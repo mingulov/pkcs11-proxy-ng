@@ -1,0 +1,687 @@
+// proto/pkcs11-proxy-ng/v1/mechanism_params.proto
+syntax = "proto3";
+package pkcs11_proxy_ng.v1;
+
+message RsaPkcsPssParams {
+  uint64 hash_alg = 1;
+  uint64 mgf = 2;
+  uint64 salt_len = 3;
+}
+
+message RsaPkcsOaepParams {
+  uint64 hash_alg = 1;
+  uint64 mgf = 2;
+  uint64 source = 3;
+  bytes source_data = 4;
+}
+
+// CK_GCM_PARAMS — AES-GCM authenticated encryption parameters.
+// iv_bits is the length of the IV in bits (typically 96 for a 12-byte IV).
+// tag_bits is the authentication tag length in bits (e.g. 128, 112, 96).
+// aad is the additional authenticated data (may be empty).
+// iv_buffer_len is the writable pIv buffer capacity when a provider may
+// generate and write back an IV while ulIvLen is zero on input.
+message GcmParams {
+  bytes iv = 1;
+  uint64 iv_bits = 2;
+  bytes aad = 3;
+  uint64 tag_bits = 4;
+  uint64 iv_buffer_len = 5;
+}
+
+// CK_ECDH1_DERIVE_PARAMS — ECDH key derivation parameters (PKCS#11 §2.3.3).
+// kdf: key derivation function (CKD_NULL = 1, CKD_SHA1_KDF = 2, etc.)
+// shared_data: optional shared data for the KDF (may be empty)
+// public_data: other party's EC public key (DER-encoded EC point)
+message Ecdh1DeriveParams {
+  uint64 kdf = 1;
+  bytes shared_data = 2;
+  bytes public_data = 3;
+}
+
+// IV-based parameters for CBC/CBC-PAD mechanisms.
+// Used by AES-CBC, AES-CBC-PAD, DES3-CBC, DES3-CBC-PAD, etc.
+// The IV length is implicitly determined by the mechanism:
+// - AES-CBC/AES-CBC-PAD: 16 bytes
+// - DES3-CBC/DES3-CBC-PAD: 8 bytes
+message IvParams {
+  bytes iv = 1;
+}
+
+// CK_GCM_MESSAGE_PARAMS — per-message GCM parameters for message-based APIs.
+message GcmMessageParams {
+  bytes iv = 1;
+  uint64 iv_fixed_bits = 2;
+  uint64 iv_generator = 3;
+  bytes tag = 4;
+  uint64 tag_bits = 5;
+}
+
+// CK_CCM_MESSAGE_PARAMS — per-message CCM parameters for message-based APIs.
+message CcmMessageParams {
+  uint64 data_len = 1;
+  bytes nonce = 2;
+  uint64 nonce_fixed_bits = 3;
+  uint64 nonce_generator = 4;
+  bytes mac = 5;
+  uint64 mac_len = 6;
+}
+
+// CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS
+message Salsa20ChaCha20Poly1305MessageParams {
+  bytes nonce = 1;
+  bytes tag = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Symmetric Encryption Parameters
+// ---------------------------------------------------------------------------
+
+// CK_AES_CTR_PARAMS
+message AesCtrParams {
+  uint64 counter_bits = 1;
+  bytes cb = 2;  // 16-byte counter block
+}
+
+// CK_AES_CCM_PARAMS / CK_CCM_PARAMS
+message CcmParams {
+  uint64 data_len = 1;
+  bytes nonce = 2;
+  bytes aad = 3;
+  uint64 mac_len = 4;
+}
+
+// CK_AES_CBC_ENCRYPT_DATA_PARAMS
+message AesCbcEncryptDataParams {
+  bytes iv = 1;   // 16-byte IV
+  bytes data = 2;
+}
+
+// CK_DES_CBC_ENCRYPT_DATA_PARAMS
+message DesCbcEncryptDataParams {
+  bytes iv = 1;   // 8-byte IV
+  bytes data = 2;
+}
+
+// CK_ARIA_CBC_ENCRYPT_DATA_PARAMS
+message AriaCbcEncryptDataParams {
+  bytes iv = 1;   // 16-byte IV
+  bytes data = 2;
+}
+
+// CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS
+message CamelliaCbcEncryptDataParams {
+  bytes iv = 1;   // 16-byte IV
+  bytes data = 2;
+}
+
+// CK_CAMELLIA_CTR_PARAMS
+message CamelliaCtrParams {
+  uint64 counter_bits = 1;
+  bytes cb = 2;  // 16-byte counter block
+}
+
+// CK_SEED_CBC_ENCRYPT_DATA_PARAMS
+message SeedCbcEncryptDataParams {
+  bytes iv = 1;   // 16-byte IV
+  bytes data = 2;
+}
+
+// CK_RC2_CBC_PARAMS
+message Rc2CbcParams {
+  uint64 effective_bits = 1;
+  bytes iv = 2;  // 8-byte IV
+}
+
+// CK_RC2_MAC_GENERAL_PARAMS
+message Rc2MacGeneralParams {
+  uint64 effective_bits = 1;
+  uint64 mac_length = 2;
+}
+
+// CK_RC5_PARAMS
+message Rc5Params {
+  uint64 word_size = 1;
+  uint64 rounds = 2;
+}
+
+// CK_RC5_CBC_PARAMS
+message Rc5CbcParams {
+  uint64 word_size = 1;
+  uint64 rounds = 2;
+  bytes iv = 3;
+}
+
+// CK_RC5_MAC_GENERAL_PARAMS
+message Rc5MacGeneralParams {
+  uint64 word_size = 1;
+  uint64 rounds = 2;
+  uint64 mac_length = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Authenticated Encryption / AEAD
+// ---------------------------------------------------------------------------
+
+// CK_CHACHA20_PARAMS
+message ChaCha20Params {
+  bytes block_counter = 1;
+  uint64 block_counter_bits = 2;
+  bytes nonce = 3;
+  uint64 nonce_bits = 4;
+}
+
+// CK_SALSA20_PARAMS
+message Salsa20Params {
+  bytes block_counter = 1;
+  bytes nonce = 2;
+  uint64 nonce_bits = 3;
+}
+
+// CK_SALSA20_CHACHA20_POLY1305_PARAMS (non-message variant)
+message Salsa20ChaCha20Poly1305Params {
+  bytes nonce = 1;
+  bytes aad = 2;
+}
+
+// CK_GCM_WRAP_PARAMS
+message GcmWrapParams {
+  bytes iv = 1;
+  uint64 iv_fixed_bits = 2;
+  uint64 iv_generator = 3;
+  bytes aad = 4;
+  uint64 tag_bits = 5;
+}
+
+// CK_CCM_WRAP_PARAMS
+message CcmWrapParams {
+  uint64 data_len = 1;
+  bytes nonce = 2;
+  uint64 nonce_fixed_bits = 3;
+  uint64 nonce_generator = 4;
+  bytes aad = 5;
+  uint64 mac_len = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Key Derivation
+// ---------------------------------------------------------------------------
+
+// CK_ECDH2_DERIVE_PARAMS
+message Ecdh2DeriveParams {
+  uint64 kdf = 1;
+  bytes shared_data = 2;
+  bytes public_data = 3;
+  uint64 private_data_len = 4;
+  uint64 private_data_handle = 5;  // CK_OBJECT_HANDLE
+  bytes public_data2 = 6;
+}
+
+// CK_ECMQV_DERIVE_PARAMS
+message EcmqvDeriveParams {
+  uint64 kdf = 1;
+  bytes shared_data = 2;
+  bytes public_data = 3;
+  uint64 private_data_len = 4;
+  uint64 private_data_handle = 5;
+  bytes public_data2 = 6;
+  uint64 public_key_handle = 7;
+}
+
+// CK_X9_42_DH1_DERIVE_PARAMS
+message X942Dh1DeriveParams {
+  uint64 kdf = 1;
+  bytes other_info = 2;
+  bytes public_data = 3;
+}
+
+// CK_X9_42_DH2_DERIVE_PARAMS
+message X942Dh2DeriveParams {
+  uint64 kdf = 1;
+  bytes other_info = 2;
+  bytes public_data = 3;
+  uint64 private_data_len = 4;
+  uint64 private_data_handle = 5;
+  bytes public_data2 = 6;
+}
+
+// CK_X9_42_MQV_DERIVE_PARAMS
+message X942MqvDeriveParams {
+  uint64 kdf = 1;
+  bytes other_info = 2;
+  bytes public_data = 3;
+  uint64 private_data_len = 4;
+  uint64 private_data_handle = 5;
+  bytes public_data2 = 6;
+  uint64 public_key_handle = 7;
+}
+
+// CK_HKDF_PARAMS
+message HkdfParams {
+  bool extract = 1;
+  bool expand = 2;
+  uint64 prf_hash_mechanism = 3;
+  uint64 salt_type = 4;
+  bytes salt = 5;
+  uint64 salt_key_handle = 6;  // CK_OBJECT_HANDLE
+  bytes info = 7;
+}
+
+// CK_EDDSA_PARAMS
+message EddsaParams {
+  bool ph_flag = 1;
+  bytes context_data = 2;
+}
+
+// CK_XEDDSA_PARAMS
+message XeddsaParams {
+  uint64 hash = 1;
+}
+
+// CK_GOSTR3410_DERIVE_PARAMS
+message Gostr3410DeriveParams {
+  uint64 kdf = 1;
+  bytes public_data = 2;
+  bytes ukm = 3;
+}
+
+// CK_KEA_DERIVE_PARAMS
+message KeaDeriveParams {
+  bool is_sender = 1;
+  bytes random_a = 2;
+  bytes random_b = 3;
+  bytes public_data = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Key Wrapping
+// ---------------------------------------------------------------------------
+
+// CK_ECDH_AES_KEY_WRAP_PARAMS
+message EcdhAesKeyWrapParams {
+  uint64 aes_key_bits = 1;
+  uint64 kdf = 2;
+  bytes shared_data = 3;
+}
+
+// CK_RSA_AES_KEY_WRAP_PARAMS
+message RsaAesKeyWrapParams {
+  uint64 aes_key_bits = 1;
+  RsaPkcsOaepParams oaep_params = 2;  // nested
+}
+
+// CK_GOSTR3410_KEY_WRAP_PARAMS
+message Gostr3410KeyWrapParams {
+  bytes wrap_oid = 1;
+  bytes ukm = 2;
+  uint64 key_handle = 3;
+}
+
+// CK_KEY_WRAP_SET_OAEP_PARAMS
+message KeyWrapSetOaepParams {
+  uint32 bc = 1;
+  bytes x = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Password-Based Encryption
+// ---------------------------------------------------------------------------
+
+// CK_PBE_PARAMS
+message PbeParams {
+  bytes init_vector = 1;
+  bytes password = 2;
+  bytes salt = 3;
+  uint64 iteration = 4;
+}
+
+// CK_PKCS5_PBKD2_PARAMS
+message Pkcs5Pbkd2Params {
+  uint64 salt_source = 1;
+  bytes salt_source_data = 2;
+  uint64 iterations = 3;
+  uint64 prf = 4;
+  bytes prf_data = 5;
+  bytes password = 6;
+}
+
+// ---------------------------------------------------------------------------
+// TLS/SSL
+// ---------------------------------------------------------------------------
+
+// Shared sub-message for TLS/SSL random data
+message SslRandomData {
+  bytes client_random = 1;
+  bytes server_random = 2;
+}
+
+// CK_TLS_MAC_PARAMS
+message TlsMacParams {
+  uint64 prf_hash_mechanism = 1;
+  uint64 mac_length = 2;
+  uint64 server_or_client = 3;
+}
+
+// CK_TLS_PRF_PARAMS
+message TlsPrfParams {
+  bytes seed = 1;
+  bytes label = 2;
+  uint64 output_len = 3;
+}
+
+// CK_TLS_KDF_PARAMS
+message TlsKdfParams {
+  uint64 prf_mechanism = 1;
+  bytes label = 2;
+  SslRandomData random_info = 3;
+  bytes context_data = 4;
+}
+
+// CK_SSL3_MASTER_KEY_DERIVE_PARAMS
+message Ssl3MasterKeyDeriveParams {
+  SslRandomData random_info = 1;
+  uint32 version_major = 2;
+  uint32 version_minor = 3;
+}
+
+// CK_TLS12_MASTER_KEY_DERIVE_PARAMS
+message Tls12MasterKeyDeriveParams {
+  SslRandomData random_info = 1;
+  uint32 version_major = 2;
+  uint32 version_minor = 3;
+  uint64 prf_hash_mechanism = 4;
+}
+
+// CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS
+message Tls12ExtendedMasterKeyDeriveParams {
+  uint64 prf_hash_mechanism = 1;
+  bytes session_hash = 2;
+  uint32 version_major = 3;
+  uint32 version_minor = 4;
+}
+
+// CK_SSL3_KEY_MAT_PARAMS / CK_TLS12_KEY_MAT_PARAMS
+message Ssl3KeyMatParams {
+  uint64 mac_size_bits = 1;
+  uint64 key_size_bits = 2;
+  uint64 iv_size_bits = 3;
+  bool is_export = 4;
+  SslRandomData random_info = 5;
+  uint64 prf_hash_mechanism = 6;  // 0 for SSL3, set for TLS12
+}
+
+// CK_WTLS_RANDOM_DATA
+message WtlsRandomData {
+  bytes client_random = 1;
+  bytes server_random = 2;
+}
+
+// CK_WTLS_MASTER_KEY_DERIVE_PARAMS
+message WtlsMasterKeyDeriveParams {
+  uint64 digest_mechanism = 1;
+  WtlsRandomData random_info = 2;
+  uint32 version = 3;
+}
+
+// CK_WTLS_PRF_PARAMS
+message WtlsPrfParams {
+  uint64 digest_mechanism = 1;
+  bytes seed = 2;
+  bytes label = 3;
+  uint64 output_len = 4;
+}
+
+// CK_WTLS_KEY_MAT_PARAMS
+message WtlsKeyMatParams {
+  uint64 digest_mechanism = 1;
+  uint64 mac_size_bits = 2;
+  uint64 key_size_bits = 3;
+  uint64 iv_size_bits = 4;
+  uint64 sequence_number = 5;
+  bool is_export = 6;
+  WtlsRandomData random_info = 7;
+}
+
+// ---------------------------------------------------------------------------
+// IKE / IPSec
+// ---------------------------------------------------------------------------
+
+// CK_IKE_PRF_DERIVE_PARAMS
+message IkePrfDeriveParams {
+  uint64 prf_mechanism = 1;
+  bool data_as_key = 2;
+  bool rekey = 3;
+  bytes ni = 4;
+  bytes nr = 5;
+  uint64 new_key_handle = 6;
+}
+
+// CK_IKE1_PRF_DERIVE_PARAMS
+message Ike1PrfDeriveParams {
+  uint64 prf_mechanism = 1;
+  bool has_prev_key = 2;
+  uint64 keygxy_handle = 3;
+  uint64 prev_key_handle = 4;
+  bytes ckyi = 5;
+  bytes ckyr = 6;
+  uint32 key_number = 7;
+}
+
+// CK_IKE1_EXTENDED_DERIVE_PARAMS
+message Ike1ExtendedDeriveParams {
+  uint64 prf_mechanism = 1;
+  bool has_keygxy = 2;
+  uint64 keygxy_handle = 3;
+  bytes extra_data = 4;
+}
+
+// CK_IKE2_PRF_PLUS_DERIVE_PARAMS
+message Ike2PrfPlusDeriveParams {
+  uint64 prf_mechanism = 1;
+  bool has_seed_key = 2;
+  uint64 seed_key_handle = 3;
+  bytes seed_data = 4;
+}
+
+// ---------------------------------------------------------------------------
+// SP800-108 KDF
+// ---------------------------------------------------------------------------
+
+// CK_PRF_DATA_PARAM (used inside SP800-108 params)
+message PrfDataParam {
+  uint64 type = 1;
+  bytes value = 2;
+}
+
+// CK_SP800_108_KDF_PARAMS
+message Sp800108KdfParams {
+  uint64 prf_type = 1;
+  repeated PrfDataParam data_params = 2;
+  // Additional derived keys omitted — uses the template mechanism instead
+}
+
+// CK_SP800_108_FEEDBACK_KDF_PARAMS
+message Sp800108FeedbackKdfParams {
+  uint64 prf_type = 1;
+  repeated PrfDataParam data_params = 2;
+  bytes iv = 3;
+}
+
+// CK_SP800_108_COUNTER_FORMAT
+message Sp800108CounterFormat {
+  uint64 width_in_bits = 1;
+}
+
+// CK_SP800_108_DKM_LENGTH_FORMAT
+message Sp800108DkmLengthFormat {
+  uint64 dkm_length_method = 1;
+  uint64 width_in_bits = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Signal Protocol
+// ---------------------------------------------------------------------------
+
+// CK_X3DH_INITIATE_PARAMS
+message X3dhInitiateParams {
+  uint64 kdf = 1;
+  uint64 peer_identity_handle = 2;
+  uint64 peer_prekey_handle = 3;
+  bytes prekey_signature = 4;
+  uint64 onetime_key_handle = 5;
+  uint64 own_identity_handle = 6;
+  uint64 own_ephemeral_handle = 7;
+}
+
+// CK_X3DH_RESPOND_PARAMS
+message X3dhRespondParams {
+  uint64 kdf = 1;
+  uint64 identity_handle = 2;
+  uint64 prekey_handle = 3;
+  uint64 onetime_key_handle = 4;
+  uint64 initiator_identity_handle = 5;
+  uint64 initiator_ephemeral_handle = 6;
+}
+
+// CK_X2RATCHET_INITIALIZE_PARAMS
+message X2RatchetInitializeParams {
+  bytes sk = 1;
+  uint64 peer_public_prekey_handle = 2;
+  uint64 peer_public_identity_handle = 3;
+  uint64 own_public_identity_handle = 4;
+  bool encrypted_header = 5;
+  uint64 curve = 6;
+  uint64 aead_mechanism = 7;
+  uint64 kdf_mechanism = 8;
+}
+
+// CK_X2RATCHET_RESPOND_PARAMS
+message X2RatchetRespondParams {
+  bytes sk = 1;
+  uint64 own_prekey_handle = 2;
+  uint64 initiator_identity_handle = 3;
+  uint64 own_identity_handle = 4;
+  bool encrypted_header = 5;
+  uint64 curve = 6;
+  uint64 aead_mechanism = 7;
+  uint64 kdf_mechanism = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Miscellaneous
+// ---------------------------------------------------------------------------
+
+// CK_OTP_PARAM (individual OTP parameter)
+message OtpParam {
+  uint64 type = 1;
+  bytes value = 2;
+}
+
+// CK_OTP_PARAMS
+message OtpParams {
+  repeated OtpParam params = 1;
+}
+
+// CK_SKIPJACK_PRIVATE_WRAP_PARAMS
+message SkipjackPrivateWrapParams {
+  bytes password = 1;
+  bytes public_data = 2;
+  uint64 password_length = 3;
+  bytes random_a = 4;
+  bytes prime_p = 5;
+  bytes base_g = 6;
+  bytes subprime_q = 7;
+}
+
+// CK_SKIPJACK_RELAYX_PARAMS
+message SkipjackRelayxParams {
+  bytes old_wrapped_x = 1;
+  bytes old_password = 2;
+  bytes old_public_data = 3;
+  bytes old_random_a = 4;
+  bytes new_password = 5;
+  bytes new_public_data = 6;
+  bytes new_random_a = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Generic / Vendor parameter shapes
+// ---------------------------------------------------------------------------
+
+// CK_MAC_GENERAL_PARAMS — a single CK_ULONG specifying the MAC/tag length.
+message MacGeneralParams {
+  uint64 mac_length = 1;
+}
+
+// CKM_CONCATENATE_BASE_AND_KEY parameter — a single CK_OBJECT_HANDLE.
+message ObjectHandleParam {
+  uint64 handle = 1;
+}
+
+// CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA/SLH-DSA hedge mode + optional context.
+message SignAdditionalContext {
+  uint64 hedge_variant = 1;
+  bytes context = 2;
+}
+
+// CK_KEY_DERIVATION_STRING_DATA — data bytes for key derivation.
+message KeyDerivationStringData {
+  bytes data = 1;
+}
+
+// Opaque raw parameter bytes — opt-in escape hatch for vendor-specific
+// mechanisms with scalar-only (non-pointer) parameter structures.
+// Used when no typed serialization is available.
+// WARNING: bypasses structural validation. Use only with trusted backends
+// and for mechanisms explicitly listed in mechanism_params.toml.
+message RawMechanismParams {
+  bytes data = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Vendor-specific parameter shapes
+// ---------------------------------------------------------------------------
+
+// AES-CMAC key derivation parameters
+// (CK_NC_AES_CMAC_KEY_DERIVATION_PARAMS).
+message AesCmacKeyDerivationParams {
+  bytes context = 1;
+  bytes label = 2;
+}
+
+// Dilithium / ML-DSA post-quantum signature parameters (CK_IBM_DILITHIUM_PARAMS).
+message DilithiumParams {
+  uint64 version = 1;
+  uint64 mode = 2;
+}
+
+// Kyber / ML-KEM post-quantum key encapsulation parameters (CK_IBM_KYBER_PARAMS).
+message KyberParams {
+  uint64 version = 1;
+  uint64 mode = 2;
+  uint64 secret_handle = 3;
+  bytes shared_data = 4;
+  bytes blob = 5;
+}
+
+// HD key derivation (BIP-32, BIP-44, SLIP-10) parameters
+// (CK_IBM_BTC_DERIVE_PARAMS).
+message HdKeyDeriveParams {
+  uint64 derive_type = 1;   // BIP-32, BIP-44, SLIP-10
+  uint64 child_key_index = 2;
+  bytes chain_code = 3;
+  uint64 version = 4;
+}
+
+// Vendor object extraction (cloning/backup) parameters.
+message VendorObjectExtractParams {
+  uint64 format = 1;
+  bytes context = 2;
+}
+
+// Vendor object insertion (restore) parameters.
+message VendorObjectInsertParams {
+  uint64 format = 1;
+  bytes context = 2;
+  bytes object_data = 3;
+}

@@ -1,0 +1,135 @@
+# Tier 2-3 — Provider-matrix and consumer interoperability
+#
+# Scheduled nightly and dispatchable manually.  Runs the full test matrix
+# inside Dockerfile.test using SoftHSM2, NSS softokn, Kryoptic, pkcs11-tool,
+# p11tool, and optionally OpenSSL pkcs11-provider.
+#
+# This job is intentionally NOT a PR gate:
+#   - It requires Docker, SoftHSM2, and consumer tool installation.
+#   - It takes several minutes to build Kryoptic from source.
+#   - Failures here indicate real compatibility regressions and must be
+#     investigated, but they should not block unrelated PRs.
+#
+# Failed runs upload their log artifacts so the full output is inspectable
+# without re-running.
+#
+# Test tiers exercised here:
+#   Tier 2: real-module workflow tests (SoftHSM2, NSS, Kryoptic)
+#   Tier 3: consumer interoperability (pkcs11-tool, p11tool, OpenSSL pkcs11prov)
+#   Tier 4: multi-client, restart, and failure-path tests (#[ignore] suite)
+#
+# Tier 0 checks are NOT duplicated here — they run on every PR via ci.yml.
+
+name: Nightly provider matrix
+
+on:
+  schedule:
+    # 03:00 UTC every day
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      skip_consumers:
+        description: "Skip consumer interoperability smoke tests"
+        required: false
+        default: "false"
+        type: boolean
+      skip_optional_providers:
+        description: "Skip NSS and Kryoptic suites (run SoftHSM2 only)"
+        required: false
+        default: "false"
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  provider-matrix:
+    name: Provider matrix (Docker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build test image
+        run: |
+          docker buildx build \
+            --file Dockerfile.test \
+            --tag pkcs11-proxy-ng-test:ci \
+            --load \
+            --cache-from type=gha \
+            --cache-to   type=gha,mode=max \
+            .
+
+      # Dispatch inputs are boolean strings controlled by the workflow operator.
+      # They are placed in environment variables and compared in shell — never
+      # interpolated directly into a command string.
+      - name: Run test matrix inside container
+        env:
+          SKIP_CONSUMERS: ${{ github.event.inputs.skip_consumers }}
+          SKIP_OPTIONAL_PROVIDERS: ${{ github.event.inputs.skip_optional_providers }}
+        run: |
+          FLAGS="--skip-fast"
+          if [[ "${SKIP_CONSUMERS}" == "true" ]]; then
+            FLAGS="${FLAGS} --skip-consumers"
+          fi
+          if [[ "${SKIP_OPTIONAL_PROVIDERS}" == "true" ]]; then
+            FLAGS="${FLAGS} --skip-optional-providers"
+          fi
+          # shellcheck disable=SC2086
+          docker run --rm \
+            --name pkcs11-proxy-ng-matrix \
+            pkcs11-proxy-ng-test:ci \
+            bash scripts/test-matrix.sh ${FLAGS} \
+            2>&1 | tee matrix-run.log
+
+      - name: Upload matrix log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-log-${{ github.run_id }}
+          path: matrix-run.log
+          retention-days: 14
+
+  # ── Tier 0 sanity on the same commit ──────────────────────────────────────
+  # Re-run fast checks in the nightly job so nightly also acts as an
+  # independent regression signal for unit tests.
+  fast-checks:
+    name: Tier 0 sanity (nightly)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install stable toolchain with components
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+
+      - name: Tier 0 checks
+        run: |
+          cargo fmt --all -- --check
+          cargo build --workspace
+          cargo test --workspace
+          cargo clippy --workspace --all-targets --all-features -- -D warnings

@@ -1,0 +1,25 @@
+[package]
+name = "pkcs11-proxy-ng-shim"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "pkcs11_proxy_ng_shim"
+# cdylib: the deployable PKCS#11 shared library
+# rlib: enables `cargo test` for #[cfg(test)] modules within the crate
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pkcs11-proxy-ng-types = { path = "../types" }
+pkcs11-proxy-ng-client = { path = "../client" }
+pkcs11-proxy-ng-proto = { path = "../proto" }
+cryptoki-sys.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pkcs11-proxy-ng-backend = { path = "../backend" }
+pkcs11-proxy-ng = { path = "../server" }
+pkcs11-proxy-ng-proto = { path = "../proto" }
+tokio-stream = "0.1"
+tonic.workspace = true

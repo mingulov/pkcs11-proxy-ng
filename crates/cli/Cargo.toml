@@ -1,0 +1,19 @@
+[package]
+name = "pkcs11-proxy-ng-cli"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "pkcs11-proxy-ng-cli"
+path = "src/main.rs"
+
+[dependencies]
+pkcs11-proxy-ng-types = { path = "../types" }
+pkcs11-proxy-ng-client = { path = "../client" }
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hex = "0.4"
+base64 = "0.22"
+x509-parser.workspace = true

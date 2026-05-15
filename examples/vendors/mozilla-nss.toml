@@ -1,0 +1,38 @@
+# Mozilla NSS vendor mechanism extensions.
+# Use with: PKCS11_PROXY_MECHANISMS=/path/to/mozilla-nss.toml
+#
+# Reference: pkcs11n.h (NSS source tree)
+# Modern base: 0x80000000 | 0x4E534350 ("NSCP") = 0xCE534350
+# Legacy base: 0x80000002+
+
+# --- NSS HKDF (now standardized in PKCS#11 3.0, but NSS uses vendor IDs) ---
+[[params]]
+shape = "hkdf"
+mechanisms = [0xCE534353, 0xCE534354]  # CKM_NSS_HKDF_SHA1, CKM_NSS_HKDF_SHA256
+
+# --- NSS AES key wrap ---
+parameterless = [
+  0xCE534351, # CKM_NSS_AES_KEY_WRAP
+  0xCE534352, # CKM_NSS_AES_KEY_WRAP_PAD
+]
+
+# --- Legacy PBE mechanisms ---
+[[params]]
+shape = "pbe"
+mechanisms = [
+  0x80000002, # CKM_NSS_PBE_SHA1_DES_CBC
+  0x80000003, # CKM_NSS_PBE_SHA1_TRIPLE_DES_CBC
+  0x80000004, # CKM_NSS_PBE_SHA1_40_BIT_RC2_CBC
+  0x80000005, # CKM_NSS_PBE_SHA1_128_BIT_RC2_CBC
+]
+
+# --- Legacy PBE (parameterless key gen) ---
+parameterless = [
+  0x80000009, # CKM_NSS_PBE_SHA1_HMAC_KEY_GEN
+  0x8000000A, # CKM_NSS_PBE_MD5_HMAC_KEY_GEN
+]
+
+# --- TLS PRF ---
+[[params]]
+shape = "tls_prf"
+mechanisms = [0x80000373]  # CKM_TLS_PRF_GENERAL

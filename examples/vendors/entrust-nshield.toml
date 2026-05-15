@@ -1,0 +1,34 @@
+# Entrust nShield vendor mechanism extensions.
+# Use with: PKCS11_PROXY_MECHANISMS=/path/to/entrust-nshield.toml
+#
+# Reference: Security World SDK pkcs11extra.h
+# WARNING: nShield uses non-standard vendor base 0xDE436972, NOT 0x80000000.
+
+# --- AES-CMAC ---
+# CKM_NC_AES_CMAC uses MAC general params (single CK_ULONG tag length)
+[[params]]
+shape = "mac_general"
+mechanisms = [0xDE436990]  # CKM_NC_AES_CMAC (approximate, check your SDK)
+
+# CKM_NC_AES_CMAC_KEY_DERIVATION
+[[params]]
+shape = "aes_cmac_key_derivation"
+mechanisms = [0xDE436991]  # CKM_NC_AES_CMAC_KEY_DERIVATION
+
+# --- ECIES ---
+[[params]]
+shape = "ecies"
+mechanisms = [0xDE436993]  # CKM_NC_ECIES (approximate, check your SDK)
+
+# --- Parameterless vendor mechanisms ---
+parameterless = [
+  0xDE436980, # CKM_NC_SHA_1_HMAC_KEY_GEN (approximate)
+  0xDE436981, # CKM_NC_SHA224_HMAC_KEY_GEN
+  0xDE436982, # CKM_NC_SHA256_HMAC_KEY_GEN
+  0xDE436983, # CKM_NC_SHA384_HMAC_KEY_GEN
+  0xDE436984, # CKM_NC_SHA512_HMAC_KEY_GEN
+]
+
+# NOTE: Exact hex values depend on your nShield firmware version.
+# Run C_GetMechanismList to discover the actual values on your HSM.
+# The values above are approximations based on public documentation.

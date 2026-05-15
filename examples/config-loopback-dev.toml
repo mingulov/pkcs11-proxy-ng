@@ -1,0 +1,29 @@
+# Reference: Loopback development configuration
+#
+# Single-developer setup for local testing. The daemon listens on
+# localhost TCP with authentication disabled. DO NOT use in production.
+#
+# Usage:
+#   cargo run --bin pkcs11-proxy-ng -- examples/config-loopback-dev.toml
+#
+# Backend: SoftHSM2 (adjust path for your distribution)
+#   softhsm2-util --init-token --slot 0 --label test --pin 1234 --so-pin 5678
+
+[backend]
+module = "/usr/lib/softhsm/libsofthsm2.so"
+
+[proxy]
+mechanism_discovery = "transparent"
+lease_seconds = 600
+request_timeout_secs = 60
+# Maximum concurrent backend HSM calls.
+# Tune based on HSM capacity (e.g., 10 for hardware HSM, 200 for software token).
+max_concurrent_backend_calls = 200
+# Size of the tokio blocking thread pool. Must be >= max_concurrent_backend_calls.
+# Default 512. Increase for high-concurrency HSM deployments.
+max_blocking_threads = 512
+
+[listener.remote]
+bind = "127.0.0.1:50051"
+auth = "none"
+allow_insecure_tcp = true

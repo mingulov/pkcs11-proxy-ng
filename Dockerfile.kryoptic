@@ -1,0 +1,36 @@
+# Dockerfile.kryoptic — Reproducible Kryoptic PKCS#11 module build
+#
+# Based on the Alpine aports APKBUILD for kryoptic v1.5.0.
+# Produces /out/libkryoptic_pkcs11.so that can be COPY --from'd into test images.
+#
+# Usage:
+#   docker build -f Dockerfile.kryoptic -t kryoptic-builder .
+#   docker run --rm kryoptic-builder cat /out/libkryoptic_pkcs11.so > libkryoptic_pkcs11.so
+#
+# Or use as a build stage:
+#   COPY --from=kryoptic-builder /out/libkryoptic_pkcs11.so /usr/lib/pkcs11/
+
+FROM alpine:3.21 AS builder
+
+ARG KRYOPTIC_VERSION=1.5.0
+ARG KRYOPTIC_FEATURES="standard,nssdb,pqc,dynamic"
+
+RUN apk add --no-cache \
+    cargo \
+    clang-dev \
+    openssl-dev \
+    sqlite-dev \
+    curl \
+    gcc \
+    musl-dev
+
+RUN curl -fsSL "https://github.com/latchset/kryoptic/archive/v${KRYOPTIC_VERSION}.tar.gz" \
+    | tar xz -C /tmp \
+    && mv "/tmp/kryoptic-${KRYOPTIC_VERSION}" /build
+
+WORKDIR /build
+RUN CONFDIR=/etc cargo build --workspace --release --features "${KRYOPTIC_FEATURES}"
+
+FROM scratch AS output
+COPY --from=builder /build/target/release/libkryoptic_pkcs11.so /out/libkryoptic_pkcs11.so
+COPY --from=builder /build/target/release/softhsm_migrate /out/softhsm_migrate

@@ -1,0 +1,83 @@
+# Dockerfile.test — Integration test environment for pkcs11-proxy-ng
+#
+# Two-stage build with dependency caching:
+#   Stage 1 (deps): System packages + Rust + Kryoptic (rarely changes, cached)
+#   Stage 2 (test): Workspace source + build (changes with code)
+#
+# Dependency caching trick: Cargo.toml files are copied first with stub
+# source files to pre-compile all dependencies. Then real source is copied
+# and only changed crates recompile. This makes test-only changes fast.
+#
+# Usage:
+#   docker build -f Dockerfile.test -t pkcs11-proxy-ng-test .
+#   docker run --rm pkcs11-proxy-ng-test
+
+# ── Stage 1: Deps + Kryoptic (cached across source changes) ─────────
+FROM fedora:43 AS deps
+
+RUN dnf install -y \
+        bash curl git python3 \
+        gcc gcc-c++ make pkgconf-pkg-config clang-devel \
+        openssl openssl-devel protobuf-compiler \
+        sqlite sqlite-devel \
+        softhsm \
+        nss-tools nss-softokn nss-softokn-freebl \
+        opensc gnutls-utils pkcs11test \
+    && dnf clean all
+
+RUN dnf install -y libp11 || true
+RUN dnf install -y openssl-pkcs11 || true
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Build Kryoptic (cached unless version changes)
+ARG KRYOPTIC_VERSION=1.5.0
+RUN curl -fsSL "https://github.com/latchset/kryoptic/archive/v${KRYOPTIC_VERSION}.tar.gz" \
+    | tar xz -C /opt \
+    && mv "/opt/kryoptic-${KRYOPTIC_VERSION}" /opt/kryoptic \
+    && cd /opt/kryoptic \
+    && CONFDIR=/etc cargo build --release --features "standard,nssdb,dynamic" \
+    && rm -rf /opt/kryoptic/target/release/deps \
+              /opt/kryoptic/target/release/build \
+              /opt/kryoptic/target/release/incremental \
+              /root/.cargo/registry/cache \
+              /root/.cargo/git/checkouts
+
+# ── Stage 2: Workspace build ────────────────────────────────────────
+FROM deps AS test
+
+WORKDIR /workspace
+
+# Copy dependency manifests first (this layer is cached when only source changes)
+COPY Cargo.toml Cargo.lock ./
+COPY proto/ proto/
+COPY crates/types/Cargo.toml crates/types/Cargo.toml
+COPY crates/proto/Cargo.toml crates/proto/Cargo.toml
+COPY crates/proto/build.rs crates/proto/build.rs
+COPY crates/backend/Cargo.toml crates/backend/Cargo.toml
+COPY crates/pkcs11-proxy-ng/Cargo.toml crates/pkcs11-proxy-ng/Cargo.toml
+COPY crates/pkcs11-proxy-ng-client/Cargo.toml crates/pkcs11-proxy-ng-client/Cargo.toml
+COPY crates/pkcs11-proxy-ng-shim/Cargo.toml crates/pkcs11-proxy-ng-shim/Cargo.toml
+COPY crates/pkcs11-proxy-ng-cli/Cargo.toml crates/pkcs11-proxy-ng-cli/Cargo.toml
+
+# Stub source files for dependency pre-compilation
+RUN for crate in types proto backend pkcs11-proxy-ng-client pkcs11-proxy-ng-shim; do \
+        mkdir -p "crates/$crate/src" && echo "" > "crates/$crate/src/lib.rs"; \
+    done && \
+    mkdir -p crates/pkcs11-proxy-ng/src && echo "fn main(){}" > crates/pkcs11-proxy-ng/src/main.rs && echo "" > crates/pkcs11-proxy-ng/src/lib.rs && \
+    mkdir -p crates/pkcs11-proxy-ng-cli/src && echo "fn main(){}" > crates/pkcs11-proxy-ng-cli/src/main.rs
+
+# Pre-compile dependencies (cached layer — only re-runs when Cargo.toml changes)
+RUN cargo build --workspace 2>/dev/null || true
+
+# Copy actual source (invalidates from here on source changes)
+COPY . .
+RUN find crates -name "*.rs" -exec touch {} +
+
+# Build workspace (incremental — deps already compiled above)
+RUN cargo build -p pkcs11-proxy-ng --tests -p backend -p pkcs11-proxy-ng-client \
+    -p proto -p types -p pkcs11-proxy-ng-shim
+
+CMD ["bash", "scripts/test-matrix.sh", "--skip-fast"]

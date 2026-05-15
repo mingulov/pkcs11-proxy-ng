@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/types",
+    "crates/proto",
+    "crates/backend",
+    "crates/server",
+    "crates/client",
+    "crates/cli",
+    "crates/shim",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0 OR MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.14", features = ["tls-ring"] }
+prost = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+clap = { version = "4", features = ["derive", "env"] }
+libloading = "0.9"
+cryptoki-sys = "0.5"
+nix = { version = "0.31", features = ["socket", "user"] }
+dashmap = "6"
+x509-parser = "0.18"
+tonic-build = "0.14"
+tonic-health = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"

@@ -1,0 +1,51 @@
+# Reference: planned multi-user mTLS configuration with per-identity policy
+#
+# Runtime mTLS enforcement is not wired in this binary yet. The daemon fails
+# closed when auth = "mtls" is configured so this file cannot accidentally
+# start a plaintext listener that looks secured. Keep this as the target
+# configuration shape for the full mTLS and token-policy implementation.
+#
+# Usage:
+#   pkcs11-proxy-ng examples/config-multi-user.toml
+
+[backend]
+module = "/usr/lib/softhsm/libsofthsm2.so"
+
+[proxy]
+mechanism_discovery = "transparent"
+lease_seconds = 300
+# Backend call timeout in seconds. Calls exceeding this return CKR_DEVICE_ERROR.
+request_timeout_secs = 30
+# Maximum concurrent backend HSM calls.
+# Tune based on HSM capacity (e.g., 10 for hardware HSM, 200 for software token).
+max_concurrent_backend_calls = 200
+# Size of the tokio blocking thread pool. Must be >= max_concurrent_backend_calls.
+# Default 512. Increase for high-concurrency HSM deployments.
+max_blocking_threads = 512
+
+[listener.remote]
+bind = "0.0.0.0:50051"
+auth = "mtls"
+ca_cert = "/etc/pkcs11-proxy/ca.crt"
+server_cert = "/etc/pkcs11-proxy/server.crt"
+server_key = "/etc/pkcs11-proxy/server.key"
+
+[auth]
+allow_all_authenticated = false
+
+# mTLS identities use the daemon's canonical issuer+subject policy key format.
+#
+# App service account: can access the "app-signing" token
+[[auth.policy]]
+identity = "x509:issuer=CN=Example Root CA,O=Example Corp;subject=CN=app-service,O=Example Corp"
+tokens = ["label:app-signing"]
+
+# CI pipeline: can access the "ci-signing" token
+[[auth.policy]]
+identity = "x509:issuer=CN=Example Root CA,O=Example Corp;subject=CN=ci-pipeline,O=Example Corp"
+tokens = ["label:ci-signing"]
+
+# Admin: access all tokens
+[[auth.policy]]
+identity = "x509:issuer=CN=Example Root CA,O=Example Corp;subject=CN=admin,O=Example Corp"
+tokens = "all"

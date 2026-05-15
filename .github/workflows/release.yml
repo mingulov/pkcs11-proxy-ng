@@ -1,0 +1,131 @@
+# Release workflow
+#
+# Builds release binaries on tag push (vX.Y.Z), packages them into a tarball
+# with SHA-256 checksums, extracts release notes from CHANGELOG.md for the
+# matching version, and creates a GitHub Release with the assets attached.
+#
+# Trigger: push an annotated tag matching v*.  The workflow validates the
+# tag format (vMAJOR.MINOR.PATCH[-suffix]) before doing anything else and
+# fails loudly if CHANGELOG.md has no matching section.
+#
+# To cut a release:
+#   git tag -a vX.Y.Z -m "..."
+#   git push origin vX.Y.Z
+#
+# Security notes:
+#   - GITHUB_REF_NAME is read directly as a shell env var; no `${{ }}`
+#     interpolation of tag-derived strings into shell scripts.
+#   - The tag format is validated before any further command uses it,
+#     so a malformed or injection-style tag fails fast.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required to create the GitHub Release
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate tag format
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match vMAJOR.MINOR.PATCH[-suffix]; refusing to release."
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME validated"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install stable Rust toolchain (must satisfy MSRV from Cargo.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+            ${{ runner.os }}-cargo-
+
+      - name: Build release artifacts via existing dry-run script
+        run: scripts/release-dry-run.sh
+
+      - name: Smoke-test built binaries
+        run: |
+          target/release/pkcs11-proxy-ng --version
+          target/release/pkcs11-proxy-ng-cli --version
+          file target/release/libpkcs11_proxy_ng_shim.so
+
+      - name: Package release tarball + checksums
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          TARGET="$(rustc -vV | awk '/^host:/ {print $2}')"
+          BUNDLE="pkcs11-proxy-ng-${GITHUB_REF_NAME}-${TARGET}"
+
+          mkdir -p "dist/${BUNDLE}/bin" "dist/${BUNDLE}/lib/pkcs11"
+          cp target/release/pkcs11-proxy-ng           "dist/${BUNDLE}/bin/"
+          cp target/release/pkcs11-proxy-ng-cli       "dist/${BUNDLE}/bin/"
+          cp target/release/libpkcs11_proxy_ng_shim.so "dist/${BUNDLE}/lib/pkcs11/"
+          cp README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT "dist/${BUNDLE}/"
+
+          strip "dist/${BUNDLE}/bin/"* "dist/${BUNDLE}/lib/pkcs11/"*.so
+
+          TAG_DATE="$(git log -1 --format=%cI "$GITHUB_REF_NAME")"
+          ( cd dist && tar --owner=0 --group=0 --mtime="$TAG_DATE" \
+                  -czf "${BUNDLE}.tar.gz" "${BUNDLE}" )
+          ( cd dist && sha256sum "${BUNDLE}.tar.gz" > SHA256SUMS )
+
+          ls -la dist/
+          cat dist/SHA256SUMS
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+            /^## \[/ && flag           { flag=0 }
+            flag                       { print }
+          ' CHANGELOG.md > dist/RELEASE_NOTES.md
+
+          if [ ! -s dist/RELEASE_NOTES.md ]; then
+            echo "::error::CHANGELOG.md has no section for version ${VERSION} — refusing to publish empty release notes."
+            echo "Expected a heading like: ## [${VERSION}] - YYYY-MM-DD"
+            exit 1
+          fi
+
+          echo "--- release notes ---"
+          cat dist/RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: pkcs11-proxy-ng ${{ github.ref_name }}
+          body_path: dist/RELEASE_NOTES.md
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true

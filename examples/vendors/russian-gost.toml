@@ -1,0 +1,23 @@
+# Russian GOST / TC26 vendor mechanism extensions.
+# Use with: PKCS11_PROXY_MECHANISMS=/path/to/russian-gost.toml
+#
+# Note: GOST mechanisms are partially standardized in PKCS#11 (0x1200+)
+# but some implementations use vendor-defined IDs.
+
+# Standard GOST mechanisms are already in the default config.
+# Add vendor-defined variants if your HSM uses non-standard IDs:
+
+parameterless = [
+  0x80001210, # CKM_GOSTR3410_2012_256 (vendor variant)
+  0x80001211, # CKM_GOSTR3410_2012_512 (vendor variant)
+  0x80001220, # CKM_GOSTR3411_2012_256 (vendor variant)
+  0x80001221, # CKM_GOSTR3411_2012_512 (vendor variant)
+]
+
+[[params]]
+shape = "gostr3410_derive"
+mechanisms = [0x80001230]  # CKM_GOSTR3410_DERIVE (vendor variant)
+
+[[params]]
+shape = "gostr3410_key_wrap"
+mechanisms = [0x80001240]  # CKM_GOSTR3410_KEY_WRAP (vendor variant)

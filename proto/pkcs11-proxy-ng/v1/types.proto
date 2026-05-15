@@ -1,0 +1,1433 @@
+// proto/pkcs11-proxy-ng/v1/types.proto
+syntax = "proto3";
+package pkcs11_proxy_ng.v1;
+
+import "pkcs11-proxy-ng/v1/mechanism_params.proto";
+
+// --- Shared domain types ---
+
+message Mechanism {
+  uint64 mechanism_type = 1;
+  oneof params {
+    RsaPkcsPssParams rsa_pkcs_pss_params = 2;
+    RsaPkcsOaepParams rsa_pkcs_oaep_params = 3;
+    GcmParams gcm_params = 4;
+    Ecdh1DeriveParams ecdh1_derive_params = 5;
+    IvParams iv_params = 6;
+    // Symmetric encryption
+    AesCtrParams aes_ctr_params = 7;
+    CcmParams ccm_params = 8;
+    AesCbcEncryptDataParams aes_cbc_encrypt_data_params = 9;
+    DesCbcEncryptDataParams des_cbc_encrypt_data_params = 10;
+    AriaCbcEncryptDataParams aria_cbc_encrypt_data_params = 11;
+    CamelliaCbcEncryptDataParams camellia_cbc_encrypt_data_params = 12;
+    CamelliaCtrParams camellia_ctr_params = 13;
+    SeedCbcEncryptDataParams seed_cbc_encrypt_data_params = 14;
+    Rc2CbcParams rc2_cbc_params = 15;
+    Rc2MacGeneralParams rc2_mac_general_params = 16;
+    Rc5Params rc5_params = 17;
+    Rc5CbcParams rc5_cbc_params = 18;
+    Rc5MacGeneralParams rc5_mac_general_params = 19;
+    // Authenticated encryption / AEAD
+    ChaCha20Params chacha20_params = 20;
+    Salsa20Params salsa20_params = 21;
+    Salsa20ChaCha20Poly1305Params salsa20_chacha20_poly1305_params = 22;
+    GcmWrapParams gcm_wrap_params = 23;
+    CcmWrapParams ccm_wrap_params = 24;
+    // Key derivation
+    Ecdh2DeriveParams ecdh2_derive_params = 25;
+    EcmqvDeriveParams ecmqv_derive_params = 26;
+    X942Dh1DeriveParams x942_dh1_derive_params = 27;
+    X942Dh2DeriveParams x942_dh2_derive_params = 28;
+    X942MqvDeriveParams x942_mqv_derive_params = 29;
+    HkdfParams hkdf_params = 30;
+    EddsaParams eddsa_params = 31;
+    XeddsaParams xeddsa_params = 32;
+    Gostr3410DeriveParams gostr3410_derive_params = 33;
+    KeaDeriveParams kea_derive_params = 34;
+    // Key wrapping
+    EcdhAesKeyWrapParams ecdh_aes_key_wrap_params = 35;
+    RsaAesKeyWrapParams rsa_aes_key_wrap_params = 36;
+    Gostr3410KeyWrapParams gostr3410_key_wrap_params = 37;
+    KeyWrapSetOaepParams key_wrap_set_oaep_params = 38;
+    // Password-based encryption
+    PbeParams pbe_params = 39;
+    Pkcs5Pbkd2Params pkcs5_pbkd2_params = 40;
+    // TLS/SSL
+    TlsMacParams tls_mac_params = 41;
+    TlsPrfParams tls_prf_params = 42;
+    TlsKdfParams tls_kdf_params = 43;
+    Ssl3MasterKeyDeriveParams ssl3_master_key_derive_params = 44;
+    Tls12MasterKeyDeriveParams tls12_master_key_derive_params = 45;
+    Tls12ExtendedMasterKeyDeriveParams tls12_extended_master_key_derive_params = 46;
+    Ssl3KeyMatParams ssl3_key_mat_params = 47;
+    WtlsMasterKeyDeriveParams wtls_master_key_derive_params = 48;
+    WtlsPrfParams wtls_prf_params = 49;
+    WtlsKeyMatParams wtls_key_mat_params = 50;
+    // IKE / IPSec
+    IkePrfDeriveParams ike_prf_derive_params = 51;
+    Ike1PrfDeriveParams ike1_prf_derive_params = 52;
+    Ike1ExtendedDeriveParams ike1_extended_derive_params = 53;
+    Ike2PrfPlusDeriveParams ike2_prf_plus_derive_params = 54;
+    // SP800-108 KDF
+    Sp800108KdfParams sp800_108_kdf_params = 55;
+    Sp800108FeedbackKdfParams sp800_108_feedback_kdf_params = 56;
+    // Signal protocol
+    X3dhInitiateParams x3dh_initiate_params = 57;
+    X3dhRespondParams x3dh_respond_params = 58;
+    X2RatchetInitializeParams x2_ratchet_initialize_params = 59;
+    X2RatchetRespondParams x2_ratchet_respond_params = 60;
+    // Miscellaneous
+    OtpParams otp_params = 61;
+    KipParams kip_params = 62;
+    CmsSigParams cms_sig_params = 63;
+    SkipjackPrivateWrapParams skipjack_private_wrap_params = 64;
+    SkipjackRelayxParams skipjack_relayx_params = 65;
+    // Generic / vendor parameter shapes
+    MacGeneralParams mac_general_params = 66;
+    KeyDerivationStringData key_derivation_string_data = 67;
+    RawMechanismParams raw_mechanism_params = 68;
+    // Vendor-specific parameter shapes
+    EciesParams ecies_params = 69;
+    AesCmacKeyDerivationParams aes_cmac_key_derivation_params = 70;
+    DilithiumParams dilithium_params = 71;
+    KyberParams kyber_params = 72;
+    HdKeyDeriveParams hd_key_derive_params = 73;
+    VendorObjectExtractParams vendor_object_extract_params = 74;
+    VendorObjectInsertParams vendor_object_insert_params = 75;
+    ObjectHandleParam object_handle_param = 76;
+    // Post-quantum signature hedge mode
+    SignAdditionalContext sign_additional_context = 77;
+  }
+}
+
+// CK_KIP_PARAMS — placed in types.proto (references Mechanism).
+message KipParams {
+  Mechanism mechanism = 1;  // nested CK_MECHANISM
+  uint64 key_handle = 2;
+  bytes seed = 3;
+}
+
+// ECIES (Elliptic Curve Integrated Encryption Scheme) parameters (CK_NC_ECIES_PARAMS).
+// Contains nested mechanisms for derivation, encryption, and MAC.
+// Placed in types.proto because it references Mechanism.
+message EciesParams {
+  Mechanism derivation_mechanism = 1;
+  Mechanism encryption_mechanism = 2;
+  Mechanism mac_mechanism = 3;
+  bytes shared_data = 4;
+}
+
+// CK_CMS_SIG_PARAMS — placed in types.proto (references Mechanism).
+message CmsSigParams {
+  uint64 certificate_handle = 1;
+  Mechanism signing_mechanism = 2;
+  Mechanism digest_mechanism = 3;
+  string content_type = 4;
+  bytes requested_attributes = 5;
+  bytes required_attributes = 6;
+}
+
+message MechanismInfo {
+  uint64 min_key_size = 1;
+  uint64 max_key_size = 2;
+  uint64 flags = 3;
+}
+
+message Attribute {
+  uint64 attr_type = 1;
+  oneof value {
+    bool bool_value = 2;
+    uint64 ulong_value = 3;
+    bytes bytes_value = 4;
+    string string_value = 5;
+  }
+}
+
+// Per-attribute result for C_GetAttributeValue (ADR-0003: partial-success semantics).
+// One entry per attribute in the template.
+message AttributeResult {
+  uint64 attr_type = 1;
+  oneof result {
+    bytes value = 2;          // attribute value (success)
+    uint64 ck_rv = 3;         // per-attribute error (e.g. CKR_ATTRIBUTE_SENSITIVE)
+  }
+  // Actual length from backend, even when value is sensitive/unavailable.
+  // Used for buffer-size queries.
+  uint64 actual_length = 4;
+}
+
+message OutputBufferSpec {
+  bool buffer_present = 1;
+  uint64 buffer_len = 2;
+}
+
+// Discriminator for the 18 byte-output PKCS#11 functions that share
+// the ByteOutputExact RPC.
+enum ByteOutputFunction {
+  BYTE_OUTPUT_FUNCTION_UNSPECIFIED = 0;
+  BYTE_OUTPUT_FUNCTION_SIGN = 1;
+  BYTE_OUTPUT_FUNCTION_SIGN_FINAL = 2;
+  BYTE_OUTPUT_FUNCTION_SIGN_RECOVER = 3;
+  BYTE_OUTPUT_FUNCTION_VERIFY_RECOVER = 4;
+  BYTE_OUTPUT_FUNCTION_DIGEST = 5;
+  BYTE_OUTPUT_FUNCTION_DIGEST_FINAL = 6;
+  BYTE_OUTPUT_FUNCTION_ENCRYPT = 7;
+  BYTE_OUTPUT_FUNCTION_ENCRYPT_UPDATE = 8;
+  BYTE_OUTPUT_FUNCTION_ENCRYPT_FINAL = 9;
+  BYTE_OUTPUT_FUNCTION_DECRYPT = 10;
+  BYTE_OUTPUT_FUNCTION_DECRYPT_UPDATE = 11;
+  BYTE_OUTPUT_FUNCTION_DECRYPT_FINAL = 12;
+  BYTE_OUTPUT_FUNCTION_DIGEST_ENCRYPT_UPDATE = 13;
+  BYTE_OUTPUT_FUNCTION_DECRYPT_DIGEST_UPDATE = 14;
+  BYTE_OUTPUT_FUNCTION_SIGN_ENCRYPT_UPDATE = 15;
+  BYTE_OUTPUT_FUNCTION_DECRYPT_VERIFY_UPDATE = 16;
+  BYTE_OUTPUT_FUNCTION_WRAP_KEY = 17;
+  BYTE_OUTPUT_FUNCTION_GET_OPERATION_STATE = 18;
+}
+
+message OutputBufferResult {
+  uint64 ck_rv = 1;
+  uint64 returned_len = 2;
+  optional bytes value = 3;
+}
+
+message ParameterRoundtripSpec {
+  bool buffer_present = 1;
+  uint64 buffer_len = 2;
+  optional bytes value = 3;
+}
+
+message ParameterRoundtripResult {
+  uint64 ck_rv = 1;
+  uint64 returned_len = 2;
+  optional bytes value = 3;
+}
+
+message OutputAndHandleResult {
+  uint64 ck_rv = 1;
+  uint64 returned_len = 2;
+  optional bytes value = 3;
+  uint64 object_handle = 4;
+}
+
+message AttributeQueryList {
+  repeated AttributeQuery queries = 1;
+}
+
+message AttributeQuery {
+  uint64 attr_type = 1;
+  bool buffer_present = 2;
+  uint64 buffer_len = 3;
+  optional AttributeQueryList nested = 4;
+}
+
+message AttributeQueryResultList {
+  repeated AttributeQueryResult results = 1;
+}
+
+message AttributeQueryResult {
+  uint64 attr_type = 1;
+  uint64 returned_len = 2;
+  optional bytes value = 3;
+  optional uint64 ck_rv = 4;
+  optional AttributeQueryResultList nested = 5;
+}
+
+message SessionInfo {
+  uint64 slot_id = 1;
+  uint64 state = 2;
+  uint64 flags = 3;
+  uint64 device_error = 4;
+}
+
+message SlotInfo {
+  string slot_description = 1;
+  string manufacturer_id = 2;
+  uint64 flags = 3;
+  uint32 hardware_version_major = 4;
+  uint32 hardware_version_minor = 5;
+  uint32 firmware_version_major = 6;
+  uint32 firmware_version_minor = 7;
+}
+
+message TokenInfo {
+  string label = 1;
+  string manufacturer_id = 2;
+  string model = 3;
+  string serial_number = 4;
+  uint64 flags = 5;
+  uint64 max_session_count = 6;
+  uint64 session_count = 7;
+  uint64 max_rw_session_count = 8;
+  uint64 rw_session_count = 9;
+  uint64 max_pin_len = 10;
+  uint64 min_pin_len = 11;
+  uint64 total_public_memory = 12;
+  uint64 free_public_memory = 13;
+  uint64 total_private_memory = 14;
+  uint64 free_private_memory = 15;
+  uint32 hardware_version_major = 16;
+  uint32 hardware_version_minor = 17;
+  uint32 firmware_version_major = 18;
+  uint32 firmware_version_minor = 19;
+  string utc_time = 20;
+}
+
+message CryptokiInfo {
+  uint32 cryptoki_version_major = 1;
+  uint32 cryptoki_version_minor = 2;
+  string manufacturer_id = 3;
+  uint64 flags = 4;
+  string library_description = 5;
+  uint32 library_version_major = 6;
+  uint32 library_version_minor = 7;
+}
+
+// --- PKCS#11 3.0/3.2 shared types ---
+
+// Per-message parameter for message-based crypto APIs.
+// The mechanism type determines which variant to use.
+message MessageParameter {
+  oneof params {
+    bytes raw = 1;
+    GcmMessageParams gcm_message_params = 2;
+    CcmMessageParams ccm_message_params = 3;
+    Salsa20ChaCha20Poly1305MessageParams salsa_chacha_message_params = 4;
+  }
+}
+
+// CK_ASYNC_DATA — result structure for C_AsyncComplete.
+message AsyncData {
+  uint64 version = 1;
+  bytes value = 2;
+  uint64 value_len = 3;
+  uint64 object_handle = 4;
+  uint64 additional_object_handle = 5;
+}
+
+// --- Request/Response messages for each RPC ---
+
+message InitializeRequest {
+  // client_context_id is empty on first call; daemon assigns one and returns it.
+  string client_context_id = 1;
+}
+message InitializeResponse {
+  uint64 ck_rv = 1;
+  // The logical client instance ID assigned by the daemon (ADR-0002 §3).
+  // Client must include this in all subsequent requests.
+  string client_context_id = 2;
+}
+
+message FinalizeRequest {
+  string client_context_id = 1;
+}
+message FinalizeResponse {
+  uint64 ck_rv = 1;
+}
+
+message GetInfoRequest {
+  string client_context_id = 1;
+}
+message GetInfoResponse {
+  uint64 ck_rv = 1;
+  CryptokiInfo info = 2;
+}
+
+message GetSlotListRequest {
+  string client_context_id = 1;
+  bool token_present = 2;
+}
+message GetSlotListResponse {
+  uint64 ck_rv = 1;
+  repeated uint64 slot_ids = 2;
+}
+
+message GetSlotInfoRequest {
+  string client_context_id = 1;
+  uint64 slot_id = 2;
+}
+message GetSlotInfoResponse {
+  uint64 ck_rv = 1;
+  SlotInfo info = 2;
+}
+
+message GetTokenInfoRequest {
+  string client_context_id = 1;
+  uint64 slot_id = 2;
+}
+message GetTokenInfoResponse {
+  uint64 ck_rv = 1;
+  TokenInfo info = 2;
+}
+
+message GetMechanismListRequest {
+  string client_context_id = 1;
+  uint64 slot_id = 2;
+}
+message GetMechanismListResponse {
+  uint64 ck_rv = 1;
+  repeated uint64 mechanism_types = 2;
+}
+
+message GetMechanismInfoRequest {
+  string client_context_id = 1;
+  uint64 slot_id = 2;
+  uint64 mechanism_type = 3;
+}
+message GetMechanismInfoResponse {
+  uint64 ck_rv = 1;
+  MechanismInfo info = 2;
+}
+
+message OpenSessionRequest {
+  string client_context_id = 1;
+  uint64 slot_id = 2;
+  uint64 flags = 3;
+}
+message OpenSessionResponse {
+  uint64 ck_rv = 1;
+  uint64 session_handle = 2;
+}
+
+message CloseSessionRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message CloseSessionResponse {
+  uint64 ck_rv = 1;
+}
+
+message CloseAllSessionsRequest {
+  string client_context_id = 1;
+  uint64 slot_id = 2;
+}
+message CloseAllSessionsResponse {
+  uint64 ck_rv = 1;
+}
+
+message GetSessionInfoRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message GetSessionInfoResponse {
+  uint64 ck_rv = 1;
+  SessionInfo info = 2;
+}
+
+message LoginRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 user_type = 3;
+  optional bytes pin = 4;  // None = NULL pPin pointer
+}
+message LoginResponse {
+  uint64 ck_rv = 1;
+}
+
+message LogoutRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message LogoutResponse {
+  uint64 ck_rv = 1;
+}
+
+message FindObjectsInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  repeated Attribute template = 3;
+}
+message FindObjectsInitResponse {
+  uint64 ck_rv = 1;
+}
+
+message FindObjectsRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint32 max_object_count = 3;
+}
+message FindObjectsResponse {
+  uint64 ck_rv = 1;
+  repeated uint64 object_handles = 2;
+}
+
+message FindObjectsFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message FindObjectsFinalResponse {
+  uint64 ck_rv = 1;
+}
+
+message GetAttributeValueRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 object_handle = 3;
+  repeated Attribute template = 4;
+}
+message GetAttributeValueResponse {
+  uint64 ck_rv = 1;
+  repeated AttributeResult results = 2;
+}
+
+message GetAttributeValueExactRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 object_handle = 3;
+  repeated AttributeQuery queries = 4;
+}
+message GetAttributeValueExactResponse {
+  uint64 ck_rv = 1;
+  repeated AttributeQueryResult results = 2;
+}
+
+message SignInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 key_handle = 4;
+}
+message SignInitResponse {
+  uint64 ck_rv = 1;
+}
+
+message SignRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes data = 3;
+}
+message SignResponse {
+  uint64 ck_rv = 1;
+  bytes signature = 2;
+}
+
+message SignUpdateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes part = 3;
+}
+message SignUpdateResponse {
+  uint64 ck_rv = 1;
+}
+
+message SignFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message SignFinalResponse {
+  uint64 ck_rv = 1;
+  bytes signature = 2;
+}
+
+message VerifyInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 key_handle = 4;
+}
+message VerifyInitResponse {
+  uint64 ck_rv = 1;
+}
+
+message VerifyRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes data = 3;
+  bytes signature = 4;
+}
+message VerifyResponse {
+  uint64 ck_rv = 1;
+}
+
+message VerifyUpdateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes part = 3;
+}
+message VerifyUpdateResponse {
+  uint64 ck_rv = 1;
+}
+
+message VerifyFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes signature = 3;
+}
+message VerifyFinalResponse {
+  uint64 ck_rv = 1;
+}
+
+// --- Object management ---
+
+message CreateObjectRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  repeated Attribute template = 3;
+}
+message CreateObjectResponse {
+  uint64 ck_rv = 1;
+  uint64 object_handle = 2;
+}
+
+message CopyObjectRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 object_handle = 3;
+  repeated Attribute template = 4;
+}
+message CopyObjectResponse {
+  uint64 ck_rv = 1;
+  uint64 new_object_handle = 2;
+}
+
+message DestroyObjectRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 object_handle = 3;
+}
+message DestroyObjectResponse {
+  uint64 ck_rv = 1;
+}
+
+message GetObjectSizeRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 object_handle = 3;
+}
+message GetObjectSizeResponse {
+  uint64 ck_rv = 1;
+  uint64 size = 2;
+}
+
+message SetAttributeValueRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 object_handle = 3;
+  repeated Attribute template = 4;
+}
+message SetAttributeValueResponse {
+  uint64 ck_rv = 1;
+}
+
+// --- Digest ---
+
+message DigestInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+}
+message DigestInitResponse {
+  uint64 ck_rv = 1;
+}
+
+message DigestRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes data = 3;
+}
+message DigestResponse {
+  uint64 ck_rv = 1;
+  bytes digest = 2;
+}
+
+message DigestUpdateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes part = 3;
+}
+message DigestUpdateResponse {
+  uint64 ck_rv = 1;
+}
+
+message DigestKeyRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 key_handle = 3;
+}
+message DigestKeyResponse {
+  uint64 ck_rv = 1;
+}
+
+message DigestFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message DigestFinalResponse {
+  uint64 ck_rv = 1;
+  bytes digest = 2;
+}
+
+// --- Encryption / Decryption ---
+
+message EncryptInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 key_handle = 4;
+}
+message EncryptInitResponse {
+  uint64 ck_rv = 1;
+  Mechanism mechanism_out = 2;
+}
+
+message EncryptRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes data = 3;
+}
+message EncryptResponse {
+  uint64 ck_rv = 1;
+  bytes encrypted_data = 2;
+}
+
+message EncryptUpdateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes part = 3;
+}
+message EncryptUpdateResponse {
+  uint64 ck_rv = 1;
+  bytes encrypted_part = 2;
+}
+
+message EncryptFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message EncryptFinalResponse {
+  uint64 ck_rv = 1;
+  bytes last_encrypted_part = 2;
+}
+
+message DecryptInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 key_handle = 4;
+}
+message DecryptInitResponse {
+  uint64 ck_rv = 1;
+}
+
+message DecryptRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes encrypted_data = 3;
+}
+message DecryptResponse {
+  uint64 ck_rv = 1;
+  bytes data = 2;
+}
+
+message DecryptUpdateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes encrypted_part = 3;
+}
+message DecryptUpdateResponse {
+  uint64 ck_rv = 1;
+  bytes part = 2;
+}
+
+message DecryptFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message DecryptFinalResponse {
+  uint64 ck_rv = 1;
+  bytes last_part = 2;
+}
+
+message DeriveKeyRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 base_key_handle = 4;
+  repeated Attribute template = 5;
+}
+message DeriveKeyResponse {
+  uint64 ck_rv = 1;
+  uint64 key_handle = 2;
+}
+
+message WrapKeyRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 wrapping_key_handle = 4;
+  uint64 key_handle = 5;
+}
+message WrapKeyResponse {
+  uint64 ck_rv = 1;
+  bytes wrapped_key = 2;
+}
+
+message UnwrapKeyRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 unwrapping_key_handle = 4;
+  bytes wrapped_key = 5;
+  repeated Attribute template = 6;
+}
+message UnwrapKeyResponse {
+  uint64 ck_rv = 1;
+  uint64 key_handle = 2;
+}
+
+message GenerateKeyRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  repeated Attribute template = 4;
+}
+message GenerateKeyResponse {
+  uint64 ck_rv = 1;
+  uint64 key_handle = 2;
+}
+
+message GenerateKeyPairRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  repeated Attribute public_key_template = 4;
+  repeated Attribute private_key_template = 5;
+}
+message GenerateKeyPairResponse {
+  uint64 ck_rv = 1;
+  uint64 public_key_handle = 2;
+  uint64 private_key_handle = 3;
+}
+
+message GetOperationStateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message GetOperationStateResponse {
+  uint64 ck_rv = 1;
+  bytes operation_state = 2;
+}
+
+message SetOperationStateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes operation_state = 3;
+  uint64 encryption_key_handle = 4;
+  uint64 authentication_key_handle = 5;
+}
+message SetOperationStateResponse {
+  uint64 ck_rv = 1;
+}
+
+message SeedRandomRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes seed = 3;
+}
+message SeedRandomResponse {
+  uint64 ck_rv = 1;
+}
+
+message GenerateRandomRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint32 length = 3;
+}
+message GenerateRandomResponse {
+  uint64 ck_rv = 1;
+  bytes random_data = 2;
+}
+
+// --- Token / PIN administration ---
+
+message InitTokenRequest {
+  string client_context_id = 1;
+  uint64 slot_id = 2;
+  optional bytes so_pin = 3;  // None = NULL pPin pointer
+  string label = 4;
+}
+message InitTokenResponse {
+  uint64 ck_rv = 1;
+}
+
+message InitPinRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  optional bytes pin = 3;  // None = NULL pPin pointer
+}
+message InitPinResponse {
+  uint64 ck_rv = 1;
+}
+
+message SetPinRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  optional bytes old_pin = 3;  // None = NULL pOldPin pointer
+  optional bytes new_pin = 4;  // None = NULL pNewPin pointer
+}
+message SetPinResponse {
+  uint64 ck_rv = 1;
+}
+
+// --- Combined operations ---
+
+message DigestEncryptUpdateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes part = 3;
+}
+message DigestEncryptUpdateResponse {
+  uint64 ck_rv = 1;
+  bytes encrypted_part = 2;
+}
+
+message DecryptDigestUpdateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes encrypted_part = 3;
+}
+message DecryptDigestUpdateResponse {
+  uint64 ck_rv = 1;
+  bytes part = 2;
+}
+
+message SignEncryptUpdateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes part = 3;
+}
+message SignEncryptUpdateResponse {
+  uint64 ck_rv = 1;
+  bytes encrypted_part = 2;
+}
+
+message DecryptVerifyUpdateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes encrypted_part = 3;
+}
+message DecryptVerifyUpdateResponse {
+  uint64 ck_rv = 1;
+  bytes part = 2;
+}
+
+// --- Recovery signatures ---
+
+message SignRecoverInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 key_handle = 4;
+}
+message SignRecoverInitResponse {
+  uint64 ck_rv = 1;
+}
+
+message SignRecoverRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes data = 3;
+}
+message SignRecoverResponse {
+  uint64 ck_rv = 1;
+  bytes signature = 2;
+}
+
+message VerifyRecoverInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 key_handle = 4;
+}
+message VerifyRecoverInitResponse {
+  uint64 ck_rv = 1;
+}
+
+message VerifyRecoverRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes signature = 3;
+}
+message VerifyRecoverResponse {
+  uint64 ck_rv = 1;
+  bytes data = 2;
+}
+
+message WaitForSlotEventRequest {
+  string client_context_id = 1;
+  uint64 flags = 2;  // CKF_DONT_BLOCK (0x1) or 0 for blocking
+}
+message WaitForSlotEventResponse {
+  uint64 ck_rv = 1;
+  uint64 slot_id = 2;
+}
+
+// --- Legacy parallel function status (PKCS#11 2.40) ---
+
+message GetFunctionStatusRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message GetFunctionStatusResponse { uint64 ck_rv = 1; }
+
+message CancelFunctionRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message CancelFunctionResponse { uint64 ck_rv = 1; }
+
+// --- PKCS#11 3.0/3.2 Request/Response messages ---
+
+// C_LoginUser
+message LoginUserRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 user_type = 3;
+  bytes pin = 4;
+  bytes username = 5;
+}
+message LoginUserResponse { uint64 ck_rv = 1; }
+
+// C_SessionCancel
+message SessionCancelRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 flags = 3;
+}
+message SessionCancelResponse { uint64 ck_rv = 1; }
+
+// C_GetSessionValidationFlags
+message GetSessionValidationFlagsRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  uint64 flags_type = 3;
+}
+message GetSessionValidationFlagsResponse {
+  uint64 ck_rv = 1;
+  uint64 flags = 2;
+}
+
+// C_EncapsulateKey
+message EncapsulateKeyRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 public_key_handle = 4;
+  repeated Attribute template = 5;
+}
+message EncapsulateKeyResponse {
+  uint64 ck_rv = 1;
+  bytes ciphertext = 2;
+  uint64 key_handle = 3;
+}
+
+// C_DecapsulateKey
+message DecapsulateKeyRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 private_key_handle = 4;
+  repeated Attribute template = 5;
+  bytes ciphertext = 6;
+}
+message DecapsulateKeyResponse {
+  uint64 ck_rv = 1;
+  uint64 key_handle = 2;
+}
+
+// C_MessageEncryptInit
+message MessageEncryptInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  optional Mechanism mechanism = 3;  // absent = cancel active state
+  uint64 key_handle = 4;
+}
+message MessageEncryptInitResponse { uint64 ck_rv = 1; }
+
+// C_EncryptMessage
+message EncryptMessageRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+  bytes associated_data = 4;
+  bytes plaintext = 5;
+}
+message EncryptMessageResponse {
+  uint64 ck_rv = 1;
+  bytes parameter_out = 2;
+  bytes ciphertext = 3;
+}
+
+// C_EncryptMessageBegin
+message EncryptMessageBeginRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+  bytes associated_data = 4;
+}
+message EncryptMessageBeginResponse {
+  uint64 ck_rv = 1;
+  bytes parameter_out = 2;
+}
+
+// C_EncryptMessageNext
+message EncryptMessageNextRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+  bytes plaintext_part = 4;
+  uint64 flags = 5;
+}
+message EncryptMessageNextResponse {
+  uint64 ck_rv = 1;
+  bytes parameter_out = 2;
+  bytes ciphertext_part = 3;
+}
+
+// C_MessageEncryptFinal
+message MessageEncryptFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message MessageEncryptFinalResponse { uint64 ck_rv = 1; }
+
+// C_MessageDecryptInit
+message MessageDecryptInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  optional Mechanism mechanism = 3;  // absent = cancel active state
+  uint64 key_handle = 4;
+}
+message MessageDecryptInitResponse { uint64 ck_rv = 1; }
+
+// C_DecryptMessage
+message DecryptMessageRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+  bytes associated_data = 4;
+  bytes ciphertext = 5;
+}
+message DecryptMessageResponse {
+  uint64 ck_rv = 1;
+  bytes parameter_out = 2;
+  bytes plaintext = 3;
+}
+
+// C_DecryptMessageBegin
+message DecryptMessageBeginRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+  bytes associated_data = 4;
+}
+message DecryptMessageBeginResponse {
+  uint64 ck_rv = 1;
+  bytes parameter_out = 2;
+}
+
+// C_DecryptMessageNext
+message DecryptMessageNextRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+  bytes ciphertext_part = 4;
+  uint64 flags = 5;
+}
+message DecryptMessageNextResponse {
+  uint64 ck_rv = 1;
+  bytes parameter_out = 2;
+  bytes plaintext_part = 3;
+}
+
+// C_MessageDecryptFinal
+message MessageDecryptFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message MessageDecryptFinalResponse { uint64 ck_rv = 1; }
+
+// C_MessageSignInit
+message MessageSignInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  optional Mechanism mechanism = 3;  // absent = cancel active state
+  uint64 key_handle = 4;
+}
+message MessageSignInitResponse { uint64 ck_rv = 1; }
+
+// C_SignMessage
+message SignMessageRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+  bytes data = 4;
+}
+message SignMessageResponse {
+  uint64 ck_rv = 1;
+  bytes parameter_out = 2;
+  bytes signature = 3;
+}
+
+// C_SignMessageBegin
+message SignMessageBeginRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+}
+message SignMessageBeginResponse {
+  uint64 ck_rv = 1;
+  bytes parameter_out = 2;
+}
+
+// C_SignMessageNext
+message SignMessageNextRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+  bytes data_part = 4;
+  bool request_signature = 5;  // true = final part, return signature
+}
+message SignMessageNextResponse {
+  uint64 ck_rv = 1;
+  bytes parameter_out = 2;
+  bytes signature = 3;  // empty if request_signature was false
+}
+
+// C_MessageSignFinal
+message MessageSignFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message MessageSignFinalResponse { uint64 ck_rv = 1; }
+
+// C_MessageVerifyInit
+message MessageVerifyInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  optional Mechanism mechanism = 3;  // absent = cancel active state
+  uint64 key_handle = 4;
+}
+message MessageVerifyInitResponse { uint64 ck_rv = 1; }
+
+// C_VerifyMessage
+message VerifyMessageRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+  bytes data = 4;
+  bytes signature = 5;
+}
+message VerifyMessageResponse { uint64 ck_rv = 1; }
+
+// C_VerifyMessageBegin
+message VerifyMessageBeginRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+}
+message VerifyMessageBeginResponse {
+  uint64 ck_rv = 1;
+  bytes parameter_out = 2;
+}
+
+// C_VerifyMessageNext
+message VerifyMessageNextRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes parameter = 3;
+  bytes data_part = 4;
+  bool is_final = 5;
+  bytes signature = 6;  // only used when is_final=true
+}
+message VerifyMessageNextResponse { uint64 ck_rv = 1; }
+
+// C_MessageVerifyFinal
+message MessageVerifyFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message MessageVerifyFinalResponse { uint64 ck_rv = 1; }
+
+// C_VerifySignatureInit
+message VerifySignatureInitRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  optional Mechanism mechanism = 3;  // absent = cancel
+  uint64 key_handle = 4;            // ignored on cancel
+  bytes signature = 5;              // ignored on cancel
+}
+message VerifySignatureInitResponse { uint64 ck_rv = 1; }
+
+// C_VerifySignature
+message VerifySignatureRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes data = 3;
+}
+message VerifySignatureResponse { uint64 ck_rv = 1; }
+
+// C_VerifySignatureUpdate
+message VerifySignatureUpdateRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  bytes data_part = 3;
+}
+message VerifySignatureUpdateResponse { uint64 ck_rv = 1; }
+
+// C_VerifySignatureFinal
+message VerifySignatureFinalRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+}
+message VerifySignatureFinalResponse { uint64 ck_rv = 1; }
+
+// C_WrapKeyAuthenticated
+message WrapKeyAuthenticatedRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 wrapping_key_handle = 4;
+  uint64 key_handle = 5;
+  bytes associated_data = 6;
+}
+message WrapKeyAuthenticatedResponse {
+  uint64 ck_rv = 1;
+  bytes wrapped_key = 2;
+  bytes mechanism_parameter_out = 3;
+}
+
+// C_UnwrapKeyAuthenticated
+message UnwrapKeyAuthenticatedRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 unwrapping_key_handle = 4;
+  bytes wrapped_key = 5;
+  repeated Attribute template = 6;
+  bytes associated_data = 7;
+}
+message UnwrapKeyAuthenticatedResponse {
+  uint64 ck_rv = 1;
+  uint64 key_handle = 2;
+  bytes mechanism_parameter_out = 3;
+}
+
+// C_AsyncComplete
+message AsyncCompleteRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  string function_name = 3;
+}
+message AsyncCompleteResponse {
+  uint64 ck_rv = 1;  // may be CKR_PENDING
+  AsyncData async_data = 2;
+}
+
+// C_AsyncGetID — always returns CKR_STATE_UNSAVEABLE (Option B)
+message AsyncGetIDRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  string function_name = 3;
+}
+message AsyncGetIDResponse {
+  uint64 ck_rv = 1;
+  uint64 operation_id = 2;
+}
+
+// C_AsyncJoin — always returns CKR_SAVED_STATE_INVALID (Option B)
+message AsyncJoinRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  string function_name = 3;
+  uint64 operation_id = 4;
+  uint64 buffer_size = 5;
+}
+message AsyncJoinResponse {
+  uint64 ck_rv = 1;
+  bytes data = 2;
+}
+
+// --- Exact byte-output RPC (Track B) ---
+
+message ByteOutputExactRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  ByteOutputFunction function = 3;
+  OutputBufferSpec output_spec = 4;
+  bytes input_data = 5;                  // data/part for functions that take input
+  optional Mechanism mechanism = 6;      // only for wrap_key
+  uint64 wrapping_key_handle = 7;        // only for wrap_key
+  uint64 key_handle = 8;                 // only for wrap_key
+}
+message ByteOutputExactResponse {
+  OutputBufferResult result = 1;
+  Mechanism mechanism_out = 2;
+}
+
+// --- Exact parameter-output RPC (Track C) ---
+
+// Discriminator for the 7 parameter-output PKCS#11 functions that share
+// the ParameterOutputExact RPC.
+enum ParameterOutputFunction {
+  PARAMETER_OUTPUT_FUNCTION_UNSPECIFIED = 0;
+  PARAMETER_OUTPUT_FUNCTION_ENCRYPT_MESSAGE = 1;
+  PARAMETER_OUTPUT_FUNCTION_DECRYPT_MESSAGE = 2;
+  PARAMETER_OUTPUT_FUNCTION_SIGN_MESSAGE = 3;
+  PARAMETER_OUTPUT_FUNCTION_ENCRYPT_MESSAGE_NEXT = 4;
+  PARAMETER_OUTPUT_FUNCTION_DECRYPT_MESSAGE_NEXT = 5;
+  PARAMETER_OUTPUT_FUNCTION_SIGN_MESSAGE_NEXT = 6;
+  PARAMETER_OUTPUT_FUNCTION_WRAP_KEY_AUTHENTICATED = 7;
+}
+
+message ParameterOutputExactRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  ParameterOutputFunction function = 3;
+  OutputBufferSpec output_spec = 4;
+  bytes input_data = 5;                          // plaintext/ciphertext/data
+  bytes associated_data = 6;                     // AAD for message encrypt/decrypt and auth wrap
+  bytes parameter = 7;                           // input parameter (IV/nonce)
+  ParameterRoundtripSpec parameter_out_spec = 8; // spec for parameter write-back buffer
+  uint64 flags = 9;                              // for *_next functions
+  optional Mechanism mechanism = 10;             // only for wrap_key_authenticated
+  uint64 wrapping_key_handle = 11;               // only for wrap_key_authenticated
+  uint64 key_handle = 12;                        // only for wrap_key_authenticated
+  optional MessageParameter message_parameter = 13; // structured message param (replaces raw `parameter` for message crypto)
+}
+
+message ParameterOutputExactResponse {
+  OutputBufferResult output_result = 1;
+  ParameterRoundtripResult parameter_result = 2;
+  optional MessageParameter message_parameter_out = 3; // modified message param after backend call
+}
+
+// Track C Task 2: C_EncapsulateKey with exact output semantics
+message EncapsulateKeyExactRequest {
+  string client_context_id = 1;
+  uint64 session_handle = 2;
+  Mechanism mechanism = 3;
+  uint64 public_key_handle = 4;
+  repeated Attribute template = 5;
+  OutputBufferSpec output_spec = 6;
+}
+
+message EncapsulateKeyExactResponse {
+  OutputAndHandleResult result = 1;
+}
+
+// BUG-001: Interface version transparency
+
+message GetBackendInterfacesRequest {}
+
+message InterfaceInfo {
+  uint32 version_major = 1;
+  uint32 version_minor = 2;
+  // Function names that are NULL in the backend's function list.
+  repeated string null_functions = 3;
+}
+
+message GetBackendInterfacesResponse {
+  repeated InterfaceInfo interfaces = 1;
+}

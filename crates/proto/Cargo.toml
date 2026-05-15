@@ -1,0 +1,13 @@
+[package]
+name = "pkcs11-proxy-ng-proto"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+pkcs11-proxy-ng-types = { path = "../types" }
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true

@@ -1,0 +1,49 @@
+# Reference: planned mTLS-secured TCP configuration shape
+#
+# Runtime mTLS enforcement is not wired in this binary yet. The daemon fails
+# closed when auth = "mtls" is configured so this file cannot accidentally
+# start a plaintext listener that looks secured. Keep this as the target
+# configuration shape for the full mTLS listener implementation.
+#
+# Certificate setup (example with OpenSSL):
+#   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+#     -keyout ca.key -out ca.crt -days 365 -nodes -subj "/CN=pkcs11-proxy-ng-ca"
+#   # Generate server cert signed by CA
+#   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+#     -keyout server.key -out server.csr -nodes -subj "/CN=pkcs11-proxy-ng-server"
+#   openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
+#     -CAcreateserial -out server.crt -days 365
+#   # Generate client cert signed by CA
+#   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+#     -keyout client.key -out client.csr -nodes -subj "/CN=app-client"
+#   openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key \
+#     -CAcreateserial -out client.crt -days 365
+#
+# Usage:
+#   pkcs11-proxy-ng examples/config-mtls.toml
+
+[backend]
+module = "/usr/lib/softhsm/libsofthsm2.so"
+
+[proxy]
+mechanism_discovery = "transparent"
+lease_seconds = 300
+max_message_bytes = 4194304      # 4 MiB
+# Backend call timeout in seconds. Calls exceeding this return CKR_DEVICE_ERROR.
+request_timeout_secs = 30
+# Maximum concurrent backend HSM calls.
+# Tune based on HSM capacity (e.g., 10 for hardware HSM, 200 for software token).
+max_concurrent_backend_calls = 200
+# Size of the tokio blocking thread pool. Must be >= max_concurrent_backend_calls.
+# Default 512. Increase for high-concurrency HSM deployments.
+max_blocking_threads = 512
+
+[listener.remote]
+bind = "0.0.0.0:50051"
+auth = "mtls"
+ca_cert = "/etc/pkcs11-proxy/ca.crt"
+server_cert = "/etc/pkcs11-proxy/server.crt"
+server_key = "/etc/pkcs11-proxy/server.key"
+
+[auth]
+allow_all_authenticated = true

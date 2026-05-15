@@ -1,0 +1,128 @@
+# Tier 0 — Fast PR checks
+#
+# Runs on every push and pull request.  Must complete quickly (< 5 min) to
+# give fast feedback.  Does NOT require any external dependencies beyond the
+# Rust toolchain and protobuf compiler.
+#
+# Checks performed:
+#   cargo fmt --check   — formatting gate
+#   cargo audit         — RustSec advisory gate
+#   cargo build         — compilation gate (all workspace crates)
+#   cargo test          — unit + integration tests that don't require #[ignore]
+#   cargo clippy        — linting gate for all targets/features (-D warnings)
+#
+# See .github/workflows/nightly.yml for Tier 2-3 provider-matrix and
+# consumer interoperability jobs (scheduled, not per-PR).
+
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Tier 0a: formatting ────────────────────────────────────────────────────
+  fmt:
+    name: Format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable toolchain with rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  # ── Tier 0b: dependency advisory audit ────────────────────────────────────
+  audit:
+    name: Cargo Audit
+    runs-on: ubuntu-24.04
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo audit binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-v0
+
+      - name: Install cargo-audit
+        run: |
+          if ! command -v cargo-audit >/dev/null 2>&1; then
+            cargo install cargo-audit --locked
+          fi
+
+      - name: cargo audit
+        run: cargo audit
+
+  # ── Tier 0c: build, test, clippy ──────────────────────────────────────────
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-24.04
+    needs: [fmt, audit]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install stable toolchain with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo build --workspace
+        run: cargo build --workspace
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # ── Tier 0d: MSRV check ────────────────────────────────────────────────────
+  # Validates that the workspace compiles on the minimum Rust version declared
+  # in the workspace Cargo.toml (currently 1.94).  Separate job so MSRV
+  # failures don't block the main test feedback.
+  msrv:
+    name: MSRV (1.94)
+    runs-on: ubuntu-24.04
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler
+
+      # Hard-coded to match rust-version in workspace Cargo.toml.
+      # Update both places when the MSRV is bumped.
+      - name: Install Rust 1.94 (MSRV)
+        uses: dtolnay/rust-toolchain@1.94
+
+      - name: cargo build --workspace (MSRV)
+        run: cargo build --workspace

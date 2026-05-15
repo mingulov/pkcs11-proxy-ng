@@ -1,0 +1,704 @@
+# Default mechanism parameter shape mappings for the PKCS#11 proxy.
+#
+# This file is embedded at compile time via include_str!() and defines the
+# baseline set of mechanisms the proxy understands. Operators can layer an
+# override TOML on top to add vendor-specific mechanisms.
+#
+# Hex values are taken from OASIS PKCS#11 v3.02 pkcs11t.h.
+
+# Discovery mode: "transparent" passes all backend mechanisms through to
+# clients; "filtered" only advertises mechanisms the proxy can fully handle.
+discovery_mode = "transparent"
+
+# ─── Parameterless mechanisms ───────────────────────────────────────────────
+#
+# Mechanisms that always take NULL pMechanism->pParameter.
+# The proxy forwards these without inspecting parameters.
+
+parameterless = [
+    # RSA
+    0x0000,  # CKM_RSA_PKCS_KEY_PAIR_GEN
+    0x0001,  # CKM_RSA_PKCS
+    0x0002,  # CKM_RSA_9796
+    0x0003,  # CKM_RSA_X_509
+    0x0004,  # CKM_MD2_RSA_PKCS
+    0x0005,  # CKM_MD5_RSA_PKCS
+    0x0006,  # CKM_SHA1_RSA_PKCS
+    0x0007,  # CKM_RIPEMD128_RSA_PKCS
+    0x0008,  # CKM_RIPEMD160_RSA_PKCS
+    0x000A,  # CKM_RSA_X9_31_KEY_PAIR_GEN
+    0x000B,  # CKM_RSA_X9_31
+    0x000C,  # CKM_SHA1_RSA_X9_31
+    0x0040,  # CKM_SHA256_RSA_PKCS
+    0x0041,  # CKM_SHA384_RSA_PKCS
+    0x0042,  # CKM_SHA512_RSA_PKCS
+    0x0046,  # CKM_SHA224_RSA_PKCS
+    0x0060,  # CKM_SHA3_256_RSA_PKCS
+    0x0061,  # CKM_SHA3_384_RSA_PKCS
+    0x0062,  # CKM_SHA3_512_RSA_PKCS
+    0x0066,  # CKM_SHA3_224_RSA_PKCS
+
+    # DSA
+    0x0010,  # CKM_DSA_KEY_PAIR_GEN
+    0x0011,  # CKM_DSA
+    0x0012,  # CKM_DSA_SHA1
+    0x0013,  # CKM_DSA_SHA224
+    0x0014,  # CKM_DSA_SHA256
+    0x0015,  # CKM_DSA_SHA384
+    0x0016,  # CKM_DSA_SHA512
+    0x0018,  # CKM_DSA_SHA3_224
+    0x0019,  # CKM_DSA_SHA3_256
+    0x001A,  # CKM_DSA_SHA3_384
+    0x001B,  # CKM_DSA_SHA3_512
+    0x2000,  # CKM_DSA_PARAMETER_GEN
+    0x2003,  # CKM_DSA_PROBABILISTIC_PARAMETER_GEN
+    0x2004,  # CKM_DSA_SHAWE_TAYLOR_PARAMETER_GEN
+    0x2005,  # CKM_DSA_FIPS_G_GEN
+
+    # DH
+    0x0020,  # CKM_DH_PKCS_KEY_PAIR_GEN
+    0x2001,  # CKM_DH_PKCS_PARAMETER_GEN
+
+    # X9.42 DH
+    0x0030,  # CKM_X9_42_DH_KEY_PAIR_GEN
+    0x2002,  # CKM_X9_42_DH_PARAMETER_GEN
+
+    # EC / ECDSA
+    0x1040,  # CKM_EC_KEY_PAIR_GEN
+    0x1041,  # CKM_ECDSA
+    0x1042,  # CKM_ECDSA_SHA1
+    0x1043,  # CKM_ECDSA_SHA224
+    0x1044,  # CKM_ECDSA_SHA256
+    0x1045,  # CKM_ECDSA_SHA384
+    0x1046,  # CKM_ECDSA_SHA512
+    0x1047,  # CKM_ECDSA_SHA3_224
+    0x1048,  # CKM_ECDSA_SHA3_256
+    0x1049,  # CKM_ECDSA_SHA3_384
+    0x104A,  # CKM_ECDSA_SHA3_512
+    0x1055,  # CKM_EC_EDWARDS_KEY_PAIR_GEN
+    0x1056,  # CKM_EC_MONTGOMERY_KEY_PAIR_GEN
+    0x1057,  # CKM_EDDSA
+
+    # KEA (historical)
+    0x1010,  # CKM_KEA_KEY_PAIR_GEN
+
+    # Generic secret
+    0x0350,  # CKM_GENERIC_SECRET_KEY_GEN
+
+    # RC2 (historical)
+    0x0100,  # CKM_RC2_KEY_GEN
+    0x0101,  # CKM_RC2_ECB
+
+    # RC4 (historical)
+    0x0110,  # CKM_RC4_KEY_GEN
+    0x0111,  # CKM_RC4
+
+    # RC5 (historical)
+    0x0330,  # CKM_RC5_KEY_GEN
+    0x0331,  # CKM_RC5_ECB
+    0x0333,  # CKM_RC5_MAC
+
+    # DES (historical)
+    0x0120,  # CKM_DES_KEY_GEN
+    0x0121,  # CKM_DES_ECB
+    0x0123,  # CKM_DES_MAC
+
+    # DES2 / DES3
+    0x0130,  # CKM_DES2_KEY_GEN
+    0x0131,  # CKM_DES3_KEY_GEN
+    0x0132,  # CKM_DES3_ECB
+    0x0134,  # CKM_DES3_MAC
+    0x0138,  # CKM_DES3_CMAC
+
+    # CDMF (historical)
+    0x0140,  # CKM_CDMF_KEY_GEN
+    0x0141,  # CKM_CDMF_ECB
+    0x0143,  # CKM_CDMF_MAC
+
+    # CAST (historical)
+    0x0300,  # CKM_CAST_KEY_GEN
+    0x0301,  # CKM_CAST_ECB
+    0x0303,  # CKM_CAST_MAC
+
+    # CAST3 (historical)
+    0x0310,  # CKM_CAST3_KEY_GEN
+    0x0311,  # CKM_CAST3_ECB
+    0x0313,  # CKM_CAST3_MAC
+
+    # CAST128 (historical)
+    0x0320,  # CKM_CAST128_KEY_GEN
+    0x0321,  # CKM_CAST128_ECB
+    0x0323,  # CKM_CAST128_MAC
+
+    # IDEA (historical)
+    0x0340,  # CKM_IDEA_KEY_GEN
+    0x0341,  # CKM_IDEA_ECB
+    0x0343,  # CKM_IDEA_MAC
+
+    # AES
+    0x1080,  # CKM_AES_KEY_GEN
+    0x1081,  # CKM_AES_ECB
+    0x1083,  # CKM_AES_MAC
+    0x108A,  # CKM_AES_CMAC
+    0x108C,  # CKM_AES_XCBC_MAC
+    0x108E,  # CKM_AES_GMAC
+
+    # SEED
+    0x0650,  # CKM_SEED_KEY_GEN
+    0x0651,  # CKM_SEED_ECB
+    0x0653,  # CKM_SEED_MAC
+
+    # Camellia
+    0x0550,  # CKM_CAMELLIA_KEY_GEN
+    0x0551,  # CKM_CAMELLIA_ECB
+    0x0553,  # CKM_CAMELLIA_MAC
+
+    # ARIA
+    0x0560,  # CKM_ARIA_KEY_GEN
+    0x0561,  # CKM_ARIA_ECB
+    0x0563,  # CKM_ARIA_MAC
+
+    # SSL/TLS
+    0x0370,  # CKM_SSL3_PRE_MASTER_KEY_GEN
+    0x0374,  # CKM_TLS_PRE_MASTER_KEY_GEN
+    0x0380,  # CKM_SSL3_MD5_MAC
+    0x0381,  # CKM_SSL3_SHA1_MAC
+
+    # Digests
+    0x0200,  # CKM_MD2
+    0x0201,  # CKM_MD2_HMAC
+    0x0210,  # CKM_MD5
+    0x0211,  # CKM_MD5_HMAC
+    0x0220,  # CKM_SHA_1
+    0x0221,  # CKM_SHA_1_HMAC
+    0x0250,  # CKM_SHA256
+    0x0251,  # CKM_SHA256_HMAC
+    0x0255,  # CKM_SHA224
+    0x0256,  # CKM_SHA224_HMAC
+    0x0260,  # CKM_SHA384
+    0x0261,  # CKM_SHA384_HMAC
+    0x0270,  # CKM_SHA512
+    0x0271,  # CKM_SHA512_HMAC
+    0x02B0,  # CKM_SHA3_256
+    0x02B1,  # CKM_SHA3_256_HMAC
+    0x02B5,  # CKM_SHA3_224
+    0x02B6,  # CKM_SHA3_224_HMAC
+    0x02C0,  # CKM_SHA3_384
+    0x02C1,  # CKM_SHA3_384_HMAC
+    0x02D0,  # CKM_SHA3_512
+    0x02D1,  # CKM_SHA3_512_HMAC
+
+    # Key derivation (parameterless digest-based)
+    0x0390,  # CKM_MD5_KEY_DERIVATION
+    0x0391,  # CKM_MD2_KEY_DERIVATION
+    0x0392,  # CKM_SHA1_KEY_DERIVATION
+    0x0393,  # CKM_SHA256_KEY_DERIVATION
+    0x0394,  # CKM_SHA384_KEY_DERIVATION
+    0x0395,  # CKM_SHA512_KEY_DERIVATION
+    0x0396,  # CKM_SHA224_KEY_DERIVATION
+    0x0397,  # CKM_SHA3_256_KEY_DERIVATION
+    0x0398,  # CKM_SHA3_224_KEY_DERIVATION
+    0x0399,  # CKM_SHA3_384_KEY_DERIVATION
+    0x039A,  # CKM_SHA3_512_KEY_DERIVATION
+    0x039B,  # CKM_SHAKE_128_KEY_DERIVATION
+    0x039C,  # CKM_SHAKE_256_KEY_DERIVATION
+
+    # RIPEMD (historical)
+    0x0230,  # CKM_RIPEMD128
+    0x0231,  # CKM_RIPEMD128_HMAC
+    0x0240,  # CKM_RIPEMD160
+    0x0241,  # CKM_RIPEMD160_HMAC
+
+    # Fasthash
+    0x1070,  # CKM_FASTHASH
+
+    # ChaCha20 / Poly1305
+    0x1225,  # CKM_CHACHA20_KEY_GEN
+
+    # HKDF
+    0x402C,  # CKM_HKDF_KEY_GEN
+
+    # Wrapping
+    0x0400,  # CKM_KEY_WRAP_LYNKS
+    0x2109,  # CKM_AES_KEY_WRAP
+    0x210A,  # CKM_AES_KEY_WRAP_PAD
+    0x210B,  # CKM_AES_KEY_WRAP_KWP
+    0x210C,  # CKM_AES_KEY_WRAP_PKCS7
+
+    # Skipjack (historical)
+    0x1000,  # CKM_SKIPJACK_KEY_GEN
+    0x1008,  # CKM_SKIPJACK_WRAP
+
+    # Baton (historical)
+    0x1030,  # CKM_BATON_KEY_GEN
+    0x1036,  # CKM_BATON_WRAP
+
+    # Juniper (historical)
+    0x1060,  # CKM_JUNIPER_KEY_GEN
+    0x1065,  # CKM_JUNIPER_WRAP
+
+    # Fortezza (historical)
+    0x1020,  # CKM_FORTEZZA_TIMESTAMP
+
+    # Post-quantum
+    0x000F,  # CKM_ML_KEM_KEY_PAIR_GEN
+    0x0017,  # CKM_ML_KEM
+    0x001C,  # CKM_ML_DSA_KEY_PAIR_GEN
+    0x001D,  # CKM_ML_DSA
+]
+
+# ─── Parameterized mechanism shapes ─────────────────────────────────────────
+#
+# Each [[params]] entry maps a named parameter shape to one or more mechanism
+# types that use that shape. The proxy uses the shape name to select the
+# correct serialization/deserialization logic.
+
+# RSA-PSS: CK_RSA_PKCS_PSS_PARAMS (hash_alg, mgf, salt_len)
+[[params]]
+shape = "rsa_pss"
+mechanisms = [
+    0x000D,  # CKM_RSA_PKCS_PSS
+    0x000E,  # CKM_SHA1_RSA_PKCS_PSS
+    0x0043,  # CKM_SHA256_RSA_PKCS_PSS
+    0x0044,  # CKM_SHA384_RSA_PKCS_PSS
+    0x0045,  # CKM_SHA512_RSA_PKCS_PSS
+    0x0047,  # CKM_SHA224_RSA_PKCS_PSS
+    0x0063,  # CKM_SHA3_256_RSA_PKCS_PSS
+    0x0064,  # CKM_SHA3_384_RSA_PKCS_PSS
+    0x0065,  # CKM_SHA3_512_RSA_PKCS_PSS
+    0x0067,  # CKM_SHA3_224_RSA_PKCS_PSS
+]
+
+# RSA-OAEP: CK_RSA_PKCS_OAEP_PARAMS (hash_alg, mgf, source, source_data)
+[[params]]
+shape = "rsa_oaep"
+mechanisms = [
+    0x0009,  # CKM_RSA_PKCS_OAEP
+]
+
+# AES-GCM: CK_GCM_PARAMS (iv, iv_bits, aad, tag_bits)
+[[params]]
+shape = "gcm"
+mechanisms = [
+    0x1087,  # CKM_AES_GCM
+]
+
+# ECDH1 derive: CK_ECDH1_DERIVE_PARAMS (kdf, shared_data, public_data)
+[[params]]
+shape = "ecdh1_derive"
+mechanisms = [
+    0x1050,  # CKM_ECDH1_DERIVE
+    0x1051,  # CKM_ECDH1_COFACTOR_DERIVE
+]
+
+# IV-based: raw IV bytes (16 for AES, 8 for DES3/DES, 16 for Camellia/ARIA/SEED)
+[[params]]
+shape = "iv"
+mechanisms = [
+    0x1082,  # CKM_AES_CBC
+    0x1085,  # CKM_AES_CBC_PAD
+    0x0122,  # CKM_DES_CBC
+    0x0125,  # CKM_DES_CBC_PAD
+    0x0133,  # CKM_DES3_CBC
+    0x0136,  # CKM_DES3_CBC_PAD
+    0x0142,  # CKM_CDMF_CBC
+    0x0145,  # CKM_CDMF_CBC_PAD
+    0x0302,  # CKM_CAST_CBC
+    0x0305,  # CKM_CAST_CBC_PAD
+    0x0312,  # CKM_CAST3_CBC
+    0x0315,  # CKM_CAST3_CBC_PAD
+    0x0322,  # CKM_CAST128_CBC
+    0x0325,  # CKM_CAST128_CBC_PAD
+    0x0342,  # CKM_IDEA_CBC
+    0x0345,  # CKM_IDEA_CBC_PAD
+    0x0552,  # CKM_CAMELLIA_CBC
+    0x0555,  # CKM_CAMELLIA_CBC_PAD
+    0x0652,  # CKM_SEED_CBC
+    0x0655,  # CKM_SEED_CBC_PAD
+    0x0562,  # CKM_ARIA_CBC
+    0x0565,  # CKM_ARIA_CBC_PAD
+    0x0021,  # CKM_DH_PKCS_DERIVE (raw public value bytes)
+    0x1089,  # CKM_AES_CTS
+    0x2104,  # CKM_AES_OFB
+    0x2105,  # CKM_AES_CFB64
+    0x2106,  # CKM_AES_CFB8
+    0x2107,  # CKM_AES_CFB128
+    0x2108,  # CKM_AES_CFB1
+    0x1071,  # CKM_AES_XTS
+]
+
+# AES-CCM: CK_CCM_PARAMS (data_len, nonce, aad, mac_len)
+[[params]]
+shape = "ccm"
+mechanisms = [
+    0x1088,  # CKM_AES_CCM
+]
+
+# AES-CTR: CK_AES_CTR_PARAMS (counter_bits, cb[16])
+[[params]]
+shape = "aes_ctr"
+mechanisms = [
+    0x1086,  # CKM_AES_CTR
+]
+
+# EdDSA: CK_EDDSA_PARAMS (ph_flag, context_data)
+[[params]]
+shape = "eddsa"
+mechanisms = [
+    0x1057,  # CKM_EDDSA (also in parameterless — can be used either way)
+]
+
+# HKDF: CK_HKDF_PARAMS (extract, expand, prf, salt_type, salt, salt_key, info)
+[[params]]
+shape = "hkdf"
+mechanisms = [
+    0x402A,  # CKM_HKDF_DERIVE
+    0x402B,  # CKM_HKDF_DATA
+]
+
+# ChaCha20: CK_CHACHA20_PARAMS (block_counter, nonce)
+[[params]]
+shape = "chacha20"
+mechanisms = [
+    0x1226,  # CKM_CHACHA20
+]
+
+# Salsa20/ChaCha20-Poly1305 AEAD
+[[params]]
+shape = "salsa20_chacha20_poly1305"
+mechanisms = [
+    0x4021,  # CKM_CHACHA20_POLY1305
+    0x4022,  # CKM_SALSA20_POLY1305
+]
+
+# AES CBC encrypt data: CK_AES_CBC_ENCRYPT_DATA_PARAMS (iv[16] + data)
+[[params]]
+shape = "aes_cbc_encrypt_data"
+mechanisms = [
+    0x1105,  # CKM_AES_CBC_ENCRYPT_DATA
+]
+
+# DES CBC encrypt data: CK_DES_CBC_ENCRYPT_DATA_PARAMS (iv[8] + data)
+[[params]]
+shape = "des_cbc_encrypt_data"
+mechanisms = [
+    0x1101,  # CKM_DES_CBC_ENCRYPT_DATA
+    0x1103,  # CKM_DES3_CBC_ENCRYPT_DATA
+]
+
+# Camellia CBC encrypt data: CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS (iv[16] + data)
+[[params]]
+shape = "camellia_cbc_encrypt_data"
+mechanisms = [
+    0x0557,  # CKM_CAMELLIA_CBC_ENCRYPT_DATA
+]
+
+# ARIA CBC encrypt data: CK_ARIA_CBC_ENCRYPT_DATA_PARAMS (iv[16] + data)
+[[params]]
+shape = "aria_cbc_encrypt_data"
+mechanisms = [
+    0x0567,  # CKM_ARIA_CBC_ENCRYPT_DATA
+]
+
+# SEED CBC encrypt data: CK_SEED_CBC_ENCRYPT_DATA_PARAMS (iv[16] + data)
+[[params]]
+shape = "seed_cbc_encrypt_data"
+mechanisms = [
+    0x0657,  # CKM_SEED_CBC_ENCRYPT_DATA
+]
+
+# MAC general: single CK_ULONG (mac/tag length)
+[[params]]
+shape = "mac_general"
+mechanisms = [
+    0x0202,  # CKM_MD2_HMAC_GENERAL
+    0x0212,  # CKM_MD5_HMAC_GENERAL
+    0x0222,  # CKM_SHA_1_HMAC_GENERAL
+    0x0232,  # CKM_RIPEMD128_HMAC_GENERAL
+    0x0242,  # CKM_RIPEMD160_HMAC_GENERAL
+    0x0252,  # CKM_SHA256_HMAC_GENERAL
+    0x0257,  # CKM_SHA224_HMAC_GENERAL
+    0x0262,  # CKM_SHA384_HMAC_GENERAL
+    0x0272,  # CKM_SHA512_HMAC_GENERAL
+    0x02B2,  # CKM_SHA3_256_HMAC_GENERAL
+    0x02B7,  # CKM_SHA3_224_HMAC_GENERAL
+    0x02C2,  # CKM_SHA3_384_HMAC_GENERAL
+    0x02D2,  # CKM_SHA3_512_HMAC_GENERAL
+    0x0103,  # CKM_RC2_MAC (CK_RC2_PARAMS = single CK_ULONG)
+    0x0104,  # CKM_RC2_MAC_GENERAL
+    0x0124,  # CKM_DES_MAC_GENERAL
+    0x0135,  # CKM_DES3_MAC_GENERAL
+    0x0144,  # CKM_CDMF_MAC_GENERAL
+    0x0304,  # CKM_CAST_MAC_GENERAL
+    0x0314,  # CKM_CAST3_MAC_GENERAL
+    0x0324,  # CKM_CAST128_MAC_GENERAL
+    0x0344,  # CKM_IDEA_MAC_GENERAL
+    0x1084,  # CKM_AES_MAC_GENERAL
+    0x108B,  # CKM_AES_CMAC_GENERAL
+    0x0554,  # CKM_CAMELLIA_MAC_GENERAL
+    0x0654,  # CKM_SEED_MAC_GENERAL
+    0x0564,  # CKM_ARIA_MAC_GENERAL
+    0x004A,  # CKM_SHA512_224_HMAC_GENERAL
+    0x004E,  # CKM_SHA512_256_HMAC_GENERAL
+    0x0137,  # CKM_DES3_CMAC_GENERAL
+    0x0365,  # CKM_EXTRACT_KEY_FROM_KEY (CK_EXTRACT_PARAMS = CK_ULONG bit position)
+]
+
+# Object handle parameter: CK_OBJECT_HANDLE (single handle value)
+[[params]]
+shape = "object_handle"
+mechanisms = [
+    0x0360,  # CKM_CONCATENATE_BASE_AND_KEY
+]
+
+# Key derivation string data: CK_KEY_DERIVATION_STRING_DATA (data bytes)
+# SHA3/SHAKE key derivation mechanisms accept an optional CK_KEY_DERIVATION_STRING_DATA
+# parameter; they are also listed in `parameterless` for the no-param case.
+[[params]]
+shape = "key_derivation_string"
+mechanisms = [
+    0x0362,  # CKM_CONCATENATE_BASE_AND_DATA
+    0x0363,  # CKM_CONCATENATE_DATA_AND_BASE
+    0x0364,  # CKM_XOR_BASE_AND_DATA
+    0x1104,  # CKM_AES_ECB_ENCRYPT_DATA
+    0x0390,  # CKM_MD5_KEY_DERIVATION
+    0x0391,  # CKM_MD2_KEY_DERIVATION
+    0x0392,  # CKM_SHA1_KEY_DERIVATION
+    0x0393,  # CKM_SHA256_KEY_DERIVATION
+    0x0394,  # CKM_SHA384_KEY_DERIVATION
+    0x0395,  # CKM_SHA512_KEY_DERIVATION
+    0x0396,  # CKM_SHA224_KEY_DERIVATION
+    0x0397,  # CKM_SHA3_256_KEY_DERIVATION
+    0x0398,  # CKM_SHA3_224_KEY_DERIVATION
+    0x0399,  # CKM_SHA3_384_KEY_DERIVATION
+    0x039A,  # CKM_SHA3_512_KEY_DERIVATION
+    0x039B,  # CKM_SHAKE_128_KEY_DERIVATION
+    0x039C,  # CKM_SHAKE_256_KEY_DERIVATION
+]
+
+# RC5: CK_RC5_PARAMS (word_size, rounds)
+[[params]]
+shape = "rc5"
+mechanisms = [
+    0x0332,  # CKM_RC5_CBC
+    0x0334,  # CKM_RC5_MAC_GENERAL (uses RC5_MAC_GENERAL_PARAMS actually)
+]
+
+# RC2 CBC: CK_RC2_CBC_PARAMS (effective_bits, iv[8])
+[[params]]
+shape = "rc2_cbc"
+mechanisms = [
+    0x0102,  # CKM_RC2_CBC
+    0x0105,  # CKM_RC2_CBC_PAD
+]
+
+# Camellia CTR: CK_CAMELLIA_CTR_PARAMS (counter_bits, cb[16])
+[[params]]
+shape = "camellia_ctr"
+mechanisms = [
+    0x0558,  # CKM_CAMELLIA_CTR
+]
+
+# XEdDSA: CK_XEDDSA_PARAMS (hash)
+[[params]]
+shape = "xeddsa"
+mechanisms = [
+    0x4029,  # CKM_XEDDSA
+]
+
+# TLS MAC: CK_TLS_MAC_PARAMS
+[[params]]
+shape = "tls_mac"
+mechanisms = [
+    0x03D8,  # CKM_TLS12_MAC
+    0x03E4,  # CKM_TLS_MAC
+]
+
+# RSA-AES key wrap: CK_RSA_AES_KEY_WRAP_PARAMS (nested OAEP params)
+[[params]]
+shape = "rsa_aes_key_wrap"
+mechanisms = [
+    0x1054,  # CKM_RSA_AES_KEY_WRAP
+]
+
+# Sign additional context: CK_SIGN_ADDITIONAL_CONTEXT (hedge mode + context)
+# CKM_ML_DSA is also in the parameterless list for the default-hedge case.
+# When called with a parameter, the proxy uses this shape.
+[[params]]
+shape = "sign_additional_context"
+mechanisms = [
+    0x001D,  # CKM_ML_DSA (optional — hedge mode)
+]
+
+# PKCS#5 PBKD2: CK_PKCS5_PBKD2_PARAMS2 (salt, iterations, PRF, password)
+[[params]]
+shape = "pkcs5_pbkd2"
+mechanisms = [
+    0x03B0,  # CKM_PKCS5_PBKD2
+]
+
+# TLS 1.2 key derivation: CK_TLS12_MASTER_KEY_DERIVE_PARAMS and CK_TLS12_KEY_MAT_PARAMS
+[[params]]
+shape = "tls12_master_key_derive"
+mechanisms = [
+    0x03E0,  # CKM_TLS12_MASTER_KEY_DERIVE
+    0x03E2,  # CKM_TLS12_MASTER_KEY_DERIVE_DH
+]
+
+# TLS PRF: CK_TLS_PRF_PARAMS (seed, label, output, outputLen)
+[[params]]
+shape = "tls_prf"
+mechanisms = [
+    0x0378,  # CKM_TLS_PRF
+]
+
+# TLS KDF: CK_TLS_KDF_PARAMS (prfMechanism, label, randomInfo, contextData)
+[[params]]
+shape = "tls_kdf"
+mechanisms = [
+    0x03D9,  # CKM_TLS12_KDF
+    0x03E5,  # CKM_TLS_KDF
+]
+
+# SSL3 Master Key Derive: CK_SSL3_MASTER_KEY_DERIVE_PARAMS
+[[params]]
+shape = "ssl3_master_key_derive"
+mechanisms = [
+    0x0371,  # CKM_SSL3_MASTER_KEY_DERIVE
+    0x0373,  # CKM_SSL3_MASTER_KEY_DERIVE_DH
+]
+
+# TLS 1.2 Extended Master Key Derive: CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS
+[[params]]
+shape = "tls12_extended_master_key_derive"
+mechanisms = [
+    0x0056,  # CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE
+    0x0057,  # CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE_DH
+]
+
+# SSL3/TLS Key Mat: CK_SSL3_KEY_MAT_PARAMS or CK_TLS12_KEY_MAT_PARAMS
+[[params]]
+shape = "ssl3_key_mat"
+mechanisms = [
+    0x0372,  # CKM_SSL3_KEY_AND_MAC_DERIVE
+    0x03E1,  # CKM_TLS12_KEY_AND_MAC_DERIVE
+    0x03E3,  # CKM_TLS12_KEY_SAFE_DERIVE
+]
+
+# PBE: CK_PBE_PARAMS (init_vector, password, salt, iteration)
+[[params]]
+shape = "pbe"
+mechanisms = [
+    0x03A0,  # CKM_PBE_MD2_DES_CBC
+    0x03A1,  # CKM_PBE_MD5_DES_CBC
+    0x03A2,  # CKM_PBE_MD5_CAST_CBC
+    0x03A3,  # CKM_PBE_MD5_CAST3_CBC
+    0x03A4,  # CKM_PBE_MD5_CAST128_CBC
+    0x03A5,  # CKM_PBE_SHA1_CAST128_CBC
+    0x03A6,  # CKM_PBE_SHA1_RC4_128
+    0x03A7,  # CKM_PBE_SHA1_RC4_40
+    0x03A8,  # CKM_PBE_SHA1_DES3_EDE_CBC
+    0x03A9,  # CKM_PBE_SHA1_DES2_EDE_CBC
+    0x03AA,  # CKM_PBE_SHA1_RC2_128_CBC
+    0x03AB,  # CKM_PBE_SHA1_RC2_40_CBC
+]
+
+# ECDH-AES Key Wrap: CK_ECDH_AES_KEY_WRAP_PARAMS
+[[params]]
+shape = "ecdh_aes_key_wrap"
+mechanisms = [
+    0x1053,  # CKM_ECDH_AES_KEY_WRAP
+]
+
+# ECDH2 Derive: CK_ECDH2_DERIVE_PARAMS
+[[params]]
+shape = "ecdh2_derive"
+mechanisms = [
+    0x1052,  # CKM_ECDH2_DERIVE (placeholder)
+]
+
+# ECMQV Derive: CK_ECMQV_DERIVE_PARAMS
+[[params]]
+shape = "ecmqv_derive"
+mechanisms = [
+    0x1102,  # CKM_ECMQV_DERIVE (placeholder)
+]
+
+# X9.42 DH1 Derive: CK_X9_42_DH1_DERIVE_PARAMS
+[[params]]
+shape = "x942_dh1_derive"
+mechanisms = [
+    0x0031,  # CKM_X9_42_DH_DERIVE
+]
+
+# X9.42 DH2 Derive: CK_X9_42_DH2_DERIVE_PARAMS
+[[params]]
+shape = "x942_dh2_derive"
+mechanisms = [
+    0x0032,  # CKM_X9_42_DH_HYBRID_DERIVE
+]
+
+# GOSTR3410 Derive: CK_GOSTR3410_DERIVE_PARAMS
+[[params]]
+shape = "gostr3410_derive"
+mechanisms = [
+    0x1201,  # CKM_GOSTR3410_DERIVE
+]
+
+# GOSTR3410 Key Wrap: CK_GOSTR3410_KEY_WRAP_PARAMS
+[[params]]
+shape = "gostr3410_key_wrap"
+mechanisms = [
+    0x1203,  # CKM_GOSTR3410_KEY_WRAP
+]
+
+# Key Wrap Set OAEP: CK_KEY_WRAP_SET_OAEP_PARAMS
+[[params]]
+shape = "key_wrap_set_oaep"
+mechanisms = [
+    0x0401,  # CKM_KEY_WRAP_SET_OAEP
+]
+
+# KEA Derive: CK_KEA_DERIVE_PARAMS
+[[params]]
+shape = "kea_derive"
+mechanisms = [
+    0x1011,  # CKM_KEA_KEY_DERIVE
+]
+
+# IKE PRF Derive: CK_IKE_PRF_DERIVE_PARAMS
+[[params]]
+shape = "ike_prf_derive"
+mechanisms = [
+    0x4020,  # CKM_IKE_PRF_DERIVE (placeholder)
+]
+
+# IKE1 PRF Derive: CK_IKE1_PRF_DERIVE_PARAMS
+[[params]]
+shape = "ike1_prf_derive"
+mechanisms = [
+    0x401E,  # CKM_IKE1_PRF_DERIVE (placeholder)
+]
+
+# IKE1 Extended Derive: CK_IKE1_EXTENDED_DERIVE_PARAMS
+[[params]]
+shape = "ike1_extended_derive"
+mechanisms = [
+    0x401F,  # CKM_IKE1_EXTENDED_DERIVE (placeholder)
+]
+
+# IKE2 PRF Plus Derive: CK_IKE2_PRF_PLUS_DERIVE_PARAMS
+[[params]]
+shape = "ike2_prf_plus_derive"
+mechanisms = [
+    0x4023,  # CKM_IKE2_PRF_PLUS_DERIVE (placeholder)
+]
+
+# SP800-108 KDF: CK_SP800_108_KDF_PARAMS (PRF type, data params, additional derived keys)
+[[params]]
+shape = "sp800_108_kdf"
+mechanisms = [
+    0x03AC,  # CKM_SP800_108_COUNTER_KDF
+    0x03AD,  # CKM_SP800_108_FEEDBACK_KDF
+    0x03AE,  # CKM_SP800_108_DOUBLE_PIPELINE_KDF
+]

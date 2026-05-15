@@ -1,0 +1,81 @@
+# Thales Luna Network HSM vendor mechanism extensions.
+# Use with: PKCS11_PROXY_MECHANISMS=/path/to/thales-luna.toml
+#
+# Reference: Luna Client SDK cryptoki_v2.h
+# Vendor base: CKM_VENDOR_DEFINED (0x80000000)
+
+# --- Korean algorithms ---
+# These are parameterless
+parameterless = [
+  0x80000100, # CKM_HAS160
+  0x80000101, # CKM_KCDSA_KEY_PAIR_GEN
+  0x80000102, # CKM_KCDSA_HAS160
+  0x80000109, # CKM_KCDSA_SHA1
+  0x80000103, # CKM_SEED_KEY_GEN
+  0x80000104, # CKM_SEED_ECB
+  0x80000107, # CKM_SEED_MAC
+]
+
+# SEED CBC uses IV params
+[[params]]
+shape = "iv"
+mechanisms = [0x80000105, 0x80000106]  # CKM_SEED_CBC, CKM_SEED_CBC_PAD
+
+# SEED CBC encrypt data
+[[params]]
+shape = "seed_cbc_encrypt_data"
+mechanisms = [0x80000108]  # CKM_SEED_CBC_ENCRYPT_DATA
+
+# --- Legacy SHA-224 (pre-standardization) ---
+parameterless = [
+  0x80000110, # CKM_SHA224_RSA_PKCS_OLD
+  0x80000112, # CKM_SHA224_OLD
+  0x80000113, # CKM_SHA224_HMAC_OLD
+  0x80000115, # CKM_SHA224_KEY_DERIVATION_OLD
+]
+
+[[params]]
+shape = "rsa_pss"
+mechanisms = [0x80000111]  # CKM_SHA224_RSA_PKCS_PSS_OLD
+
+# --- ARIA (Korean AES alternative) ---
+parameterless = [
+  0x80000130, # CKM_ARIA_KEY_GEN
+  0x80000131, # CKM_ARIA_ECB
+  0x80000138, # CKM_ARIA_MAC
+  0x80000139, # CKM_ARIA_MAC_GENERAL
+]
+
+[[params]]
+shape = "iv"
+mechanisms = [0x80000132, 0x80000133]  # CKM_ARIA_CBC, CKM_ARIA_CBC_PAD
+
+# --- EdDSA (pre-standardization) ---
+parameterless = [
+  0x80000C02, # CKM_EDDSA_NACL_KEY_PAIR_GEN
+]
+
+[[params]]
+shape = "eddsa"
+mechanisms = [0x80000C03]  # CKM_EDDSA (with optional context)
+
+# --- Object cloning (CPv4) ---
+[[params]]
+shape = "vendor_object_extract"
+mechanisms = [0x80000208]  # CKM_CPV4_EXTRACT
+
+[[params]]
+shape = "vendor_object_insert"
+mechanisms = [0x80000209]  # CKM_CPV4_INSERT
+
+# --- ECIES ---
+[[params]]
+shape = "ecies"
+mechanisms = [0x80000A00]  # CKM_ECIES
+
+# --- Payment / DUKPT ---
+# These are typically parameterless or use raw_bytes
+parameterless = [
+  0x80000611, # CKM_DUKPT_IPEK_DERIVE
+  0x80000612, # CKM_DUKPT_PIN_ENCRYPT
+]

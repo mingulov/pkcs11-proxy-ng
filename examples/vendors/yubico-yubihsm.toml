@@ -1,0 +1,15 @@
+# Yubico YubiHSM 2 vendor mechanism extensions.
+# Use with: PKCS11_PROXY_MECHANISMS=/path/to/yubico-yubihsm.toml
+#
+# Reference: pkcs11y.h (https://github.com/Yubico/yubihsm-shell/blob/master/pkcs11/pkcs11y.h)
+# Vendor base: 0x59554200 | CKM_VENDOR_DEFINED ("YUB\0")
+
+# CKM_YUBICO_AES_CCM_WRAP — scalar parameter (nonce length)
+[[params]]
+shape = "mac_general"
+mechanisms = [0xD9554201]  # CKM_YUBICO_AES_CCM_WRAP
+
+# CKM_YUBICO_RSA_WRAP — parameterless
+parameterless = [
+  0xD9554202, # CKM_YUBICO_RSA_WRAP (approximate, check your SDK)
+]

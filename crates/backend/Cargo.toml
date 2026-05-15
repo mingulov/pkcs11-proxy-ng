@@ -1,0 +1,11 @@
+[package]
+name = "pkcs11-proxy-ng-backend"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+pkcs11-proxy-ng-types = { path = "../types" }
+pkcs11-proxy-ng-proto = { path = "../proto" }
+libloading.workspace = true
+cryptoki-sys.workspace = true
+tracing.workspace = true

@@ -1,0 +1,172 @@
+// proto/pkcs11-proxy-ng/v1/service.proto
+syntax = "proto3";
+package pkcs11_proxy_ng.v1;
+
+import "pkcs11-proxy-ng/v1/types.proto";
+
+service Pkcs11Proxy {
+  // General
+  rpc Initialize(InitializeRequest) returns (InitializeResponse);
+  rpc Finalize(FinalizeRequest) returns (FinalizeResponse);
+  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+
+  // Slot / Token discovery
+  rpc GetSlotList(GetSlotListRequest) returns (GetSlotListResponse);
+  rpc GetSlotInfo(GetSlotInfoRequest) returns (GetSlotInfoResponse);
+  rpc GetTokenInfo(GetTokenInfoRequest) returns (GetTokenInfoResponse);
+  rpc GetMechanismList(GetMechanismListRequest) returns (GetMechanismListResponse);
+  rpc GetMechanismInfo(GetMechanismInfoRequest) returns (GetMechanismInfoResponse);
+
+  // Sessions / Auth
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+  rpc CloseAllSessions(CloseAllSessionsRequest) returns (CloseAllSessionsResponse);
+  rpc GetSessionInfo(GetSessionInfoRequest) returns (GetSessionInfoResponse);
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+
+  // Object discovery
+  rpc FindObjectsInit(FindObjectsInitRequest) returns (FindObjectsInitResponse);
+  rpc FindObjects(FindObjectsRequest) returns (FindObjectsResponse);
+  rpc FindObjectsFinal(FindObjectsFinalRequest) returns (FindObjectsFinalResponse);
+  rpc GetAttributeValue(GetAttributeValueRequest) returns (GetAttributeValueResponse);
+  rpc GetAttributeValueExact(GetAttributeValueExactRequest) returns (GetAttributeValueExactResponse);
+
+  // Signing / Verification
+  rpc SignInit(SignInitRequest) returns (SignInitResponse);
+  rpc Sign(SignRequest) returns (SignResponse);
+  rpc SignUpdate(SignUpdateRequest) returns (SignUpdateResponse);
+  rpc SignFinal(SignFinalRequest) returns (SignFinalResponse);
+  rpc VerifyInit(VerifyInitRequest) returns (VerifyInitResponse);
+  rpc Verify(VerifyRequest) returns (VerifyResponse);
+  rpc VerifyUpdate(VerifyUpdateRequest) returns (VerifyUpdateResponse);
+  rpc VerifyFinal(VerifyFinalRequest) returns (VerifyFinalResponse);
+
+  // Object management
+  rpc CreateObject(CreateObjectRequest) returns (CreateObjectResponse);
+  rpc CopyObject(CopyObjectRequest) returns (CopyObjectResponse);
+  rpc DestroyObject(DestroyObjectRequest) returns (DestroyObjectResponse);
+  rpc GetObjectSize(GetObjectSizeRequest) returns (GetObjectSizeResponse);
+  rpc SetAttributeValue(SetAttributeValueRequest) returns (SetAttributeValueResponse);
+
+  // Digest (hashing)
+  rpc DigestInit(DigestInitRequest) returns (DigestInitResponse);
+  rpc Digest(DigestRequest) returns (DigestResponse);
+  rpc DigestUpdate(DigestUpdateRequest) returns (DigestUpdateResponse);
+  rpc DigestKey(DigestKeyRequest) returns (DigestKeyResponse);
+  rpc DigestFinal(DigestFinalRequest) returns (DigestFinalResponse);
+
+  // Encryption / Decryption
+  rpc EncryptInit(EncryptInitRequest) returns (EncryptInitResponse);
+  rpc Encrypt(EncryptRequest) returns (EncryptResponse);
+  rpc EncryptUpdate(EncryptUpdateRequest) returns (EncryptUpdateResponse);
+  rpc EncryptFinal(EncryptFinalRequest) returns (EncryptFinalResponse);
+  rpc DecryptInit(DecryptInitRequest) returns (DecryptInitResponse);
+  rpc Decrypt(DecryptRequest) returns (DecryptResponse);
+  rpc DecryptUpdate(DecryptUpdateRequest) returns (DecryptUpdateResponse);
+  rpc DecryptFinal(DecryptFinalRequest) returns (DecryptFinalResponse);
+
+  // Combined operations
+  rpc DigestEncryptUpdate(DigestEncryptUpdateRequest) returns (DigestEncryptUpdateResponse);
+  rpc DecryptDigestUpdate(DecryptDigestUpdateRequest) returns (DecryptDigestUpdateResponse);
+  rpc SignEncryptUpdate(SignEncryptUpdateRequest) returns (SignEncryptUpdateResponse);
+  rpc DecryptVerifyUpdate(DecryptVerifyUpdateRequest) returns (DecryptVerifyUpdateResponse);
+
+  // Recovery signatures
+  rpc SignRecoverInit(SignRecoverInitRequest) returns (SignRecoverInitResponse);
+  rpc SignRecover(SignRecoverRequest) returns (SignRecoverResponse);
+  rpc VerifyRecoverInit(VerifyRecoverInitRequest) returns (VerifyRecoverInitResponse);
+  rpc VerifyRecover(VerifyRecoverRequest) returns (VerifyRecoverResponse);
+
+  // Legacy parallel function status (PKCS#11 2.40)
+  rpc GetFunctionStatus(GetFunctionStatusRequest) returns (GetFunctionStatusResponse);
+  rpc CancelFunction(CancelFunctionRequest) returns (CancelFunctionResponse);
+
+  // Slot events
+  rpc WaitForSlotEvent(WaitForSlotEventRequest) returns (WaitForSlotEventResponse);
+
+  // State management
+  rpc GetOperationState(GetOperationStateRequest) returns (GetOperationStateResponse);
+  rpc SetOperationState(SetOperationStateRequest) returns (SetOperationStateResponse);
+
+  // Token / PIN administration
+  rpc InitToken(InitTokenRequest) returns (InitTokenResponse);
+  rpc InitPin(InitPinRequest) returns (InitPinResponse);
+  rpc SetPin(SetPinRequest) returns (SetPinResponse);
+
+  // Key management / RNG
+  rpc GenerateKey(GenerateKeyRequest) returns (GenerateKeyResponse);
+  rpc DeriveKey(DeriveKeyRequest) returns (DeriveKeyResponse);
+  rpc WrapKey(WrapKeyRequest) returns (WrapKeyResponse);
+  rpc UnwrapKey(UnwrapKeyRequest) returns (UnwrapKeyResponse);
+  rpc GenerateKeyPair(GenerateKeyPairRequest) returns (GenerateKeyPairResponse);
+  rpc SeedRandom(SeedRandomRequest) returns (SeedRandomResponse);
+  rpc GenerateRandom(GenerateRandomRequest) returns (GenerateRandomResponse);
+
+  // PKCS#11 3.0 — Session extensions
+  rpc LoginUser(LoginUserRequest) returns (LoginUserResponse);
+  rpc SessionCancel(SessionCancelRequest) returns (SessionCancelResponse);
+
+  // PKCS#11 3.0 — Message-based encryption
+  rpc MessageEncryptInit(MessageEncryptInitRequest) returns (MessageEncryptInitResponse);
+  rpc EncryptMessage(EncryptMessageRequest) returns (EncryptMessageResponse);
+  rpc EncryptMessageBegin(EncryptMessageBeginRequest) returns (EncryptMessageBeginResponse);
+  rpc EncryptMessageNext(EncryptMessageNextRequest) returns (EncryptMessageNextResponse);
+  rpc MessageEncryptFinal(MessageEncryptFinalRequest) returns (MessageEncryptFinalResponse);
+
+  // PKCS#11 3.0 — Message-based decryption
+  rpc MessageDecryptInit(MessageDecryptInitRequest) returns (MessageDecryptInitResponse);
+  rpc DecryptMessage(DecryptMessageRequest) returns (DecryptMessageResponse);
+  rpc DecryptMessageBegin(DecryptMessageBeginRequest) returns (DecryptMessageBeginResponse);
+  rpc DecryptMessageNext(DecryptMessageNextRequest) returns (DecryptMessageNextResponse);
+  rpc MessageDecryptFinal(MessageDecryptFinalRequest) returns (MessageDecryptFinalResponse);
+
+  // PKCS#11 3.0 — Message-based signing
+  rpc MessageSignInit(MessageSignInitRequest) returns (MessageSignInitResponse);
+  rpc SignMessage(SignMessageRequest) returns (SignMessageResponse);
+  rpc SignMessageBegin(SignMessageBeginRequest) returns (SignMessageBeginResponse);
+  rpc SignMessageNext(SignMessageNextRequest) returns (SignMessageNextResponse);
+  rpc MessageSignFinal(MessageSignFinalRequest) returns (MessageSignFinalResponse);
+
+  // PKCS#11 3.0 — Message-based verification
+  rpc MessageVerifyInit(MessageVerifyInitRequest) returns (MessageVerifyInitResponse);
+  rpc VerifyMessage(VerifyMessageRequest) returns (VerifyMessageResponse);
+  rpc VerifyMessageBegin(VerifyMessageBeginRequest) returns (VerifyMessageBeginResponse);
+  rpc VerifyMessageNext(VerifyMessageNextRequest) returns (VerifyMessageNextResponse);
+  rpc MessageVerifyFinal(MessageVerifyFinalRequest) returns (MessageVerifyFinalResponse);
+
+  // PKCS#11 3.2 — KEM
+  rpc EncapsulateKey(EncapsulateKeyRequest) returns (EncapsulateKeyResponse);
+  rpc DecapsulateKey(DecapsulateKeyRequest) returns (DecapsulateKeyResponse);
+
+  // PKCS#11 3.2 — Verify signature (signature at init time)
+  rpc VerifySignatureInit(VerifySignatureInitRequest) returns (VerifySignatureInitResponse);
+  rpc VerifySignature(VerifySignatureRequest) returns (VerifySignatureResponse);
+  rpc VerifySignatureUpdate(VerifySignatureUpdateRequest) returns (VerifySignatureUpdateResponse);
+  rpc VerifySignatureFinal(VerifySignatureFinalRequest) returns (VerifySignatureFinalResponse);
+
+  // PKCS#11 3.2 — Authenticated wrap
+  rpc WrapKeyAuthenticated(WrapKeyAuthenticatedRequest) returns (WrapKeyAuthenticatedResponse);
+  rpc UnwrapKeyAuthenticated(UnwrapKeyAuthenticatedRequest) returns (UnwrapKeyAuthenticatedResponse);
+
+  // PKCS#11 3.2 — Async (Option B: polling only)
+  rpc AsyncComplete(AsyncCompleteRequest) returns (AsyncCompleteResponse);
+  rpc AsyncGetID(AsyncGetIDRequest) returns (AsyncGetIDResponse);
+  rpc AsyncJoin(AsyncJoinRequest) returns (AsyncJoinResponse);
+
+  // PKCS#11 3.2 — Validation
+  rpc GetSessionValidationFlags(GetSessionValidationFlagsRequest) returns (GetSessionValidationFlagsResponse);
+
+  // Track B: Exact byte-output RPC (18 functions via discriminator)
+  rpc ByteOutputExact(ByteOutputExactRequest) returns (ByteOutputExactResponse);
+
+  // Track C: Exact parameter-output RPC (7 functions via discriminator)
+  rpc ParameterOutputExact(ParameterOutputExactRequest) returns (ParameterOutputExactResponse);
+
+  // Track C Task 2: C_EncapsulateKey with exact output semantics
+  rpc EncapsulateKeyExact(EncapsulateKeyExactRequest) returns (EncapsulateKeyExactResponse);
+
+  // BUG-001: Interface version transparency (context-free)
+  rpc GetBackendInterfaces(GetBackendInterfacesRequest)
+      returns (GetBackendInterfacesResponse);
+}

@@ -1,0 +1,23 @@
+# AWS CloudHSM vendor mechanism extensions.
+# Use with: PKCS11_PROXY_MECHANISMS=/path/to/aws-cloudhsm.toml
+#
+# Reference: /opt/cloudhsm/include/pkcs11/cloudhsm_pkcs11_vendor_defs.h
+
+# CKM_CLOUDHSM_AES_GCM — same as standard AES-GCM but HSM generates IV
+[[params]]
+shape = "gcm"
+mechanisms = [0x80001087]
+
+# CloudHSM AES key wrap variants — parameterless or IV
+[[params]]
+shape = "iv"
+mechanisms = [0x80002109, 0x8000210A, 0x8000216F]
+
+# CKM_CLOUDHSM_SP800_108_COUNTER_KDF
+[[params]]
+shape = "sp800_108_kdf"
+mechanisms = [0x80000001]
+
+# Note: CKD_CLOUDHSM_X963_SHA*_KDF types are used inside ECDH1_DERIVE
+# params (the kdf field). They pass through as u64 values automatically.
+# No config entry needed for KDF type constants.

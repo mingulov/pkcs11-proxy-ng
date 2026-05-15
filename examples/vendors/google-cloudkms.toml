@@ -1,0 +1,10 @@
+# Google Cloud KMS PKCS#11 vendor mechanism extensions.
+# Use with: PKCS11_PROXY_MECHANISMS=/path/to/google-cloudkms.toml
+#
+# Reference: kmsp11.h (https://github.com/GoogleCloudPlatform/kms-integrations)
+# Vendor base: 0x80000000 | 0x1E100 ("1e100" ~ Googol)
+
+# CKM_CLOUDKMS_AES_GCM — same as standard GCM but HSM generates IV
+[[params]]
+shape = "gcm"
+mechanisms = [0x8001E101]
