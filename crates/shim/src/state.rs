@@ -14,6 +14,10 @@ static CLIENT: OnceLock<tokio::sync::Mutex<Pkcs11Client>> = OnceLock::new();
 /// wait rather than racing to connect, and so that a failed init is
 /// retried on the next `C_Initialize` rather than being cached forever.
 static CLIENT_INIT: Mutex<()> = Mutex::new(());
+/// `C_Finalize` ends the PKCS#11 application context.  A later
+/// `C_Initialize` must re-read connection configuration instead of reusing a
+/// channel that may point at an old daemon.
+static CLIENT_RECONNECT_REQUIRED: AtomicBool = AtomicBool::new(false);
 static MECHANISM_REGISTRY: OnceLock<MechanismRegistry> = OnceLock::new();
 
 /// Returns the global mechanism registry.
@@ -52,6 +56,11 @@ pub fn mark_initialized() -> bool {
 /// Transition from initialized → uninitialized.
 pub fn mark_finalized() {
     INITIALIZED.store(false, Ordering::Release);
+}
+
+/// Require the next client access to connect from the current environment.
+pub fn mark_client_reconnect_required() {
+    CLIENT_RECONNECT_REQUIRED.store(true, Ordering::Release);
 }
 
 pub type SessionByteCacheMap = Mutex<HashMap<CK_SESSION_HANDLE, Vec<u8>>>;
@@ -373,29 +382,7 @@ pub fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime::new().expect("Failed to create tokio runtime"))
 }
 
-/// Establish the gRPC client connection with retry.
-///
-/// Must be called **outside** any `runtime().block_on()` context to avoid
-/// a nested-`block_on` panic.  `c_initialize` calls this before entering
-/// its own `block_on` block; every subsequent `client()` call just returns
-/// the cached value.
-///
-/// Returns `Err(CkRv::DEVICE_ERROR)` if all connect attempts fail
-/// (instead of panicking).
-///
-/// Uses `CLIENT_INIT` mutex so that concurrent callers serialize, and a
-/// failed init is retried on the next call (not cached).
-pub fn ensure_client_connected() -> Result<(), CkRv> {
-    // Fast path: already connected.
-    if CLIENT.get().is_some() {
-        return Ok(());
-    }
-    // Slow path: serialize init attempts.
-    let _guard = CLIENT_INIT.lock().unwrap_or_else(|e| e.into_inner());
-    // Re-check after acquiring the lock (another thread may have succeeded).
-    if CLIENT.get().is_some() {
-        return Ok(());
-    }
+fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {
     let endpoint =
         std::env::var("PKCS11_PROXY_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:7512".into());
     let timeout_secs: u64 = std::env::var("PKCS11_PROXY_CONNECT_TIMEOUT")
@@ -405,11 +392,45 @@ pub fn ensure_client_connected() -> Result<(), CkRv> {
     let tls_files =
         pkcs11_proxy_ng_client::tls::ClientTlsFiles::from_env().map_err(|_| CkRv::DEVICE_ERROR)?;
     let rt = runtime();
-    let client = rt
-        .block_on(async { connect_with_retry(&endpoint, tls_files, timeout_secs).await })
-        .map_err(|_| CkRv::DEVICE_ERROR)?;
+    rt.block_on(async { connect_with_retry(&endpoint, tls_files, timeout_secs).await })
+        .map_err(|_| CkRv::DEVICE_ERROR)
+}
+
+/// Establish the gRPC client connection with retry.
+///
+/// Must be called **outside** any `runtime().block_on()` context to avoid
+/// a nested-`block_on` panic.  `c_initialize` calls this before entering
+/// its own `block_on` block; every subsequent `client()` call returns the
+/// cached value until `C_Finalize` marks it stale.
+///
+/// Returns `Err(CkRv::DEVICE_ERROR)` if all connect attempts fail
+/// (instead of panicking).
+///
+/// Uses `CLIENT_INIT` mutex so that concurrent callers serialize, and a
+/// failed init is retried on the next call (not cached).
+pub fn ensure_client_connected() -> Result<(), CkRv> {
+    // Fast path: already connected.
+    if CLIENT.get().is_some() && !CLIENT_RECONNECT_REQUIRED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    // Slow path: serialize init attempts.
+    let _guard = CLIENT_INIT.lock().unwrap_or_else(|e| e.into_inner());
+    // Re-check after acquiring the lock (another thread may have succeeded).
+    if let Some(existing) = CLIENT.get() {
+        if !CLIENT_RECONNECT_REQUIRED.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let client = connect_client_from_env()?;
+        runtime().block_on(async {
+            *existing.lock().await = client;
+        });
+        CLIENT_RECONNECT_REQUIRED.store(false, Ordering::Release);
+        return Ok(());
+    }
+    let client = connect_client_from_env()?;
     // Store the connected client; ignore the error (another winner is fine).
     let _ = CLIENT.set(tokio::sync::Mutex::new(client));
+    CLIENT_RECONNECT_REQUIRED.store(false, Ordering::Release);
     Ok(())
 }
 

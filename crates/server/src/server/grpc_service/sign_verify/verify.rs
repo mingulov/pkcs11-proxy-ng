@@ -17,6 +17,22 @@ pub(crate) async fn verify_init(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
+    if req.mechanism.is_none() {
+        let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
+            Ok(session) => session,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyInitResponse {
+                    ck_rv: rv.0,
+                }));
+            }
+        };
+        let backend = Arc::clone(backend_ref);
+        let result = spawn_backend(move || backend.verify_init_cancel(session)).await?;
+        return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyInitResponse {
+            ck_rv: ck_rv_only(result),
+        }));
+    }
+
     let (session, key) =
         match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle).await {
             Ok(handles) => handles,
@@ -108,6 +124,22 @@ pub(crate) async fn verify_recover_init(
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyRecoverInitResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+
+    if req.mechanism.is_none() {
+        let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
+            Ok(session) => session,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyRecoverInitResponse {
+                    ck_rv: rv.0,
+                }));
+            }
+        };
+        let backend = Arc::clone(backend_ref);
+        let result = spawn_backend(move || backend.verify_recover_init_cancel(session)).await?;
+        return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyRecoverInitResponse {
+            ck_rv: ck_rv_only(result),
+        }));
+    }
 
     let (session, key) =
         match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle).await {

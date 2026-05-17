@@ -77,16 +77,38 @@ impl Drop for ScopedEnvVar {
 
 impl ProviderFixture {
     pub async fn soft_hsm() -> Result<Self, String> {
+        Self::soft_hsm_with_module(None).await
+    }
+
+    /// Build a SoftHSM2 fixture using the caller-supplied module path.
+    ///
+    /// Pass `None` to fall back to the default system-search behaviour.
+    /// Used by the GCM-IV simulator integration test
+    /// (`mechanism_out_integration_test.rs`) to point at a locally
+    /// built patched libsofthsm2.so via the
+    /// `SOFTHSM2_GCM_IV_SIM_LIB` env var.
+    pub async fn soft_hsm_with_module(explicit_module: Option<PathBuf>) -> Result<Self, String> {
         let guard = real_backend_lock().lock_owned().await;
-        let module_path = find_first_existing_path(&[
-            "/usr/lib/softhsm/libsofthsm2.so",
-            "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so",
-            "/usr/local/lib/softhsm/libsofthsm2.so",
-            "/usr/lib64/softhsm/libsofthsm2.so",
-            "/usr/lib64/pkcs11/libsofthsm2.so",
-            "/usr/lib64/libsofthsm2.so",
-        ])
-        .ok_or_else(|| "libsofthsm2.so not found".to_string())?;
+        let module_path = match explicit_module {
+            Some(p) => {
+                if !p.exists() {
+                    return Err(format!(
+                        "explicit libsofthsm2.so path {} does not exist",
+                        p.display()
+                    ));
+                }
+                p
+            }
+            None => find_first_existing_path(&[
+                "/usr/lib/softhsm/libsofthsm2.so",
+                "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so",
+                "/usr/local/lib/softhsm/libsofthsm2.so",
+                "/usr/lib64/softhsm/libsofthsm2.so",
+                "/usr/lib64/pkcs11/libsofthsm2.so",
+                "/usr/lib64/libsofthsm2.so",
+            ])
+            .ok_or_else(|| "libsofthsm2.so not found".to_string())?,
+        };
 
         let temp_dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
         let conf_path = temp_dir.path().join("softhsm2.conf");

@@ -11,6 +11,10 @@ pub(super) struct MockState {
     pub(super) open_sessions: Vec<(CkSessionHandle, CkSlotId, CkSessionFlags)>,
     pub(super) login_state: HashMap<CkSlotId, CkUserType>,
     pub(super) live_objects: HashSet<u64>,
+    /// Session object ownership: object handle -> creating session handle.
+    ///
+    /// Objects absent from this map are token-scoped for mock lifecycle purposes.
+    pub(super) session_objects: HashMap<u64, u64>,
     pub(super) active_ops: HashMap<u64, MultiPartOp>,
 }
 
@@ -27,6 +31,9 @@ impl MockState {
 
     /// Assert an operation of the given type is active; return OPERATION_NOT_INITIALIZED if not.
     pub(super) fn require_op(&self, session: CkSessionHandle, op: MultiPartOp) -> CkResult<()> {
+        if !self.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
         match self.active_ops.get(&session.0) {
             Some(active) if *active == op => Ok(()),
             _ => Err(CkRv::OPERATION_NOT_INITIALIZED),
@@ -35,12 +42,21 @@ impl MockState {
 
     /// End the active operation on a session (called on Final or single-pass).
     pub(super) fn end_op(&mut self, session: CkSessionHandle, op: MultiPartOp) -> CkResult<()> {
+        if !self.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
         match self.active_ops.get(&session.0) {
             Some(active) if *active == op => {
                 self.active_ops.remove(&session.0);
                 Ok(())
             }
             _ => Err(CkRv::OPERATION_NOT_INITIALIZED),
+        }
+    }
+
+    pub(super) fn cancel_op_if_active(&mut self, session: CkSessionHandle, op: MultiPartOp) {
+        if matches!(self.active_ops.get(&session.0), Some(active) if *active == op) {
+            self.active_ops.remove(&session.0);
         }
     }
 

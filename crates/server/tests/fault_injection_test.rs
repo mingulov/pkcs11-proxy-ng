@@ -469,6 +469,27 @@ async fn close_all_sessions_cleans_up() {
 }
 
 #[tokio::test]
+async fn client_finalize_does_not_finalize_backend_or_other_clients() {
+    let mock = Arc::new(mock(&[0], &[0x00000001]));
+    let (endpoint, _shutdown) = mock_daemon(mock.clone()).await;
+    let mut client_a = init_client(&endpoint).await;
+    let mut client_b = init_client(&endpoint).await;
+
+    let slots = client_a.get_slot_list(false).await.unwrap();
+    let _session_a = client_a.open_session(slots[0], CKF_SERIAL).await.unwrap();
+    let session_b = client_b.open_session(slots[0], CKF_SERIAL).await.unwrap();
+
+    client_a.finalize().await.unwrap();
+    assert_eq!(client_a.get_info().await.unwrap_err(), CkRv::CRYPTOKI_NOT_INITIALIZED);
+
+    let info_b = client_b.get_session_info(session_b).await.unwrap();
+    assert_eq!(info_b.slot_id, slots[0]);
+
+    client_b.close_session(session_b).await.unwrap();
+    client_b.finalize().await.unwrap();
+}
+
+#[tokio::test]
 async fn finalize_cleans_up_after_backend_errors() {
     let mock = Arc::new(mock(&[0], &[0x00000001]));
     let (endpoint, _shutdown) = mock_daemon(mock.clone()).await;

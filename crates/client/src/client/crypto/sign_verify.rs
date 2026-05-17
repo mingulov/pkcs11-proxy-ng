@@ -19,6 +19,17 @@ impl Pkcs11Client {
         pkcs11_unary_ok!(self.grpc.sign_init(req), true)
     }
 
+    pub async fn sign_init_cancel(&mut self, session: CkSessionHandle) -> CkResult<()> {
+        let ctx = self.context_id()?;
+        let req = pkcs11_proxy_ng_proto::SignInitRequest {
+            client_context_id: ctx,
+            session_handle: session.0,
+            mechanism: None,
+            key_handle: 0,
+        };
+        pkcs11_unary_ok!(self.grpc.sign_init(req), true)
+    }
+
     pub async fn sign(&mut self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::SignRequest {
@@ -64,6 +75,17 @@ impl Pkcs11Client {
         pkcs11_unary_ok!(self.grpc.sign_recover_init(req), true)
     }
 
+    pub async fn sign_recover_init_cancel(&mut self, session: CkSessionHandle) -> CkResult<()> {
+        let ctx = self.context_id()?;
+        let req = pkcs11_proxy_ng_proto::SignRecoverInitRequest {
+            client_context_id: ctx,
+            session_handle: session.0,
+            mechanism: None,
+            key_handle: 0,
+        };
+        pkcs11_unary_ok!(self.grpc.sign_recover_init(req), true)
+    }
+
     pub async fn sign_recover(
         &mut self,
         session: CkSessionHandle,
@@ -94,6 +116,17 @@ impl Pkcs11Client {
         pkcs11_unary_ok!(self.grpc.verify_recover_init(req), true)
     }
 
+    pub async fn verify_recover_init_cancel(&mut self, session: CkSessionHandle) -> CkResult<()> {
+        let ctx = self.context_id()?;
+        let req = pkcs11_proxy_ng_proto::VerifyRecoverInitRequest {
+            client_context_id: ctx,
+            session_handle: session.0,
+            mechanism: None,
+            key_handle: 0,
+        };
+        pkcs11_unary_ok!(self.grpc.verify_recover_init(req), true)
+    }
+
     pub async fn verify_recover(
         &mut self,
         session: CkSessionHandle,
@@ -120,6 +153,17 @@ impl Pkcs11Client {
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism)),
             key_handle: key.0,
+        };
+        pkcs11_unary_ok!(self.grpc.verify_init(req), true)
+    }
+
+    pub async fn verify_init_cancel(&mut self, session: CkSessionHandle) -> CkResult<()> {
+        let ctx = self.context_id()?;
+        let req = pkcs11_proxy_ng_proto::VerifyInitRequest {
+            client_context_id: ctx,
+            session_handle: session.0,
+            mechanism: None,
+            key_handle: 0,
         };
         pkcs11_unary_ok!(self.grpc.verify_init(req), true)
     }

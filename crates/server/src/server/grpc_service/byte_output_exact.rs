@@ -5,13 +5,13 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::output::byte_output_function_from_i32;
 use pkcs11_proxy_ng_types::{
-    ByteOutputFunction, CkMechanism, CkMechanismParams, CkMechanismType, CkOutputBufferResult,
-    CkOutputBufferSpec, CkResult,
+    ByteOutputFunction, CkOutputBufferResult, CkOutputBufferSpec, CkResult,
 };
 
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::service_utils::{
-    parse_mechanism, resolve_session, resolve_session_and_two_objects, spawn_backend,
+    mechanism_output_to_proto, parse_mechanism, resolve_session, resolve_session_and_two_objects,
+    spawn_backend,
 };
 
 pub(super) async fn byte_output_exact(
@@ -83,13 +83,17 @@ pub(super) async fn byte_output_exact(
 
             let backend = backend_ref.clone();
             let result = spawn_backend(move || {
-                backend.wrap_key_exact(session, &mechanism, wrapping_key, key, &spec)
+                backend.wrap_key_exact_with_output(session, &mechanism, wrapping_key, key, &spec)
             })
             .await?;
+            let (wrap_result, mechanism_out) = match result {
+                Ok((output, mech_out)) => (Ok(output), mech_out),
+                Err(error) => (Err(error), None),
+            };
 
             Ok(Response::new(pkcs11_proxy_ng_proto::ByteOutputExactResponse {
-                result: Some(result_to_proto(result)),
-                mechanism_out: None,
+                result: Some(result_to_proto(wrap_result)),
+                mechanism_out: mechanism_out.and_then(mechanism_output_to_proto),
             }))
         }
 
@@ -227,15 +231,5 @@ fn result_to_proto(
     }
 }
 
-fn mechanism_output_to_proto(
-    params: CkMechanismParams,
-) -> Option<pkcs11_proxy_ng_proto::Mechanism> {
-    let mechanism_type = match params {
-        CkMechanismParams::Gcm(_) => CkMechanismType::AES_GCM,
-        _ => return None,
-    };
-    Some(pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
-        mechanism_type,
-        params: Some(params),
-    }))
-}
+// `mechanism_output_to_proto` has moved to `service_utils` so the
+// simple Encrypt/Decrypt handlers can share the same conversion.

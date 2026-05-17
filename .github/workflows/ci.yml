@@ -30,7 +30,7 @@ jobs:
     name: Format
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install stable toolchain with rustfmt
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -44,13 +44,13 @@ jobs:
     runs-on: ubuntu-24.04
     needs: fmt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo audit binary
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin/cargo-audit
           key: ${{ runner.os }}-cargo-audit-v0
@@ -70,7 +70,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [fmt, audit]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |
@@ -83,7 +83,7 @@ jobs:
           components: clippy
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -112,7 +112,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: fmt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install system dependencies
         run: |

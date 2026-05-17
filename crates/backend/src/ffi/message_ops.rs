@@ -1,6 +1,8 @@
 use super::ffi_conversion::mechanism_to_ffi;
 use super::{FfiBackend, call_3x_fn};
-use pkcs11_proxy_ng_proto::convert::message_params::{GcmMessageParams, MessageParameter};
+use pkcs11_proxy_ng_proto::convert::message_params::{
+    CcmMessageParams, GcmMessageParams, MessageParameter, Salsa20ChaCha20Poly1305MessageParams,
+};
 use pkcs11_proxy_ng_types::*;
 
 /// Two-call FFI pattern for message operations that return
@@ -815,6 +817,195 @@ impl FfiBackend {
         }
     }
 
+    /// Common helper: call a message crypto FFI function with a CCM
+    /// message-parameter struct. CCM has a fixed `ulDataLen` (caller
+    /// supplies the total ciphertext/plaintext length) and a
+    /// HSM-mutable nonce + MAC.  Mirror of
+    /// [`Self::call_with_gcm_message_param`].
+    fn call_with_ccm_message_param<F>(
+        &self,
+        ccm: &CcmMessageParams,
+        output_spec: &CkOutputBufferSpec,
+        mut call: F,
+    ) -> CkResult<(CkOutputBufferResult, MessageParameter)>
+    where
+        F: FnMut(
+            *mut cryptoki_sys::CK_CCM_MESSAGE_PARAMS,
+            *mut cryptoki_sys::CK_BYTE,
+            &mut cryptoki_sys::CK_ULONG,
+        ) -> cryptoki_sys::CK_RV,
+    {
+        let mut nonce_buf = ccm.nonce.clone();
+        let mac_bytes = ccm.mac_len as usize;
+        let mut mac_buf = if ccm.mac.len() >= mac_bytes {
+            ccm.mac.clone()
+        } else {
+            let mut buf = vec![0u8; mac_bytes];
+            let copy_len = ccm.mac.len().min(mac_bytes);
+            buf[..copy_len].copy_from_slice(&ccm.mac[..copy_len]);
+            buf
+        };
+
+        let mut ck_params = cryptoki_sys::CK_CCM_MESSAGE_PARAMS {
+            ulDataLen: ccm.data_len as cryptoki_sys::CK_ULONG,
+            pNonce: if nonce_buf.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                nonce_buf.as_mut_ptr()
+            },
+            ulNonceLen: nonce_buf.len() as cryptoki_sys::CK_ULONG,
+            ulNonceFixedBits: ccm.nonce_fixed_bits as cryptoki_sys::CK_ULONG,
+            nonceGenerator: ccm.nonce_generator as cryptoki_sys::CK_GENERATOR_FUNCTION,
+            pMAC: if mac_buf.is_empty() { std::ptr::null_mut() } else { mac_buf.as_mut_ptr() },
+            ulMACLen: ccm.mac_len as cryptoki_sys::CK_ULONG,
+        };
+
+        let mut out_len: cryptoki_sys::CK_ULONG = 0;
+        let snapshot = |nonce_buf: &Vec<u8>, mac_buf: &Vec<u8>| {
+            MessageParameter::CcmMessage(CcmMessageParams {
+                data_len: ccm.data_len,
+                nonce: nonce_buf.clone(),
+                nonce_fixed_bits: ccm.nonce_fixed_bits,
+                nonce_generator: ccm.nonce_generator,
+                mac: mac_buf.clone(),
+                mac_len: ccm.mac_len,
+            })
+        };
+
+        if !output_spec.buffer_present {
+            let rv = call(&mut ck_params, std::ptr::null_mut(), &mut out_len);
+            if rv == CkRv::OK.0 {
+                Ok((
+                    CkOutputBufferResult {
+                        ck_rv: CkRv::OK,
+                        returned_len: out_len as u64,
+                        value: None,
+                    },
+                    snapshot(&nonce_buf, &mac_buf),
+                ))
+            } else {
+                Err(CkRv(rv))
+            }
+        } else {
+            out_len = output_spec.buffer_len as cryptoki_sys::CK_ULONG;
+            let mut buf = vec![0u8; output_spec.buffer_len as usize];
+            let rv = call(&mut ck_params, buf.as_mut_ptr(), &mut out_len);
+            if rv == CkRv::OK.0 {
+                buf.truncate(out_len as usize);
+                Ok((
+                    CkOutputBufferResult {
+                        ck_rv: CkRv::OK,
+                        returned_len: out_len as u64,
+                        value: Some(buf),
+                    },
+                    snapshot(&nonce_buf, &mac_buf),
+                ))
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 {
+                Ok((
+                    CkOutputBufferResult {
+                        ck_rv: CkRv::BUFFER_TOO_SMALL,
+                        returned_len: out_len as u64,
+                        value: None,
+                    },
+                    snapshot(&nonce_buf, &mac_buf),
+                ))
+            } else {
+                Err(CkRv(rv))
+            }
+        }
+    }
+
+    /// Common helper: call a message crypto FFI function with a
+    /// Salsa20/ChaCha20-Poly1305 message-parameter struct.  The C
+    /// struct has only `pNonce`/`ulNonceLen`/`pTag` — caller provides
+    /// the nonce, HSM populates the tag.
+    fn call_with_salsa20_chacha20_poly1305_message_param<F>(
+        &self,
+        params: &Salsa20ChaCha20Poly1305MessageParams,
+        output_spec: &CkOutputBufferSpec,
+        mut call: F,
+    ) -> CkResult<(CkOutputBufferResult, MessageParameter)>
+    where
+        F: FnMut(
+            *mut cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS,
+            *mut cryptoki_sys::CK_BYTE,
+            &mut cryptoki_sys::CK_ULONG,
+        ) -> cryptoki_sys::CK_RV,
+    {
+        let mut nonce_buf = params.nonce.clone();
+        // The CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS struct has no
+        // explicit tag length — Poly1305 is always 16 bytes.
+        const POLY1305_TAG_LEN: usize = 16;
+        let mut tag_buf = if params.tag.len() >= POLY1305_TAG_LEN {
+            params.tag.clone()
+        } else {
+            let mut buf = vec![0u8; POLY1305_TAG_LEN];
+            let copy_len = params.tag.len().min(POLY1305_TAG_LEN);
+            buf[..copy_len].copy_from_slice(&params.tag[..copy_len]);
+            buf
+        };
+
+        let mut ck_params = cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS {
+            pNonce: if nonce_buf.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                nonce_buf.as_mut_ptr()
+            },
+            ulNonceLen: nonce_buf.len() as cryptoki_sys::CK_ULONG,
+            pTag: if tag_buf.is_empty() { std::ptr::null_mut() } else { tag_buf.as_mut_ptr() },
+        };
+
+        let mut out_len: cryptoki_sys::CK_ULONG = 0;
+        let snapshot = |nonce_buf: &Vec<u8>, tag_buf: &Vec<u8>| {
+            MessageParameter::SalaChacha(Salsa20ChaCha20Poly1305MessageParams {
+                nonce: nonce_buf.clone(),
+                tag: tag_buf.clone(),
+            })
+        };
+
+        if !output_spec.buffer_present {
+            let rv = call(&mut ck_params, std::ptr::null_mut(), &mut out_len);
+            if rv == CkRv::OK.0 {
+                Ok((
+                    CkOutputBufferResult {
+                        ck_rv: CkRv::OK,
+                        returned_len: out_len as u64,
+                        value: None,
+                    },
+                    snapshot(&nonce_buf, &tag_buf),
+                ))
+            } else {
+                Err(CkRv(rv))
+            }
+        } else {
+            out_len = output_spec.buffer_len as cryptoki_sys::CK_ULONG;
+            let mut buf = vec![0u8; output_spec.buffer_len as usize];
+            let rv = call(&mut ck_params, buf.as_mut_ptr(), &mut out_len);
+            if rv == CkRv::OK.0 {
+                buf.truncate(out_len as usize);
+                Ok((
+                    CkOutputBufferResult {
+                        ck_rv: CkRv::OK,
+                        returned_len: out_len as u64,
+                        value: Some(buf),
+                    },
+                    snapshot(&nonce_buf, &tag_buf),
+                ))
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 {
+                Ok((
+                    CkOutputBufferResult {
+                        ck_rv: CkRv::BUFFER_TOO_SMALL,
+                        returned_len: out_len as u64,
+                        value: None,
+                    },
+                    snapshot(&nonce_buf, &tag_buf),
+                ))
+            } else {
+                Err(CkRv(rv))
+            }
+        }
+    }
+
     /// C_EncryptMessage with structured GCM message parameter.
     pub(super) fn ffi_encrypt_message_exact_msg(
         &self,
@@ -846,9 +1037,43 @@ impl FfiBackend {
                     )
                 },
             ),
-            // CCM and Salsa/ChaCha follow the same pattern — for now, fall back
-            // to the raw path (which will likely fail for these too, but they're
-            // not tested yet). We can add them when needed.
+            MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
+                ccm,
+                output_spec,
+                |params, output, output_len| unsafe {
+                    f(
+                        Self::session_handle(session),
+                        params as *mut _ as *mut _,
+                        std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
+                            as cryptoki_sys::CK_ULONG,
+                        aad.as_ptr() as *mut _,
+                        Self::ulong_len(aad.len()),
+                        plaintext.as_ptr() as *mut _,
+                        Self::ulong_len(plaintext.len()),
+                        output,
+                        output_len,
+                    )
+                },
+            ),
+            MessageParameter::SalaChacha(params_in) => self
+                .call_with_salsa20_chacha20_poly1305_message_param(
+                    params_in,
+                    output_spec,
+                    |params, output, output_len| unsafe {
+                        f(
+                            Self::session_handle(session),
+                            params as *mut _ as *mut _,
+                            std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
+                                as cryptoki_sys::CK_ULONG,
+                            aad.as_ptr() as *mut _,
+                            Self::ulong_len(aad.len()),
+                            plaintext.as_ptr() as *mut _,
+                            Self::ulong_len(plaintext.len()),
+                            output,
+                            output_len,
+                        )
+                    },
+                ),
             _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
         }
     }
@@ -884,6 +1109,43 @@ impl FfiBackend {
                     )
                 },
             ),
+            MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
+                ccm,
+                output_spec,
+                |params, output, output_len| unsafe {
+                    f(
+                        Self::session_handle(session),
+                        params as *mut _ as *mut _,
+                        std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
+                            as cryptoki_sys::CK_ULONG,
+                        aad.as_ptr() as *mut _,
+                        Self::ulong_len(aad.len()),
+                        ciphertext.as_ptr() as *mut _,
+                        Self::ulong_len(ciphertext.len()),
+                        output,
+                        output_len,
+                    )
+                },
+            ),
+            MessageParameter::SalaChacha(params_in) => self
+                .call_with_salsa20_chacha20_poly1305_message_param(
+                    params_in,
+                    output_spec,
+                    |params, output, output_len| unsafe {
+                        f(
+                            Self::session_handle(session),
+                            params as *mut _ as *mut _,
+                            std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
+                                as cryptoki_sys::CK_ULONG,
+                            aad.as_ptr() as *mut _,
+                            Self::ulong_len(aad.len()),
+                            ciphertext.as_ptr() as *mut _,
+                            Self::ulong_len(ciphertext.len()),
+                            output,
+                            output_len,
+                        )
+                    },
+                ),
             _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
         }
     }
@@ -916,6 +1178,39 @@ impl FfiBackend {
                     )
                 },
             ),
+            MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
+                ccm,
+                output_spec,
+                |params, output, output_len| unsafe {
+                    f(
+                        Self::session_handle(session),
+                        params as *mut _ as *mut _,
+                        std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
+                            as cryptoki_sys::CK_ULONG,
+                        data.as_ptr() as *mut _,
+                        Self::ulong_len(data.len()),
+                        output,
+                        output_len,
+                    )
+                },
+            ),
+            MessageParameter::SalaChacha(params_in) => self
+                .call_with_salsa20_chacha20_poly1305_message_param(
+                    params_in,
+                    output_spec,
+                    |params, output, output_len| unsafe {
+                        f(
+                            Self::session_handle(session),
+                            params as *mut _ as *mut _,
+                            std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
+                                as cryptoki_sys::CK_ULONG,
+                            data.as_ptr() as *mut _,
+                            Self::ulong_len(data.len()),
+                            output,
+                            output_len,
+                        )
+                    },
+                ),
             _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
         }
     }
@@ -950,6 +1245,41 @@ impl FfiBackend {
                     )
                 },
             ),
+            MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
+                ccm,
+                output_spec,
+                |params, output, output_len| unsafe {
+                    f(
+                        Self::session_handle(session),
+                        params as *mut _ as *mut _,
+                        std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
+                            as cryptoki_sys::CK_ULONG,
+                        plaintext_part.as_ptr() as *mut _,
+                        Self::ulong_len(plaintext_part.len()),
+                        output,
+                        output_len,
+                        flags.0 as cryptoki_sys::CK_FLAGS,
+                    )
+                },
+            ),
+            MessageParameter::SalaChacha(params_in) => self
+                .call_with_salsa20_chacha20_poly1305_message_param(
+                    params_in,
+                    output_spec,
+                    |params, output, output_len| unsafe {
+                        f(
+                            Self::session_handle(session),
+                            params as *mut _ as *mut _,
+                            std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
+                                as cryptoki_sys::CK_ULONG,
+                            plaintext_part.as_ptr() as *mut _,
+                            Self::ulong_len(plaintext_part.len()),
+                            output,
+                            output_len,
+                            flags.0 as cryptoki_sys::CK_FLAGS,
+                        )
+                    },
+                ),
             _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
         }
     }
@@ -984,6 +1314,41 @@ impl FfiBackend {
                     )
                 },
             ),
+            MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
+                ccm,
+                output_spec,
+                |params, output, output_len| unsafe {
+                    f(
+                        Self::session_handle(session),
+                        params as *mut _ as *mut _,
+                        std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
+                            as cryptoki_sys::CK_ULONG,
+                        ciphertext_part.as_ptr() as *mut _,
+                        Self::ulong_len(ciphertext_part.len()),
+                        output,
+                        output_len,
+                        flags.0 as cryptoki_sys::CK_FLAGS,
+                    )
+                },
+            ),
+            MessageParameter::SalaChacha(params_in) => self
+                .call_with_salsa20_chacha20_poly1305_message_param(
+                    params_in,
+                    output_spec,
+                    |params, output, output_len| unsafe {
+                        f(
+                            Self::session_handle(session),
+                            params as *mut _ as *mut _,
+                            std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
+                                as cryptoki_sys::CK_ULONG,
+                            ciphertext_part.as_ptr() as *mut _,
+                            Self::ulong_len(ciphertext_part.len()),
+                            output,
+                            output_len,
+                            flags.0 as cryptoki_sys::CK_FLAGS,
+                        )
+                    },
+                ),
             _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
         }
     }
@@ -1016,6 +1381,39 @@ impl FfiBackend {
                     )
                 },
             ),
+            MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
+                ccm,
+                output_spec,
+                |params, output, output_len| unsafe {
+                    f(
+                        Self::session_handle(session),
+                        params as *mut _ as *mut _,
+                        std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
+                            as cryptoki_sys::CK_ULONG,
+                        data_part.as_ptr() as *mut _,
+                        Self::ulong_len(data_part.len()),
+                        output,
+                        output_len,
+                    )
+                },
+            ),
+            MessageParameter::SalaChacha(params_in) => self
+                .call_with_salsa20_chacha20_poly1305_message_param(
+                    params_in,
+                    output_spec,
+                    |params, output, output_len| unsafe {
+                        f(
+                            Self::session_handle(session),
+                            params as *mut _ as *mut _,
+                            std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
+                                as cryptoki_sys::CK_ULONG,
+                            data_part.as_ptr() as *mut _,
+                            Self::ulong_len(data_part.len()),
+                            output,
+                            output_len,
+                        )
+                    },
+                ),
             _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
         }
     }

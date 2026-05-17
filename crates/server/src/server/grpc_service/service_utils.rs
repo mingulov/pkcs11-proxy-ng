@@ -118,6 +118,28 @@ pub(super) fn ck_rv_only(result: CkResult<()>) -> u64 {
     }
 }
 
+/// Convert a `CkMechanismParams` returned by the backend into a proto
+/// `Mechanism`, deriving the mechanism type from the variant tag.
+///
+/// Used by all RPCs whose response carries a `mechanism_out` field
+/// (Encrypt/Decrypt simple paths + ByteOutputExact + WrapKey). New
+/// mechanism variants that surface output parameters must extend the
+/// match below, otherwise `mechanism_out` will silently be `None` for
+/// that mechanism even when the backend mutated it.
+pub(super) fn mechanism_output_to_proto(
+    params: CkMechanismParams,
+) -> Option<pkcs11_proxy_ng_proto::Mechanism> {
+    let mechanism_type = match params {
+        CkMechanismParams::Gcm(_) => CkMechanismType::AES_GCM,
+        CkMechanismParams::Tls12MasterKeyDerive(_) => CkMechanismType::TLS12_MASTER_KEY_DERIVE,
+        _ => return None,
+    };
+    Some(pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
+        mechanism_type,
+        params: Some(params),
+    }))
+}
+
 pub(super) async fn context_exists(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
@@ -295,6 +317,47 @@ pub(super) async fn register_object_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pkcs11_proxy_ng_types::{GcmParams, SslRandomData, Tls12MasterKeyDeriveParams};
+
+    #[test]
+    fn mechanism_output_to_proto_handles_gcm() {
+        let params = CkMechanismParams::Gcm(GcmParams {
+            iv: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            iv_bits: 96,
+            iv_buffer_len: 12,
+            aad: Vec::new(),
+            tag_bits: 128,
+        });
+        let proto_mech = mechanism_output_to_proto(params).expect("gcm should convert");
+        // The proto Mechanism's type field should match AES_GCM.
+        assert_eq!(proto_mech.mechanism_type, CkMechanismType::AES_GCM.0);
+    }
+
+    #[test]
+    fn mechanism_output_to_proto_handles_tls12_master_key_derive() {
+        let params = CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
+            random_info: SslRandomData {
+                client_random: vec![0xaa; 32],
+                server_random: vec![0xbb; 32],
+            },
+            version_major: 3,
+            version_minor: 3, // TLS 1.2
+            prf_hash_mechanism: CkMechanismType::SHA256.0,
+        });
+        let proto_mech = mechanism_output_to_proto(params).expect("tls12 should convert");
+        assert_eq!(proto_mech.mechanism_type, CkMechanismType::TLS12_MASTER_KEY_DERIVE.0);
+    }
+
+    #[test]
+    fn mechanism_output_to_proto_returns_none_for_unmodeled_variant() {
+        // A mechanism variant we haven't added to the match (e.g. Raw)
+        // should return None so the response carries no mech_out rather
+        // than panicking or sending wrong type info.
+        let params = CkMechanismParams::Raw(pkcs11_proxy_ng_types::RawMechanismParams {
+            data: vec![1, 2, 3],
+        });
+        assert!(mechanism_output_to_proto(params).is_none());
+    }
 
     #[test]
     fn configure_backend_guard_sets_values() {

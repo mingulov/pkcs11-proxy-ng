@@ -110,8 +110,12 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
     })
 }
 
-pub unsafe extern "C" fn c_finalize(_p_reserved: CK_VOID_PTR) -> CK_RV {
+pub unsafe extern "C" fn c_finalize(p_reserved: CK_VOID_PTR) -> CK_RV {
     catch_panics(|| {
+        if !p_reserved.is_null() {
+            return rv_err(CkRv::ARGUMENTS_BAD);
+        }
+
         // Local flag check — avoids a network call when not initialized.
         if !state::is_initialized() {
             return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
@@ -129,6 +133,7 @@ pub unsafe extern "C" fn c_finalize(_p_reserved: CK_VOID_PTR) -> CK_RV {
         // Clear local state regardless of the server result; the context is
         // gone or unreachable either way.
         state::mark_finalized();
+        state::mark_client_reconnect_required();
         state::clear_all_caches();
         // Clear the probe cache so the next C_Initialize re-probes (BUG-001).
         crate::interface_probe::clear_cache();

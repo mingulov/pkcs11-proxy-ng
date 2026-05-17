@@ -27,8 +27,6 @@ AI agents, automation, and human contributors.
 - Do not invent compatibility claims such as “full PKCS#11 support”.
 - Keep the current discovery and mechanism policy intact unless a design change
   is explicitly intended and documented.
-- When in doubt, use the vendored OASIS PKCS#11 spec in
-  `../doc/oasis-tcs-pkcs11/working/doc/spec/` as the source of truth.
 
 ## 3. FFI Safety Is Non-Negotiable
 
@@ -152,8 +150,14 @@ entry in `mechanism_params.toml` (step 6) — no code changes.
 - **Config**: `mechanism_params.toml` embedded default + env override
   (`PKCS11_PROXY_MECHANISMS`). Additive merge.
 - **Session caches**: Cleaned on `c_close_session` via `evict_session_caches()`.
-- **105 PKCS#11 functions** implemented across all layers (2.40 + 3.0 + 3.2).
-- **75 mechanism parameter shapes** with full serialization.
+- **104 standard PKCS#11 function-list fields** represented across all layers
+  (2.40 + 3.0 + 3.2).
+- **6 `C_DigestXof*` spec-only functions** tracked as explicit ABI gaps because
+  the current published function-list headers and `cryptoki-sys` bindings do
+  not expose standard slots for them.
+- **79 mechanism parameter shapes** and **3 message parameter shapes** with
+  serialization, FFI conversion, and shim-safety coverage tracked by the OASIS
+  inventory.
 - **Exact output semantics**: 27 output-bearing functions use the exact/raw
   path via 4 dedicated RPCs (`GetAttributeValueExact`, `ByteOutputExact`,
   `ParameterOutputExact`, `EncapsulateKeyExact`). The backend performs one

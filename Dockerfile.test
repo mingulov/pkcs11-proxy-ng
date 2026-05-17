@@ -57,17 +57,17 @@ COPY crates/types/Cargo.toml crates/types/Cargo.toml
 COPY crates/proto/Cargo.toml crates/proto/Cargo.toml
 COPY crates/proto/build.rs crates/proto/build.rs
 COPY crates/backend/Cargo.toml crates/backend/Cargo.toml
-COPY crates/pkcs11-proxy-ng/Cargo.toml crates/pkcs11-proxy-ng/Cargo.toml
-COPY crates/pkcs11-proxy-ng-client/Cargo.toml crates/pkcs11-proxy-ng-client/Cargo.toml
-COPY crates/pkcs11-proxy-ng-shim/Cargo.toml crates/pkcs11-proxy-ng-shim/Cargo.toml
-COPY crates/pkcs11-proxy-ng-cli/Cargo.toml crates/pkcs11-proxy-ng-cli/Cargo.toml
+COPY crates/server/Cargo.toml crates/server/Cargo.toml
+COPY crates/client/Cargo.toml crates/client/Cargo.toml
+COPY crates/shim/Cargo.toml crates/shim/Cargo.toml
+COPY crates/cli/Cargo.toml crates/cli/Cargo.toml
 
 # Stub source files for dependency pre-compilation
-RUN for crate in types proto backend pkcs11-proxy-ng-client pkcs11-proxy-ng-shim; do \
+RUN for crate in types proto backend client shim; do \
         mkdir -p "crates/$crate/src" && echo "" > "crates/$crate/src/lib.rs"; \
     done && \
-    mkdir -p crates/pkcs11-proxy-ng/src && echo "fn main(){}" > crates/pkcs11-proxy-ng/src/main.rs && echo "" > crates/pkcs11-proxy-ng/src/lib.rs && \
-    mkdir -p crates/pkcs11-proxy-ng-cli/src && echo "fn main(){}" > crates/pkcs11-proxy-ng-cli/src/main.rs
+    mkdir -p crates/server/src && echo "fn main(){}" > crates/server/src/main.rs && echo "" > crates/server/src/lib.rs && \
+    mkdir -p crates/cli/src && echo "fn main(){}" > crates/cli/src/main.rs
 
 # Pre-compile dependencies (cached layer — only re-runs when Cargo.toml changes)
 RUN cargo build --workspace 2>/dev/null || true
@@ -77,7 +77,6 @@ COPY . .
 RUN find crates -name "*.rs" -exec touch {} +
 
 # Build workspace (incremental — deps already compiled above)
-RUN cargo build -p pkcs11-proxy-ng --tests -p backend -p pkcs11-proxy-ng-client \
-    -p proto -p types -p pkcs11-proxy-ng-shim
+RUN cargo build --workspace --tests
 
 CMD ["bash", "scripts/test-matrix.sh", "--skip-fast"]

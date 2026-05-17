@@ -98,6 +98,9 @@ message Mechanism {
     ObjectHandleParam object_handle_param = 76;
     // Post-quantum signature hedge mode
     SignAdditionalContext sign_additional_context = 77;
+    ExtractParams extract_params = 78;
+    KmacParams kmac_params = 79;
+    MuGenParams mu_gen_params = 80;
   }
 }
 
@@ -679,6 +682,7 @@ message EncryptRequest {
 message EncryptResponse {
   uint64 ck_rv = 1;
   bytes encrypted_data = 2;
+  Mechanism mechanism_out = 3;
 }
 
 message EncryptUpdateRequest {
@@ -689,6 +693,7 @@ message EncryptUpdateRequest {
 message EncryptUpdateResponse {
   uint64 ck_rv = 1;
   bytes encrypted_part = 2;
+  Mechanism mechanism_out = 3;
 }
 
 message EncryptFinalRequest {
@@ -698,6 +703,7 @@ message EncryptFinalRequest {
 message EncryptFinalResponse {
   uint64 ck_rv = 1;
   bytes last_encrypted_part = 2;
+  Mechanism mechanism_out = 3;
 }
 
 message DecryptInitRequest {
@@ -708,6 +714,7 @@ message DecryptInitRequest {
 }
 message DecryptInitResponse {
   uint64 ck_rv = 1;
+  Mechanism mechanism_out = 2;
 }
 
 message DecryptRequest {
@@ -718,6 +725,7 @@ message DecryptRequest {
 message DecryptResponse {
   uint64 ck_rv = 1;
   bytes data = 2;
+  Mechanism mechanism_out = 3;
 }
 
 message DecryptUpdateRequest {
@@ -728,6 +736,7 @@ message DecryptUpdateRequest {
 message DecryptUpdateResponse {
   uint64 ck_rv = 1;
   bytes part = 2;
+  Mechanism mechanism_out = 3;
 }
 
 message DecryptFinalRequest {
@@ -737,6 +746,7 @@ message DecryptFinalRequest {
 message DecryptFinalResponse {
   uint64 ck_rv = 1;
   bytes last_part = 2;
+  Mechanism mechanism_out = 3;
 }
 
 message DeriveKeyRequest {
@@ -749,6 +759,7 @@ message DeriveKeyRequest {
 message DeriveKeyResponse {
   uint64 ck_rv = 1;
   uint64 key_handle = 2;
+  Mechanism mechanism_out = 3;
 }
 
 message WrapKeyRequest {

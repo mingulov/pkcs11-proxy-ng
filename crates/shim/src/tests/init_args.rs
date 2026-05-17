@@ -32,6 +32,14 @@ fn initialize_p_reserved_nonnull_returns_bad_args() {
 }
 
 #[test]
+fn finalize_p_reserved_nonnull_returns_bad_args() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let rv = unsafe { dispatch::general::c_finalize(std::ptr::dangling_mut()) };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
 fn initialize_custom_mutex_callbacks_returns_cant_lock() {
     let _guard = shim_state_test_guard();
     let mut args = CK_C_INITIALIZE_ARGS {

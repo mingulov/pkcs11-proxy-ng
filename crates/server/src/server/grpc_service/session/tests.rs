@@ -3,8 +3,9 @@ use crate::server::context_manager::{ClientContextId, ContextManager};
 use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
 use pkcs11_proxy_ng_types::*;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tonic::Request;
+use tracing::instrument::WithSubscriber;
 use tracing_subscriber::fmt::MakeWriter;
 
 /// Shared buffer that captures tracing output for assertions.
@@ -35,6 +36,8 @@ impl<'a> MakeWriter<'a> for CapturedWriter {
         self.clone()
     }
 }
+
+static LOG_CAPTURE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 async fn setup_session() -> (Arc<ContextManager>, Arc<dyn Pkcs11Backend>, ClientContextId, u64) {
     let mock = MockBackend::default_test();
@@ -68,6 +71,7 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    let _capture_guard = LOG_CAPTURE_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
     let writer = CapturedWriter::default();
     let subscriber = tracing_subscriber::fmt()
         .json()
@@ -75,12 +79,40 @@ where
         .with_writer(writer.clone())
         .finish();
 
-    // Use set_default and ensure it stays alive until after f completes
-    let guard = tracing::subscriber::set_default(subscriber);
-    f().await;
-    // Explicitly drop guard to ensure logs are flushed
-    drop(guard);
+    f().with_subscriber(subscriber).await;
     writer.output()
+}
+
+#[tokio::test]
+async fn capture_logs_keeps_overlapping_captures_isolated() {
+    let (first, second) = tokio::join!(
+        capture_logs(|| async {
+            tokio::task::yield_now().await;
+            tracing::info!("first audit marker");
+        }),
+        capture_logs(|| async {
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            tracing::info!("second audit marker");
+        })
+    );
+
+    assert!(
+        first.contains("first audit marker"),
+        "first capture missed its own event; first={first:?} second={second:?}"
+    );
+    assert!(
+        second.contains("second audit marker"),
+        "second capture missed its own event; first={first:?} second={second:?}"
+    );
+    assert!(
+        !first.contains("second audit marker"),
+        "first capture included second event; first={first:?} second={second:?}"
+    );
+    assert!(
+        !second.contains("first audit marker"),
+        "second capture included first event; first={first:?} second={second:?}"
+    );
 }
 
 #[tokio::test]
@@ -103,7 +135,10 @@ async fn login_produces_audit_log_without_pin() {
     })
     .await;
 
-    assert!(output.contains("Login succeeded") || output.contains("Login failed"));
+    assert!(
+        output.contains("Login succeeded") || output.contains("Login failed"),
+        "login audit output missing expected event: {output:?}"
+    );
     assert!(
         !output.contains("SuperSecretPIN"),
         "PIN data must never appear in log output: {output}"
@@ -187,20 +222,20 @@ async fn set_pin_produces_audit_log_without_pins() {
 #[tokio::test]
 async fn logout_produces_audit_log() {
     let (ctx_mgr, backend, ctx_id, session) = setup_session().await;
-
-    let _ = login(
-        &ctx_mgr,
-        &backend,
-        Request::new(pkcs11_proxy_ng_proto::LoginRequest {
-            client_context_id: ctx_id.0.clone(),
-            session_handle: session,
-            user_type: 1,
-            pin: Some(b"anypin".to_vec()),
-        }),
-    )
-    .await;
+    let pin = b"LogoutSetupPin!123".to_vec();
 
     let output = capture_logs(|| async {
+        let _ = login(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                user_type: 1,
+                pin: Some(pin.clone()),
+            }),
+        )
+        .await;
         let _ = logout(
             &ctx_mgr,
             &backend,
@@ -214,6 +249,7 @@ async fn logout_produces_audit_log() {
     .await;
 
     assert!(output.contains("Logout succeeded") || output.contains("Logout"));
+    assert!(!output.contains("LogoutSetupPin"), "PIN must never appear in log output: {output}");
 }
 
 #[test]

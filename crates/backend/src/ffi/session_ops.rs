@@ -114,7 +114,7 @@ impl FfiBackend {
         slot_id: CkSlotId,
         flags: CkSessionFlags,
     ) -> CkResult<CkSessionHandle> {
-        Self::call_session_output(
+        let handle = Self::call_session_output(
             unsafe { (*self.func_list).C_OpenSession },
             |function, handle| unsafe {
                 function(
@@ -125,17 +125,27 @@ impl FfiBackend {
                     handle,
                 )
             },
-        )
+        )?;
+        // Record the session->slot binding so we can drop per-slot
+        // `mech_cache` entries in `C_CloseAllSessions`.
+        self.remember_session_slot(handle, slot_id);
+        Ok(handle)
     }
 
     pub(super) fn ffi_close_session(&self, session: CkSessionHandle) -> CkResult<()> {
         self.drop_mech_cache(session);
+        self.forget_session_slot(session);
         Self::call_unit(unsafe { (*self.func_list).C_CloseSession }, |function| unsafe {
             function(Self::session_handle(session))
         })
     }
 
     pub(super) fn ffi_close_all_sessions(&self, slot_id: CkSlotId) -> CkResult<()> {
+        // Drop our Rust-owned `mech_cache` entries for the slot first; the
+        // underlying lib's `C_CloseAllSessions` then invalidates the session
+        // handles. Even if the underlying call fails, the application's
+        // notion of which sessions are valid is already in disarray.
+        self.drop_mech_cache_for_slot(slot_id);
         Self::call_unit(unsafe { (*self.func_list).C_CloseAllSessions }, |function| unsafe {
             function(Self::slot_id(slot_id))
         })

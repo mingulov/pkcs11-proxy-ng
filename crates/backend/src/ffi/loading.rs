@@ -54,6 +54,7 @@ impl FfiBackend {
             func_list_3_2,
             initialize_args,
             mech_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            session_slot_map: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 

@@ -2,9 +2,9 @@
 //!
 //! These tests exercise the full client -> gRPC -> backend stack using
 //! `TestBackend3x`, which provides simple deterministic implementations of
-//! all 34 new trait methods.  Unlike the Wave 1–5 tests (which validated
-//! `CKR_FUNCTION_NOT_SUPPORTED` propagation with `MockBackend`), these tests
-//! verify that the full round-trip succeeds with a cooperating backend.
+//! the 3.x trait methods. These tests verify that the full round-trip succeeds
+//! with a cooperating backend and add MockBackend coverage for mechanism-output
+//! paths that need its provider-behavior hooks.
 
 use std::sync::Arc;
 
@@ -168,6 +168,51 @@ async fn message_encrypt_decrypt_round_trip() {
 }
 
 #[tokio::test]
+async fn message_encrypt_decrypt_begin_next_round_trip() {
+    let mechanism = test_mechanism();
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![mechanism.mechanism_type]));
+    let (endpoint, _shutdown) = mock_daemon(backend).await;
+    let mut client = init_client(&endpoint).await;
+
+    let (session, key) = setup_session_with_key(&mut client).await;
+    let aad = b"begin-next-aad";
+    let parameter = b"begin-next-param";
+    let part1 = b"hello ";
+    let part2 = b"message begin-next";
+
+    client.message_encrypt_init(session, Some(&mechanism), key).await.unwrap();
+    let encrypt_parameter = client.encrypt_message_begin(session, parameter, aad).await.unwrap();
+    assert_eq!(encrypt_parameter, parameter);
+
+    let (encrypt_parameter, ciphertext1) =
+        client.encrypt_message_next(session, &encrypt_parameter, part1, CkFlags(0)).await.unwrap();
+    let (encrypt_parameter, ciphertext2) =
+        client.encrypt_message_next(session, &encrypt_parameter, part2, CkFlags(0)).await.unwrap();
+    assert_eq!(encrypt_parameter, parameter);
+    assert_ne!(ciphertext1, part1);
+    assert_ne!(ciphertext2, part2);
+    client.message_encrypt_final(session).await.unwrap();
+
+    client.message_decrypt_init(session, Some(&mechanism), key).await.unwrap();
+    let decrypt_parameter =
+        client.decrypt_message_begin(session, &encrypt_parameter, aad).await.unwrap();
+    assert_eq!(decrypt_parameter, parameter);
+
+    let (decrypt_parameter, recovered1) = client
+        .decrypt_message_next(session, &decrypt_parameter, &ciphertext1, CkFlags(0))
+        .await
+        .unwrap();
+    let (decrypt_parameter, recovered2) = client
+        .decrypt_message_next(session, &decrypt_parameter, &ciphertext2, CkFlags(0))
+        .await
+        .unwrap();
+    assert_eq!(decrypt_parameter, parameter);
+    assert_eq!(recovered1, part1);
+    assert_eq!(recovered2, part2);
+    client.message_decrypt_final(session).await.unwrap();
+}
+
+#[tokio::test]
 async fn encrypt_init_returns_gcm_output_params_through_grpc() {
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
     let generated_iv = vec![0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB];
@@ -207,6 +252,322 @@ async fn encrypt_init_returns_gcm_output_params_through_grpc() {
     );
 }
 
+#[tokio::test]
+async fn simple_encrypt_returns_cached_gcm_output_params_through_grpc() {
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
+    let generated_iv = vec![0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB];
+    backend.set_encrypt_init_output(Some(CkMechanismParams::Gcm(GcmParams {
+        iv: generated_iv.clone(),
+        iv_bits: 96,
+        iv_buffer_len: generated_iv.len() as u64,
+        aad: b"simple-aad".to_vec(),
+        tag_bits: 128,
+    })));
+    let (endpoint, _shutdown) = mock_daemon(backend).await;
+    let mut client = init_client(&endpoint).await;
+    let (session, key) = setup_session_with_key(&mut client).await;
+
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv: vec![],
+            iv_bits: 96,
+            iv_buffer_len: generated_iv.len() as u64,
+            aad: b"simple-aad".to_vec(),
+            tag_bits: 128,
+        })),
+    };
+    let init_output = client.encrypt_init(session, &mechanism, key).await.unwrap();
+    assert!(init_output.is_some(), "init response should expose generated IV");
+
+    let plaintext = b"simple encrypt mechanism_out";
+    let (ciphertext, mechanism_out) =
+        client.encrypt_with_mechanism_out(session, plaintext).await.unwrap();
+    let expected_ciphertext = plaintext.iter().map(|byte| byte ^ 0x42).collect::<Vec<_>>();
+
+    assert_eq!(ciphertext, expected_ciphertext);
+    assert_eq!(
+        mechanism_out,
+        Some(CkMechanismParams::Gcm(GcmParams {
+            iv: generated_iv,
+            iv_bits: 96,
+            iv_buffer_len: 12,
+            aad: b"simple-aad".to_vec(),
+            tag_bits: 128,
+        }))
+    );
+}
+
+#[tokio::test]
+async fn simple_encrypt_returns_late_gcm_output_params_through_grpc() {
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
+    let generated_iv = vec![0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB];
+    let expected_output = CkMechanismParams::Gcm(GcmParams {
+        iv: generated_iv.clone(),
+        iv_bits: 96,
+        iv_buffer_len: generated_iv.len() as u64,
+        aad: b"late-simple-aad".to_vec(),
+        tag_bits: 128,
+    });
+    backend.set_encrypt_operation_output(Some(expected_output.clone()));
+    let (endpoint, _shutdown) = mock_daemon(backend).await;
+    let mut client = init_client(&endpoint).await;
+    let (session, key) = setup_session_with_key(&mut client).await;
+
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv: vec![],
+            iv_bits: 96,
+            iv_buffer_len: generated_iv.len() as u64,
+            aad: b"late-simple-aad".to_vec(),
+            tag_bits: 128,
+        })),
+    };
+    let init_output = client.encrypt_init(session, &mechanism, key).await.unwrap();
+    assert_eq!(init_output, None, "late-output simulation must not surface output at init");
+
+    let plaintext = b"late simple encrypt mechanism_out";
+    let (ciphertext, mechanism_out) =
+        client.encrypt_with_mechanism_out(session, plaintext).await.unwrap();
+    let expected_ciphertext = plaintext.iter().map(|byte| byte ^ 0x42).collect::<Vec<_>>();
+    assert_eq!(ciphertext, expected_ciphertext);
+    assert_eq!(mechanism_out, Some(expected_output));
+}
+
+#[tokio::test]
+async fn multipart_encrypt_returns_cached_gcm_output_params_through_grpc() {
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
+    let generated_iv = vec![0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB];
+    let expected_output = CkMechanismParams::Gcm(GcmParams {
+        iv: generated_iv.clone(),
+        iv_bits: 96,
+        iv_buffer_len: generated_iv.len() as u64,
+        aad: b"multipart-aad".to_vec(),
+        tag_bits: 128,
+    });
+    backend.set_encrypt_init_output(Some(expected_output.clone()));
+    let (endpoint, _shutdown) = mock_daemon(backend).await;
+    let mut client = init_client(&endpoint).await;
+    let (session, key) = setup_session_with_key(&mut client).await;
+
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv: vec![],
+            iv_bits: 96,
+            iv_buffer_len: generated_iv.len() as u64,
+            aad: b"multipart-aad".to_vec(),
+            tag_bits: 128,
+        })),
+    };
+    let init_output = client.encrypt_init(session, &mechanism, key).await.unwrap();
+    assert_eq!(init_output, Some(expected_output.clone()));
+
+    let plaintext_part = b"multipart encrypt mechanism_out";
+    let (encrypted_part, update_mechanism_out) =
+        client.encrypt_update_with_mechanism_out(session, plaintext_part).await.unwrap();
+    let expected_part = plaintext_part.iter().map(|byte| byte ^ 0x42).collect::<Vec<_>>();
+    assert_eq!(encrypted_part, expected_part);
+    assert_eq!(update_mechanism_out, Some(expected_output.clone()));
+
+    let (last_encrypted_part, final_mechanism_out) =
+        client.encrypt_final_with_mechanism_out(session).await.unwrap();
+    assert!(last_encrypted_part.is_empty(), "MockBackend final encrypt emits no trailing bytes");
+    assert_eq!(final_mechanism_out, Some(expected_output));
+}
+
+#[tokio::test]
+async fn multipart_encrypt_returns_late_gcm_output_params_through_grpc() {
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
+    let generated_iv = vec![0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB];
+    let expected_output = CkMechanismParams::Gcm(GcmParams {
+        iv: generated_iv.clone(),
+        iv_bits: 96,
+        iv_buffer_len: generated_iv.len() as u64,
+        aad: b"late-multipart-aad".to_vec(),
+        tag_bits: 128,
+    });
+    backend.set_encrypt_operation_output(Some(expected_output.clone()));
+    let (endpoint, _shutdown) = mock_daemon(backend).await;
+    let mut client = init_client(&endpoint).await;
+    let (session, key) = setup_session_with_key(&mut client).await;
+
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv: vec![],
+            iv_bits: 96,
+            iv_buffer_len: generated_iv.len() as u64,
+            aad: b"late-multipart-aad".to_vec(),
+            tag_bits: 128,
+        })),
+    };
+    let init_output = client.encrypt_init(session, &mechanism, key).await.unwrap();
+    assert_eq!(init_output, None, "late-output simulation must not surface output at init");
+
+    let plaintext_part = b"late multipart encrypt mechanism_out";
+    let (encrypted_part, update_mechanism_out) =
+        client.encrypt_update_with_mechanism_out(session, plaintext_part).await.unwrap();
+    let expected_part = plaintext_part.iter().map(|byte| byte ^ 0x42).collect::<Vec<_>>();
+    assert_eq!(encrypted_part, expected_part);
+    assert_eq!(update_mechanism_out, Some(expected_output.clone()));
+
+    let (last_encrypted_part, final_mechanism_out) =
+        client.encrypt_final_with_mechanism_out(session).await.unwrap();
+    assert!(last_encrypted_part.is_empty(), "MockBackend final encrypt emits no trailing bytes");
+    assert_eq!(final_mechanism_out, Some(expected_output));
+}
+
+#[tokio::test]
+async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
+    let generated_iv = vec![0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB];
+    backend.set_encrypt_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
+        iv: generated_iv.clone(),
+        iv_bits: 96,
+        iv_buffer_len: generated_iv.len() as u64,
+        aad: b"aad".to_vec(),
+        tag_bits: 128,
+    })));
+    let (endpoint, _shutdown) = mock_daemon(backend).await;
+    let mut client = init_client(&endpoint).await;
+    let (session, key) = setup_session_with_key(&mut client).await;
+
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv: vec![],
+            iv_bits: 96,
+            iv_buffer_len: generated_iv.len() as u64,
+            aad: b"aad".to_vec(),
+            tag_bits: 128,
+        })),
+    };
+    client.encrypt_init(session, &mechanism, key).await.unwrap();
+
+    let plaintext = b"exact-output mechanism_out";
+    let size_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+    let (size_result, size_mechanism_out) = client
+        .byte_output_exact_with_mechanism_out(
+            session,
+            ByteOutputFunction::Encrypt,
+            &size_spec,
+            plaintext,
+            None,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(size_result.ck_rv, CkRv::OK);
+    assert_eq!(size_result.returned_len, plaintext.len() as u64);
+    assert!(size_result.value.is_none(), "size query must not return ciphertext bytes");
+    assert!(size_mechanism_out.is_none(), "size query must not surface delayed mechanism_out");
+
+    let data_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: plaintext.len() as u64 };
+    let (data_result, data_mechanism_out) = client
+        .byte_output_exact_with_mechanism_out(
+            session,
+            ByteOutputFunction::Encrypt,
+            &data_spec,
+            plaintext,
+            None,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(data_result.ck_rv, CkRv::OK);
+    assert_eq!(data_result.returned_len, plaintext.len() as u64);
+    let expected_ciphertext = plaintext.iter().map(|byte| byte ^ 0x42).collect::<Vec<_>>();
+    assert_eq!(data_result.value.as_deref(), Some(expected_ciphertext.as_slice()));
+    assert_eq!(
+        data_mechanism_out,
+        Some(CkMechanismParams::Gcm(GcmParams {
+            iv: generated_iv.clone(),
+            iv_bits: 96,
+            iv_buffer_len: generated_iv.len() as u64,
+            aad: b"aad".to_vec(),
+            tag_bits: 128,
+        }))
+    );
+}
+
+#[tokio::test]
+async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]));
+    let generated_iv = vec![0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB];
+    backend.set_wrap_key_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
+        iv: generated_iv.clone(),
+        iv_bits: 96,
+        iv_buffer_len: generated_iv.len() as u64,
+        aad: b"wrap-aad".to_vec(),
+        tag_bits: 128,
+    })));
+    let (endpoint, _shutdown) = mock_daemon(backend).await;
+    let mut client = init_client(&endpoint).await;
+    let (session, wrapping_key, key) = setup_session_with_two_keys(&mut client).await;
+
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv: vec![],
+            iv_bits: 96,
+            iv_buffer_len: generated_iv.len() as u64,
+            aad: b"wrap-aad".to_vec(),
+            tag_bits: 128,
+        })),
+    };
+
+    let size_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+    let (size_result, size_mechanism_out) = client
+        .byte_output_exact_with_mechanism_out(
+            session,
+            ByteOutputFunction::WrapKey,
+            &size_spec,
+            &[],
+            Some(&mechanism),
+            wrapping_key.0,
+            key.0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(size_result.ck_rv, CkRv::OK);
+    assert_eq!(size_result.returned_len, 4);
+    assert!(size_result.value.is_none(), "size query must not return wrapped bytes");
+    assert!(size_mechanism_out.is_none(), "size query must not surface delayed mechanism_out");
+
+    let data_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 4 };
+    let (wrap_result, mechanism_out) = client
+        .byte_output_exact_with_mechanism_out(
+            session,
+            ByteOutputFunction::WrapKey,
+            &data_spec,
+            &[],
+            Some(&mechanism),
+            wrapping_key.0,
+            key.0,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(wrap_result.ck_rv, CkRv::OK);
+    assert_eq!(wrap_result.returned_len, 4);
+    assert_eq!(wrap_result.value, Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+    assert_eq!(
+        mechanism_out,
+        Some(CkMechanismParams::Gcm(GcmParams {
+            iv: generated_iv,
+            iv_bits: 96,
+            iv_buffer_len: 12,
+            aad: b"wrap-aad".to_vec(),
+            tag_bits: 128,
+        }))
+    );
+}
+
 // ────────────────────────────────────────────────────────────────────
 // 6. message_sign_verify_round_trip
 // ────────────────────────────────────────────────────────────────────
@@ -239,6 +600,44 @@ async fn message_sign_verify_round_trip() {
     assert!(result.is_ok(), "verify_message should succeed for matching signature");
 
     // Finalize verify
+    client.message_verify_final(session).await.unwrap();
+}
+
+#[tokio::test]
+async fn message_sign_verify_begin_next_round_trip() {
+    let mechanism = test_mechanism();
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![mechanism.mechanism_type]));
+    let (endpoint, _shutdown) = mock_daemon(backend).await;
+    let mut client = init_client(&endpoint).await;
+
+    let (session, key) = setup_session_with_key(&mut client).await;
+    let parameter = b"sign-begin-next-param";
+    let nonfinal_data = b"nonfinal";
+    let final_data = b"final payload";
+
+    client.message_sign_init(session, Some(&mechanism), key).await.unwrap();
+    let sign_parameter = client.sign_message_begin(session, parameter).await.unwrap();
+    assert_eq!(sign_parameter, parameter);
+
+    let (sign_parameter, nonfinal_signature) =
+        client.sign_message_next(session, &sign_parameter, nonfinal_data, false).await.unwrap();
+    assert_eq!(sign_parameter, parameter);
+    assert!(nonfinal_signature.is_empty());
+
+    let (sign_parameter, signature) =
+        client.sign_message_next(session, &sign_parameter, final_data, true).await.unwrap();
+    let expected_signature: Vec<u8> = final_data.iter().rev().copied().collect();
+    assert_eq!(sign_parameter, parameter);
+    assert_eq!(signature, expected_signature);
+    client.message_sign_final(session).await.unwrap();
+
+    client.message_verify_init(session, Some(&mechanism), key).await.unwrap();
+    client.verify_message_begin(session, &sign_parameter).await.unwrap();
+    client.verify_message_next(session, &sign_parameter, nonfinal_data, false, &[]).await.unwrap();
+    client
+        .verify_message_next(session, &sign_parameter, final_data, true, &signature)
+        .await
+        .unwrap();
     client.message_verify_final(session).await.unwrap();
 }
 

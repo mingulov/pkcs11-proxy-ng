@@ -4,10 +4,9 @@
 //! `GetSessionValidationFlags` through the full client -> gRPC -> backend
 //! stack using `MockBackend`.
 //!
-//! The `MockBackend` does not override the default trait implementations for
-//! these functions, so they return `CKR_FUNCTION_NOT_SUPPORTED`. The tests
-//! verify that this error propagates correctly through the full stack,
-//! confirming all layers (client, proto, gRPC handler, backend) are wired.
+//! The `MockBackend` implements deterministic support for these functions so
+//! tests can exercise the full client, proto, gRPC handler, and backend stack
+//! without requiring a real provider that supports the 3.x calls.
 
 use std::sync::Arc;
 
@@ -23,7 +22,7 @@ const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION
 // ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn login_user_returns_function_not_supported_through_full_stack() {
+async fn login_user_succeeds_through_full_stack() {
     let backend = Arc::new(mock(&[0], &[0x00000001]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
@@ -31,17 +30,11 @@ async fn login_user_returns_function_not_supported_through_full_stack() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
-    let err = client.login_user(session, CkUserType::User, b"testuser", b"1234").await.unwrap_err();
-
-    assert_eq!(
-        err,
-        CkRv::FUNCTION_NOT_SUPPORTED,
-        "MockBackend default login_user should return CKR_FUNCTION_NOT_SUPPORTED"
-    );
+    client.login_user(session, CkUserType::User, b"testuser", b"1234").await.unwrap();
 }
 
 #[tokio::test]
-async fn login_user_with_empty_credentials() {
+async fn login_user_with_empty_credentials_reaches_backend() {
     let backend = Arc::new(mock(&[0], &[0x00000001]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
@@ -49,10 +42,11 @@ async fn login_user_with_empty_credentials() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
-    // Empty username and pin should still reach the backend
+    // Empty username and pin should still reach the backend and fail as a
+    // backend PIN decision, not as unsupported wiring.
     let err = client.login_user(session, CkUserType::So, b"", b"").await.unwrap_err();
 
-    assert_eq!(err, CkRv::FUNCTION_NOT_SUPPORTED);
+    assert_eq!(err, CkRv::PIN_INCORRECT);
 }
 
 #[tokio::test]
@@ -64,14 +58,9 @@ async fn login_user_all_user_types() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
-    // All valid CkUserType variants should reach the backend
+    // All valid CkUserType variants should reach the backend.
     for user_type in [CkUserType::So, CkUserType::User, CkUserType::ContextSpecific] {
-        let err = client.login_user(session, user_type, b"user", b"pin").await.unwrap_err();
-        assert_eq!(
-            err,
-            CkRv::FUNCTION_NOT_SUPPORTED,
-            "login_user({user_type:?}) should return CKR_FUNCTION_NOT_SUPPORTED"
-        );
+        client.login_user(session, user_type, b"user", b"1234").await.unwrap();
     }
 }
 
@@ -80,7 +69,7 @@ async fn login_user_all_user_types() {
 // ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn session_cancel_returns_function_not_supported_through_full_stack() {
+async fn session_cancel_succeeds_through_full_stack() {
     let backend = Arc::new(mock(&[0], &[0x00000001]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
@@ -88,13 +77,7 @@ async fn session_cancel_returns_function_not_supported_through_full_stack() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
-    let err = client.session_cancel(session, CkFlags(0)).await.unwrap_err();
-
-    assert_eq!(
-        err,
-        CkRv::FUNCTION_NOT_SUPPORTED,
-        "MockBackend default session_cancel should return CKR_FUNCTION_NOT_SUPPORTED"
-    );
+    client.session_cancel(session, CkFlags(0)).await.unwrap();
 }
 
 #[tokio::test]
@@ -106,10 +89,8 @@ async fn session_cancel_with_flags() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
-    // Non-zero flags should propagate correctly
-    let err = client.session_cancel(session, CkFlags(0x0000_0001)).await.unwrap_err();
-
-    assert_eq!(err, CkRv::FUNCTION_NOT_SUPPORTED);
+    // Non-zero flags should propagate correctly.
+    client.session_cancel(session, CkFlags(0x0000_0001)).await.unwrap();
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -117,7 +98,7 @@ async fn session_cancel_with_flags() {
 // ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn get_session_validation_flags_returns_function_not_supported() {
+async fn get_session_validation_flags_returns_zero() {
     let backend = Arc::new(mock(&[0], &[0x00000001]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
@@ -125,13 +106,9 @@ async fn get_session_validation_flags_returns_function_not_supported() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
-    let err = client.get_session_validation_flags(session, 0).await.unwrap_err();
+    let flags = client.get_session_validation_flags(session, 0).await.unwrap();
 
-    assert_eq!(
-        err,
-        CkRv::FUNCTION_NOT_SUPPORTED,
-        "MockBackend default get_session_validation_flags should return CKR_FUNCTION_NOT_SUPPORTED"
-    );
+    assert_eq!(flags, 0);
 }
 
 #[tokio::test]
@@ -143,10 +120,10 @@ async fn get_session_validation_flags_with_nonzero_type() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
-    // Non-zero flags_type should propagate through
-    let err = client.get_session_validation_flags(session, 42).await.unwrap_err();
+    // Non-zero flags_type should propagate through.
+    let flags = client.get_session_validation_flags(session, 42).await.unwrap();
 
-    assert_eq!(err, CkRv::FUNCTION_NOT_SUPPORTED);
+    assert_eq!(flags, 0);
 }
 
 // ────────────────────────────────────────────────────────────────────

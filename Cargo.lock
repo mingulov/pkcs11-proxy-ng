@@ -1136,8 +1136,10 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "criterion",
+ "cryptoki-sys",
  "dashmap",
  "libc",
+ "libloading 0.9.0",
  "nix",
  "pkcs11-proxy-ng-backend",
  "pkcs11-proxy-ng-client",
@@ -1145,6 +1147,7 @@ dependencies = [
  "pkcs11-proxy-ng-types",
  "rcgen",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "time",

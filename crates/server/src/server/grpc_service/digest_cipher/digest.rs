@@ -25,6 +25,14 @@ pub(crate) async fn digest_init(
         }
     };
 
+    if req.mechanism.is_none() {
+        let backend = Arc::clone(backend_ref);
+        let result = spawn_backend(move || backend.digest_init_cancel(session)).await?;
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse {
+            ck_rv: ck_rv_only(result),
+        }));
+    }
+
     let mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {

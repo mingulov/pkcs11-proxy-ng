@@ -225,7 +225,12 @@ impl Pkcs11Backend for TestBackend3x {
     fn encrypt_final(&self, s: CkSessionHandle) -> CkResult<Vec<u8>> {
         self.inner.encrypt_final(s)
     }
-    fn decrypt_init(&self, s: CkSessionHandle, m: &CkMechanism, k: CkObjectHandle) -> CkResult<()> {
+    fn decrypt_init(
+        &self,
+        s: CkSessionHandle,
+        m: &CkMechanism,
+        k: CkObjectHandle,
+    ) -> CkResult<Option<CkMechanismParams>> {
         self.inner.decrypt_init(s, m, k)
     }
     fn decrypt(&self, s: CkSessionHandle, encrypted_data: &[u8]) -> CkResult<Vec<u8>> {

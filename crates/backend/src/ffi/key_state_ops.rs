@@ -25,6 +25,58 @@ impl FfiBackend {
         )
     }
 
+    /// `C_DeriveKey` returning the derived key handle plus
+    /// HSM-mutated mechanism params (e.g. the negotiated `CK_VERSION`
+    /// from `CKM_TLS12_MASTER_KEY_DERIVE.pVersion`).  See AGENTS.md
+    /// §2 — behavioural parity with a native PKCS#11 module.
+    pub(super) fn ffi_derive_key_with_output(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        base_key: CkObjectHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
+        let ffi_attrs = FfiAttrs::from_slice(template);
+        Self::call_object_with_mechanism_output(
+            unsafe { (*self.func_list).C_DeriveKey },
+            mechanism,
+            |function, mech, handle| unsafe {
+                function(
+                    Self::session_handle(session),
+                    mech,
+                    Self::object_handle(base_key),
+                    Self::ffi_attr_ptr(&ffi_attrs),
+                    Self::ffi_attr_len(&ffi_attrs),
+                    handle,
+                )
+            },
+        )
+    }
+
+    pub(super) fn ffi_derive_key_with_output_result(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        base_key: CkObjectHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<crate::traits::CkDeriveKeyOutputResult> {
+        let ffi_attrs = FfiAttrs::from_slice(template);
+        Self::call_object_with_mechanism_output_result(
+            unsafe { (*self.func_list).C_DeriveKey },
+            mechanism,
+            |function, mech, handle| unsafe {
+                function(
+                    Self::session_handle(session),
+                    mech,
+                    Self::object_handle(base_key),
+                    Self::ffi_attr_ptr(&ffi_attrs),
+                    Self::ffi_attr_len(&ffi_attrs),
+                    handle,
+                )
+            },
+        )
+    }
+
     pub(super) fn ffi_wrap_key(
         &self,
         session: CkSessionHandle,
@@ -57,6 +109,35 @@ impl FfiBackend {
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact_with_mechanism(
+            unsafe { (*self.func_list).C_WrapKey },
+            mechanism,
+            spec,
+            |function, mech, output, output_len| unsafe {
+                function(
+                    Self::session_handle(session),
+                    mech,
+                    Self::object_handle(wrapping_key),
+                    Self::object_handle(key),
+                    output,
+                    output_len,
+                )
+            },
+        )
+    }
+
+    /// `C_WrapKey` with mechanism-param write-back so HSM-generated values
+    /// (most importantly the AES-GCM IV when wrapping with `CKM_AES_GCM`)
+    /// round-trip back to the caller's `CK_MECHANISM`.  See AGENTS.md
+    /// §2/§3 — the proxy must behave like a native PKCS#11 module.
+    pub(super) fn ffi_wrap_key_exact_with_output(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        wrapping_key: CkObjectHandle,
+        key: CkObjectHandle,
+        spec: &CkOutputBufferSpec,
+    ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)> {
+        Self::call_bytes_exact_with_mechanism_output(
             unsafe { (*self.func_list).C_WrapKey },
             mechanism,
             spec,

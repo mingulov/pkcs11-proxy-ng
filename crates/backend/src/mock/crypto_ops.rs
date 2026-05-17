@@ -1,3 +1,6 @@
+use pkcs11_proxy_ng_proto::convert::message_params::{
+    CcmMessageParams, GcmMessageParams, MessageParameter, Salsa20ChaCha20Poly1305MessageParams,
+};
 use pkcs11_proxy_ng_types::*;
 
 use super::{MockBackend, MultiPartOp};
@@ -9,14 +12,103 @@ pub(super) const MOCK_VERIFY_RECOVER_OUTPUT: [u8; 2] = [0xBE, 0xEF];
 pub(super) const MOCK_WRAP_OUTPUT: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
 pub(super) const MOCK_ENCAPSULATE_OUTPUT: [u8; 8] =
     [0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF];
-const MOCK_ENCAPSULATE_KEY_HANDLE: u64 = 42;
+const MOCK_GCM_TAG_BYTE: u8 = 0xA5;
+const MOCK_CCM_MAC_BYTE: u8 = 0xC3;
+const MOCK_SALSA_CHACHA_TAG_BYTE: u8 = 0x5A;
 const MOCK_DIGEST_FINAL_LEN: usize = 4;
 const MOCK_RANDOM_BYTE: u8 = 0x42;
 
 impl MockBackend {
-    pub(super) fn sign_init_impl(&self, session: CkSessionHandle) -> CkResult<()> {
+    pub(super) fn require_live_key(
+        &self,
+        state: &super::MockState,
+        session: CkSessionHandle,
+        key: CkObjectHandle,
+    ) -> CkResult<()> {
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        self.require_live_object(state, key)
+    }
+
+    pub(super) fn require_live_keys(
+        &self,
+        state: &super::MockState,
+        session: CkSessionHandle,
+        keys: &[CkObjectHandle],
+    ) -> CkResult<()> {
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        for key in keys {
+            self.require_live_object(state, *key)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_live_key_for_optional_mechanism_workflow(
+        &self,
+        state: &super::MockState,
+        session: CkSessionHandle,
+        mechanism: Option<&CkMechanism>,
+        key: CkObjectHandle,
+        required_flag: u64,
+    ) -> CkResult<()> {
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        if let Some(mechanism) = mechanism {
+            self.require_mechanism_workflow_for_state(state, session, mechanism, required_flag)?;
+            self.require_live_object(state, key)?;
+        }
+        Ok(())
+    }
+
+    fn begin_keyed_op(
+        &self,
+        session: CkSessionHandle,
+        key: CkObjectHandle,
+        op: MultiPartOp,
+    ) -> CkResult<()> {
+        let mut state = self.state.lock().unwrap();
+        self.require_live_key(&state, session, key)?;
+        state.begin_op(session, op)
+    }
+
+    pub(super) fn begin_keyed_op_with_mechanism(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        key: CkObjectHandle,
+        op: MultiPartOp,
+    ) -> CkResult<()> {
+        let mut state = self.state.lock().unwrap();
+        self.require_live_key(&state, session, key)?;
+        self.validate_source_grounded_param_handles(&state, mechanism)?;
+        state.begin_op(session, op)
+    }
+
+    pub(super) fn init_cancel_impl(
+        &self,
+        session: CkSessionHandle,
+        op: MultiPartOp,
+    ) -> CkResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        state.cancel_op_if_active(session, op);
+        Ok(())
+    }
+
+    pub(super) fn sign_init_impl(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        key: CkObjectHandle,
+    ) -> CkResult<()> {
         self.check_injected()?;
-        self.state.lock().unwrap().begin_op(session, MultiPartOp::Sign)
+        self.begin_keyed_op_with_mechanism(session, mechanism, key, MultiPartOp::Sign)
     }
 
     pub(super) fn sign_impl(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
@@ -33,9 +125,14 @@ impl MockBackend {
         Ok(MOCK_SIGN_OUTPUT.to_vec())
     }
 
-    pub(super) fn verify_init_impl(&self, session: CkSessionHandle) -> CkResult<()> {
+    pub(super) fn verify_init_impl(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        key: CkObjectHandle,
+    ) -> CkResult<()> {
         self.check_injected()?;
-        self.state.lock().unwrap().begin_op(session, MultiPartOp::Verify)
+        self.begin_keyed_op_with_mechanism(session, mechanism, key, MultiPartOp::Verify)
     }
 
     pub(super) fn verify_impl(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -56,16 +153,24 @@ impl MockBackend {
 
     pub(super) fn digest_impl(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Digest)?;
-        let sum: u32 = data.iter().map(|&byte| byte as u32).sum();
-        Ok(sum.to_be_bytes().to_vec())
+        Ok(Self::digest_bytes(data))
     }
 
     pub(super) fn digest_update_impl(&self, session: CkSessionHandle) -> CkResult<()> {
         self.state.lock().unwrap().require_op(session, MultiPartOp::Digest)
     }
 
-    pub(super) fn digest_key_impl(&self, session: CkSessionHandle) -> CkResult<()> {
-        self.state.lock().unwrap().require_op(session, MultiPartOp::Digest)
+    pub(super) fn digest_key_impl(
+        &self,
+        session: CkSessionHandle,
+        key: CkObjectHandle,
+    ) -> CkResult<()> {
+        let state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        state.require_op(session, MultiPartOp::Digest)?;
+        self.require_live_object(&state, key)
     }
 
     pub(super) fn digest_final_impl(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
@@ -73,13 +178,18 @@ impl MockBackend {
         Ok(vec![0; MOCK_DIGEST_FINAL_LEN])
     }
 
-    pub(super) fn encrypt_init_impl(&self, session: CkSessionHandle) -> CkResult<()> {
+    pub(super) fn encrypt_init_impl(
+        &self,
+        session: CkSessionHandle,
+        key: CkObjectHandle,
+    ) -> CkResult<()> {
         self.check_injected()?;
-        self.state.lock().unwrap().begin_op(session, MultiPartOp::Encrypt)
+        self.begin_keyed_op(session, key, MultiPartOp::Encrypt)
     }
 
     pub(super) fn encrypt_impl(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Encrypt)?;
+        self.record_encrypt_operation_output(session);
         Ok(Self::xor_bytes(data))
     }
 
@@ -89,17 +199,29 @@ impl MockBackend {
         part: &[u8],
     ) -> CkResult<Vec<u8>> {
         self.state.lock().unwrap().require_op(session, MultiPartOp::Encrypt)?;
+        self.record_encrypt_operation_output(session);
         Ok(Self::xor_bytes(part))
     }
 
     pub(super) fn encrypt_final_impl(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Encrypt)?;
+        self.record_encrypt_operation_output(session);
         Ok(vec![])
     }
 
-    pub(super) fn decrypt_init_impl(&self, session: CkSessionHandle) -> CkResult<()> {
+    fn record_encrypt_operation_output(&self, session: CkSessionHandle) {
+        if let Some(params) = self.encrypt_operation_output.lock().unwrap().clone() {
+            self.session_mechanism_output.lock().unwrap().insert(session.0, params);
+        }
+    }
+
+    pub(super) fn decrypt_init_impl(
+        &self,
+        session: CkSessionHandle,
+        key: CkObjectHandle,
+    ) -> CkResult<()> {
         self.check_injected()?;
-        self.state.lock().unwrap().begin_op(session, MultiPartOp::Decrypt)
+        self.begin_keyed_op(session, key, MultiPartOp::Decrypt)
     }
 
     pub(super) fn decrypt_impl(
@@ -132,7 +254,10 @@ impl MockBackend {
         }
         match state.active_ops.get(&session.0) {
             None => Err(CkRv::OPERATION_NOT_INITIALIZED),
-            Some(op) => Ok([MOCK_STATE_PREFIX.as_slice(), &[self.encode_op(*op)]].concat()),
+            Some(op) => match self.encode_op(*op) {
+                Some(op_byte) => Ok([MOCK_STATE_PREFIX.as_slice(), &[op_byte]].concat()),
+                None => Err(CkRv::OPERATION_NOT_INITIALIZED),
+            },
         }
     }
 
@@ -177,29 +302,56 @@ impl MockBackend {
         &self,
         session: CkSessionHandle,
         _mechanism: &CkMechanism,
-        _public_key: CkObjectHandle,
-        _template: &[CkAttribute],
+        public_key: CkObjectHandle,
+        template: &[CkAttribute],
     ) -> CkResult<(Vec<u8>, CkObjectHandle)> {
         self.check_injected()?;
-        // Verify session exists
-        let state = self.state.lock().unwrap();
-        if !state.has_session(session) {
-            return Err(CkRv::SESSION_HANDLE_INVALID);
-        }
-        drop(state);
-        // Return synthetic ciphertext + a fixed mock key handle
+        let mut state = self.state.lock().unwrap();
+        self.require_live_key(&state, session, public_key)?;
         let ciphertext = MOCK_ENCAPSULATE_OUTPUT.to_vec();
-        let key_handle = CkObjectHandle(MOCK_ENCAPSULATE_KEY_HANDLE);
+        let key_handle =
+            self.allocate_session_object_with_template(&mut state, session, template)?;
         Ok((ciphertext, key_handle))
     }
 
-    fn encode_op(&self, op: MultiPartOp) -> u8 {
+    pub(super) fn encapsulate_key_exact_impl(
+        &self,
+        session: CkSessionHandle,
+        _mechanism: &CkMechanism,
+        public_key: CkObjectHandle,
+        template: &[CkAttribute],
+        spec: &CkOutputBufferSpec,
+    ) -> CkResult<CkOutputAndHandleResult> {
+        self.check_injected()?;
+        let output = CkOutputBufferResult::from_convenience_bytes(&MOCK_ENCAPSULATE_OUTPUT, spec);
+
+        let mut state = self.state.lock().unwrap();
+        self.require_live_key(&state, session, public_key)?;
+
+        let object_handle = if output.value.is_some() {
+            self.allocate_session_object_with_template(&mut state, session, template)?
+        } else {
+            CkObjectHandle(0)
+        };
+
+        Ok(CkOutputAndHandleResult {
+            ck_rv: output.ck_rv,
+            returned_len: output.returned_len,
+            value: output.value,
+            object_handle,
+        })
+    }
+
+    fn encode_op(&self, op: MultiPartOp) -> Option<u8> {
         match op {
-            MultiPartOp::Sign => 1,
-            MultiPartOp::Verify => 2,
-            MultiPartOp::Digest => 3,
-            MultiPartOp::Encrypt => 4,
-            MultiPartOp::Decrypt => 5,
+            MultiPartOp::Sign => Some(1),
+            MultiPartOp::Verify => Some(2),
+            MultiPartOp::Digest => Some(3),
+            MultiPartOp::Encrypt => Some(4),
+            MultiPartOp::Decrypt => Some(5),
+            MultiPartOp::SignRecover => Some(6),
+            MultiPartOp::VerifyRecover => Some(7),
+            MultiPartOp::FindObjects => None,
         }
     }
 
@@ -213,6 +365,8 @@ impl MockBackend {
             3 => Ok(MultiPartOp::Digest),
             4 => Ok(MultiPartOp::Encrypt),
             5 => Ok(MultiPartOp::Decrypt),
+            6 => Ok(MultiPartOp::SignRecover),
+            7 => Ok(MultiPartOp::VerifyRecover),
             _ => Err(CkRv::SAVED_STATE_INVALID),
         }
     }
@@ -222,13 +376,28 @@ impl MockBackend {
     // Each delegates to the existing convenience method and wraps the result
     // with `CkOutputBufferResult::from_convenience_bytes`.
 
+    fn exact_terminal_output(
+        &self,
+        session: CkSessionHandle,
+        op: MultiPartOp,
+        bytes: &[u8],
+        spec: &CkOutputBufferSpec,
+    ) -> CkResult<CkOutputBufferResult> {
+        let result = CkOutputBufferResult::from_convenience_bytes(bytes, spec);
+        if result.ck_rv == CkRv::OK && result.value.is_some() {
+            self.state.lock().unwrap().end_op(session, op)?;
+        } else {
+            self.state.lock().unwrap().require_op(session, op)?;
+        }
+        Ok(result)
+    }
+
     pub(super) fn sign_exact_impl(
         &self,
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = self.sign_impl(session)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        self.exact_terminal_output(session, MultiPartOp::Sign, &MOCK_SIGN_OUTPUT, spec)
     }
 
     pub(super) fn sign_final_exact_impl(
@@ -236,24 +405,24 @@ impl MockBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = self.sign_final_impl(session)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        self.exact_terminal_output(session, MultiPartOp::Sign, &MOCK_SIGN_OUTPUT, spec)
     }
 
     pub(super) fn sign_recover_exact_impl(
         &self,
+        session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = MOCK_SIGN_OUTPUT.to_vec();
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        self.exact_terminal_output(session, MultiPartOp::SignRecover, &MOCK_SIGN_OUTPUT, spec)
     }
 
     pub(super) fn verify_recover_exact_impl(
         &self,
+        session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         let bytes = self.verify_recover_impl()?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        self.exact_terminal_output(session, MultiPartOp::VerifyRecover, &bytes, spec)
     }
 
     pub(super) fn digest_exact_impl(
@@ -262,8 +431,8 @@ impl MockBackend {
         data: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = self.digest_impl(session, data)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        let bytes = Self::digest_bytes(data);
+        self.exact_terminal_output(session, MultiPartOp::Digest, &bytes, spec)
     }
 
     pub(super) fn digest_final_exact_impl(
@@ -271,8 +440,8 @@ impl MockBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = self.digest_final_impl(session)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        let bytes = vec![0; MOCK_DIGEST_FINAL_LEN];
+        self.exact_terminal_output(session, MultiPartOp::Digest, &bytes, spec)
     }
 
     pub(super) fn encrypt_exact_impl(
@@ -281,12 +450,12 @@ impl MockBackend {
         data: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        if !spec.buffer_present {
-            self.state.lock().unwrap().require_op(session, MultiPartOp::Encrypt)?;
-            return Ok(CkOutputBufferResult::from_convenience_bytes(&Self::xor_bytes(data), spec));
+        let bytes = Self::xor_bytes(data);
+        let result = self.exact_terminal_output(session, MultiPartOp::Encrypt, &bytes, spec)?;
+        if result.ck_rv == CkRv::OK && result.value.is_some() {
+            self.record_encrypt_operation_output(session);
         }
-        let bytes = self.encrypt_impl(session, data)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        Ok(result)
     }
 
     pub(super) fn encrypt_update_exact_impl(
@@ -304,8 +473,12 @@ impl MockBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = self.encrypt_final_impl(session)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        let bytes = Vec::new();
+        let result = self.exact_terminal_output(session, MultiPartOp::Encrypt, &bytes, spec)?;
+        if result.ck_rv == CkRv::OK && result.value.is_some() {
+            self.record_encrypt_operation_output(session);
+        }
+        Ok(result)
     }
 
     pub(super) fn decrypt_exact_impl(
@@ -314,8 +487,8 @@ impl MockBackend {
         encrypted_data: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = self.decrypt_impl(session, encrypted_data)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        let bytes = Self::xor_bytes(encrypted_data);
+        self.exact_terminal_output(session, MultiPartOp::Decrypt, &bytes, spec)
     }
 
     pub(super) fn decrypt_update_exact_impl(
@@ -333,8 +506,8 @@ impl MockBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = self.decrypt_final_impl(session)?;
-        Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
+        let bytes = Vec::new();
+        self.exact_terminal_output(session, MultiPartOp::Decrypt, &bytes, spec)
     }
 
     pub(super) fn digest_encrypt_update_exact_impl(
@@ -405,6 +578,130 @@ impl MockBackend {
             returned_len: parameter.len() as u64,
             value: if param_out_spec.buffer_present { Some(parameter.to_vec()) } else { None },
         }
+    }
+
+    fn mock_message_parameter_out(message_parameter: &MessageParameter) -> MessageParameter {
+        match message_parameter {
+            MessageParameter::Raw(raw) => MessageParameter::Raw(raw.clone()),
+            MessageParameter::GcmMessage(params) => {
+                let tag_len = if params.tag_bits == 0 {
+                    params.tag.len()
+                } else {
+                    params.tag_bits.div_ceil(8) as usize
+                };
+                MessageParameter::GcmMessage(GcmMessageParams {
+                    iv: params.iv.clone(),
+                    iv_fixed_bits: params.iv_fixed_bits,
+                    iv_generator: params.iv_generator,
+                    tag: vec![MOCK_GCM_TAG_BYTE; tag_len],
+                    tag_bits: params.tag_bits,
+                })
+            }
+            MessageParameter::CcmMessage(params) => {
+                let mac_len =
+                    if params.mac_len == 0 { params.mac.len() } else { params.mac_len as usize };
+                MessageParameter::CcmMessage(CcmMessageParams {
+                    data_len: params.data_len,
+                    nonce: params.nonce.clone(),
+                    nonce_fixed_bits: params.nonce_fixed_bits,
+                    nonce_generator: params.nonce_generator,
+                    mac: vec![MOCK_CCM_MAC_BYTE; mac_len],
+                    mac_len: params.mac_len,
+                })
+            }
+            MessageParameter::SalaChacha(params) => {
+                let tag_len = if params.tag.is_empty() { 16 } else { params.tag.len() };
+                MessageParameter::SalaChacha(Salsa20ChaCha20Poly1305MessageParams {
+                    nonce: params.nonce.clone(),
+                    tag: vec![MOCK_SALSA_CHACHA_TAG_BYTE; tag_len],
+                })
+            }
+        }
+    }
+
+    pub(super) fn encrypt_message_exact_msg_impl(
+        &self,
+        session: CkSessionHandle,
+        message_parameter: &MessageParameter,
+        _aad: &[u8],
+        plaintext: &[u8],
+        output_spec: &CkOutputBufferSpec,
+    ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
+        self.require_open_session(session)?;
+        let bytes = Self::xor_bytes(plaintext);
+        let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
+        Ok((output_result, Self::mock_message_parameter_out(message_parameter)))
+    }
+
+    pub(super) fn decrypt_message_exact_msg_impl(
+        &self,
+        session: CkSessionHandle,
+        message_parameter: &MessageParameter,
+        _aad: &[u8],
+        ciphertext: &[u8],
+        output_spec: &CkOutputBufferSpec,
+    ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
+        self.require_open_session(session)?;
+        let bytes = Self::xor_bytes(ciphertext);
+        let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
+        Ok((output_result, Self::mock_message_parameter_out(message_parameter)))
+    }
+
+    pub(super) fn sign_message_exact_msg_impl(
+        &self,
+        session: CkSessionHandle,
+        message_parameter: &MessageParameter,
+        data: &[u8],
+        output_spec: &CkOutputBufferSpec,
+    ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
+        self.require_open_session(session)?;
+        let bytes = Self::reverse_bytes(data);
+        let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
+        Ok((output_result, Self::mock_message_parameter_out(message_parameter)))
+    }
+
+    pub(super) fn encrypt_message_next_exact_msg_impl(
+        &self,
+        session: CkSessionHandle,
+        message_parameter: &MessageParameter,
+        plaintext_part: &[u8],
+        _flags: CkFlags,
+        output_spec: &CkOutputBufferSpec,
+    ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
+        self.encrypt_message_exact_msg_impl(
+            session,
+            message_parameter,
+            &[],
+            plaintext_part,
+            output_spec,
+        )
+    }
+
+    pub(super) fn decrypt_message_next_exact_msg_impl(
+        &self,
+        session: CkSessionHandle,
+        message_parameter: &MessageParameter,
+        ciphertext_part: &[u8],
+        _flags: CkFlags,
+        output_spec: &CkOutputBufferSpec,
+    ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
+        self.decrypt_message_exact_msg_impl(
+            session,
+            message_parameter,
+            &[],
+            ciphertext_part,
+            output_spec,
+        )
+    }
+
+    pub(super) fn sign_message_next_exact_msg_impl(
+        &self,
+        session: CkSessionHandle,
+        message_parameter: &MessageParameter,
+        data_part: &[u8],
+        output_spec: &CkOutputBufferSpec,
+    ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
+        self.sign_message_exact_msg_impl(session, message_parameter, data_part, output_spec)
     }
 
     pub(super) fn encrypt_message_exact_impl(

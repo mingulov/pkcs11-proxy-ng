@@ -20,6 +20,14 @@ impl FfiBackend {
         )
     }
 
+    pub(super) fn ffi_sign_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        Self::call_unit(unsafe { (*self.func_list).C_SignInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+        })?;
+        self.drop_mech_cache(session);
+        Ok(())
+    }
+
     pub(super) fn ffi_sign(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_Sign },
@@ -55,6 +63,14 @@ impl FfiBackend {
             mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
+    }
+
+    pub(super) fn ffi_sign_recover_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        Self::call_unit(unsafe { (*self.func_list).C_SignRecoverInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+        })?;
+        self.drop_mech_cache(session);
+        Ok(())
     }
 
     pub(super) fn ffi_sign_recover(
@@ -142,6 +158,14 @@ impl FfiBackend {
         )
     }
 
+    pub(super) fn ffi_verify_recover_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        Self::call_unit(unsafe { (*self.func_list).C_VerifyRecoverInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+        })?;
+        self.drop_mech_cache(session);
+        Ok(())
+    }
+
     pub(super) fn ffi_verify_recover(
         &self,
         session: CkSessionHandle,
@@ -167,6 +191,14 @@ impl FfiBackend {
             mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
+    }
+
+    pub(super) fn ffi_verify_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        Self::call_unit(unsafe { (*self.func_list).C_VerifyInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+        })?;
+        self.drop_mech_cache(session);
+        Ok(())
     }
 
     pub(super) fn ffi_verify(
@@ -213,6 +245,14 @@ impl FfiBackend {
             mechanism,
             |function, mech| unsafe { function(Self::session_handle(session), mech) },
         )
+    }
+
+    pub(super) fn ffi_digest_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        Self::call_unit(unsafe { (*self.func_list).C_DigestInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut())
+        })?;
+        self.drop_mech_cache(session);
+        Ok(())
     }
 
     pub(super) fn ffi_digest(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
@@ -289,6 +329,14 @@ impl FfiBackend {
         )
     }
 
+    pub(super) fn ffi_encrypt_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        Self::call_unit(unsafe { (*self.func_list).C_EncryptInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+        })?;
+        self.drop_mech_cache(session);
+        Ok(())
+    }
+
     pub(super) fn ffi_encrypt(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
         Self::call_bytes(unsafe { (*self.func_list).C_Encrypt }, |function, output, output_len| {
             session_bytes_input!(session, data, function, output, output_len)
@@ -322,13 +370,21 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         key: CkObjectHandle,
-    ) -> CkResult<()> {
-        self.call_init_with_mechanism(
+    ) -> CkResult<Option<CkMechanismParams>> {
+        self.call_init_with_mechanism_output(
             session,
             unsafe { (*self.func_list).C_DecryptInit },
             mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
         )
+    }
+
+    pub(super) fn ffi_decrypt_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        Self::call_unit(unsafe { (*self.func_list).C_DecryptInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+        })?;
+        self.drop_mech_cache(session);
+        Ok(())
     }
 
     pub(super) fn ffi_decrypt(

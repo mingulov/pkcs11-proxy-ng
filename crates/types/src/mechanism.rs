@@ -1,3 +1,5 @@
+use crate::attribute::CkAttribute;
+
 /// Mechanism type identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CkMechanismType(pub u64);
@@ -8,14 +10,42 @@ impl CkMechanismType {
     // Phase 1 seed set — parameterless mechanisms
     pub const RSA_PKCS: Self = Self(0x00000001);
     pub const RSA_PKCS_KEY_PAIR_GEN: Self = Self(0x00000000);
+    pub const RSA_9796: Self = Self(0x00000002);
+    pub const RSA_X_509: Self = Self(0x00000003);
+    pub const RSA_X9_31_KEY_PAIR_GEN: Self = Self(0x0000000A);
+    pub const RSA_X9_31: Self = Self(0x0000000B);
     pub const SHA256_RSA_PKCS: Self = Self(0x00000040);
     pub const SHA384_RSA_PKCS: Self = Self(0x00000041);
     pub const SHA512_RSA_PKCS: Self = Self(0x00000042);
     pub const ECDSA: Self = Self(0x00001041);
+    pub const ECDSA_SHA1: Self = Self(0x00001042);
+    pub const ECDSA_SHA224: Self = Self(0x00001043);
     pub const ECDSA_SHA256: Self = Self(0x00001044);
     pub const ECDSA_SHA384: Self = Self(0x00001045);
     pub const ECDSA_SHA512: Self = Self(0x00001046);
+    pub const ECDSA_SHA3_224: Self = Self(0x00001047);
+    pub const ECDSA_SHA3_256: Self = Self(0x00001048);
+    pub const ECDSA_SHA3_384: Self = Self(0x00001049);
+    pub const ECDSA_SHA3_512: Self = Self(0x0000104A);
     pub const EC_KEY_PAIR_GEN: Self = Self(0x00001040);
+    pub const EC_KEY_PAIR_GEN_W_EXTRA_BITS: Self = Self(0x0000140B);
+    pub const EC_EDWARDS_KEY_PAIR_GEN: Self = Self(0x00001055);
+    pub const EC_MONTGOMERY_KEY_PAIR_GEN: Self = Self(0x00001056);
+    pub const EDDSA: Self = Self(0x00001057);
+    pub const XEDDSA: Self = Self(0x00004029);
+    pub const HKDF_DERIVE: Self = Self(0x0000402A);
+    pub const HKDF_DATA: Self = Self(0x0000402B);
+    pub const HKDF_KEY_GEN: Self = Self(0x0000402C);
+    pub const IKE2_PRF_PLUS_DERIVE: Self = Self(0x0000402E);
+    pub const IKE_PRF_DERIVE: Self = Self(0x0000402F);
+    pub const IKE1_PRF_DERIVE: Self = Self(0x00004030);
+    pub const IKE1_EXTENDED_DERIVE: Self = Self(0x00004031);
+    pub const HSS_KEY_PAIR_GEN: Self = Self(0x00004032);
+    pub const HSS: Self = Self(0x00004033);
+    pub const XMSS_KEY_PAIR_GEN: Self = Self(0x00004034);
+    pub const XMSSMT_KEY_PAIR_GEN: Self = Self(0x00004035);
+    pub const XMSS: Self = Self(0x00004036);
+    pub const XMSSMT: Self = Self(0x00004037);
     pub const SHA256: Self = Self(0x00000250);
     pub const SHA384: Self = Self(0x00000260);
     pub const SHA512: Self = Self(0x00000270);
@@ -23,22 +53,183 @@ impl CkMechanismType {
     // Phase 1 — parameterized mechanisms (P0)
     pub const RSA_PKCS_PSS: Self = Self(0x0000000D);
     pub const RSA_PKCS_OAEP: Self = Self(0x00000009);
+    pub const DH_PKCS_KEY_PAIR_GEN: Self = Self(0x00000020);
+    pub const DH_PKCS_DERIVE: Self = Self(0x00000021);
+    pub const X9_42_DH_KEY_PAIR_GEN: Self = Self(0x00000030);
+    pub const X9_42_DH_DERIVE: Self = Self(0x00000031);
+    pub const X9_42_DH_HYBRID_DERIVE: Self = Self(0x00000032);
+    pub const X9_42_MQV_DERIVE: Self = Self(0x00000033);
 
     // Planned extensions (P1)
+    pub const AES_XTS: Self = Self(0x00001071);
+    pub const AES_XTS_KEY_GEN: Self = Self(0x00001072);
     pub const AES_KEY_GEN: Self = Self(0x00001080);
     pub const AES_ECB: Self = Self(0x00001081);
+    pub const AES_MAC: Self = Self(0x00001083);
+    pub const AES_MAC_GENERAL: Self = Self(0x00001084);
+    pub const AES_CTR: Self = Self(0x00001086);
     pub const AES_GCM: Self = Self(0x00001087);
+    pub const AES_CCM: Self = Self(0x00001088);
+    pub const AES_CTS: Self = Self(0x00001089);
+    pub const AES_CMAC: Self = Self(0x0000108A);
+    pub const AES_CMAC_GENERAL: Self = Self(0x0000108B);
+    pub const AES_XCBC_MAC: Self = Self(0x0000108C);
+    pub const AES_XCBC_MAC_96: Self = Self(0x0000108D);
+    pub const AES_GMAC: Self = Self(0x0000108E);
+    pub const AES_ECB_ENCRYPT_DATA: Self = Self(0x00001104);
+    pub const AES_CBC_ENCRYPT_DATA: Self = Self(0x00001105);
+    pub const DES_ECB_ENCRYPT_DATA: Self = Self(0x00001100);
+    pub const DES_CBC_ENCRYPT_DATA: Self = Self(0x00001101);
+    pub const DES3_ECB_ENCRYPT_DATA: Self = Self(0x00001102);
+    pub const DES3_CBC_ENCRYPT_DATA: Self = Self(0x00001103);
+    pub const MD2: Self = Self(0x00000200);
+    pub const MD5: Self = Self(0x00000210);
+    pub const SHAKE_128_KEY_DERIVATION: Self = Self(0x0000039B);
+    pub const SHAKE_256_KEY_DERIVATION: Self = Self(0x0000039C);
+    pub const CHACHA20_KEY_GEN: Self = Self(0x00001225);
+    pub const CHACHA20: Self = Self(0x00001226);
+    pub const POLY1305_KEY_GEN: Self = Self(0x00001227);
+    pub const POLY1305: Self = Self(0x00001228);
     pub const ECDH1_DERIVE: Self = Self(0x00001050);
+    pub const ECDH1_COFACTOR_DERIVE: Self = Self(0x00001051);
+    pub const ECMQV_DERIVE: Self = Self(0x00001052);
+    pub const ECDH_AES_KEY_WRAP: Self = Self(0x00001053);
+    pub const RSA_AES_KEY_WRAP: Self = Self(0x00001054);
+    pub const ECDH_X_AES_KEY_WRAP: Self = Self(0x00004038);
+    pub const ECDH_COF_AES_KEY_WRAP: Self = Self(0x00004039);
+    pub const SECURID_KEY_GEN: Self = Self(0x00000280);
+    pub const SECURID: Self = Self(0x00000282);
+    pub const HOTP_KEY_GEN: Self = Self(0x00000290);
+    pub const HOTP: Self = Self(0x00000291);
+    pub const PBE_SHA1_DES3_EDE_CBC: Self = Self(0x000003A8);
+    pub const PBE_SHA1_DES2_EDE_CBC: Self = Self(0x000003A9);
+    pub const PKCS5_PBKD2: Self = Self(0x000003B0);
+    pub const PBA_SHA1_WITH_SHA1_HMAC: Self = Self(0x000003C0);
+    pub const CMS_SIG: Self = Self(0x00000500);
+    pub const BLOWFISH_KEY_GEN: Self = Self(0x00001090);
+    pub const BLOWFISH_CBC: Self = Self(0x00001091);
+    pub const TWOFISH_KEY_GEN: Self = Self(0x00001092);
+    pub const TWOFISH_CBC: Self = Self(0x00001093);
+    pub const BLOWFISH_CBC_PAD: Self = Self(0x00001094);
+    pub const TWOFISH_CBC_PAD: Self = Self(0x00001095);
+    pub const GENERIC_SECRET_KEY_GEN: Self = Self(0x00000350);
+    pub const CONCATENATE_BASE_AND_KEY: Self = Self(0x00000360);
+    pub const CONCATENATE_BASE_AND_DATA: Self = Self(0x00000362);
+    pub const CONCATENATE_DATA_AND_BASE: Self = Self(0x00000363);
+    pub const XOR_BASE_AND_DATA: Self = Self(0x00000364);
+    pub const EXTRACT_KEY_FROM_KEY: Self = Self(0x00000365);
+    pub const PUB_KEY_FROM_PRIV_KEY: Self = Self(0x0000403A);
+    pub const DES_KEY_GEN: Self = Self(0x00000120);
+    pub const DES_ECB: Self = Self(0x00000121);
+    pub const DES_MAC: Self = Self(0x00000123);
+    pub const DES_CBC_PAD: Self = Self(0x00000125);
+    pub const DES2_KEY_GEN: Self = Self(0x00000130);
+    pub const DES3_KEY_GEN: Self = Self(0x00000131);
+    pub const DES3_ECB: Self = Self(0x00000132);
+    pub const DES3_MAC: Self = Self(0x00000134);
+    pub const DES3_MAC_GENERAL: Self = Self(0x00000135);
+    pub const DES3_CMAC_GENERAL: Self = Self(0x00000137);
+    pub const DES3_CMAC: Self = Self(0x00000138);
+    pub const KIP_DERIVE: Self = Self(0x00000510);
+    pub const KIP_WRAP: Self = Self(0x00000511);
+    pub const KIP_MAC: Self = Self(0x00000512);
+    pub const CAMELLIA_KEY_GEN: Self = Self(0x00000550);
+    pub const CAMELLIA_ECB: Self = Self(0x00000551);
+    pub const CAMELLIA_CBC: Self = Self(0x00000552);
+    pub const CAMELLIA_MAC: Self = Self(0x00000553);
+    pub const CAMELLIA_MAC_GENERAL: Self = Self(0x00000554);
+    pub const CAMELLIA_CBC_PAD: Self = Self(0x00000555);
+    pub const CAMELLIA_ECB_ENCRYPT_DATA: Self = Self(0x00000556);
+    pub const CAMELLIA_CBC_ENCRYPT_DATA: Self = Self(0x00000557);
+    pub const ARIA_KEY_GEN: Self = Self(0x00000560);
+    pub const ARIA_ECB: Self = Self(0x00000561);
+    pub const ARIA_CBC: Self = Self(0x00000562);
+    pub const ARIA_MAC: Self = Self(0x00000563);
+    pub const ARIA_MAC_GENERAL: Self = Self(0x00000564);
+    pub const ARIA_CBC_PAD: Self = Self(0x00000565);
+    pub const ARIA_ECB_ENCRYPT_DATA: Self = Self(0x00000566);
+    pub const ARIA_CBC_ENCRYPT_DATA: Self = Self(0x00000567);
+    pub const SEED_KEY_GEN: Self = Self(0x00000650);
+    pub const SEED_ECB: Self = Self(0x00000651);
+    pub const SEED_CBC: Self = Self(0x00000652);
+    pub const SEED_MAC: Self = Self(0x00000653);
+    pub const SEED_MAC_GENERAL: Self = Self(0x00000654);
+    pub const SEED_CBC_PAD: Self = Self(0x00000655);
+    pub const SEED_ECB_ENCRYPT_DATA: Self = Self(0x00000656);
+    pub const SEED_CBC_ENCRYPT_DATA: Self = Self(0x00000657);
+    pub const GOSTR3410_KEY_PAIR_GEN: Self = Self(0x00001200);
+    pub const GOSTR3410: Self = Self(0x00001201);
+    pub const GOSTR3410_WITH_GOSTR3411: Self = Self(0x00001202);
+    pub const GOSTR3410_KEY_WRAP: Self = Self(0x00001203);
+    pub const GOSTR3410_DERIVE: Self = Self(0x00001204);
+    pub const GOSTR3411: Self = Self(0x00001210);
+    pub const GOSTR3411_HMAC: Self = Self(0x00001211);
+    pub const GOST28147_KEY_GEN: Self = Self(0x00001220);
+    pub const GOST28147_ECB: Self = Self(0x00001221);
+    pub const GOST28147: Self = Self(0x00001222);
+    pub const GOST28147_MAC: Self = Self(0x00001223);
+    pub const GOST28147_KEY_WRAP: Self = Self(0x00001224);
 
     // IV-based symmetric mechanisms
     pub const AES_CBC: Self = Self(0x00001082);
     pub const AES_CBC_PAD: Self = Self(0x00001085);
+    pub const AES_OFB: Self = Self(0x00002104);
+    pub const AES_CFB64: Self = Self(0x00002105);
+    pub const AES_CFB8: Self = Self(0x00002106);
+    pub const AES_CFB128: Self = Self(0x00002107);
+    pub const AES_CFB1: Self = Self(0x00002108);
+    pub const DES_OFB64: Self = Self(0x00000150);
+    pub const DES_OFB8: Self = Self(0x00000151);
+    pub const DES_CFB64: Self = Self(0x00000152);
+    pub const DES_CFB8: Self = Self(0x00000153);
+    pub const DH_PKCS_PARAMETER_GEN: Self = Self(0x00002001);
+    pub const X9_42_DH_PARAMETER_GEN: Self = Self(0x00002002);
     pub const AES_KEY_WRAP: Self = Self(0x00002109);
     pub const AES_KEY_WRAP_PAD: Self = Self(0x0000210A);
     pub const AES_KEY_WRAP_KWP: Self = Self(0x0000210B);
     pub const AES_KEY_WRAP_PKCS7: Self = Self(0x0000210C);
+    pub const RSA_PKCS_TPM_1_1: Self = Self(0x00004001);
+    pub const RSA_PKCS_OAEP_TPM_1_1: Self = Self(0x00004002);
+    pub const NULL: Self = Self(0x0000400B);
+    pub const SALSA20: Self = Self(0x00004020);
+    pub const CHACHA20_POLY1305: Self = Self(0x00004021);
+    pub const SALSA20_POLY1305: Self = Self(0x00004022);
+    pub const X3DH_INITIALIZE: Self = Self(0x00004023);
+    pub const X3DH_RESPOND: Self = Self(0x00004024);
+    pub const X2RATCHET_INITIALIZE: Self = Self(0x00004025);
+    pub const X2RATCHET_RESPOND: Self = Self(0x00004026);
+    pub const X2RATCHET_ENCRYPT: Self = Self(0x00004027);
+    pub const X2RATCHET_DECRYPT: Self = Self(0x00004028);
+    pub const SALSA20_KEY_GEN: Self = Self(0x0000402D);
     pub const DES3_CBC: Self = Self(0x00000133);
     pub const DES3_CBC_PAD: Self = Self(0x00000136);
+
+    // TLS / SSL key derive (output-parameter mechanisms — used for the
+    // `mechanism_out` round-trip on `C_DeriveKey`).
+    pub const TLS12_EXTENDED_MASTER_KEY_DERIVE: Self = Self(0x00000056);
+    pub const TLS12_EXTENDED_MASTER_KEY_DERIVE_DH: Self = Self(0x00000057);
+    pub const SSL3_PRE_MASTER_KEY_GEN: Self = Self(0x00000370);
+    pub const SSL3_MASTER_KEY_DERIVE: Self = Self(0x00000371);
+    pub const SSL3_KEY_AND_MAC_DERIVE: Self = Self(0x00000372);
+    pub const SSL3_MASTER_KEY_DERIVE_DH: Self = Self(0x00000373);
+    pub const TLS_PRE_MASTER_KEY_GEN: Self = Self(0x00000374);
+    pub const TLS_PRF: Self = Self(0x00000378);
+    pub const SSL3_MD5_MAC: Self = Self(0x00000380);
+    pub const SSL3_SHA1_MAC: Self = Self(0x00000381);
+    pub const WTLS_PRE_MASTER_KEY_GEN: Self = Self(0x000003D0);
+    pub const WTLS_MASTER_KEY_DERIVE: Self = Self(0x000003D1);
+    pub const WTLS_MASTER_KEY_DERIVE_DH_ECC: Self = Self(0x000003D2);
+    pub const WTLS_PRF: Self = Self(0x000003D3);
+    pub const WTLS_SERVER_KEY_AND_MAC_DERIVE: Self = Self(0x000003D4);
+    pub const WTLS_CLIENT_KEY_AND_MAC_DERIVE: Self = Self(0x000003D5);
+    pub const TLS12_MAC: Self = Self(0x000003D8);
+    pub const TLS12_KDF: Self = Self(0x000003D9);
+    pub const TLS12_MASTER_KEY_DERIVE: Self = Self(0x000003E0);
+    pub const TLS12_KEY_AND_MAC_DERIVE: Self = Self(0x000003E1);
+    pub const TLS12_MASTER_KEY_DERIVE_DH: Self = Self(0x000003E2);
+    pub const TLS12_KEY_SAFE_DERIVE: Self = Self(0x000003E3);
+    pub const TLS_MAC: Self = Self(0x000003E4);
+    pub const TLS_KDF: Self = Self(0x000003E5);
 
     pub const fn from_vendor(offset: u32) -> Self {
         Self(Self::VENDOR_DEFINED.0 | offset as u64)
@@ -61,6 +252,14 @@ pub struct CkMechanismInfo {
 pub struct CkMechanismFlags(pub u64);
 
 impl CkMechanismFlags {
+    pub const HW: u64 = 0x00000001;
+    pub const MESSAGE_ENCRYPT: u64 = 0x00000002;
+    pub const MESSAGE_DECRYPT: u64 = 0x00000004;
+    pub const MESSAGE_SIGN: u64 = 0x00000008;
+    pub const MESSAGE_VERIFY: u64 = 0x00000010;
+    pub const MULTI_MESSAGE: u64 = 0x00000020;
+    pub const MULTI_MESSGE: u64 = Self::MULTI_MESSAGE;
+    pub const FIND_OBJECTS: u64 = 0x00000040;
     pub const ENCRYPT: u64 = 0x00000100;
     pub const DECRYPT: u64 = 0x00000200;
     pub const DIGEST: u64 = 0x00000400;
@@ -68,10 +267,22 @@ impl CkMechanismFlags {
     pub const SIGN_RECOVER: u64 = 0x00001000;
     pub const VERIFY: u64 = 0x00002000;
     pub const VERIFY_RECOVER: u64 = 0x00004000;
+    pub const GENERATE: u64 = 0x00008000;
     pub const GENERATE_KEY_PAIR: u64 = 0x00010000;
     pub const WRAP: u64 = 0x00020000;
     pub const UNWRAP: u64 = 0x00040000;
     pub const DERIVE: u64 = 0x00080000;
+    pub const EC_F_P: u64 = 0x00100000;
+    pub const EC_F_2M: u64 = 0x00200000;
+    pub const EC_ECPARAMETERS: u64 = 0x00400000;
+    pub const EC_OID: u64 = 0x00800000;
+    pub const EC_NAMEDCURVE: u64 = Self::EC_OID;
+    pub const EC_UNCOMPRESS: u64 = 0x01000000;
+    pub const EC_COMPRESS: u64 = 0x02000000;
+    pub const EC_CURVENAME: u64 = 0x04000000;
+    pub const ENCAPSULATE: u64 = 0x10000000;
+    pub const DECAPSULATE: u64 = 0x20000000;
+    pub const EXTENSION: u64 = 0x80000000;
 }
 
 // --- Mechanism parameter structs (ADR-0001 §2: explicitly modeled) ---
@@ -431,7 +642,7 @@ pub struct PbeParams {
     pub iteration: u64,
 }
 
-/// CK_PKCS5_PBKD2_PARAMS — PKCS#5 PBKDF2.
+/// CK_PKCS5_PBKD2_PARAMS / CK_PKCS5_PBKD2_PARAMS2 — PKCS#5 PBKDF2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pkcs5Pbkd2Params {
     pub salt_source: u64,
@@ -505,6 +716,12 @@ pub struct Ssl3KeyMatParams {
     pub is_export: bool,
     pub random_info: SslRandomData,
     pub prf_hash_mechanism: u64,
+    pub client_mac_secret_handle: u64,
+    pub server_mac_secret_handle: u64,
+    pub client_key_handle: u64,
+    pub server_key_handle: u64,
+    pub client_iv: Vec<u8>,
+    pub server_iv: Vec<u8>,
 }
 
 /// CK_WTLS_RANDOM_DATA
@@ -541,6 +758,9 @@ pub struct WtlsKeyMatParams {
     pub sequence_number: u64,
     pub is_export: bool,
     pub random_info: WtlsRandomData,
+    pub mac_secret_handle: u64,
+    pub key_handle: u64,
+    pub iv: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +824,7 @@ pub struct PrfDataParam {
 pub struct Sp800108KdfParams {
     pub prf_type: u64,
     pub data_params: Vec<PrfDataParam>,
+    pub additional_derived_keys: Vec<Sp800108DerivedKey>,
 }
 
 /// CK_SP800_108_FEEDBACK_KDF_PARAMS
@@ -612,6 +833,14 @@ pub struct Sp800108FeedbackKdfParams {
     pub prf_type: u64,
     pub data_params: Vec<PrfDataParam>,
     pub iv: Vec<u8>,
+    pub additional_derived_keys: Vec<Sp800108DerivedKey>,
+}
+
+/// CK_DERIVED_KEY entry nested inside SP800-108 KDF params.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sp800108DerivedKey {
+    pub template: Vec<CkAttribute>,
+    pub key_handle: u64,
 }
 
 /// CK_SP800_108_COUNTER_FORMAT
@@ -757,6 +986,12 @@ pub struct ObjectHandleParam {
     pub handle: u64,
 }
 
+/// CK_EXTRACT_PARAMS — bit position for CKM_EXTRACT_KEY_FROM_KEY.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractParams {
+    pub bit_position: u64,
+}
+
 /// CK_KEY_DERIVATION_STRING_DATA — data bytes for key derivation.
 /// Used by CONCATENATE_BASE_AND_DATA, CONCATENATE_DATA_AND_BASE, etc.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -768,6 +1003,22 @@ pub struct KeyDerivationStringData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignAdditionalContext {
     pub hedge_variant: u64,
+    pub context: Vec<u8>,
+}
+
+/// CK_KMAC_PARAMS — keyed MAC output length and optional customization string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KmacParams {
+    pub key_handle: u64,
+    pub mac_length: u64,
+    pub customization_string: Vec<u8>,
+}
+
+/// CK_MU_GEN_PARAMS — ML-DSA external-mu generation inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MuGenParams {
+    pub key_handle: u64,
+    pub tr: Vec<u8>,
     pub context: Vec<u8>,
 }
 
@@ -933,7 +1184,10 @@ pub enum CkMechanismParams {
     // Generic / vendor parameter shapes
     MacGeneral(MacGeneralParams),
     ObjectHandle(ObjectHandleParam),
+    Extract(ExtractParams),
     SignAdditionalContext(SignAdditionalContext),
+    Kmac(KmacParams),
+    MuGen(MuGenParams),
     KeyDerivationString(KeyDerivationStringData),
     Raw(RawMechanismParams),
     // Vendor-specific parameter shapes
@@ -961,10 +1215,312 @@ mod tests {
     #[test]
     fn standard_aes_constants_match_spec() {
         assert_eq!(CkMechanismType::AES_KEY_GEN.0, 0x0000_1080);
+        assert_eq!(CkMechanismType::AES_XTS.0, 0x0000_1071);
+        assert_eq!(CkMechanismType::AES_XTS_KEY_GEN.0, 0x0000_1072);
         assert_eq!(CkMechanismType::AES_ECB.0, 0x0000_1081);
+        assert_eq!(CkMechanismType::AES_CBC.0, 0x0000_1082);
+        assert_eq!(CkMechanismType::AES_MAC.0, 0x0000_1083);
+        assert_eq!(CkMechanismType::AES_MAC_GENERAL.0, 0x0000_1084);
+        assert_eq!(CkMechanismType::AES_CBC_PAD.0, 0x0000_1085);
+        assert_eq!(CkMechanismType::AES_CTR.0, 0x0000_1086);
+        assert_eq!(CkMechanismType::AES_GCM.0, 0x0000_1087);
+        assert_eq!(CkMechanismType::AES_CCM.0, 0x0000_1088);
+        assert_eq!(CkMechanismType::AES_CTS.0, 0x0000_1089);
+        assert_eq!(CkMechanismType::AES_CMAC.0, 0x0000_108A);
+        assert_eq!(CkMechanismType::AES_CMAC_GENERAL.0, 0x0000_108B);
+        assert_eq!(CkMechanismType::AES_XCBC_MAC.0, 0x0000_108C);
+        assert_eq!(CkMechanismType::AES_XCBC_MAC_96.0, 0x0000_108D);
+        assert_eq!(CkMechanismType::AES_GMAC.0, 0x0000_108E);
+        assert_eq!(CkMechanismType::AES_ECB_ENCRYPT_DATA.0, 0x0000_1104);
+        assert_eq!(CkMechanismType::AES_CBC_ENCRYPT_DATA.0, 0x0000_1105);
+        assert_eq!(CkMechanismType::AES_OFB.0, 0x0000_2104);
+        assert_eq!(CkMechanismType::AES_CFB64.0, 0x0000_2105);
+        assert_eq!(CkMechanismType::AES_CFB8.0, 0x0000_2106);
+        assert_eq!(CkMechanismType::AES_CFB128.0, 0x0000_2107);
+        assert_eq!(CkMechanismType::AES_CFB1.0, 0x0000_2108);
         assert_eq!(CkMechanismType::AES_KEY_WRAP.0, 0x0000_2109);
         assert_eq!(CkMechanismType::AES_KEY_WRAP_PAD.0, 0x0000_210A);
         assert_eq!(CkMechanismType::AES_KEY_WRAP_KWP.0, 0x0000_210B);
         assert_eq!(CkMechanismType::AES_KEY_WRAP_PKCS7.0, 0x0000_210C);
+    }
+
+    #[test]
+    fn standard_salsa_chacha_poly1305_constants_match_spec() {
+        assert_eq!(CkMechanismType::CHACHA20_KEY_GEN.0, 0x0000_1225);
+        assert_eq!(CkMechanismType::CHACHA20.0, 0x0000_1226);
+        assert_eq!(CkMechanismType::POLY1305_KEY_GEN.0, 0x0000_1227);
+        assert_eq!(CkMechanismType::POLY1305.0, 0x0000_1228);
+        assert_eq!(CkMechanismType::SALSA20.0, 0x0000_4020);
+        assert_eq!(CkMechanismType::CHACHA20_POLY1305.0, 0x0000_4021);
+        assert_eq!(CkMechanismType::SALSA20_POLY1305.0, 0x0000_4022);
+        assert_eq!(CkMechanismType::SALSA20_KEY_GEN.0, 0x0000_402D);
+    }
+
+    #[test]
+    fn standard_aria_camellia_seed_constants_match_spec() {
+        assert_eq!(CkMechanismType::CAMELLIA_KEY_GEN.0, 0x0000_0550);
+        assert_eq!(CkMechanismType::CAMELLIA_ECB.0, 0x0000_0551);
+        assert_eq!(CkMechanismType::CAMELLIA_CBC.0, 0x0000_0552);
+        assert_eq!(CkMechanismType::CAMELLIA_MAC.0, 0x0000_0553);
+        assert_eq!(CkMechanismType::CAMELLIA_MAC_GENERAL.0, 0x0000_0554);
+        assert_eq!(CkMechanismType::CAMELLIA_CBC_PAD.0, 0x0000_0555);
+        assert_eq!(CkMechanismType::CAMELLIA_ECB_ENCRYPT_DATA.0, 0x0000_0556);
+        assert_eq!(CkMechanismType::CAMELLIA_CBC_ENCRYPT_DATA.0, 0x0000_0557);
+        assert_eq!(CkMechanismType::ARIA_KEY_GEN.0, 0x0000_0560);
+        assert_eq!(CkMechanismType::ARIA_ECB.0, 0x0000_0561);
+        assert_eq!(CkMechanismType::ARIA_CBC.0, 0x0000_0562);
+        assert_eq!(CkMechanismType::ARIA_MAC.0, 0x0000_0563);
+        assert_eq!(CkMechanismType::ARIA_MAC_GENERAL.0, 0x0000_0564);
+        assert_eq!(CkMechanismType::ARIA_CBC_PAD.0, 0x0000_0565);
+        assert_eq!(CkMechanismType::ARIA_ECB_ENCRYPT_DATA.0, 0x0000_0566);
+        assert_eq!(CkMechanismType::ARIA_CBC_ENCRYPT_DATA.0, 0x0000_0567);
+        assert_eq!(CkMechanismType::SEED_KEY_GEN.0, 0x0000_0650);
+        assert_eq!(CkMechanismType::SEED_ECB.0, 0x0000_0651);
+        assert_eq!(CkMechanismType::SEED_CBC.0, 0x0000_0652);
+        assert_eq!(CkMechanismType::SEED_MAC.0, 0x0000_0653);
+        assert_eq!(CkMechanismType::SEED_MAC_GENERAL.0, 0x0000_0654);
+        assert_eq!(CkMechanismType::SEED_CBC_PAD.0, 0x0000_0655);
+        assert_eq!(CkMechanismType::SEED_ECB_ENCRYPT_DATA.0, 0x0000_0656);
+        assert_eq!(CkMechanismType::SEED_CBC_ENCRYPT_DATA.0, 0x0000_0657);
+    }
+
+    #[test]
+    fn standard_des_family_constants_match_spec() {
+        assert_eq!(CkMechanismType::DES_KEY_GEN.0, 0x0000_0120);
+        assert_eq!(CkMechanismType::DES_ECB.0, 0x0000_0121);
+        assert_eq!(CkMechanismType::DES_MAC.0, 0x0000_0123);
+        assert_eq!(CkMechanismType::DES_CBC_PAD.0, 0x0000_0125);
+        assert_eq!(CkMechanismType::DES2_KEY_GEN.0, 0x0000_0130);
+        assert_eq!(CkMechanismType::DES3_KEY_GEN.0, 0x0000_0131);
+        assert_eq!(CkMechanismType::DES3_ECB.0, 0x0000_0132);
+        assert_eq!(CkMechanismType::DES3_CBC.0, 0x0000_0133);
+        assert_eq!(CkMechanismType::DES3_MAC.0, 0x0000_0134);
+        assert_eq!(CkMechanismType::DES3_MAC_GENERAL.0, 0x0000_0135);
+        assert_eq!(CkMechanismType::DES3_CBC_PAD.0, 0x0000_0136);
+        assert_eq!(CkMechanismType::DES3_CMAC_GENERAL.0, 0x0000_0137);
+        assert_eq!(CkMechanismType::DES3_CMAC.0, 0x0000_0138);
+        assert_eq!(CkMechanismType::DES_OFB64.0, 0x0000_0150);
+        assert_eq!(CkMechanismType::DES_OFB8.0, 0x0000_0151);
+        assert_eq!(CkMechanismType::DES_CFB64.0, 0x0000_0152);
+        assert_eq!(CkMechanismType::DES_CFB8.0, 0x0000_0153);
+        assert_eq!(CkMechanismType::DES_ECB_ENCRYPT_DATA.0, 0x0000_1100);
+        assert_eq!(CkMechanismType::DES_CBC_ENCRYPT_DATA.0, 0x0000_1101);
+        assert_eq!(CkMechanismType::DES3_ECB_ENCRYPT_DATA.0, 0x0000_1102);
+        assert_eq!(CkMechanismType::DES3_CBC_ENCRYPT_DATA.0, 0x0000_1103);
+    }
+
+    #[test]
+    fn standard_ec_family_constants_match_spec() {
+        assert_eq!(CkMechanismType::EC_KEY_PAIR_GEN.0, 0x0000_1040);
+        assert_eq!(CkMechanismType::ECDSA.0, 0x0000_1041);
+        assert_eq!(CkMechanismType::ECDSA_SHA1.0, 0x0000_1042);
+        assert_eq!(CkMechanismType::ECDSA_SHA224.0, 0x0000_1043);
+        assert_eq!(CkMechanismType::ECDSA_SHA256.0, 0x0000_1044);
+        assert_eq!(CkMechanismType::ECDSA_SHA384.0, 0x0000_1045);
+        assert_eq!(CkMechanismType::ECDSA_SHA512.0, 0x0000_1046);
+        assert_eq!(CkMechanismType::ECDSA_SHA3_224.0, 0x0000_1047);
+        assert_eq!(CkMechanismType::ECDSA_SHA3_256.0, 0x0000_1048);
+        assert_eq!(CkMechanismType::ECDSA_SHA3_384.0, 0x0000_1049);
+        assert_eq!(CkMechanismType::ECDSA_SHA3_512.0, 0x0000_104A);
+        assert_eq!(CkMechanismType::ECDH1_DERIVE.0, 0x0000_1050);
+        assert_eq!(CkMechanismType::ECDH1_COFACTOR_DERIVE.0, 0x0000_1051);
+        assert_eq!(CkMechanismType::ECMQV_DERIVE.0, 0x0000_1052);
+        assert_eq!(CkMechanismType::ECDH_AES_KEY_WRAP.0, 0x0000_1053);
+        assert_eq!(CkMechanismType::EC_EDWARDS_KEY_PAIR_GEN.0, 0x0000_1055);
+        assert_eq!(CkMechanismType::EC_MONTGOMERY_KEY_PAIR_GEN.0, 0x0000_1056);
+        assert_eq!(CkMechanismType::EDDSA.0, 0x0000_1057);
+        assert_eq!(CkMechanismType::EC_KEY_PAIR_GEN_W_EXTRA_BITS.0, 0x0000_140B);
+        assert_eq!(CkMechanismType::XEDDSA.0, 0x0000_4029);
+        assert_eq!(CkMechanismType::ECDH_X_AES_KEY_WRAP.0, 0x0000_4038);
+        assert_eq!(CkMechanismType::ECDH_COF_AES_KEY_WRAP.0, 0x0000_4039);
+    }
+
+    #[test]
+    fn standard_blowfish_twofish_constants_match_spec() {
+        assert_eq!(CkMechanismType::BLOWFISH_KEY_GEN.0, 0x0000_1090);
+        assert_eq!(CkMechanismType::BLOWFISH_CBC.0, 0x0000_1091);
+        assert_eq!(CkMechanismType::TWOFISH_KEY_GEN.0, 0x0000_1092);
+        assert_eq!(CkMechanismType::TWOFISH_CBC.0, 0x0000_1093);
+        assert_eq!(CkMechanismType::BLOWFISH_CBC_PAD.0, 0x0000_1094);
+        assert_eq!(CkMechanismType::TWOFISH_CBC_PAD.0, 0x0000_1095);
+    }
+
+    #[test]
+    fn standard_simple_key_derivation_constants_match_spec() {
+        assert_eq!(CkMechanismType::GENERIC_SECRET_KEY_GEN.0, 0x0000_0350);
+        assert_eq!(CkMechanismType::CONCATENATE_BASE_AND_KEY.0, 0x0000_0360);
+        assert_eq!(CkMechanismType::CONCATENATE_BASE_AND_DATA.0, 0x0000_0362);
+        assert_eq!(CkMechanismType::CONCATENATE_DATA_AND_BASE.0, 0x0000_0363);
+        assert_eq!(CkMechanismType::XOR_BASE_AND_DATA.0, 0x0000_0364);
+        assert_eq!(CkMechanismType::EXTRACT_KEY_FROM_KEY.0, 0x0000_0365);
+        assert_eq!(CkMechanismType::PUB_KEY_FROM_PRIV_KEY.0, 0x0000_403A);
+    }
+
+    #[test]
+    fn standard_hkdf_constants_match_spec() {
+        assert_eq!(CkMechanismType::HKDF_DERIVE.0, 0x0000_402A);
+        assert_eq!(CkMechanismType::HKDF_DATA.0, 0x0000_402B);
+        assert_eq!(CkMechanismType::HKDF_KEY_GEN.0, 0x0000_402C);
+    }
+
+    #[test]
+    fn standard_kip_constants_match_spec() {
+        assert_eq!(CkMechanismType::KIP_DERIVE.0, 0x0000_0510);
+        assert_eq!(CkMechanismType::KIP_WRAP.0, 0x0000_0511);
+        assert_eq!(CkMechanismType::KIP_MAC.0, 0x0000_0512);
+    }
+
+    #[test]
+    fn standard_ike_constants_match_spec() {
+        assert_eq!(CkMechanismType::IKE2_PRF_PLUS_DERIVE.0, 0x0000_402E);
+        assert_eq!(CkMechanismType::IKE_PRF_DERIVE.0, 0x0000_402F);
+        assert_eq!(CkMechanismType::IKE1_PRF_DERIVE.0, 0x0000_4030);
+        assert_eq!(CkMechanismType::IKE1_EXTENDED_DERIVE.0, 0x0000_4031);
+    }
+
+    #[test]
+    fn standard_shake_key_derivation_constants_match_spec() {
+        assert_eq!(CkMechanismType::SHAKE_128_KEY_DERIVATION.0, 0x0000_039B);
+        assert_eq!(CkMechanismType::SHAKE_256_KEY_DERIVATION.0, 0x0000_039C);
+    }
+
+    #[test]
+    fn standard_historical_md_digest_constants_match_spec() {
+        assert_eq!(CkMechanismType::MD2.0, 0x0000_0200);
+        assert_eq!(CkMechanismType::MD5.0, 0x0000_0210);
+    }
+
+    #[test]
+    fn standard_otp_constants_match_spec() {
+        assert_eq!(CkMechanismType::SECURID_KEY_GEN.0, 0x0000_0280);
+        assert_eq!(CkMechanismType::SECURID.0, 0x0000_0282);
+        assert_eq!(CkMechanismType::HOTP_KEY_GEN.0, 0x0000_0290);
+        assert_eq!(CkMechanismType::HOTP.0, 0x0000_0291);
+    }
+
+    #[test]
+    fn standard_stateful_hash_signature_constants_match_spec() {
+        assert_eq!(CkMechanismType::HSS_KEY_PAIR_GEN.0, 0x0000_4032);
+        assert_eq!(CkMechanismType::HSS.0, 0x0000_4033);
+        assert_eq!(CkMechanismType::XMSS_KEY_PAIR_GEN.0, 0x0000_4034);
+        assert_eq!(CkMechanismType::XMSSMT_KEY_PAIR_GEN.0, 0x0000_4035);
+        assert_eq!(CkMechanismType::XMSS.0, 0x0000_4036);
+        assert_eq!(CkMechanismType::XMSSMT.0, 0x0000_4037);
+    }
+
+    #[test]
+    fn standard_tls_ssl_wtls_constants_match_spec() {
+        assert_eq!(CkMechanismType::SSL3_PRE_MASTER_KEY_GEN.0, 0x0000_0370);
+        assert_eq!(CkMechanismType::SSL3_MASTER_KEY_DERIVE.0, 0x0000_0371);
+        assert_eq!(CkMechanismType::SSL3_KEY_AND_MAC_DERIVE.0, 0x0000_0372);
+        assert_eq!(CkMechanismType::SSL3_MASTER_KEY_DERIVE_DH.0, 0x0000_0373);
+        assert_eq!(CkMechanismType::TLS_PRE_MASTER_KEY_GEN.0, 0x0000_0374);
+        assert_eq!(CkMechanismType::SSL3_MD5_MAC.0, 0x0000_0380);
+        assert_eq!(CkMechanismType::SSL3_SHA1_MAC.0, 0x0000_0381);
+        assert_eq!(CkMechanismType::WTLS_PRE_MASTER_KEY_GEN.0, 0x0000_03D0);
+        assert_eq!(CkMechanismType::WTLS_MASTER_KEY_DERIVE.0, 0x0000_03D1);
+        assert_eq!(CkMechanismType::WTLS_MASTER_KEY_DERIVE_DH_ECC.0, 0x0000_03D2);
+        assert_eq!(CkMechanismType::WTLS_PRF.0, 0x0000_03D3);
+        assert_eq!(CkMechanismType::WTLS_SERVER_KEY_AND_MAC_DERIVE.0, 0x0000_03D4);
+        assert_eq!(CkMechanismType::WTLS_CLIENT_KEY_AND_MAC_DERIVE.0, 0x0000_03D5);
+        assert_eq!(CkMechanismType::TLS12_MAC.0, 0x0000_03D8);
+        assert_eq!(CkMechanismType::TLS12_KDF.0, 0x0000_03D9);
+        assert_eq!(CkMechanismType::TLS_PRF.0, 0x0000_0378);
+        assert_eq!(CkMechanismType::TLS12_MASTER_KEY_DERIVE.0, 0x0000_03E0);
+        assert_eq!(CkMechanismType::TLS12_KEY_AND_MAC_DERIVE.0, 0x0000_03E1);
+        assert_eq!(CkMechanismType::TLS12_MASTER_KEY_DERIVE_DH.0, 0x0000_03E2);
+        assert_eq!(CkMechanismType::TLS12_KEY_SAFE_DERIVE.0, 0x0000_03E3);
+        assert_eq!(CkMechanismType::TLS_MAC.0, 0x0000_03E4);
+        assert_eq!(CkMechanismType::TLS_KDF.0, 0x0000_03E5);
+        assert_eq!(CkMechanismType::TLS12_EXTENDED_MASTER_KEY_DERIVE.0, 0x0000_0056);
+        assert_eq!(CkMechanismType::TLS12_EXTENDED_MASTER_KEY_DERIVE_DH.0, 0x0000_0057);
+    }
+
+    #[test]
+    fn standard_diffie_hellman_constants_match_spec() {
+        assert_eq!(CkMechanismType::DH_PKCS_KEY_PAIR_GEN.0, 0x0000_0020);
+        assert_eq!(CkMechanismType::DH_PKCS_DERIVE.0, 0x0000_0021);
+        assert_eq!(CkMechanismType::X9_42_DH_KEY_PAIR_GEN.0, 0x0000_0030);
+        assert_eq!(CkMechanismType::X9_42_DH_DERIVE.0, 0x0000_0031);
+        assert_eq!(CkMechanismType::X9_42_DH_HYBRID_DERIVE.0, 0x0000_0032);
+        assert_eq!(CkMechanismType::X9_42_MQV_DERIVE.0, 0x0000_0033);
+        assert_eq!(CkMechanismType::DH_PKCS_PARAMETER_GEN.0, 0x0000_2001);
+        assert_eq!(CkMechanismType::X9_42_DH_PARAMETER_GEN.0, 0x0000_2002);
+    }
+
+    #[test]
+    fn standard_remaining_table_backed_constants_match_spec() {
+        assert_eq!(CkMechanismType::RSA_9796.0, 0x0000_0002);
+        assert_eq!(CkMechanismType::RSA_X_509.0, 0x0000_0003);
+        assert_eq!(CkMechanismType::RSA_X9_31_KEY_PAIR_GEN.0, 0x0000_000A);
+        assert_eq!(CkMechanismType::RSA_X9_31.0, 0x0000_000B);
+        assert_eq!(CkMechanismType::CMS_SIG.0, 0x0000_0500);
+        assert_eq!(CkMechanismType::PBE_SHA1_DES3_EDE_CBC.0, 0x0000_03A8);
+        assert_eq!(CkMechanismType::PBE_SHA1_DES2_EDE_CBC.0, 0x0000_03A9);
+        assert_eq!(CkMechanismType::PKCS5_PBKD2.0, 0x0000_03B0);
+        assert_eq!(CkMechanismType::PBA_SHA1_WITH_SHA1_HMAC.0, 0x0000_03C0);
+        assert_eq!(CkMechanismType::RSA_AES_KEY_WRAP.0, 0x0000_1054);
+        assert_eq!(CkMechanismType::GOSTR3410_KEY_PAIR_GEN.0, 0x0000_1200);
+        assert_eq!(CkMechanismType::GOSTR3410.0, 0x0000_1201);
+        assert_eq!(CkMechanismType::GOSTR3410_WITH_GOSTR3411.0, 0x0000_1202);
+        assert_eq!(CkMechanismType::GOSTR3410_KEY_WRAP.0, 0x0000_1203);
+        assert_eq!(CkMechanismType::GOSTR3410_DERIVE.0, 0x0000_1204);
+        assert_eq!(CkMechanismType::GOSTR3411.0, 0x0000_1210);
+        assert_eq!(CkMechanismType::GOSTR3411_HMAC.0, 0x0000_1211);
+        assert_eq!(CkMechanismType::GOST28147_KEY_GEN.0, 0x0000_1220);
+        assert_eq!(CkMechanismType::GOST28147_ECB.0, 0x0000_1221);
+        assert_eq!(CkMechanismType::GOST28147.0, 0x0000_1222);
+        assert_eq!(CkMechanismType::GOST28147_MAC.0, 0x0000_1223);
+        assert_eq!(CkMechanismType::GOST28147_KEY_WRAP.0, 0x0000_1224);
+        assert_eq!(CkMechanismType::RSA_PKCS_TPM_1_1.0, 0x0000_4001);
+        assert_eq!(CkMechanismType::RSA_PKCS_OAEP_TPM_1_1.0, 0x0000_4002);
+        assert_eq!(CkMechanismType::NULL.0, 0x0000_400B);
+        assert_eq!(CkMechanismType::X3DH_INITIALIZE.0, 0x0000_4023);
+        assert_eq!(CkMechanismType::X3DH_RESPOND.0, 0x0000_4024);
+        assert_eq!(CkMechanismType::X2RATCHET_INITIALIZE.0, 0x0000_4025);
+        assert_eq!(CkMechanismType::X2RATCHET_RESPOND.0, 0x0000_4026);
+        assert_eq!(CkMechanismType::X2RATCHET_ENCRYPT.0, 0x0000_4027);
+        assert_eq!(CkMechanismType::X2RATCHET_DECRYPT.0, 0x0000_4028);
+    }
+
+    #[test]
+    fn mechanism_info_flag_constants_match_pkcs11_3_2_header() {
+        let flags = [
+            (CkMechanismFlags::HW, 0x0000_0001),
+            (CkMechanismFlags::MESSAGE_ENCRYPT, 0x0000_0002),
+            (CkMechanismFlags::MESSAGE_DECRYPT, 0x0000_0004),
+            (CkMechanismFlags::MESSAGE_SIGN, 0x0000_0008),
+            (CkMechanismFlags::MESSAGE_VERIFY, 0x0000_0010),
+            (CkMechanismFlags::MULTI_MESSAGE, 0x0000_0020),
+            (CkMechanismFlags::MULTI_MESSGE, 0x0000_0020),
+            (CkMechanismFlags::FIND_OBJECTS, 0x0000_0040),
+            (CkMechanismFlags::ENCRYPT, 0x0000_0100),
+            (CkMechanismFlags::DECRYPT, 0x0000_0200),
+            (CkMechanismFlags::DIGEST, 0x0000_0400),
+            (CkMechanismFlags::SIGN, 0x0000_0800),
+            (CkMechanismFlags::SIGN_RECOVER, 0x0000_1000),
+            (CkMechanismFlags::VERIFY, 0x0000_2000),
+            (CkMechanismFlags::VERIFY_RECOVER, 0x0000_4000),
+            (CkMechanismFlags::GENERATE, 0x0000_8000),
+            (CkMechanismFlags::GENERATE_KEY_PAIR, 0x0001_0000),
+            (CkMechanismFlags::WRAP, 0x0002_0000),
+            (CkMechanismFlags::UNWRAP, 0x0004_0000),
+            (CkMechanismFlags::DERIVE, 0x0008_0000),
+            (CkMechanismFlags::EC_F_P, 0x0010_0000),
+            (CkMechanismFlags::EC_F_2M, 0x0020_0000),
+            (CkMechanismFlags::EC_ECPARAMETERS, 0x0040_0000),
+            (CkMechanismFlags::EC_OID, 0x0080_0000),
+            (CkMechanismFlags::EC_NAMEDCURVE, 0x0080_0000),
+            (CkMechanismFlags::EC_UNCOMPRESS, 0x0100_0000),
+            (CkMechanismFlags::EC_COMPRESS, 0x0200_0000),
+            (CkMechanismFlags::EC_CURVENAME, 0x0400_0000),
+            (CkMechanismFlags::ENCAPSULATE, 0x1000_0000),
+            (CkMechanismFlags::DECAPSULATE, 0x2000_0000),
+            (CkMechanismFlags::EXTENSION, 0x8000_0000),
+        ];
+
+        for (actual, expected) in flags {
+            assert_eq!(actual, expected);
+        }
     }
 }

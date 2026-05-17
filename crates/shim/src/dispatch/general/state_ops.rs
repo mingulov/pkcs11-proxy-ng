@@ -9,10 +9,10 @@ use super::*;
 pub unsafe extern "C" fn c_wait_for_slot_event(
     flags: CK_FLAGS,
     p_slot: CK_SLOT_ID_PTR,
-    _p_reserved: CK_VOID_PTR,
+    p_reserved: CK_VOID_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if p_slot.is_null() {
+        if p_slot.is_null() || !p_reserved.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         match with_client!(client => client.wait_for_slot_event(flags)) {

@@ -3,9 +3,9 @@
 //! These tests exercise `EncapsulateKey` and `DecapsulateKey` through the full
 //! client -> gRPC -> backend stack using `MockBackend`.
 //!
-//! `MockBackend` implements encapsulation for exact-output shim tests, but does
-//! not implement decapsulation. These tests verify both paths through the full
-//! client, proto, gRPC handler, and backend stack.
+//! `MockBackend` implements deterministic encapsulation and decapsulation so
+//! these tests can verify both paths through the full client, proto, gRPC
+//! handler, and backend stack without depending on provider KEM support.
 
 use std::sync::Arc;
 
@@ -81,23 +81,17 @@ async fn encapsulate_key_with_template_returns_synthetic_result() {
 // ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn decapsulate_key_returns_function_not_supported_through_full_stack() {
+async fn decapsulate_key_returns_synthetic_handle_through_full_stack() {
     let backend = Arc::new(mock(&[0], &[0x00000001]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
 
     let (session, key) = setup_session_with_key(&mut client).await;
 
-    let err = client
-        .decapsulate_key(session, &test_mechanism(), key, &[], &[0xAA, 0xBB])
-        .await
-        .unwrap_err();
+    let decapsulated_key =
+        client.decapsulate_key(session, &test_mechanism(), key, &[], &[0xAA, 0xBB]).await.unwrap();
 
-    assert_eq!(
-        err,
-        CkRv::FUNCTION_NOT_SUPPORTED,
-        "MockBackend default decapsulate_key should return CKR_FUNCTION_NOT_SUPPORTED"
-    );
+    assert_ne!(decapsulated_key, CkObjectHandle(0));
 }
 
 #[tokio::test]
@@ -109,9 +103,10 @@ async fn decapsulate_key_with_empty_ciphertext() {
     let (session, key) = setup_session_with_key(&mut client).await;
 
     // Empty ciphertext should still reach the backend.
-    let err = client.decapsulate_key(session, &test_mechanism(), key, &[], &[]).await.unwrap_err();
+    let decapsulated_key =
+        client.decapsulate_key(session, &test_mechanism(), key, &[], &[]).await.unwrap();
 
-    assert_eq!(err, CkRv::FUNCTION_NOT_SUPPORTED);
+    assert_ne!(decapsulated_key, CkObjectHandle(0));
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -162,7 +157,7 @@ async fn decapsulate_key_rejects_invalid_session() {
 // ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn encapsulate_key_forwards_unknown_key_handle_to_backend() {
+async fn encapsulate_key_returns_backend_error_for_unknown_key_handle() {
     let backend = Arc::new(mock(&[0], &[0x00000001]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
@@ -171,18 +166,17 @@ async fn encapsulate_key_forwards_unknown_key_handle_to_backend() {
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
     // Key handle 999_999 was never created. The proxy forwards CK_INVALID_HANDLE
-    // to the backend instead of locally inventing CKR_KEY_HANDLE_INVALID.
-    let (ciphertext, encapsulated_key) = client
+    // to the backend, and MockBackend now reports that as an invalid object.
+    let err = client
         .encapsulate_key(session, &test_mechanism(), CkObjectHandle(999_999), &[])
         .await
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(ciphertext, vec![0xCA, 0xFE, 0xBA, 0xBE, 0xDE, 0xAD, 0xBE, 0xEF]);
-    assert_ne!(encapsulated_key, CkObjectHandle(0));
+    assert_eq!(err, CkRv::OBJECT_HANDLE_INVALID);
 }
 
 #[tokio::test]
-async fn decapsulate_key_forwards_unknown_key_handle_to_unsupported_backend() {
+async fn decapsulate_key_returns_backend_error_for_unknown_key_handle() {
     let backend = Arc::new(mock(&[0], &[0x00000001]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
@@ -195,9 +189,5 @@ async fn decapsulate_key_forwards_unknown_key_handle_to_unsupported_backend() {
         .await
         .unwrap_err();
 
-    assert_eq!(
-        err,
-        CkRv::FUNCTION_NOT_SUPPORTED,
-        "unsupported MockBackend decides error priority after unknown key handle forwarding"
-    );
+    assert_eq!(err, CkRv::OBJECT_HANDLE_INVALID);
 }

@@ -7,11 +7,11 @@ use pkcs11_proxy_ng_types::{
     AesCbcEncryptDataParams, AesCtrParams, AriaCbcEncryptDataParams, CamelliaCbcEncryptDataParams,
     CamelliaCtrParams, CcmParams, CcmWrapParams, ChaCha20Params, CkMechanism, CkMechanismFlags,
     CkMechanismInfo, CkMechanismParams, CkMechanismType, CkRv, DesCbcEncryptDataParams,
-    Ecdh1DeriveParams, GcmParams, GcmWrapParams, IvParams, KeyDerivationStringData,
-    MacGeneralParams, ObjectHandleParam, RawMechanismParams, Rc2CbcParams, Rc2MacGeneralParams,
-    Rc5CbcParams, Rc5MacGeneralParams, Rc5Params, RsaPkcsOaepParams, RsaPkcsPssParams,
-    Salsa20ChaCha20Poly1305Params, Salsa20Params, SeedCbcEncryptDataParams, SignAdditionalContext,
-    TlsMacParams, XeddsaParams,
+    Ecdh1DeriveParams, ExtractParams, GcmParams, GcmWrapParams, IvParams, KeyDerivationStringData,
+    KmacParams, MacGeneralParams, MuGenParams, ObjectHandleParam, RawMechanismParams, Rc2CbcParams,
+    Rc2MacGeneralParams, Rc5CbcParams, Rc5MacGeneralParams, Rc5Params, RsaPkcsOaepParams,
+    RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, Salsa20Params, SeedCbcEncryptDataParams,
+    SignAdditionalContext, TlsMacParams, XeddsaParams,
 };
 
 impl From<&CkMechanism> for v1_proto::Mechanism {
@@ -330,6 +330,11 @@ impl From<&CkMechanism> for v1_proto::Mechanism {
                     handle: p.handle,
                 }))
             }
+            Some(CkMechanismParams::Extract(p)) => {
+                Some(v1_proto::mechanism::Params::ExtractParams(v1_proto::ExtractParams {
+                    bit_position: p.bit_position,
+                }))
+            }
             Some(CkMechanismParams::SignAdditionalContext(p)) => {
                 Some(v1_proto::mechanism::Params::SignAdditionalContext(
                     v1_proto::SignAdditionalContext {
@@ -337,6 +342,20 @@ impl From<&CkMechanism> for v1_proto::Mechanism {
                         context: p.context.clone(),
                     },
                 ))
+            }
+            Some(CkMechanismParams::Kmac(p)) => {
+                Some(v1_proto::mechanism::Params::KmacParams(v1_proto::KmacParams {
+                    key_handle: p.key_handle,
+                    mac_length: p.mac_length,
+                    customization_string: p.customization_string.clone(),
+                }))
+            }
+            Some(CkMechanismParams::MuGen(p)) => {
+                Some(v1_proto::mechanism::Params::MuGenParams(v1_proto::MuGenParams {
+                    key_handle: p.key_handle,
+                    tr: p.tr.clone(),
+                    context: p.context.clone(),
+                }))
             }
             Some(CkMechanismParams::KeyDerivationString(p)) => {
                 Some(v1_proto::mechanism::Params::KeyDerivationStringData(
@@ -681,9 +700,26 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
             Some(v1_proto::mechanism::Params::ObjectHandleParam(p)) => {
                 Some(CkMechanismParams::ObjectHandle(ObjectHandleParam { handle: p.handle }))
             }
+            Some(v1_proto::mechanism::Params::ExtractParams(p)) => {
+                Some(CkMechanismParams::Extract(ExtractParams { bit_position: p.bit_position }))
+            }
             Some(v1_proto::mechanism::Params::SignAdditionalContext(p)) => {
                 Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                     hedge_variant: p.hedge_variant,
+                    context: p.context.clone(),
+                }))
+            }
+            Some(v1_proto::mechanism::Params::KmacParams(p)) => {
+                Some(CkMechanismParams::Kmac(KmacParams {
+                    key_handle: p.key_handle,
+                    mac_length: p.mac_length,
+                    customization_string: p.customization_string.clone(),
+                }))
+            }
+            Some(v1_proto::mechanism::Params::MuGenParams(p)) => {
+                Some(CkMechanismParams::MuGen(MuGenParams {
+                    key_handle: p.key_handle,
+                    tr: p.tr.clone(),
                     context: p.context.clone(),
                 }))
             }

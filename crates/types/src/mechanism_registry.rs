@@ -218,6 +218,20 @@ impl MechanismRegistry {
     pub fn discovery_mode(&self) -> DiscoveryMode {
         self.discovery_mode
     }
+
+    /// Return every mechanism registered by the embedded/default registry plus
+    /// any operator override, sorted and deduplicated.
+    ///
+    /// This is intended for deterministic test backends and audit tooling that
+    /// need the complete proxy-understood mechanism surface, not for filtering
+    /// real provider discovery.
+    pub fn registered_mechanisms(&self) -> Vec<u64> {
+        let mut registered = self.parameterless.clone();
+        registered.extend(self.param_shapes.keys().copied());
+        let mut mechanisms: Vec<u64> = registered.into_iter().collect();
+        mechanisms.sort_unstable();
+        mechanisms
+    }
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
@@ -239,6 +253,25 @@ mod tests {
     const CKM_RSA_PKCS_OAEP: u64 = 0x0009;
     const CKM_AES_CBC_PAD: u64 = 0x1085;
     const CKM_DES3_CBC: u64 = 0x0133;
+    const CKM_SP800_108_COUNTER_KDF: u64 = 0x03AC;
+    const CKM_SP800_108_FEEDBACK_KDF: u64 = 0x03AD;
+    const CKM_SP800_108_DOUBLE_PIPELINE_KDF: u64 = 0x03AE;
+    const CKM_EXTRACT_KEY_FROM_KEY: u64 = 0x0365;
+    const CKM_WTLS_MASTER_KEY_DERIVE: u64 = 0x03D1;
+    const CKM_WTLS_MASTER_KEY_DERIVE_DH_ECC: u64 = 0x03D2;
+    const CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE: u64 = 0x03D4;
+    const CKM_WTLS_CLIENT_KEY_AND_MAC_DERIVE: u64 = 0x03D5;
+    const CKM_ECMQV_DERIVE: u64 = 0x1052;
+    const CKM_DES_ECB_ENCRYPT_DATA: u64 = 0x1100;
+    const CKM_DES3_ECB_ENCRYPT_DATA: u64 = 0x1102;
+    const CKM_BLAKE2B_512_KEY_DERIVE: u64 = 0x401E;
+    const CKM_BLAKE2B_512_KEY_GEN: u64 = 0x401F;
+    const CKM_SALSA20: u64 = 0x4020;
+    const CKM_X3DH_INITIALIZE: u64 = 0x4023;
+    const CKM_IKE2_PRF_PLUS_DERIVE: u64 = 0x402E;
+    const CKM_IKE_PRF_DERIVE: u64 = 0x402F;
+    const CKM_IKE1_PRF_DERIVE: u64 = 0x4030;
+    const CKM_IKE1_EXTENDED_DERIVE: u64 = 0x4031;
 
     #[test]
     fn load_embedded_default() {
@@ -274,8 +307,45 @@ mod tests {
         // AES_KEY_GEN is parameterless.
         assert!(reg.is_parameterless(CKM_AES_KEY_GEN));
 
+        // SP800-108 has two official parameter structs: feedback mode has
+        // an IV field, while counter and double-pipeline do not.
+        assert_eq!(reg.param_shape(CKM_SP800_108_COUNTER_KDF), Some("sp800_108_kdf"));
+        assert_eq!(reg.param_shape(CKM_SP800_108_FEEDBACK_KDF), Some("sp800_108_feedback_kdf"));
+        assert_eq!(reg.param_shape(CKM_SP800_108_DOUBLE_PIPELINE_KDF), Some("sp800_108_kdf"));
+
+        // CK_EXTRACT_PARAMS is its own bit-position parameter shape, not a MAC length.
+        assert_eq!(reg.param_shape(CKM_EXTRACT_KEY_FROM_KEY), Some("extract"));
+
+        // WTLS master-key derivation has a mutable pVersion byte.
+        assert_eq!(reg.param_shape(CKM_WTLS_MASTER_KEY_DERIVE), Some("wtls_master_key_derive"));
+        assert_eq!(
+            reg.param_shape(CKM_WTLS_MASTER_KEY_DERIVE_DH_ECC),
+            Some("wtls_master_key_derive")
+        );
+        assert_eq!(reg.param_shape(CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE), Some("wtls_key_mat"));
+        assert_eq!(reg.param_shape(CKM_WTLS_CLIENT_KEY_AND_MAC_DERIVE), Some("wtls_key_mat"));
+
         // Default discovery mode is transparent.
         assert_eq!(reg.discovery_mode(), DiscoveryMode::Transparent);
+    }
+
+    #[test]
+    fn embedded_default_registry_does_not_assign_project_local_placeholder_ids() {
+        let reg = MechanismRegistry::load_with_override_str(None).unwrap();
+
+        assert_eq!(reg.param_shape(CKM_ECMQV_DERIVE), Some("ecmqv_derive"));
+        assert_eq!(reg.param_shape(CKM_DES_ECB_ENCRYPT_DATA), Some("key_derivation_string"));
+        assert_eq!(reg.param_shape(CKM_DES3_ECB_ENCRYPT_DATA), Some("key_derivation_string"));
+        assert_eq!(reg.param_shape(CKM_SALSA20), Some("salsa20"));
+
+        assert_eq!(reg.param_shape(CKM_IKE_PRF_DERIVE), Some("ike_prf_derive"));
+        assert_eq!(reg.param_shape(CKM_IKE1_PRF_DERIVE), Some("ike1_prf_derive"));
+        assert_eq!(reg.param_shape(CKM_IKE1_EXTENDED_DERIVE), Some("ike1_extended_derive"));
+        assert_eq!(reg.param_shape(CKM_IKE2_PRF_PLUS_DERIVE), Some("ike2_prf_plus_derive"));
+
+        assert_eq!(reg.param_shape(CKM_BLAKE2B_512_KEY_DERIVE), None);
+        assert_eq!(reg.param_shape(CKM_BLAKE2B_512_KEY_GEN), None);
+        assert_eq!(reg.param_shape(CKM_X3DH_INITIALIZE), None);
     }
 
     #[test]
@@ -491,6 +561,41 @@ mod tests {
         // Discovery mode should remain transparent (CloudHSM override
         // does not set it).
         assert_eq!(reg.discovery_mode(), DiscoveryMode::Transparent);
+    }
+
+    #[test]
+    fn registered_mechanisms_returns_parameterless_and_parameterized_union() {
+        let reg = MechanismRegistry::load_with_override_str(Some(
+            r#"
+            parameterless = [0x80FF0001]
+
+            [[params]]
+            shape = "gcm"
+            mechanisms = [0x80001087]
+            "#,
+        ))
+        .unwrap();
+
+        let mechanisms = reg.registered_mechanisms();
+
+        assert!(mechanisms.contains(&CKM_RSA_PKCS), "parameterless mechanism included");
+        assert!(mechanisms.contains(&CKM_AES_GCM), "parameterized mechanism included");
+        assert!(mechanisms.contains(&0x80FF0001), "vendor parameterless mechanism included");
+        assert!(mechanisms.contains(&0x80001087), "vendor parameterized mechanism included");
+        assert!(mechanisms.windows(2).all(|pair| pair[0] < pair[1]), "mechanisms sorted unique");
+    }
+
+    #[test]
+    fn official_mechanisms_include_provider_gap_examples() {
+        let mechanisms = crate::pkcs11_3_2_official_mechanisms();
+
+        assert!(mechanisms.windows(2).all(|pair| pair[0].0 < pair[1].0), "sorted unique");
+        assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_001F))); // CKM_HASH_ML_DSA
+        assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_002E))); // CKM_SLH_DSA
+        assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_03D5))); // CKM_WTLS_CLIENT_KEY_AND_MAC_DERIVE
+        assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_108D))); // CKM_AES_XCBC_MAC_96
+        assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_4037))); // CKM_XMSSMT
+        assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_403A))); // CKM_PUB_KEY_FROM_PRIV_KEY
     }
 
     #[test]

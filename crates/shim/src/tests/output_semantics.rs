@@ -41,7 +41,12 @@ impl TestDaemon {
         let (endpoint, backend, context_manager, shutdown) = runtime.block_on(async {
             let backend = Arc::new(MockBackend::new(
                 vec![CkSlotId(0), CkSlotId(1)],
-                vec![CkMechanismType::SHA256, CkMechanismType::RSA_PKCS, CkMechanismType::AES_ECB],
+                vec![
+                    CkMechanismType::SHA256,
+                    CkMechanismType::RSA_PKCS,
+                    CkMechanismType::AES_ECB,
+                    CkMechanismType::AES_GCM,
+                ],
             ));
             backend.set_interface_capabilities(InterfaceCapabilities {
                 interfaces: vec![
@@ -709,6 +714,19 @@ fn cached_size_query_result_is_not_reused_after_digest_reinit() {
     assert_eq!(first_rv, CKR_OK as CK_RV);
     assert_eq!(first_len, 4);
 
+    let mut first_out = [0_u8; 4];
+    let mut first_out_len = first_out.len() as CK_ULONG;
+    let first_data_rv = unsafe {
+        dispatch::general::c_digest(
+            shim.session,
+            first.as_ptr() as CK_BYTE_PTR,
+            first.len() as CK_ULONG,
+            first_out.as_mut_ptr(),
+            &mut first_out_len,
+        )
+    };
+    assert_eq!(first_data_rv, CKR_OK as CK_RV);
+
     let reinit_rv = unsafe { dispatch::general::c_digest_init(shim.session, &mut mechanism) };
     assert_eq!(reinit_rv, CKR_OK as CK_RV);
 
@@ -727,6 +745,40 @@ fn cached_size_query_result_is_not_reused_after_digest_reinit() {
     assert_eq!(second_rv, CKR_OK as CK_RV);
     assert_eq!(out_len, out.len() as CK_ULONG);
     assert_eq!(out, expected_mock_digest(second));
+}
+
+#[test]
+fn digest_init_null_mechanism_cancels_active_digest_operation() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let mut mechanism = sha256_mechanism();
+
+    let init_rv = unsafe { dispatch::general::c_digest_init(shim.session, &mut mechanism) };
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_DigestInit");
+
+    let update_rv = unsafe {
+        dispatch::general::c_digest_update(
+            shim.session,
+            b"cancel-me".as_ptr() as CK_BYTE_PTR,
+            b"cancel-me".len() as CK_ULONG,
+        )
+    };
+    assert_eq!(update_rv, CKR_OK as CK_RV, "C_DigestUpdate");
+
+    let cancel_rv = unsafe { dispatch::general::c_digest_init(shim.session, std::ptr::null_mut()) };
+    assert_eq!(cancel_rv, CKR_OK as CK_RV, "C_DigestInit(NULL_PTR)");
+
+    let mut out = [0_u8; 4];
+    let mut out_len = out.len() as CK_ULONG;
+    let final_rv =
+        unsafe { dispatch::general::c_digest_final(shim.session, out.as_mut_ptr(), &mut out_len) };
+    assert_eq!(
+        final_rv, CKR_OPERATION_NOT_INITIALIZED as CK_RV,
+        "C_DigestFinal after NULL init cancellation"
+    );
+
+    let reinit_rv = unsafe { dispatch::general::c_digest_init(shim.session, &mut mechanism) };
+    assert_eq!(reinit_rv, CKR_OK as CK_RV, "C_DigestInit after cancellation");
 }
 
 #[test]
@@ -838,6 +890,19 @@ fn one_shot_digest_output_is_not_replayed_through_digest_final() {
     assert_eq!(digest_rv, CKR_OK as CK_RV);
     assert_eq!(len, 4);
 
+    let mut digest_out = [0_u8; 4];
+    let mut digest_out_len = digest_out.len() as CK_ULONG;
+    let digest_data_rv = unsafe {
+        dispatch::general::c_digest(
+            shim.session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            digest_out.as_mut_ptr(),
+            &mut digest_out_len,
+        )
+    };
+    assert_eq!(digest_data_rv, CKR_OK as CK_RV);
+
     let mut out = [0_u8; 4];
     let mut out_len = out.len() as CK_ULONG;
     let final_rv =
@@ -927,6 +992,19 @@ fn restored_operation_clears_stale_output_byte_caches() {
     };
     assert_eq!(stale_rv, CKR_OK as CK_RV);
     assert_eq!(stale_len, 4);
+
+    let mut stale_out = [0_u8; 4];
+    let mut stale_out_len = stale_out.len() as CK_ULONG;
+    let stale_data_rv = unsafe {
+        dispatch::general::c_digest(
+            shim.session,
+            stale_data.as_ptr() as CK_BYTE_PTR,
+            stale_data.len() as CK_ULONG,
+            stale_out.as_mut_ptr(),
+            &mut stale_out_len,
+        )
+    };
+    assert_eq!(stale_data_rv, CKR_OK as CK_RV);
 
     let second_session = shim.open_additional_session();
     let key = create_object(second_session);
@@ -1092,25 +1170,47 @@ fn exact_digest_size_query_returns_length_without_copy() {
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_Digest(size query)");
     // Mock digest returns 4 bytes (sum of input bytes as u32 big-endian)
     assert_eq!(out_len, 4, "returned_len should be 4");
+
+    let mut too_small = [0_u8; 1];
+    let mut too_small_len = too_small.len() as CK_ULONG;
+    let too_small_rv = unsafe {
+        dispatch::general::c_digest(
+            shim.session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            too_small.as_mut_ptr(),
+            &mut too_small_len,
+        )
+    };
+    assert_eq!(too_small_rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_Digest(too small)");
+    assert_eq!(too_small_len, 4, "too-small call should return required length");
+
+    let mut out = [0_u8; 4];
+    let mut data_len = out.len() as CK_ULONG;
+    let data_rv = unsafe {
+        dispatch::general::c_digest(
+            shim.session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            out.as_mut_ptr(),
+            &mut data_len,
+        )
+    };
+    assert_eq!(data_rv, CKR_OK as CK_RV, "C_Digest(data query)");
+    assert_eq!(data_len, 4, "data query returned_len should be 4");
+    assert_eq!(out, [0, 0, 2, 20], "mock digest output should match input sum");
 }
 
 #[test]
 fn exact_digest_final_size_query_does_not_consume_state() {
-    // With the exact (non-caching) path, each call to C_DigestFinal goes
-    // directly to the backend.  This test verifies that:
-    //   1. A size query (NULL output) returns CKR_OK with the correct length.
-    //   2. A subsequent data query on a fresh operation returns the bytes.
-    //
-    // Note: the MockBackend's digest_final_exact_impl consumes the operation on
-    // every call (matching real PKCS#11 semantics where the token may or may not
-    // retain state after a size query).  We therefore re-initialise between calls.
+    // OASIS specifies that C_DigestFinal does not terminate the active digest
+    // operation when it returns CKR_OK for a size query or CKR_BUFFER_TOO_SMALL.
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
     let mut mechanism = sha256_mechanism();
 
-    // --- Step 1: size query ---
     let init_rv = unsafe { dispatch::general::c_digest_init(shim.session, &mut mechanism) };
-    assert_eq!(init_rv, CKR_OK as CK_RV, "C_DigestInit (size query)");
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_DigestInit");
 
     let part = b"abc";
     let update_rv = unsafe {
@@ -1127,21 +1227,15 @@ fn exact_digest_final_size_query_does_not_consume_state() {
         dispatch::general::c_digest_final(shim.session, std::ptr::null_mut(), &mut out_len)
     };
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_DigestFinal(size query)");
-    // Mock digest_final always returns MOCK_DIGEST_FINAL_LEN (4) bytes
     assert_eq!(out_len, 4, "size query returned_len should be 4");
 
-    // --- Step 2: data query on a fresh operation ---
-    let reinit_rv = unsafe { dispatch::general::c_digest_init(shim.session, &mut mechanism) };
-    assert_eq!(reinit_rv, CKR_OK as CK_RV, "C_DigestInit (data query)");
-
-    let update2_rv = unsafe {
-        dispatch::general::c_digest_update(
-            shim.session,
-            part.as_ptr() as CK_BYTE_PTR,
-            part.len() as CK_ULONG,
-        )
+    let mut too_small = [0_u8; 1];
+    let mut too_small_len = too_small.len() as CK_ULONG;
+    let too_small_rv = unsafe {
+        dispatch::general::c_digest_final(shim.session, too_small.as_mut_ptr(), &mut too_small_len)
     };
-    assert_eq!(update2_rv, CKR_OK as CK_RV, "C_DigestUpdate (second)");
+    assert_eq!(too_small_rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_DigestFinal(too small)");
+    assert_eq!(too_small_len, 4, "too-small call should return required length");
 
     let mut out = [0_u8; 4];
     let mut data_len = out.len() as CK_ULONG;
@@ -1177,26 +1271,48 @@ fn exact_sign_size_query_returns_length_without_copy() {
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_Sign(size query)");
     // MockBackend returns MOCK_SIGN_OUTPUT = [0xDE, 0xAD] = 2 bytes
     assert_eq!(out_len, 2, "returned_len should be 2 for mock sign output");
+
+    let mut too_small = [0_u8; 1];
+    let mut too_small_len = too_small.len() as CK_ULONG;
+    let too_small_rv = unsafe {
+        dispatch::general::c_sign(
+            shim.session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            too_small.as_mut_ptr(),
+            &mut too_small_len,
+        )
+    };
+    assert_eq!(too_small_rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_Sign(too small)");
+    assert_eq!(too_small_len, 2, "too-small call should return required length");
+
+    let mut out = [0_u8; 2];
+    let mut data_len = out.len() as CK_ULONG;
+    let data_rv = unsafe {
+        dispatch::general::c_sign(
+            shim.session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            out.as_mut_ptr(),
+            &mut data_len,
+        )
+    };
+    assert_eq!(data_rv, CKR_OK as CK_RV, "C_Sign(data query)");
+    assert_eq!(data_len, 2, "data query returned_len should be 2");
+    assert_eq!(out, [0xDE, 0xAD], "mock sign output should be [0xDE, 0xAD]");
 }
 
 #[test]
 fn exact_sign_final_size_query_does_not_consume_state() {
-    // With the exact (non-caching) path, each call to C_SignFinal goes
-    // directly to the backend.  This test verifies that:
-    //   1. A size query (NULL output) returns CKR_OK with the correct length.
-    //   2. A subsequent data query on a fresh operation returns the bytes.
-    //
-    // Note: the MockBackend's sign_final_exact_impl consumes the operation on
-    // every call (matching real PKCS#11 semantics).  We therefore re-initialise
-    // between calls.
+    // OASIS specifies that C_SignFinal does not terminate the active signing
+    // operation when it returns CKR_OK for a size query or CKR_BUFFER_TOO_SMALL.
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
     let key = create_object(shim.session);
     let mut mechanism = rsa_pkcs_mechanism();
 
-    // --- Step 1: size query ---
     let init_rv = unsafe { dispatch::general::c_sign_init(shim.session, &mut mechanism, key) };
-    assert_eq!(init_rv, CKR_OK as CK_RV, "C_SignInit (size query)");
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_SignInit");
 
     let mut out_len: CK_ULONG = 0;
     let size_rv = unsafe {
@@ -1206,9 +1322,13 @@ fn exact_sign_final_size_query_does_not_consume_state() {
     // MockBackend sign_final returns MOCK_SIGN_OUTPUT = [0xDE, 0xAD] = 2 bytes
     assert_eq!(out_len, 2, "size query returned_len should be 2");
 
-    // --- Step 2: data query on a fresh operation ---
-    let reinit_rv = unsafe { dispatch::general::c_sign_init(shim.session, &mut mechanism, key) };
-    assert_eq!(reinit_rv, CKR_OK as CK_RV, "C_SignInit (data query)");
+    let mut too_small = [0_u8; 1];
+    let mut too_small_len = too_small.len() as CK_ULONG;
+    let too_small_rv = unsafe {
+        dispatch::general::c_sign_final(shim.session, too_small.as_mut_ptr(), &mut too_small_len)
+    };
+    assert_eq!(too_small_rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_SignFinal(too small)");
+    assert_eq!(too_small_len, 2, "too-small call should return required length");
 
     let mut out = [0_u8; 2];
     let mut data_len = out.len() as CK_ULONG;
@@ -1217,6 +1337,142 @@ fn exact_sign_final_size_query_does_not_consume_state() {
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_SignFinal(data query)");
     assert_eq!(data_len, 2, "data query returned_len should be 2");
     assert_eq!(out, [0xDE, 0xAD], "mock sign_final output should be [0xDE, 0xAD]");
+}
+
+#[test]
+fn sign_init_null_mechanism_cancels_active_sign_operation() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = rsa_pkcs_mechanism();
+
+    let init_rv = unsafe { dispatch::general::c_sign_init(shim.session, &mut mechanism, key) };
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_SignInit");
+
+    let update_rv = unsafe {
+        dispatch::general::c_sign_update(
+            shim.session,
+            b"cancel-me".as_ptr() as CK_BYTE_PTR,
+            b"cancel-me".len() as CK_ULONG,
+        )
+    };
+    assert_eq!(update_rv, CKR_OK as CK_RV, "C_SignUpdate");
+
+    let cancel_rv =
+        unsafe { dispatch::general::c_sign_init(shim.session, std::ptr::null_mut(), 0) };
+    assert_eq!(cancel_rv, CKR_OK as CK_RV, "C_SignInit(NULL_PTR)");
+
+    let mut out = [0_u8; 2];
+    let mut out_len = out.len() as CK_ULONG;
+    let final_rv =
+        unsafe { dispatch::general::c_sign_final(shim.session, out.as_mut_ptr(), &mut out_len) };
+    assert_eq!(
+        final_rv, CKR_OPERATION_NOT_INITIALIZED as CK_RV,
+        "C_SignFinal after NULL init cancellation"
+    );
+}
+
+#[test]
+fn verify_init_null_mechanism_cancels_active_verify_operation() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = rsa_pkcs_mechanism();
+
+    let init_rv = unsafe { dispatch::general::c_verify_init(shim.session, &mut mechanism, key) };
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_VerifyInit");
+
+    let update_rv = unsafe {
+        dispatch::general::c_verify_update(
+            shim.session,
+            b"cancel-me".as_ptr() as CK_BYTE_PTR,
+            b"cancel-me".len() as CK_ULONG,
+        )
+    };
+    assert_eq!(update_rv, CKR_OK as CK_RV, "C_VerifyUpdate");
+
+    let cancel_rv =
+        unsafe { dispatch::general::c_verify_init(shim.session, std::ptr::null_mut(), 0) };
+    assert_eq!(cancel_rv, CKR_OK as CK_RV, "C_VerifyInit(NULL_PTR)");
+
+    let signature = [0xDE, 0xAD];
+    let final_rv = unsafe {
+        dispatch::general::c_verify_final(
+            shim.session,
+            signature.as_ptr() as CK_BYTE_PTR,
+            signature.len() as CK_ULONG,
+        )
+    };
+    assert_eq!(
+        final_rv, CKR_OPERATION_NOT_INITIALIZED as CK_RV,
+        "C_VerifyFinal after NULL init cancellation"
+    );
+}
+
+#[test]
+fn sign_recover_init_null_mechanism_cancels_active_sign_recover_operation() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = rsa_pkcs_mechanism();
+
+    let init_rv =
+        unsafe { dispatch::general::c_sign_recover_init(shim.session, &mut mechanism, key) };
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_SignRecoverInit");
+
+    let cancel_rv =
+        unsafe { dispatch::general::c_sign_recover_init(shim.session, std::ptr::null_mut(), 0) };
+    assert_eq!(cancel_rv, CKR_OK as CK_RV, "C_SignRecoverInit(NULL_PTR)");
+
+    let data = b"cancel-me";
+    let mut out = [0_u8; 2];
+    let mut out_len = out.len() as CK_ULONG;
+    let recover_rv = unsafe {
+        dispatch::general::c_sign_recover(
+            shim.session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            out.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
+    assert_eq!(
+        recover_rv, CKR_OPERATION_NOT_INITIALIZED as CK_RV,
+        "C_SignRecover after NULL init cancellation"
+    );
+}
+
+#[test]
+fn verify_recover_init_null_mechanism_cancels_active_verify_recover_operation() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = rsa_pkcs_mechanism();
+
+    let init_rv =
+        unsafe { dispatch::general::c_verify_recover_init(shim.session, &mut mechanism, key) };
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_VerifyRecoverInit");
+
+    let cancel_rv =
+        unsafe { dispatch::general::c_verify_recover_init(shim.session, std::ptr::null_mut(), 0) };
+    assert_eq!(cancel_rv, CKR_OK as CK_RV, "C_VerifyRecoverInit(NULL_PTR)");
+
+    let signature = [0xDE, 0xAD];
+    let mut out = [0_u8; 2];
+    let mut out_len = out.len() as CK_ULONG;
+    let recover_rv = unsafe {
+        dispatch::general::c_verify_recover(
+            shim.session,
+            signature.as_ptr() as CK_BYTE_PTR,
+            signature.len() as CK_ULONG,
+            out.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
+    assert_eq!(
+        recover_rv, CKR_OPERATION_NOT_INITIALIZED as CK_RV,
+        "C_VerifyRecover after NULL init cancellation"
+    );
 }
 
 fn aes_ecb_mechanism() -> CK_MECHANISM {
@@ -1387,6 +1643,78 @@ fn gcm_delayed_iv_size_query_does_not_consume_writeback() {
 }
 
 #[test]
+fn encrypt_init_null_mechanism_cancels_active_encrypt_operation() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = aes_ecb_mechanism();
+
+    let init_rv = unsafe { dispatch::general::c_encrypt_init(shim.session, &mut mechanism, key) };
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_EncryptInit");
+
+    let mut query_len = 0;
+    let update_rv = unsafe {
+        dispatch::general::c_encrypt_update(
+            shim.session,
+            b"cancel-me".as_ptr() as CK_BYTE_PTR,
+            b"cancel-me".len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut query_len,
+        )
+    };
+    assert_eq!(update_rv, CKR_OK as CK_RV, "C_EncryptUpdate(size query)");
+
+    let cancel_rv =
+        unsafe { dispatch::general::c_encrypt_init(shim.session, std::ptr::null_mut(), 0) };
+    assert_eq!(cancel_rv, CKR_OK as CK_RV, "C_EncryptInit(NULL_PTR)");
+
+    let mut out = [0_u8; 1];
+    let mut out_len = out.len() as CK_ULONG;
+    let final_rv =
+        unsafe { dispatch::general::c_encrypt_final(shim.session, out.as_mut_ptr(), &mut out_len) };
+    assert_eq!(
+        final_rv, CKR_OPERATION_NOT_INITIALIZED as CK_RV,
+        "C_EncryptFinal after NULL init cancellation"
+    );
+}
+
+#[test]
+fn decrypt_init_null_mechanism_cancels_active_decrypt_operation() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = aes_ecb_mechanism();
+
+    let init_rv = unsafe { dispatch::general::c_decrypt_init(shim.session, &mut mechanism, key) };
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_DecryptInit");
+
+    let mut query_len = 0;
+    let update_rv = unsafe {
+        dispatch::general::c_decrypt_update(
+            shim.session,
+            b"cancel-me".as_ptr() as CK_BYTE_PTR,
+            b"cancel-me".len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut query_len,
+        )
+    };
+    assert_eq!(update_rv, CKR_OK as CK_RV, "C_DecryptUpdate(size query)");
+
+    let cancel_rv =
+        unsafe { dispatch::general::c_decrypt_init(shim.session, std::ptr::null_mut(), 0) };
+    assert_eq!(cancel_rv, CKR_OK as CK_RV, "C_DecryptInit(NULL_PTR)");
+
+    let mut out = [0_u8; 1];
+    let mut out_len = out.len() as CK_ULONG;
+    let final_rv =
+        unsafe { dispatch::general::c_decrypt_final(shim.session, out.as_mut_ptr(), &mut out_len) };
+    assert_eq!(
+        final_rv, CKR_OPERATION_NOT_INITIALIZED as CK_RV,
+        "C_DecryptFinal after NULL init cancellation"
+    );
+}
+
+#[test]
 fn exact_encrypt_size_query_returns_length() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
@@ -1412,6 +1740,35 @@ fn exact_encrypt_size_query_returns_length() {
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_Encrypt(size query)");
     // MockBackend xor_bytes returns same-length output as input (5 bytes)
     assert_eq!(out_len, 5, "returned_len should be 5 for 5-byte input");
+
+    let mut too_small = [0_u8; 1];
+    let mut too_small_len = too_small.len() as CK_ULONG;
+    let too_small_rv = unsafe {
+        dispatch::general::c_encrypt(
+            shim.session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            too_small.as_mut_ptr(),
+            &mut too_small_len,
+        )
+    };
+    assert_eq!(too_small_rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_Encrypt(too small)");
+    assert_eq!(too_small_len, 5, "too-small call should return required length");
+
+    let mut out = [0_u8; 5];
+    let mut data_len = out.len() as CK_ULONG;
+    let data_rv = unsafe {
+        dispatch::general::c_encrypt(
+            shim.session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            out.as_mut_ptr(),
+            &mut data_len,
+        )
+    };
+    assert_eq!(data_rv, CKR_OK as CK_RV, "C_Encrypt(data query)");
+    assert_eq!(data_len, 5, "data query returned_len should be 5");
+    assert_eq!(out, [0x2A, 0x27, 0x2E, 0x2E, 0x2D], "mock ciphertext");
 }
 
 #[test]
@@ -1469,6 +1826,35 @@ fn exact_decrypt_size_query_returns_length() {
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_Decrypt(size query)");
     // MockBackend xor_bytes returns same-length output as input (5 bytes)
     assert_eq!(out_len, 5, "returned_len should be 5 for 5-byte input");
+
+    let mut too_small = [0_u8; 1];
+    let mut too_small_len = too_small.len() as CK_ULONG;
+    let too_small_rv = unsafe {
+        dispatch::general::c_decrypt(
+            shim.session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            too_small.as_mut_ptr(),
+            &mut too_small_len,
+        )
+    };
+    assert_eq!(too_small_rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_Decrypt(too small)");
+    assert_eq!(too_small_len, 5, "too-small call should return required length");
+
+    let mut out = [0_u8; 5];
+    let mut data_len = out.len() as CK_ULONG;
+    let data_rv = unsafe {
+        dispatch::general::c_decrypt(
+            shim.session,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            out.as_mut_ptr(),
+            &mut data_len,
+        )
+    };
+    assert_eq!(data_rv, CKR_OK as CK_RV, "C_Decrypt(data query)");
+    assert_eq!(data_len, 5, "data query returned_len should be 5");
+    assert_eq!(out, [0x2A, 0x27, 0x2E, 0x2E, 0x2D], "mock plaintext");
 }
 
 #[test]
@@ -2258,9 +2644,9 @@ fn mechanism_list_count_reflects_filtered_count() {
         dispatch::general::c_get_mechanism_list(shim.slot_id, std::ptr::null_mut(), &mut count)
     };
     assert_eq!(rv, CKR_OK as CK_RV, "C_GetMechanismList(count-only)");
-    // MockBackend has 3 mechanisms: SHA256, RSA_PKCS, AES_ECB.
-    // Default registry is Transparent mode, so all 3 pass through.
-    assert_eq!(count, 3, "expected 3 mechanisms from MockBackend (transparent mode)");
+    // MockBackend has 4 mechanisms: SHA256, RSA_PKCS, AES_ECB, AES_GCM.
+    // Default registry is Transparent mode, so all 4 pass through.
+    assert_eq!(count, 4, "expected 4 mechanisms from MockBackend (transparent mode)");
 
     // Fetch into a correctly sized buffer.
     let mut mechs = vec![0_u64; count as usize];

@@ -13,7 +13,13 @@ pub unsafe extern "C" fn c_sign_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+            let result =
+                with_client!(client => client.sign_init_cancel(CkSessionHandle(h_session)));
+            if result.is_ok() {
+                state::clear_sign_output_caches(h_session);
+                state::clear_operation_state_cache(h_session);
+            }
+            return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -112,7 +118,12 @@ pub unsafe extern "C" fn c_verify_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+            let result =
+                with_client!(client => client.verify_init_cancel(CkSessionHandle(h_session)));
+            if result.is_ok() {
+                state::clear_operation_state_cache(h_session);
+            }
+            return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -184,7 +195,13 @@ pub unsafe extern "C" fn c_sign_recover_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+            let result =
+                with_client!(client => client.sign_recover_init_cancel(CkSessionHandle(h_session)));
+            if result.is_ok() {
+                state::clear_sign_recover_output_cache(h_session);
+                state::clear_operation_state_cache(h_session);
+            }
+            return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -240,7 +257,14 @@ pub unsafe extern "C" fn c_verify_recover_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+            let result = with_client!(client => client.verify_recover_init_cancel(
+                CkSessionHandle(h_session)
+            ));
+            if result.is_ok() {
+                state::clear_verify_recover_output_cache(h_session);
+                state::clear_operation_state_cache(h_session);
+            }
+            return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {

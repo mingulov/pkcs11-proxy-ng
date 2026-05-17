@@ -250,17 +250,8 @@ async fn pkcs11_tool_test_suite_via_shim() {
         if name.contains("Random") {
             assert!(passed, "{name} section should pass");
         }
-        // Digest: the shim's two-call cache triggers CKR_OPERATION_NOT_INITIALIZED
-        // when pkcs11-tool calls C_Digest with NULL output after C_DigestUpdate.
-        // This is a known limitation (the one-shot C_Digest consumes the operation
-        // state on the server, leaving nothing for the size-query second call).
-        // Document it but don't fail the test.
-        if name.contains("Digest") && !passed {
-            record_skip!(SkipReason::KnownIncompat {
-                provider: "proxy shim",
-                description: "Digest two-call cache consumes backend op state on size query",
-            });
-            eprintln!("        Details: {details}");
+        if name.contains("Digest") {
+            assert!(passed, "{name} section should pass: {details}");
         }
     }
 

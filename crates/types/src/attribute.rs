@@ -90,7 +90,7 @@ impl CkAttributeType {
 }
 
 /// A typed attribute value (ADR-0001: known attributes use typed serialization).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CkAttributeValue {
     Bool(bool),
     Ulong(u64),
@@ -99,7 +99,7 @@ pub enum CkAttributeValue {
 }
 
 /// A single PKCS#11 attribute (type + optional value).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CkAttribute {
     pub attr_type: CkAttributeType,
     pub value: Option<CkAttributeValue>,

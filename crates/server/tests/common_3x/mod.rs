@@ -34,6 +34,8 @@ pub fn mock(slots: &[u64], mechs: &[u64]) -> MockBackend {
 pub async fn mock_daemon(
     backend: Arc<dyn Pkcs11Backend>,
 ) -> (String, tokio::sync::watch::Sender<bool>) {
+    backend.initialize().expect("initialize mock backend before serving");
+
     let ctx = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
     ctx.populate_slots(&backend).await.expect("populate_slots");
 

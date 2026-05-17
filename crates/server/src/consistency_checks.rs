@@ -255,7 +255,23 @@ fn backend_methods_have_proto_rpcs() {
         "sign_encrypt_update_exact",
         "decrypt_verify_update_exact",
         "wrap_key_exact",
+        "wrap_key_exact_with_output",
+        "derive_key_with_output",
+        "derive_key_with_output_result",
         "get_operation_state_exact",
+        // Helper used by the simple Encrypt/Decrypt + Update/Final RPCs to
+        // surface HSM-mutated mechanism params. Not its own RPC; populates
+        // the `mechanism_out` field of the existing crypto-op responses.
+        "session_output_mechanism_params",
+        // NULL-mechanism init cancellation is carried by the existing *Init
+        // RPCs with `mechanism: None`, not by separate proto methods.
+        "sign_init_cancel",
+        "verify_init_cancel",
+        "sign_recover_init_cancel",
+        "verify_recover_init_cancel",
+        "digest_init_cancel",
+        "encrypt_init_cancel",
+        "decrypt_init_cancel",
         // Exact-output trait method for GetAttributeValueExact RPC
         "get_attribute_value_exact",
         // Exact-output trait methods shared via ParameterOutputExact RPC

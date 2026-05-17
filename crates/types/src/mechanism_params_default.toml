@@ -363,6 +363,13 @@ mechanisms = [
     0x1226,  # CKM_CHACHA20
 ]
 
+# Salsa20: CK_SALSA20_PARAMS (block_counter, nonce)
+[[params]]
+shape = "salsa20"
+mechanisms = [
+    0x4020,  # CKM_SALSA20
+]
+
 # Salsa20/ChaCha20-Poly1305 AEAD
 [[params]]
 shape = "salsa20_chacha20_poly1305"
@@ -441,7 +448,6 @@ mechanisms = [
     0x004A,  # CKM_SHA512_224_HMAC_GENERAL
     0x004E,  # CKM_SHA512_256_HMAC_GENERAL
     0x0137,  # CKM_DES3_CMAC_GENERAL
-    0x0365,  # CKM_EXTRACT_KEY_FROM_KEY (CK_EXTRACT_PARAMS = CK_ULONG bit position)
 ]
 
 # Object handle parameter: CK_OBJECT_HANDLE (single handle value)
@@ -449,6 +455,13 @@ mechanisms = [
 shape = "object_handle"
 mechanisms = [
     0x0360,  # CKM_CONCATENATE_BASE_AND_KEY
+]
+
+# Extract parameter: CK_EXTRACT_PARAMS (single CK_ULONG bit position)
+[[params]]
+shape = "extract"
+mechanisms = [
+    0x0365,  # CKM_EXTRACT_KEY_FROM_KEY
 ]
 
 # Key derivation string data: CK_KEY_DERIVATION_STRING_DATA (data bytes)
@@ -460,6 +473,8 @@ mechanisms = [
     0x0362,  # CKM_CONCATENATE_BASE_AND_DATA
     0x0363,  # CKM_CONCATENATE_DATA_AND_BASE
     0x0364,  # CKM_XOR_BASE_AND_DATA
+    0x1100,  # CKM_DES_ECB_ENCRYPT_DATA
+    0x1102,  # CKM_DES3_ECB_ENCRYPT_DATA
     0x1104,  # CKM_AES_ECB_ENCRYPT_DATA
     0x0390,  # CKM_MD5_KEY_DERIVATION
     0x0391,  # CKM_MD2_KEY_DERIVATION
@@ -610,18 +625,14 @@ mechanisms = [
     0x1053,  # CKM_ECDH_AES_KEY_WRAP
 ]
 
-# ECDH2 Derive: CK_ECDH2_DERIVE_PARAMS
-[[params]]
-shape = "ecdh2_derive"
-mechanisms = [
-    0x1052,  # CKM_ECDH2_DERIVE (placeholder)
-]
-
 # ECMQV Derive: CK_ECMQV_DERIVE_PARAMS
+# CK_ECDH2_DERIVE_PARAMS is represented as a typed transport shape, but OASIS
+# publishes no distinct CKM_ECDH2_DERIVE value. Do not assign a project-local
+# value in the default registry.
 [[params]]
 shape = "ecmqv_derive"
 mechanisms = [
-    0x1102,  # CKM_ECMQV_DERIVE (placeholder)
+    0x1052,  # CKM_ECMQV_DERIVE
 ]
 
 # X9.42 DH1 Derive: CK_X9_42_DH1_DERIVE_PARAMS
@@ -670,28 +681,28 @@ mechanisms = [
 [[params]]
 shape = "ike_prf_derive"
 mechanisms = [
-    0x4020,  # CKM_IKE_PRF_DERIVE (placeholder)
+    0x402F,  # CKM_IKE_PRF_DERIVE
 ]
 
 # IKE1 PRF Derive: CK_IKE1_PRF_DERIVE_PARAMS
 [[params]]
 shape = "ike1_prf_derive"
 mechanisms = [
-    0x401E,  # CKM_IKE1_PRF_DERIVE (placeholder)
+    0x4030,  # CKM_IKE1_PRF_DERIVE
 ]
 
 # IKE1 Extended Derive: CK_IKE1_EXTENDED_DERIVE_PARAMS
 [[params]]
 shape = "ike1_extended_derive"
 mechanisms = [
-    0x401F,  # CKM_IKE1_EXTENDED_DERIVE (placeholder)
+    0x4031,  # CKM_IKE1_EXTENDED_DERIVE
 ]
 
 # IKE2 PRF Plus Derive: CK_IKE2_PRF_PLUS_DERIVE_PARAMS
 [[params]]
 shape = "ike2_prf_plus_derive"
 mechanisms = [
-    0x4023,  # CKM_IKE2_PRF_PLUS_DERIVE (placeholder)
+    0x402E,  # CKM_IKE2_PRF_PLUS_DERIVE
 ]
 
 # SP800-108 KDF: CK_SP800_108_KDF_PARAMS (PRF type, data params, additional derived keys)
@@ -699,6 +710,28 @@ mechanisms = [
 shape = "sp800_108_kdf"
 mechanisms = [
     0x03AC,  # CKM_SP800_108_COUNTER_KDF
-    0x03AD,  # CKM_SP800_108_FEEDBACK_KDF
     0x03AE,  # CKM_SP800_108_DOUBLE_PIPELINE_KDF
+]
+
+# SP800-108 Feedback KDF: CK_SP800_108_FEEDBACK_KDF_PARAMS (adds IV)
+[[params]]
+shape = "sp800_108_feedback_kdf"
+mechanisms = [
+    0x03AD,  # CKM_SP800_108_FEEDBACK_KDF
+]
+
+# WTLS master key derive: CK_WTLS_MASTER_KEY_DERIVE_PARAMS (mutable pVersion byte)
+[[params]]
+shape = "wtls_master_key_derive"
+mechanisms = [
+    0x03D1,  # CKM_WTLS_MASTER_KEY_DERIVE
+    0x03D2,  # CKM_WTLS_MASTER_KEY_DERIVE_DH_ECC
+]
+
+# WTLS key and MAC derive: CK_WTLS_KEY_MAT_PARAMS with CK_WTLS_KEY_MAT_OUT
+[[params]]
+shape = "wtls_key_mat"
+mechanisms = [
+    0x03D4,  # CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE
+    0x03D5,  # CKM_WTLS_CLIENT_KEY_AND_MAC_DERIVE
 ]

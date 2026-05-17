@@ -16,7 +16,13 @@ pub unsafe extern "C" fn c_digest_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+            let result =
+                with_client!(client => client.digest_init_cancel(CkSessionHandle(h_session)));
+            if result.is_ok() {
+                state::clear_digest_output_caches(h_session);
+                state::clear_operation_state_cache(h_session);
+            }
+            return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -123,7 +129,14 @@ pub unsafe extern "C" fn c_encrypt_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+            let result =
+                with_client!(client => client.encrypt_init_cancel(CkSessionHandle(h_session)));
+            if result.is_ok() {
+                state::clear_delayed_gcm_writeback(h_session);
+                state::clear_encrypt_output_caches(h_session);
+                state::clear_operation_state_cache(h_session);
+            }
+            return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -193,7 +206,7 @@ pub unsafe extern "C" fn c_encrypt(
     })
 }
 
-unsafe fn delayed_gcm_parameter_addr(p_mechanism: CK_MECHANISM_PTR) -> Option<usize> {
+pub(super) unsafe fn delayed_gcm_parameter_addr(p_mechanism: CK_MECHANISM_PTR) -> Option<usize> {
     if p_mechanism.is_null() {
         return None;
     }
@@ -217,7 +230,10 @@ unsafe fn delayed_gcm_parameter_addr(p_mechanism: CK_MECHANISM_PTR) -> Option<us
     if capacity == 0 { None } else { Some(mechanism.pParameter as usize) }
 }
 
-unsafe fn write_delayed_gcm_output_params(param_addr: usize, params: &CkMechanismParams) {
+pub(super) unsafe fn write_delayed_gcm_output_params(
+    param_addr: usize,
+    params: &CkMechanismParams,
+) {
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_AES_GCM,
         pParameter: param_addr as CK_VOID_PTR,
@@ -291,7 +307,13 @@ pub unsafe extern "C" fn c_decrypt_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+            let result =
+                with_client!(client => client.decrypt_init_cancel(CkSessionHandle(h_session)));
+            if result.is_ok() {
+                state::clear_decrypt_output_caches(h_session);
+                state::clear_operation_state_cache(h_session);
+            }
+            return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {

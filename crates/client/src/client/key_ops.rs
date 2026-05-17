@@ -2,6 +2,13 @@ use pkcs11_proxy_ng_types::*;
 
 use super::Pkcs11Client;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeriveKeyMechanismOutResult {
+    pub rv: CkRv,
+    pub key_handle: Option<CkObjectHandle>,
+    pub mechanism_out: Option<CkMechanismParams>,
+}
+
 impl Pkcs11Client {
     pub async fn wrap_key(
         &mut self,
@@ -51,6 +58,39 @@ impl Pkcs11Client {
         base_key: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
+        let (handle, _) =
+            self.derive_key_with_mechanism_out(session, mechanism, base_key, template).await?;
+        Ok(handle)
+    }
+
+    /// `C_DeriveKey` returning both the derived key handle AND any
+    /// HSM-mutated mechanism params (e.g. the negotiated `CK_VERSION`
+    /// written into `CK_TLS12_MASTER_KEY_DERIVE_PARAMS.pVersion`).
+    /// Backwards-compatible sibling of [`Self::derive_key`].
+    pub async fn derive_key_with_mechanism_out(
+        &mut self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        base_key: CkObjectHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
+        let result = self
+            .derive_key_with_mechanism_out_result(session, mechanism, base_key, template)
+            .await?;
+        if result.rv.is_ok() {
+            Ok((result.key_handle.unwrap_or(CkObjectHandle(0)), result.mechanism_out))
+        } else {
+            Err(result.rv)
+        }
+    }
+
+    pub async fn derive_key_with_mechanism_out_result(
+        &mut self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        base_key: CkObjectHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<DeriveKeyMechanismOutResult> {
         let ctx = self.context_id()?;
         let proto_template = Self::proto_template(template);
         let req = pkcs11_proxy_ng_proto::DeriveKeyRequest {
@@ -60,8 +100,22 @@ impl Pkcs11Client {
             base_key_handle: base_key.0,
             template: proto_template,
         };
-        let resp = pkcs11_unary_call!(self.grpc.derive_key(req), true);
-        Ok(CkObjectHandle(resp.key_handle))
+        let resp = self
+            .grpc
+            .derive_key(req)
+            .await
+            .map_err(|status| crate::error::grpc_status_to_ck_rv(status.code(), true))?
+            .into_inner();
+        let rv = CkRv(resp.ck_rv);
+        let mechanism_out = match resp.mechanism_out {
+            Some(proto_mech) => CkMechanism::try_from(&proto_mech)?.params,
+            None => None,
+        };
+        Ok(DeriveKeyMechanismOutResult {
+            rv,
+            key_handle: if rv.is_ok() { Some(CkObjectHandle(resp.key_handle)) } else { None },
+            mechanism_out,
+        })
     }
 
     pub async fn generate_key(

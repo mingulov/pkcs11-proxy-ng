@@ -104,6 +104,19 @@ fn get_attribute_value_exact_unknown_handle_returns_error() {
 }
 
 #[test]
+fn get_attribute_value_unknown_handle_returns_error() {
+    let backend = MockBackend::default_test();
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let mut template = vec![CkAttribute { attr_type: CkAttributeType::LABEL, value: None }];
+
+    assert_eq!(
+        backend.get_attribute_value(session, CkObjectHandle(42), &mut template).unwrap_err(),
+        CkRv::OBJECT_HANDLE_INVALID
+    );
+}
+
+#[test]
 fn set_attribute_value_unknown_handle_returns_error() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
@@ -153,6 +166,16 @@ fn session_handle_invalid_after_close() {
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     backend.close_session(session).unwrap();
     assert_eq!(backend.get_session_info(session).unwrap_err(), CkRv::SESSION_HANDLE_INVALID);
+}
+
+#[test]
+fn mock_legacy_parallel_functions_return_function_not_parallel() {
+    let backend = MockBackend::default_test();
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+
+    assert_eq!(backend.get_function_status(session).unwrap_err(), CkRv::FUNCTION_NOT_PARALLEL);
+    assert_eq!(backend.cancel_function(session).unwrap_err(), CkRv::FUNCTION_NOT_PARALLEL);
 }
 
 #[test]
@@ -349,27 +372,34 @@ fn finalize_clears_login_state() {
     assert_eq!(err, CkRv::USER_NOT_LOGGED_IN);
 }
 
+fn initialized_attribute_session(backend: &MockBackend) -> CkSessionHandle {
+    backend.initialize().unwrap();
+    backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap()
+}
+
 #[test]
 fn attribute_store_value_returned() {
     let backend = MockBackend::default_test();
-    let obj = CkObjectHandle(1);
+    let session = initialized_attribute_session(&backend);
+    let obj = backend.create_object(session, &[]).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
         MockAttributeSlot::Value(CkAttributeValue::String("mykey".into())),
     );
     let mut template = vec![CkAttribute { attr_type: CkAttributeType::LABEL, value: None }];
-    backend.get_attribute_value(CkSessionHandle(1), obj, &mut template).unwrap();
+    backend.get_attribute_value(session, obj, &mut template).unwrap();
     assert_eq!(template[0].value, Some(CkAttributeValue::String("mykey".into())));
 }
 
 #[test]
 fn attribute_store_sensitive_returns_none_and_error() {
     let backend = MockBackend::default_test();
-    let obj = CkObjectHandle(2);
+    let session = initialized_attribute_session(&backend);
+    let obj = backend.create_object(session, &[]).unwrap();
     backend.set_attribute(obj, CkAttributeType::VALUE, MockAttributeSlot::Sensitive);
     let mut template = vec![CkAttribute { attr_type: CkAttributeType::VALUE, value: None }];
-    let rv = backend.get_attribute_value(CkSessionHandle(1), obj, &mut template).unwrap_err();
+    let rv = backend.get_attribute_value(session, obj, &mut template).unwrap_err();
     assert_eq!(rv, CkRv::ATTRIBUTE_SENSITIVE);
     assert!(template[0].value.is_none());
 }
@@ -377,10 +407,11 @@ fn attribute_store_sensitive_returns_none_and_error() {
 #[test]
 fn attribute_store_invalid_type_returns_none_and_error() {
     let backend = MockBackend::default_test();
-    let obj = CkObjectHandle(3);
+    let session = initialized_attribute_session(&backend);
+    let obj = backend.create_object(session, &[]).unwrap();
     backend.set_attribute(obj, CkAttributeType::LABEL, MockAttributeSlot::InvalidType);
     let mut template = vec![CkAttribute { attr_type: CkAttributeType::LABEL, value: None }];
-    let rv = backend.get_attribute_value(CkSessionHandle(1), obj, &mut template).unwrap_err();
+    let rv = backend.get_attribute_value(session, obj, &mut template).unwrap_err();
     assert_eq!(rv, CkRv::ATTRIBUTE_TYPE_INVALID);
     assert!(template[0].value.is_none());
 }
@@ -388,7 +419,8 @@ fn attribute_store_invalid_type_returns_none_and_error() {
 #[test]
 fn attribute_store_mixed_template_partial_results() {
     let backend = MockBackend::default_test();
-    let obj = CkObjectHandle(4);
+    let session = initialized_attribute_session(&backend);
+    let obj = backend.create_object(session, &[]).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -401,7 +433,7 @@ fn attribute_store_mixed_template_partial_results() {
         CkAttribute { attr_type: CkAttributeType::VALUE, value: None },
         CkAttribute { attr_type: CkAttributeType::MODULUS, value: None },
     ];
-    let rv = backend.get_attribute_value(CkSessionHandle(1), obj, &mut template).unwrap_err();
+    let rv = backend.get_attribute_value(session, obj, &mut template).unwrap_err();
     assert_eq!(rv, CkRv::ATTRIBUTE_SENSITIVE);
     assert!(template[0].value.is_some());
     assert!(template[1].value.is_none());
@@ -411,8 +443,10 @@ fn attribute_store_mixed_template_partial_results() {
 #[test]
 fn attribute_store_absent_object_is_noop() {
     let backend = MockBackend::default_test();
+    let session = initialized_attribute_session(&backend);
+    let obj = backend.create_object(session, &[]).unwrap();
     let mut template = vec![CkAttribute { attr_type: CkAttributeType::LABEL, value: None }];
-    let result = backend.get_attribute_value(CkSessionHandle(1), CkObjectHandle(99), &mut template);
+    let result = backend.get_attribute_value(session, obj, &mut template);
     assert!(result.is_ok());
     assert!(template[0].value.is_none());
 }
@@ -420,7 +454,8 @@ fn attribute_store_absent_object_is_noop() {
 #[test]
 fn attribute_store_only_invalid_type() {
     let backend = MockBackend::default_test();
-    let obj = CkObjectHandle(5);
+    let session = initialized_attribute_session(&backend);
+    let obj = backend.create_object(session, &[]).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -431,7 +466,7 @@ fn attribute_store_only_invalid_type() {
         CkAttribute { attr_type: CkAttributeType::LABEL, value: None },
         CkAttribute { attr_type: CkAttributeType::MODULUS, value: None },
     ];
-    let rv = backend.get_attribute_value(CkSessionHandle(1), obj, &mut template).unwrap_err();
+    let rv = backend.get_attribute_value(session, obj, &mut template).unwrap_err();
     assert_eq!(rv, CkRv::ATTRIBUTE_TYPE_INVALID);
     assert!(template[0].value.is_some());
     assert!(template[1].value.is_none());
@@ -440,7 +475,8 @@ fn attribute_store_only_invalid_type() {
 #[test]
 fn get_attribute_value_exact_size_query_returns_length_without_bytes() {
     let backend = MockBackend::default_test();
-    let obj = CkObjectHandle(6);
+    let session = initialized_attribute_session(&backend);
+    let obj = backend.create_object(session, &[]).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -449,7 +485,7 @@ fn get_attribute_value_exact_size_query_returns_length_without_bytes() {
 
     let (rv, results) = backend
         .get_attribute_value_exact(
-            CkSessionHandle(1),
+            session,
             obj,
             &[CkAttributeQuery {
                 attr_type: CkAttributeType::LABEL,
@@ -476,7 +512,8 @@ fn get_attribute_value_exact_size_query_returns_length_without_bytes() {
 #[test]
 fn get_attribute_value_exact_too_small_returns_backend_length() {
     let backend = MockBackend::default_test();
-    let obj = CkObjectHandle(7);
+    let session = initialized_attribute_session(&backend);
+    let obj = backend.create_object(session, &[]).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -485,7 +522,7 @@ fn get_attribute_value_exact_too_small_returns_backend_length() {
 
     let (rv, results) = backend
         .get_attribute_value_exact(
-            CkSessionHandle(1),
+            session,
             obj,
             &[CkAttributeQuery {
                 attr_type: CkAttributeType::LABEL,
@@ -512,7 +549,8 @@ fn get_attribute_value_exact_too_small_returns_backend_length() {
 #[test]
 fn get_attribute_value_exact_mixed_sensitive_and_invalid_preserves_statuses() {
     let backend = MockBackend::default_test();
-    let obj = CkObjectHandle(8);
+    let session = initialized_attribute_session(&backend);
+    let obj = backend.create_object(session, &[]).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -523,7 +561,7 @@ fn get_attribute_value_exact_mixed_sensitive_and_invalid_preserves_statuses() {
 
     let (rv, results) = backend
         .get_attribute_value_exact(
-            CkSessionHandle(1),
+            session,
             obj,
             &[
                 CkAttributeQuery {
@@ -581,6 +619,7 @@ fn setup_with_session() -> (MockBackend, CkSessionHandle) {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let _key = backend.create_object(session, &[]).unwrap();
     (backend, session)
 }
 
@@ -598,6 +637,15 @@ fn get_op_state_sign_active_returns_blob() {
     backend.sign_init(session, &mech, CkObjectHandle(1)).unwrap();
     let blob = backend.get_operation_state(session).unwrap();
     assert_eq!(blob, vec![0xC9u8, 0xEA, 1]);
+}
+
+#[test]
+fn get_op_state_find_objects_active_returns_operation_not_initialized() {
+    let (backend, session) = setup_with_session();
+    backend.find_objects_init(session, &[]).unwrap();
+    let rv = backend.get_operation_state(session).unwrap_err();
+    assert_eq!(rv, CkRv::OPERATION_NOT_INITIALIZED);
+    backend.find_objects_final(session).unwrap();
 }
 
 #[test]
@@ -671,18 +719,33 @@ fn set_op_state_when_active_returns_operation_active() {
 #[test]
 fn get_set_op_state_all_op_types_roundtrip() {
     use MultiPartOp::*;
-    let ops: &[(MultiPartOp, u8)] = &[(Sign, 1), (Verify, 2), (Digest, 3), (Encrypt, 4), (Decrypt, 5)];
+    let ops: &[(MultiPartOp, u8)] = &[
+        (Sign, 1),
+        (Verify, 2),
+        (Digest, 3),
+        (Encrypt, 4),
+        (Decrypt, 5),
+        (SignRecover, 6),
+        (VerifyRecover, 7),
+    ];
     for (op, expected_byte) in ops {
         let (backend, session) = setup_with_session();
         let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         match op {
             Sign => backend.sign_init(session, &mech, CkObjectHandle(1)).unwrap(),
+            SignRecover => backend.sign_recover_init(session, &mech, CkObjectHandle(1)).unwrap(),
             Verify => backend.verify_init(session, &mech, CkObjectHandle(1)).unwrap(),
+            VerifyRecover => {
+                backend.verify_recover_init(session, &mech, CkObjectHandle(1)).unwrap();
+            }
             Digest => backend.digest_init(session, &mech).unwrap(),
             Encrypt => {
                 backend.encrypt_init(session, &mech, CkObjectHandle(1)).unwrap();
             }
-            Decrypt => backend.decrypt_init(session, &mech, CkObjectHandle(1)).unwrap(),
+            Decrypt => {
+                backend.decrypt_init(session, &mech, CkObjectHandle(1)).unwrap();
+            }
+            FindObjects => unreachable!("object search state is not cryptographic operation state"),
         }
         let blob = backend.get_operation_state(session).unwrap();
         assert_eq!(blob, vec![0xC9u8, 0xEA, *expected_byte]);
@@ -690,8 +753,14 @@ fn get_set_op_state_all_op_types_roundtrip() {
             Sign => {
                 backend.sign_final(session).unwrap();
             }
+            SignRecover => {
+                backend.sign_recover(session, b"data").unwrap();
+            }
             Verify => {
                 let _ = backend.verify(session, &[0xDE, 0xAD], &[0xDE, 0xAD]);
+            }
+            VerifyRecover => {
+                backend.verify_recover(session, &[0xDE, 0xAD]).unwrap();
             }
             Digest => {
                 backend.digest_final(session).unwrap();
@@ -702,6 +771,7 @@ fn get_set_op_state_all_op_types_roundtrip() {
             Decrypt => {
                 backend.decrypt_final(session).unwrap();
             }
+            FindObjects => unreachable!("object search state is not cryptographic operation state"),
         }
         backend.set_operation_state(session, &blob, CkObjectHandle(0), CkObjectHandle(0)).unwrap();
         let blob2 = backend.get_operation_state(session).unwrap();
@@ -759,6 +829,18 @@ fn copy_object_also_enforces_max_objects_quota() {
     let obj = backend.create_object(s, &[]).unwrap();
     let rv = backend.copy_object(s, obj, &[]).unwrap_err();
     assert_eq!(rv, CkRv::DEVICE_MEMORY);
+}
+
+#[test]
+fn copy_object_unknown_source_handle_returns_error() {
+    let backend = MockBackend::default_test();
+    backend.initialize().unwrap();
+    let s = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+
+    assert_eq!(
+        backend.copy_object(s, CkObjectHandle(42), &[]).unwrap_err(),
+        CkRv::OBJECT_HANDLE_INVALID
+    );
 }
 
 #[test]

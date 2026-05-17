@@ -189,6 +189,12 @@ impl From<&Ssl3KeyMatParams> for v1_proto::Ssl3KeyMatParams {
             is_export: p.is_export,
             random_info: Some(ssl_random_to_proto(&p.random_info)),
             prf_hash_mechanism: p.prf_hash_mechanism,
+            client_mac_secret_handle: p.client_mac_secret_handle,
+            server_mac_secret_handle: p.server_mac_secret_handle,
+            client_key_handle: p.client_key_handle,
+            server_key_handle: p.server_key_handle,
+            client_iv: p.client_iv.clone(),
+            server_iv: p.server_iv.clone(),
         }
     }
 }
@@ -204,6 +210,12 @@ impl TryFrom<&v1_proto::Ssl3KeyMatParams> for Ssl3KeyMatParams {
             is_export: p.is_export,
             random_info: required_ssl_random_from_option(&p.random_info)?,
             prf_hash_mechanism: p.prf_hash_mechanism,
+            client_mac_secret_handle: p.client_mac_secret_handle,
+            server_mac_secret_handle: p.server_mac_secret_handle,
+            client_key_handle: p.client_key_handle,
+            server_key_handle: p.server_key_handle,
+            client_iv: p.client_iv.clone(),
+            server_iv: p.server_iv.clone(),
         })
     }
 }
@@ -274,6 +286,9 @@ impl From<&WtlsKeyMatParams> for v1_proto::WtlsKeyMatParams {
             sequence_number: p.sequence_number,
             is_export: p.is_export,
             random_info: Some(wtls_random_to_proto(&p.random_info)),
+            mac_secret_handle: p.mac_secret_handle,
+            key_handle: p.key_handle,
+            iv: p.iv.clone(),
         }
     }
 }
@@ -290,6 +305,9 @@ impl TryFrom<&v1_proto::WtlsKeyMatParams> for WtlsKeyMatParams {
             sequence_number: p.sequence_number,
             is_export: p.is_export,
             random_info: required_wtls_random_from_option(&p.random_info)?,
+            mac_secret_handle: p.mac_secret_handle,
+            key_handle: p.key_handle,
+            iv: p.iv.clone(),
         })
     }
 }

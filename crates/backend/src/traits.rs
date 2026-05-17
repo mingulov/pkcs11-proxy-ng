@@ -1,5 +1,24 @@
 use pkcs11_proxy_ng_types::*;
 
+/// Structured `C_DeriveKey` result for mechanisms that can mutate caller-owned
+/// mechanism parameters even when the PKCS#11 return value is not `CKR_OK`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CkDeriveKeyOutputResult {
+    pub rv: CkRv,
+    pub key_handle: Option<CkObjectHandle>,
+    pub mechanism_out: Option<CkMechanismParams>,
+}
+
+impl CkDeriveKeyOutputResult {
+    pub fn ok(key_handle: CkObjectHandle, mechanism_out: Option<CkMechanismParams>) -> Self {
+        Self { rv: CkRv::OK, key_handle: Some(key_handle), mechanism_out }
+    }
+
+    pub fn error(rv: CkRv, mechanism_out: Option<CkMechanismParams>) -> Self {
+        Self { rv, key_handle: None, mechanism_out }
+    }
+}
+
 /// A PKCS#11 backend that the daemon can dispatch operations to (ADR-0004 §1).
 /// Each method corresponds to a supported PKCS#11 function.
 /// All methods are synchronous — the daemon bridges to async at the gRPC layer
@@ -90,6 +109,9 @@ pub trait Pkcs11Backend: Send + Sync {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<()>;
+    fn sign_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
     fn sign(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>>;
     fn sign_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()>;
     fn sign_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>>;
@@ -113,6 +135,9 @@ pub trait Pkcs11Backend: Send + Sync {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<()>;
+    fn sign_recover_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
     fn sign_recover(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>>;
 
     fn verify_recover_init(
@@ -121,6 +146,9 @@ pub trait Pkcs11Backend: Send + Sync {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<()>;
+    fn verify_recover_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
     fn verify_recover(&self, session: CkSessionHandle, signature: &[u8]) -> CkResult<Vec<u8>>;
 
     fn verify_init(
@@ -129,6 +157,9 @@ pub trait Pkcs11Backend: Send + Sync {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<()>;
+    fn verify_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
     fn verify(&self, session: CkSessionHandle, data: &[u8], signature: &[u8]) -> CkResult<()>;
     fn verify_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()>;
     fn verify_final(&self, session: CkSessionHandle, signature: &[u8]) -> CkResult<()>;
@@ -156,6 +187,9 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<()>;
 
     fn digest_init(&self, session: CkSessionHandle, mechanism: &CkMechanism) -> CkResult<()>;
+    fn digest_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
     fn digest(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>>;
     fn digest_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()>;
     fn digest_key(&self, session: CkSessionHandle, key: CkObjectHandle) -> CkResult<()>;
@@ -167,6 +201,9 @@ pub trait Pkcs11Backend: Send + Sync {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>>;
+    fn encrypt_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
     fn encrypt(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>>;
     fn encrypt_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<Vec<u8>>;
     fn encrypt_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>>;
@@ -176,7 +213,10 @@ pub trait Pkcs11Backend: Send + Sync {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         key: CkObjectHandle,
-    ) -> CkResult<()>;
+    ) -> CkResult<Option<CkMechanismParams>>;
+    fn decrypt_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
+        Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
     fn decrypt(&self, session: CkSessionHandle, encrypted_data: &[u8]) -> CkResult<Vec<u8>>;
     fn decrypt_update(&self, session: CkSessionHandle, encrypted_part: &[u8]) -> CkResult<Vec<u8>>;
     fn decrypt_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>>;
@@ -188,6 +228,39 @@ pub trait Pkcs11Backend: Send + Sync {
         base_key: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle>;
+
+    /// `C_DeriveKey` returning both the derived key handle AND any
+    /// mechanism-param mutations the HSM performed during the call —
+    /// most importantly the negotiated `CK_VERSION` written back to
+    /// `CK_TLS12_MASTER_KEY_DERIVE_PARAMS.pVersion`. Default delegates
+    /// to `derive_key` and reports no mutation, preserving the
+    /// pre-existing behaviour for backends that don't implement it.
+    fn derive_key_with_output(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        base_key: CkObjectHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
+        self.derive_key(session, mechanism, base_key, template).map(|h| (h, None))
+    }
+
+    /// Non-throwing PKCS#11 result shape for `C_DeriveKey` mechanism-output
+    /// writeback. The outer `CkResult` is reserved for failures that prevent a
+    /// structured call result from being formed; PKCS#11 return values from the
+    /// backend call itself live in [`CkDeriveKeyOutputResult::rv`].
+    fn derive_key_with_output_result(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        base_key: CkObjectHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<CkDeriveKeyOutputResult> {
+        Ok(match self.derive_key_with_output(session, mechanism, base_key, template) {
+            Ok((handle, mechanism_out)) => CkDeriveKeyOutputResult::ok(handle, mechanism_out),
+            Err(rv) => CkDeriveKeyOutputResult::error(rv, None),
+        })
+    }
     fn wrap_key(
         &self,
         session: CkSessionHandle,
@@ -405,6 +478,24 @@ pub trait Pkcs11Backend: Send + Sync {
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
+    }
+
+    /// `C_WrapKey` with mechanism-param write-back. Returns the wrapped key
+    /// bytes plus any `Option<CkMechanismParams>` the HSM mutated during
+    /// the call — most importantly the AES-GCM IV when wrapping with
+    /// `CKM_AES_GCM` and the HSM generated it. Default delegates to
+    /// `wrap_key_exact` and reports no mechanism mutation, preserving the
+    /// pre-existing behaviour for backends that don't implement it.
+    fn wrap_key_exact_with_output(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        wrapping_key: CkObjectHandle,
+        key: CkObjectHandle,
+        spec: &CkOutputBufferSpec,
+    ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)> {
+        self.wrap_key_exact(session, mechanism, wrapping_key, key, spec)
+            .map(|result| (result, None))
     }
 
     // --- Track C: Exact parameter-output methods ---
@@ -912,5 +1003,18 @@ pub trait Pkcs11Backend: Send + Sync {
                 null_functions: vec![],
             }],
         }
+    }
+
+    /// Return the current `output_params()` of the mechanism cached for
+    /// `session` (set by the last `*_init` call). Used by the server to
+    /// surface HSM-mutated mechanism fields (e.g. AES-GCM IV after
+    /// `C_Encrypt`) on the simple `Encrypt`/`Decrypt` RPCs that pre-date
+    /// the `ByteOutputExact` exact-output path.  Returns `None` for
+    /// backends that don't cache mechanism state across RPCs.
+    fn session_output_mechanism_params(
+        &self,
+        _session: CkSessionHandle,
+    ) -> Option<CkMechanismParams> {
+        None
     }
 }

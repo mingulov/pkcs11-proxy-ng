@@ -1,5 +1,5 @@
 // crates/pkcs11-backend/src/ffi.rs
-use crate::traits::Pkcs11Backend;
+use crate::traits::{CkDeriveKeyOutputResult, Pkcs11Backend};
 use libloading::Library;
 use pkcs11_proxy_ng_types::*;
 use std::collections::HashMap;
@@ -137,6 +137,10 @@ pub struct FfiBackend {
     /// FfiMechanism (and its backing `Vec<u8>` buffers) alive until the next
     /// Init call or session close replaces it.
     mech_cache: Mutex<HashMap<u64, ffi_conversion::FfiMechanism>>,
+    /// Reverse map of session handle -> slot id, used to evict per-slot
+    /// `mech_cache` entries on `C_CloseAllSessions`. Populated on successful
+    /// `ffi_open_session`, drained on close paths.
+    session_slot_map: Mutex<HashMap<u64, u64>>,
 }
 
 // Safety: PKCS#11 spec requires modules loaded with CKF_OS_LOCKING_OK to be
@@ -180,7 +184,13 @@ impl Pkcs11Backend for FfiBackend {
     fn finalize(&self) -> CkResult<()> {
         Self::call_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
             function(std::ptr::null_mut())
-        })
+        })?;
+        // This is the daemon/backend finalizer, not the per-client gRPC
+        // Finalize path. Per-client Finalize removes only that client context
+        // and closes its sessions. Once the underlying module accepts
+        // C_Finalize, every cached session binding is out of scope.
+        self.drop_all_mech_cache();
+        Ok(())
     }
 
     fn get_info(&self) -> CkResult<CkInfo> {
@@ -303,6 +313,10 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_sign_init(session, mechanism, key)
     }
 
+    fn sign_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.ffi_sign_init_cancel(session)
+    }
+
     fn sign(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
         self.ffi_sign(session, data)
     }
@@ -322,6 +336,10 @@ impl Pkcs11Backend for FfiBackend {
         key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_sign_recover_init(session, mechanism, key)
+    }
+
+    fn sign_recover_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.ffi_sign_recover_init_cancel(session)
     }
 
     fn sign_recover(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
@@ -372,6 +390,10 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_verify_recover_init(session, mechanism, key)
     }
 
+    fn verify_recover_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.ffi_verify_recover_init_cancel(session)
+    }
+
     fn verify_recover(&self, session: CkSessionHandle, signature: &[u8]) -> CkResult<Vec<u8>> {
         self.ffi_verify_recover(session, signature)
     }
@@ -383,6 +405,10 @@ impl Pkcs11Backend for FfiBackend {
         key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_verify_init(session, mechanism, key)
+    }
+
+    fn verify_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.ffi_verify_init_cancel(session)
     }
 
     fn verify(&self, session: CkSessionHandle, data: &[u8], signature: &[u8]) -> CkResult<()> {
@@ -399,6 +425,10 @@ impl Pkcs11Backend for FfiBackend {
 
     fn digest_init(&self, session: CkSessionHandle, mechanism: &CkMechanism) -> CkResult<()> {
         self.ffi_digest_init(session, mechanism)
+    }
+
+    fn digest_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.ffi_digest_init_cancel(session)
     }
 
     fn digest(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
@@ -443,6 +473,10 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_encrypt_init_with_output(session, mechanism, key)
     }
 
+    fn encrypt_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.ffi_encrypt_init_cancel(session)
+    }
+
     fn encrypt(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
         self.ffi_encrypt(session, data)
     }
@@ -460,8 +494,19 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         key: CkObjectHandle,
-    ) -> CkResult<()> {
+    ) -> CkResult<Option<CkMechanismParams>> {
         self.ffi_decrypt_init(session, mechanism, key)
+    }
+
+    fn decrypt_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        self.ffi_decrypt_init_cancel(session)
+    }
+
+    fn session_output_mechanism_params(
+        &self,
+        session: CkSessionHandle,
+    ) -> Option<CkMechanismParams> {
+        self.cached_mechanism_output_params(session)
     }
 
     fn decrypt(&self, session: CkSessionHandle, encrypted_data: &[u8]) -> CkResult<Vec<u8>> {
@@ -547,6 +592,26 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_derive_key(session, mechanism, base_key, template)
     }
 
+    fn derive_key_with_output(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        base_key: CkObjectHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
+        self.ffi_derive_key_with_output(session, mechanism, base_key, template)
+    }
+
+    fn derive_key_with_output_result(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        base_key: CkObjectHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<CkDeriveKeyOutputResult> {
+        self.ffi_derive_key_with_output_result(session, mechanism, base_key, template)
+    }
+
     fn wrap_key(
         &self,
         session: CkSessionHandle,
@@ -566,6 +631,17 @@ impl Pkcs11Backend for FfiBackend {
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_wrap_key_exact(session, mechanism, wrapping_key, key, spec)
+    }
+
+    fn wrap_key_exact_with_output(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        wrapping_key: CkObjectHandle,
+        key: CkObjectHandle,
+        spec: &CkOutputBufferSpec,
+    ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)> {
+        self.ffi_wrap_key_exact_with_output(session, mechanism, wrapping_key, key, spec)
     }
 
     fn unwrap_key(
@@ -1233,5 +1309,67 @@ impl Pkcs11Backend for FfiBackend {
 
     fn get_interface_capabilities(&self) -> InterfaceCapabilities {
         self.detect_interface_capabilities()
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" fn finalize_ok(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn finalize_fails(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_GENERAL_ERROR
+    }
+
+    fn backend_with_finalize(
+        finalize: cryptoki_sys::CK_C_Finalize,
+    ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_Finalize = finalize;
+
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: Mutex::new(HashMap::new()),
+            session_slot_map: Mutex::new(HashMap::new()),
+        };
+
+        (backend, functions)
+    }
+
+    fn seed_cache(backend: &FfiBackend) {
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
+        backend.mech_cache.lock().unwrap().insert(7, ffi_mechanism);
+        backend.session_slot_map.lock().unwrap().insert(7, 11);
+    }
+
+    #[test]
+    fn finalize_preserves_mechanism_cache_when_underlying_finalize_fails() {
+        let (backend, _functions) = backend_with_finalize(Some(finalize_fails));
+        seed_cache(&backend);
+
+        assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
+
+        assert!(backend.mech_cache.lock().unwrap().contains_key(&7));
+        assert_eq!(backend.session_slot_map.lock().unwrap().get(&7), Some(&11));
+    }
+
+    #[test]
+    fn finalize_clears_mechanism_cache_after_underlying_finalize_succeeds() {
+        let (backend, _functions) = backend_with_finalize(Some(finalize_ok));
+        seed_cache(&backend);
+
+        backend.finalize().unwrap();
+
+        assert!(backend.mech_cache.lock().unwrap().is_empty());
+        assert!(backend.session_slot_map.lock().unwrap().is_empty());
     }
 }

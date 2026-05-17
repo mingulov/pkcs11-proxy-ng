@@ -258,8 +258,221 @@ impl FfiMechanism {
                     tag_bits: gcm.ulTagBits as u64,
                 }))
             }
+            FfiParamBacking::Tls12MasterKeyDerive(tls12, client_random, server_random, version) => {
+                // CK_TLS12_MASTER_KEY_DERIVE_PARAMS.pVersion is OUT —
+                // the HSM writes the negotiated CK_VERSION here when
+                // pVersion is non-NULL. Surface the version_major /
+                // version_minor back to the caller; the random data
+                // and PRF mechanism are unchanged by the derive (those
+                // fields are caller-supplied inputs).
+                Some(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
+                    random_info: pkcs11_proxy_ng_types::SslRandomData {
+                        client_random: client_random.clone(),
+                        server_random: server_random.clone(),
+                    },
+                    version_major: version.major as u32,
+                    version_minor: version.minor as u32,
+                    prf_hash_mechanism: tls12.prfHashMechanism as u64,
+                }))
+            }
+            FfiParamBacking::WtlsMasterKeyDerive(wtls, client_random, server_random, version) => {
+                Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
+                    digest_mechanism: wtls.DigestMechanism as u64,
+                    random_info: WtlsRandomData {
+                        client_random: client_random.clone(),
+                        server_random: server_random.clone(),
+                    },
+                    version: version.first().copied().unwrap_or_default() as u32,
+                }))
+            }
+            FfiParamBacking::WtlsKeyMat(wtls, client_random, server_random, key_mat_out, iv) => {
+                let iv_len = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(iv.len());
+                let output_iv =
+                    if key_mat_out.pIV.is_null() { Vec::new() } else { iv[..iv_len].to_vec() };
+                Some(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
+                    digest_mechanism: wtls.DigestMechanism as u64,
+                    mac_size_bits: wtls.ulMacSizeInBits as u64,
+                    key_size_bits: wtls.ulKeySizeInBits as u64,
+                    iv_size_bits: wtls.ulIVSizeInBits as u64,
+                    sequence_number: wtls.ulSequenceNumber as u64,
+                    is_export: wtls.bIsExport != 0,
+                    random_info: WtlsRandomData {
+                        client_random: client_random.clone(),
+                        server_random: server_random.clone(),
+                    },
+                    mac_secret_handle: key_mat_out.hMacSecret as u64,
+                    key_handle: key_mat_out.hKey as u64,
+                    iv: output_iv,
+                }))
+            }
+            FfiParamBacking::Ssl3KeyMat(
+                ssl3,
+                client_random,
+                server_random,
+                key_mat_out,
+                client_iv,
+                server_iv,
+            ) => {
+                let iv_len =
+                    (((ssl3.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
+                Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+                    mac_size_bits: ssl3.ulMacSizeInBits as u64,
+                    key_size_bits: ssl3.ulKeySizeInBits as u64,
+                    iv_size_bits: ssl3.ulIVSizeInBits as u64,
+                    is_export: ssl3.bIsExport != 0,
+                    random_info: pkcs11_proxy_ng_types::SslRandomData {
+                        client_random: client_random.clone(),
+                        server_random: server_random.clone(),
+                    },
+                    prf_hash_mechanism: 0,
+                    client_mac_secret_handle: key_mat_out.hClientMacSecret as u64,
+                    server_mac_secret_handle: key_mat_out.hServerMacSecret as u64,
+                    client_key_handle: key_mat_out.hClientKey as u64,
+                    server_key_handle: key_mat_out.hServerKey as u64,
+                    client_iv: if key_mat_out.pIVClient.is_null() {
+                        Vec::new()
+                    } else {
+                        client_iv[..iv_len].to_vec()
+                    },
+                    server_iv: if key_mat_out.pIVServer.is_null() {
+                        Vec::new()
+                    } else {
+                        server_iv[..iv_len.min(server_iv.len())].to_vec()
+                    },
+                }))
+            }
+            FfiParamBacking::Tls12KeyMat(
+                tls12,
+                client_random,
+                server_random,
+                key_mat_out,
+                client_iv,
+                server_iv,
+            ) => {
+                let iv_len =
+                    (((tls12.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
+                Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+                    mac_size_bits: tls12.ulMacSizeInBits as u64,
+                    key_size_bits: tls12.ulKeySizeInBits as u64,
+                    iv_size_bits: tls12.ulIVSizeInBits as u64,
+                    is_export: tls12.bIsExport != 0,
+                    random_info: pkcs11_proxy_ng_types::SslRandomData {
+                        client_random: client_random.clone(),
+                        server_random: server_random.clone(),
+                    },
+                    prf_hash_mechanism: tls12.prfHashMechanism as u64,
+                    client_mac_secret_handle: key_mat_out.hClientMacSecret as u64,
+                    server_mac_secret_handle: key_mat_out.hServerMacSecret as u64,
+                    client_key_handle: key_mat_out.hClientKey as u64,
+                    server_key_handle: key_mat_out.hServerKey as u64,
+                    client_iv: if key_mat_out.pIVClient.is_null() {
+                        Vec::new()
+                    } else {
+                        client_iv[..iv_len].to_vec()
+                    },
+                    server_iv: if key_mat_out.pIVServer.is_null() {
+                        Vec::new()
+                    } else {
+                        server_iv[..iv_len.min(server_iv.len())].to_vec()
+                    },
+                }))
+            }
+            FfiParamBacking::Sp800108Kdf(sp800, data_params, data_buffers, derived_keys)
+                if !derived_keys.is_empty() =>
+            {
+                Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+                    prf_type: sp800.prfType as u64,
+                    data_params: sp800_108_data_params_from_ffi(data_params, data_buffers),
+                    additional_derived_keys: derived_keys.output_keys(),
+                }))
+            }
+            FfiParamBacking::Sp800108FeedbackKdf(
+                sp800,
+                data_params,
+                data_buffers,
+                iv,
+                derived_keys,
+            ) if !derived_keys.is_empty() => {
+                Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
+                    prf_type: sp800.prfType as u64,
+                    data_params: sp800_108_data_params_from_ffi(data_params, data_buffers),
+                    iv: iv[..(sp800.ulIVLen as usize).min(iv.len())].to_vec(),
+                    additional_derived_keys: derived_keys.output_keys(),
+                }))
+            }
             _ => None,
         }
+    }
+}
+
+fn sp800_108_data_params_from_ffi(
+    params: &[cryptoki_sys::CK_PRF_DATA_PARAM],
+    buffers: &[Vec<u8>],
+) -> Vec<PrfDataParam> {
+    params
+        .iter()
+        .zip(buffers.iter())
+        .map(|(param, value)| PrfDataParam { type_: param.type_ as u64, value: value.clone() })
+        .collect()
+}
+
+struct FfiSp800108DerivedKeys {
+    original: Vec<Sp800108DerivedKey>,
+    _templates: Vec<FfiAttrs>,
+    handles: Vec<cryptoki_sys::CK_OBJECT_HANDLE>,
+    derived_keys: Vec<cryptoki_sys::CK_DERIVED_KEY>,
+}
+
+impl FfiSp800108DerivedKeys {
+    fn new(keys: &[Sp800108DerivedKey]) -> Self {
+        let mut templates: Vec<FfiAttrs> =
+            keys.iter().map(|key| FfiAttrs::from_slice(&key.template)).collect();
+        let mut handles: Vec<cryptoki_sys::CK_OBJECT_HANDLE> =
+            keys.iter().map(|key| key.key_handle as cryptoki_sys::CK_OBJECT_HANDLE).collect();
+        let handle_ptr = handles.as_mut_ptr();
+        let mut derived_keys = Vec::with_capacity(keys.len());
+
+        for (index, template) in templates.iter_mut().enumerate() {
+            let template_ptr = if template.attrs.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                template.attrs.as_mut_ptr()
+            };
+            derived_keys.push(cryptoki_sys::CK_DERIVED_KEY {
+                pTemplate: template_ptr,
+                ulAttributeCount: template.attrs.len() as cryptoki_sys::CK_ULONG,
+                phKey: unsafe { handle_ptr.add(index) },
+            });
+        }
+
+        Self { original: keys.to_vec(), _templates: templates, handles, derived_keys }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.derived_keys.is_empty()
+    }
+
+    fn ptr(&mut self) -> *mut cryptoki_sys::CK_DERIVED_KEY {
+        if self.derived_keys.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            self.derived_keys.as_mut_ptr()
+        }
+    }
+
+    fn len(&self) -> cryptoki_sys::CK_ULONG {
+        self.derived_keys.len() as cryptoki_sys::CK_ULONG
+    }
+
+    fn output_keys(&self) -> Vec<Sp800108DerivedKey> {
+        self.original
+            .iter()
+            .zip(self.handles.iter())
+            .map(|(original, handle)| Sp800108DerivedKey {
+                template: original.template.clone(),
+                key_handle: *handle as u64,
+            })
+            .collect()
     }
 }
 
@@ -306,6 +519,8 @@ enum FfiParamBacking {
     ),
     RsaAesKeyWrap(Box<FfiRsaAesKeyWrapParams>, Box<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>, Vec<u8>),
     SignAdditionalContext(Box<FfiSignAdditionalContext>, Vec<u8>),
+    Kmac(Box<FfiKmacParams>, Vec<u8>),
+    MuGen(Box<FfiMuGenParams>, Vec<u8>, Vec<u8>),
     Pkcs5Pbkd2(Box<cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2>, Vec<u8>, Vec<u8>, Vec<u8>),
     Tls12MasterKeyDerive(
         Box<cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS>,
@@ -387,12 +602,14 @@ enum FfiParamBacking {
         Box<cryptoki_sys::CK_SP800_108_KDF_PARAMS>,
         Vec<cryptoki_sys::CK_PRF_DATA_PARAM>,
         Vec<Vec<u8>>,
+        FfiSp800108DerivedKeys,
     ),
     Sp800108FeedbackKdf(
         Box<cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS>,
         Vec<cryptoki_sys::CK_PRF_DATA_PARAM>,
         Vec<Vec<u8>>,
         Vec<u8>,
+        FfiSp800108DerivedKeys,
     ),
     X3dhInitiate(Box<cryptoki_sys::CK_X3DH_INITIATE_PARAMS>, Vec<u8>, Vec<u8>),
     X3dhRespond(Box<cryptoki_sys::CK_X3DH_RESPOND_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
@@ -442,6 +659,25 @@ struct FfiSignAdditionalContext {
     hedge_variant: cryptoki_sys::CK_ULONG,
     p_context: *mut cryptoki_sys::CK_BYTE,
     ul_context_len: cryptoki_sys::CK_ULONG,
+}
+
+/// CK_KMAC_PARAMS — not in cryptoki-sys, defined by the working OASIS spec.
+#[repr(C)]
+struct FfiKmacParams {
+    h_key: cryptoki_sys::CK_OBJECT_HANDLE,
+    ul_mac_length: cryptoki_sys::CK_ULONG,
+    p_customization_string: cryptoki_sys::CK_VOID_PTR,
+    ul_customization_string_len: cryptoki_sys::CK_ULONG,
+}
+
+/// CK_MU_GEN_PARAMS — not in cryptoki-sys, defined by the working OASIS spec.
+#[repr(C)]
+struct FfiMuGenParams {
+    h_key: cryptoki_sys::CK_OBJECT_HANDLE,
+    p_tr: cryptoki_sys::CK_BYTE_PTR,
+    ul_tr_len: cryptoki_sys::CK_ULONG,
+    p_ctx: cryptoki_sys::CK_BYTE_PTR,
+    ul_ctx_len: cryptoki_sys::CK_ULONG,
 }
 
 /// Convert a `CkMechanism` to an `FfiMechanism` for FFI calls.
@@ -1098,6 +1334,22 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             })
         }
 
+        // -- Extract: single CK_ULONG bit position --------------------------
+        CkMechanismParams::Extract(p) => {
+            let val = p.bit_position as cryptoki_sys::CK_EXTRACT_PARAMS;
+            let mut buf = val.to_ne_bytes().to_vec();
+            let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
+            let len = buf.len();
+            Ok(FfiMechanism {
+                ck_mechanism: cryptoki_sys::CK_MECHANISM {
+                    mechanism: mech_type,
+                    pParameter: ptr,
+                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
+                },
+                _backing: FfiParamBacking::Bytes(buf),
+            })
+        }
+
         // -- KeyDerivationStringData: struct with pointer to data -----------
         CkMechanismParams::KeyDerivationString(p) => {
             let mut data = p.data.clone();
@@ -1186,6 +1438,57 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     ulParameterLen: len as cryptoki_sys::CK_ULONG,
                 },
                 _backing: FfiParamBacking::SignAdditionalContext(sac, ctx),
+            })
+        }
+
+        // -- KMAC: CK_KMAC_PARAMS -----------------------------------------
+        CkMechanismParams::Kmac(p) => {
+            let mut customization_string = p.customization_string.clone();
+            let customization_ptr = if customization_string.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                customization_string.as_mut_ptr() as cryptoki_sys::CK_VOID_PTR
+            };
+            let mut kmac = Box::new(FfiKmacParams {
+                h_key: p.key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                ul_mac_length: p.mac_length as cryptoki_sys::CK_ULONG,
+                p_customization_string: customization_ptr,
+                ul_customization_string_len: customization_string.len() as cryptoki_sys::CK_ULONG,
+            });
+            let ptr = &mut *kmac as *mut FfiKmacParams as *mut std::ffi::c_void;
+            let len = std::mem::size_of::<FfiKmacParams>();
+            Ok(FfiMechanism {
+                ck_mechanism: cryptoki_sys::CK_MECHANISM {
+                    mechanism: mech_type,
+                    pParameter: ptr,
+                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
+                },
+                _backing: FfiParamBacking::Kmac(kmac, customization_string),
+            })
+        }
+
+        // -- ML-DSA external mu generation: CK_MU_GEN_PARAMS ---------------
+        CkMechanismParams::MuGen(p) => {
+            let mut tr = p.tr.clone();
+            let mut ctx = p.context.clone();
+            let tr_ptr = if tr.is_empty() { std::ptr::null_mut() } else { tr.as_mut_ptr() };
+            let ctx_ptr = if ctx.is_empty() { std::ptr::null_mut() } else { ctx.as_mut_ptr() };
+            let mut mu_gen = Box::new(FfiMuGenParams {
+                h_key: p.key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                p_tr: tr_ptr,
+                ul_tr_len: tr.len() as cryptoki_sys::CK_ULONG,
+                p_ctx: ctx_ptr,
+                ul_ctx_len: ctx.len() as cryptoki_sys::CK_ULONG,
+            });
+            let ptr = &mut *mu_gen as *mut FfiMuGenParams as *mut std::ffi::c_void;
+            let len = std::mem::size_of::<FfiMuGenParams>();
+            Ok(FfiMechanism {
+                ck_mechanism: cryptoki_sys::CK_MECHANISM {
+                    mechanism: mech_type,
+                    pParameter: ptr,
+                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
+                },
+                _backing: FfiParamBacking::MuGen(mu_gen, tr, ctx),
             })
         }
 
@@ -1468,19 +1771,30 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             } else {
                 server_random.as_mut_ptr()
             };
-            // Allocate IV output buffers: size = ulIVSizeInBits / 8
-            let iv_bytes = (p.iv_size_bits as usize) / 8;
-            let mut iv_client = vec![0u8; iv_bytes];
-            let mut iv_server = vec![0u8; iv_bytes];
+            let iv_bytes = ((p.iv_size_bits as usize).saturating_add(7)) / 8;
+            let mut iv_client = if p.client_iv.is_empty() {
+                vec![0u8; iv_bytes]
+            } else {
+                let mut iv = p.client_iv.clone();
+                iv.resize(iv_bytes, 0);
+                iv
+            };
+            let mut iv_server = if p.server_iv.is_empty() {
+                vec![0u8; iv_bytes]
+            } else {
+                let mut iv = p.server_iv.clone();
+                iv.resize(iv_bytes, 0);
+                iv
+            };
             let iv_client_ptr =
-                if iv_bytes == 0 { std::ptr::null_mut() } else { iv_client.as_mut_ptr() };
+                if iv_client.is_empty() { std::ptr::null_mut() } else { iv_client.as_mut_ptr() };
             let iv_server_ptr =
-                if iv_bytes == 0 { std::ptr::null_mut() } else { iv_server.as_mut_ptr() };
+                if iv_server.is_empty() { std::ptr::null_mut() } else { iv_server.as_mut_ptr() };
             let mut key_mat_out = Box::new(cryptoki_sys::CK_SSL3_KEY_MAT_OUT {
-                hClientMacSecret: 0,
-                hServerMacSecret: 0,
-                hClientKey: 0,
-                hServerKey: 0,
+                hClientMacSecret: p.client_mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hServerMacSecret: p.server_mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hClientKey: p.client_key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hServerKey: p.server_key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
                 pIVClient: iv_client_ptr,
                 pIVServer: iv_server_ptr,
             });
@@ -2127,11 +2441,20 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             } else {
                 server_random.as_mut_ptr()
             };
-            let iv_bytes = (p.iv_size_bits as usize) / 8;
-            let mut iv_buf = vec![0u8; iv_bytes];
-            let iv_ptr = if iv_bytes == 0 { std::ptr::null_mut() } else { iv_buf.as_mut_ptr() };
-            let mut kmo =
-                Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_OUT { hMacSecret: 0, hKey: 0, pIV: iv_ptr });
+            let iv_bytes = ((p.iv_size_bits as usize).saturating_add(7)) / 8;
+            let mut iv_buf = if p.iv.is_empty() {
+                vec![0u8; iv_bytes]
+            } else {
+                let mut iv = p.iv.clone();
+                iv.resize(iv_bytes, 0);
+                iv
+            };
+            let iv_ptr = if iv_buf.is_empty() { std::ptr::null_mut() } else { iv_buf.as_mut_ptr() };
+            let mut kmo = Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_OUT {
+                hMacSecret: p.mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hKey: p.key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                pIV: iv_ptr,
+            });
             let mut wtls = Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS {
                 DigestMechanism: p.digest_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
                 ulMacSizeInBits: p.mac_size_bits as cryptoki_sys::CK_ULONG,
@@ -2187,12 +2510,13 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             }
             let data_ptr =
                 if c_params.is_empty() { std::ptr::null_mut() } else { c_params.as_mut_ptr() };
+            let mut derived_keys = FfiSp800108DerivedKeys::new(&p.additional_derived_keys);
             let mut sp = Box::new(cryptoki_sys::CK_SP800_108_KDF_PARAMS {
                 prfType: p.prf_type as cryptoki_sys::CK_SP800_108_PRF_TYPE,
                 ulNumberOfDataParams: c_params.len() as cryptoki_sys::CK_ULONG,
                 pDataParams: data_ptr,
-                ulAdditionalDerivedKeys: 0,
-                pAdditionalDerivedKeys: std::ptr::null_mut(),
+                ulAdditionalDerivedKeys: derived_keys.len(),
+                pAdditionalDerivedKeys: derived_keys.ptr(),
             });
             let ptr = &mut *sp as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_KDF_PARAMS>();
@@ -2202,7 +2526,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     pParameter: ptr,
                     ulParameterLen: len as cryptoki_sys::CK_ULONG,
                 },
-                _backing: FfiParamBacking::Sp800108Kdf(sp, c_params, buffers),
+                _backing: FfiParamBacking::Sp800108Kdf(sp, c_params, buffers, derived_keys),
             })
         }
 
@@ -2229,14 +2553,15 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 if c_params.is_empty() { std::ptr::null_mut() } else { c_params.as_mut_ptr() };
             let mut iv = p.iv.clone();
             let iv_ptr = if iv.is_empty() { std::ptr::null_mut() } else { iv.as_mut_ptr() };
+            let mut derived_keys = FfiSp800108DerivedKeys::new(&p.additional_derived_keys);
             let mut sp = Box::new(cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS {
                 prfType: p.prf_type as cryptoki_sys::CK_SP800_108_PRF_TYPE,
                 ulNumberOfDataParams: c_params.len() as cryptoki_sys::CK_ULONG,
                 pDataParams: data_ptr,
                 ulIVLen: iv.len() as cryptoki_sys::CK_ULONG,
                 pIV: iv_ptr,
-                ulAdditionalDerivedKeys: 0,
-                pAdditionalDerivedKeys: std::ptr::null_mut(),
+                ulAdditionalDerivedKeys: derived_keys.len(),
+                pAdditionalDerivedKeys: derived_keys.ptr(),
             });
             let ptr = &mut *sp as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS>();
@@ -2246,7 +2571,13 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     pParameter: ptr,
                     ulParameterLen: len as cryptoki_sys::CK_ULONG,
                 },
-                _backing: FfiParamBacking::Sp800108FeedbackKdf(sp, c_params, buffers, iv),
+                _backing: FfiParamBacking::Sp800108FeedbackKdf(
+                    sp,
+                    c_params,
+                    buffers,
+                    iv,
+                    derived_keys,
+                ),
             })
         }
 
@@ -2658,13 +2989,85 @@ fn gcm_iv_capacity(p: &GcmParams) -> CkResult<usize> {
 mod mechanism_to_ffi_tests {
     use super::mechanism_to_ffi;
     use pkcs11_proxy_ng_types::{
-        AesCtrParams, CkMechanism, CkMechanismParams, CkMechanismType, GcmParams, IvParams,
-        RsaPkcsOaepParams, RsaPkcsPssParams,
+        AesCmacKeyDerivationParams, AesCtrParams, CkMechanism, CkMechanismParams, CkMechanismType,
+        CkRv, DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams, IvParams,
+        KeyDerivationStringData, KmacParams, KyberParams, MuGenParams, ObjectHandleParam,
+        RawMechanismParams, RsaPkcsOaepParams, RsaPkcsPssParams, SignAdditionalContext,
+        Ssl3KeyMatParams, SslRandomData, VendorObjectExtractParams, VendorObjectInsertParams,
+        WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsRandomData,
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
         mechanism_to_ffi(&CkMechanism { mechanism_type, params: Some(params) })
             .expect("mechanism converts to ffi")
+    }
+
+    #[test]
+    fn unsupported_mechanism_params_are_rejected_by_backend_ffi() {
+        let parameterless = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
+        let cases = [
+            ("Raw", CkMechanismParams::Raw(RawMechanismParams { data: vec![0x01, 0x02] })),
+            (
+                "Ecies",
+                CkMechanismParams::Ecies(EciesParams {
+                    derivation_mechanism: Box::new(parameterless.clone()),
+                    encryption_mechanism: Box::new(parameterless.clone()),
+                    mac_mechanism: Box::new(parameterless.clone()),
+                    shared_data: vec![0x03],
+                }),
+            ),
+            (
+                "AesCmacKeyDerivation",
+                CkMechanismParams::AesCmacKeyDerivation(AesCmacKeyDerivationParams {
+                    context: vec![0x04],
+                    label: vec![0x05],
+                }),
+            ),
+            ("Dilithium", CkMechanismParams::Dilithium(DilithiumParams { version: 1, mode: 2 })),
+            (
+                "Kyber",
+                CkMechanismParams::Kyber(KyberParams {
+                    version: 3,
+                    mode: 4,
+                    secret_handle: 5,
+                    shared_data: vec![0x06],
+                    blob: vec![0x07],
+                }),
+            ),
+            (
+                "HdKeyDerive",
+                CkMechanismParams::HdKeyDerive(HdKeyDeriveParams {
+                    derive_type: 8,
+                    child_key_index: 9,
+                    chain_code: vec![0x0A],
+                    version: 10,
+                }),
+            ),
+            (
+                "VendorObjectExtract",
+                CkMechanismParams::VendorObjectExtract(VendorObjectExtractParams {
+                    format: 11,
+                    context: vec![0x0C],
+                }),
+            ),
+            (
+                "VendorObjectInsert",
+                CkMechanismParams::VendorObjectInsert(VendorObjectInsertParams {
+                    format: 12,
+                    context: vec![0x0D],
+                    object_data: vec![0x0E],
+                }),
+            ),
+        ];
+
+        for (name, params) in cases {
+            let mechanism =
+                CkMechanism { mechanism_type: CkMechanismType(0x8000_0000), params: Some(params) };
+            match mechanism_to_ffi(&mechanism) {
+                Err(err) => assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID, "{name}"),
+                Ok(_) => panic!("{name} should be rejected before backend FFI reconstruction"),
+            }
+        }
     }
 
     #[test]
@@ -2784,6 +3187,222 @@ mod mechanism_to_ffi_tests {
     }
 
     #[test]
+    fn wtls_master_key_derive_output_params_surface_mutated_version_byte() {
+        const CKM_WTLS_MASTER_KEY_DERIVE: CkMechanismType = CkMechanismType(0x0000_03D1);
+
+        let ffi = convert(
+            CKM_WTLS_MASTER_KEY_DERIVE,
+            CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
+                digest_mechanism: CkMechanismType::SHA256.0,
+                random_info: WtlsRandomData {
+                    client_random: vec![0xA1, 0xA2],
+                    server_random: vec![0xB1, 0xB2],
+                },
+                version: 1,
+            }),
+        );
+
+        let wtls = unsafe {
+            &mut *(ffi.ck_mechanism.pParameter
+                as *mut cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS)
+        };
+        assert!(!wtls.pVersion.is_null());
+        unsafe {
+            *wtls.pVersion = 2;
+        }
+
+        match ffi.output_params() {
+            Some(CkMechanismParams::WtlsMasterKeyDerive(params)) => {
+                assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0);
+                assert_eq!(params.random_info.client_random, [0xA1, 0xA2]);
+                assert_eq!(params.random_info.server_random, [0xB1, 0xB2]);
+                assert_eq!(params.version, 2);
+            }
+            other => panic!("unexpected output params: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wtls_key_mat_output_params_surface_mutated_handles_and_iv() {
+        const CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE: CkMechanismType = CkMechanismType(0x0000_03D4);
+
+        let ffi = convert(
+            CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE,
+            CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
+                digest_mechanism: CkMechanismType::SHA256.0,
+                mac_size_bits: 160,
+                key_size_bits: 128,
+                iv_size_bits: 32,
+                sequence_number: 7,
+                is_export: true,
+                random_info: WtlsRandomData {
+                    client_random: vec![0xC1, 0xC2],
+                    server_random: vec![0xD1, 0xD2],
+                },
+                mac_secret_handle: 0,
+                key_handle: 0,
+                iv: Vec::new(),
+            }),
+        );
+
+        let wtls = unsafe {
+            &mut *(ffi.ck_mechanism.pParameter as *mut cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS)
+        };
+        let key_mat_out = unsafe { &mut *wtls.pReturnedKeyMaterial };
+        assert!(!key_mat_out.pIV.is_null());
+        key_mat_out.hMacSecret = 101;
+        key_mat_out.hKey = 202;
+        unsafe {
+            std::ptr::copy_nonoverlapping([0xA1, 0xA2, 0xA3, 0xA4].as_ptr(), key_mat_out.pIV, 4);
+        }
+
+        match ffi.output_params() {
+            Some(CkMechanismParams::WtlsKeyMat(params)) => {
+                assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0);
+                assert_eq!(params.mac_size_bits, 160);
+                assert_eq!(params.key_size_bits, 128);
+                assert_eq!(params.iv_size_bits, 32);
+                assert_eq!(params.sequence_number, 7);
+                assert!(params.is_export);
+                assert_eq!(params.random_info.client_random, [0xC1, 0xC2]);
+                assert_eq!(params.random_info.server_random, [0xD1, 0xD2]);
+                assert_eq!(params.mac_secret_handle, 101);
+                assert_eq!(params.key_handle, 202);
+                assert_eq!(params.iv, [0xA1, 0xA2, 0xA3, 0xA4]);
+            }
+            other => panic!("unexpected output params: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssl3_key_mat_output_params_surface_mutated_handles_and_ivs() {
+        const CKM_SSL3_KEY_AND_MAC_DERIVE: CkMechanismType = CkMechanismType(0x0000_0372);
+
+        let ffi = convert(
+            CKM_SSL3_KEY_AND_MAC_DERIVE,
+            CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+                mac_size_bits: 160,
+                key_size_bits: 128,
+                iv_size_bits: 32,
+                is_export: false,
+                random_info: SslRandomData {
+                    client_random: vec![0x11, 0x12],
+                    server_random: vec![0x21, 0x22],
+                },
+                prf_hash_mechanism: 0,
+                client_mac_secret_handle: 0,
+                server_mac_secret_handle: 0,
+                client_key_handle: 0,
+                server_key_handle: 0,
+                client_iv: Vec::new(),
+                server_iv: Vec::new(),
+            }),
+        );
+
+        let ssl3 = unsafe {
+            &mut *(ffi.ck_mechanism.pParameter as *mut cryptoki_sys::CK_SSL3_KEY_MAT_PARAMS)
+        };
+        let key_mat_out = unsafe { &mut *ssl3.pReturnedKeyMaterial };
+        key_mat_out.hClientMacSecret = 101;
+        key_mat_out.hServerMacSecret = 102;
+        key_mat_out.hClientKey = 201;
+        key_mat_out.hServerKey = 202;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                [0xA1, 0xA2, 0xA3, 0xA4].as_ptr(),
+                key_mat_out.pIVClient,
+                4,
+            );
+            std::ptr::copy_nonoverlapping(
+                [0xB1, 0xB2, 0xB3, 0xB4].as_ptr(),
+                key_mat_out.pIVServer,
+                4,
+            );
+        }
+
+        match ffi.output_params() {
+            Some(CkMechanismParams::Ssl3KeyMat(params)) => {
+                assert_eq!(params.mac_size_bits, 160);
+                assert_eq!(params.key_size_bits, 128);
+                assert_eq!(params.iv_size_bits, 32);
+                assert!(!params.is_export);
+                assert_eq!(params.random_info.client_random, [0x11, 0x12]);
+                assert_eq!(params.random_info.server_random, [0x21, 0x22]);
+                assert_eq!(params.prf_hash_mechanism, 0);
+                assert_eq!(params.client_mac_secret_handle, 101);
+                assert_eq!(params.server_mac_secret_handle, 102);
+                assert_eq!(params.client_key_handle, 201);
+                assert_eq!(params.server_key_handle, 202);
+                assert_eq!(params.client_iv, [0xA1, 0xA2, 0xA3, 0xA4]);
+                assert_eq!(params.server_iv, [0xB1, 0xB2, 0xB3, 0xB4]);
+            }
+            other => panic!("unexpected output params: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tls12_key_mat_output_params_surface_mutated_handles_and_ivs() {
+        const CKM_TLS12_KEY_AND_MAC_DERIVE: CkMechanismType = CkMechanismType(0x0000_03E1);
+
+        let ffi = convert(
+            CKM_TLS12_KEY_AND_MAC_DERIVE,
+            CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+                mac_size_bits: 160,
+                key_size_bits: 128,
+                iv_size_bits: 32,
+                is_export: false,
+                random_info: SslRandomData {
+                    client_random: vec![0x31, 0x32],
+                    server_random: vec![0x41, 0x42],
+                },
+                prf_hash_mechanism: CkMechanismType::SHA256.0,
+                client_mac_secret_handle: 0,
+                server_mac_secret_handle: 0,
+                client_key_handle: 0,
+                server_key_handle: 0,
+                client_iv: Vec::new(),
+                server_iv: Vec::new(),
+            }),
+        );
+
+        let tls12 = unsafe {
+            &mut *(ffi.ck_mechanism.pParameter as *mut cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS)
+        };
+        let key_mat_out = unsafe { &mut *tls12.pReturnedKeyMaterial };
+        key_mat_out.hClientMacSecret = 111;
+        key_mat_out.hServerMacSecret = 112;
+        key_mat_out.hClientKey = 211;
+        key_mat_out.hServerKey = 212;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                [0xC1, 0xC2, 0xC3, 0xC4].as_ptr(),
+                key_mat_out.pIVClient,
+                4,
+            );
+            std::ptr::copy_nonoverlapping(
+                [0xD1, 0xD2, 0xD3, 0xD4].as_ptr(),
+                key_mat_out.pIVServer,
+                4,
+            );
+        }
+
+        match ffi.output_params() {
+            Some(CkMechanismParams::Ssl3KeyMat(params)) => {
+                assert_eq!(params.random_info.client_random, [0x31, 0x32]);
+                assert_eq!(params.random_info.server_random, [0x41, 0x42]);
+                assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0);
+                assert_eq!(params.client_mac_secret_handle, 111);
+                assert_eq!(params.server_mac_secret_handle, 112);
+                assert_eq!(params.client_key_handle, 211);
+                assert_eq!(params.server_key_handle, 212);
+                assert_eq!(params.client_iv, [0xC1, 0xC2, 0xC3, 0xC4]);
+                assert_eq!(params.server_iv, [0xD1, 0xD2, 0xD3, 0xD4]);
+            }
+            other => panic!("unexpected output params: {other:?}"),
+        }
+    }
+
+    #[test]
     fn cbc_iv_params_reconstruct_raw_iv_buffer() {
         let ffi = convert(
             CkMechanismType::AES_CBC,
@@ -2815,6 +3434,137 @@ mod mechanism_to_ffi_tests {
             unsafe { &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_AES_CTR_PARAMS) };
         assert_eq!(ctr.ulCounterBits, 128);
         assert_eq!(ctr.cb, [0x33; 16]);
+    }
+
+    #[test]
+    fn extract_params_reconstruct_ck_ulong_bit_position() {
+        let ffi = convert(
+            CkMechanismType(0x0000_0365),
+            CkMechanismParams::Extract(ExtractParams { bit_position: 21 }),
+        );
+
+        assert_eq!(
+            ffi.ck_mechanism.ulParameterLen,
+            std::mem::size_of::<cryptoki_sys::CK_EXTRACT_PARAMS>() as cryptoki_sys::CK_ULONG
+        );
+        let bit_position =
+            unsafe { *(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_EXTRACT_PARAMS) };
+        assert_eq!(bit_position, 21);
+    }
+
+    #[test]
+    fn object_handle_param_reconstructs_ck_object_handle() {
+        let ffi = convert(
+            CkMechanismType(0x0000_0500),
+            CkMechanismParams::ObjectHandle(ObjectHandleParam { handle: 0xCAFE }),
+        );
+
+        assert_eq!(
+            ffi.ck_mechanism.ulParameterLen,
+            std::mem::size_of::<cryptoki_sys::CK_OBJECT_HANDLE>() as cryptoki_sys::CK_ULONG
+        );
+        let handle =
+            unsafe { *(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_OBJECT_HANDLE) };
+        assert_eq!(handle, 0xCAFE);
+    }
+
+    #[test]
+    fn key_derivation_string_data_reconstructs_c_struct() {
+        let ffi = convert(
+            CkMechanismType(0x0000_0501),
+            CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
+                data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            }),
+        );
+
+        assert_eq!(
+            ffi.ck_mechanism.ulParameterLen,
+            std::mem::size_of::<cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA>()
+                as cryptoki_sys::CK_ULONG
+        );
+        let params = unsafe {
+            &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA)
+        };
+        assert_eq!(params.ulLen, 4);
+        let data = unsafe { std::slice::from_raw_parts(params.pData, params.ulLen as usize) };
+        assert_eq!(data, [0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn sign_additional_context_reconstructs_c_struct() {
+        let ffi = convert(
+            CkMechanismType(0x0000_0502),
+            CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
+                hedge_variant: 1,
+                context: vec![0xA1, 0xA2, 0xA3],
+            }),
+        );
+
+        assert_eq!(
+            ffi.ck_mechanism.ulParameterLen,
+            std::mem::size_of::<super::FfiSignAdditionalContext>() as cryptoki_sys::CK_ULONG
+        );
+        let params =
+            unsafe { &*(ffi.ck_mechanism.pParameter as *const super::FfiSignAdditionalContext) };
+        assert_eq!(params.hedge_variant, 1);
+        assert_eq!(params.ul_context_len, 3);
+        let context =
+            unsafe { std::slice::from_raw_parts(params.p_context, params.ul_context_len as usize) };
+        assert_eq!(context, [0xA1, 0xA2, 0xA3]);
+    }
+
+    #[test]
+    fn kmac_params_reconstruct_c_struct_and_customization_string() {
+        let ffi = convert(
+            CkMechanismType(0x8000_0001),
+            CkMechanismParams::Kmac(KmacParams {
+                key_handle: 0xCAFE,
+                mac_length: 64,
+                customization_string: b"custom".to_vec(),
+            }),
+        );
+
+        assert_eq!(
+            ffi.ck_mechanism.ulParameterLen,
+            std::mem::size_of::<super::FfiKmacParams>() as cryptoki_sys::CK_ULONG
+        );
+        let kmac = unsafe { &*(ffi.ck_mechanism.pParameter as *const super::FfiKmacParams) };
+        assert_eq!(kmac.h_key, 0xCAFE);
+        assert_eq!(kmac.ul_mac_length, 64);
+        assert_eq!(kmac.ul_customization_string_len, 6);
+        let customization = unsafe {
+            std::slice::from_raw_parts(
+                kmac.p_customization_string as *const u8,
+                kmac.ul_customization_string_len as usize,
+            )
+        };
+        assert_eq!(customization, b"custom");
+    }
+
+    #[test]
+    fn mu_gen_params_reconstruct_c_struct_tr_and_context() {
+        let ffi = convert(
+            CkMechanismType(0x8000_0002),
+            CkMechanismParams::MuGen(MuGenParams {
+                key_handle: 0xA11CE,
+                tr: b"precomputed-tr".to_vec(),
+                context: b"context".to_vec(),
+            }),
+        );
+
+        assert_eq!(
+            ffi.ck_mechanism.ulParameterLen,
+            std::mem::size_of::<super::FfiMuGenParams>() as cryptoki_sys::CK_ULONG
+        );
+        let mu_gen = unsafe { &*(ffi.ck_mechanism.pParameter as *const super::FfiMuGenParams) };
+        assert_eq!(mu_gen.h_key, 0xA11CE);
+        assert_eq!(mu_gen.ul_tr_len, 14);
+        assert_eq!(mu_gen.ul_ctx_len, 7);
+        let tr = unsafe { std::slice::from_raw_parts(mu_gen.p_tr, mu_gen.ul_tr_len as usize) };
+        let context =
+            unsafe { std::slice::from_raw_parts(mu_gen.p_ctx, mu_gen.ul_ctx_len as usize) };
+        assert_eq!(tr, b"precomputed-tr");
+        assert_eq!(context, b"context");
     }
 }
 

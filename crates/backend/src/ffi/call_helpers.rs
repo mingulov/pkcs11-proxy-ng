@@ -1,4 +1,5 @@
 use super::{FfiBackend, ffi_conversion::mechanism_to_ffi};
+use crate::traits::CkDeriveKeyOutputResult;
 use pkcs11_proxy_ng_types::*;
 
 /// Maximum output buffer the daemon will allocate for a single PKCS#11 call.
@@ -317,6 +318,58 @@ impl FfiBackend {
         }
     }
 
+    /// Record `session -> slot` for later per-slot eviction in
+    /// `C_CloseAllSessions`. Called after a successful `C_OpenSession`.
+    pub(super) fn remember_session_slot(&self, session: CkSessionHandle, slot: CkSlotId) {
+        if let Ok(mut map) = self.session_slot_map.lock() {
+            map.insert(session.0, slot.0);
+        }
+    }
+
+    /// Forget `session -> slot` mapping. Called from per-session close paths.
+    pub(super) fn forget_session_slot(&self, session: CkSessionHandle) {
+        if let Ok(mut map) = self.session_slot_map.lock() {
+            map.remove(&session.0);
+        }
+    }
+
+    /// Drop all `mech_cache` entries belonging to sessions on `slot_id`,
+    /// and remove those session-slot mappings. Called from
+    /// `C_CloseAllSessions` so the underlying lib's session invalidation
+    /// is reflected in our Rust-owned caches.
+    pub(super) fn drop_mech_cache_for_slot(&self, slot_id: CkSlotId) {
+        let sessions: Vec<u64> = if let Ok(mut map) = self.session_slot_map.lock() {
+            let evicted: Vec<u64> =
+                map.iter().filter_map(|(s, slot)| (*slot == slot_id.0).then_some(*s)).collect();
+            for s in &evicted {
+                map.remove(s);
+            }
+            evicted
+        } else {
+            Vec::new()
+        };
+
+        if !sessions.is_empty()
+            && let Ok(mut cache) = self.mech_cache.lock()
+        {
+            for s in &sessions {
+                cache.remove(s);
+            }
+        }
+    }
+
+    /// Clear all `mech_cache` entries and session-slot mappings after
+    /// successful `C_Finalize` so Rust-owned mechanism backing memory is
+    /// released even when the caller doesn't close sessions individually first.
+    pub(super) fn drop_all_mech_cache(&self) {
+        if let Ok(mut cache) = self.mech_cache.lock() {
+            cache.clear();
+        }
+        if let Ok(mut map) = self.session_slot_map.lock() {
+            map.clear();
+        }
+    }
+
     pub(super) fn cached_mechanism_output_params(
         &self,
         session: CkSessionHandle,
@@ -459,6 +512,106 @@ impl FfiBackend {
         Self::single_call_bytes_exact(spec, |output, output_len| {
             call(function, &mut ffi_mech.ck_mechanism, output, output_len)
         })
+    }
+
+    /// `C_DeriveKey`-style call with mechanism-param write-back.
+    /// Returns the derived key handle plus any HSM-mutated params
+    /// (e.g. the negotiated `CK_VERSION` from a TLS 1.2 master-key
+    /// derive).  Mirrors [`Self::call_object_with_mechanism`] but
+    /// surfaces `output_params()` for callers that need it.
+    pub(super) fn call_object_with_mechanism_output<TFunction, F>(
+        function: Option<TFunction>,
+        mechanism: &CkMechanism,
+        mut call: F,
+    ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)>
+    where
+        TFunction: Copy,
+        F: FnMut(
+            TFunction,
+            &mut cryptoki_sys::CK_MECHANISM,
+            *mut cryptoki_sys::CK_OBJECT_HANDLE,
+        ) -> cryptoki_sys::CK_RV,
+    {
+        let function = Self::require_fn(function)?;
+        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+        let handle =
+            Self::object_output(|handle| call(function, &mut ffi_mech.ck_mechanism, handle))?;
+        Ok((handle, ffi_mech.output_params()))
+    }
+
+    /// `C_DeriveKey`-style call with mechanism-param write-back, preserving
+    /// post-call output params even when the PKCS#11 return value is not OK.
+    pub(super) fn call_object_with_mechanism_output_result<TFunction, F>(
+        function: Option<TFunction>,
+        mechanism: &CkMechanism,
+        mut call: F,
+    ) -> CkResult<CkDeriveKeyOutputResult>
+    where
+        TFunction: Copy,
+        F: FnMut(
+            TFunction,
+            &mut cryptoki_sys::CK_MECHANISM,
+            *mut cryptoki_sys::CK_OBJECT_HANDLE,
+        ) -> cryptoki_sys::CK_RV,
+    {
+        let function = match Self::require_fn(function) {
+            Ok(function) => function,
+            Err(rv) => return Ok(CkDeriveKeyOutputResult::error(rv, None)),
+        };
+        let mut ffi_mech = match mechanism_to_ffi(mechanism) {
+            Ok(ffi_mech) => ffi_mech,
+            Err(rv) => return Ok(CkDeriveKeyOutputResult::error(rv, None)),
+        };
+        let mut handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
+        let rv = CkRv(call(function, &mut ffi_mech.ck_mechanism, &mut handle));
+        let mechanism_out = ffi_mech.output_params();
+        if rv.is_ok() {
+            Ok(CkDeriveKeyOutputResult::ok(CkObjectHandle(handle as u64), mechanism_out))
+        } else {
+            Ok(CkDeriveKeyOutputResult::error(rv, mechanism_out))
+        }
+    }
+
+    /// Single FFI call with exact buffer semantics AND mechanism param
+    /// write-back. Used by single-shot operations whose mechanism can be
+    /// mutated by the HSM during the call (e.g. AES-GCM key wrap with
+    /// HSM-generated IV).
+    ///
+    /// Mirrors [`Self::call_bytes_exact_with_mechanism`] but additionally
+    /// reads the post-call `output_params()` off the FfiMechanism so
+    /// callers can return it to the client.  No `mech_cache` write — the
+    /// mechanism is consumed in this one call; if the HSM writes the IV
+    /// after returning (CloudHSM Encrypt-time pattern), the caller must
+    /// route through the cached `*Init` path instead.
+    pub(super) fn call_bytes_exact_with_mechanism_output<TFunction, F>(
+        function: Option<TFunction>,
+        mechanism: &CkMechanism,
+        spec: &CkOutputBufferSpec,
+        mut call: F,
+    ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)>
+    where
+        TFunction: Copy,
+        F: FnMut(
+            TFunction,
+            &mut cryptoki_sys::CK_MECHANISM,
+            *mut cryptoki_sys::CK_BYTE,
+            &mut cryptoki_sys::CK_ULONG,
+        ) -> cryptoki_sys::CK_RV,
+    {
+        let function = Self::require_fn(function)?;
+        let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+        let result = Self::single_call_bytes_exact(spec, |output, output_len| {
+            call(function, &mut ffi_mech.ck_mechanism, output, output_len)
+        })?;
+        // Only surface the mutated params when the buffer was actually
+        // present (size-query first call doesn't trigger HSM-side IV
+        // generation on most providers) and the op completed OK.
+        let mechanism_out = if spec.buffer_present && result.ck_rv == CkRv::OK {
+            ffi_mech.output_params()
+        } else {
+            None
+        };
+        Ok((result, mechanism_out))
     }
 
     /// Single FFI call with exact buffer semantics for BOTH main output AND

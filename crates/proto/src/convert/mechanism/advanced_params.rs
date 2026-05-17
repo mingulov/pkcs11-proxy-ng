@@ -2,13 +2,15 @@
 //! and miscellaneous mechanism parameters.
 
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
+use crate::pkcs11_proxy_ng::v1::sp800108_attribute;
 use pkcs11_proxy_ng_types::{
-    AesCmacKeyDerivationParams, CkMechanism, CkRv, CmsSigParams, DilithiumParams, EciesParams,
-    HdKeyDeriveParams, Ike1ExtendedDeriveParams, Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams,
-    IkePrfDeriveParams, KipParams, KyberParams, OtpParam, OtpParams, PrfDataParam,
-    SkipjackPrivateWrapParams, SkipjackRelayxParams, Sp800108FeedbackKdfParams, Sp800108KdfParams,
-    VendorObjectExtractParams, VendorObjectInsertParams, X2RatchetInitializeParams,
-    X2RatchetRespondParams, X3dhInitiateParams, X3dhRespondParams,
+    AesCmacKeyDerivationParams, CkAttribute, CkAttributeType, CkAttributeValue, CkMechanism, CkRv,
+    CmsSigParams, DilithiumParams, EciesParams, HdKeyDeriveParams, Ike1ExtendedDeriveParams,
+    Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams, IkePrfDeriveParams, KipParams, KyberParams,
+    OtpParam, OtpParams, PrfDataParam, SkipjackPrivateWrapParams, SkipjackRelayxParams,
+    Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams, VendorObjectExtractParams,
+    VendorObjectInsertParams, X2RatchetInitializeParams, X2RatchetRespondParams,
+    X3dhInitiateParams, X3dhRespondParams,
 };
 
 // ---------------------------------------------------------------------------
@@ -137,6 +139,50 @@ fn prf_data_from_proto(p: &v1_proto::PrfDataParam) -> PrfDataParam {
     PrfDataParam { type_: p.r#type, value: p.value.clone() }
 }
 
+fn sp800_108_attribute_to_proto(attr: &CkAttribute) -> v1_proto::Sp800108Attribute {
+    let value = match &attr.value {
+        None => None,
+        Some(CkAttributeValue::Bool(value)) => Some(sp800108_attribute::Value::BoolValue(*value)),
+        Some(CkAttributeValue::Ulong(value)) => Some(sp800108_attribute::Value::UlongValue(*value)),
+        Some(CkAttributeValue::Bytes(value)) => {
+            Some(sp800108_attribute::Value::BytesValue(value.clone()))
+        }
+        Some(CkAttributeValue::String(value)) => {
+            Some(sp800108_attribute::Value::StringValue(value.clone()))
+        }
+    };
+    v1_proto::Sp800108Attribute { attr_type: attr.attr_type.0, value }
+}
+
+fn sp800_108_attribute_from_proto(attr: &v1_proto::Sp800108Attribute) -> CkAttribute {
+    let value = match &attr.value {
+        None => None,
+        Some(sp800108_attribute::Value::BoolValue(value)) => Some(CkAttributeValue::Bool(*value)),
+        Some(sp800108_attribute::Value::UlongValue(value)) => Some(CkAttributeValue::Ulong(*value)),
+        Some(sp800108_attribute::Value::BytesValue(value)) => {
+            Some(CkAttributeValue::Bytes(value.clone()))
+        }
+        Some(sp800108_attribute::Value::StringValue(value)) => {
+            Some(CkAttributeValue::String(value.clone()))
+        }
+    };
+    CkAttribute { attr_type: CkAttributeType(attr.attr_type), value }
+}
+
+fn sp800_108_derived_key_to_proto(key: &Sp800108DerivedKey) -> v1_proto::Sp800108DerivedKey {
+    v1_proto::Sp800108DerivedKey {
+        template: key.template.iter().map(sp800_108_attribute_to_proto).collect(),
+        key_handle: key.key_handle,
+    }
+}
+
+fn sp800_108_derived_key_from_proto(key: &v1_proto::Sp800108DerivedKey) -> Sp800108DerivedKey {
+    Sp800108DerivedKey {
+        template: key.template.iter().map(sp800_108_attribute_from_proto).collect(),
+        key_handle: key.key_handle,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SP800-108: Sp800108KdfParams
 // ---------------------------------------------------------------------------
@@ -146,6 +192,11 @@ impl From<&Sp800108KdfParams> for v1_proto::Sp800108KdfParams {
         Self {
             prf_type: p.prf_type,
             data_params: p.data_params.iter().map(prf_data_to_proto).collect(),
+            additional_derived_keys: p
+                .additional_derived_keys
+                .iter()
+                .map(sp800_108_derived_key_to_proto)
+                .collect(),
         }
     }
 }
@@ -155,6 +206,11 @@ impl From<&v1_proto::Sp800108KdfParams> for Sp800108KdfParams {
         Self {
             prf_type: p.prf_type,
             data_params: p.data_params.iter().map(prf_data_from_proto).collect(),
+            additional_derived_keys: p
+                .additional_derived_keys
+                .iter()
+                .map(sp800_108_derived_key_from_proto)
+                .collect(),
         }
     }
 }
@@ -169,6 +225,11 @@ impl From<&Sp800108FeedbackKdfParams> for v1_proto::Sp800108FeedbackKdfParams {
             prf_type: p.prf_type,
             data_params: p.data_params.iter().map(prf_data_to_proto).collect(),
             iv: p.iv.clone(),
+            additional_derived_keys: p
+                .additional_derived_keys
+                .iter()
+                .map(sp800_108_derived_key_to_proto)
+                .collect(),
         }
     }
 }
@@ -179,6 +240,11 @@ impl From<&v1_proto::Sp800108FeedbackKdfParams> for Sp800108FeedbackKdfParams {
             prf_type: p.prf_type,
             data_params: p.data_params.iter().map(prf_data_from_proto).collect(),
             iv: p.iv.clone(),
+            additional_derived_keys: p
+                .additional_derived_keys
+                .iter()
+                .map(sp800_108_derived_key_from_proto)
+                .collect(),
         }
     }
 }

@@ -27,8 +27,11 @@ pub enum MockAttributeSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MultiPartOp {
     Sign,
+    SignRecover,
     Verify,
+    VerifyRecover,
     Digest,
     Encrypt,
     Decrypt,
+    FindObjects,
 }

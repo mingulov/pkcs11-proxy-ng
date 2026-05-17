@@ -6,7 +6,7 @@ use std::mem::size_of;
 
 use pkcs11_proxy_ng_types::*;
 
-use super::{MockAttributeSlot, MockBackend};
+use super::{MockAttributeSlot, MockBackend, MultiPartOp};
 
 impl MockBackend {
     fn attribute_bytes(value: &CkAttributeValue) -> Vec<u8> {
@@ -24,23 +24,47 @@ impl MockBackend {
         }
     }
 
-    pub(super) fn find_objects_init_impl(&self) -> CkResult<()> {
-        Ok(())
+    pub(super) fn find_objects_init_impl(&self, session: CkSessionHandle) -> CkResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        state.begin_op(session, MultiPartOp::FindObjects)
     }
 
-    pub(super) fn find_objects_impl(&self) -> CkResult<Vec<CkObjectHandle>> {
+    pub(super) fn find_objects_impl(
+        &self,
+        session: CkSessionHandle,
+    ) -> CkResult<Vec<CkObjectHandle>> {
+        let state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        state.require_op(session, MultiPartOp::FindObjects)?;
         Ok(vec![])
     }
 
-    pub(super) fn find_objects_final_impl(&self) -> CkResult<()> {
-        Ok(())
+    pub(super) fn find_objects_final_impl(&self, session: CkSessionHandle) -> CkResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        state.end_op(session, MultiPartOp::FindObjects)
     }
 
     pub(super) fn get_attribute_value_impl(
         &self,
+        session: CkSessionHandle,
         object: CkObjectHandle,
         template: &mut [CkAttribute],
     ) -> CkResult<()> {
+        let state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        self.require_live_object(&state, object)?;
+        drop(state);
+
         let store = self.attribute_store.lock().unwrap();
         let obj_map = match store.get(&object.0) {
             None => return Ok(()),
@@ -76,9 +100,13 @@ impl MockBackend {
 
     pub(super) fn get_attribute_value_exact_impl(
         &self,
+        session: CkSessionHandle,
         object: CkObjectHandle,
         queries: &[CkAttributeQuery],
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
+        if !self.state.lock().unwrap().has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
         let store = self.attribute_store.lock().unwrap();
         let Some(obj_map) = store.get(&object.0) else {
             return Err(CkRv::OBJECT_HANDLE_INVALID);
@@ -257,52 +285,133 @@ impl MockBackend {
         }
     }
 
-    pub(super) fn derive_key_impl(&self) -> CkResult<CkObjectHandle> {
-        self.allocate_object_locked()
+    pub(super) fn derive_key_impl(
+        &self,
+        session: CkSessionHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<CkObjectHandle> {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        self.allocate_session_object_with_template(&mut state, session, template)
     }
 
     pub(super) fn wrap_key_impl(&self) -> CkResult<Vec<u8>> {
         Ok(super::crypto_ops::MOCK_WRAP_OUTPUT.to_vec())
     }
 
-    pub(super) fn unwrap_key_impl(&self) -> CkResult<CkObjectHandle> {
-        self.allocate_object_locked()
-    }
-
-    pub(super) fn generate_key_impl(&self) -> CkResult<CkObjectHandle> {
-        self.check_injected()?;
-        self.allocate_object_locked()
-    }
-
-    pub(super) fn create_object_impl(&self) -> CkResult<CkObjectHandle> {
-        self.allocate_object_locked()
-    }
-
-    pub(super) fn copy_object_impl(&self) -> CkResult<CkObjectHandle> {
-        self.allocate_object_locked()
-    }
-
-    pub(super) fn destroy_object_impl(&self, object: CkObjectHandle) -> CkResult<()> {
+    pub(super) fn unwrap_key_impl(
+        &self,
+        session: CkSessionHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<CkObjectHandle> {
         let mut state = self.state.lock().unwrap();
-        if state.live_objects.remove(&object.0) { Ok(()) } else { Err(CkRv::OBJECT_HANDLE_INVALID) }
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        self.allocate_session_object_with_template(&mut state, session, template)
     }
 
-    pub(super) fn object_size(&self, object: CkObjectHandle) -> CkResult<u64> {
+    pub(super) fn generate_key_impl(
+        &self,
+        session: CkSessionHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<CkObjectHandle> {
+        self.check_injected()?;
+        let mut state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        self.allocate_session_object_with_template(&mut state, session, template)
+    }
+
+    pub(super) fn create_object_impl(
+        &self,
+        session: CkSessionHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<CkObjectHandle> {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        self.allocate_session_object_with_template(&mut state, session, template)
+    }
+
+    pub(super) fn copy_object_impl(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+        template: &[CkAttribute],
+    ) -> CkResult<CkObjectHandle> {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        self.require_live_object(&state, object)?;
+        self.allocate_session_object_with_template(&mut state, session, template)
+    }
+
+    pub(super) fn destroy_object_impl(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+    ) -> CkResult<()> {
+        let mut state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        if state.live_objects.contains(&object.0) {
+            self.remove_objects(&mut state, &[object.0]);
+            Ok(())
+        } else {
+            Err(CkRv::OBJECT_HANDLE_INVALID)
+        }
+    }
+
+    pub(super) fn object_size(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+    ) -> CkResult<u64> {
         let state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
         self.require_live_object(&state, object)?;
         Ok(0)
     }
 
-    pub(super) fn set_attribute_value_impl(&self, object: CkObjectHandle) -> CkResult<()> {
+    pub(super) fn set_attribute_value_impl(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+    ) -> CkResult<()> {
         let state = self.state.lock().unwrap();
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
         self.require_live_object(&state, object)
     }
 
-    pub(super) fn generate_key_pair_impl(&self) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
+    pub(super) fn generate_key_pair_impl(
+        &self,
+        session: CkSessionHandle,
+        public_template: &[CkAttribute],
+        private_template: &[CkAttribute],
+    ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
         self.check_injected()?;
         let mut state = self.state.lock().unwrap();
-        let public = self.allocate_object(&mut state)?;
-        let private = self.allocate_object(&mut state)?;
+        if !state.has_session(session) {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
+        if self.max_objects > 0 && state.live_objects.len() as u64 + 2 > self.max_objects {
+            return Err(CkRv::DEVICE_MEMORY);
+        }
+        let public =
+            self.allocate_session_object_with_template(&mut state, session, public_template)?;
+        let private =
+            self.allocate_session_object_with_template(&mut state, session, private_template)?;
         Ok((public, private))
     }
 }
