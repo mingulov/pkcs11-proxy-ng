@@ -7,7 +7,7 @@
 #   * pkcs11-proxy-ng-compat  — legacy symlinks
 #
 # The spec expects pre-built artifacts under
-# %{_sourcedir}/pkcs11-proxy-ng-%{version}/target/release/ — the
+# %%{_sourcedir}/pkcs11-proxy-ng-%%{version}/target/release/ — the
 # accompanying Dockerfile.amazon runs `cargo build --release` in a
 # stock AL2023 builder stage before invoking rpmbuild.
 
@@ -21,7 +21,12 @@ URL:            https://gitlab.com/laavat/laavat-product/architecture/3rdparty/p
 Source0:        pkcs11-proxy-ng-%{version}.tar.gz
 
 BuildArch:      x86_64
-BuildRequires:  cargo rust
+# `cargo` and `rust` are NOT listed in BuildRequires: the
+# Dockerfile.amazon installs a rustup-managed toolchain (AL2023 stock
+# rust is below transitive dep MSRV). The rustup cargo is on PATH
+# when rpmbuild runs %build below. systemd-rpm-macros gives us the
+# %{_unitdir} macro used in the daemon subpackage's file list.
+BuildRequires:  protobuf-compiler systemd-rpm-macros
 Requires:       glibc
 
 %define _enable_debug_packages 0
@@ -152,6 +157,6 @@ EOF
 exit 0
 
 %changelog
-* Tue May 20 2026 Denis Mingulov <denis@laavat.com> - 0.2.0-1
+* Wed May 20 2026 Denis Mingulov <denis@laavat.com> - 0.2.0-1
 - Initial pkcs11-proxy-ng RPM release. Server-driven mechanism
   registry, three-way subpackage split, optional -compat layer.

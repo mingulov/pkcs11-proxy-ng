@@ -27,11 +27,21 @@ COPY . .
 RUN <<EOF
   set -eu
   dnf -y update
-  dnf -y install cargo rust gcc make rpm-build rpmdevtools tar gzip
+  # `curl` is intentionally omitted because AL2023 ships curl-minimal
+  # by default and a non-minimal curl install conflicts. The minimal
+  # curl is sufficient for the rustup bootstrap below.
+  dnf -y install gcc make rpm-build rpmdevtools tar gzip protobuf-compiler systemd-rpm-macros
+  # AL2023's stock rust/cargo (typically 1.86) is below transitive
+  # dependency MSRV (libloading 0.9, time 0.3.47 require 1.88+). The
+  # design's "use stock Rust" preference yields to "AL2023 must be in
+  # Phase 1" — see doc/audit/r1-implementation.md for the deviation.
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+      sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+  . "$HOME/.cargo/env"
   rpmdev-setuptree
   mkdir -p /rpm
 
-  # Build the workspace with stock rustc/cargo from AL2023.
+  # Build the workspace with the rustup-installed toolchain.
   cargo build --release --workspace --locked
 
   # Stage a source tarball that the .spec file consumes. The tarball
@@ -44,7 +54,11 @@ RUN <<EOF
   tar -czf pkcs11-proxy-ng-0.2.0.tar.gz pkcs11-proxy-ng-0.2.0
 
   cp /root/packaging/amazon/pkcs11-proxy-ng.spec ~/rpmbuild/SPECS/
-  rpmbuild -ba ~/rpmbuild/SPECS/pkcs11-proxy-ng.spec
+  # The .spec %build re-runs `cargo build` from inside rpmbuild; pass
+  # the rustup cargo via PATH so it picks up the same toolchain
+  # without re-downloading. Disable rpmbuild's debug split (already
+  # done in the .spec) so AL2023's strict-build defaults don't trip.
+  PATH="$HOME/.cargo/bin:$PATH" rpmbuild -ba ~/rpmbuild/SPECS/pkcs11-proxy-ng.spec
   cp ~/rpmbuild/RPMS/x86_64/*.rpm /rpm/
 EOF
 

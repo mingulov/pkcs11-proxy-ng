@@ -24,13 +24,38 @@ ARG GIT_COMMIT=unknown
 
 FROM ${ALPINE_BUILD_IMAGE} AS buildapk
 
+# Install build tooling. cargo/rust come from rustup rather than
+# Alpine packages so the toolchain is uniform across the matrix and
+# new enough for the workspace's transitive dependency MSRVs (Alpine
+# 3.22 stock rust is 1.87, but libloading 0.9 / time 0.3.47 require
+# 1.88+). See doc/audit/r1-implementation.md for the deviation
+# rationale.
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Rustup's musl toolchain defaults to `crt-static`, which is fine for
+# the daemon and CLI binaries but disables `cdylib` (required by the
+# shim). Override so all crate-types compile; the daemon stays
+# musl-linked just like before.
+ENV RUSTFLAGS="-C target-feature=-crt-static"
 RUN <<EOF
-  apk add --no-cache alpine-sdk sudo cargo rust
+  set -eux
+  apk add --no-cache alpine-sdk sudo protoc protobuf-dev curl gcc musl-dev openssl-dev bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+  sh /tmp/rustup-init.sh -y --default-toolchain stable --profile minimal --no-modify-path
+  rm /tmp/rustup-init.sh
+  test -x /usr/local/cargo/bin/cargo
+  /usr/local/cargo/bin/rustc --version
   adduser -S -G abuild -D build
   echo "build ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
   apk update
   mkdir /apk
   chown build:abuild /apk
+  # Make the rustup toolchain visible to the build user, and the
+  # cargo registry / registry-index cache writable so abuild's
+  # cargo-build step can populate them.
+  chmod -R a+rwX /usr/local/cargo
+  chmod -R a+rX /usr/local/rustup
 EOF
 
 USER build
@@ -41,23 +66,31 @@ WORKDIR /home/build/
 COPY --chown=build:abuild . .
 
 # Build APKs from packaging/alpine/APKBUILD. abuild expects to be run
-# from the directory containing the APKBUILD; pkgname-relative paths
-# inside the APKBUILD resolve against $builddir (set to the parent of
-# APKBUILD by abuild itself).
+# from the directory containing the APKBUILD; the APKBUILD itself
+# sets builddir="$startdir/../.." so it picks up the workspace root.
+# REPODEST sends produced APKs straight into /apk so we do not need
+# to chase abuild's default packages-per-reponame path layout.
+ENV REPODEST=/apk
 RUN <<EOF
+  set -e
   cd packaging/alpine
   abuild-keygen -a -i -n
   abuild -r
-  mv /home/build/packages/alpine/* /apk/ 2>/dev/null || true
-  # The default abuild output path varies by configuration; cover the
-  # common roots that may hold the produced APKs.
-  for src in /home/build/packages/* ; do
-    [ -d "$src" ] && cp -a "$src"/* /apk/ 2>/dev/null || true
+  # abuild's actual storage layout is $REPODEST/$REPONAME/$CARCH/.
+  # $REPONAME is the basename of the parent directory of the APKBUILD
+  # (so here it ends up "packaging"). Downstream consumers expect to
+  # pass --repository /apk and find /apk/$CARCH/APKINDEX.tar.gz, so
+  # flatten that one level out.
+  if [ -d /apk/packaging ]; then
+    mv /apk/packaging/* /apk/
+    rmdir /apk/packaging
+  fi
+  ls -lR /apk
+  # Confirm every produced APK lives in the expected /apk/<arch>/ layout.
+  for pkg in pkcs11-proxy-ng-shim pkcs11-proxy-ng-daemon \
+             pkcs11-proxy-ng-cli pkcs11-proxy-ng-compat; do
+    ls /apk/*/"${pkg}"-*.apk
   done
-  apk info -a --repository /apk pkcs11-proxy-ng-shim || true
-  apk info -a --repository /apk pkcs11-proxy-ng-daemon || true
-  apk info -a --repository /apk pkcs11-proxy-ng-cli || true
-  apk info -a --repository /apk pkcs11-proxy-ng-compat || true
 EOF
 
 # ─── Stage 2: smoke-test install/uninstall ─────────────────────────────────
