@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Server-driven mechanism registry. The daemon now reads
+  `mechanism_params.toml` (or the embedded default) at startup,
+  computes a SHA-256-truncated revision string, and publishes the
+  payload on every `GetBackendInterfaces` RPC. Shims consume the
+  payload during `interface_probe::ensure_probed()` and atomically
+  swap their in-memory registry to match. SIGHUP triggers a daemon
+  reload with no restart. Workflow: edit TOML → `kill -HUP daemon` →
+  rolling-restart consumer services.
+- Loud one-time WARN at daemon startup when running with
+  `auth = "none"` + `allow_insecure_tcp = true`. Documents the SaaS
+  trust model in operator logs.
+- New ProxyConfig knobs with defaults:
+  - `startup_timeout_secs = 30` wraps `populate_slots()` so a backend
+    hang fails the daemon at startup rather than hanging the process.
+  - `shutdown_grace_secs = 30` controls graceful-shutdown drain on
+    SIGTERM/SIGINT.
+  - `backend_health_consecutive_failures = 3` gating threshold for
+    `tonic-health` (wiring follows in a separate commit).
+- Daemon refuses to start when `backend.module` is still the shipped
+  placeholder (`/CHANGE_ME/path/to/backend.so`).
+- Shim accepts the legacy `PKCS11_PROXY_SOCKET=tcp://host:port` env
+  var as a back-compat alias for `PKCS11_PROXY_ENDPOINT=http://host:port`.
+  `PKCS11_PROXY_ENDPOINT` always wins when both are set.
+- `PKCS11_PROXY_DISABLE_SERVER_REGISTRY=1` opts out of the server
+  payload for test/debug, restoring purely embedded-default behaviour.
+- Packaging under `packaging/{alpine,amazon,config}/`. Alpine APK
+  build (3.22, 3.23) and Amazon Linux 2023 RPM build, each producing
+  a `FROM scratch` carrier image at `/apk` or `/rpm` for downstream
+  Dockerfiles to bind-mount. Three-way subpackage split
+  (`-shim` / `-daemon` / `-cli`) plus an optional `-compat`
+  subpackage that adds `/usr/lib/libpkcs11-proxy.so` symlink for
+  legacy consumer Dockerfiles.
+- `.gitlab-ci.yml` Phase-1 matrix: `alpine_3_22`, `alpine_3_23`,
+  `amazon_2023`.
+
 ### Changed
 
 - Workspace MSRV lowered from `1.94` to `1.85` so the project builds with
@@ -16,6 +53,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[profile.release]` now sets `lto = "thin"`, `strip = "symbols"`, and
   `codegen-units = 1`. The shim cdylib and daemon binary shrink ~25-30%
   at the cost of ~30s additional CI build time.
+- Shim's `MECHANISM_REGISTRY` storage changed from
+  `OnceLock<MechanismRegistry>` to
+  `OnceLock<RwLock<Arc<MechanismRegistry>>>` so the registry can be
+  atomically swapped on reprobe. `state::mechanism_registry()` now
+  returns `Arc<MechanismRegistry>` (cheap clone); callers never hold
+  the read lock across FFI/RPC calls.
+- `Pkcs11Client::get_backend_interfaces()` now returns a
+  `BackendProbe { interfaces, mechanism_registry }` struct.
+  `BackendProbe` is re-exported from the client crate.
+- `Pkcs11ProxyService::new()` gains a `MechanismRegistrySource`
+  argument; test helpers use the embedded default.
+
+### Removed
+
+- `state::init_mechanism_registry` (the back-compat wrapper) — all
+  callers migrated to `replace_mechanism_registry`.
 
 ## [0.1.0] - 2026-05-15
 
