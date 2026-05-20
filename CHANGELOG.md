@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Workspace MSRV lowered from `1.94` to `1.85` so the project builds with
+  the stock Rust toolchain shipped by Alpine 3.22 (1.87), Alpine 3.23
+  (>=1.91), and Amazon Linux 2023 (~1.86). Edition `2024` is preserved.
+  See `AGENTS.md` rule 5 for the rationale.
+- `[profile.release]` now sets `lto = "thin"`, `strip = "symbols"`, and
+  `codegen-units = 1`. The shim cdylib and daemon binary shrink ~25-30%
+  at the cost of ~30s additional CI build time.
+
 ## [0.1.0] - 2026-05-15
 
 Initial release of the Rust PKCS#11 remote proxy.

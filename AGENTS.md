@@ -59,7 +59,12 @@ AI agents, automation, and human contributors.
 - Avoid “clever” abstractions that make PKCS#11 call flow harder to audit.
 - Prefer named PKCS#11 constants and typed wrappers; do not introduce magic
   numbers for `CKR_*`, mechanisms, attributes, or object classes.
-- Maintain edition `2024` and MSRV `1.94` compatibility.
+- Maintain edition `2024` and MSRV `1.85` compatibility. The MSRV was
+  lowered from `1.94` so the workspace builds with the stock Rust shipped
+  by Alpine 3.22 (1.87), Alpine 3.23 (≥1.91), and Amazon Linux 2023
+  (~1.86). Do not raise MSRV above the lowest of those values without
+  extending the distribution matrix. New code may not use language or
+  library features stabilized after Rust 1.85.
 
 ## 6. Refactor Rules
 
@@ -126,15 +131,18 @@ When adding a new mechanism parameter shape:
 3. Add the Rust struct + `CkMechanismParams` variant in `types`
 4. Add bidirectional From/TryFrom in `proto` conversion code
 5. Add the C struct reconstruction in `mechanism_to_ffi()` (`ffi/helpers.rs`)
-6. Add to `mechanism_params_default.toml` (or a vendor override)
+6. Add to `mechanism_params_default.toml` for spec-defined mechanisms.
+   Vendor-defined mechanisms (e.g. CloudHSM, Thales) belong in the
+   daemon's runtime registry file
+   (`/etc/pkcs11-proxy-ng/mechanism_params.toml` by default, configurable
+   via `[mechanisms].config_path`) and are served to shims over gRPC.
+   Vendor mechanisms that reuse an existing parameter shape need no code
+   changes — only a TOML entry. New shapes still require steps 1–5 above.
 7. Add a round-trip unit test in `proto`
 8. Add a real-backend integration test if possible
 
 Missing step 5 is the most dangerous — proto tests pass but operations
 fail silently at the FFI boundary with `CKR_MECHANISM_PARAM_INVALID`.
-
-Vendor mechanisms that reuse standard parameter shapes need only a config
-entry in `mechanism_params.toml` (step 6) — no code changes.
 
 ## 13. Architecture Quick Reference
 
@@ -147,8 +155,13 @@ entry in `mechanism_params.toml` (step 6) — no code changes.
 - **FFI backend** (`crates/backend`, package `pkcs11-proxy-ng-backend`): Rust → C via `dlopen`. Uses
   `call_3x_fn!` for 3.0/3.2 functions. `mechanism_to_ffi()` converts
   Rust params to C structs.
-- **Config**: `mechanism_params.toml` embedded default + env override
-  (`PKCS11_PROXY_MECHANISMS`). Additive merge.
+- **Config**: server publishes `MechanismRegistry` over `GetBackendInterfaces`
+  RPC from `/etc/pkcs11-proxy-ng/mechanism_params.toml`. The shim consumes
+  it during `interface_probe::ensure_probed()` and falls back to the
+  embedded `mechanism_params_default.toml` plus `PKCS11_PROXY_MECHANISMS`
+  env override only when the daemon is unreachable or omits the field.
+  `PKCS11_PROXY_DISABLE_SERVER_REGISTRY=1` forces the fallback path
+  (test/debug use).
 - **Session caches**: Cleaned on `c_close_session` via `evict_session_caches()`.
 - **104 standard PKCS#11 function-list fields** represented across all layers
   (2.40 + 3.0 + 3.2).

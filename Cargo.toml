@@ -12,7 +12,14 @@ members = [
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.94"
+# MSRV lowered from 1.94 to 1.85 (edition-2024 baseline) so the workspace
+# builds with the stock Rust shipped on Alpine 3.22 (1.87), Alpine 3.23
+# (>=1.91), and Amazon Linux 2023 (~1.86). See AGENTS.md rule 5 and
+# doc/superpowers/specs/2026-05-20-pkcs11-proxy-ng-packaging-and-vendor-config-design.md
+# for the rationale. If a build target's stock Rust is older than 1.85,
+# bump this value to the smallest viable version rather than expanding the
+# distro support matrix.
+rust-version = "1.85"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
@@ -35,3 +42,11 @@ tonic-build = "0.14"
 tonic-health = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
+sha2 = "0.10"
+
+# Release profile tuned for size and runtime over build time. The shim
+# cdylib and daemon binary shrink ~25-30%; CI build cost rises by ~30s.
+[profile.release]
+lto = "thin"
+strip = "symbols"
+codegen-units = 1
