@@ -3,6 +3,7 @@ use pkcs11_proxy_ng_types::*;
 use tonic::transport::Channel;
 
 use super::{ConnectionSource, Pkcs11Client};
+use crate::error::{RpcKind, grpc_status_to_ck_rv_kind};
 
 /// Result of a `get_backend_interfaces` probe — the backend's interface
 /// capabilities plus the server's mechanism registry payload (absent on
@@ -12,6 +13,14 @@ pub struct BackendProbe {
     pub interfaces: Vec<(u8, u8, Vec<String>)>,
     pub mechanism_registry: Option<MechanismRegistryPayload>,
 }
+
+// TODO R2-FOLLOWUP-slow-backend: scenario 5 (slow backend) in the R2
+// resilience fixture is only able to inject latency on the network
+// path between shim and daemon (via toxiproxy). A true "backend-slow"
+// test requires a mock backend module (.so) that intentionally
+// sleeps in C_Sign so the daemon's spawn_backend timeout fires.
+// Track that mock under tests/r2_resilience/mock-backend/ when
+// implementing R5 (PKCS#11 compatibility audit).
 
 async fn connect_channel(
     endpoint: &str,
@@ -76,18 +85,45 @@ impl Pkcs11Client {
 
     /// Call `C_Initialize` on the proxy. Stores the returned `context_id` for
     /// use in all subsequent requests.
+    ///
+    /// Transport errors are mapped via `RpcKind::Lifecycle` because
+    /// `C_Initialize` has a stricter spec-permitted CK_RV set than the
+    /// session-scoped RPCs (PKCS#11 v3.0 §5.4): `CKR_TOKEN_NOT_PRESENT`
+    /// is NOT in that set, so a daemon-unreachable failure surfaces as
+    /// `CKR_GENERAL_ERROR` instead.
     pub async fn initialize(&mut self) -> CkResult<()> {
         let req = pkcs11_proxy_ng_proto::InitializeRequest { client_context_id: String::new() };
-        let resp = pkcs11_unary_call!(self.grpc.initialize(req), false);
-        self.context_id = Some(resp.client_context_id);
+        let response = self
+            .grpc
+            .initialize(req)
+            .await
+            .map_err(|status| grpc_status_to_ck_rv_kind(status.code(), RpcKind::Lifecycle))?
+            .into_inner();
+        let rv = CkRv(response.ck_rv);
+        if !rv.is_ok() {
+            return Err(rv);
+        }
+        self.context_id = Some(response.client_context_id);
         Ok(())
     }
 
     /// Call `C_Finalize` on the proxy. Clears the stored `context_id`.
+    ///
+    /// Like `initialize`, uses `RpcKind::Lifecycle` for transport-error
+    /// mapping per PKCS#11 v3.0 §5.5.
     pub async fn finalize(&mut self) -> CkResult<()> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::FinalizeRequest { client_context_id: ctx };
-        pkcs11_unary_ok!(self.grpc.finalize(req), false)?;
+        let response = self
+            .grpc
+            .finalize(req)
+            .await
+            .map_err(|status| grpc_status_to_ck_rv_kind(status.code(), RpcKind::Lifecycle))?
+            .into_inner();
+        let rv = CkRv(response.ck_rv);
+        if !rv.is_ok() {
+            return Err(rv);
+        }
         self.context_id = None;
         Ok(())
     }

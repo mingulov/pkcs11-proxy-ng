@@ -1,0 +1,25 @@
+# Runner image for the R2 resilience fixture. Bundles the shim +
+# CLI from the alpine3.23 carrier (musl-built), plus `pkcs11-tool` for
+# sign/list-slots operations and `curl` + `jq` for poking the
+# toxiproxy control plane, and docker CLI so scenarios that need to
+# restart the daemon container can shell-out to `docker restart`.
+
+FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng
+
+FROM alpine:3.23
+
+RUN apk add --no-cache opensc bash curl jq libgcc docker-cli
+
+RUN --mount=type=bind,from=pkcs11ng,source=/apk,target=/apk \
+    apk --no-cache add --allow-untrusted --repository /apk \
+        pkcs11-proxy-ng-shim \
+        pkcs11-proxy-ng-cli
+
+# Scenario scripts (mounted at /scenarios via docker-compose? No — we
+# bake them in so the image is self-contained).
+COPY pkcs11-proxy-ng/tests/r2_resilience/scenarios /scenarios
+RUN chmod +x /scenarios/*.sh /scenarios/run_scenario.sh
+
+ENV PKCS11_MODULE_PATH=/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so
+
+WORKDIR /work

@@ -433,6 +433,19 @@ fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {
         .map_err(|_| CkRv::DEVICE_ERROR)
 }
 
+// TODO R2-FOLLOWUP-dns-reresolve: tonic's `transport::Channel`, when
+// built from a single `Endpoint`, resolves the hostname at connect
+// time and reuses the resulting IP for the lifetime of the channel.
+// For shims that need to follow a daemon whose DNS A-record changes
+// (k8s Service rollout, DNS-based blue/green), we should either:
+//   - rebuild the channel on transport errors (forcing re-resolve), or
+//   - switch to `tonic::transport::Channel::balance_list` with a
+//     resolver that periodically re-queries DNS.
+// Scenario 4 is intentionally skipped in the local R2 fixture because
+// Docker's embedded DNS doesn't support runtime A-record mutation;
+// reproducing this requires CoreDNS-sidecar / k8s-Service setup. See
+// doc/audit/r2-resilience.md §Scenario 4 for the deferral rationale.
+
 /// Resolve the daemon endpoint from environment variables.
 ///
 /// Precedence:
@@ -529,23 +542,92 @@ pub fn client() -> &'static tokio::sync::Mutex<Pkcs11Client> {
     CLIENT.get().expect("BUG: client() called before ensure_client_connected()")
 }
 
-/// Connect to the daemon with up to 3 attempts and exponential backoff.
+/// Bounded exponential backoff with jitter, matching the R2 resilience
+/// contract:
+///
+/// * Attempt 1: no delay (immediate connect).
+/// * Attempt N≥2: delay = min(`INITIAL_BACKOFF` × 2^(N−2), `MAX_BACKOFF`)
+///   with ±`JITTER_PCT`% multiplicative jitter applied on each attempt.
+///   The jitter prevents many shims that all dropped connection at the
+///   same time (e.g. after a daemon pod restart) from re-dialing in
+///   lock-step.
+///
+/// Iterations are capped at `MAX_ATTEMPTS` so a permanently-unreachable
+/// endpoint can't block the C_Initialize call forever.
+const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+const MAX_BACKOFF: Duration = Duration::from_secs(5);
+const JITTER_PCT: u32 = 20;
+const MAX_ATTEMPTS: u32 = 10;
+
+/// Return the backoff delay for attempt `n` (0-indexed). Attempt 0 is
+/// immediate. The deterministic part (`base`) is exposed so unit tests
+/// can verify the doubling+cap without depending on jitter randomness.
+fn backoff_for_attempt(n: u32) -> Duration {
+    if n == 0 {
+        return Duration::ZERO;
+    }
+    let base = backoff_base(n);
+    apply_jitter(base, JITTER_PCT)
+}
+
+fn backoff_base(n: u32) -> Duration {
+    // Doubling pattern, capped at MAX_BACKOFF. checked_pow guards against
+    // overflow at very high attempt numbers.
+    let exp = n.saturating_sub(1);
+    let factor = 1u64.checked_shl(exp.min(63)).unwrap_or(u64::MAX);
+    let millis =
+        INITIAL_BACKOFF.as_millis().saturating_mul(factor as u128).min(MAX_BACKOFF.as_millis())
+            as u64;
+    Duration::from_millis(millis)
+}
+
+fn apply_jitter(base: Duration, jitter_pct: u32) -> Duration {
+    if jitter_pct == 0 || base.is_zero() {
+        return base;
+    }
+    // Lightweight LCG-style jitter seeded by the wall clock nanosecond
+    // count. We intentionally avoid adding a `rand` dependency for this
+    // single use; the jitter doesn't need cryptographic randomness — it
+    // just needs to decorrelate concurrent shims.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let mixed = nanos.wrapping_add(pid);
+    let pct_range = (jitter_pct as u64) * 2; // ±jitter_pct
+    let offset_pct = (mixed as u64) % pct_range; // 0..pct_range
+    let signed_pct = offset_pct as i64 - jitter_pct as i64; // -jitter_pct..jitter_pct
+    let base_millis = base.as_millis() as i64;
+    let delta = base_millis * signed_pct / 100;
+    let total = (base_millis + delta).max(0) as u64;
+    Duration::from_millis(total)
+}
+
+/// Connect to the daemon with bounded exponential backoff + jitter.
+///
+/// Returns `Ok` on the first successful attempt, `Err` after
+/// `MAX_ATTEMPTS` failures. Each attempt's connect call is itself
+/// bounded by `timeout_secs` so a hung TCP handshake cannot block the
+/// retry loop indefinitely.
 async fn connect_with_retry(
     endpoint: &str,
     tls_files: Option<pkcs11_proxy_ng_client::tls::ClientTlsFiles>,
     timeout_secs: u64,
 ) -> Result<Pkcs11Client, String> {
-    let delays = [
-        Duration::from_millis(0),   // attempt 1: immediate
-        Duration::from_millis(100), // attempt 2: 100ms backoff
-        Duration::from_millis(500), // attempt 3: 500ms backoff
-    ];
     let connect_timeout = Duration::from_secs(timeout_secs);
 
-    for (i, delay) in delays.iter().enumerate() {
-        if i > 0 {
-            tokio::time::sleep(*delay).await;
+    for attempt in 0..MAX_ATTEMPTS {
+        let delay = backoff_for_attempt(attempt);
+        if !delay.is_zero() {
+            tracing::debug!(
+                attempt = attempt + 1,
+                backoff_ms = delay.as_millis() as u64,
+                "gRPC reconnect: sleeping before next attempt"
+            );
+            tokio::time::sleep(delay).await;
         }
+
         let connect = async {
             match tls_files.clone() {
                 Some(tls_files) => Pkcs11Client::connect_with_tls_files(endpoint, tls_files).await,
@@ -555,12 +637,97 @@ async fn connect_with_retry(
         match tokio::time::timeout(connect_timeout, connect).await {
             Ok(Ok(client)) => return Ok(client),
             Ok(Err(e)) => {
-                tracing::warn!(attempt = i + 1, error = %e, "gRPC connect failed, retrying");
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = MAX_ATTEMPTS,
+                    error = %e,
+                    "gRPC connect failed, retrying"
+                );
             }
             Err(_) => {
-                tracing::warn!(attempt = i + 1, timeout_secs, "gRPC connect timed out, retrying");
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = MAX_ATTEMPTS,
+                    timeout_secs,
+                    "gRPC connect timed out, retrying"
+                );
             }
         }
     }
-    Err("all connect attempts failed".into())
+    Err(format!("all {MAX_ATTEMPTS} connect attempts failed"))
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn first_attempt_is_immediate() {
+        // `backoff_for_attempt(0)` is the public contract — attempt 0
+        // (the very first connect) takes no delay. `backoff_base`'s
+        // own n=0 value is unused; the wrapper short-circuits.
+        assert_eq!(backoff_for_attempt(0), Duration::ZERO);
+    }
+
+    #[test]
+    fn second_attempt_starts_at_initial_backoff() {
+        assert_eq!(backoff_base(1), INITIAL_BACKOFF);
+    }
+
+    #[test]
+    fn base_doubles_until_cap() {
+        assert_eq!(backoff_base(1), Duration::from_millis(100));
+        assert_eq!(backoff_base(2), Duration::from_millis(200));
+        assert_eq!(backoff_base(3), Duration::from_millis(400));
+        assert_eq!(backoff_base(4), Duration::from_millis(800));
+        assert_eq!(backoff_base(5), Duration::from_millis(1600));
+        assert_eq!(backoff_base(6), Duration::from_millis(3200));
+        // Attempt 7's doubled value (6400 ms) exceeds MAX_BACKOFF.
+        assert_eq!(backoff_base(7), MAX_BACKOFF);
+        assert_eq!(backoff_base(20), MAX_BACKOFF);
+    }
+
+    #[test]
+    fn jitter_stays_within_band() {
+        let base = Duration::from_millis(1000);
+        // Sample many times so any randomness in the jitter source
+        // would surface as an outlier.
+        for _ in 0..1000 {
+            let d = apply_jitter(base, JITTER_PCT);
+            let millis = d.as_millis() as u64;
+            assert!(
+                millis >= 800 && millis <= 1200,
+                "{millis}ms is outside the ±{JITTER_PCT}% band around {}ms",
+                base.as_millis()
+            );
+        }
+    }
+
+    #[test]
+    fn jitter_at_zero_disables_offset() {
+        let base = Duration::from_millis(1000);
+        assert_eq!(apply_jitter(base, 0), base);
+    }
+
+    #[test]
+    fn jitter_on_zero_delay_stays_zero() {
+        assert_eq!(apply_jitter(Duration::ZERO, JITTER_PCT), Duration::ZERO);
+    }
+
+    #[test]
+    fn backoff_for_attempt_is_within_jittered_band() {
+        // Attempts 1..MAX_ATTEMPTS — every value should be within ±JITTER_PCT
+        // of the base for that attempt (and base is bounded by MAX_BACKOFF).
+        for n in 1..MAX_ATTEMPTS {
+            let base = backoff_base(n).as_millis() as i128;
+            let actual = backoff_for_attempt(n).as_millis() as i128;
+            let band = base * JITTER_PCT as i128 / 100;
+            assert!(
+                actual >= base - band && actual <= base + band,
+                "attempt {n}: actual {actual}ms outside [{}..={}]",
+                base - band,
+                base + band,
+            );
+        }
+    }
 }

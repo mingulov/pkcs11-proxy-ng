@@ -145,22 +145,38 @@ where
         }
     };
 
-    // PKCS#11 errors are application-level (CKR_PIN_INCORRECT,
-    // CKR_DATA_INVALID, …) — they do NOT mean "the backend is
-    // unhealthy". Health gating triggers only on transport-level
-    // failures: timeouts, spawn-blocking panics, breaker trips. Those
-    // produce `Ok(Err(CkRv::DEVICE_ERROR))` from the timeout path
-    // above, or `Err(Status)` from spawn_task on panic.
-    let healthy = match &result {
-        Ok(Ok(_)) => true,
-        Ok(Err(rv)) if *rv == CkRv::DEVICE_ERROR => false, // timeout
-        Ok(Err(_)) => true,                                // normal PKCS#11 error
-        Err(_) => false,                                   // blocking-pool panic
-    };
-    report_backend_outcome(healthy);
+    report_backend_outcome(classify_backend_outcome::<T>(&result));
 
     result
     // _guard drops here (or when Future is cancelled) → IN_FLIGHT decremented
+}
+
+/// Classify a `spawn_backend` result as healthy (true) or unhealthy
+/// (false) from the daemon-level readiness gauge's perspective.
+///
+/// Health gating triggers ONLY on transport-level failures:
+///   * timeouts (mapped to `Ok(Err(CkRv::DEVICE_ERROR))` by
+///     [`spawn_backend`] above, distinguishable because PKCS#11
+///     application errors must never produce `CKR_DEVICE_ERROR`),
+///   * `spawn_blocking` panics (`Err(Status)`),
+///   * circuit-breaker trips (also `Ok(Err(CkRv::DEVICE_ERROR))` —
+///     reported separately by `spawn_backend` before this function is
+///     called).
+///
+/// PKCS#11 application errors (CKR_PIN_INCORRECT, CKR_DATA_INVALID,
+/// CKR_MECHANISM_INVALID, …) are normal client-side outcomes; they
+/// must NOT trip the readiness gauge, or a noisy authentication user
+/// could take the daemon out of the load-balancer rotation.
+///
+/// Extracted as a pure function so the contract is testable without
+/// the global `HEALTH_EVENT_TX` channel state.
+fn classify_backend_outcome<T>(result: &Result<CkResult<T>, Status>) -> bool {
+    match result {
+        Ok(Ok(_)) => true,
+        Ok(Err(rv)) if *rv == CkRv::DEVICE_ERROR => false, // timeout / breaker trip
+        Ok(Err(_)) => true,                                // normal PKCS#11 error
+        Err(_) => false,                                   // blocking-pool panic
+    }
 }
 
 pub(super) fn ck_rv_only(result: CkResult<()>) -> u64 {
@@ -472,76 +488,59 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 
-    #[tokio::test]
-    async fn spawn_backend_reports_success_outcome_when_channel_configured() {
-        // Use a local channel so we don't race with other tests over
-        // the global OnceLock.
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        // OnceLock semantics: first call wins. If another test already
-        // installed a sender, this call is a no-op; we then can't
-        // observe events here. Skip the assertion in that case so the
-        // test suite stays order-independent.
-        let installed = HEALTH_EVENT_TX.set(tx).is_ok();
+    /// Health-event classification tests use the pure
+    /// `classify_backend_outcome` helper rather than driving
+    /// `spawn_backend` end-to-end. The end-to-end path is exercised
+    /// at runtime by `spawn_backend_health_gate` in `main.rs`; in
+    /// unit tests it races on the global `HEALTH_EVENT_TX` OnceLock
+    /// when other tests run in parallel.
 
-        let result = spawn_backend(|| Ok(7u64)).await;
-        assert_eq!(result.expect("status ok").unwrap(), 7);
-
-        if installed {
-            let event = tokio::time::timeout(Duration::from_millis(50), rx.recv())
-                .await
-                .expect("event arrives quickly")
-                .expect("channel still open");
-            assert!(matches!(event, BackendHealthEvent::Success));
-        }
+    #[test]
+    fn classify_ok_is_healthy() {
+        let result: Result<CkResult<u64>, Status> = Ok(Ok(42));
+        assert!(classify_backend_outcome(&result));
     }
 
-    #[tokio::test]
-    async fn spawn_backend_reports_failure_outcome_on_timeout() {
-        // We can't easily inject the timeout from inside the test, but
-        // we *can* exercise the circuit-breaker-trip failure path,
-        // which also reports a Failure event.
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let installed = HEALTH_EVENT_TX.set(tx).is_ok();
-
-        let max = max_concurrent_backend_calls();
-        let previous = IN_FLIGHT.load(Ordering::Relaxed);
-        IN_FLIGHT.store(max, Ordering::Relaxed);
-        let result = spawn_backend(|| Ok(())).await;
-        IN_FLIGHT.store(previous, Ordering::Relaxed);
-
-        assert_eq!(result.expect("status ok").unwrap_err(), CkRv::DEVICE_ERROR);
-
-        if installed {
-            let event = tokio::time::timeout(Duration::from_millis(50), rx.recv())
-                .await
-                .expect("event arrives quickly")
-                .expect("channel still open");
-            assert!(matches!(event, BackendHealthEvent::Failure));
-        }
-    }
-
-    #[tokio::test]
-    async fn pkcs11_application_error_is_not_a_health_failure() {
-        // CkResult::Err for an application-level CK_RV is a normal
-        // outcome and must NOT count as a health failure — otherwise
-        // a noisy CKR_PIN_INCORRECT user would trip the readiness
-        // gauge.
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let installed = HEALTH_EVENT_TX.set(tx).is_ok();
-
-        let result = spawn_backend(|| Err::<(), _>(CkRv::PIN_INCORRECT)).await;
-        assert_eq!(result.expect("status ok").unwrap_err(), CkRv::PIN_INCORRECT);
-
-        if installed {
-            let event = tokio::time::timeout(Duration::from_millis(50), rx.recv())
-                .await
-                .expect("event arrives quickly")
-                .expect("channel still open");
+    #[test]
+    fn classify_pkcs11_application_error_is_healthy() {
+        // CKR_PIN_INCORRECT, CKR_DATA_INVALID, etc. are normal
+        // application-level outcomes — they must NOT trip the
+        // readiness gauge, or a noisy auth user would take the
+        // daemon out of rotation.
+        for rv in [
+            CkRv::PIN_INCORRECT,
+            CkRv::DATA_INVALID,
+            CkRv::MECHANISM_INVALID,
+            CkRv::SESSION_HANDLE_INVALID,
+            CkRv::USER_NOT_LOGGED_IN,
+        ] {
+            let result: Result<CkResult<()>, Status> = Ok(Err(rv));
             assert!(
-                matches!(event, BackendHealthEvent::Success),
-                "PKCS#11 application errors must report Success to the health gate"
+                classify_backend_outcome(&result),
+                "CkRv {:?} must be classified as healthy",
+                rv
             );
         }
+    }
+
+    #[test]
+    fn classify_device_error_is_unhealthy() {
+        // CKR_DEVICE_ERROR is what spawn_backend produces on the
+        // timeout and circuit-breaker-trip paths. PKCS#11
+        // application errors must NOT use CKR_DEVICE_ERROR — that
+        // invariant is enforced by the proto layer (see
+        // ADR-0003 §3).
+        let result: Result<CkResult<()>, Status> = Ok(Err(CkRv::DEVICE_ERROR));
+        assert!(!classify_backend_outcome(&result));
+    }
+
+    #[test]
+    fn classify_transport_status_is_unhealthy() {
+        // `Err(Status)` from spawn_task means a blocking-pool panic
+        // or otherwise unrecoverable backend interaction — always
+        // unhealthy.
+        let result: Result<CkResult<()>, Status> = Err(Status::internal("backend panicked"));
+        assert!(!classify_backend_outcome(&result));
     }
 
     #[tokio::test]

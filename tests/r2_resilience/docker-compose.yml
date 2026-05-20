@@ -1,0 +1,85 @@
+# R2 resilience-audit fixture.
+#
+# Topology:
+#
+#   runner ─(toxiproxy:7512)─► daemon (auth="none") ─dlopen─► softhsm2.so
+#
+# Toxiproxy intercepts the gRPC TCP stream between the shim runner and
+# the daemon, so individual scenarios can inject drops/latency without
+# touching the daemon or the shim. The toxiproxy HTTP control plane
+# lives on 8474; scenario scripts (in tests/r2_resilience/scenarios/)
+# poke that endpoint to add/remove `toxics`.
+#
+# Usage:
+#   docker compose -f tests/r2_resilience/docker-compose.yml build
+#   docker compose -f tests/r2_resilience/docker-compose.yml up -d
+#   tests/r2_resilience/run_scenario.sh <N>     # 1..6
+#   docker compose -f tests/r2_resilience/docker-compose.yml down -v
+#
+# The runner image is built once from tests/r2_resilience/Dockerfile.runner;
+# the daemon and SoftHSM2 share a small alpine-based image built from
+# tests/r2_resilience/Dockerfile.daemon. Both images embed binaries
+# produced by `cargo build --release --workspace` on the host, so the
+# fixture is fast to iterate on.
+
+services:
+  daemon:
+    build:
+      context: ../../..
+      dockerfile: pkcs11-proxy-ng/tests/r2_resilience/Dockerfile.daemon
+    container_name: r2-daemon
+    networks:
+      - r2net
+    expose:
+      - "7512"
+    environment:
+      RUST_LOG: "pkcs11_proxy_ng=info"
+      LOG_FORMAT: "json"
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: r2-toxiproxy
+    networks:
+      - r2net
+    expose:
+      - "7512"
+      - "8474"
+    # Pre-create the daemon proxy with the listener-and-upstream pair
+    # the runner connects to. Scenarios manipulate `toxics` via the
+    # control-plane port (8474) from the runner.
+    command:
+      - "-host"
+      - "0.0.0.0"
+      - "-config"
+      - "/etc/toxiproxy/config.json"
+    volumes:
+      - ./toxiproxy-config.json:/etc/toxiproxy/config.json:ro
+    depends_on:
+      - daemon
+
+  runner:
+    build:
+      context: ../../..
+      dockerfile: pkcs11-proxy-ng/tests/r2_resilience/Dockerfile.runner
+    container_name: r2-runner
+    networks:
+      - r2net
+    depends_on:
+      - toxiproxy
+    environment:
+      # The shim talks to toxiproxy:7512, NOT directly to the daemon —
+      # that's the whole point of the fixture.
+      PKCS11_PROXY_ENDPOINT: "http://toxiproxy:7512"
+      PKCS11_PROXY_CONNECT_TIMEOUT: "5"
+      RUST_LOG: "pkcs11_proxy_ng_shim=info,pkcs11_proxy_ng_client=info"
+    # Scenarios 2 & 3 restart the daemon container; needs access to
+    # the host's Docker socket.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The runner script orchestrates each scenario, then exits. Keep it
+    # running until manually invoked.
+    command: ["sleep", "infinity"]
+
+networks:
+  r2net:
+    driver: bridge
