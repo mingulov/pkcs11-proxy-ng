@@ -4,6 +4,8 @@ use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 
+use crate::mechanism_registry_source::MechanismRegistrySource;
+
 use super::super::super::context_manager::ContextManager;
 use super::super::service_utils::spawn_backend;
 
@@ -11,14 +13,22 @@ use super::super::service_utils::spawn_backend;
 ///
 /// Context-free: no client_context_id required.
 /// Returns the backend's interface capabilities (which versions are
-/// supported and which function pointers are NULL).
+/// supported and which function pointers are NULL) plus the daemon's
+/// current mechanism registry payload so shims can refresh their
+/// param-shape / parameterless data without restarting.
 pub(super) async fn get_backend_interfaces(
     _ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    registry_source: &MechanismRegistrySource,
     _request: Request<pkcs11_proxy_ng_proto::GetBackendInterfacesRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetBackendInterfacesResponse>, Status> {
     let backend = backend_ref.clone();
     let result = spawn_backend(move || Ok(backend.get_interface_capabilities())).await?;
+
+    // Take a snapshot of the registry payload up-front so we can include
+    // it in either the success or fallback response without an extra
+    // RwLock acquisition.
+    let registry_payload = registry_source.current();
 
     let caps = match result {
         Ok(caps) => caps,
@@ -27,7 +37,7 @@ pub(super) async fn get_backend_interfaces(
             // but handle gracefully.
             return Ok(Response::new(pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
                 interfaces: vec![],
-                mechanism_registry: None,
+                mechanism_registry: Some((*registry_payload).clone()),
             }));
         }
     };
@@ -44,6 +54,6 @@ pub(super) async fn get_backend_interfaces(
 
     Ok(Response::new(pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
         interfaces,
-        mechanism_registry: None,
+        mechanism_registry: Some((*registry_payload).clone()),
     }))
 }

@@ -4,6 +4,7 @@ use tonic::transport::Server;
 use tracing_subscriber::EnvFilter;
 
 use pkcs11_proxy_ng::config;
+use pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource;
 use pkcs11_proxy_ng::server;
 use pkcs11_proxy_ng::server::health;
 
@@ -57,6 +58,7 @@ async fn build_service(
     (
         pkcs11_proxy_ng_proto::Pkcs11ProxyServer<server::grpc_service::Pkcs11ProxyService>,
         Arc<server::context_manager::ContextManager>,
+        MechanismRegistrySource,
     ),
     BoxError,
 > {
@@ -76,11 +78,40 @@ async fn build_service(
         config.proxy.max_contexts,
     ));
 
-    context_manager
-        .populate_slots(backend)
-        .await
-        .map_err(|rv| format!("Slot population failed: {rv}"))?;
-    tracing::info!("Slot map populated");
+    // Backend-probe startup timeout (config.proxy.startup_timeout_secs).
+    // If populate_slots takes too long the daemon exits 1 so the operator
+    // sees a clear startup failure rather than a hung process.
+    let startup_timeout = std::time::Duration::from_secs(config.proxy.startup_timeout_secs);
+    match tokio::time::timeout(startup_timeout, context_manager.populate_slots(backend)).await {
+        Ok(Ok(())) => {
+            tracing::info!("Slot map populated");
+        }
+        Ok(Err(rv)) => {
+            return Err(format!("Slot population failed: {rv}").into());
+        }
+        Err(_) => {
+            return Err(format!(
+                "Slot population exceeded proxy.startup_timeout_secs={}s; daemon refusing to start",
+                config.proxy.startup_timeout_secs
+            )
+            .into());
+        }
+    }
+
+    // Load mechanism registry from configured file (or embedded default).
+    // Logged so the operator can see the served revision at startup.
+    let registry_source = MechanismRegistrySource::load(config.mechanisms.config_path.as_deref())
+        .map_err(|e| format!("Mechanism registry load failed: {e}"))?;
+    {
+        let payload = registry_source.current();
+        tracing::info!(
+            revision = %payload.revision,
+            discovery_mode = %payload.discovery_mode,
+            parameterless = payload.parameterless.len(),
+            param_shapes = payload.params.len(),
+            "mechanism registry ready"
+        );
+    }
 
     let token_policy = Arc::new(
         server::auth::policy::TokenPolicy::from_config(&config.auth)
@@ -93,12 +124,13 @@ async fn build_service(
         backend.clone(),
         tcp_auth_mode,
         token_policy,
+        registry_source.clone(),
     );
     let grpc_service = pkcs11_proxy_ng_proto::Pkcs11ProxyServer::new(service)
         .max_decoding_message_size(config.proxy.max_message_bytes)
         .max_encoding_message_size(config.proxy.max_message_bytes);
 
-    Ok((grpc_service, context_manager))
+    Ok((grpc_service, context_manager, registry_source))
 }
 
 fn resolve_bind_address(config: &config::DaemonConfig) -> Result<std::net::SocketAddr, BoxError> {
@@ -119,6 +151,40 @@ fn validate_runtime_listener_support(config: &config::DaemonConfig) -> Result<()
     }
 
     Ok(())
+}
+
+/// On SIGHUP the daemon reloads `mechanisms.config_path` and swaps the
+/// served payload atomically. Reload failures retain the current
+/// registry — the daemon must never crash because the operator pushed
+/// a malformed TOML file mid-rollout.
+#[cfg(unix)]
+fn spawn_sighup_handler(registry_source: MechanismRegistrySource) {
+    tokio::spawn(async move {
+        let mut sighup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to install SIGHUP handler");
+                return;
+            }
+        };
+        while sighup.recv().await.is_some() {
+            match registry_source.reload() {
+                Ok(payload) => tracing::info!(
+                    revision = %payload.revision,
+                    discovery_mode = %payload.discovery_mode,
+                    parameterless = payload.parameterless.len(),
+                    param_shapes = payload.params.len(),
+                    "mechanism registry reloaded"
+                ),
+                Err(e) => tracing::error!(
+                    error = %e,
+                    config_path = ?registry_source.config_path(),
+                    "mechanism registry reload failed; retaining previous registry"
+                ),
+            }
+        }
+    });
 }
 
 fn spawn_eviction_task(
@@ -185,8 +251,29 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         config.proxy.max_concurrent_backend_calls,
     );
 
-    let (svc, context_manager) = build_service(&config, &backend).await?;
+    let (svc, context_manager, registry_source) = build_service(&config, &backend).await?;
+
+    // Loud one-time warning if TCP listener is running without auth
+    // (the design's default for SaaS deployments behind external
+    // network protection). Stays visible in operator log scans.
+    if let Some(tcp) = config.listener.remote.as_ref()
+        && matches!(tcp.auth, config::TcpAuthMode::None)
+        && tcp.allow_insecure_tcp
+    {
+        tracing::warn!(
+            bind = %tcp.bind,
+            "listening on tcp without authentication; relying on external network \
+             protection (k8s NetworkPolicy / VPC). do not use in untrusted networks."
+        );
+    }
+
     health::set_serving(&mut health_reporter).await;
+
+    // Install SIGHUP handler so operators can reload the mechanism
+    // registry without restarting the daemon. Reload failure retains
+    // the current registry and logs an error rather than crashing.
+    #[cfg(unix)]
+    spawn_sighup_handler(registry_source.clone());
     let addr = resolve_bind_address(&config)?;
     spawn_eviction_task(
         context_manager,

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::config::{AuthConfig, TcpAuthMode};
+use crate::mechanism_registry_source::MechanismRegistrySource;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::Pkcs11Proxy;
 use pkcs11_proxy_ng_types::*;
@@ -38,6 +39,10 @@ pub struct Pkcs11ProxyService {
     backend: Arc<dyn Pkcs11Backend>,
     tcp_auth_mode: TcpAuthMode,
     token_policy: Arc<TokenPolicy>,
+    /// Holds the current registry payload to publish over
+    /// `GetBackendInterfaces`. Wrapped in a `MechanismRegistrySource`
+    /// so SIGHUP can swap the payload while live requests are in flight.
+    mechanism_registry_source: MechanismRegistrySource,
 }
 
 impl Pkcs11ProxyService {
@@ -46,8 +51,9 @@ impl Pkcs11ProxyService {
         backend: Arc<dyn Pkcs11Backend>,
         tcp_auth_mode: TcpAuthMode,
         token_policy: Arc<TokenPolicy>,
+        mechanism_registry_source: MechanismRegistrySource,
     ) -> Self {
-        Self { context_manager, backend, tcp_auth_mode, token_policy }
+        Self { context_manager, backend, tcp_auth_mode, token_policy, mechanism_registry_source }
     }
 
     pub fn insecure_for_tests(
@@ -56,7 +62,9 @@ impl Pkcs11ProxyService {
     ) -> Self {
         let token_policy =
             Arc::new(TokenPolicy::from_config(&AuthConfig::default()).expect("default policy"));
-        Self::new(context_manager, backend, TcpAuthMode::None, token_policy)
+        let registry = MechanismRegistrySource::load(None)
+            .expect("embedded mechanism registry must always load");
+        Self::new(context_manager, backend, TcpAuthMode::None, token_policy, registry)
     }
 }
 
@@ -165,6 +173,19 @@ macro_rules! impl_proxy_service {
                     &self.context_manager,
                     &self.backend,
                     self.token_policy.as_ref(),
+                    request,
+                )
+                .await
+            }
+
+            async fn get_backend_interfaces(
+                &self,
+                request: Request<pkcs11_proxy_ng_proto::GetBackendInterfacesRequest>,
+            ) -> Result<Response<pkcs11_proxy_ng_proto::GetBackendInterfacesResponse>, Status> {
+                general::get_backend_interfaces(
+                    &self.context_manager,
+                    &self.backend,
+                    &self.mechanism_registry_source,
                     request,
                 )
                 .await
@@ -525,12 +546,6 @@ impl_proxy_service!(
         GetSessionValidationFlagsRequest,
         GetSessionValidationFlagsResponse,
         session_3x::get_session_validation_flags
-    ),
-    (
-        get_backend_interfaces,
-        GetBackendInterfacesRequest,
-        GetBackendInterfacesResponse,
-        general::get_backend_interfaces
     ),
     // Track B: Exact byte-output RPC
     (

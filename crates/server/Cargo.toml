@@ -23,6 +23,7 @@ nix.workspace = true
 dashmap.workspace = true
 x509-parser.workspace = true
 tonic-health.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 pkcs11-proxy-ng-client = { path = "../client" }
@@ -30,7 +31,6 @@ cryptoki-sys.workspace = true
 libloading.workspace = true
 tokio-stream = "0.1"
 tempfile = "3"
-sha2 = "0.10"
 rcgen = "0.14"
 time = "0.3"
 criterion = { version = "0.8", features = ["async_tokio"] }

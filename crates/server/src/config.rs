@@ -10,7 +10,23 @@ pub struct DaemonConfig {
     pub listener: ListenerGroup,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub mechanisms: MechanismsConfig,
 }
+
+/// Mechanism registry source. The daemon loads the file at startup and
+/// serves the resulting registry to shims over `GetBackendInterfaces`.
+/// If `config_path` is absent the daemon serves the embedded default
+/// registry (revision = "embedded-default").
+#[derive(Debug, Deserialize, Default)]
+pub struct MechanismsConfig {
+    pub config_path: Option<PathBuf>,
+}
+
+/// Placeholder backend module path shipped in the default proxy.toml.
+/// The daemon refuses to start if `backend.module` is still this value
+/// so misconfigurations fail loud at startup rather than at first call.
+pub const BACKEND_MODULE_PLACEHOLDER: &str = "/CHANGE_ME/path/to/backend.so";
 
 /// Authorization configuration (ADR-0005).
 #[derive(Debug, Deserialize, Default)]
@@ -111,6 +127,21 @@ pub struct ProxyConfig {
     /// HTTP/2 keepalive ping timeout (seconds).
     #[serde(default = "default_http2_keepalive_timeout_secs")]
     pub http2_keepalive_timeout_secs: u64,
+    /// Maximum time (seconds) the daemon waits for `populate_slots` to
+    /// complete at startup. On timeout the daemon exits 1.
+    #[serde(default = "default_startup_timeout_secs")]
+    pub startup_timeout_secs: u64,
+    /// On SIGTERM/SIGINT, drain in-flight RPCs for up to this many
+    /// seconds before forcing shutdown. k8s
+    /// `terminationGracePeriodSeconds` should be at least this value.
+    #[serde(default = "default_shutdown_grace_secs")]
+    pub shutdown_grace_secs: u64,
+    /// Consecutive backend-call failures before `tonic-health` flips to
+    /// NOT_SERVING. The next successful backend call flips it back.
+    /// Drives k8s readiness probes when the daemon is up but the
+    /// backend HSM is unresponsive.
+    #[serde(default = "default_backend_health_consecutive_failures")]
+    pub backend_health_consecutive_failures: u32,
 }
 
 impl Default for ProxyConfig {
@@ -126,6 +157,9 @@ impl Default for ProxyConfig {
             max_contexts: default_max_contexts(),
             http2_keepalive_interval_secs: default_http2_keepalive_interval_secs(),
             http2_keepalive_timeout_secs: default_http2_keepalive_timeout_secs(),
+            startup_timeout_secs: default_startup_timeout_secs(),
+            shutdown_grace_secs: default_shutdown_grace_secs(),
+            backend_health_consecutive_failures: default_backend_health_consecutive_failures(),
         }
     }
 }
@@ -156,6 +190,15 @@ fn default_http2_keepalive_interval_secs() -> u64 {
 }
 fn default_http2_keepalive_timeout_secs() -> u64 {
     5
+}
+fn default_startup_timeout_secs() -> u64 {
+    30
+}
+fn default_shutdown_grace_secs() -> u64 {
+    30
+}
+fn default_backend_health_consecutive_failures() -> u32 {
+    3
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -304,11 +347,43 @@ impl DaemonConfig {
         if self.proxy.eviction_interval_secs == 0 {
             return Err("proxy.eviction_interval_secs must be > 0".into());
         }
+        // Refuse to start if backend.module is still the shipped
+        // placeholder — fail loud at startup rather than at first call.
+        if self.backend.module.as_os_str() == BACKEND_MODULE_PLACEHOLDER {
+            return Err(format!(
+                "backend.module is still the shipped placeholder ({BACKEND_MODULE_PLACEHOLDER}). \
+                 Edit /etc/pkcs11-proxy-ng/proxy.toml or set the PKCS11_PROXY_BACKEND_MODULE \
+                 env var to point at a real PKCS#11 .so before starting the daemon."
+            ));
+        }
         // Validate backend module path exists
         if !self.backend.module.exists() {
             return Err(format!(
                 "backend.module path does not exist: {}",
                 self.backend.module.display()
+            ));
+        }
+        // Validate lifecycle/health knobs
+        if self.proxy.startup_timeout_secs == 0 {
+            return Err("proxy.startup_timeout_secs must be > 0".into());
+        }
+        if self.proxy.shutdown_grace_secs == 0 {
+            return Err("proxy.shutdown_grace_secs must be > 0 (set to 1 if you really want \
+                 effectively-immediate shutdown)"
+                .into());
+        }
+        if self.proxy.backend_health_consecutive_failures == 0 {
+            return Err("proxy.backend_health_consecutive_failures must be > 0 \
+                 (the readiness gate cannot trip on zero failures)"
+                .into());
+        }
+        // Validate the mechanism-registry config path if set.
+        if let Some(path) = &self.mechanisms.config_path
+            && !path.exists()
+        {
+            return Err(format!(
+                "mechanisms.config_path points at a missing file: {}",
+                path.display()
             ));
         }
         if let Some(ref tcp) = self.listener.remote {
