@@ -27,6 +27,7 @@ pub(super) async fn get_backend_interfaces(
             // but handle gracefully.
             return Ok(Response::new(pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
                 interfaces: vec![],
+                mechanism_registry: None,
             }));
         }
     };
@@ -41,5 +42,8 @@ pub(super) async fn get_backend_interfaces(
         })
         .collect();
 
-    Ok(Response::new(pkcs11_proxy_ng_proto::GetBackendInterfacesResponse { interfaces }))
+    Ok(Response::new(pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
+        interfaces,
+        mechanism_registry: None,
+    }))
 }

@@ -29,14 +29,22 @@ pub enum DiscoveryMode {
     Filtered,
 }
 
+/// Sentinel revision used when the registry is the embedded default or has
+/// no content-derived revision otherwise.
+pub const EMBEDDED_DEFAULT_REVISION: &str = "embedded-default";
+
 /// Registry of mechanism parameter shapes, parameterless mechanisms, and
 /// discovery mode. Built from an embedded TOML default plus an optional
-/// operator override.
+/// operator override, or reconstructed from a server-published payload.
 #[derive(Debug)]
 pub struct MechanismRegistry {
     param_shapes: HashMap<u64, String>,
     parameterless: HashSet<u64>,
     discovery_mode: DiscoveryMode,
+    /// Short content-derived identifier used for change detection
+    /// between probes (`EMBEDDED_DEFAULT_REVISION` for the embedded
+    /// default, or a hex-truncated SHA-256 of the source TOML).
+    revision: String,
 }
 
 // ─── TOML schema ───────────────────────────────────────────────────────────
@@ -129,7 +137,12 @@ impl MechanismRegistry {
             Self::merge_config(&over, &mut param_shapes, &mut parameterless, &mut discovery_mode);
         }
 
-        Ok(Self { param_shapes, parameterless, discovery_mode })
+        Ok(Self {
+            param_shapes,
+            parameterless,
+            discovery_mode,
+            revision: EMBEDDED_DEFAULT_REVISION.to_string(),
+        })
     }
 
     /// Merge a parsed `TomlConfig` into the running state.
@@ -163,7 +176,49 @@ impl MechanismRegistry {
             Self::merge_config(&over, &mut param_shapes, &mut parameterless, &mut discovery_mode);
         }
 
-        Ok(Self { param_shapes, parameterless, discovery_mode })
+        Ok(Self {
+            param_shapes,
+            parameterless,
+            discovery_mode,
+            revision: EMBEDDED_DEFAULT_REVISION.to_string(),
+        })
+    }
+
+    /// Construct a registry directly from its component parts. Used by
+    /// the proto conversion layer when reconstructing a registry from a
+    /// server-published payload.
+    pub fn from_parts(
+        param_shapes: HashMap<u64, String>,
+        parameterless: HashSet<u64>,
+        discovery_mode: DiscoveryMode,
+        revision: String,
+    ) -> Self {
+        Self { param_shapes, parameterless, discovery_mode, revision }
+    }
+
+    /// Replace the revision string. Used by the daemon after loading a
+    /// registry file from disk to attach a content-derived identifier.
+    pub fn set_revision(&mut self, revision: String) {
+        self.revision = revision;
+    }
+
+    /// Return the registry's revision identifier. Callers must treat this
+    /// as opaque; equality across two values means "same registry
+    /// contents", inequality means "may differ" — nothing else.
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    /// Borrow the parameter-shape map, for serialisation into the proto
+    /// payload. Callers should not mutate; this is a read-only view.
+    pub fn param_shapes_view(&self) -> &HashMap<u64, String> {
+        &self.param_shapes
+    }
+
+    /// Borrow the parameterless set, for serialisation into the proto
+    /// payload.
+    pub fn parameterless_view(&self) -> &HashSet<u64> {
+        &self.parameterless
     }
 
     /// Return the parameter shape name for a mechanism, or `None` if the
