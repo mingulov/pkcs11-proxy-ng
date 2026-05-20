@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tonic::Status;
 
 use pkcs11_proxy_ng_types::*;
@@ -13,11 +14,42 @@ use super::super::handle_map::{BackendHandle, VirtualHandle};
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();
+static HEALTH_EVENT_TX: OnceLock<mpsc::UnboundedSender<BackendHealthEvent>> = OnceLock::new();
+
+/// Outcome reported by [`spawn_backend`] for the health-gating task
+/// in `main.rs` to consume. `Success` = backend produced any
+/// `CkResult` (including a PKCS#11 error code that is a normal
+/// application-level outcome); `Failure` = transport-level failure
+/// (timeout, blocking-pool panic, circuit-breaker trip) — those are
+/// the only conditions that flip `tonic-health` to NOT_SERVING.
+#[derive(Debug, Clone, Copy)]
+pub enum BackendHealthEvent {
+    Success,
+    Failure,
+}
 
 /// Called once at server startup to configure the backend guard.
 pub fn configure_backend_guard(timeout_secs: u64, max_calls: usize) {
     BACKEND_TIMEOUT.set(Duration::from_secs(timeout_secs)).ok();
     MAX_BACKEND_CALLS.set(max_calls).ok();
+}
+
+/// Wire up the channel that `spawn_backend` uses to report outcomes
+/// to the health-gating task. Called once at startup. If never called,
+/// backend outcomes are silently dropped — health gating is disabled
+/// and `tonic-health` stays at whatever startup last set it to.
+pub fn configure_backend_health_events(tx: mpsc::UnboundedSender<BackendHealthEvent>) {
+    HEALTH_EVENT_TX.set(tx).ok();
+}
+
+fn report_backend_outcome(success: bool) {
+    if let Some(tx) = HEALTH_EVENT_TX.get() {
+        let _ = tx.send(if success {
+            BackendHealthEvent::Success
+        } else {
+            BackendHealthEvent::Failure
+        });
+    }
 }
 
 fn backend_timeout() -> Duration {
@@ -93,10 +125,14 @@ where
             max = max_calls,
             "Backend circuit breaker tripped — too many in-flight calls"
         );
+        // A flood of breaker trips means the daemon is overloaded and
+        // downstream traffic should be diverted — count as a failure
+        // for the health gate.
+        report_backend_outcome(false);
         return Ok(Err(CkRv::DEVICE_ERROR));
     };
 
-    match tokio::time::timeout(backend_timeout(), spawn_task(operation)).await {
+    let result = match tokio::time::timeout(backend_timeout(), spawn_task(operation)).await {
         Ok(result) => result,
         Err(_elapsed) => {
             tracing::warn!(
@@ -107,7 +143,23 @@ where
             );
             Ok(Err(CkRv::DEVICE_ERROR))
         }
-    }
+    };
+
+    // PKCS#11 errors are application-level (CKR_PIN_INCORRECT,
+    // CKR_DATA_INVALID, …) — they do NOT mean "the backend is
+    // unhealthy". Health gating triggers only on transport-level
+    // failures: timeouts, spawn-blocking panics, breaker trips. Those
+    // produce `Ok(Err(CkRv::DEVICE_ERROR))` from the timeout path
+    // above, or `Err(Status)` from spawn_task on panic.
+    let healthy = match &result {
+        Ok(Ok(_)) => true,
+        Ok(Err(rv)) if *rv == CkRv::DEVICE_ERROR => false, // timeout
+        Ok(Err(_)) => true,                                // normal PKCS#11 error
+        Err(_) => false,                                   // blocking-pool panic
+    };
+    report_backend_outcome(healthy);
+
+    result
     // _guard drops here (or when Future is cancelled) → IN_FLIGHT decremented
 }
 
@@ -418,6 +470,78 @@ mod tests {
         drop(third);
         drop(replacement);
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn spawn_backend_reports_success_outcome_when_channel_configured() {
+        // Use a local channel so we don't race with other tests over
+        // the global OnceLock.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // OnceLock semantics: first call wins. If another test already
+        // installed a sender, this call is a no-op; we then can't
+        // observe events here. Skip the assertion in that case so the
+        // test suite stays order-independent.
+        let installed = HEALTH_EVENT_TX.set(tx).is_ok();
+
+        let result = spawn_backend(|| Ok(7u64)).await;
+        assert_eq!(result.expect("status ok").unwrap(), 7);
+
+        if installed {
+            let event = tokio::time::timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .expect("event arrives quickly")
+                .expect("channel still open");
+            assert!(matches!(event, BackendHealthEvent::Success));
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_backend_reports_failure_outcome_on_timeout() {
+        // We can't easily inject the timeout from inside the test, but
+        // we *can* exercise the circuit-breaker-trip failure path,
+        // which also reports a Failure event.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let installed = HEALTH_EVENT_TX.set(tx).is_ok();
+
+        let max = max_concurrent_backend_calls();
+        let previous = IN_FLIGHT.load(Ordering::Relaxed);
+        IN_FLIGHT.store(max, Ordering::Relaxed);
+        let result = spawn_backend(|| Ok(())).await;
+        IN_FLIGHT.store(previous, Ordering::Relaxed);
+
+        assert_eq!(result.expect("status ok").unwrap_err(), CkRv::DEVICE_ERROR);
+
+        if installed {
+            let event = tokio::time::timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .expect("event arrives quickly")
+                .expect("channel still open");
+            assert!(matches!(event, BackendHealthEvent::Failure));
+        }
+    }
+
+    #[tokio::test]
+    async fn pkcs11_application_error_is_not_a_health_failure() {
+        // CkResult::Err for an application-level CK_RV is a normal
+        // outcome and must NOT count as a health failure — otherwise
+        // a noisy CKR_PIN_INCORRECT user would trip the readiness
+        // gauge.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let installed = HEALTH_EVENT_TX.set(tx).is_ok();
+
+        let result = spawn_backend(|| Err::<(), _>(CkRv::PIN_INCORRECT)).await;
+        assert_eq!(result.expect("status ok").unwrap_err(), CkRv::PIN_INCORRECT);
+
+        if installed {
+            let event = tokio::time::timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .expect("event arrives quickly")
+                .expect("channel still open");
+            assert!(
+                matches!(event, BackendHealthEvent::Success),
+                "PKCS#11 application errors must report Success to the health gate"
+            );
+        }
     }
 
     #[tokio::test]

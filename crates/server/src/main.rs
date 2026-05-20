@@ -187,6 +187,57 @@ fn spawn_sighup_handler(registry_source: MechanismRegistrySource) {
     });
 }
 
+/// Bridge between `spawn_backend`'s outcome channel and the
+/// `tonic-health` reporter. Counts consecutive backend failures; flips
+/// the per-service health status to `NOT_SERVING` once the count
+/// reaches `threshold`, and flips it back to `SERVING` on the next
+/// successful backend call. Driven by `proxy.backend_health_consecutive_failures`.
+fn spawn_backend_health_gate(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<
+        server::grpc_service::service_utils::BackendHealthEvent,
+    >,
+    mut reporter: tonic_health::server::HealthReporter,
+    threshold: u32,
+) {
+    tokio::spawn(async move {
+        use server::grpc_service::service_utils::BackendHealthEvent;
+        let mut consecutive_failures: u32 = 0;
+        // We assume the daemon enters this task already in the SERVING
+        // state — the spawn point in `async_main` calls
+        // `health::set_serving` immediately before us.
+        let mut currently_serving = true;
+        while let Some(event) = rx.recv().await {
+            match event {
+                BackendHealthEvent::Success => {
+                    let prior_failures = consecutive_failures;
+                    consecutive_failures = 0;
+                    if !currently_serving {
+                        tracing::info!(
+                            recovered_after = prior_failures,
+                            "backend recovered; flipping readiness back to SERVING"
+                        );
+                        health::set_serving(&mut reporter).await;
+                        currently_serving = true;
+                    }
+                }
+                BackendHealthEvent::Failure => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    if currently_serving && consecutive_failures >= threshold {
+                        tracing::warn!(
+                            consecutive_failures,
+                            threshold,
+                            "backend exceeded failure threshold; flipping readiness to NOT_SERVING"
+                        );
+                        health::set_not_serving(&mut reporter).await;
+                        currently_serving = false;
+                    }
+                }
+            }
+        }
+        tracing::debug!("backend health-gate channel closed; task exiting");
+    });
+}
+
 fn spawn_eviction_task(
     context_manager: Arc<server::context_manager::ContextManager>,
     backend: Backend,
@@ -268,6 +319,18 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     }
 
     health::set_serving(&mut health_reporter).await;
+
+    // Wire backend-health gating: spawn_backend reports each outcome
+    // through an unbounded channel; this task counts consecutive
+    // transport-level failures and flips tonic-health to NOT_SERVING
+    // once `proxy.backend_health_consecutive_failures` is exceeded.
+    let (health_tx, health_rx) = tokio::sync::mpsc::unbounded_channel();
+    server::grpc_service::service_utils::configure_backend_health_events(health_tx);
+    spawn_backend_health_gate(
+        health_rx,
+        health_reporter.clone(),
+        config.proxy.backend_health_consecutive_failures,
+    );
 
     // Install SIGHUP handler so operators can reload the mechanism
     // registry without restarting the daemon. Reload failure retains
