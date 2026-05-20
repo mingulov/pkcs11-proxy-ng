@@ -384,7 +384,11 @@ pub(crate) unsafe fn validate_mechanism(p_mechanism: *const CK_MECHANISM) -> CK_
 /// `ulParameterLen` bytes containing the appropriate C struct.
 pub(crate) unsafe fn read_mechanism(p_mechanism: *const CK_MECHANISM) -> CkMechanism {
     let c_mech = unsafe { &*p_mechanism };
-    let shape = crate::state::mechanism_registry().param_shape(c_mech.mechanism);
+    // Hold the Arc until after we have copied the shape string out — the
+    // returned `&str` borrows from the Arc, so dropping it before the call
+    // below would leave a dangling reference.
+    let registry = crate::state::mechanism_registry();
+    let shape = registry.param_shape(c_mech.mechanism);
     unsafe { read_mechanism_with_shape(c_mech, shape) }
 }
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use cryptoki_sys::{CK_SESSION_HANDLE, CK_SLOT_ID};
@@ -18,20 +18,68 @@ static CLIENT_INIT: Mutex<()> = Mutex::new(());
 /// `C_Initialize` must re-read connection configuration instead of reusing a
 /// channel that may point at an old daemon.
 static CLIENT_RECONNECT_REQUIRED: AtomicBool = AtomicBool::new(false);
-static MECHANISM_REGISTRY: OnceLock<MechanismRegistry> = OnceLock::new();
 
-/// Returns the global mechanism registry.
+/// The mechanism registry uses a two-level wrapper:
 ///
-/// Panics if called before `init_mechanism_registry()`.
-pub fn mechanism_registry() -> &'static MechanismRegistry {
-    MECHANISM_REGISTRY.get().expect("MechanismRegistry not initialized")
+/// * `OnceLock<...>` so the very first registry can be installed exactly
+///   once during `C_Initialize`, matching the historical contract.
+/// * `RwLock<Arc<MechanismRegistry>>` so subsequent probes
+///   (`reprobe()`-driven) can atomically swap the registry without
+///   blocking concurrent readers — readers clone the `Arc` while holding
+///   the read lock for only a couple of nanoseconds, then drop the lock
+///   before doing any work.
+///
+/// Readers MUST NOT hold the read guard across FFI or RPC calls; that
+/// invariant is enforced by the fact that the public accessor returns
+/// an owned `Arc<MechanismRegistry>` rather than a borrow tied to the
+/// guard.
+static MECHANISM_REGISTRY: OnceLock<RwLock<Arc<MechanismRegistry>>> = OnceLock::new();
+
+/// Returns a cheap clone of the current mechanism registry.
+///
+/// Panics if called before [`replace_mechanism_registry`] has installed
+/// the first registry. Callers do not have to worry about locking — the
+/// `Arc<MechanismRegistry>` is captured and the underlying lock is
+/// released before this function returns.
+pub fn mechanism_registry() -> Arc<MechanismRegistry> {
+    MECHANISM_REGISTRY
+        .get()
+        .expect("MechanismRegistry not initialized")
+        .read()
+        .expect("MechanismRegistry RwLock poisoned")
+        .clone()
 }
 
-/// Initialize the global mechanism registry (called from `C_Initialize`).
+/// Install or atomically replace the global mechanism registry.
 ///
-/// Returns `Ok(())` on first call; `Err` if already set (OnceLock semantics).
+/// First invocation (from `C_Initialize`) creates the `RwLock` inside
+/// the `OnceLock`; later invocations (from `reprobe()`) acquire the
+/// write lock and swap the `Arc` in-place. Existing readers that already
+/// cloned the `Arc` keep using the old registry until they drop it,
+/// which preserves consistency for in-flight operations.
+pub fn replace_mechanism_registry(reg: MechanismRegistry) {
+    let arc = Arc::new(reg);
+    match MECHANISM_REGISTRY.get() {
+        Some(lock) => {
+            *lock.write().expect("MechanismRegistry RwLock poisoned") = arc;
+        }
+        None => {
+            // Ignore the race outcome: if another thread already
+            // installed the OnceLock between our `get()` and `set()`,
+            // we fall through to a swap on the next call.
+            let _ = MECHANISM_REGISTRY.set(RwLock::new(arc));
+        }
+    }
+}
+
+/// Backwards-compatible alias for [`replace_mechanism_registry`]. The
+/// old name returned an `Err` if the registry was already initialised;
+/// the new contract is "swap, do not refuse", so this shim always
+/// reports success. Callers that relied on the failure semantics are
+/// expected to be tests that have been migrated to expect the swap.
 pub fn init_mechanism_registry(reg: MechanismRegistry) -> Result<(), MechanismRegistry> {
-    MECHANISM_REGISTRY.set(reg)
+    replace_mechanism_registry(reg);
+    Ok(())
 }
 
 /// Whether `C_Initialize` has been called and returned `CKR_OK`.
