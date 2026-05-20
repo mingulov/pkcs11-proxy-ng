@@ -1,0 +1,94 @@
+# Maintainer: Denis Mingulov <denis@laavat.com>
+
+# pkcs11-proxy-ng — Rust PKCS#11 remote proxy.
+#
+# Subpackages mirror the existing pkcs11-proxy distribution layout:
+#   * pkcs11-proxy-ng-shim    — client-side PKCS#11 module (.so)
+#   * pkcs11-proxy-ng-daemon  — gRPC server binary + default configs
+#   * pkcs11-proxy-ng-cli     — admin / smoke-test CLI
+#   * pkcs11-proxy-ng-compat  — legacy symlinks (libpkcs11-proxy.so → shim)
+#
+# Built artifacts live under /usr/lib/pkcs11/, /usr/bin/, and
+# /etc/pkcs11-proxy-ng/. The -compat package installs an extra symlink
+# /usr/lib/libpkcs11-proxy.so → /usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so
+# so older consumer Dockerfiles using the legacy path keep working
+# after a one-line PKCS11_PROXY_SOCKET/PKCS11_PROXY_ENDPOINT swap.
+
+pkgname=pkcs11-proxy-ng
+pkgver=0.2.0
+pkgrel=0
+pkgdesc="Rust PKCS#11 remote proxy (next-gen)"
+url="https://gitlab.com/laavat/laavat-product/architecture/3rdparty/pkcs11-proxy-ng"
+arch="x86_64"
+license="Apache-2.0 OR MIT"
+depends=""
+makedepends="cargo rust"
+install="$pkgname-shim.post-install
+        $pkgname-shim.post-deinstall
+        $pkgname-daemon.post-install
+        $pkgname-daemon.post-deinstall
+        $pkgname-cli.post-install
+        $pkgname-compat.post-install
+        $pkgname-compat.post-deinstall"
+subpackages="$pkgname-shim $pkgname-daemon $pkgname-cli $pkgname-compat"
+
+# `source` is intentionally empty: the build pulls the workspace from
+# the surrounding build context (a Dockerfile COPY's it into the
+# builder image).
+source=""
+
+build() {
+    # Build the release artifacts from the workspace. The release
+    # profile pulls in lto="thin", strip="symbols", codegen-units=1
+    # from the workspace Cargo.toml — output binaries are already
+    # stripped, so no additional `strip` invocation is needed.
+    cd "$builddir"
+    cargo build --release --workspace --locked
+}
+
+check() {
+    cd "$builddir"
+    cargo test --release --workspace --locked --lib --bins
+}
+
+package() {
+    # Umbrella package owns nothing on its own — every file is in a
+    # subpackage. Apk's normal empty-package handling applies.
+    mkdir -p "$pkgdir"
+}
+
+shim() {
+    pkgdesc="$pkgdesc (client-side PKCS#11 module)"
+    install -Dm0755 "$builddir/target/release/libpkcs11_proxy_ng_shim.so" \
+        "$subpkgdir/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so"
+}
+
+daemon() {
+    pkgdesc="$pkgdesc (gRPC server daemon)"
+    install -Dm0755 "$builddir/target/release/pkcs11-proxy-ng" \
+        "$subpkgdir/usr/bin/pkcs11-proxy-ng"
+    install -Dm0644 "$builddir/packaging/config/proxy.toml.default" \
+        "$subpkgdir/etc/pkcs11-proxy-ng/proxy.toml"
+    # Ship the current embedded default as the operator-editable
+    # mechanism registry. SIGHUP reloads this file at runtime.
+    install -Dm0644 "$builddir/crates/types/src/mechanism_params_default.toml" \
+        "$subpkgdir/etc/pkcs11-proxy-ng/mechanism_params.toml"
+    install -Dm0644 "$builddir/packaging/config/mechanism_params.cloudhsm.toml.example" \
+        "$subpkgdir/etc/pkcs11-proxy-ng/mechanism_params.cloudhsm.toml.example"
+    install -Dm0644 "$builddir/packaging/alpine/pkcs11-proxy-ng-daemon.openrc" \
+        "$subpkgdir/etc/init.d/pkcs11-proxy-ng"
+}
+
+cli() {
+    pkgdesc="$pkgdesc (admin / smoke-test CLI)"
+    install -Dm0755 "$builddir/target/release/pkcs11-proxy-ng-cli" \
+        "$subpkgdir/usr/bin/pkcs11-proxy-ng-cli"
+}
+
+compat() {
+    pkgdesc="$pkgdesc (legacy libpkcs11-proxy.so symlink)"
+    depends="$pkgname-shim"
+    install -d "$subpkgdir/usr/lib"
+    ln -s pkcs11/libpkcs11_proxy_ng_shim.so \
+        "$subpkgdir/usr/lib/libpkcs11-proxy.so"
+}

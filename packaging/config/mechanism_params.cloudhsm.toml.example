@@ -1,0 +1,50 @@
+# Example: AWS CloudHSM vendor mechanism overlay.
+#
+# How to use:
+# 1. Copy or symlink this file alongside your active
+#    /etc/pkcs11-proxy-ng/mechanism_params.toml.
+# 2. Either (a) merge the entries below into your active registry
+#    file, or (b) reference this file from your active registry using
+#    the `include` directive.
+# 3. Send SIGHUP to the daemon to swap registries
+#    (`kill -HUP $(pidof pkcs11-proxy-ng)` or `kubectl rollout restart`).
+# 4. Roll-restart consumer services so their next C_Initialize pulls
+#    the new registry over the GetBackendInterfaces RPC.
+#
+# Notes:
+# - This file is intentionally a TEMPLATE. Every entry is commented
+#   out so a casual `include` does not change behaviour. Uncomment the
+#   mechanisms you actually need.
+# - All entries below reuse parameter shapes that the shim already
+#   understands (gcm, iv, rsa_pkcs_oaep, rsa_pkcs_pss, ecdh1_derive,
+#   raw). Adding a mechanism that needs a NEW shape requires shim
+#   code changes per AGENTS.md rule 12 steps 1-5; this file alone
+#   cannot do that.
+# - CloudHSM mechanism IDs are conventionally in the vendor range
+#   (0x80000000+). Check current AWS docs for the authoritative list;
+#   the IDs below illustrate the file structure but may shift between
+#   CloudHSM major versions.
+#
+# discovery_mode = "transparent"
+#
+# parameterless = [
+#     # 0x80000007,  # CKM_CLOUDHSM_AES_KEY_GEN (example placeholder)
+# ]
+#
+# [[params]]
+# shape = "gcm"
+# mechanisms = [
+#     # 0x80000010,  # CKM_CLOUDHSM_AES_GCM (example placeholder)
+# ]
+#
+# [[params]]
+# shape = "iv"
+# mechanisms = [
+#     # 0x80000020,  # CKM_CLOUDHSM_AES_CBC (example placeholder)
+# ]
+#
+# [[params]]
+# shape = "rsa_pkcs_oaep"
+# mechanisms = [
+#     # 0x80000030,  # CKM_CLOUDHSM_RSA_OAEP (example placeholder)
+# ]
