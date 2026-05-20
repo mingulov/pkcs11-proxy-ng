@@ -3236,7 +3236,7 @@ mod mechanism_parameter_tests {
 
     fn ensure_registry() {
         let registry = MechanismRegistry::load(None).expect("default mechanism registry");
-        let _ = crate::state::init_mechanism_registry(registry);
+        crate::state::replace_mechanism_registry(registry);
     }
 
     unsafe fn read_ck_mechanism(mechanism: &CK_MECHANISM) -> CkMechanismParams {

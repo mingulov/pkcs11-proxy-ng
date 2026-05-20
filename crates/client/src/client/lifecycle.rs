@@ -1,8 +1,17 @@
-use pkcs11_proxy_ng_proto::Pkcs11ProxyClient as GrpcClient;
+use pkcs11_proxy_ng_proto::{MechanismRegistryPayload, Pkcs11ProxyClient as GrpcClient};
 use pkcs11_proxy_ng_types::*;
 use tonic::transport::Channel;
 
 use super::{ConnectionSource, Pkcs11Client};
+
+/// Result of a `get_backend_interfaces` probe — the backend's interface
+/// capabilities plus the server's mechanism registry payload (absent on
+/// older daemons predating the field).
+#[derive(Debug, Clone)]
+pub struct BackendProbe {
+    pub interfaces: Vec<(u8, u8, Vec<String>)>,
+    pub mechanism_registry: Option<MechanismRegistryPayload>,
+}
 
 async fn connect_channel(
     endpoint: &str,
@@ -83,12 +92,14 @@ impl Pkcs11Client {
         Ok(())
     }
 
-    /// Query the daemon for the backend's interface capabilities.
+    /// Query the daemon for the backend's interface capabilities. Also
+    /// pulls the server-published mechanism registry payload when the
+    /// daemon includes it (older daemons predate the field and the
+    /// caller must fall back to its embedded default).
     ///
-    /// This is context-free (no `C_Initialize` required) and can be called
-    /// before `initialize()`. Used by the shim to dynamically build
-    /// function lists matching the backend.
-    pub async fn get_backend_interfaces(&mut self) -> Result<Vec<(u8, u8, Vec<String>)>, String> {
+    /// Context-free (no `C_Initialize` required); safe to call before
+    /// `initialize()`.
+    pub async fn get_backend_interfaces(&mut self) -> Result<BackendProbe, String> {
         let req = pkcs11_proxy_ng_proto::GetBackendInterfacesRequest {};
         let resp = self
             .grpc
@@ -97,11 +108,13 @@ impl Pkcs11Client {
             .map_err(|e| format!("GetBackendInterfaces failed: {e}"))?
             .into_inner();
 
-        Ok(resp
+        let interfaces = resp
             .interfaces
             .into_iter()
             .map(|info| (info.version_major as u8, info.version_minor as u8, info.null_functions))
-            .collect())
+            .collect();
+
+        Ok(BackendProbe { interfaces, mechanism_registry: resp.mechanism_registry })
     }
 
     /// Re-dial the endpoint (if it was created via `connect`) and probe the
