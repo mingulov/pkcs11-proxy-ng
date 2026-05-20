@@ -1,0 +1,23 @@
+# Daemon config for R5 consumer matrix. The backend.module value is
+# templated per-backend by each Dockerfile.daemon.* via sed.
+
+[backend]
+module = "@BACKEND_MODULE@"
+
+[proxy]
+request_timeout_secs = 60
+startup_timeout_secs = 30
+shutdown_grace_secs = 5
+backend_health_consecutive_failures = 3
+
+[listener.remote]
+bind = "0.0.0.0:7512"
+auth = "none"
+allow_insecure_tcp = true
+
+[auth]
+
+[mechanisms]
+# Daemon's runtime registry. Each daemon image overlays a config file
+# for vendor extensions if needed.
+config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"

@@ -1,0 +1,62 @@
+From: pkcs11-proxy-ng R5 audit
+Subject: [PATCH] Alias CKM_CLOUDHSM_AES_GCM (0x80001087) to CKM_AES_GCM
+
+R5 audit needs a SoftHSM2 build that advertises a CloudHSM-style
+vendor mechanism (0x80001087) and accepts it at C_EncryptInit /
+C_DecryptInit by reusing the standard AES-GCM code path. This is
+NOT a faithful CloudHSM emulation — it's enough to verify that the
+pkcs11-proxy-ng vendor-extension flow works end-to-end, i.e. a
+consumer can submit `CKM_CLOUDHSM_AES_GCM` and the daemon will
+forward it to the backend, which will run the GCM op and return
+the result.
+
+Touch sites in src/lib/SoftHSM.cpp (5):
+  - prepareSupportedMechanisms()   — add to the mechanism table
+  - C_GetMechanismInfo dispatch    — same key-size / flag info as AES-GCM
+  - isMechanismPermitted helper    — accept the vendor mechanism
+  - SymEncryptInit dispatch        — fall through to GCM
+  - SymDecryptInit dispatch        — fall through to GCM
+
+--- a/src/lib/SoftHSM.cpp
++++ b/src/lib/SoftHSM.cpp
+@@ -743,6 +743,8 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
+ 	t["CKM_AES_CBC_PAD"]		= CKM_AES_CBC_PAD;
+ 	t["CKM_AES_CTR"]		= CKM_AES_CTR;
+ 	t["CKM_AES_GCM"]		= CKM_AES_GCM;
++	// R5 audit: CKM_CLOUDHSM_AES_GCM alias for vendor-extension flow.
++	t["CKM_CLOUDHSM_AES_GCM"]	= (CK_MECHANISM_TYPE)0x80001087UL;
+ 	t["CKM_AES_KEY_WRAP"]		= CKM_AES_KEY_WRAP;
+ #ifdef HAVE_AES_KEY_WRAP_PAD
+ 	t["CKM_AES_KEY_WRAP_PAD"]	= CKM_AES_KEY_WRAP_PAD;
+@@ -1106,6 +1108,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
+ 		case CKM_AES_CBC_PAD:
+ 		case CKM_AES_CTR:
+ 		case CKM_AES_GCM:
++		case (CK_MECHANISM_TYPE)0x80001087UL:
+ 			pInfo->ulMinKeySize = 16;
+ 			pInfo->ulMaxKeySize = 32;
+ 			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT;
+@@ -2076,6 +2079,7 @@ static bool isCBCMechanism(CK_MECHANISM_PTR pMechanism)
+ 		case CKM_AES_CBC_PAD:
+ 		case CKM_AES_CTR:
+ 		case CKM_AES_GCM:
++		case (CK_MECHANISM_TYPE)0x80001087UL:
+ 			return true;
+ 		default:
+ 			return false;
+@@ -2272,6 +2276,7 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
+ 			memcpy(&iv[0], CK_AES_CTR_PARAMS_PTR(pMechanism->pParameter)->cb, 16);
+ 			break;
+ 		case CKM_AES_GCM:
++		case (CK_MECHANISM_TYPE)0x80001087UL:
+ 			if (keyType != CKK_AES)
+ 				return CKR_KEY_TYPE_INCONSISTENT;
+ 			algo = SymAlgo::AES;
+@@ -2992,6 +2997,7 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
+ 			memcpy(&iv[0], CK_AES_CTR_PARAMS_PTR(pMechanism->pParameter)->cb, 16);
+ 			break;
+ 		case CKM_AES_GCM:
++		case (CK_MECHANISM_TYPE)0x80001087UL:
+ 			if (keyType != CKK_AES)
+ 				return CKR_KEY_TYPE_INCONSISTENT;
+ 			algo = SymAlgo::AES;

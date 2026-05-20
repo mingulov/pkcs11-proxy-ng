@@ -1,0 +1,64 @@
+# R5 daemon image — SoftHSM2 with CKM_CLOUDHSM_AES_GCM patch.
+# Rebuilds SoftHSM2 from source with a small alias mapping
+# CKM_CLOUDHSM_AES_GCM (0x80001087) to the existing AES-GCM code
+# path. The goal is to verify the full vendor-extension flow end-to-
+# end: daemon's registry advertises it (via TOML overlay) AND the
+# backend actually performs the operation.
+
+FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng
+
+FROM alpine:3.23 AS softhsm-builder
+
+RUN apk add --no-cache \
+        bash build-base autoconf automake libtool pkgconf \
+        openssl-dev cppunit-dev sqlite-dev p11-kit-dev \
+        git curl
+
+WORKDIR /src
+# Pull source from GitHub mirror — dist.opendnssec.org is sometimes
+# unreachable from CI / docker network.
+RUN git clone -b 2.6.1 --depth 1 \
+        https://github.com/opendnssec/SoftHSMv2.git softhsm
+
+COPY pkcs11-proxy-ng/tests/consumers/backends/softhsm2-patched/cloudhsm-aes-gcm.patch /src/cloudhsm.patch
+RUN cd softhsm && patch -p1 < /src/cloudhsm.patch
+
+WORKDIR /src/softhsm
+RUN sh autogen.sh \
+ && ./configure --prefix=/usr/local --with-objectstore-backend-db=no --disable-gost \
+ && make -j"$(nproc)" \
+ && make install
+
+FROM alpine:3.23
+
+RUN apk add --no-cache bash opensc openssl libstdc++ sqlite-libs p11-kit
+
+RUN --mount=type=bind,from=pkcs11ng,source=/apk,target=/apk \
+    apk --no-cache add --allow-untrusted --repository /apk \
+        pkcs11-proxy-ng-daemon \
+        pkcs11-proxy-ng-cli
+
+COPY --from=softhsm-builder /usr/local/ /usr/local/
+
+ENV SOFTHSM2_LIB=/usr/local/lib/softhsm/libsofthsm2.so
+ENV SOFTHSM2_CONF=/etc/softhsm2.conf
+ENV PATH=/usr/local/bin:$PATH
+
+RUN mkdir -p /var/lib/softhsm/tokens \
+  && printf 'directories.tokendir = /var/lib/softhsm/tokens\nobjectstore.backend = file\nlog.level = INFO\n' \
+      > /etc/softhsm2.conf \
+  && /usr/local/bin/softhsm2-util --init-token --free \
+      --label r5-token --so-pin abcd --pin 1234
+
+# Mechanism registry overlay that advertises CKM_CLOUDHSM_AES_GCM
+# to consumers via gRPC.
+RUN mkdir -p /etc/pkcs11-proxy-ng \
+ && printf '[[params]]\nshape = "gcm"\nmechanisms = [0x80001087]\n' \
+        > /etc/pkcs11-proxy-ng/mechanism_params.toml
+
+COPY pkcs11-proxy-ng/tests/consumers/proxy.toml /etc/pkcs11-proxy-ng/proxy.toml
+RUN sed -i 's|@BACKEND_MODULE@|/usr/local/lib/softhsm/libsofthsm2.so|' \
+        /etc/pkcs11-proxy-ng/proxy.toml
+
+EXPOSE 7512
+ENTRYPOINT ["/usr/bin/pkcs11-proxy-ng", "/etc/pkcs11-proxy-ng/proxy.toml"]

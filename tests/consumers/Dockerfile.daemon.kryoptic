@@ -1,0 +1,66 @@
+# R5 daemon image — Kryoptic backend.
+# Kryoptic is a Rust-based PKCS#11 module by latchset (Simo Sorce et al.)
+# https://github.com/latchset/kryoptic — modern, FIPS-targeted token.
+# Built from source against rustup-managed stable.
+
+FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng
+
+FROM alpine:3.23 AS kryoptic-builder
+
+RUN apk add --no-cache \
+        bash curl git build-base perl \
+        openssl-dev linux-headers \
+        autoconf automake libtool pkgconf \
+        clang-dev llvm-dev \
+        sqlite-dev nss-dev
+
+# rustup-managed stable for Kryoptic.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain stable
+
+# Kryoptic's ossl crate compiles OpenSSL from source as part of its
+# build. We pull a tagged OpenSSL 3.5.x source tree.
+RUN mkdir -p /src \
+ && curl -fsSL -o /tmp/openssl.tgz \
+        https://github.com/openssl/openssl/releases/download/openssl-3.5.6/openssl-3.5.6.tar.gz \
+ && tar xzf /tmp/openssl.tgz -C /src \
+ && mv /src/openssl-3.5.6 /src/openssl-src \
+ && rm /tmp/openssl.tgz
+ENV KRYOPTIC_OPENSSL_SOURCES=/src/openssl-src
+
+WORKDIR /src
+RUN git clone --depth 1 https://github.com/latchset/kryoptic.git
+WORKDIR /src/kryoptic
+RUN git submodule update --init --recursive
+
+ENV RUSTFLAGS="-C target-feature=-crt-static"
+ENV CARGO_BUILD_RUSTFLAGS="-C target-feature=-crt-static"
+# `standard` enables sqlitedb + ecc_all + ffdh + hash_all + kdf_all + rsa.
+# Need RSA for the cross-consumer compat matrix.
+RUN cargo build --release --no-default-features --features standard 2>&1 | tail -30
+
+FROM alpine:3.23
+
+RUN apk add --no-cache bash opensc libgcc sqlite-libs nss
+
+RUN --mount=type=bind,from=pkcs11ng,source=/apk,target=/apk \
+    apk --no-cache add --allow-untrusted --repository /apk \
+        pkcs11-proxy-ng-daemon \
+        pkcs11-proxy-ng-cli
+
+COPY --from=kryoptic-builder /src/kryoptic/target/release/libkryoptic_pkcs11.so /usr/lib/libkryoptic_pkcs11.so
+
+# Kryoptic uses a config file pointing at a sqlite db. Initialized
+# on first run via pkcs11-tool, but we drop a minimal config here.
+ENV KRYOPTIC_CONF=/etc/kryoptic.conf
+RUN mkdir -p /var/lib/kryoptic \
+ && printf '[[slots]]\nslot = 0\ndbtype = "sqlite"\ndbpath = "/var/lib/kryoptic/r5.sql"\n' \
+        > "$KRYOPTIC_CONF"
+
+COPY pkcs11-proxy-ng/tests/consumers/proxy.toml /etc/pkcs11-proxy-ng/proxy.toml
+RUN sed -i 's|@BACKEND_MODULE@|/usr/lib/libkryoptic_pkcs11.so|' \
+        /etc/pkcs11-proxy-ng/proxy.toml
+
+EXPOSE 7512
+ENTRYPOINT ["/usr/bin/pkcs11-proxy-ng", "/etc/pkcs11-proxy-ng/proxy.toml"]

@@ -1,0 +1,43 @@
+# R5 daemon image — p11-kit-proxy backend.
+# p11-kit-proxy.so is a meta-PKCS#11 module that chains other modules
+# discovered via /etc/pkcs11/modules/*.module. We configure it with
+# SoftHSM2 as the only downstream module. Net effect: every PKCS#11
+# call goes shim → daemon → p11-kit-proxy.so → SoftHSM2 .so. This
+# stresses our PKCS#11 conformance from the loader side.
+
+FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng
+
+FROM alpine:3.23
+
+RUN apk add --no-cache bash p11-kit p11-kit-server softhsm opensc
+
+RUN --mount=type=bind,from=pkcs11ng,source=/apk,target=/apk \
+    apk --no-cache add --allow-untrusted --repository /apk \
+        pkcs11-proxy-ng-daemon \
+        pkcs11-proxy-ng-cli
+
+ENV SOFTHSM2_LIB=/usr/lib/softhsm/libsofthsm2.so
+ENV SOFTHSM2_CONF=/etc/softhsm2.conf
+
+RUN mkdir -p /var/lib/softhsm/tokens \
+  && printf 'directories.tokendir = /var/lib/softhsm/tokens\nobjectstore.backend = file\nlog.level = INFO\n' \
+      > /etc/softhsm2.conf \
+  && softhsm2-util --init-token --free \
+      --label r5-token --so-pin abcd --pin 1234
+
+# Register SoftHSM2 as a p11-kit module.
+RUN mkdir -p /etc/pkcs11/modules \
+ && printf 'module: %s\n' "$SOFTHSM2_LIB" \
+        > /etc/pkcs11/modules/softhsm2.module
+
+# On Alpine 3.23 the proxy module is libp11-kit.so.0 itself (it
+# exports C_GetFunctionList directly). Other distros ship a separate
+# `p11-kit-proxy.so` symlink; we recreate that here for clarity.
+RUN ln -sf /usr/lib/libp11-kit.so.0 /usr/lib/p11-kit-proxy.so
+
+COPY pkcs11-proxy-ng/tests/consumers/proxy.toml /etc/pkcs11-proxy-ng/proxy.toml
+RUN sed -i 's|@BACKEND_MODULE@|/usr/lib/p11-kit-proxy.so|' \
+        /etc/pkcs11-proxy-ng/proxy.toml
+
+EXPOSE 7512
+ENTRYPOINT ["/usr/bin/pkcs11-proxy-ng", "/etc/pkcs11-proxy-ng/proxy.toml"]

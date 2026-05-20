@@ -1,0 +1,131 @@
+# R5 consumer-matrix fixture.
+#
+# Backends: softhsm2, softhsm2-patched, nss, p11kit, kryoptic.
+# Consumers: shell, go, java.
+#
+# Only ONE daemon profile runs at a time; the consumer containers
+# resolve `daemon` to the active one. run_matrix.sh cycles them.
+
+services:
+  # ---- Daemons (mutually exclusive; selected by --profile) ----
+  daemon-softhsm2:
+    profiles: ["softhsm2"]
+    build:
+      context: ../../..
+      dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.daemon.softhsm2
+    container_name: r5-daemon
+    networks:
+      r5net:
+        aliases: [daemon]
+    expose: ["7512"]
+    environment:
+      RUST_LOG: "pkcs11_proxy_ng=info,pkcs11_proxy_ng_backend=info"
+      LOG_FORMAT: "json"
+
+  daemon-softhsm2-patched:
+    profiles: ["softhsm2-patched"]
+    build:
+      context: ../../..
+      dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.daemon.softhsm2-patched
+    container_name: r5-daemon
+    networks:
+      r5net:
+        aliases: [daemon]
+    expose: ["7512"]
+    environment:
+      RUST_LOG: "pkcs11_proxy_ng=info"
+      LOG_FORMAT: "json"
+
+  daemon-nss:
+    profiles: ["nss"]
+    build:
+      context: ../../..
+      dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.daemon.nss
+    container_name: r5-daemon
+    networks:
+      r5net:
+        aliases: [daemon]
+    expose: ["7512"]
+    environment:
+      RUST_LOG: "pkcs11_proxy_ng=info"
+      LOG_FORMAT: "json"
+
+  daemon-p11kit:
+    profiles: ["p11kit"]
+    build:
+      context: ../../..
+      dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.daemon.p11kit
+    container_name: r5-daemon
+    networks:
+      r5net:
+        aliases: [daemon]
+    expose: ["7512"]
+    environment:
+      RUST_LOG: "pkcs11_proxy_ng=info"
+      LOG_FORMAT: "json"
+
+  daemon-kryoptic:
+    profiles: ["kryoptic"]
+    build:
+      context: ../../..
+      dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.daemon.kryoptic
+    container_name: r5-daemon
+    networks:
+      r5net:
+        aliases: [daemon]
+    expose: ["7512"]
+    environment:
+      RUST_LOG: "pkcs11_proxy_ng=info"
+      LOG_FORMAT: "json"
+
+  # ---- Consumers (long-running; reused across backends) ----
+  consumer-shell:
+    profiles: ["softhsm2", "softhsm2-patched", "nss", "p11kit", "kryoptic"]
+    build:
+      context: ../../..
+      dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.consumer.shell
+    container_name: r5-consumer-shell
+    networks: [r5net]
+    environment:
+      PKCS11_PROXY_ENDPOINT: "http://daemon:7512"
+      PKCS11_PROXY_CONNECT_TIMEOUT: "5"
+      RUST_LOG: "pkcs11_proxy_ng_shim=warn,pkcs11_proxy_ng_client=warn"
+      DAEMON_HOST: "daemon"
+      DAEMON_PORT: "7512"
+
+  consumer-go:
+    profiles: ["softhsm2", "nss", "kryoptic"]
+    build:
+      context: ../../..
+      dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.consumer.go
+    container_name: r5-consumer-go
+    networks: [r5net]
+    environment:
+      PKCS11_PROXY_ENDPOINT: "http://daemon:7512"
+      PKCS11_PROXY_CONNECT_TIMEOUT: "5"
+      DAEMON_HOST: "daemon"
+      DAEMON_PORT: "7512"
+
+  consumer-java:
+    profiles: ["softhsm2"]
+    build:
+      context: ../../..
+      dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.consumer.java
+    container_name: r5-consumer-java
+    networks: [r5net]
+    environment:
+      PKCS11_PROXY_ENDPOINT: "http://daemon:7512"
+      DAEMON_HOST: "daemon"
+      DAEMON_PORT: "7512"
+
+networks:
+  r5net:
+    driver: bridge
+
+# Compose v2 trick: the active daemon container is always named
+# `r5-daemon` and aliased to `daemon` on r5net. run_matrix.sh:
+#   1. docker compose -f ... --profile <backend> up -d
+#   2. docker compose -f ... exec consumer-shell /scripts/test_*.sh <backend>
+#   3. docker compose -f ... --profile <backend> down
+# The consumers can also stay up across backends; we restart them when
+# the daemon flips so they re-init cleanly.
