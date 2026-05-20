@@ -599,6 +599,30 @@ max_concurrent_backend_calls = 0
 }
 
 #[test]
+fn validate_max_concurrent_backend_calls_must_not_exceed_max_blocking_threads() {
+    // R7-4: a config in which the circuit-breaker limit is allowed
+    // to exceed the tokio blocking-pool size could deadlock the
+    // daemon — every blocking thread holds a backend call that's
+    // waiting for some resource only released by another backend
+    // call we no longer have threads to schedule. The validation
+    // catches this at startup so it never reaches production.
+    let toml = r#"
+[backend]
+module = "/dev/null"
+
+[proxy]
+max_concurrent_backend_calls = 200
+max_blocking_threads = 100
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err();
+    assert!(
+        err.contains("max_concurrent_backend_calls") && err.contains("max_blocking_threads"),
+        "error must mention both knobs: {err}"
+    );
+}
+
+#[test]
 fn validate_zero_eviction_interval_secs_rejected() {
     let toml = r#"
 [backend]

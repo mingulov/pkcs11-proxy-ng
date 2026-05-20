@@ -23,3 +23,4 @@ pkcs11-proxy-ng = { path = "../server" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
 tokio-stream = "0.1"
 tonic.workspace = true
+libc = "0.2"

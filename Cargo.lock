@@ -1216,6 +1216,7 @@ name = "pkcs11-proxy-ng-shim"
 version = "0.1.0"
 dependencies = [
  "cryptoki-sys",
+ "libc",
  "pkcs11-proxy-ng",
  "pkcs11-proxy-ng-backend",
  "pkcs11-proxy-ng-client",

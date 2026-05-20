@@ -688,6 +688,7 @@ mod backoff_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "apply_jitter uses SystemTime::now which miri isolates")]
     fn jitter_stays_within_band() {
         let base = Duration::from_millis(1000);
         // Sample many times so any randomness in the jitter source
@@ -715,6 +716,7 @@ mod backoff_tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "backoff_for_attempt calls apply_jitter (uses SystemTime::now)")]
     fn backoff_for_attempt_is_within_jittered_band() {
         // Attempts 1..MAX_ATTEMPTS — every value should be within ±JITTER_PCT
         // of the base for that attempt (and base is bounded by MAX_BACKOFF).
