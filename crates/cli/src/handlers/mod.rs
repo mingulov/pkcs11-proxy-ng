@@ -23,6 +23,8 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             query::random(client, slot_id, len, format).await
         }
         Commands::ListMechanismNames => Ok(()),
+        // Handled in main() before we initialize the PKCS#11 client.
+        Commands::Health { .. } => Ok(()),
         Commands::FindObjects { slot_id, pin, label, verbose } => {
             objects::find_objects(client, slot_id, pin, label, verbose).await
         }

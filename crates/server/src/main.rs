@@ -302,6 +302,14 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         config.proxy.max_concurrent_backend_calls,
     );
 
+    // Configure per-peer rate limiter for GetBackendInterfaces.
+    // Disabled by default (max_per_window=0); production deployments
+    // can set proxy.rate_limit_get_backend_interfaces to enable.
+    server::rate_limit::configure(
+        std::time::Duration::from_secs(config.proxy.rate_limit_window_secs),
+        config.proxy.rate_limit_get_backend_interfaces,
+    );
+
     let (svc, context_manager, registry_source) = build_service(&config, &backend).await?;
 
     // Loud one-time warning if TCP listener is running without auth
@@ -317,8 +325,6 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
              protection (k8s NetworkPolicy / VPC). do not use in untrusted networks."
         );
     }
-
-    health::set_serving(&mut health_reporter).await;
 
     // Wire backend-health gating: spawn_backend reports each outcome
     // through an unbounded channel; this task counts consecutive
@@ -338,6 +344,17 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     #[cfg(unix)]
     spawn_sighup_handler(registry_source.clone());
     let addr = resolve_bind_address(&config)?;
+
+    // Bind the TCP listener *before* flipping Health/SERVING. R5
+    // surfaced a race where shim consumers saw the daemon's gRPC
+    // health probe report SERVING but their TCP connect was refused
+    // because tonic hadn't yet bound the listener. Binding here makes
+    // the SERVING flip below truthful: by the time external probes
+    // can see it, accept() is already running.
+    let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = tcp_listener.local_addr().unwrap_or(addr);
+
+    health::set_serving(&mut health_reporter).await;
     spawn_eviction_task(
         context_manager,
         backend.clone(),
@@ -346,7 +363,7 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         config.proxy.max_concurrent_backend_calls,
     );
 
-    tracing::info!(%addr,
+    tracing::info!(addr = %local_addr,
         lease_seconds = config.proxy.lease_seconds,
         max_message_bytes = config.proxy.max_message_bytes,
         request_timeout_secs = config.proxy.request_timeout_secs,
@@ -377,10 +394,12 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
                 config.proxy.http2_keepalive_timeout_secs,
             )));
     }
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(tcp_listener);
     builder
+        .layer(server::trace_id::TraceIdLayer)
         .add_service(health_service)
         .add_service(svc)
-        .serve_with_shutdown(addr, shutdown_signal())
+        .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await?;
 
     backend.finalize().map_err(|rv| format!("C_Finalize failed: {rv}"))?;

@@ -697,7 +697,7 @@ mod backoff_tests {
             let d = apply_jitter(base, JITTER_PCT);
             let millis = d.as_millis() as u64;
             assert!(
-                millis >= 800 && millis <= 1200,
+                (800..=1200).contains(&millis),
                 "{millis}ms is outside the ±{JITTER_PCT}% band around {}ms",
                 base.as_millis()
             );

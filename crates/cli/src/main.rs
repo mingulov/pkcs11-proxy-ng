@@ -25,6 +25,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // R4-FOLLOWUP-grpc-health-probe: a no-side-effects health check that
+    // honours the daemon's backend-health gating (the daemon registers
+    // its main service and flips NOT_SERVING on N consecutive backend
+    // failures per R1). Exits 0/1/2 so k8s exec probes can interpret.
+    if let Commands::Health { service } = &cli.command {
+        use tonic_health::pb::HealthCheckRequest;
+        use tonic_health::pb::health_check_response::ServingStatus;
+        use tonic_health::pb::health_client::HealthClient;
+        let channel = tonic::transport::Endpoint::from_shared(cli.endpoint.clone())?
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .connect()
+            .await?;
+        let mut hc = HealthClient::new(channel);
+        let resp = hc.check(HealthCheckRequest { service: service.clone() }).await?.into_inner();
+        let status = ServingStatus::try_from(resp.status).unwrap_or(ServingStatus::Unknown);
+        match status {
+            ServingStatus::Serving => {
+                println!("SERVING");
+                return Ok(());
+            }
+            other => {
+                eprintln!("NOT_SERVING: {other:?}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let tls_files = ClientTlsFiles::from_optional_paths(
         cli.tls_ca_cert.clone(),
         cli.tls_client_cert.clone(),

@@ -142,6 +142,15 @@ pub struct ProxyConfig {
     /// backend HSM is unresponsive.
     #[serde(default = "default_backend_health_consecutive_failures")]
     pub backend_health_consecutive_failures: u32,
+    /// Max GetBackendInterfaces RPCs allowed per peer IP per
+    /// `rate_limit_window_secs` window. Closes R3-FOLLOWUP-rate-limit
+    /// — defends against a noisy peer spamming the discovery RPC.
+    /// 0 = disabled (default; trust the network boundary).
+    #[serde(default = "default_rate_limit_get_backend_interfaces")]
+    pub rate_limit_get_backend_interfaces: u32,
+    /// Window length for the per-peer rate limiter, in seconds.
+    #[serde(default = "default_rate_limit_window_secs")]
+    pub rate_limit_window_secs: u64,
 }
 
 impl Default for ProxyConfig {
@@ -160,8 +169,18 @@ impl Default for ProxyConfig {
             startup_timeout_secs: default_startup_timeout_secs(),
             shutdown_grace_secs: default_shutdown_grace_secs(),
             backend_health_consecutive_failures: default_backend_health_consecutive_failures(),
+            rate_limit_get_backend_interfaces: default_rate_limit_get_backend_interfaces(),
+            rate_limit_window_secs: default_rate_limit_window_secs(),
         }
     }
+}
+
+fn default_rate_limit_get_backend_interfaces() -> u32 {
+    0 // disabled by default; existing deployments don't see surprise rejections
+}
+
+fn default_rate_limit_window_secs() -> u64 {
+    1
 }
 
 fn default_lease_seconds() -> u64 {

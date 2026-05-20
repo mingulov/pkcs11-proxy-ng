@@ -190,6 +190,18 @@ pub(crate) enum Commands {
         #[arg(long)]
         key_size: Option<u64>,
     },
+    /// Probe the daemon's gRPC health endpoint. Exits 0 if SERVING,
+    /// non-zero otherwise. Use as an `exec`-based k8s readiness probe
+    /// (closes R4-FOLLOWUP-grpc-health-probe — TCP-only probes don't
+    /// honour the daemon's backend-health gating).
+    Health {
+        /// gRPC service name to check. Empty string ("") asks for the
+        /// overall server health. The daemon registers its main
+        /// service explicitly so this picks up the backend-health
+        /// gating flip.
+        #[arg(long, default_value = "")]
+        service: String,
+    },
     InitToken {
         #[arg(long)]
         slot_id: u64,

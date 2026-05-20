@@ -83,22 +83,25 @@ spec:
               readOnly: true
             - name: tokens
               mountPath: /tokens
-          # Readiness probe uses tonic-health on the per-service
-          # endpoint. The probe flips NOT_SERVING during the
-          # SIGTERM drain (R1) AND when the backend exceeds
-          # backend_health_consecutive_failures (R1 follow-up).
-          # The grpc.health.v1.Health/Check call requires a
-          # grpc-aware probe; we shell out to grpcurl-style via
-          # the daemon's own CLI for a lightweight check.
-          # For environments without grpcurl, switch the probe
-          # to a TCP socket check (the daemon closes the listener
-          # at the start of drain).
+          # Readiness probe uses pkcs11-proxy-ng-cli's `health`
+          # subcommand (closes R4-FOLLOWUP-grpc-health-probe). The
+          # CLI talks gRPC `grpc.health.v1.Health/Check` to the
+          # daemon and exits 0 on SERVING, 1 otherwise. This honours
+          # the daemon's backend-health gating: when N consecutive
+          # backend failures flip tonic-health to NOT_SERVING (R1),
+          # kube-proxy removes the pod from the Service endpoints.
+          # The earlier TCP-only probe only checked that the
+          # listener was up — backend hangs were invisible.
           readinessProbe:
-            tcpSocket:
-              port: 7512
+            exec:
+              command:
+                - /usr/bin/pkcs11-proxy-ng-cli
+                - --endpoint
+                - http://127.0.0.1:7512
+                - health
             initialDelaySeconds: 3
             periodSeconds: 5
-            timeoutSeconds: 2
+            timeoutSeconds: 3
             failureThreshold: 3
           # Liveness probe is intentionally laxer than readiness:
           # we want NOT_SERVING (= no traffic) but NOT a restart

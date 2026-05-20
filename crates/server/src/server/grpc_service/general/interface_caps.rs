@@ -5,6 +5,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 
 use crate::mechanism_registry_source::MechanismRegistrySource;
+use crate::server::rate_limit;
 
 use super::super::super::context_manager::ContextManager;
 use super::super::service_utils::spawn_backend;
@@ -16,12 +17,25 @@ use super::super::service_utils::spawn_backend;
 /// supported and which function pointers are NULL) plus the daemon's
 /// current mechanism registry payload so shims can refresh their
 /// param-shape / parameterless data without restarting.
+///
+/// Rate-limited per peer IP (R3-FOLLOWUP-rate-limit). Disabled by
+/// default — see `proxy.rate_limit_get_backend_interfaces` in
+/// proxy.toml.
 pub(super) async fn get_backend_interfaces(
     _ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     registry_source: &MechanismRegistrySource,
-    _request: Request<pkcs11_proxy_ng_proto::GetBackendInterfacesRequest>,
+    request: Request<pkcs11_proxy_ng_proto::GetBackendInterfacesRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetBackendInterfacesResponse>, Status> {
+    if let Some(peer) = request.remote_addr()
+        && let Err(retry_after) = rate_limit::check(peer.ip())
+    {
+        return Err(Status::resource_exhausted(format!(
+            "rate limit exceeded; retry after {} ms",
+            retry_after.as_millis()
+        )));
+    }
+    let _request = request;
     let backend = backend_ref.clone();
     let result = spawn_backend(move || Ok(backend.get_interface_capabilities())).await?;
 

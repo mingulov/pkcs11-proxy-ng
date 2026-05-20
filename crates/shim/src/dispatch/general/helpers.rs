@@ -25,10 +25,24 @@ macro_rules! with_client {
         if !crate::state::is_initialized() {
             return rv_err(pkcs11_proxy_ng_types::CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
-        crate::state::runtime().block_on(async {
+        let __result = crate::state::runtime().block_on(async {
             let mut $client = crate::state::client().lock().await;
             $call.await
-        })
+        });
+        // R6-9 / R2-FOLLOWUP-dns-reresolve: if the call surfaced a
+        // transport-level failure (CkRv::DEVICE_ERROR from a session-
+        // scoped RPC or CkRv::GENERAL_ERROR from a lifecycle RPC),
+        // mark the client for reconnect. The next call rebuilds the
+        // channel via `Endpoint::from_shared`, which re-resolves the
+        // hostname — this is what lets a shim follow a daemon whose
+        // DNS A-record changed (k8s rolling deploy, blue/green).
+        if let Err(rv) = &__result {
+            use pkcs11_proxy_ng_types::CkRv;
+            if matches!(*rv, CkRv::DEVICE_ERROR | CkRv::GENERAL_ERROR) {
+                crate::state::mark_client_reconnect_required();
+            }
+        }
+        __result
     }};
 }
 
