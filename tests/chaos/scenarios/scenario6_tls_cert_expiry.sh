@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# R8 scenario 6 — TLS cert expiry.
+# Scenario 6: TLS cert expiry.
 #
 # Mint a CA, a SHORT-LIVED server cert (default 15s), and a longer-
 # lived client cert via the rcgen-based cert-minter helper. Start a
@@ -12,7 +12,7 @@
 #   - At least one handshake FAILS after t=cert-expiry.
 #   - Daemon does NOT crash.
 #
-# Replaces the day-granular openssl -days flag — R8-FOLLOWUP-tls-
+# Replaces the day-granular openssl -days flag — FOLLOWUP-tls-
 # cert-expiry-minter is closed by this script.
 
 set -euo pipefail
@@ -25,7 +25,7 @@ SERVER_TTL="${SERVER_TTL:-15}"
 PROBE_SECS="${PROBE_SECS:-60}"
 PROBE_INTERVAL="${PROBE_INTERVAL:-3}"
 
-echo "=== R8 scenario 6: TLS cert expiry ==="
+echo "=== Scenario 6: TLS cert expiry ==="
 echo "  work dir:     $WORK"
 echo "  server TTL:   ${SERVER_TTL}s"
 echo "  probe window: ${PROBE_SECS}s @ ${PROBE_INTERVAL}s ticks"

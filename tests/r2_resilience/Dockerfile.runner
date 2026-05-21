@@ -1,4 +1,4 @@
-# Runner image for the R2 resilience fixture. Bundles the shim +
+# Runner image for the resilience fixture. Bundles the shim +
 # CLI from the alpine3.23 carrier (musl-built), plus `pkcs11-tool` for
 # sign/list-slots operations and `curl` + `jq` for poking the
 # toxiproxy control plane, and docker CLI so scenarios that need to

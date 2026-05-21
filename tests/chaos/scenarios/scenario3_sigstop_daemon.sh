@@ -1,14 +1,14 @@
 #!/bin/sh
-# R8 scenario 3 — SIGSTOP daemon.
+# Scenario 3: SIGSTOP daemon.
 #
 # Pause daemon 60s; resume. Verify shim's http2 keepalive trips,
-# shim reconnects on next call (R6-9 dns-reresolve path), and
+# shim reconnects on next call (dns-reresolve path), and
 # operations resume.
 
 set -u
 . "$(dirname "$0")/_common.sh"
 
-echo "=== R8 scenario 3: SIGSTOP daemon ==="
+echo "=== Scenario 3: SIGSTOP daemon ==="
 
 # Ensure daemon is up + responsive.
 docker exec "$DAEMON_CONTAINER" kill -CONT 1 2>/dev/null || true

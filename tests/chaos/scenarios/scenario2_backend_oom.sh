@@ -1,5 +1,5 @@
 #!/bin/sh
-# R8 scenario 2 — backend OOM (CKR_HOST_MEMORY).
+# Scenario 2: backend OOM (CKR_HOST_MEMORY).
 #
 # The slow_backend stub currently doesn't have a CKR_HOST_MEMORY mode.
 # This scenario is structured but defers the actual fault injection
@@ -15,9 +15,9 @@
 set -u
 . "$(dirname "$0")/_common.sh"
 
-echo "=== R8 scenario 2: backend OOM (DEFERRED) ==="
+echo "=== Scenario 2: backend OOM (DEFERRED) ==="
 echo "  slow_backend currently returns CKR_OK from C_Sign; needs a"
 echo "  SLOW_BACKEND_RETURN_RV env-var to inject CKR_HOST_MEMORY."
-echo "  Tracked as R8-FOLLOWUP-slow-backend-rv-injection."
+echo "  Tracked as FOLLOWUP-slow-backend-rv-injection."
 echo "scenario2: DEFER (slow_backend feature missing)"
 exit 0

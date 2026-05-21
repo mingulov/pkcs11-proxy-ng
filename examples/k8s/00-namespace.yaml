@@ -1,6 +1,6 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: r4-sre
+  name: pkcs11-proxy-demo
   labels:
-    pkcs11-proxy-ng.io/role: r4-audit
+    pkcs11-proxy-ng.io/role: example

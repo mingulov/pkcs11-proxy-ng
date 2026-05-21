@@ -1,4 +1,4 @@
-# Shared helpers for R2 resilience scenarios.
+# Shared helpers for resilience scenarios.
 #
 # Conventions:
 # - Every scenario runs inside the `runner` container; the daemon and

@@ -1,5 +1,5 @@
 #!/bin/sh
-# R5 consumer: p11tool (GnuTLS).
+# consumer: p11tool (GnuTLS).
 # p11tool uses p11-kit's module discovery — we point it at the shim
 # via a synthetic p11-kit module file. p11tool's natural sign test is
 # `--test-sign`, which performs sign + verify in one operation.

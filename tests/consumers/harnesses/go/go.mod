@@ -1,4 +1,4 @@
-module pkcs11proxyng-r5-harness
+module pkcs11proxyng-consumer-harness
 
 go 1.21
 

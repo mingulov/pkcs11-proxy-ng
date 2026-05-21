@@ -1,4 +1,4 @@
-# R5 daemon image — p11-kit-proxy backend.
+# daemon image — p11-kit-proxy backend.
 # p11-kit-proxy.so is a meta-PKCS#11 module that chains other modules
 # discovered via /etc/pkcs11/modules/*.module. We configure it with
 # SoftHSM2 as the only downstream module. Net effect: every PKCS#11
@@ -23,7 +23,7 @@ RUN mkdir -p /var/lib/softhsm/tokens \
   && printf 'directories.tokendir = /var/lib/softhsm/tokens\nobjectstore.backend = file\nlog.level = INFO\n' \
       > /etc/softhsm2.conf \
   && softhsm2-util --init-token --free \
-      --label r5-token --so-pin abcd --pin 1234
+      --label matrix-token --so-pin abcd --pin 1234
 
 # Register SoftHSM2 as a p11-kit module.
 RUN mkdir -p /etc/pkcs11/modules \

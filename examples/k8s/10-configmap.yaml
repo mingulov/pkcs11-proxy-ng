@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: r4-daemon-config
-  namespace: r4-sre
+  name: daemon-config
+  namespace: pkcs11-proxy-demo
 data:
   proxy.toml: |
     [backend]

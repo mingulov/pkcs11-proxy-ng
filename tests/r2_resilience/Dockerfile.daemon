@@ -1,4 +1,4 @@
-# Daemon image for the R2 resilience fixture. Bundles SoftHSM2 plus
+# Daemon image for the resilience fixture. Bundles SoftHSM2 plus
 # the pkcs11-proxy-ng-daemon APK from the alpine3.23 carrier image we
 # build separately (`docker build -f packaging/alpine/Dockerfile.alpine
 # --build-arg ALPINE_VER=3.23 -t pkcs11-proxy-ng:test-alpine3.23 .`).

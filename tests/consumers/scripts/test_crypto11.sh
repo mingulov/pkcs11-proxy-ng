@@ -1,5 +1,5 @@
 #!/bin/sh
-# R5 consumer: ThalesGroup/crypto11 Go wrapper.
+# consumer: ThalesGroup/crypto11 Go wrapper.
 set -u
 . /scripts/common.sh
 

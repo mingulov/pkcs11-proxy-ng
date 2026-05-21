@@ -1,4 +1,4 @@
-# R8 chaos daemon image — pkcs11-proxy-ng daemon backed by the
+# Chaos daemon image — pkcs11-proxy-ng daemon backed by the
 # slow_backend stub (.so).  Lets us inject backend hangs, OOM-style
 # CKR_HOST_MEMORY returns, and other chaos states the production
 # backend never produces naturally.

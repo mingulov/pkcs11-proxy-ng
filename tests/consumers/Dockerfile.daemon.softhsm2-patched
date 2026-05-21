@@ -1,4 +1,4 @@
-# R5 daemon image — SoftHSM2 with CKM_CLOUDHSM_AES_GCM patch.
+# daemon image — SoftHSM2 with CKM_CLOUDHSM_AES_GCM patch.
 # Rebuilds SoftHSM2 from source with a small alias mapping
 # CKM_CLOUDHSM_AES_GCM (0x80001087) to the existing AES-GCM code
 # path. The goal is to verify the full vendor-extension flow end-to-
@@ -48,7 +48,7 @@ RUN mkdir -p /var/lib/softhsm/tokens \
   && printf 'directories.tokendir = /var/lib/softhsm/tokens\nobjectstore.backend = file\nlog.level = INFO\n' \
       > /etc/softhsm2.conf \
   && /usr/local/bin/softhsm2-util --init-token --free \
-      --label r5-token --so-pin abcd --pin 1234
+      --label matrix-token --so-pin abcd --pin 1234
 
 # Mechanism registry overlay that advertises CKM_CLOUDHSM_AES_GCM
 # to consumers via gRPC.

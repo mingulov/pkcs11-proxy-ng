@@ -9,7 +9,7 @@ your overlay / Helm chart and tune for your environment.
 
 ```
             ┌──────────────────────────┐
-            │ Service: r4-daemon       │
+            │ Service: daemon       │
             │ sessionAffinity: ClientIP│
             └────────────┬─────────────┘
                          │
@@ -22,20 +22,20 @@ your overlay / Helm chart and tune for your environment.
    (3-replica Deployment, rolling-restart safe)
 
    ┌────────────────────────────────────┐
-   │  ConfigMap: r4-daemon-config       │
+   │  ConfigMap: daemon-config       │
    │    proxy.toml                      │
    │    mechanism_params.toml           │
    └────────────────────────────────────┘
 ```
 
 A stub consumer `StatefulSet` runs alongside, driving the shim
-against the Service hostname (`r4-daemon.default.svc:7512`).
+against the Service hostname (`daemon.default.svc:7512`).
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `00-namespace.yaml` | dedicated namespace `r4-sre` |
+| `00-namespace.yaml` | dedicated namespace `pkcs11-proxy-demo` |
 | `10-configmap.yaml` | `proxy.toml` + `mechanism_params.toml` mounted into the daemon |
 | `20-daemon-deployment.yaml` | 3-replica daemon `Deployment` + readiness/liveness probes |
 | `30-daemon-service.yaml` | ClusterIP Service with `sessionAffinity: ClientIP` |
@@ -59,28 +59,28 @@ resilience audit documented this; the manifest enforces it.
 ( cd ../../../tests/r2_resilience && docker compose build )
 
 # 3) Spin up a kind cluster and load the images.
-kind create cluster --name r4-sre
-kind load docker-image pkcs11-proxy-ng:test-alpine3.23     --name r4-sre
-kind load docker-image r2_resilience-runner:latest         --name r4-sre
+kind create cluster --name pkcs11-proxy-demo
+kind load docker-image pkcs11-proxy-ng:test-alpine3.23     --name pkcs11-proxy-demo
+kind load docker-image r2_resilience-runner:latest         --name pkcs11-proxy-demo
 
 # 4) Apply the manifests.
 kubectl apply -f .
 
 # 5) Wait for everything to come up.
-kubectl -n r4-sre rollout status deploy/r4-daemon --timeout=120s
+kubectl -n pkcs11-proxy-demo rollout status deploy/daemon --timeout=120s
 
 # 6) Watch the consumer's log to see the 10-rps sign loop.
-kubectl -n r4-sre logs -f sts/r4-consumer
+kubectl -n pkcs11-proxy-demo logs -f sts/consumer-load
 ```
 
 ## Rolling restart under load
 
 ```bash
 # In one terminal, watch the consumer's success/failure counters:
-kubectl -n r4-sre logs -f sts/r4-consumer
+kubectl -n pkcs11-proxy-demo logs -f sts/consumer-load
 
 # In another terminal, restart the daemon replicas:
-kubectl -n r4-sre rollout restart deploy/r4-daemon
+kubectl -n pkcs11-proxy-demo rollout restart deploy/daemon
 
 # The consumer must report zero "unrecoverable" errors. Transient
 # CKR_DEVICE_ERROR / CKR_CRYPTOKI_NOT_INITIALIZED during the

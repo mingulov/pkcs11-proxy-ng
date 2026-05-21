@@ -1,5 +1,5 @@
 #!/bin/sh
-# R5 consumer: pkcs11-tool (OpenSC).
+# consumer: pkcs11-tool (OpenSC).
 # Exercises: -L (list slots), -O (list objects), -G (keygen),
 # -s (sign), --decrypt, -p (login).
 
@@ -31,7 +31,7 @@ step list_objects \
 
 # RSA sign input can be any length; the AES-ECB tests need a
 # block-aligned input (16-byte multiples), so use a 32-byte buffer.
-printf '%s' 'r5-test-data-pkcs11tool-32bytes!' > /tmp/in.bin
+printf '%s' 'test-data-pkcs11tool-32bytes!' > /tmp/in.bin
 
 step rsa_sign \
     pkcs11-tool --module "$PKCS11_MODULE_PATH" --token-label "$TOKEN_LABEL" \

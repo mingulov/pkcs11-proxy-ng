@@ -5,7 +5,7 @@
 # latency on the network path, not inside the daemon's FFI calls to
 # the backend .so. A true "backend-slow" test requires a mock backend
 # module that intentionally sleeps in C_Sign — tracked as
-# R2-FOLLOWUP-slow-backend.
+# FOLLOWUP-slow-backend.
 #
 # What we DO exercise here:
 #   - Under sustained latency exceeding the shim's connect timeout,

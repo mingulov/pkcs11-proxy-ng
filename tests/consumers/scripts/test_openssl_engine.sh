@@ -1,5 +1,5 @@
 #!/bin/sh
-# R5 consumer: OpenSSL pkcs11 engine (libp11).
+# consumer: OpenSSL pkcs11 engine (libp11).
 # OpenSSL 3.x deprecates engines in favour of providers but still
 # supports them via openssl.cnf. We bootstrap a minimal config that
 # loads the libp11 engine and points it at our shim.

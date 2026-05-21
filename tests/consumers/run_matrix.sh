@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the R5 consumer × backend matrix. Per cell:
+# Run the Consumer × backend matrix. Per cell:
 #   1. Bring up the matching `daemon-<backend>` profile.
 #   2. exec the relevant test script(s) inside the appropriate
 #      consumer container.
@@ -17,7 +17,7 @@ COMPOSE="docker compose -f $SCRIPT_DIR/docker-compose.yml"
 RESULTS="${1:-$SCRIPT_DIR/results.txt}"
 
 # Backend → consumer-shell TOKEN_LABEL/PIN overrides.
-# NSS softokn exposes its own slot labels; others use r5-token.
+# NSS softokn exposes its own slot labels; others use matrix-token.
 backend_env() {
     case "$1" in
         nss)
@@ -57,7 +57,7 @@ run_cell() {
 }
 
 : > "$RESULTS"
-echo "R5 consumer-matrix run started $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$RESULTS"
+echo "Consumer-matrix run started $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$RESULTS"
 echo "" >> "$RESULTS"
 
 backends=(softhsm2 nss p11kit kryoptic softhsm2-patched)
@@ -65,7 +65,7 @@ backends=(softhsm2 nss p11kit kryoptic softhsm2-patched)
 for backend in "${backends[@]}"; do
     echo "=== Backend: $backend ==="
     # Tear down previous daemon (if any).
-    docker rm -f r5-daemon >/dev/null 2>&1 || true
+    docker rm -f consumer-matrix-daemon >/dev/null 2>&1 || true
     # Bring up the relevant daemon.
     $COMPOSE --profile "$backend" up -d "daemon-$backend" >/dev/null
     $COMPOSE --profile "$backend" up -d consumer-shell consumer-go consumer-java >/dev/null

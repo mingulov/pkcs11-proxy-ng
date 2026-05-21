@@ -1,8 +1,8 @@
-// R5 Go consumer harness — ThalesGroup/crypto11 (high-level wrapper).
+// Go consumer harness — ThalesGroup/crypto11 (high-level wrapper).
 //
 // Exercises crypto11's `Context` + `KeyPair` flow:
 //   1. Configure({Path, TokenLabel, Pin})
-//   2. GenerateRSAKeyPairWithLabel("r5-key-crypto11", 2048)
+//   2. GenerateRSAKeyPairWithLabel("matrix-key-crypto11", 2048)
 //   3. crypto.Signer interface — sha256+sign + verify with crypto/rsa
 //   4. Close()
 
@@ -29,7 +29,7 @@ func env(key, def string) string {
 func main() {
 	cfg := &crypto11.Config{
 		Path:       env("PKCS11_MODULE_PATH", "/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so"),
-		TokenLabel: env("TOKEN_LABEL", "r5-token"),
+		TokenLabel: env("TOKEN_LABEL", "matrix-token"),
 		Pin:        env("USER_PIN", "1234"),
 	}
 	ctx, err := crypto11.Configure(cfg)
@@ -39,7 +39,7 @@ func main() {
 	}
 	defer ctx.Close()
 
-	label := []byte(env("KEY_LABEL", "r5-key-crypto11"))
+	label := []byte(env("KEY_LABEL", "matrix-key-crypto11"))
 	id := []byte{0x20}
 
 	// Best-effort cleanup of any prior run.

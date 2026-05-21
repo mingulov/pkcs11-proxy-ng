@@ -1,4 +1,4 @@
-# R5 daemon image — Kryoptic backend.
+# daemon image — Kryoptic backend.
 # Kryoptic is a Rust-based PKCS#11 module by latchset (Simo Sorce et al.)
 # https://github.com/latchset/kryoptic — modern, FIPS-targeted token.
 # Built from source against rustup-managed stable.

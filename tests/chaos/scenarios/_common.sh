@@ -1,4 +1,4 @@
-# Sourced by every R8 chaos scenario. Keeps the container / env names
+# Sourced by every chaos scenario. Keeps the container / env names
 # in one place so renaming the compose service doesn't require touching
 # each script.
 

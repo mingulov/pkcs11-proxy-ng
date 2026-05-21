@@ -1,4 +1,4 @@
-// R5 Java consumer harness — OpenJDK SunPKCS11 provider.
+// Java consumer harness — OpenJDK SunPKCS11 provider.
 //
 // Loads the shim as a PKCS#11 module via a config file at
 // /tmp/pkcs11.cfg, opens a KeyStore for the token, generates an
@@ -16,7 +16,7 @@ import javax.crypto.*;
 public class Harness {
     public static void main(String[] args) throws Exception {
         String module = args.length > 0 ? args[0] : "/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so";
-        String tokenLabel = args.length > 1 ? args[1] : "r5-token";
+        String tokenLabel = args.length > 1 ? args[1] : "matrix-token";
         String pin = args.length > 2 ? args[2] : "1234";
 
         Path cfg = Path.of("/tmp/pkcs11.cfg");
@@ -38,7 +38,7 @@ public class Harness {
         ks.load(null, pin.toCharArray());
         System.out.println("  keystore loaded, " + ks.size() + " entries (token: " + tokenLabel + ")");
 
-        // Prefer reusing an existing key labelled "r5-key" so backends
+        // Prefer reusing an existing key labelled "matrix-key" so backends
         // that don't default CKA_SIGN=true on KeyPairGenerator output
         // (e.g. Kryoptic) still pass — the key was provisioned with
         // explicit sign usage by pkcs11-tool / miekg in an earlier
@@ -50,7 +50,7 @@ public class Harness {
         String existing = null;
         for (java.util.Enumeration<String> e = ks.aliases(); e.hasMoreElements();) {
             String alias = e.nextElement();
-            if (alias.equals("r5-key") || alias.startsWith("r5-key")) {
+            if (alias.equals("matrix-key") || alias.startsWith("matrix-key")) {
                 existing = alias;
                 break;
             }

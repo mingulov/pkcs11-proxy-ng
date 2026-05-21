@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scenario 6: 20 concurrent shim processes all start cold against the
-# same daemon. With the R2 backoff+jitter in place, no thundering
+# same daemon. With the backoff+jitter in place, no thundering
 # herd: connect retries spread out instead of synchronizing.
 #
 # This script doesn't manipulate toxiproxy; it just spawns N concurrent

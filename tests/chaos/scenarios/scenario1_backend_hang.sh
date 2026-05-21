@@ -1,5 +1,5 @@
 #!/bin/sh
-# R8 scenario 1 — backend hang.
+# Scenario 1: backend hang.
 #
 # Set SLOW_BACKEND_SIGN_DELAY_MS=120000 on the chaos-daemon. Drive a
 # consumer C_Sign. Verify the shim returns CKR_DEVICE_ERROR within
@@ -10,7 +10,7 @@
 set -u
 . "$(dirname "$0")/_common.sh"
 
-echo "=== R8 scenario 1: backend hang ==="
+echo "=== Scenario 1: backend hang ==="
 
 # (1) Set 120 s sign delay on the daemon. Re-create daemon with new env.
 docker compose -f "$COMPOSE_FILE" stop chaos-daemon >/dev/null

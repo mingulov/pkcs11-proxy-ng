@@ -1,4 +1,4 @@
-// R5 Go consumer harness — miekg/pkcs11 (direct PKCS#11 binding).
+// Go consumer harness — miekg/pkcs11 (direct PKCS#11 binding).
 //
 // Exercises:
 //   1. C_Initialize / C_Finalize
@@ -31,9 +31,9 @@ func env(key, def string) string {
 
 var (
 	modulePath = env("PKCS11_MODULE_PATH", "/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so")
-	tokenLabel = env("TOKEN_LABEL", "r5-token")
+	tokenLabel = env("TOKEN_LABEL", "matrix-token")
 	userPIN    = env("USER_PIN", "1234")
-	keyLabel   = env("KEY_LABEL", "r5-key-miekg")
+	keyLabel   = env("KEY_LABEL", "matrix-key-miekg")
 )
 
 func die(msg string, err error) {

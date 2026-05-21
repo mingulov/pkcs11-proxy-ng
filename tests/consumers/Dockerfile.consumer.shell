@@ -1,4 +1,4 @@
-# R5 consumer image — shell-based consumers.
+# consumer image — shell-based consumers.
 # Bundles: pkcs11-tool (OpenSC), p11tool (GnuTLS), OpenSSL 3 + libp11
 # engine + libp11 provider, plus the shim.
 

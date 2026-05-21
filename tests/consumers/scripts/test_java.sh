@@ -1,5 +1,5 @@
 #!/bin/sh
-# R5 consumer: Java SunPKCS11 provider.
+# consumer: Java SunPKCS11 provider.
 set -u
 . /scripts/common.sh
 

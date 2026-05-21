@@ -1,4 +1,4 @@
-# R5 consumer-matrix fixture.
+# consumer-matrix fixture.
 #
 # Backends: softhsm2, softhsm2-patched, nss, p11kit, kryoptic.
 # Consumers: shell, go, java.
@@ -13,9 +13,9 @@ services:
     build:
       context: ../../..
       dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.daemon.softhsm2
-    container_name: r5-daemon
+    container_name: consumer-matrix-daemon
     networks:
-      r5net:
+      consumer-matrix-net:
         aliases: [daemon]
     expose: ["7512"]
     environment:
@@ -27,9 +27,9 @@ services:
     build:
       context: ../../..
       dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.daemon.softhsm2-patched
-    container_name: r5-daemon
+    container_name: consumer-matrix-daemon
     networks:
-      r5net:
+      consumer-matrix-net:
         aliases: [daemon]
     expose: ["7512"]
     environment:
@@ -41,9 +41,9 @@ services:
     build:
       context: ../../..
       dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.daemon.nss
-    container_name: r5-daemon
+    container_name: consumer-matrix-daemon
     networks:
-      r5net:
+      consumer-matrix-net:
         aliases: [daemon]
     expose: ["7512"]
     environment:
@@ -55,9 +55,9 @@ services:
     build:
       context: ../../..
       dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.daemon.p11kit
-    container_name: r5-daemon
+    container_name: consumer-matrix-daemon
     networks:
-      r5net:
+      consumer-matrix-net:
         aliases: [daemon]
     expose: ["7512"]
     environment:
@@ -69,9 +69,9 @@ services:
     build:
       context: ../../..
       dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.daemon.kryoptic
-    container_name: r5-daemon
+    container_name: consumer-matrix-daemon
     networks:
-      r5net:
+      consumer-matrix-net:
         aliases: [daemon]
     expose: ["7512"]
     environment:
@@ -84,8 +84,8 @@ services:
     build:
       context: ../../..
       dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.consumer.shell
-    container_name: r5-consumer-shell
-    networks: [r5net]
+    container_name: consumer-matrix-shell
+    networks: [consumer-matrix-net]
     environment:
       PKCS11_PROXY_ENDPOINT: "http://daemon:7512"
       PKCS11_PROXY_CONNECT_TIMEOUT: "5"
@@ -98,8 +98,8 @@ services:
     build:
       context: ../../..
       dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.consumer.go
-    container_name: r5-consumer-go
-    networks: [r5net]
+    container_name: consumer-matrix-go
+    networks: [consumer-matrix-net]
     environment:
       PKCS11_PROXY_ENDPOINT: "http://daemon:7512"
       PKCS11_PROXY_CONNECT_TIMEOUT: "5"
@@ -111,19 +111,19 @@ services:
     build:
       context: ../../..
       dockerfile: pkcs11-proxy-ng/tests/consumers/Dockerfile.consumer.java
-    container_name: r5-consumer-java
-    networks: [r5net]
+    container_name: consumer-matrix-java
+    networks: [consumer-matrix-net]
     environment:
       PKCS11_PROXY_ENDPOINT: "http://daemon:7512"
       DAEMON_HOST: "daemon"
       DAEMON_PORT: "7512"
 
 networks:
-  r5net:
+  consumer-matrix-net:
     driver: bridge
 
 # Compose v2 trick: the active daemon container is always named
-# `r5-daemon` and aliased to `daemon` on r5net. run_matrix.sh:
+# `consumer-matrix-daemon` and aliased to `daemon` on consumer-matrix-net. run_matrix.sh:
 #   1. docker compose -f ... --profile <backend> up -d
 #   2. docker compose -f ... exec consumer-shell /scripts/test_*.sh <backend>
 #   3. docker compose -f ... --profile <backend> down

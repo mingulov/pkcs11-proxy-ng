@@ -1,4 +1,4 @@
-// R5 vendor-extension end-to-end harness.
+// vendor-extension end-to-end harness.
 //
 // Uses the vendor mechanism CKM_CLOUDHSM_AES_GCM (0x80001087) which
 // is aliased to CKM_AES_GCM in the patched SoftHSM2 backend. The
@@ -37,7 +37,7 @@ func die(msg string, err error) {
 
 func main() {
 	module := env("PKCS11_MODULE_PATH", "/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so")
-	token := env("TOKEN_LABEL", "r5-token")
+	token := env("TOKEN_LABEL", "matrix-token")
 	pin := env("USER_PIN", "1234")
 
 	p := pkcs11.New(module)
@@ -83,7 +83,7 @@ func main() {
 	}
 	defer p.Logout(sess)
 
-	keyLabel := "r5-vendor-aes"
+	keyLabel := "matrix-vendor-aes"
 	aesTmpl := []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_SECRET_KEY),
 		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, pkcs11.CKK_AES),

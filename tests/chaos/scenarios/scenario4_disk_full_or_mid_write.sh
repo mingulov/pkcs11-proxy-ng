@@ -1,5 +1,5 @@
 #!/bin/sh
-# R8 scenario 4 — IO failures on config dir + SIGHUP.
+# Scenario 4: IO failures on config dir + SIGHUP.
 #
 # Three sub-tests exercising different failure modes that the daemon's
 # SIGHUP-reload path must survive:
@@ -16,12 +16,12 @@
 #       ENOSPC. Daemon must handle the truncated/unreadable file
 #       gracefully on SIGHUP.
 #
-# Sub-test (c) closes R8-FOLLOWUP-real-disk-full.
+# Sub-test (c) closes FOLLOWUP-real-disk-full.
 
 set -u
 . "$(dirname "$0")/_common.sh"
 
-echo "=== R8 scenario 4: IO failures on registry path + SIGHUP ==="
+echo "=== Scenario 4: IO failures on registry path + SIGHUP ==="
 
 baseline_rev=$(docker logs "$DAEMON_CONTAINER" 2>&1 | grep -oE '"revision":"[a-f0-9]+"' | tail -1)
 echo "  baseline registry revision: $baseline_rev"

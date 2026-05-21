@@ -1,4 +1,4 @@
-# R5 daemon image — SoftHSM2 stock backend.
+# daemon image — SoftHSM2 stock backend.
 # Reuses the same pattern as tests/r2_resilience/Dockerfile.daemon.
 
 FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng
@@ -19,7 +19,7 @@ RUN mkdir -p /var/lib/softhsm/tokens \
   && printf 'directories.tokendir = /var/lib/softhsm/tokens\nobjectstore.backend = file\nlog.level = INFO\n' \
       > /etc/softhsm2.conf \
   && softhsm2-util --init-token --free \
-      --label r5-token --so-pin abcd --pin 1234
+      --label matrix-token --so-pin abcd --pin 1234
 
 # Daemon config: no-auth TCP on 7512.
 COPY pkcs11-proxy-ng/tests/consumers/proxy.toml /etc/pkcs11-proxy-ng/proxy.toml

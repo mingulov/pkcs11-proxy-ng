@@ -1,5 +1,5 @@
 #!/bin/sh
-# R5 vendor extension flow test.
+# vendor extension flow test.
 #
 # Mode 1 — visibility check (works with any backend):
 #   - pkcs11-tool -M lists CKM_CLOUDHSM_AES_GCM after daemon registry reload.

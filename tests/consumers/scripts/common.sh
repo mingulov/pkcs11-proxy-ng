@@ -1,17 +1,17 @@
 #!/bin/sh
-# Shared helpers for R5 consumer scripts.
+# Shared helpers for Consumer scripts.
 # Conventions:
 #   PKCS11_MODULE_PATH        — shim .so (set by image)
 #   PKCS11_PROXY_ENDPOINT     — daemon URL (set by compose)
-#   TOKEN_LABEL               — "r5-token"
+#   TOKEN_LABEL               — "matrix-token"
 #   USER_PIN                  — "1234"
 #   SO_PIN                    — "abcd"
-#   KEY_LABEL                 — "r5-key"
+#   KEY_LABEL                 — "matrix-key"
 
-: "${TOKEN_LABEL:=r5-token}"
+: "${TOKEN_LABEL:=matrix-token}"
 : "${USER_PIN:=1234}"
 : "${SO_PIN:=abcd}"
-: "${KEY_LABEL:=r5-key}"
+: "${KEY_LABEL:=matrix-key}"
 : "${KEY_ID:=01}"
 
 export TOKEN_LABEL USER_PIN SO_PIN KEY_LABEL KEY_ID

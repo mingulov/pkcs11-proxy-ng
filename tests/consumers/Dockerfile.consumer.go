@@ -1,4 +1,4 @@
-# R5 consumer image — Go-based PKCS#11 consumers.
+# consumer image — Go-based PKCS#11 consumers.
 # Bundles: miekg/pkcs11 + ThalesGroup/crypto11 harnesses + the shim.
 
 FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng

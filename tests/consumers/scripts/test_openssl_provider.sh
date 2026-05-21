@@ -1,5 +1,5 @@
 #!/bin/sh
-# R5 consumer: OpenSSL pkcs11 provider (libp11 ≥ 0.4.16 / pkcs11prov.so).
+# consumer: OpenSSL pkcs11 provider (libp11 ≥ 0.4.16 / pkcs11prov.so).
 # Configured via OPENSSL_CONF that loads the pkcs11 provider and
 # points it at our shim.
 

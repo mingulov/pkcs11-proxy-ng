@@ -1,5 +1,5 @@
 #!/bin/sh
-# R8 chaos scenario dispatcher.
+# Chaos scenario dispatcher.
 #
 # Usage: run_scenario.sh <N>     # N in {1..6}
 #        run_scenario.sh all     # run all scenarios sequentially

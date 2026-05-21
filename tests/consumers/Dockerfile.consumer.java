@@ -1,4 +1,4 @@
-# R5 consumer image — Java PKCS11 (SunPKCS11 provider).
+# consumer image — Java PKCS11 (SunPKCS11 provider).
 # OpenJDK 17 ships a built-in PKCS11 provider that loads a native
 # module via a config file. We point it at the shim.
 

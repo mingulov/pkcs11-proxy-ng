@@ -1,5 +1,5 @@
 #!/bin/sh
-# R5 consumer: miekg/pkcs11 Go binding (direct).
+# consumer: miekg/pkcs11 Go binding (direct).
 set -u
 . /scripts/common.sh
 

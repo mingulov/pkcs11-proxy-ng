@@ -1,37 +1,37 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: r4-consumer
-  namespace: r4-sre
+  name: consumer-load
+  namespace: pkcs11-proxy-demo
   labels:
-    app: r4-consumer
+    app: consumer-load
 spec:
-  serviceName: r4-consumer
+  serviceName: consumer-load
   replicas: 1
   selector:
     matchLabels:
-      app: r4-consumer
+      app: consumer-load
   template:
     metadata:
       labels:
-        app: r4-consumer
+        app: consumer-load
     spec:
       terminationGracePeriodSeconds: 5
       containers:
         - name: consumer
           # Runner image from tests/r2_resilience/Dockerfile.runner.
           # It already bundles the shim, pkcs11-tool, the CLI, and
-          # the docker socket utilities. For R4 we use only the
+          # the docker socket utilities. We use only the
           # shim + the 10-rps load harness baked in below.
           image: r2_resilience-runner:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: PKCS11_PROXY_ENDPOINT
-              value: "http://r4-daemon.r4-sre.svc:7512"
+              value: "http://daemon.pkcs11-proxy-demo.svc:7512"
             - name: PKCS11_MODULE_PATH
               value: "/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so"
             - name: TOKEN_LABEL
-              value: "r4-token"
+              value: "demo-token"
             - name: USER_PIN
               value: "1234"
             - name: TARGET_RPS
@@ -44,7 +44,7 @@ spec:
               set -eu
               # Wait for the daemon Service to be reachable.
               for _ in $(seq 1 60); do
-                if (echo > "/dev/tcp/r4-daemon.r4-sre.svc/7512") 2>/dev/null; then break; fi
+                if (echo > "/dev/tcp/daemon.pkcs11-proxy-demo.svc/7512") 2>/dev/null; then break; fi
                 sleep 1
               done
 
@@ -54,7 +54,7 @@ spec:
               pkcs11-tool --module "$PKCS11_MODULE_PATH" \
                   --token-label "$TOKEN_LABEL" --login --pin "$USER_PIN" \
                   --keypairgen --key-type rsa:2048 \
-                  --label r4-key --id 01 || true
+                  --label demo-key --id 01 || true
 
               # 10-rps signing loop.
               interval_ms=$(( 1000 / TARGET_RPS ))

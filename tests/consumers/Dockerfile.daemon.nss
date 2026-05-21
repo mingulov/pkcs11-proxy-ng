@@ -1,4 +1,4 @@
-# R5 daemon image — NSS softokn backend.
+# daemon image — NSS softokn backend.
 # NSS softokn3 is the PKCS#11 token shipped with NSS (Firefox/Chrome's
 # crypto). It exposes a different mechanism set than SoftHSM2 (notably
 # fewer AES wrap modes, no SHA-3 by default, different DH/EC support).
@@ -28,7 +28,7 @@ RUN mkdir -p "$NSSDB" \
 # we configure that through environment variables read by softokn3.so
 # at load time (`NSS_DEFAULT_DB_TYPE=sql`, `NSS_LIB_PARAMS`).
 ENV NSS_DEFAULT_DB_TYPE=sql
-ENV NSS_LIB_PARAMS="configdir='sql:/var/lib/nssdb' tokenDescription='r5-token' minPWLen=4"
+ENV NSS_LIB_PARAMS="configdir='sql:/var/lib/nssdb' tokenDescription='matrix-token' minPWLen=4"
 
 COPY pkcs11-proxy-ng/tests/consumers/proxy.toml /etc/pkcs11-proxy-ng/proxy.toml
 RUN sed -i 's|@BACKEND_MODULE@|/usr/lib/libsoftokn3.so|' \

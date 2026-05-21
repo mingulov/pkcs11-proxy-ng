@@ -1,7 +1,7 @@
-From: pkcs11-proxy-ng R5 audit
+From: pkcs11-proxy-ng consumer-matrix
 Subject: [PATCH] Alias CKM_CLOUDHSM_AES_GCM (0x80001087) to CKM_AES_GCM
 
-R5 audit needs a SoftHSM2 build that advertises a CloudHSM-style
+The consumer-matrix needs a SoftHSM2 build that advertises a CloudHSM-style
 vendor mechanism (0x80001087) and accepts it at C_EncryptInit /
 C_DecryptInit by reusing the standard AES-GCM code path. This is
 NOT a faithful CloudHSM emulation — it's enough to verify that the
@@ -23,7 +23,7 @@ Touch sites in src/lib/SoftHSM.cpp (5):
  	t["CKM_AES_CBC_PAD"]		= CKM_AES_CBC_PAD;
  	t["CKM_AES_CTR"]		= CKM_AES_CTR;
  	t["CKM_AES_GCM"]		= CKM_AES_GCM;
-+	// R5 audit: CKM_CLOUDHSM_AES_GCM alias for vendor-extension flow.
++	// CKM_CLOUDHSM_AES_GCM alias for vendor-extension flow.
 +	t["CKM_CLOUDHSM_AES_GCM"]	= (CK_MECHANISM_TYPE)0x80001087UL;
  	t["CKM_AES_KEY_WRAP"]		= CKM_AES_KEY_WRAP;
  #ifdef HAVE_AES_KEY_WRAP_PAD

@@ -1,16 +1,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: r4-daemon
-  namespace: r4-sre
+  name: daemon
+  namespace: pkcs11-proxy-demo
   labels:
-    app: r4-daemon
+    app: daemon
 spec:
   replicas: 3
-  # RollingUpdate is the only policy that meets the R4 SLO. A
+  # RollingUpdate is the only policy that meets the rolling-restart SLO. A
   # surge of 1 keeps 3 healthy replicas during the rollover; the
   # consumer's session affinity drains gracefully via the
-  # Service's `sessionAffinity: ClientIP` (see r4-daemon-svc).
+  # Service's `sessionAffinity: ClientIP` (see daemon-svc).
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -18,11 +18,11 @@ spec:
       maxUnavailable: 0
   selector:
     matchLabels:
-      app: r4-daemon
+      app: daemon
   template:
     metadata:
       labels:
-        app: r4-daemon
+        app: daemon
     spec:
       # k8s terminationGracePeriodSeconds must be >= the daemon's
       # proxy.shutdown_grace_secs (default 30) so an in-flight
@@ -32,7 +32,7 @@ spec:
         - name: daemon
           # Runnable daemon image — Alpine 3.23 with the
           # pkcs11-proxy-ng-daemon APK and SoftHSM2 installed. Built
-          # by the R2 resilience fixture
+          # by the resilience fixture
           # (tests/r2_resilience/Dockerfile.daemon); kind operators
           # load it with `kind load docker-image
           # r2_resilience-daemon:latest --name <cluster>`. The
@@ -61,9 +61,9 @@ spec:
               slots.mechanisms = ALL
               library.reset_on_fork = false
               EOF
-              if ! softhsm2-util --show-slots 2>/dev/null | grep -q "Label:[[:space:]]*r4-token"; then
+              if ! softhsm2-util --show-slots 2>/dev/null | grep -q "Label:[[:space:]]*demo-token"; then
                   softhsm2-util --init-token --free \
-                      --label r4-token --so-pin abcd --pin 1234 >/dev/null
+                      --label demo-token --so-pin abcd --pin 1234 >/dev/null
               fi
               exec /usr/bin/pkcs11-proxy-ng /etc/pkcs11-proxy-ng/proxy.toml
           env:
@@ -84,11 +84,11 @@ spec:
             - name: tokens
               mountPath: /tokens
           # Readiness probe uses pkcs11-proxy-ng-cli's `health`
-          # subcommand (closes R4-FOLLOWUP-grpc-health-probe). The
+          # subcommand (closes FOLLOWUP-grpc-health-probe). The
           # CLI talks gRPC `grpc.health.v1.Health/Check` to the
           # daemon and exits 0 on SERVING, 1 otherwise. This honours
           # the daemon's backend-health gating: when N consecutive
-          # backend failures flip tonic-health to NOT_SERVING (R1),
+          # backend failures flip tonic-health to NOT_SERVING,
           # kube-proxy removes the pod from the Service endpoints.
           # The earlier TCP-only probe only checked that the
           # listener was up — backend hangs were invisible.
@@ -130,13 +130,13 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: r4-daemon-config
+            name: daemon-config
         - name: tokens
           # hostPath stands in for a shared HSM backend. In a real
           # multi-replica deployment, this is the shared HSM device
           # / CloudHSM client / network HSM mount that every daemon
           # replica connects to. emptyDir does NOT work here — see
-          # doc/audit/r4-sre-ops.md.
+          # doc/audit/pkcs11-proxy-demo-ops.md.
           hostPath:
-            path: /var/lib/r4-softhsm-tokens
+            path: /var/lib/example-softhsm-tokens
             type: DirectoryOrCreate
