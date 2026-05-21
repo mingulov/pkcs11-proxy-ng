@@ -63,7 +63,7 @@ pub(crate) async fn import_certificate(
     let handle = client
         .create_object(session, &template)
         .await
-        .map_err(|e| format!("C_CreateObject failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_CreateObject"))?;
     println!("Certificate imported with handle: {}", handle.0);
     close_session(client, session, true).await;
     Ok(())

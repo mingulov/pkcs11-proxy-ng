@@ -157,7 +157,12 @@ fn dispatch_session_only(
         ByteOutputFunction::EncryptFinal => backend.encrypt_final_exact(session, spec),
         ByteOutputFunction::DecryptFinal => backend.decrypt_final_exact(session, spec),
         ByteOutputFunction::GetOperationState => backend.get_operation_state_exact(session, spec),
-        _ => unreachable!("only session-only variants reach this function"),
+        // Defensive: the parent match dispatched only session-only variants
+        // here, but a future variant added without updating the parent would
+        // otherwise silently `unreachable!()`-panic across the gRPC handler.
+        // Return CKR_FUNCTION_NOT_SUPPORTED instead so a panic across the
+        // tonic boundary becomes a clean client-visible error.
+        _ => Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED),
     }
 }
 
@@ -189,7 +194,9 @@ fn dispatch_session_data(
         ByteOutputFunction::DecryptVerifyUpdate => {
             backend.decrypt_verify_update_exact(session, data, spec)
         }
-        _ => unreachable!("only session+data variants reach this function"),
+        // See `dispatch_session_only` for the rationale: conservative
+        // CKR_FUNCTION_NOT_SUPPORTED instead of a panic across gRPC.
+        _ => Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED),
     }
 }
 

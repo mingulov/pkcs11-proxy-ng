@@ -12,7 +12,7 @@ pub(crate) async fn init_token(
     client
         .init_token(CkSlotId(slot_id), Some(so_pin.as_bytes()), &label)
         .await
-        .map_err(|e| format!("C_InitToken failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_InitToken"))?;
     println!("Token initialized successfully.");
     Ok(())
 }
@@ -36,7 +36,7 @@ pub(crate) async fn init_pin(
     client
         .init_pin(session, Some(new_pin.as_bytes()))
         .await
-        .map_err(|e| format!("C_InitPIN failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_InitPIN"))?;
     println!("User PIN initialized successfully.");
     close_session(client, session, true).await;
     Ok(())
@@ -52,10 +52,7 @@ pub(crate) async fn seed_random(
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
     login_user(client, session, &pin).await?;
-    client
-        .seed_random(session, &seed)
-        .await
-        .map_err(|e| format!("C_SeedRandom failed: CKR 0x{:08X}", e.0))?;
+    client.seed_random(session, &seed).await.map_err(crate::handlers::cli_err("C_SeedRandom"))?;
     println!("RNG seeded.");
     close_session(client, session, true).await;
     Ok(())
@@ -77,7 +74,7 @@ pub(crate) async fn set_pin(
     client
         .set_pin(session, Some(pin.as_bytes()), Some(new_pin.as_bytes()))
         .await
-        .map_err(|e| format!("C_SetPIN failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_SetPIN"))?;
     println!("PIN changed successfully.");
     close_session(client, session, true).await;
     Ok(())

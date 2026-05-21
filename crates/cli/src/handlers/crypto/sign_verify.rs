@@ -29,11 +29,9 @@ pub(crate) async fn sign(
     client
         .sign_init(session, &mechanism, key)
         .await
-        .map_err(|e| format!("C_SignInit failed: CKR 0x{:08X}", e.0))?;
-    let signature = client
-        .sign(session, &data)
-        .await
-        .map_err(|e| format!("C_Sign failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_SignInit"))?;
+    let signature =
+        client.sign(session, &data).await.map_err(crate::handlers::cli_err("C_Sign"))?;
     println!("{}", hex::encode(&signature));
     close_session(client, session, true).await;
     Ok(())
@@ -59,7 +57,7 @@ pub(crate) async fn verify(
     client
         .verify_init(session, &mechanism, key)
         .await
-        .map_err(|e| format!("C_VerifyInit failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_VerifyInit"))?;
     match client.verify(session, &data, &signature).await {
         Ok(()) => println!("Signature VALID"),
         Err(error) if error == CkRv::SIGNATURE_INVALID => {

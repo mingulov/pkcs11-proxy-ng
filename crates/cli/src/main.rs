@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn core::error::Error>> {
         None => Pkcs11Client::connect(&cli.endpoint).await,
     }
     .map_err(|e| format!("Connection failed: {e}"))?;
-    client.initialize().await.map_err(|e| format!("C_Initialize failed: CKR 0x{:08X}", e.0))?;
+    client.initialize().await.map_err(crate::handlers::cli_err("C_Initialize"))?;
 
     let result = run_command(&mut client, cli.command).await;
 

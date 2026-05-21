@@ -384,7 +384,7 @@ pub(super) async fn resolve_session_and_key(
     // CKR_KEY_HANDLE_INVALID locally.  This preserves transparency: the
     // backend decides the error priority (e.g., CKR_FUNCTION_NOT_SUPPORTED
     // vs CKR_KEY_HANDLE_INVALID).
-    let backend_key = key.map(|h| CkObjectHandle(h.0)).unwrap_or(CkObjectHandle(0));
+    let backend_key = key.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
     Ok((CkSessionHandle(backend_session.0), backend_key))
 }
 
@@ -409,7 +409,7 @@ pub(super) async fn resolve_session_and_object(
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
     // Forward CK_INVALID_HANDLE to backend when object is unknown — see
     // resolve_session_and_key for rationale.
-    let backend_object = object.map(|h| CkObjectHandle(h.0)).unwrap_or(CkObjectHandle(0));
+    let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
     Ok((CkSessionHandle(backend_session.0), backend_object))
 }
 
@@ -437,10 +437,8 @@ pub(super) async fn resolve_session_and_two_objects(
     // Forward CK_INVALID_HANDLE to backend when either object is unknown; see
     // resolve_session_and_key for rationale. Local context/session validation
     // remains explicit; backend-visible object handle priority stays backend-owned.
-    let first_backend_object =
-        first_object.map(|h| CkObjectHandle(h.0)).unwrap_or(CkObjectHandle(0));
-    let second_backend_object =
-        second_object.map(|h| CkObjectHandle(h.0)).unwrap_or(CkObjectHandle(0));
+    let first_backend_object = first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
+    let second_backend_object = second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
 
     Ok((CkSessionHandle(backend_session.0), first_backend_object, second_backend_object))
 }

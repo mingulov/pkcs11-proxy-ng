@@ -48,7 +48,7 @@ unsafe impl Sync for InterfaceState {}
 static INTERFACE_STATE: RwLock<Option<&'static InterfaceState>> = RwLock::new(None);
 
 /// Null-terminated name used for all interface entries.
-static IFACE_NAME_PKCS11: &[u8] = b"PKCS 11\0";
+const IFACE_NAME_PKCS11: &[u8] = b"PKCS 11\0";
 
 // ---------------------------------------------------------------------------
 // Building unpatched function lists (delegates to existing macros)

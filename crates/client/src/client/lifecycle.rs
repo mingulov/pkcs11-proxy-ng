@@ -111,7 +111,7 @@ impl Pkcs11Client {
             .map_err(|status| grpc_status_to_ck_rv_kind(status.code(), RpcKind::Lifecycle))?
             .into_inner();
         let rv = CkRv(response.ck_rv);
-        if !rv.is_ok() {
+        if rv.is_err() {
             return Err(rv);
         }
         self.context_id = Some(response.client_context_id);
@@ -132,7 +132,7 @@ impl Pkcs11Client {
             .map_err(|status| grpc_status_to_ck_rv_kind(status.code(), RpcKind::Lifecycle))?
             .into_inner();
         let rv = CkRv(response.ck_rv);
-        if !rv.is_ok() {
+        if rv.is_err() {
             return Err(rv);
         }
         self.context_id = None;

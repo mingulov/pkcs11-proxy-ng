@@ -253,8 +253,7 @@ impl ContextManager {
             let still_expired = self
                 .contexts
                 .get(id)
-                .map(|entry| now.duration_since(entry.last_active) > self.lease_duration)
-                .unwrap_or(false);
+                .is_some_and(|entry| now.duration_since(entry.last_active) > self.lease_duration);
             if !still_expired {
                 continue;
             }

@@ -14,7 +14,7 @@ macro_rules! pkcs11_unary_call {
             })?
             .into_inner();
         let rv = CkRv(response.ck_rv);
-        if !rv.is_ok() {
+        if rv.is_err() {
             return Err(rv);
         }
         response
@@ -48,7 +48,7 @@ macro_rules! pkcs11_unary_ok {
             })?
             .into_inner();
         let rv = CkRv(response.ck_rv);
-        if !rv.is_ok() {
+        if rv.is_err() {
             return Err(rv);
         }
         Ok::<(), CkRv>(())

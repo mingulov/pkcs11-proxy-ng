@@ -235,7 +235,10 @@ fn dispatch_message_oneshot(
         ParameterOutputFunction::SignMessage => {
             backend.sign_message_exact(session, parameter, input_data, output_spec, param_out_spec)
         }
-        _ => unreachable!("only one-shot message variants reach this function"),
+        // Defensive: parent dispatch routes only matching variants here; a future
+        // variant added without updating the parent would otherwise panic across
+        // the gRPC boundary. Return CKR_FUNCTION_NOT_SUPPORTED instead.
+        _ => Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED),
     }
 }
 
@@ -276,7 +279,8 @@ fn dispatch_message_next(
             output_spec,
             param_out_spec,
         ),
-        _ => unreachable!("only *_next variants reach this function"),
+        // Defensive: see `dispatch_message_oneshot` for rationale.
+        _ => Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED),
     }
 }
 
@@ -310,7 +314,10 @@ fn dispatch_message_oneshot_msg(
         ParameterOutputFunction::SignMessage => {
             backend.sign_message_exact_msg(session, msg_param, input_data, output_spec)
         }
-        _ => unreachable!("only one-shot message variants reach this function"),
+        // Defensive: parent dispatch routes only matching variants here; a future
+        // variant added without updating the parent would otherwise panic across
+        // the gRPC boundary. Return CKR_FUNCTION_NOT_SUPPORTED instead.
+        _ => Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED),
     }
 }
 
@@ -344,7 +351,8 @@ fn dispatch_message_next_msg(
         ParameterOutputFunction::SignMessageNext => {
             backend.sign_message_next_exact_msg(session, msg_param, input_data, output_spec)
         }
-        _ => unreachable!("only *_next variants reach this function"),
+        // Defensive: see `dispatch_message_oneshot` for rationale.
+        _ => Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED),
     }
 }
 
