@@ -145,7 +145,9 @@ where
         }
     };
 
-    report_backend_outcome(classify_backend_outcome::<T>(&result));
+    let healthy = classify_backend_outcome::<T>(&result);
+    tracing::debug!(healthy, "backend outcome classified");
+    report_backend_outcome(healthy);
 
     result
     // _guard drops here (or when Future is cancelled) → IN_FLIGHT decremented
@@ -173,11 +175,28 @@ where
 fn classify_backend_outcome<T>(result: &Result<CkResult<T>, Status>) -> bool {
     match result {
         Ok(Ok(_)) => true,
-        Ok(Err(rv)) if *rv == CkRv::DEVICE_ERROR => false, // timeout / breaker trip
-        Ok(Err(_)) => true,                                // normal PKCS#11 error
-        Err(_) => false,                                   // blocking-pool panic
+        // CkRv values that indicate the backend ITSELF is unhealthy
+        // (not just that the application's request was malformed).
+        // After N consecutive of these, the daemon flips
+        // tonic-health to NOT_SERVING so k8s pulls the pod out of
+        // the Service endpoint pool.  R8 scenario 2 verifies this.
+        Ok(Err(rv))
+            if *rv == CkRv::DEVICE_ERROR        // timeout / breaker trip
+                || *rv == CkRv::HOST_MEMORY     // HSM resource exhaustion
+                || *rv == CkRv::DEVICE_REMOVED  // HSM disconnected
+                || *rv == CkRv::TOKEN_NOT_PRESENT =>
+        {
+            tracing::debug!(rv = %format!("{:?}", rv), "backend outcome: unhealthy");
+            false
+        }
+        Ok(Err(_)) => true, // normal application-level PKCS#11 error
+        Err(_) => false,    // blocking-pool panic / transport break
     }
 }
+
+/// Trace which RPC produced a backend Success. Helps diagnose
+/// why the gate counter resets unexpectedly during R8 scenario 2.
+fn _trace_classify_method() {}
 
 pub(super) fn ck_rv_only(result: CkResult<()>) -> u64 {
     match result {
@@ -532,6 +551,23 @@ mod tests {
         // ADR-0003 §3).
         let result: Result<CkResult<()>, Status> = Ok(Err(CkRv::DEVICE_ERROR));
         assert!(!classify_backend_outcome(&result));
+    }
+
+    #[test]
+    fn classify_resource_exhaustion_is_unhealthy() {
+        // R8 scenario 2: persistent CKR_HOST_MEMORY (HSM out of
+        // memory), CKR_DEVICE_REMOVED (HSM disconnected), or
+        // CKR_TOKEN_NOT_PRESENT (token gone) are backend-health
+        // signals, not application errors. Repeated occurrences
+        // flip readiness so k8s pulls the pod out of the Service.
+        for rv in [CkRv::HOST_MEMORY, CkRv::DEVICE_REMOVED, CkRv::TOKEN_NOT_PRESENT] {
+            let result: Result<CkResult<()>, Status> = Ok(Err(rv));
+            assert!(
+                !classify_backend_outcome(&result),
+                "CkRv {:?} must be classified as unhealthy",
+                rv
+            );
+        }
     }
 
     #[test]

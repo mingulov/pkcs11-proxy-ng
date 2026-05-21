@@ -195,11 +195,12 @@ pub(crate) enum Commands {
     /// (closes R4-FOLLOWUP-grpc-health-probe — TCP-only probes don't
     /// honour the daemon's backend-health gating).
     Health {
-        /// gRPC service name to check. Empty string ("") asks for the
-        /// overall server health. The daemon registers its main
-        /// service explicitly so this picks up the backend-health
-        /// gating flip.
-        #[arg(long, default_value = "")]
+        /// gRPC service name to check. The daemon only flips the
+        /// status of its own service when the backend-health gate
+        /// trips (R6-12 / R8), so this defaults to the daemon's
+        /// service name. Pass `--service ""` to check overall server
+        /// status (which stays SERVING regardless of backend health).
+        #[arg(long, default_value = "pkcs11_proxy_ng.v1.Pkcs11Proxy")]
         service: String,
     },
     InitToken {

@@ -199,6 +199,7 @@ fn spawn_backend_health_gate(
     mut reporter: tonic_health::server::HealthReporter,
     threshold: u32,
 ) {
+    tracing::info!(threshold, "backend health gate starting");
     tokio::spawn(async move {
         use server::grpc_service::service_utils::BackendHealthEvent;
         let mut consecutive_failures: u32 = 0;
@@ -207,6 +208,7 @@ fn spawn_backend_health_gate(
         // `health::set_serving` immediately before us.
         let mut currently_serving = true;
         while let Some(event) = rx.recv().await {
+            tracing::debug!(?event, consecutive_failures, "backend health event received");
             match event {
                 BackendHealthEvent::Success => {
                     let prior_failures = consecutive_failures;

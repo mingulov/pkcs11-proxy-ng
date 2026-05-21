@@ -14,6 +14,16 @@
 //!   SLOW_BACKEND_SIGN_RV_HEX    — instead of OK, return this CK_RV.
 //!                                 Hex with or without 0x prefix.
 //!                                 Example: 0x2 = CKR_HOST_MEMORY.
+//!   SLOW_BACKEND_BREAK_AFTER_CALLS — after this many successful calls,
+//!                                 every subsequent call (irrespective
+//!                                 of which entry point) returns
+//!                                 SLOW_BACKEND_BREAK_RV_HEX. Lets a
+//!                                 consumer "warm up" through Login /
+//!                                 FindObjects normally, then drive a
+//!                                 monotonically-failing tail used by
+//!                                 R8 scenario 2 to flip backend health.
+//!   SLOW_BACKEND_BREAK_RV_HEX   — CK_RV to return after the break.
+//!                                 Defaults to 0x2 (CKR_HOST_MEMORY).
 //!
 //! Everything else is a stub: minimum valid return values, no real
 //! state. Sufficient to drive the daemon's lifecycle but not to do
@@ -97,6 +107,9 @@ unsafe extern "C" fn c_get_slot_list(
     slot_list: CK_SLOT_ID_PTR,
     pul_count: CK_ULONG_PTR,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     if pul_count.is_null() {
         return CKR_GENERAL_ERROR_LITERAL;
     }
@@ -137,6 +150,9 @@ unsafe extern "C" fn c_get_token_info(
     _slot_id: CK_SLOT_ID,
     info: CK_TOKEN_INFO_PTR,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     if info.is_null() {
         return CKR_GENERAL_ERROR_LITERAL;
     }
@@ -192,6 +208,9 @@ unsafe extern "C" fn c_open_session(
     _notify: CK_NOTIFY,
     phsession: CK_SESSION_HANDLE_PTR,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     if phsession.is_null() {
         return CKR_GENERAL_ERROR_LITERAL;
     }
@@ -200,6 +219,9 @@ unsafe extern "C" fn c_open_session(
 }
 
 unsafe extern "C" fn c_close_session(_h: CK_SESSION_HANDLE) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     CKR_OK
 }
 
@@ -209,10 +231,16 @@ unsafe extern "C" fn c_login(
     _pin: CK_UTF8CHAR_PTR,
     _pin_len: CK_ULONG,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     CKR_OK
 }
 
 unsafe extern "C" fn c_logout(_h: CK_SESSION_HANDLE) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     CKR_OK
 }
 
@@ -223,6 +251,9 @@ unsafe extern "C" fn c_sign_init(
     _mech: CK_MECHANISM_PTR,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     CKR_OK
 }
 
@@ -233,6 +264,9 @@ unsafe extern "C" fn c_sign(
     sig: CK_BYTE_PTR,
     sig_len: CK_ULONG_PTR,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     maybe_sleep("SLOW_BACKEND_SIGN_DELAY_MS");
     // R8 scenario 2: optionally return a forced error code instead
     // of OK. Useful for exercising the daemon's circuit-breaker /
@@ -262,6 +296,52 @@ fn env_rv(name: &str) -> Option<CK_RV> {
     let raw = std::env::var(name).ok()?;
     let stripped = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")).unwrap_or(&raw);
     u64::from_str_radix(stripped, 16).ok()
+}
+
+/// Monotonic counter of every backend entry that goes through
+/// `count_op_and_maybe_break`. Once it exceeds
+/// `SLOW_BACKEND_BREAK_AFTER_CALLS`, every subsequent call returns
+/// `SLOW_BACKEND_BREAK_RV_HEX` (default 0x2 = CKR_HOST_MEMORY).
+///
+/// Used by R8 scenario 2 to flip backend-health to NOT_SERVING
+/// after `backend_health_consecutive_failures` consecutive backend
+/// errors — without the consumer-side warmup calls (Login,
+/// FindObjects, GetAttributeValue, …) registering as Successes and
+/// resetting the gate counter between Sign attempts.
+static OP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Apply to every backend entry-point. Returns `Some(rv)` if the
+/// caller should bail out with that CK_RV; `None` if the call may
+/// proceed normally.
+///
+/// Once the cumulative operation count exceeds
+/// `SLOW_BACKEND_BREAK_AFTER_CALLS`, latches a global "broken" flag
+/// so every subsequent call — across ALL entry points — fails with
+/// `SLOW_BACKEND_BREAK_RV_HEX` (default 0x2 = CKR_HOST_MEMORY). This
+/// produces an unbroken stream of Failure events at the daemon
+/// without intervening Success calls resetting the gate counter.
+fn count_op_and_maybe_break() -> Option<CK_RV> {
+    // Already broken — every subsequent call fails fast.
+    if BROKEN.load(std::sync::atomic::Ordering::Relaxed) {
+        let rv = env_rv("SLOW_BACKEND_BREAK_RV_HEX").unwrap_or(0x2);
+        eprintln!("slow_backend: BROKEN, returning rv=0x{rv:x}");
+        return Some(rv);
+    }
+    let break_after = std::env::var("SLOW_BACKEND_BREAK_AFTER_CALLS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
+    let n = OP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    eprintln!("slow_backend: op#{n} (break_after={break_after:?})");
+    if let Some(threshold) = break_after
+        && n >= threshold
+    {
+        BROKEN.store(true, std::sync::atomic::Ordering::Relaxed);
+        let rv = env_rv("SLOW_BACKEND_BREAK_RV_HEX").unwrap_or(0x2);
+        eprintln!("slow_backend: tripped break at op#{n}, latching BROKEN");
+        return Some(rv);
+    }
+    None
 }
 
 // ─── everything else: not supported ─────────────────────────────
@@ -297,6 +377,9 @@ unsafe extern "C" fn c_get_attribute_value(
     tmpl: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     if tmpl.is_null() && count > 0 {
         return CKR_GENERAL_ERROR_LITERAL;
     }
@@ -394,6 +477,9 @@ unsafe extern "C" fn c_find_objects_init(
     _tmpl: CK_ATTRIBUTE_PTR,
     _count: CK_ULONG,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     FIND_RETURNED.store(false, AtomicOrdering::SeqCst);
     CKR_OK
 }
@@ -404,6 +490,9 @@ unsafe extern "C" fn c_find_objects(
     max: CK_ULONG,
     pul_count: CK_ULONG_PTR,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     if pul_count.is_null() {
         return CKR_GENERAL_ERROR_LITERAL;
     }
@@ -420,6 +509,9 @@ unsafe extern "C" fn c_find_objects(
 }
 
 unsafe extern "C" fn c_find_objects_final(_h: CK_SESSION_HANDLE) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     CKR_OK
 }
 unsupported!(c_encrypt_init, CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
@@ -440,6 +532,9 @@ unsafe extern "C" fn c_sign_update(
     _part: CK_BYTE_PTR,
     _part_len: CK_ULONG,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     if let Some(rv) = env_rv("SLOW_BACKEND_SIGN_RV_HEX") {
         return rv;
     }
@@ -451,6 +546,9 @@ unsafe extern "C" fn c_sign_final(
     sig: CK_BYTE_PTR,
     sig_len: CK_ULONG_PTR,
 ) -> CK_RV {
+    if let Some(rv) = count_op_and_maybe_break() {
+        return rv;
+    }
     maybe_sleep("SLOW_BACKEND_SIGN_DELAY_MS");
     if let Some(rv) = env_rv("SLOW_BACKEND_SIGN_RV_HEX") {
         return rv;

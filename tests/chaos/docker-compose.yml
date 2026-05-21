@@ -19,12 +19,14 @@ services:
     networks: [r8net]
     expose: ["7512"]
     environment:
-      RUST_LOG: "pkcs11_proxy_ng=info,pkcs11_proxy_ng_backend=info"
+      RUST_LOG: "${RUST_LOG:-pkcs11_proxy_ng=info,pkcs11_proxy_ng_backend=info}"
       LOG_FORMAT: "json"
       SLOW_BACKEND_SIGN_DELAY_MS: "${SLOW_BACKEND_SIGN_DELAY_MS:-0}"
       SLOW_BACKEND_INIT_DELAY_MS: "${SLOW_BACKEND_INIT_DELAY_MS:-0}"
       SLOW_BACKEND_INIT_HANG: "${SLOW_BACKEND_INIT_HANG:-}"
       SLOW_BACKEND_SIGN_RV_HEX: "${SLOW_BACKEND_SIGN_RV_HEX:-}"
+      SLOW_BACKEND_BREAK_AFTER_CALLS: "${SLOW_BACKEND_BREAK_AFTER_CALLS:-}"
+      SLOW_BACKEND_BREAK_RV_HEX: "${SLOW_BACKEND_BREAK_RV_HEX:-}"
     volumes:
       - ../r2_resilience/slow_backend/target/release:/opt/slow_backend:ro
 
