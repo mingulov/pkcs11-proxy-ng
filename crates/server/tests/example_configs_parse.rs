@@ -123,9 +123,7 @@ fn example_fips_mechanism_params_parses() {
     // explicitly named in the FIPS toml MUST be present (silently
     // dropping AES_GCM or ECDSA would defeat the FIPS interlock).
     // CKM_AES_GCM = 0x00001087, CKM_ECDSA_SHA256 = 0x00001044.
-    for (mech, name) in
-        &[(0x0000_1087u64, "CKM_AES_GCM"), (0x0000_1044, "CKM_ECDSA_SHA256")]
-    {
+    for (mech, name) in &[(0x0000_1087u64, "CKM_AES_GCM"), (0x0000_1044, "CKM_ECDSA_SHA256")] {
         assert!(
             registry.is_parameterless(*mech) || registry.param_shape(*mech).is_some(),
             "{name} ({mech:#010x}) must be in the FIPS registry"

@@ -245,6 +245,36 @@ pub(crate) struct FfiMechanism {
 }
 
 impl FfiMechanism {
+    /// Build an `FfiMechanism` from a parameter pointer, length, and backing.
+    ///
+    /// **SAFETY INVARIANT (callers must uphold):** `ptr` must point into the
+    /// `backing` value (typically `Box::into_raw(...)` or the data pointer of
+    /// a `Vec` stored inside `backing`), so that the pointer remains valid for
+    /// as long as `_backing` is held. This helper does not enforce the
+    /// invariant; it only packages the fields into the `CK_MECHANISM` shape
+    /// so the 70+ construction sites in `mechanism_to_ffi` don't repeat the
+    /// same struct-literal boilerplate.
+    fn with_param(
+        mech_type: cryptoki_sys::CK_MECHANISM_TYPE,
+        ptr: *mut std::ffi::c_void,
+        len: usize,
+        backing: FfiParamBacking,
+    ) -> Self {
+        Self {
+            ck_mechanism: cryptoki_sys::CK_MECHANISM {
+                mechanism: mech_type,
+                pParameter: ptr,
+                ulParameterLen: len as cryptoki_sys::CK_ULONG,
+            },
+            _backing: backing,
+        }
+    }
+
+    /// Build an `FfiMechanism` with no parameter (`pParameter = NULL`).
+    fn no_param(mech_type: cryptoki_sys::CK_MECHANISM_TYPE) -> Self {
+        Self::with_param(mech_type, std::ptr::null_mut(), 0, FfiParamBacking::None)
+    }
+
     pub(super) fn output_params(&self) -> Option<CkMechanismParams> {
         match &self._backing {
             FfiParamBacking::Gcm(gcm, iv, aad) => {
@@ -690,16 +720,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
     let mech_type = mechanism.mechanism_type.0 as cryptoki_sys::CK_MECHANISM_TYPE;
 
     let params = match &mechanism.params {
-        None => {
-            return Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: std::ptr::null_mut(),
-                    ulParameterLen: 0,
-                },
-                _backing: FfiParamBacking::None,
-            });
-        }
+        None => return Ok(FfiMechanism::no_param(mech_type)),
         Some(p) => p,
     };
 
@@ -709,14 +730,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let mut buf = iv_params.iv.clone();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Bytes(buf),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Bytes(buf)))
         }
 
         // -- RSA-PSS: scalar-only struct ------------------------------------
@@ -728,14 +742,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *pss as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Pss(pss),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Pss(pss)))
         }
 
         // -- RSA-OAEP: struct with pointer to source_data -------------------
@@ -755,14 +762,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *oaep as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Oaep(oaep, source_data),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Oaep(oaep, source_data),
+            ))
         }
 
         // -- GCM: struct with pointers to IV and AAD ------------------------
@@ -786,14 +791,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *gcm as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_GCM_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Gcm(gcm, iv, aad),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Gcm(gcm, iv, aad)))
         }
 
         // -- CCM: struct with pointers to nonce and AAD ---------------------
@@ -813,14 +811,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ccm as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_CCM_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Ccm(ccm, nonce, aad),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Ccm(ccm, nonce, aad)))
         }
 
         // -- ECDH1 Derive: struct with pointers to shared + public data -----
@@ -840,14 +831,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ecdh as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_ECDH1_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Ecdh1(ecdh, shared, public),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Ecdh1(ecdh, shared, public),
+            ))
         }
 
         // -- AES-CTR: scalar + fixed 16-byte counter block ------------------
@@ -861,14 +850,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ctr as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_AES_CTR_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::AesCtr(ctr),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::AesCtr(ctr)))
         }
 
         // -- Camellia-CTR: scalar + fixed 16-byte counter block -------------
@@ -882,14 +864,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ctr as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_CAMELLIA_CTR_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::CamelliaCtr(ctr),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::CamelliaCtr(ctr)))
         }
 
         // -- RC2-CBC: scalar + fixed 8-byte IV ------------------------------
@@ -903,14 +878,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *rc2 as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_RC2_CBC_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Rc2Cbc(rc2),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Rc2Cbc(rc2)))
         }
 
         // -- RC5-CBC: scalars + pointer to IV -------------------------------
@@ -925,14 +893,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *rc5 as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_RC5_CBC_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Rc5Cbc(rc5, iv_buf),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Rc5Cbc(rc5, iv_buf)))
         }
 
         // -- Trivial scalar-only structs ------------------------------------
@@ -943,14 +904,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *rc5 as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_RC5_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Rc5(rc5),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Rc5(rc5)))
         }
 
         CkMechanismParams::Rc5MacGeneral(p) => {
@@ -961,14 +915,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *rc5mg as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_RC5_MAC_GENERAL_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Rc5MacGeneral(rc5mg),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Rc5MacGeneral(rc5mg)))
         }
 
         CkMechanismParams::Rc2MacGeneral(p) => {
@@ -978,14 +925,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *rc2mg as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_RC2_MAC_GENERAL_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Rc2MacGeneral(rc2mg),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Rc2MacGeneral(rc2mg)))
         }
 
         CkMechanismParams::Xeddsa(p) => {
@@ -994,14 +934,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *xed as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_XEDDSA_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Xeddsa(xed),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Xeddsa(xed)))
         }
 
         CkMechanismParams::TlsMac(p) => {
@@ -1012,14 +945,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *tls as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_TLS_MAC_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::TlsMac(tls),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::TlsMac(tls)))
         }
 
         // -- CBC encrypt data variants (fixed IV + pointer to data) ---------
@@ -1036,14 +962,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *s as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_AES_CBC_ENCRYPT_DATA_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::AesCbcEncryptData(s, data),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::AesCbcEncryptData(s, data),
+            ))
         }
 
         CkMechanismParams::DesCbcEncryptData(p) => {
@@ -1059,14 +983,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *s as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_DES_CBC_ENCRYPT_DATA_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::DesCbcEncryptData(s, data),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::DesCbcEncryptData(s, data),
+            ))
         }
 
         CkMechanismParams::AriaCbcEncryptData(p) => {
@@ -1082,14 +1004,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *s as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_ARIA_CBC_ENCRYPT_DATA_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::AriaCbcEncryptData(s, data),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::AriaCbcEncryptData(s, data),
+            ))
         }
 
         CkMechanismParams::CamelliaCbcEncryptData(p) => {
@@ -1105,14 +1025,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *s as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::CamelliaCbcEncryptData(s, data),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::CamelliaCbcEncryptData(s, data),
+            ))
         }
 
         CkMechanismParams::SeedCbcEncryptData(p) => {
@@ -1128,14 +1046,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *s as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_SEED_CBC_ENCRYPT_DATA_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::SeedCbcEncryptData(s, data),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::SeedCbcEncryptData(s, data),
+            ))
         }
 
         // -- HKDF: struct with pointers to salt and info --------------------
@@ -1157,14 +1073,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *hkdf as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_HKDF_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Hkdf(hkdf, salt, info),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Hkdf(hkdf, salt, info),
+            ))
         }
 
         // -- EdDSA: struct with pointer to context data ---------------------
@@ -1178,14 +1092,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *eddsa as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_EDDSA_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Eddsa(eddsa, ctx),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Eddsa(eddsa, ctx)))
         }
 
         // -- GCM Wrap: struct with pointers to IV and AAD -------------------
@@ -1205,14 +1112,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *gw as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_GCM_WRAP_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::GcmWrap(gw, iv, aad),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::GcmWrap(gw, iv, aad)))
         }
 
         // -- CCM Wrap: struct with pointers to nonce and AAD ----------------
@@ -1234,14 +1134,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *cw as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_CCM_WRAP_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::CcmWrap(cw, nonce, aad),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::CcmWrap(cw, nonce, aad),
+            ))
         }
 
         // -- ChaCha20: struct with pointers to block counter and nonce ------
@@ -1259,14 +1157,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ch as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_CHACHA20_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::ChaCha20(ch, bc, nonce),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::ChaCha20(ch, bc, nonce),
+            ))
         }
 
         // -- Salsa20: struct with pointers to block counter and nonce -------
@@ -1283,14 +1179,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *sa as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_SALSA20_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Salsa20(sa, bc, nonce),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Salsa20(sa, bc, nonce),
+            ))
         }
 
         // -- Salsa20/ChaCha20-Poly1305: struct with pointers to nonce + AAD -
@@ -1308,14 +1202,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *sp as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Salsa20ChaCha20Poly1305(sp, nonce, aad),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Salsa20ChaCha20Poly1305(sp, nonce, aad),
+            ))
         }
 
         // -- MacGeneral: single CK_ULONG -----------------------------------
@@ -1324,14 +1216,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let mut buf = val.to_ne_bytes().to_vec();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Bytes(buf),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Bytes(buf)))
         }
 
         // -- Extract: single CK_ULONG bit position --------------------------
@@ -1340,14 +1225,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let mut buf = val.to_ne_bytes().to_vec();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Bytes(buf),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Bytes(buf)))
         }
 
         // -- KeyDerivationStringData: struct with pointer to data -----------
@@ -1360,14 +1238,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *kds as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::KeyDerivationString(kds, data),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::KeyDerivationString(kds, data),
+            ))
         }
 
         // -- RSA-AES key wrap: nested OAEP params pointer ---------------------
@@ -1394,14 +1270,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *wrap as *mut FfiRsaAesKeyWrapParams as *mut std::ffi::c_void;
             let len = std::mem::size_of::<FfiRsaAesKeyWrapParams>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::RsaAesKeyWrap(wrap, oaep, source_data),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::RsaAesKeyWrap(wrap, oaep, source_data),
+            ))
         }
 
         // -- ObjectHandle: single CK_OBJECT_HANDLE ----------------------------
@@ -1410,14 +1284,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let mut buf = val.to_ne_bytes().to_vec();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Bytes(buf),
-            })
+            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Bytes(buf)))
         }
 
         // -- SignAdditionalContext: CK_SIGN_ADDITIONAL_CONTEXT (ML-DSA hedge) -
@@ -1431,14 +1298,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *sac as *mut FfiSignAdditionalContext as *mut std::ffi::c_void;
             let len = std::mem::size_of::<FfiSignAdditionalContext>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::SignAdditionalContext(sac, ctx),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::SignAdditionalContext(sac, ctx),
+            ))
         }
 
         // -- KMAC: CK_KMAC_PARAMS -----------------------------------------
@@ -1457,14 +1322,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *kmac as *mut FfiKmacParams as *mut std::ffi::c_void;
             let len = std::mem::size_of::<FfiKmacParams>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Kmac(kmac, customization_string),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Kmac(kmac, customization_string),
+            ))
         }
 
         // -- ML-DSA external mu generation: CK_MU_GEN_PARAMS ---------------
@@ -1482,14 +1345,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *mu_gen as *mut FfiMuGenParams as *mut std::ffi::c_void;
             let len = std::mem::size_of::<FfiMuGenParams>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::MuGen(mu_gen, tr, ctx),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::MuGen(mu_gen, tr, ctx),
+            ))
         }
 
         // -- Raw: reject at FFI boundary to prevent SIGSEGV ------------------
@@ -1537,19 +1398,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *tls12 as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Tls12MasterKeyDerive(
-                    tls12,
-                    client_random,
-                    server_random,
-                    version,
-                ),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Tls12MasterKeyDerive(tls12, client_random, server_random, version),
+            ))
         }
 
         // -- PKCS#5 PBKDF2: struct with 3 embedded pointers ----------------
@@ -1579,14 +1433,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *pbkd2 as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Pkcs5Pbkd2(pbkd2, salt, prf_data, password),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Pkcs5Pbkd2(pbkd2, salt, prf_data, password),
+            ))
         }
 
         // -- TLS PRF: struct with 4 pointers (seed, label, output, outputLen) --
@@ -1610,14 +1462,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *tls as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_TLS_PRF_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::TlsPrf(tls, seed, label, output, output_len),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::TlsPrf(tls, seed, label, output, output_len),
+            ))
         }
 
         // -- TLS KDF: PRF mechanism + label + nested SSL3_RANDOM_DATA + context --
@@ -1658,20 +1508,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *tls as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_TLS_KDF_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::TlsKdf(
-                    tls,
-                    label,
-                    client_random,
-                    server_random,
-                    context_data,
-                ),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::TlsKdf(tls, label, client_random, server_random, context_data),
+            ))
         }
 
         // -- SSL3 Master Key Derive: nested SSL3_RANDOM_DATA + pVersion ----------
@@ -1708,19 +1550,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ssl3 as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_SSL3_MASTER_KEY_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Ssl3MasterKeyDerive(
-                    ssl3,
-                    client_random,
-                    server_random,
-                    version,
-                ),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Ssl3MasterKeyDerive(ssl3, client_random, server_random, version),
+            ))
         }
 
         // -- TLS 1.2 Extended Master Key Derive: PRF + session hash + pVersion ----
@@ -1747,14 +1582,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let ptr = &mut *ext as *mut _ as *mut std::ffi::c_void;
             let len =
                 std::mem::size_of::<cryptoki_sys::CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Tls12ExtendedMasterKeyDerive(ext, session_hash, version),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Tls12ExtendedMasterKeyDerive(ext, session_hash, version),
+            ))
         }
 
         // -- SSL3/TLS Key Mat: nested random data + output key material -----------
@@ -1820,13 +1653,11 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 });
                 let ptr = &mut *km as *mut _ as *mut std::ffi::c_void;
                 let len = std::mem::size_of::<cryptoki_sys::CK_SSL3_KEY_MAT_PARAMS>();
-                Ok(FfiMechanism {
-                    ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                        mechanism: mech_type,
-                        pParameter: ptr,
-                        ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                    },
-                    _backing: FfiParamBacking::Ssl3KeyMat(
+                Ok(FfiMechanism::with_param(
+                    mech_type,
+                    ptr,
+                    len,
+                    FfiParamBacking::Ssl3KeyMat(
                         km,
                         client_random,
                         server_random,
@@ -1834,7 +1665,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                         iv_client,
                         iv_server,
                     ),
-                })
+                ))
             } else {
                 // TLS12 variant: uses CK_TLS12_KEY_MAT_PARAMS (superset of SSL3)
                 let mut km = Box::new(cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS {
@@ -1857,13 +1688,11 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 });
                 let ptr = &mut *km as *mut _ as *mut std::ffi::c_void;
                 let len = std::mem::size_of::<cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS>();
-                Ok(FfiMechanism {
-                    ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                        mechanism: mech_type,
-                        pParameter: ptr,
-                        ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                    },
-                    _backing: FfiParamBacking::Tls12KeyMat(
+                Ok(FfiMechanism::with_param(
+                    mech_type,
+                    ptr,
+                    len,
+                    FfiParamBacking::Tls12KeyMat(
                         km,
                         client_random,
                         server_random,
@@ -1871,7 +1700,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                         iv_client,
                         iv_server,
                     ),
-                })
+                ))
             }
         }
 
@@ -1898,14 +1727,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *pbe as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_PBE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Pbe(pbe, init_vector, password, salt),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Pbe(pbe, init_vector, password, salt),
+            ))
         }
 
         // -- ECDH-AES Key Wrap: struct with 1 pointer ---------------------------
@@ -1921,14 +1748,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ew as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_ECDH_AES_KEY_WRAP_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::EcdhAesKeyWrap(ew, shared),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::EcdhAesKeyWrap(ew, shared),
+            ))
         }
 
         // -- ECDH2 Derive: struct with 3 pointers -------------------------------
@@ -1955,14 +1780,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ecdh2 as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_ECDH2_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Ecdh2Derive(ecdh2, shared, public, public2),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Ecdh2Derive(ecdh2, shared, public, public2),
+            ))
         }
 
         // -- ECMQV Derive: struct with 3 pointers + handle ---------------------
@@ -1990,14 +1813,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ecmqv as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_ECMQV_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::EcmqvDerive(ecmqv, shared, public, public2),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::EcmqvDerive(ecmqv, shared, public, public2),
+            ))
         }
 
         // -- X9.42 DH1 Derive: struct with 2 pointers ---------------------------
@@ -2020,14 +1841,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *x942 as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_X9_42_DH1_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::X942Dh1Derive(x942, other_info, public_data),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::X942Dh1Derive(x942, other_info, public_data),
+            ))
         }
 
         // -- X9.42 DH2 Derive: struct with 3 pointers + handle ------------------
@@ -2060,19 +1879,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *x942 as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_X9_42_DH2_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::X942Dh2Derive(
-                    x942,
-                    other_info,
-                    public_data,
-                    public_data2,
-                ),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::X942Dh2Derive(x942, other_info, public_data, public_data2),
+            ))
         }
 
         // -- X9.42 MQV Derive: struct with 3 pointers + 2 handles ---------------
@@ -2106,19 +1918,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *x942 as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_X9_42_MQV_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::X942MqvDerive(
-                    x942,
-                    other_info,
-                    public_data,
-                    public_data2,
-                ),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::X942MqvDerive(x942, other_info, public_data, public_data2),
+            ))
         }
 
         // -- GOSTR3410 Derive: struct with 2 pointers ---------------------------
@@ -2140,14 +1945,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *gost as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_GOSTR3410_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Gostr3410Derive(gost, public_data, ukm),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Gostr3410Derive(gost, public_data, ukm),
+            ))
         }
 
         // -- GOSTR3410 Key Wrap: struct with 2 pointers + handle ----------------
@@ -2166,14 +1969,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *gost as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_GOSTR3410_KEY_WRAP_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Gostr3410KeyWrap(gost, wrap_oid, ukm),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Gostr3410KeyWrap(gost, wrap_oid, ukm),
+            ))
         }
 
         // -- Key Wrap Set OAEP: struct with 1 pointer ---------------------------
@@ -2187,14 +1988,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *kw as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_KEY_WRAP_SET_OAEP_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::KeyWrapSetOaep(kw, x),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::KeyWrapSetOaep(kw, x),
+            ))
         }
 
         // -- KEA Derive: struct with 3 pointers ---------------------------------
@@ -2223,14 +2022,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *kea as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_KEA_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::KeaDerive(kea, random_a, random_b, public_data),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::KeaDerive(kea, random_a, random_b, public_data),
+            ))
         }
 
         // -- IKE PRF Derive: struct with 2 pointers -----------------------------
@@ -2255,14 +2052,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ike as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_IKE_PRF_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::IkePrfDerive(ike, ni, nr),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::IkePrfDerive(ike, ni, nr),
+            ))
         }
 
         // -- IKE1 PRF Derive: struct with 2 pointers + handles ------------------
@@ -2288,14 +2083,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ike as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_IKE1_PRF_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Ike1PrfDerive(ike, ckyi, ckyr),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Ike1PrfDerive(ike, ckyi, ckyr),
+            ))
         }
 
         // -- IKE1 Extended Derive: struct with 1 pointer + handle ---------------
@@ -2316,14 +2109,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ike as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_IKE1_EXTENDED_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Ike1ExtendedDerive(ike, extra),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Ike1ExtendedDerive(ike, extra),
+            ))
         }
 
         // -- IKE2 PRF Plus Derive: struct with 1 pointer + handle ---------------
@@ -2343,14 +2134,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *ike as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_IKE2_PRF_PLUS_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Ike2PrfPlusDerive(ike, seed),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Ike2PrfPlusDerive(ike, seed),
+            ))
         }
 
         // -- WTLS Master Key Derive: digest mechanism + WTLS random data + pVersion --
@@ -2380,19 +2169,17 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *wtls as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::WtlsMasterKeyDerive(
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::WtlsMasterKeyDerive(
                     wtls,
                     client_random,
                     server_random,
                     version_buf,
                 ),
-            })
+            ))
         }
 
         // -- WTLS PRF: digest mechanism + seed + label + output -----------------
@@ -2417,14 +2204,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *wtls as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_WTLS_PRF_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::WtlsPrf(wtls, seed, label, output, output_len),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::WtlsPrf(wtls, seed, label, output, output_len),
+            ))
         }
 
         // -- WTLS Key Mat: digest mechanism + nested random data + output -------
@@ -2472,20 +2257,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *wtls as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::WtlsKeyMat(
-                    wtls,
-                    client_random,
-                    server_random,
-                    kmo,
-                    iv_buf,
-                ),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::WtlsKeyMat(wtls, client_random, server_random, kmo, iv_buf),
+            ))
         }
 
         // -- SP800-108 KDF: PRF type + data params array -------------------------
@@ -2520,14 +2297,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *sp as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_KDF_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Sp800108Kdf(sp, c_params, buffers, derived_keys),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Sp800108Kdf(sp, c_params, buffers, derived_keys),
+            ))
         }
 
         // -- SP800-108 Feedback KDF: same + IV ----------------------------------
@@ -2565,20 +2340,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *sp as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Sp800108FeedbackKdf(
-                    sp,
-                    c_params,
-                    buffers,
-                    iv,
-                    derived_keys,
-                ),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Sp800108FeedbackKdf(sp, c_params, buffers, iv, derived_keys),
+            ))
         }
 
         // -- X3DH Initiate: struct with 2 pointers + 4 handles ------------------
@@ -2603,14 +2370,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *x3dh as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_X3DH_INITIATE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::X3dhInitiate(x3dh, prekey_sig, onetime_buf),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::X3dhInitiate(x3dh, prekey_sig, onetime_buf),
+            ))
         }
 
         // -- X3DH Respond: struct with 3 pointers + 2 handles -------------------
@@ -2639,14 +2404,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             // to match backing variant shape (3 Vecs).
             // Store ephem_buf separately would need 4 vecs. Let's append ephem to onetime.
             onetime_buf.extend_from_slice(&ephem_buf);
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::X3dhRespond(x3dh, identity_buf, prekey_buf, onetime_buf),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::X3dhRespond(x3dh, identity_buf, prekey_buf, onetime_buf),
+            ))
         }
 
         // -- X2Ratchet Initialize: struct with 1 pointer + handles --------------
@@ -2670,14 +2433,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *x2r as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_X2RATCHET_INITIALIZE_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::X2RatchetInitialize(x2r, sk),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::X2RatchetInitialize(x2r, sk),
+            ))
         }
 
         // -- X2Ratchet Respond: struct with 1 pointer + handles -----------------
@@ -2700,14 +2461,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *x2r as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_X2RATCHET_RESPOND_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::X2RatchetRespond(x2r, sk),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::X2RatchetRespond(x2r, sk),
+            ))
         }
 
         // -- OTP: array of CK_OTP_PARAM ----------------------------------------
@@ -2736,14 +2495,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *otp as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_OTP_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Otp(otp, c_params, buffers),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Otp(otp, c_params, buffers),
+            ))
         }
 
         // -- KIP: nested mechanism pointer + seed + handle ----------------------
@@ -2766,14 +2523,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             // this is unsafe. But KIP is extremely rare and its inner mechanism is
             // typically parameterless or scalar-only, so this is acceptable.
             std::mem::forget(inner_ffi._backing);
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::Kip(kip, inner_mech, seed),
-            })
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::Kip(kip, inner_mech, seed),
+            ))
         }
 
         // -- CMS Sig: nested mechanisms + content type + attribute buffers -------
@@ -2806,13 +2561,11 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             std::mem::forget(digest_ffi._backing);
             let ptr = &mut *cms as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_CMS_SIG_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::CmsSig(
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::CmsSig(
                     cms,
                     sign_mech,
                     digest_mech,
@@ -2820,7 +2573,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     req_attrs,
                     reqd_attrs,
                 ),
-            })
+            ))
         }
 
         // -- Skipjack Private Wrap: struct with many pointers -------------------
@@ -2864,13 +2617,11 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *sj as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_SKIPJACK_PRIVATE_WRAP_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::SkipjackPrivateWrap(
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::SkipjackPrivateWrap(
                     sj,
                     password,
                     public_data,
@@ -2879,7 +2630,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     base_g,
                     subprime_q,
                 ),
-            })
+            ))
         }
 
         // -- Skipjack Relayx: struct with 7 pointers ----------------------------
@@ -2944,13 +2695,11 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             });
             let ptr = &mut *sj as *mut _ as *mut std::ffi::c_void;
             let len = std::mem::size_of::<cryptoki_sys::CK_SKIPJACK_RELAYX_PARAMS>();
-            Ok(FfiMechanism {
-                ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                    mechanism: mech_type,
-                    pParameter: ptr,
-                    ulParameterLen: len as cryptoki_sys::CK_ULONG,
-                },
-                _backing: FfiParamBacking::SkipjackRelayx(
+            Ok(FfiMechanism::with_param(
+                mech_type,
+                ptr,
+                len,
+                FfiParamBacking::SkipjackRelayx(
                     sj,
                     old_wrapped_x,
                     old_password,
@@ -2960,7 +2709,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     new_public_data,
                     new_random_a,
                 ),
-            })
+            ))
         }
 
         // -- Vendor-specific: these reference nested CkMechanism or complex -----
