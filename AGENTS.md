@@ -38,7 +38,7 @@ AI agents, automation, and human contributors.
   fail early and conservatively.
 - When adding new mechanism parameter types, ensure BOTH directions work:
   - Proto→Rust (`TryFrom<&proto::Mechanism>`) for server-side deserialization
-  - Rust→C struct (`mechanism_to_ffi()` in `ffi/helpers.rs`) for backend FFI calls
+  - Rust→C struct (`mechanism_to_ffi()` in `ffi/ffi_conversion.rs`) for backend FFI calls
   - Rust→Proto (`From<&CkMechanism>`) for client-side serialization
   Missing any direction causes silent failures at runtime.
 
@@ -134,7 +134,7 @@ When adding a new mechanism parameter shape:
 2. Add it to the `Mechanism.params` oneof in `types.proto`
 3. Add the Rust struct + `CkMechanismParams` variant in `types`
 4. Add bidirectional From/TryFrom in `proto` conversion code
-5. Add the C struct reconstruction in `mechanism_to_ffi()` (`ffi/helpers.rs`)
+5. Add the C struct reconstruction in `mechanism_to_ffi()` (`ffi/ffi_conversion.rs`)
 6. Add to `mechanism_params_default.toml` for spec-defined mechanisms.
    Vendor-defined mechanisms (e.g. CloudHSM, Thales) belong in the
    daemon's runtime registry file

@@ -99,6 +99,45 @@ pub async fn spawn_service(svc: Pkcs11ProxyService) -> (String, tokio::sync::wat
             .await;
     });
 
+    // Give the spawned task one timer-tick to begin polling the
+    // listener; otherwise the first client connect can race the
+    // task's first poll on heavily-loaded CI runners and surface as
+    // a flaky "connection refused".
     tokio::time::sleep(Duration::from_millis(50)).await;
+    (endpoint, shutdown_tx)
+}
+
+/// `spawn_service` + a periodic `evict_expired` loop on the same
+/// `ContextManager`, sharing the same shutdown signal so a single
+/// `shutdown_tx.send(true)` (or drop) stops both.
+///
+/// Used by tests that exercise the eviction path (lease-expiry
+/// regression, leak-detection under sustained load).
+pub async fn mock_daemon_with_lease(
+    backend: Arc<MockBackend>,
+    lease: Duration,
+    eviction_interval: Duration,
+) -> (String, tokio::sync::watch::Sender<bool>) {
+    let backend_trait: Arc<dyn Pkcs11Backend> = backend.clone();
+    let ctx = Arc::new(ContextManager::new(lease, 0));
+    ctx.populate_slots(&backend_trait).await.expect("populate_slots");
+
+    let svc = Pkcs11ProxyService::insecure_for_tests(ctx.clone(), backend_trait);
+    let (endpoint, shutdown_tx) = spawn_service(svc).await;
+
+    let evict_backend: Arc<dyn Pkcs11Backend> = backend;
+    let mut evict_shutdown = shutdown_tx.subscribe();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(eviction_interval);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    ctx.evict_expired(&evict_backend).await;
+                }
+                _ = evict_shutdown.changed() => break,
+            }
+        }
+    });
+
     (endpoint, shutdown_tx)
 }

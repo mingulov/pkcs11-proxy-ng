@@ -7,9 +7,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use pkcs11_proxy_ng::server::context_manager::ContextManager;
-use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::MockBackend;
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
@@ -17,14 +14,12 @@ use pkcs11_proxy_ng_types::*;
 mod common_3x;
 
 fn mock_backend(slots: &[u64], mechs: &[u64]) -> MockBackend {
-    MockBackend::new(
-        slots.iter().copied().map(CkSlotId).collect(),
-        mechs.iter().copied().map(CkMechanismType).collect(),
-    )
+    common_3x::mock(slots, mechs)
 }
 
 async fn mock_daemon(backend: Arc<MockBackend>) -> (String, tokio::sync::watch::Sender<bool>) {
-    mock_daemon_with_lease(backend, Duration::from_secs(300), Duration::from_millis(100)).await
+    common_3x::mock_daemon_with_lease(backend, Duration::from_secs(300), Duration::from_millis(100))
+        .await
 }
 
 async fn mock_daemon_with_lease(
@@ -32,29 +27,7 @@ async fn mock_daemon_with_lease(
     lease: Duration,
     eviction_interval: Duration,
 ) -> (String, tokio::sync::watch::Sender<bool>) {
-    let backend_trait: Arc<dyn Pkcs11Backend> = backend.clone();
-    let ctx = Arc::new(ContextManager::new(lease, 0));
-    ctx.populate_slots(&backend_trait).await.expect("populate_slots");
-
-    let svc = Pkcs11ProxyService::insecure_for_tests(ctx.clone(), backend_trait);
-    let (endpoint, shutdown_tx) = common_3x::spawn_service(svc).await;
-
-    let evict_ctx = ctx;
-    let evict_backend: Arc<dyn Pkcs11Backend> = backend;
-    let mut evict_shutdown = shutdown_tx.subscribe();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(eviction_interval);
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    evict_ctx.evict_expired(&evict_backend).await;
-                }
-                _ = evict_shutdown.changed() => break,
-            }
-        }
-    });
-
-    (endpoint, shutdown_tx)
+    common_3x::mock_daemon_with_lease(backend, lease, eviction_interval).await
 }
 
 async fn init_client(endpoint: &str) -> Pkcs11Client {
