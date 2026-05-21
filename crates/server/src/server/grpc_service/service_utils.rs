@@ -186,17 +186,13 @@ fn classify_backend_outcome<T>(result: &Result<CkResult<T>, Status>) -> bool {
                 || *rv == CkRv::DEVICE_REMOVED  // HSM disconnected
                 || *rv == CkRv::TOKEN_NOT_PRESENT =>
         {
-            tracing::debug!(rv = %format!("{:?}", rv), "backend outcome: unhealthy");
+            tracing::debug!(?rv, "backend outcome: unhealthy");
             false
         }
         Ok(Err(_)) => true, // normal application-level PKCS#11 error
         Err(_) => false,    // blocking-pool panic / transport break
     }
 }
-
-/// Trace which RPC produced a backend Success. Helps diagnose
-/// why the gate counter resets unexpectedly during chaos scenario 2.
-fn _trace_classify_method() {}
 
 pub(super) fn ck_rv_only(result: CkResult<()>) -> u64 {
     match result {
@@ -211,15 +207,97 @@ pub(super) fn ck_rv_only(result: CkResult<()>) -> u64 {
 /// Used by all RPCs whose response carries a `mechanism_out` field
 /// (Encrypt/Decrypt simple paths + ByteOutputExact + WrapKey). New
 /// mechanism variants that surface output parameters must extend the
-/// match below, otherwise `mechanism_out` will silently be `None` for
-/// that mechanism even when the backend mutated it.
+/// match below; the catch-all is enumerated exhaustively (no bare `_`)
+/// so adding a new `CkMechanismParams` variant fails to compile here,
+/// forcing the maintainer to triage whether the new variant surfaces
+/// `mechanism_out` and add the appropriate arm.
 pub(super) fn mechanism_output_to_proto(
     params: CkMechanismParams,
 ) -> Option<pkcs11_proxy_ng_proto::Mechanism> {
-    let mechanism_type = match params {
+    let mechanism_type = match &params {
+        // Variants that surface mechanism output to the caller.
         CkMechanismParams::Gcm(_) => CkMechanismType::AES_GCM,
         CkMechanismParams::Tls12MasterKeyDerive(_) => CkMechanismType::TLS12_MASTER_KEY_DERIVE,
-        _ => return None,
+        // Variants that do NOT surface mechanism output (today). The
+        // exhaustive enumeration forces a compile error when a new
+        // variant is added.
+        CkMechanismParams::RsaPkcsPss(_)
+        | CkMechanismParams::RsaPkcsOaep(_)
+        | CkMechanismParams::Ecdh1Derive(_)
+        | CkMechanismParams::Iv(_)
+        | CkMechanismParams::Rc5(_)
+        | CkMechanismParams::Rc5MacGeneral(_)
+        | CkMechanismParams::Rc2MacGeneral(_)
+        | CkMechanismParams::Xeddsa(_)
+        | CkMechanismParams::TlsMac(_)
+        | CkMechanismParams::AesCtr(_)
+        | CkMechanismParams::CamelliaCtr(_)
+        | CkMechanismParams::Rc2Cbc(_)
+        | CkMechanismParams::Rc5Cbc(_)
+        | CkMechanismParams::AesCbcEncryptData(_)
+        | CkMechanismParams::DesCbcEncryptData(_)
+        | CkMechanismParams::AriaCbcEncryptData(_)
+        | CkMechanismParams::CamelliaCbcEncryptData(_)
+        | CkMechanismParams::SeedCbcEncryptData(_)
+        | CkMechanismParams::Ccm(_)
+        | CkMechanismParams::ChaCha20(_)
+        | CkMechanismParams::Salsa20(_)
+        | CkMechanismParams::Salsa20ChaCha20Poly1305(_)
+        | CkMechanismParams::GcmWrap(_)
+        | CkMechanismParams::CcmWrap(_)
+        | CkMechanismParams::Ecdh2Derive(_)
+        | CkMechanismParams::EcmqvDerive(_)
+        | CkMechanismParams::X942Dh1Derive(_)
+        | CkMechanismParams::X942Dh2Derive(_)
+        | CkMechanismParams::X942MqvDerive(_)
+        | CkMechanismParams::Hkdf(_)
+        | CkMechanismParams::Eddsa(_)
+        | CkMechanismParams::Gostr3410Derive(_)
+        | CkMechanismParams::KeaDerive(_)
+        | CkMechanismParams::EcdhAesKeyWrap(_)
+        | CkMechanismParams::RsaAesKeyWrap(_)
+        | CkMechanismParams::Gostr3410KeyWrap(_)
+        | CkMechanismParams::KeyWrapSetOaep(_)
+        | CkMechanismParams::Pbe(_)
+        | CkMechanismParams::Pkcs5Pbkd2(_)
+        | CkMechanismParams::TlsPrf(_)
+        | CkMechanismParams::TlsKdf(_)
+        | CkMechanismParams::Ssl3MasterKeyDerive(_)
+        | CkMechanismParams::Tls12ExtendedMasterKeyDerive(_)
+        | CkMechanismParams::Ssl3KeyMat(_)
+        | CkMechanismParams::WtlsMasterKeyDerive(_)
+        | CkMechanismParams::WtlsPrf(_)
+        | CkMechanismParams::WtlsKeyMat(_)
+        | CkMechanismParams::IkePrfDerive(_)
+        | CkMechanismParams::Ike1PrfDerive(_)
+        | CkMechanismParams::Ike1ExtendedDerive(_)
+        | CkMechanismParams::Ike2PrfPlusDerive(_)
+        | CkMechanismParams::Sp800108Kdf(_)
+        | CkMechanismParams::Sp800108FeedbackKdf(_)
+        | CkMechanismParams::X3dhInitiate(_)
+        | CkMechanismParams::X3dhRespond(_)
+        | CkMechanismParams::X2RatchetInitialize(_)
+        | CkMechanismParams::X2RatchetRespond(_)
+        | CkMechanismParams::Otp(_)
+        | CkMechanismParams::Kip(_)
+        | CkMechanismParams::CmsSig(_)
+        | CkMechanismParams::SkipjackPrivateWrap(_)
+        | CkMechanismParams::SkipjackRelayx(_)
+        | CkMechanismParams::MacGeneral(_)
+        | CkMechanismParams::ObjectHandle(_)
+        | CkMechanismParams::Extract(_)
+        | CkMechanismParams::SignAdditionalContext(_)
+        | CkMechanismParams::Kmac(_)
+        | CkMechanismParams::MuGen(_)
+        | CkMechanismParams::KeyDerivationString(_)
+        | CkMechanismParams::Raw(_)
+        | CkMechanismParams::Ecies(_)
+        | CkMechanismParams::AesCmacKeyDerivation(_)
+        | CkMechanismParams::Dilithium(_)
+        | CkMechanismParams::Kyber(_)
+        | CkMechanismParams::HdKeyDerive(_)
+        | CkMechanismParams::VendorObjectExtract(_)
+        | CkMechanismParams::VendorObjectInsert(_) => return None,
     };
     Some(pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
         mechanism_type,

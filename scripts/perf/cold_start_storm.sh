@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# R6 — cold-start storm.
+# Cold-start storm.
 #
 # Spawn N fresh shim processes simultaneously, all of which call
 # C_Initialize against the same daemon over loopback. Captures:
@@ -7,7 +7,7 @@
 #   - per-process exit status
 #   - daemon CPU + RSS peak during the storm (sampled at 100 ms)
 #
-# Exit criterion (R6): every process completes within
+# Exit criterion: every process completes within
 # `proxy.request_timeout_secs` (default 60), reporting CKR_OK.
 #
 # Usage:
@@ -29,12 +29,12 @@ mkdir -p "$OUT_DIR"
 # Use the consumers fixture daemon (Alpine, softhsm2 backend).
 COMPOSE="docker compose -f $(cd "$(dirname "$0")/../.." && pwd)/tests/consumers/docker-compose.yml"
 
-echo "=== R6 cold-start storm: $N shims ==="
+echo "=== Cold-start storm: $N shims ==="
 
 # 1. Bring up daemon-softhsm2 + a single consumer-shell container we
 #    can exec into to spawn shim processes.
 $COMPOSE --profile softhsm2 up -d daemon-softhsm2 consumer-shell >/dev/null
-sleep 5  # workaround for R5-FOLLOWUP-shim-startup-race; remove when fixed.
+sleep 5  # workaround for FOLLOWUP-shim-startup-race; remove when fixed.
 
 # 2. Find the daemon's PID (inside the container) for CPU+RSS sampling.
 daemon_pid=$(docker inspect --format '{{.State.Pid}}' r5-daemon)

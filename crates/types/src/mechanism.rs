@@ -648,11 +648,15 @@ pub struct PbeParams {
 
 impl std::fmt::Debug for PbeParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure so the compiler errors here when a field is
+        // added — preventing a future contributor from adding a
+        // secret-bearing field that is silently omitted from Debug.
+        let Self { init_vector, password, salt, iteration } = self;
         f.debug_struct("PbeParams")
-            .field("init_vector", &format_args!("[{} bytes]", self.init_vector.len()))
-            .field("password", &format_args!("[REDACTED; {} bytes]", self.password.len()))
-            .field("salt", &format_args!("[{} bytes]", self.salt.len()))
-            .field("iteration", &self.iteration)
+            .field("init_vector", &format_args!("[{} bytes]", init_vector.len()))
+            .field("password", &format_args!("[REDACTED; {} bytes]", password.len()))
+            .field("salt", &format_args!("[{} bytes]", salt.len()))
+            .field("iteration", iteration)
             .finish()
     }
 }
@@ -673,13 +677,15 @@ pub struct Pkcs5Pbkd2Params {
 
 impl std::fmt::Debug for Pkcs5Pbkd2Params {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to gate against silently-omitted future fields.
+        let Self { salt_source, salt_source_data, iterations, prf, prf_data, password } = self;
         f.debug_struct("Pkcs5Pbkd2Params")
-            .field("salt_source", &self.salt_source)
-            .field("salt_source_data", &format_args!("[{} bytes]", self.salt_source_data.len()))
-            .field("iterations", &self.iterations)
-            .field("prf", &self.prf)
-            .field("prf_data", &format_args!("[{} bytes]", self.prf_data.len()))
-            .field("password", &format_args!("[REDACTED; {} bytes]", self.password.len()))
+            .field("salt_source", salt_source)
+            .field("salt_source_data", &format_args!("[{} bytes]", salt_source_data.len()))
+            .field("iterations", iterations)
+            .field("prf", prf)
+            .field("prf_data", &format_args!("[{} bytes]", prf_data.len()))
+            .field("password", &format_args!("[REDACTED; {} bytes]", password.len()))
             .finish()
     }
 }
@@ -993,14 +999,17 @@ pub struct SkipjackPrivateWrapParams {
 
 impl std::fmt::Debug for SkipjackPrivateWrapParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to gate against silently-omitted future fields.
+        let Self { password, public_data, password_length, random_a, prime_p, base_g, subprime_q } =
+            self;
         f.debug_struct("SkipjackPrivateWrapParams")
-            .field("password", &format_args!("[REDACTED; {} bytes]", self.password.len()))
-            .field("public_data", &format_args!("[{} bytes]", self.public_data.len()))
-            .field("password_length", &self.password_length)
-            .field("random_a", &format_args!("[{} bytes]", self.random_a.len()))
-            .field("prime_p", &format_args!("[{} bytes]", self.prime_p.len()))
-            .field("base_g", &format_args!("[{} bytes]", self.base_g.len()))
-            .field("subprime_q", &format_args!("[{} bytes]", self.subprime_q.len()))
+            .field("password", &format_args!("[REDACTED; {} bytes]", password.len()))
+            .field("public_data", &format_args!("[{} bytes]", public_data.len()))
+            .field("password_length", password_length)
+            .field("random_a", &format_args!("[{} bytes]", random_a.len()))
+            .field("prime_p", &format_args!("[{} bytes]", prime_p.len()))
+            .field("base_g", &format_args!("[{} bytes]", base_g.len()))
+            .field("subprime_q", &format_args!("[{} bytes]", subprime_q.len()))
             .finish()
     }
 }
@@ -1022,14 +1031,24 @@ pub struct SkipjackRelayxParams {
 
 impl std::fmt::Debug for SkipjackRelayxParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructure to gate against silently-omitted future fields.
+        let Self {
+            old_wrapped_x,
+            old_password,
+            old_public_data,
+            old_random_a,
+            new_password,
+            new_public_data,
+            new_random_a,
+        } = self;
         f.debug_struct("SkipjackRelayxParams")
-            .field("old_wrapped_x", &format_args!("[{} bytes]", self.old_wrapped_x.len()))
-            .field("old_password", &format_args!("[REDACTED; {} bytes]", self.old_password.len()))
-            .field("old_public_data", &format_args!("[{} bytes]", self.old_public_data.len()))
-            .field("old_random_a", &format_args!("[{} bytes]", self.old_random_a.len()))
-            .field("new_password", &format_args!("[REDACTED; {} bytes]", self.new_password.len()))
-            .field("new_public_data", &format_args!("[{} bytes]", self.new_public_data.len()))
-            .field("new_random_a", &format_args!("[{} bytes]", self.new_random_a.len()))
+            .field("old_wrapped_x", &format_args!("[{} bytes]", old_wrapped_x.len()))
+            .field("old_password", &format_args!("[REDACTED; {} bytes]", old_password.len()))
+            .field("old_public_data", &format_args!("[{} bytes]", old_public_data.len()))
+            .field("old_random_a", &format_args!("[{} bytes]", old_random_a.len()))
+            .field("new_password", &format_args!("[REDACTED; {} bytes]", new_password.len()))
+            .field("new_public_data", &format_args!("[{} bytes]", new_public_data.len()))
+            .field("new_random_a", &format_args!("[{} bytes]", new_random_a.len()))
             .finish()
     }
 }

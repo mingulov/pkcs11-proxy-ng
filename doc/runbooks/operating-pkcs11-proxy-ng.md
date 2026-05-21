@@ -40,8 +40,8 @@ kubectl -n r4-sre rollout status deploy/r4-daemon
 ```
 
 **Smoke test.** Run a single sign through the shim from a consumer
-pod (the R4 reference manifests include a `r4-consumer` `StatefulSet`
-that drives 10-rps signing).
+pod (the reference manifests in `examples/k8s/` include a consumer
+`StatefulSet` that drives 10-rps signing).
 
 ## 2. Upgrade (rolling, zero downtime)
 
@@ -59,9 +59,8 @@ kubectl -n <ns> rollout status deploy/<daemon-deploy>
 
 **SLO.** Under the reference manifests' `sessionAffinity: ClientIP`
 Service + `maxSurge: 1, maxUnavailable: 0` rollout strategy, the
-R4 audit observed **zero application-visible failures** through a
-~22-second rolling restart at 10 rps. See `doc/audit/r4-sre-ops.md`
-for the measurement.
+SRE/ops audit observed **zero application-visible failures** through
+a ~22-second rolling restart at 10 rps.
 
 **If consumer reports unrecoverable errors during the rollout:**
 
@@ -88,9 +87,9 @@ kubectl -n <ns> rollout undo deploy/<daemon-deploy> --to-revision=<N>
 ```
 
 **Recovery timing.** Same as upgrade — rolling-restart safe under the
-reference manifests' settings. The R2 resilience audit confirmed
-shim consumers tolerate daemon restarts within `lease_seconds`
-(default 30) without re-init.
+reference manifests' settings. The resilience audit confirmed shim
+consumers tolerate daemon restarts within `lease_seconds` (default 30)
+without re-init.
 
 ## 4. Scaling daemon replicas
 
@@ -128,7 +127,7 @@ kubectl -n <ns> rollout restart deploy/<daemon-deploy>
 # 3) Restart consumer services so their next C_Initialize fetches
 #    the new registry. The shim doesn't background-poll the
 #    registry — it picks up changes only via reprobe (which runs at
-#    every C_Initialize) or full process restart. See the R2 audit.
+#    every C_Initialize) or full process restart.
 kubectl -n <consumer-ns> rollout restart deploy/<consumer-deploy>
 ```
 
@@ -188,9 +187,10 @@ restart, network partition, daemon overload (circuit-breaker trip).
 4. If breakers are tripping, check backend (HSM) capacity vs.
    `proxy.max_concurrent_backend_calls`.
 
-**Recovery.** Usually transient — the shim's reconnect path (R2)
-restores the channel without app intervention. If errors persist,
-roll back the daemon to a known-good image or scale it up.
+**Recovery.** Usually transient — the shim's bounded-backoff
+reconnect path restores the channel without app intervention. If
+errors persist, roll back the daemon to a known-good image or scale
+it up.
 
 ### CKR_CRYPTOKI_NOT_INITIALIZED (0x190)
 
@@ -237,7 +237,7 @@ the pod out of the Service endpoint pool.
 
 **Most likely cause.** New daemon replica doesn't have the key in
 its backend store. This is the *shared-backend* assumption breaking
-down — see the R4 audit's "shared backend storage" finding.
+down — see the SRE/ops audit's "shared backend storage" finding.
 
 **Triage / recovery.** Verify the `tokens` (or HSM-specific) volume
 in the daemon deployment is mounted from a shared backend (PVC,
@@ -361,12 +361,11 @@ encounter; they are scope of follow-up rounds:
 
 | Limitation | Workaround | Owner |
 | --- | --- | --- |
-| R7-FOLLOWUP-fork-safety: forked children of a `C_Initialize`d shim must `C_Finalize`+`C_Initialize` to recover | Use fork-then-exec in consumer apps | Application code (not daemon-side) |
+| FOLLOWUP-fork-safety: forked children of a `C_Initialize`d shim must `C_Finalize`+`C_Initialize` to recover | Use fork-then-exec in consumer apps | Application code (not daemon-side) |
 
-The R2/R3/R4 follow-ups (DNS re-resolve, slow-backend test, per-RPC
-trace ID, gRPC health probe, rate-limiter) listed in earlier
-revisions of this runbook were all closed in R6; see
-`doc/audit/r6-performance.md`.
+Earlier follow-ups (DNS re-resolve, slow-backend test, per-RPC
+trace ID, gRPC health probe, rate-limiter) are closed; the
+umbrella audit history lives in the parent repo.
 
 ## 10. Escalation
 

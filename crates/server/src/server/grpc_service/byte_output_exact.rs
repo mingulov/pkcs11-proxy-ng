@@ -5,7 +5,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::output::byte_output_function_from_i32;
 use pkcs11_proxy_ng_types::{
-    ByteOutputFunction, CkOutputBufferResult, CkOutputBufferSpec, CkResult,
+    ByteOutputFunction, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
 };
 
 use super::super::context_manager::{ClientContextId, ContextManager};
@@ -33,6 +33,17 @@ pub(super) async fn byte_output_exact(
         }
     };
 
+    fn error_response(error: CkRv) -> pkcs11_proxy_ng_proto::ByteOutputExactResponse {
+        pkcs11_proxy_ng_proto::ByteOutputExactResponse {
+            result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                ck_rv: error.0,
+                returned_len: 0,
+                value: None,
+            }),
+            mechanism_out: None,
+        }
+    }
+
     // Build the output buffer spec
     let spec = req
         .output_spec
@@ -47,16 +58,7 @@ pub(super) async fn byte_output_exact(
         ByteOutputFunction::WrapKey => {
             let mechanism = match parse_mechanism(req.mechanism) {
                 Ok(m) => m,
-                Err(error) => {
-                    return Ok(Response::new(pkcs11_proxy_ng_proto::ByteOutputExactResponse {
-                        result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
-                            ck_rv: error.0,
-                            returned_len: 0,
-                            value: None,
-                        }),
-                        mechanism_out: None,
-                    }));
-                }
+                Err(error) => return Ok(Response::new(error_response(error))),
             };
 
             let (session, wrapping_key, key) = match resolve_session_and_two_objects(
@@ -69,16 +71,7 @@ pub(super) async fn byte_output_exact(
             .await
             {
                 Ok(handles) => handles,
-                Err(error) => {
-                    return Ok(Response::new(pkcs11_proxy_ng_proto::ByteOutputExactResponse {
-                        result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
-                            ck_rv: error.0,
-                            returned_len: 0,
-                            value: None,
-                        }),
-                        mechanism_out: None,
-                    }));
-                }
+                Err(error) => return Ok(Response::new(error_response(error))),
             };
 
             let backend = backend_ref.clone();
@@ -105,16 +98,7 @@ pub(super) async fn byte_output_exact(
         | ByteOutputFunction::GetOperationState => {
             let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
                 Ok(s) => s,
-                Err(error) => {
-                    return Ok(Response::new(pkcs11_proxy_ng_proto::ByteOutputExactResponse {
-                        result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
-                            ck_rv: error.0,
-                            returned_len: 0,
-                            value: None,
-                        }),
-                        mechanism_out: None,
-                    }));
-                }
+                Err(error) => return Ok(Response::new(error_response(error))),
             };
 
             let backend = backend_ref.clone();
@@ -132,16 +116,7 @@ pub(super) async fn byte_output_exact(
         _ => {
             let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
                 Ok(s) => s,
-                Err(error) => {
-                    return Ok(Response::new(pkcs11_proxy_ng_proto::ByteOutputExactResponse {
-                        result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
-                            ck_rv: error.0,
-                            returned_len: 0,
-                            value: None,
-                        }),
-                        mechanism_out: None,
-                    }));
-                }
+                Err(error) => return Ok(Response::new(error_response(error))),
             };
 
             let backend = backend_ref.clone();

@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# R6 — soak test.
+# Soak test.
 #
 # Drives sustained N rps of C_Sign load through the shim against a
 # daemon backed by SoftHSM2 for DURATION seconds, sampling daemon
 # RSS + open FD count every 60 seconds.
 #
-# Exit criteria (R6):
+# Exit criteria:
 #   - No monotonic RSS growth > 50 MB over the run.
 #   - Open FD count bounded.
 #
-# R6 production prompt asks for 24 h; this audit runs 1 h by default
-# (configurable via DURATION env var). R12 canary will run the full
-# 24 h cycle.
+# Default duration is 1 h (configurable via DURATION env var); 24 h
+# runs are exercised separately in production canary windows.
 #
 # Usage:
 #   DURATION=3600 RPS=50 scripts/perf/soak.sh
@@ -30,11 +29,11 @@ mkdir -p "$OUT_DIR"
 
 COMPOSE="docker compose -f $(cd "$(dirname "$0")/../.." && pwd)/tests/consumers/docker-compose.yml"
 
-echo "=== R6 soak: ${DURATION}s @ ${RPS}rps ==="
+echo "=== Soak: ${DURATION}s @ ${RPS}rps ==="
 
 # 1. Bring up daemon + consumer.
 $COMPOSE --profile softhsm2 up -d daemon-softhsm2 consumer-shell >/dev/null
-sleep 5  # R5-FOLLOWUP-shim-startup-race workaround
+sleep 5  # FOLLOWUP-shim-startup-race workaround
 
 daemon_pid=$(docker inspect --format '{{.State.Pid}}' r5-daemon)
 echo "daemon PID (host): $daemon_pid"

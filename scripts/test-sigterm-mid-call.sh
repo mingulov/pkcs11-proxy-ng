@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# R7 concurrency-audit scenario 5: SIGTERM to the daemon mid-call.
+# Concurrency scenario: SIGTERM to the daemon mid-call.
 #
 # Setup:
 #   1. Initialise a fresh SoftHSM2 token in a tempdir.

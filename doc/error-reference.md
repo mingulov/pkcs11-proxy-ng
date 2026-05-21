@@ -232,8 +232,8 @@ or the application.
 ## Quick triage flow
 
 1. **Application reports any CK_RV** → check the daemon's structured
-   log at the matching request_id (R6 trace-id middleware emits
-   `request_id` in every span).
+   log at the matching request_id (the request-scoped trace-id
+   middleware emits `request_id` in every span).
 2. The log line `backend call returned RV=0x<hex>` proves the RV
    came from the backend, not from transport. If absent, the
    proxy's transport/timeout layer originated it (see proxy-

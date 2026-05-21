@@ -22,19 +22,14 @@
 
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 
-use pkcs11_proxy_ng::server::context_manager::ContextManager;
-use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_backend::mock::MockBackend;
-use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
 
-use tokio::net::TcpListener;
-use tonic::transport::Server;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
+
+mod common_3x;
 
 // ---- canaries --------------------------------------------------------------
 // Each PIN canary is a high-entropy unique string. Substring matching is
@@ -104,42 +99,6 @@ fn install_global_capture() -> CaptureBuf {
         .clone()
 }
 
-// ---- daemon harness (mock backend) ----------------------------------------
-
-async fn mock_daemon() -> (String, Arc<MockBackend>, tokio::sync::watch::Sender<bool>) {
-    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
-    let backend_trait: Arc<dyn Pkcs11Backend> = backend.clone();
-
-    let ctx = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-    ctx.populate_slots(&backend_trait).await.expect("populate_slots");
-
-    let svc = Pkcs11ProxyService::insecure_for_tests(ctx.clone(), backend_trait);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
-    let endpoint = format!("http://127.0.0.1:{}", addr.port());
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let server_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-        let _ = Server::builder()
-            .add_service(pkcs11_proxy_ng_proto::Pkcs11ProxyServer::new(svc))
-            .serve_with_incoming_shutdown(incoming, async move {
-                let mut rx = server_shutdown;
-                let _ = rx.changed().await;
-            })
-            .await;
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    (endpoint, backend, shutdown_tx)
-}
-
-async fn init_client(endpoint: &str) -> Pkcs11Client {
-    let mut client = Pkcs11Client::connect(endpoint).await.expect("connect");
-    client.initialize().await.expect("C_Initialize");
-    client
-}
-
 // ---- canary scanning ------------------------------------------------------
 
 fn assert_no_canary_in_logs(label: &str, captured: &[u8]) {
@@ -207,8 +166,9 @@ async fn pins_never_appear_in_trace_logs() {
         );
     }
 
-    let (endpoint, _backend, _shutdown) = mock_daemon().await;
-    let mut client = init_client(&endpoint).await;
+    let backend = Arc::new(common_3x::mock(&[0], &[CkMechanismType::RSA_PKCS.0]));
+    let (endpoint, _shutdown) = common_3x::mock_daemon(backend as Arc<dyn Pkcs11Backend>).await;
+    let mut client = common_3x::init_client(&endpoint).await;
 
     // Use the virtual slot ID published by the daemon, not the raw
     // backend slot ID. ContextManager maps the two.

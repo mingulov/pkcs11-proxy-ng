@@ -75,40 +75,33 @@ fn write_temp(toml: &str) -> tempfile::NamedTempFile {
     f
 }
 
-#[test]
-fn example_dev_parses() {
-    let p = submodule_root().join("examples/configs/dev/proxy.toml");
-    let raw = std::fs::read_to_string(&p).expect("dev/proxy.toml");
+fn assert_example_parses(tier: &str) {
+    let p = submodule_root().join(format!("examples/configs/{tier}/proxy.toml"));
+    let raw = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{tier}/proxy.toml: {e}"));
     let patched = rewrite_for_test(&raw);
     let tmp = write_temp(&patched);
-    pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path()).expect("dev parses");
+    pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path())
+        .unwrap_or_else(|e| panic!("{tier} parses: {e:?}"));
+}
+
+#[test]
+fn example_dev_parses() {
+    assert_example_parses("dev");
 }
 
 #[test]
 fn example_staging_parses() {
-    let p = submodule_root().join("examples/configs/staging/proxy.toml");
-    let raw = std::fs::read_to_string(&p).expect("staging/proxy.toml");
-    let patched = rewrite_for_test(&raw);
-    let tmp = write_temp(&patched);
-    pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path()).expect("staging parses");
+    assert_example_parses("staging");
 }
 
 #[test]
 fn example_prod_parses() {
-    let p = submodule_root().join("examples/configs/prod/proxy.toml");
-    let raw = std::fs::read_to_string(&p).expect("prod/proxy.toml");
-    let patched = rewrite_for_test(&raw);
-    let tmp = write_temp(&patched);
-    pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path()).expect("prod parses");
+    assert_example_parses("prod");
 }
 
 #[test]
 fn example_fips_parses() {
-    let p = submodule_root().join("examples/configs/fips/proxy.toml");
-    let raw = std::fs::read_to_string(&p).expect("fips/proxy.toml");
-    let patched = rewrite_for_test(&raw);
-    let tmp = write_temp(&patched);
-    pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path()).expect("fips parses");
+    assert_example_parses("fips");
 }
 
 #[test]
@@ -125,6 +118,25 @@ fn example_fips_mechanism_params_parses() {
         pkcs11_proxy_ng_types::DiscoveryMode::Filtered,
         "fips registry must enable filtered discovery"
     );
+
+    // Positive membership: representative FIPS-approved mechanisms
+    // explicitly named in the FIPS toml MUST be present (silently
+    // dropping AES_GCM or ECDSA would defeat the FIPS interlock).
+    // CKM_AES_GCM = 0x00001087, CKM_ECDSA_SHA256 = 0x00001044.
+    for (mech, name) in
+        &[(0x0000_1087u64, "CKM_AES_GCM"), (0x0000_1044, "CKM_ECDSA_SHA256")]
+    {
+        assert!(
+            registry.is_parameterless(*mech) || registry.param_shape(*mech).is_some(),
+            "{name} ({mech:#010x}) must be in the FIPS registry"
+        );
+    }
+    // Note: the registry is additive (FIPS override appends to the
+    // embedded default). Disallowed mechanisms like CKM_MD5 / CKM_RC4
+    // are still in the union — the FIPS interlock relies on the
+    // backend (e.g., NSS softokn in FIPS mode) not advertising them
+    // plus the operator's policy layer, not on the registry
+    // filtering them out.
 }
 
 /// Forward-compat: an older shipped proxy.toml (the one used by the
