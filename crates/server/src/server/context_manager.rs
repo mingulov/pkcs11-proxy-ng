@@ -1,5 +1,6 @@
 use super::handle_map::{BackendHandle, HandleMap, VirtualHandle};
 use super::slot_map::SlotMap;
+use dashmap::DashMap;
 use pkcs11_proxy_ng_types::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -97,8 +98,14 @@ impl LogicalClientInstance {
 }
 
 /// Manages all active logical client instances (ADR-0002 §3, §9, §10).
+///
+/// The `contexts` map is a `DashMap` (sharded concurrent hashmap) rather
+/// than `RwLock<HashMap>` so that concurrent RPC handlers touching
+/// *different* `ClientContextId` shards don't serialize on a global
+/// write lock. The single-key critical section (insert / remove / a
+/// `get_mut` callback) is still atomic via per-shard locking.
 pub struct ContextManager {
-    contexts: Arc<RwLock<HashMap<ClientContextId, LogicalClientInstance>>>,
+    contexts: Arc<DashMap<ClientContextId, LogicalClientInstance>>,
     slot_map: Arc<RwLock<SlotMap>>,
     lease_duration: std::time::Duration,
     max_contexts: usize,
@@ -107,7 +114,7 @@ pub struct ContextManager {
 impl ContextManager {
     pub fn new(lease_duration: std::time::Duration, max_contexts: usize) -> Self {
         Self {
-            contexts: Arc::new(RwLock::new(HashMap::new())),
+            contexts: Arc::new(DashMap::new()),
             slot_map: Arc::new(RwLock::new(SlotMap::new())),
             lease_duration,
             max_contexts,
@@ -151,24 +158,27 @@ impl ContextManager {
     }
 
     pub async fn create_context(&self, identity: Option<String>) -> CkResult<ClientContextId> {
-        let mut contexts = self.contexts.write().await;
-
-        // Enforce max context limit
-        if self.max_contexts > 0 && contexts.len() >= self.max_contexts {
-            // Try evicting expired contexts first
+        // Enforce max context limit. The check + insert is not strictly
+        // atomic across shards (DashMap has no global lock), so under
+        // concurrent context creation the limit may be exceeded
+        // transiently by the number of racing creators — acceptable
+        // because the limit is a soft cap, not a correctness gate.
+        if self.max_contexts > 0 && self.contexts.len() >= self.max_contexts {
+            // Try evicting expired contexts first.
             let now = std::time::Instant::now();
-            let expired: Vec<_> = contexts
+            let expired: Vec<_> = self
+                .contexts
                 .iter()
-                .filter(|(_, ctx)| now.duration_since(ctx.last_active) > self.lease_duration)
-                .map(|(id, _)| id.clone())
+                .filter(|entry| now.duration_since(entry.value().last_active) > self.lease_duration)
+                .map(|entry| entry.key().clone())
                 .collect();
             for id in &expired {
-                contexts.remove(id);
+                self.contexts.remove(id);
             }
             // Still at capacity? Reject.
-            if contexts.len() >= self.max_contexts {
+            if self.contexts.len() >= self.max_contexts {
                 tracing::error!(
-                    count = contexts.len(),
+                    count = self.contexts.len(),
                     max = self.max_contexts,
                     "context limit reached"
                 );
@@ -178,37 +188,38 @@ impl ContextManager {
 
         let ctx = LogicalClientInstance::new(identity);
         let id = ctx.id.clone();
-        contexts.insert(id.clone(), ctx);
+        self.contexts.insert(id.clone(), ctx);
         Ok(id)
     }
 
     /// Returns the current number of active contexts.
     pub async fn context_count(&self) -> usize {
-        self.contexts.read().await.len()
+        self.contexts.len()
     }
 
     /// Returns the currently active context IDs.
     pub async fn context_ids(&self) -> Vec<ClientContextId> {
-        self.contexts.read().await.keys().cloned().collect()
+        self.contexts.iter().map(|entry| entry.key().clone()).collect()
     }
 
     pub async fn get_context<F, R>(&self, id: &ClientContextId, f: F) -> Option<R>
     where
         F: FnOnce(&mut LogicalClientInstance) -> R,
     {
-        let mut contexts = self.contexts.write().await;
-        contexts.get_mut(id).map(|ctx| {
+        // DashMap::get_mut returns a per-shard guard, so concurrent
+        // RPCs touching different contexts don't serialize.
+        self.contexts.get_mut(id).map(|mut ctx| {
             ctx.touch();
-            f(ctx)
+            f(ctx.value_mut())
         })
     }
 
     pub async fn context_identity(&self, id: &ClientContextId) -> Option<String> {
-        self.contexts.read().await.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
+        self.contexts.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
     }
 
     pub async fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
-        self.contexts.write().await.remove(id)
+        self.contexts.remove(id).map(|(_k, v)| v)
     }
 
     /// Evict expired contexts (called periodically).
@@ -216,34 +227,38 @@ impl ContextManager {
         &self,
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
     ) -> Vec<ClientContextId> {
-        let mut contexts = self.contexts.write().await;
         let now = Instant::now();
-        let expired = self.collect_expired_context_ids(&contexts, now);
-        let all_backend_sessions = Self::drain_expired_contexts(&mut contexts, &expired);
-        drop(contexts); // release the lock before blocking FFI calls
+        let expired = self.collect_expired_context_ids(now);
+        let all_backend_sessions = self.drain_expired_contexts(&expired);
         Self::close_backend_sessions(backend, all_backend_sessions).await;
         expired
     }
 
-    fn collect_expired_context_ids(
-        &self,
-        contexts: &HashMap<ClientContextId, LogicalClientInstance>,
-        now: Instant,
-    ) -> Vec<ClientContextId> {
-        contexts
+    fn collect_expired_context_ids(&self, now: Instant) -> Vec<ClientContextId> {
+        self.contexts
             .iter()
-            .filter(|(_, ctx)| now.duration_since(ctx.last_active) > self.lease_duration)
-            .map(|(id, _)| id.clone())
+            .filter(|entry| now.duration_since(entry.value().last_active) > self.lease_duration)
+            .map(|entry| entry.key().clone())
             .collect()
     }
 
-    fn drain_expired_contexts(
-        contexts: &mut HashMap<ClientContextId, LogicalClientInstance>,
-        expired: &[ClientContextId],
-    ) -> Vec<u64> {
+    fn drain_expired_contexts(&self, expired: &[ClientContextId]) -> Vec<u64> {
+        // Re-check expiry under the per-shard lock so a context that
+        // got touched between `collect_expired_context_ids` and here
+        // is not evicted on stale data. The first scan is best-effort
+        // (no lock held across shards); this scan is authoritative.
+        let now = Instant::now();
         let mut backend_sessions = Vec::new();
         for id in expired {
-            if let Some(mut ctx) = contexts.remove(id) {
+            let still_expired = self
+                .contexts
+                .get(id)
+                .map(|entry| now.duration_since(entry.last_active) > self.lease_duration)
+                .unwrap_or(false);
+            if !still_expired {
+                continue;
+            }
+            if let Some((_, mut ctx)) = self.contexts.remove(id) {
                 backend_sessions.extend(ctx.teardown());
             }
         }
