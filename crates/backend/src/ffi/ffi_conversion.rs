@@ -275,6 +275,30 @@ impl FfiMechanism {
         Self::with_param(mech_type, std::ptr::null_mut(), 0, FfiParamBacking::None)
     }
 
+    /// Build an `FfiMechanism` from a `Box<T>` C-struct: derives the
+    /// `pParameter` pointer from the box's heap allocation (stable
+    /// address) and the `ulParameterLen` from `size_of::<T>()`.
+    /// The caller passes a closure that constructs the matching
+    /// `FfiParamBacking` variant from the same box; this keeps the
+    /// box and the pointer-into-box tied together in one expression
+    /// and removes the `&mut *boxed as *mut _ as *mut c_void` /
+    /// `std::mem::size_of::<...>()` boilerplate that repeated at 60+
+    /// sites in `mechanism_to_ffi`.
+    ///
+    /// **SAFETY INVARIANT:** `make_backing(b)` MUST move `b` into a
+    /// variant of `FfiParamBacking` so that the C struct's pointer
+    /// (and any pointers the struct itself holds into side-data) stay
+    /// live for as long as the returned `FfiMechanism`.
+    fn from_box<T>(
+        mech_type: cryptoki_sys::CK_MECHANISM_TYPE,
+        mut boxed: Box<T>,
+        make_backing: impl FnOnce(Box<T>) -> FfiParamBacking,
+    ) -> Self {
+        let ptr = &mut *boxed as *mut T as *mut std::ffi::c_void;
+        let len = std::mem::size_of::<T>();
+        Self::with_param(mech_type, ptr, len, make_backing(boxed))
+    }
+
     pub(super) fn output_params(&self) -> Option<CkMechanismParams> {
         match &self._backing {
             FfiParamBacking::Gcm(gcm, iv, aad) => {
@@ -735,14 +759,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
 
         // -- RSA-PSS: scalar-only struct ------------------------------------
         CkMechanismParams::RsaPkcsPss(p) => {
-            let mut pss = Box::new(cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS {
+            let pss = Box::new(cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS {
                 hashAlg: p.hash_alg.0 as cryptoki_sys::CK_MECHANISM_TYPE,
                 mgf: p.mgf as cryptoki_sys::CK_RSA_PKCS_MGF_TYPE,
                 sLen: p.salt_len as cryptoki_sys::CK_ULONG,
             });
-            let ptr = &mut *pss as *mut _ as *mut std::ffi::c_void;
-            let len = std::mem::size_of::<cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS>();
-            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Pss(pss)))
+            Ok(FfiMechanism::from_box(mech_type, pss, FfiParamBacking::Pss))
         }
 
         // -- RSA-OAEP: struct with pointer to source_data -------------------
@@ -844,13 +866,11 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let mut cb = [0u8; 16];
             let copy_len = p.cb.len().min(16);
             cb[..copy_len].copy_from_slice(&p.cb[..copy_len]);
-            let mut ctr = Box::new(cryptoki_sys::CK_AES_CTR_PARAMS {
+            let ctr = Box::new(cryptoki_sys::CK_AES_CTR_PARAMS {
                 ulCounterBits: p.counter_bits as cryptoki_sys::CK_ULONG,
                 cb,
             });
-            let ptr = &mut *ctr as *mut _ as *mut std::ffi::c_void;
-            let len = std::mem::size_of::<cryptoki_sys::CK_AES_CTR_PARAMS>();
-            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::AesCtr(ctr)))
+            Ok(FfiMechanism::from_box(mech_type, ctr, FfiParamBacking::AesCtr))
         }
 
         // -- Camellia-CTR: scalar + fixed 16-byte counter block -------------
@@ -858,13 +878,11 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let mut cb = [0u8; 16];
             let copy_len = p.cb.len().min(16);
             cb[..copy_len].copy_from_slice(&p.cb[..copy_len]);
-            let mut ctr = Box::new(cryptoki_sys::CK_CAMELLIA_CTR_PARAMS {
+            let ctr = Box::new(cryptoki_sys::CK_CAMELLIA_CTR_PARAMS {
                 ulCounterBits: p.counter_bits as cryptoki_sys::CK_ULONG,
                 cb,
             });
-            let ptr = &mut *ctr as *mut _ as *mut std::ffi::c_void;
-            let len = std::mem::size_of::<cryptoki_sys::CK_CAMELLIA_CTR_PARAMS>();
-            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::CamelliaCtr(ctr)))
+            Ok(FfiMechanism::from_box(mech_type, ctr, FfiParamBacking::CamelliaCtr))
         }
 
         // -- RC2-CBC: scalar + fixed 8-byte IV ------------------------------
@@ -872,13 +890,11 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let mut iv = [0u8; 8];
             let copy_len = p.iv.len().min(8);
             iv[..copy_len].copy_from_slice(&p.iv[..copy_len]);
-            let mut rc2 = Box::new(cryptoki_sys::CK_RC2_CBC_PARAMS {
+            let rc2 = Box::new(cryptoki_sys::CK_RC2_CBC_PARAMS {
                 ulEffectiveBits: p.effective_bits as cryptoki_sys::CK_ULONG,
                 iv,
             });
-            let ptr = &mut *rc2 as *mut _ as *mut std::ffi::c_void;
-            let len = std::mem::size_of::<cryptoki_sys::CK_RC2_CBC_PARAMS>();
-            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Rc2Cbc(rc2)))
+            Ok(FfiMechanism::from_box(mech_type, rc2, FfiParamBacking::Rc2Cbc))
         }
 
         // -- RC5-CBC: scalars + pointer to IV -------------------------------
@@ -898,54 +914,44 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
 
         // -- Trivial scalar-only structs ------------------------------------
         CkMechanismParams::Rc5(p) => {
-            let mut rc5 = Box::new(cryptoki_sys::CK_RC5_PARAMS {
+            let rc5 = Box::new(cryptoki_sys::CK_RC5_PARAMS {
                 ulWordsize: p.word_size as cryptoki_sys::CK_ULONG,
                 ulRounds: p.rounds as cryptoki_sys::CK_ULONG,
             });
-            let ptr = &mut *rc5 as *mut _ as *mut std::ffi::c_void;
-            let len = std::mem::size_of::<cryptoki_sys::CK_RC5_PARAMS>();
-            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Rc5(rc5)))
+            Ok(FfiMechanism::from_box(mech_type, rc5, FfiParamBacking::Rc5))
         }
 
         CkMechanismParams::Rc5MacGeneral(p) => {
-            let mut rc5mg = Box::new(cryptoki_sys::CK_RC5_MAC_GENERAL_PARAMS {
+            let rc5mg = Box::new(cryptoki_sys::CK_RC5_MAC_GENERAL_PARAMS {
                 ulWordsize: p.word_size as cryptoki_sys::CK_ULONG,
                 ulRounds: p.rounds as cryptoki_sys::CK_ULONG,
                 ulMacLength: p.mac_length as cryptoki_sys::CK_ULONG,
             });
-            let ptr = &mut *rc5mg as *mut _ as *mut std::ffi::c_void;
-            let len = std::mem::size_of::<cryptoki_sys::CK_RC5_MAC_GENERAL_PARAMS>();
-            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Rc5MacGeneral(rc5mg)))
+            Ok(FfiMechanism::from_box(mech_type, rc5mg, FfiParamBacking::Rc5MacGeneral))
         }
 
         CkMechanismParams::Rc2MacGeneral(p) => {
-            let mut rc2mg = Box::new(cryptoki_sys::CK_RC2_MAC_GENERAL_PARAMS {
+            let rc2mg = Box::new(cryptoki_sys::CK_RC2_MAC_GENERAL_PARAMS {
                 ulEffectiveBits: p.effective_bits as cryptoki_sys::CK_ULONG,
                 ulMacLength: p.mac_length as cryptoki_sys::CK_ULONG,
             });
-            let ptr = &mut *rc2mg as *mut _ as *mut std::ffi::c_void;
-            let len = std::mem::size_of::<cryptoki_sys::CK_RC2_MAC_GENERAL_PARAMS>();
-            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Rc2MacGeneral(rc2mg)))
+            Ok(FfiMechanism::from_box(mech_type, rc2mg, FfiParamBacking::Rc2MacGeneral))
         }
 
         CkMechanismParams::Xeddsa(p) => {
-            let mut xed = Box::new(cryptoki_sys::CK_XEDDSA_PARAMS {
+            let xed = Box::new(cryptoki_sys::CK_XEDDSA_PARAMS {
                 hash: p.hash as cryptoki_sys::CK_XEDDSA_HASH_TYPE,
             });
-            let ptr = &mut *xed as *mut _ as *mut std::ffi::c_void;
-            let len = std::mem::size_of::<cryptoki_sys::CK_XEDDSA_PARAMS>();
-            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Xeddsa(xed)))
+            Ok(FfiMechanism::from_box(mech_type, xed, FfiParamBacking::Xeddsa))
         }
 
         CkMechanismParams::TlsMac(p) => {
-            let mut tls = Box::new(cryptoki_sys::CK_TLS_MAC_PARAMS {
+            let tls = Box::new(cryptoki_sys::CK_TLS_MAC_PARAMS {
                 prfHashMechanism: p.prf_hash_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
                 ulMacLength: p.mac_length as cryptoki_sys::CK_ULONG,
                 ulServerOrClient: p.server_or_client as cryptoki_sys::CK_ULONG,
             });
-            let ptr = &mut *tls as *mut _ as *mut std::ffi::c_void;
-            let len = std::mem::size_of::<cryptoki_sys::CK_TLS_MAC_PARAMS>();
-            Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::TlsMac(tls)))
+            Ok(FfiMechanism::from_box(mech_type, tls, FfiParamBacking::TlsMac))
         }
 
         // -- CBC encrypt data variants (fixed IV + pointer to data) ---------

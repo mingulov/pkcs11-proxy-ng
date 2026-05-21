@@ -24,6 +24,11 @@ struct State {
     max_per_window: u32,
     /// Per-peer counter (count, window_start).
     peers: DashMap<IpAddr, PeerCell>,
+    /// When the last opportunistic GC walked `peers`. Initial value
+    /// is the daemon start time. Gated to at most one GC sweep per
+    /// `window` to keep the per-check cost flat even if `peers.len()`
+    /// hovers above the GC trigger threshold.
+    last_gc: std::sync::Mutex<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -41,7 +46,12 @@ static STATE: OnceLock<State> = OnceLock::new();
 /// permissive so existing deployments don't suddenly see
 /// RESOURCE_EXHAUSTED).
 pub fn configure(window: Duration, max_per_window: u32) {
-    let _ = STATE.set(State { window, max_per_window, peers: DashMap::new() });
+    let _ = STATE.set(State {
+        window,
+        max_per_window,
+        peers: DashMap::new(),
+        last_gc: std::sync::Mutex::new(Instant::now()),
+    });
 }
 
 /// Check whether a peer may issue another call. Returns `Ok(())`
@@ -53,25 +63,36 @@ pub fn check(peer: IpAddr) -> Result<(), Duration> {
         _ => return Ok(()),
     };
     let now = Instant::now();
-    let mut entry = state.peers.entry(peer).or_insert(PeerCell { count: 0, window_start: now });
-    if now.duration_since(entry.window_start) >= state.window {
-        entry.window_start = now;
-        entry.count = 0;
+    {
+        let mut entry = state.peers.entry(peer).or_insert(PeerCell { count: 0, window_start: now });
+        if now.duration_since(entry.window_start) >= state.window {
+            entry.window_start = now;
+            entry.count = 0;
+        }
+        if entry.count >= state.max_per_window {
+            let elapsed = now.duration_since(entry.window_start);
+            let retry_after = state.window.saturating_sub(elapsed);
+            return Err(retry_after);
+        }
+        entry.count += 1;
+        // `entry` (the per-shard write guard) drops here before the
+        // GC below — `DashMap::retain` walks every shard and would
+        // deadlock-or-stall if we held this shard's guard across it.
     }
-    if entry.count >= state.max_per_window {
-        let elapsed = now.duration_since(entry.window_start);
-        let retry_after = state.window.saturating_sub(elapsed);
-        return Err(retry_after);
-    }
-    entry.count += 1;
 
-    // Opportunistic GC: when the map has more than 1k entries, walk it
-    // and drop ones that have been idle > 5 windows. Cheaper than a
-    // dedicated GC task for the expected steady-state of a single-
-    // digit peer set.
-    if state.peers.len() > 1024 {
+    // Opportunistic GC: when the map has more than 1k entries AND
+    // we haven't GC'd within the last window, walk it and drop
+    // entries idle > 5 windows. The window-gate keeps the
+    // per-check cost flat (O(1) load) even if `peers.len()` stays
+    // above 1024 — without it, every check would trigger an O(N)
+    // retain scan.
+    if state.peers.len() > 1024
+        && let Ok(mut last) = state.last_gc.try_lock()
+        && now.duration_since(*last) >= state.window
+    {
         let stale_after = state.window * 5;
         state.peers.retain(|_, cell| now.duration_since(cell.window_start) < stale_after);
+        *last = now;
     }
 
     Ok(())

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -15,6 +15,13 @@ static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();
 static HEALTH_EVENT_TX: OnceLock<mpsc::UnboundedSender<BackendHealthEvent>> = OnceLock::new();
+/// Tracks whether the LAST sent health event was `Success`. Initialized
+/// to `true` because the health-gate task assumes the daemon starts in
+/// `SERVING`. Used by [`report_backend_outcome`] to suppress
+/// successive `Success` events — the gate only needs the first
+/// `Success` after a `Failure` streak to reset its counter, so a
+/// per-RPC `Success` push at the data-plane rate is pure noise.
+static LAST_SENT_HEALTHY: AtomicBool = AtomicBool::new(true);
 
 /// Outcome reported by [`spawn_backend`] for the health-gating task
 /// in `main.rs` to consume. `Success` = backend produced any
@@ -43,12 +50,23 @@ pub fn configure_backend_health_events(tx: mpsc::UnboundedSender<BackendHealthEv
 }
 
 fn report_backend_outcome(success: bool) {
-    if let Some(tx) = HEALTH_EVENT_TX.get() {
-        let _ = tx.send(if success {
-            BackendHealthEvent::Success
-        } else {
-            BackendHealthEvent::Failure
-        });
+    let Some(tx) = HEALTH_EVENT_TX.get() else { return };
+    if success {
+        // Coalesce: only send a Success event when transitioning from
+        // a previously-unhealthy state. The gate's only use for
+        // Success is to reset its consecutive_failures counter; once
+        // reset, repeated Success events do nothing. Suppressing them
+        // removes one MPSC push (+ allocation) from every successful
+        // data-plane RPC.
+        if !LAST_SENT_HEALTHY.swap(true, Ordering::Relaxed) {
+            let _ = tx.send(BackendHealthEvent::Success);
+        }
+    } else {
+        // Failures always go through: the gate counts consecutive
+        // failures toward its threshold. Coalescing would make the
+        // counter never advance.
+        LAST_SENT_HEALTHY.store(false, Ordering::Relaxed);
+        let _ = tx.send(BackendHealthEvent::Failure);
     }
 }
 
