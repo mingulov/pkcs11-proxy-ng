@@ -1,0 +1,72 @@
+# pkcs11-proxy-ng — PRODUCTION deployment.
+#
+# mTLS, real HSM backend placeholder, WARN tracing, higher concurrency.
+# Operator MUST replace `backend.module` with the real HSM .so before
+# starting the daemon (the placeholder value causes load-time refusal).
+#
+# Env vars (k8s pod spec):
+#   RUST_LOG=pkcs11_proxy_ng=warn,pkcs11_proxy_ng_backend=warn
+#   LOG_FORMAT=json
+#
+# File-permission requirements (R9):
+#   server_key   0600 — daemon refuses to start otherwise
+#
+# Recommended k8s readiness probe (R6-12 grpc-health-probe):
+#   exec: ["/usr/bin/pkcs11-proxy-ng-cli", "--endpoint",
+#          "http://127.0.0.1:7512", "health"]
+
+[backend]
+# Replace with the real HSM client .so path before deploying.
+# The shipped placeholder fails fast at startup — that's intentional.
+module = "/CHANGE_ME/path/to/backend.so"
+# initialize_args = "credentials=/run/secrets/hsm-creds" # use env if it contains a secret
+
+[proxy]
+# Production runs longer-lived contexts; default 30s is fine but
+# tune up if your apps do heavy session reuse.
+lease_seconds = 30
+# Generous concurrency — real HSMs handle parallel calls well.
+# Tune max_concurrent_backend_calls based on HSM capacity rather than
+# blindly increasing it: HSMs typically refuse > 256 simultaneous
+# operations and the circuit breaker should trip BEFORE the HSM does.
+max_concurrent_backend_calls = 256
+max_blocking_threads = 512
+# Longer timeout for slow-but-legitimate HSM operations like keygen.
+request_timeout_secs = 60
+startup_timeout_secs = 60
+# Match k8s terminationGracePeriodSeconds (set this <= terminationGracePeriodSeconds).
+shutdown_grace_secs = 30
+backend_health_consecutive_failures = 3
+http2_keepalive_interval_secs = 15
+http2_keepalive_timeout_secs = 5
+# Cap the registry-probe rate per peer when the trust model widens
+# beyond intra-VPC (R3-FOLLOWUP-rate-limit). 0 disables; bump as needed.
+rate_limit_get_backend_interfaces = 0
+rate_limit_window_secs = 1
+
+[listener.remote]
+bind = "0.0.0.0:7512"
+auth = "mtls"
+ca_cert = "/etc/pkcs11-proxy-ng/tls/ca.crt"
+server_cert = "/etc/pkcs11-proxy-ng/tls/server.crt"
+server_key = "/etc/pkcs11-proxy-ng/tls/server.key"
+allow_insecure_tcp = false
+
+[auth]
+# Production should pin to specific peer identities via [[auth.policy]]
+# rather than allow_all_authenticated. Example:
+#
+# allow_all_authenticated = false
+# [[auth.policy]]
+# identity = "x509:issuer=CN=corp-ca;subject=CN=svc-healthcheck"
+# tokens = ["primary-hsm-slot-0"]
+#
+# Keeping the permissive default here as a starting point; the
+# accompanying runbook walks through the tightening step.
+allow_all_authenticated = true
+
+[mechanisms]
+# Vendor extensions (CloudHSM, Thales) declared in this file; the
+# daemon reloads it on SIGHUP per the runbook's "Updating mechanism
+# config" section.
+config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"

@@ -1,0 +1,48 @@
+# pkcs11-proxy-ng — STAGING deployment.
+#
+# mTLS, NSS softokn backend, INFO tracing.  Mirrors prod's transport
+# posture but uses a software token so the rest of the staging
+# environment doesn't burn HSM capacity.
+#
+# Env vars expected:
+#   RUST_LOG=pkcs11_proxy_ng=info
+#   LOG_FORMAT=json
+#
+# File-permission requirements (R9):
+#   server_key   0600 (owner-only; daemon refuses to start otherwise)
+#   server_cert  0644 OK
+#   ca_cert      0644 OK
+#   proxy.toml   0644 OK
+
+[backend]
+module = "/usr/lib64/libsoftokn3.so"
+# initialize_args = "configdir='sql:/var/lib/nssdb' ..." # via env if needed
+
+[proxy]
+request_timeout_secs = 60
+startup_timeout_secs = 30
+shutdown_grace_secs = 10
+backend_health_consecutive_failures = 3
+max_concurrent_backend_calls = 100
+max_blocking_threads = 256
+# Match the deployment lease policy so staging behaves like prod.
+lease_seconds = 30
+# HTTP/2 keepalive — staging tests rolling-restart behaviour.
+http2_keepalive_interval_secs = 15
+http2_keepalive_timeout_secs = 5
+
+[listener.remote]
+bind = "0.0.0.0:7512"
+auth = "mtls"
+ca_cert = "/etc/pkcs11-proxy-ng/tls/ca.crt"
+server_cert = "/etc/pkcs11-proxy-ng/tls/server.crt"
+server_key = "/etc/pkcs11-proxy-ng/tls/server.key"
+allow_insecure_tcp = false
+
+[auth]
+# Tighten further in prod; staging mirrors prod's allow-all-authenticated
+# baseline so authorised mTLS clients can hit any slot.
+allow_all_authenticated = true
+
+[mechanisms]
+config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"

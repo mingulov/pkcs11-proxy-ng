@@ -324,10 +324,56 @@ impl DaemonConfig {
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read config '{}': {e}", path.display()))?;
-        let config: Self = toml::from_str(&content)
+        let mut config: Self = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse config '{}': {e}", path.display()))?;
+        config.apply_env_overrides();
         config.validate()?;
         Ok(config)
+    }
+
+    /// Apply documented env-var overrides on top of the TOML-parsed config.
+    /// Precedence: env > TOML > default. The set is intentionally small —
+    /// the daemon's primary config surface is the TOML file (mounted via
+    /// k8s ConfigMap in production). Env vars are reserved for the
+    /// highest-traffic operational tweaks (`PKCS11_PROXY_BIND` for
+    /// per-replica port tuning, `PKCS11_PROXY_BACKEND_MODULE` for swapping
+    /// HSM .sos without rewriting the ConfigMap, etc.).
+    ///
+    /// Documented env vars:
+    /// - `PKCS11_PROXY_BIND`              → `listener.remote.bind`
+    /// - `PKCS11_PROXY_BACKEND_MODULE`    → `backend.module`
+    /// - `PKCS11_PROXY_BACKEND_ARGS`      → `backend.initialize_args`
+    /// - `PKCS11_PROXY_MECHANISMS_CONFIG` → `mechanisms.config_path`
+    pub fn apply_env_overrides(&mut self) {
+        if let Ok(v) = std::env::var("PKCS11_PROXY_BACKEND_MODULE") {
+            self.backend.module = std::path::PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("PKCS11_PROXY_BACKEND_ARGS") {
+            self.backend.initialize_args = Some(v);
+        }
+        if let Ok(v) = std::env::var("PKCS11_PROXY_MECHANISMS_CONFIG") {
+            self.mechanisms.config_path = Some(std::path::PathBuf::from(v));
+        }
+        if let Ok(v) = std::env::var("PKCS11_PROXY_BIND") {
+            // Bind override applies to whichever TCP listener is already
+            // configured; if there's no [listener.remote] block, the env
+            // var implicitly creates a TCP listener with insecure-TCP
+            // default. Tighter listener semantics (auth, TLS) still have
+            // to come from the TOML.
+            match self.listener.remote.as_mut() {
+                Some(tcp) => tcp.bind = v,
+                None => {
+                    self.listener.remote = Some(TcpListenerConfig {
+                        bind: v,
+                        auth: TcpAuthMode::None,
+                        ca_cert: None,
+                        server_cert: None,
+                        server_key: None,
+                        allow_insecure_tcp: true,
+                    });
+                }
+            }
+        }
     }
 
     fn validate(&self) -> Result<(), String> {
