@@ -58,11 +58,18 @@ pub fn configure(window: Duration, max_per_window: u32) {
 /// if allowed (and consumes one budget unit); `Err(retry_after)` if
 /// the peer is over budget.
 pub fn check(peer: IpAddr) -> Result<(), Duration> {
-    let state = match STATE.get() {
+    check_against(STATE.get(), peer, Instant::now())
+}
+
+/// Pure check against an explicit `State` reference at a given `now`.
+/// Exposed to tests so each test owns its `State` instead of racing on
+/// the global `STATE` OnceLock (which is set-once for the daemon's
+/// lifetime).
+fn check_against(state: Option<&State>, peer: IpAddr, now: Instant) -> Result<(), Duration> {
+    let state = match state {
         Some(s) if s.max_per_window > 0 => s,
         _ => return Ok(()),
     };
-    let now = Instant::now();
     {
         let mut entry = state.peers.entry(peer).or_insert(PeerCell { count: 0, window_start: now });
         if now.duration_since(entry.window_start) >= state.window {
@@ -107,25 +114,73 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(127, 0, 0, n))
     }
 
+    fn fresh_state(window: Duration, max_per_window: u32) -> State {
+        State {
+            window,
+            max_per_window,
+            peers: DashMap::new(),
+            last_gc: std::sync::Mutex::new(Instant::now()),
+        }
+    }
+
     #[test]
-    fn disabled_by_default() {
-        // We rely on configure() not having been called by this point
-        // in this test module's lifecycle. Multiple tests in this
-        // module share state; we use distinct peer IPs to keep things
-        // independent.
+    fn disabled_when_state_unset() {
+        // The disabled path is the one we hit when `configure()` has
+        // never been called (the default for daemons that don't opt
+        // in). Test it with an explicit `None` so we don't race on the
+        // global `STATE` OnceLock with sibling tests.
+        let now = Instant::now();
         for _ in 0..10_000 {
-            check(peer(1)).unwrap();
+            check_against(None, peer(1), now).unwrap();
+        }
+    }
+
+    #[test]
+    fn disabled_when_max_is_zero() {
+        // Explicit `max_per_window = 0` is the documented "disabled"
+        // setting. Verify it short-circuits even when state IS set.
+        let state = fresh_state(Duration::from_millis(100), 0);
+        let now = Instant::now();
+        for _ in 0..10_000 {
+            check_against(Some(&state), peer(1), now).unwrap();
         }
     }
 
     #[test]
     fn allows_within_budget_rejects_over() {
-        configure(Duration::from_millis(100), 3);
+        let state = fresh_state(Duration::from_millis(100), 3);
+        let now = Instant::now();
         let p = peer(2);
-        assert!(check(p).is_ok());
-        assert!(check(p).is_ok());
-        assert!(check(p).is_ok());
-        let rejection = check(p).expect_err("4th call within budget should be rejected");
+        assert!(check_against(Some(&state), p, now).is_ok());
+        assert!(check_against(Some(&state), p, now).is_ok());
+        assert!(check_against(Some(&state), p, now).is_ok());
+        let rejection = check_against(Some(&state), p, now)
+            .expect_err("4th call within budget should be rejected");
         assert!(rejection > Duration::ZERO);
+    }
+
+    #[test]
+    fn window_rollover_resets_count() {
+        // Verify the count resets when `now` advances past the window.
+        // Previously untested — now trivial with explicit `now`.
+        let state = fresh_state(Duration::from_millis(100), 2);
+        let t0 = Instant::now();
+        let p = peer(3);
+        assert!(check_against(Some(&state), p, t0).is_ok());
+        assert!(check_against(Some(&state), p, t0).is_ok());
+        assert!(check_against(Some(&state), p, t0).is_err());
+        let t1 = t0 + Duration::from_millis(150);
+        assert!(check_against(Some(&state), p, t1).is_ok());
+    }
+
+    #[test]
+    fn per_peer_isolation() {
+        // Distinct peers don't share a budget.
+        let state = fresh_state(Duration::from_millis(100), 1);
+        let now = Instant::now();
+        assert!(check_against(Some(&state), peer(4), now).is_ok());
+        assert!(check_against(Some(&state), peer(5), now).is_ok());
+        assert!(check_against(Some(&state), peer(4), now).is_err());
+        assert!(check_against(Some(&state), peer(5), now).is_err());
     }
 }
