@@ -433,19 +433,6 @@ fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {
         .map_err(|_| CkRv::DEVICE_ERROR)
 }
 
-// TODO R2-FOLLOWUP-dns-reresolve: tonic's `transport::Channel`, when
-// built from a single `Endpoint`, resolves the hostname at connect
-// time and reuses the resulting IP for the lifetime of the channel.
-// For shims that need to follow a daemon whose DNS A-record changes
-// (k8s Service rollout, DNS-based blue/green), we should either:
-//   - rebuild the channel on transport errors (forcing re-resolve), or
-//   - switch to `tonic::transport::Channel::balance_list` with a
-//     resolver that periodically re-queries DNS.
-// Scenario 4 is intentionally skipped in the local R2 fixture because
-// Docker's embedded DNS doesn't support runtime A-record mutation;
-// reproducing this requires CoreDNS-sidecar / k8s-Service setup. See
-// doc/audit/r2-resilience.md §Scenario 4 for the deferral rationale.
-
 /// Resolve the daemon endpoint from environment variables.
 ///
 /// Precedence:

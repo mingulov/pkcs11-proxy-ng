@@ -89,5 +89,5 @@ kubectl -n r4-sre rollout restart deploy/r4-daemon
 # eventually succeeds within the rollout window".
 ```
 
-See `doc/runbooks/operating-pkcs11-proxy-ng.md` for the full operator
-runbook.
+See [`../../doc/runbooks/operating-pkcs11-proxy-ng.md`](../../doc/runbooks/operating-pkcs11-proxy-ng.md)
+for the full operator runbook.

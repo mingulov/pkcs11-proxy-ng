@@ -14,14 +14,6 @@ pub struct BackendProbe {
     pub mechanism_registry: Option<MechanismRegistryPayload>,
 }
 
-// TODO R2-FOLLOWUP-slow-backend: scenario 5 (slow backend) in the R2
-// resilience fixture is only able to inject latency on the network
-// path between shim and daemon (via toxiproxy). A true "backend-slow"
-// test requires a mock backend module (.so) that intentionally
-// sleeps in C_Sign so the daemon's spawn_backend timeout fires.
-// Track that mock under tests/r2_resilience/mock-backend/ when
-// implementing R5 (PKCS#11 compatibility audit).
-
 async fn connect_channel(
     endpoint: &str,
     tls_files: Option<crate::tls::ClientTlsFiles>,
