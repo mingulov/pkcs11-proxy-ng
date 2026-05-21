@@ -26,7 +26,15 @@ macro_rules! with_client {
             return rv_err(pkcs11_proxy_ng_types::CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
         let __result = crate::state::runtime().block_on(async {
-            let mut $client = crate::state::client().lock().await;
+            // Take a cheap clone of the shared client and drop the
+            // mutex guard before the RPC. `Pkcs11Client` wraps a tonic
+            // `Channel` (Arc'd, HTTP/2 multiplexed), so concurrent
+            // shim calls now share the connection instead of
+            // serializing on the mutex. The mutex remains as the
+            // swap point for reconnect (state::ensure_client_connected
+            // overwrites the stored client on reconnect; in-flight
+            // RPCs keep using their pre-swap clones).
+            let mut $client = crate::state::client().lock().await.clone();
             $call.await
         });
         // FOLLOWUP-dns-reresolve: if the call surfaced a
