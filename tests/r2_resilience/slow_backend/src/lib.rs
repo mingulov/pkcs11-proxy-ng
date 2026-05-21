@@ -11,6 +11,9 @@
 //!                                 C_SignFinal before returning OK.
 //!   SLOW_BACKEND_INIT_DELAY_MS  — sleep this long in C_Initialize.
 //!   SLOW_BACKEND_INIT_HANG=1    — block forever in C_Initialize.
+//!   SLOW_BACKEND_SIGN_RV_HEX    — instead of OK, return this CK_RV.
+//!                                 Hex with or without 0x prefix.
+//!                                 Example: 0x2 = CKR_HOST_MEMORY.
 //!
 //! Everything else is a stub: minimum valid return values, no real
 //! state. Sufficient to drive the daemon's lifecycle but not to do
@@ -231,6 +234,12 @@ unsafe extern "C" fn c_sign(
     sig_len: CK_ULONG_PTR,
 ) -> CK_RV {
     maybe_sleep("SLOW_BACKEND_SIGN_DELAY_MS");
+    // R8 scenario 2: optionally return a forced error code instead
+    // of OK. Useful for exercising the daemon's circuit-breaker /
+    // backend-health gating.
+    if let Some(rv) = env_rv("SLOW_BACKEND_SIGN_RV_HEX") {
+        return rv;
+    }
     if sig_len.is_null() {
         return CKR_GENERAL_ERROR_LITERAL;
     }
@@ -247,6 +256,12 @@ unsafe extern "C" fn c_sign(
         *sig_len = 32;
     }
     CKR_OK
+}
+
+fn env_rv(name: &str) -> Option<CK_RV> {
+    let raw = std::env::var(name).ok()?;
+    let stripped = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")).unwrap_or(&raw);
+    u64::from_str_radix(stripped, 16).ok()
 }
 
 // ─── everything else: not supported ─────────────────────────────
@@ -271,11 +286,142 @@ unsupported!(c_create_object, CK_SESSION_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_
 unsupported!(c_copy_object, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
 unsupported!(c_destroy_object, CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 unsupported!(c_get_object_size, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ULONG_PTR);
-unsupported!(c_get_attribute_value, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG);
+// Minimal GetAttributeValue: report the fake handle as an RSA-2048
+// private key. Sufficient for pkcs11-tool's `--sign` path which
+// queries CKA_CLASS + CKA_KEY_TYPE to confirm the object is signable.
+// Anything not in our handful of known attrs is reported as
+// CKA_TYPE_INVALID per spec.
+unsafe extern "C" fn c_get_attribute_value(
+    _h: CK_SESSION_HANDLE,
+    _obj: CK_OBJECT_HANDLE,
+    tmpl: CK_ATTRIBUTE_PTR,
+    count: CK_ULONG,
+) -> CK_RV {
+    if tmpl.is_null() && count > 0 {
+        return CKR_GENERAL_ERROR_LITERAL;
+    }
+    const CKA_CLASS_LITERAL: CK_ATTRIBUTE_TYPE = 0;
+    const CKA_KEY_TYPE_LITERAL: CK_ATTRIBUTE_TYPE = 0x100;
+    const CKA_LABEL_LITERAL: CK_ATTRIBUTE_TYPE = 0x3;
+    const CKA_ID_LITERAL: CK_ATTRIBUTE_TYPE = 0x102;
+    const CKA_SIGN_LITERAL: CK_ATTRIBUTE_TYPE = 0x108;
+    const CKO_PRIVATE_KEY_LITERAL: CK_ULONG = 3;
+    const CKK_RSA_LITERAL: CK_ULONG = 0;
+
+    let mut had_unknown = false;
+    for i in 0..count as isize {
+        let attr = unsafe { &mut *tmpl.offset(i) };
+        match attr.type_ {
+            CKA_CLASS_LITERAL => {
+                if attr.pValue.is_null() {
+                    attr.ulValueLen = std::mem::size_of::<CK_ULONG>() as CK_ULONG;
+                } else if attr.ulValueLen as usize >= std::mem::size_of::<CK_ULONG>() {
+                    unsafe {
+                        *(attr.pValue as *mut CK_ULONG) = CKO_PRIVATE_KEY_LITERAL;
+                    }
+                    attr.ulValueLen = std::mem::size_of::<CK_ULONG>() as CK_ULONG;
+                } else {
+                    attr.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                }
+            }
+            CKA_KEY_TYPE_LITERAL => {
+                if attr.pValue.is_null() {
+                    attr.ulValueLen = std::mem::size_of::<CK_ULONG>() as CK_ULONG;
+                } else if attr.ulValueLen as usize >= std::mem::size_of::<CK_ULONG>() {
+                    unsafe {
+                        *(attr.pValue as *mut CK_ULONG) = CKK_RSA_LITERAL;
+                    }
+                    attr.ulValueLen = std::mem::size_of::<CK_ULONG>() as CK_ULONG;
+                } else {
+                    attr.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                }
+            }
+            CKA_SIGN_LITERAL => {
+                if attr.pValue.is_null() {
+                    attr.ulValueLen = 1;
+                } else if attr.ulValueLen >= 1 {
+                    unsafe {
+                        *(attr.pValue as *mut CK_BBOOL) = 1; // CK_TRUE
+                    }
+                    attr.ulValueLen = 1;
+                } else {
+                    attr.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                }
+            }
+            CKA_LABEL_LITERAL | CKA_ID_LITERAL => {
+                let label = b"slow-backend-key";
+                if attr.pValue.is_null() {
+                    attr.ulValueLen = label.len() as CK_ULONG;
+                } else if (attr.ulValueLen as usize) >= label.len() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            label.as_ptr(),
+                            attr.pValue as *mut u8,
+                            label.len(),
+                        );
+                    }
+                    attr.ulValueLen = label.len() as CK_ULONG;
+                } else {
+                    attr.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                }
+            }
+            _ => {
+                attr.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                had_unknown = true;
+            }
+        }
+    }
+    if had_unknown {
+        // CKR_ATTRIBUTE_TYPE_INVALID
+        0x12
+    } else {
+        CKR_OK
+    }
+}
+// not used — kept for macro slot count compatibility, but the macro
+// will be removed for this name below.
 unsupported!(c_set_attribute_value, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG);
-unsupported!(c_find_objects_init, CK_SESSION_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG);
-unsupported!(c_find_objects, CK_SESSION_HANDLE, CK_OBJECT_HANDLE_PTR, CK_ULONG, CK_ULONG_PTR);
-unsupported!(c_find_objects_final, CK_SESSION_HANDLE);
+// R8 scenarios need real FindObjects support so pkcs11-tool --sign
+// can resolve a key handle. We return a fixed handle (42) on first
+// invocation, then 0-results on subsequent invocations of the same
+// FindObjects sequence. Thread-unsafe; the chaos fixture is
+// single-consumer so that's fine.
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+static FIND_RETURNED: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" fn c_find_objects_init(
+    _h: CK_SESSION_HANDLE,
+    _tmpl: CK_ATTRIBUTE_PTR,
+    _count: CK_ULONG,
+) -> CK_RV {
+    FIND_RETURNED.store(false, AtomicOrdering::SeqCst);
+    CKR_OK
+}
+
+unsafe extern "C" fn c_find_objects(
+    _h: CK_SESSION_HANDLE,
+    out: CK_OBJECT_HANDLE_PTR,
+    max: CK_ULONG,
+    pul_count: CK_ULONG_PTR,
+) -> CK_RV {
+    if pul_count.is_null() {
+        return CKR_GENERAL_ERROR_LITERAL;
+    }
+    let already_returned = FIND_RETURNED.swap(true, AtomicOrdering::SeqCst);
+    if already_returned || max == 0 || out.is_null() {
+        unsafe { *pul_count = 0; }
+        return CKR_OK;
+    }
+    unsafe {
+        *out = 42;
+        *pul_count = 1;
+    }
+    CKR_OK
+}
+
+unsafe extern "C" fn c_find_objects_final(_h: CK_SESSION_HANDLE) -> CK_RV {
+    CKR_OK
+}
 unsupported!(c_encrypt_init, CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
 unsupported!(c_encrypt, CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR);
 unsupported!(c_encrypt_update, CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR);
@@ -289,8 +435,43 @@ unsupported!(c_digest, CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK
 unsupported!(c_digest_update, CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG);
 unsupported!(c_digest_key, CK_SESSION_HANDLE, CK_OBJECT_HANDLE);
 unsupported!(c_digest_final, CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR);
-unsupported!(c_sign_update, CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG);
-unsupported!(c_sign_final, CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG_PTR);
+unsafe extern "C" fn c_sign_update(
+    _h: CK_SESSION_HANDLE,
+    _part: CK_BYTE_PTR,
+    _part_len: CK_ULONG,
+) -> CK_RV {
+    if let Some(rv) = env_rv("SLOW_BACKEND_SIGN_RV_HEX") {
+        return rv;
+    }
+    CKR_OK
+}
+
+unsafe extern "C" fn c_sign_final(
+    _h: CK_SESSION_HANDLE,
+    sig: CK_BYTE_PTR,
+    sig_len: CK_ULONG_PTR,
+) -> CK_RV {
+    maybe_sleep("SLOW_BACKEND_SIGN_DELAY_MS");
+    if let Some(rv) = env_rv("SLOW_BACKEND_SIGN_RV_HEX") {
+        return rv;
+    }
+    if sig_len.is_null() {
+        return CKR_GENERAL_ERROR_LITERAL;
+    }
+    if sig.is_null() {
+        unsafe { *sig_len = 32; }
+        return CKR_OK;
+    }
+    if unsafe { *sig_len } < 32 {
+        unsafe { *sig_len = 32; }
+        return CKR_BUFFER_TOO_SMALL_LITERAL;
+    }
+    unsafe {
+        ptr::write_bytes(sig, 0u8, 32);
+        *sig_len = 32;
+    }
+    CKR_OK
+}
 unsupported!(c_sign_recover_init, CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
 unsupported!(c_sign_recover, CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR);
 unsupported!(c_verify_init, CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);

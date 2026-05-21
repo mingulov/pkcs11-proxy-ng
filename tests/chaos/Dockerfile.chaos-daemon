@@ -45,7 +45,20 @@ auth = "none"
 allow_insecure_tcp = true
 
 [auth]
+
+[mechanisms]
+# Real config_path so scenario 4 (mid-write configmap) can exercise
+# the TOML parse-failure path. The file is provisioned by the
+# scenario script before SIGHUP.
+config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"
 EOF
+
+# Provision a valid baseline mechanism_params.toml so the daemon's
+# first-boot registry load succeeds. Scenarios overwrite it with
+# garbage to exercise the parse-failure path.
+RUN mkdir -p /etc/pkcs11-proxy-ng \
+ && printf '[[params]]\nshape = "gcm"\nmechanisms = [0x80001087]\n' \
+        > /etc/pkcs11-proxy-ng/mechanism_params.toml
 
 EXPOSE 7512
 ENTRYPOINT ["sh", "-c", "sed -i \"s|@BACKEND_MODULE@|$BACKEND_MODULE|\" /etc/proxy.toml && exec /usr/bin/pkcs11-proxy-ng /etc/proxy.toml"]

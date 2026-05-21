@@ -24,6 +24,7 @@ services:
       SLOW_BACKEND_SIGN_DELAY_MS: "${SLOW_BACKEND_SIGN_DELAY_MS:-0}"
       SLOW_BACKEND_INIT_DELAY_MS: "${SLOW_BACKEND_INIT_DELAY_MS:-0}"
       SLOW_BACKEND_INIT_HANG: "${SLOW_BACKEND_INIT_HANG:-}"
+      SLOW_BACKEND_SIGN_RV_HEX: "${SLOW_BACKEND_SIGN_RV_HEX:-}"
     volumes:
       - ../r2_resilience/slow_backend/target/release:/opt/slow_backend:ro
 
