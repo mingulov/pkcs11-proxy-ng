@@ -124,7 +124,7 @@ async fn build_service(
             .map_err(std::io::Error::other)?,
     );
     let tcp_auth_mode =
-        config.listener.remote.as_ref().map(|tcp| tcp.auth).unwrap_or(config::TcpAuthMode::None);
+        config.listener.remote.as_ref().map_or(config::TcpAuthMode::None, |tcp| tcp.auth);
     let service = server::grpc_service::Pkcs11ProxyService::new(
         context_manager.clone(),
         backend.clone(),

@@ -64,7 +64,7 @@ pub(crate) async fn verify(
             eprintln!("Signature INVALID (CKR_SIGNATURE_INVALID)");
             std::process::exit(1);
         }
-        Err(error) => return Err(format!("C_Verify failed: CKR 0x{:08X}", error.0).into()),
+        Err(error) => return Err(crate::handlers::cli_err("C_Verify")(error)),
     }
     close_session(client, session, pin.is_some()).await;
     Ok(())

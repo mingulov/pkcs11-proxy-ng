@@ -32,7 +32,7 @@ pub(crate) async fn init_pin(
     client
         .login(session, CkUserType::So, Some(so_pin.as_bytes()))
         .await
-        .map_err(|e| format!("C_Login (SO) failed: CKR 0x{:08X}", e.0))?;
+        .map_err(crate::handlers::cli_err("C_Login (SO)"))?;
     client
         .init_pin(session, Some(new_pin.as_bytes()))
         .await

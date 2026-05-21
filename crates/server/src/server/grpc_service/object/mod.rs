@@ -94,11 +94,15 @@ pub(super) async fn destroy_object(
 
 /// Build the proto `AttributeResult` list from an owned template.
 ///
-/// Consumes `template` so the backing `Vec<u8>` / `String` of each
-/// `CkAttributeValue::{Bytes,String}` is moved into the proto's
-/// `value: bytes` field without a clone. Caller is the gRPC handler
-/// owning the template returned from the backend; nothing reads it
-/// after this call.
+/// Consumes `template` so the `Vec<u8>` of each `CkAttributeValue::Bytes`
+/// is moved straight into the proto `value` field, and the `String` of
+/// each `CkAttributeValue::String` is converted via `into_bytes()`
+/// without re-allocating. Saves one heap clone per byte/string-typed
+/// attribute on the proto-encode path. (Prost still allocates when
+/// serializing the wire form; see `FOLLOWUP-proto-bytes` in
+/// `crates/proto/build.rs` for the eventual zero-copy work.) Caller is
+/// the gRPC handler owning the template returned from the backend;
+/// nothing reads it after this call.
 fn attribute_results(template: Vec<CkAttribute>) -> Vec<pkcs11_proxy_ng_proto::AttributeResult> {
     template
         .into_iter()

@@ -8,33 +8,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pkcs11_proxy_ng_backend::mock::MockBackend;
-use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
 
 mod common_3x;
+use common_3x::{init_client, mock, mock_daemon_with_lease};
 
-fn mock(slots: &[u64], mechs: &[u64]) -> MockBackend {
-    common_3x::mock(slots, mechs)
-}
-
-/// Spin up a mock daemon on an ephemeral port.
+/// Spin up a mock daemon with this test file's default lease (300s) and
+/// eviction interval (100ms). For non-default leases call
+/// `common_3x::mock_daemon_with_lease` directly.
 async fn mock_daemon(backend: Arc<MockBackend>) -> (String, tokio::sync::watch::Sender<bool>) {
-    common_3x::mock_daemon_with_lease(backend, Duration::from_secs(300), Duration::from_millis(100))
-        .await
-}
-
-async fn mock_daemon_with_lease(
-    backend: Arc<MockBackend>,
-    lease: Duration,
-    eviction_interval: Duration,
-) -> (String, tokio::sync::watch::Sender<bool>) {
-    common_3x::mock_daemon_with_lease(backend, lease, eviction_interval).await
-}
-
-async fn init_client(endpoint: &str) -> Pkcs11Client {
-    let mut client = Pkcs11Client::connect(endpoint).await.unwrap();
-    client.initialize().await.unwrap();
-    client
+    mock_daemon_with_lease(backend, Duration::from_secs(300), Duration::from_millis(100)).await
 }
 
 const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);

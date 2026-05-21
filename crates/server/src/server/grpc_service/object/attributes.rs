@@ -110,8 +110,12 @@ pub(super) async fn get_attribute_value_exact(
             validate_exact_attribute_results(&queries, &results)?;
             Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
                 ck_rv: ck_rv.0,
+                // Consume `results` by value so each attribute's owned
+                // `Vec<u8>` moves directly into the proto buffer (mirrors
+                // the `attribute_results` optimization for the
+                // non-exact path).
                 results: results
-                    .iter()
+                    .into_iter()
                     .map(pkcs11_proxy_ng_proto::AttributeQueryResult::from)
                     .collect(),
             }))

@@ -23,6 +23,19 @@ fn attribute_query_results_to_proto(
     }
 }
 
+/// Owned-input variant of `attribute_query_results_to_proto`. Moves the
+/// `Vec<u8>` of each result's `value` straight into the proto buffer
+/// without cloning. Mirrors the consume-by-value optimization applied
+/// to `attribute_results` for `C_GetAttributeValue` so the exact path
+/// (`C_GetAttributeValue_exact`) has the same allocation profile.
+fn attribute_query_results_into_proto(
+    results: Vec<CkAttributeQueryResult>,
+) -> v1_proto::AttributeQueryResultList {
+    v1_proto::AttributeQueryResultList {
+        results: results.into_iter().map(v1_proto::AttributeQueryResult::from).collect(),
+    }
+}
+
 fn attribute_query_results_from_proto(
     results: &v1_proto::AttributeQueryResultList,
 ) -> Vec<CkAttributeQueryResult> {
@@ -153,6 +166,18 @@ impl From<&CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
             value: result.value.clone(),
             ck_rv: result.ck_rv.map(|rv| rv.0),
             nested: result.nested.as_deref().map(attribute_query_results_to_proto),
+        }
+    }
+}
+
+impl From<CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
+    fn from(result: CkAttributeQueryResult) -> Self {
+        Self {
+            attr_type: result.attr_type.0,
+            returned_len: result.returned_len,
+            value: result.value,
+            ck_rv: result.ck_rv.map(|rv| rv.0),
+            nested: result.nested.map(attribute_query_results_into_proto),
         }
     }
 }

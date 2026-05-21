@@ -1,6 +1,6 @@
 # Contributor Rules
 
-These rules are mandatory for anyone changing code in `pkcs11-proxy/`, including
+These rules are mandatory for anyone changing code in `pkcs11-proxy-ng/`, including
 AI agents, automation, and human contributors.
 
 ## 1. Follow The Existing Design
