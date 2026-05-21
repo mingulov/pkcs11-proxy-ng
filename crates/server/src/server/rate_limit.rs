@@ -86,13 +86,14 @@ pub fn check(peer: IpAddr) -> Result<(), Duration> {
     // per-check cost flat (O(1) load) even if `peers.len()` stays
     // above 1024 — without it, every check would trigger an O(N)
     // retain scan.
-    if state.peers.len() > 1024
-        && let Ok(mut last) = state.last_gc.try_lock()
-        && now.duration_since(*last) >= state.window
-    {
-        let stale_after = state.window * 5;
-        state.peers.retain(|_, cell| now.duration_since(cell.window_start) < stale_after);
-        *last = now;
+    if state.peers.len() > 1024 {
+        if let Ok(mut last) = state.last_gc.try_lock() {
+            if now.duration_since(*last) >= state.window {
+                let stale_after = state.window * 5;
+                state.peers.retain(|_, cell| now.duration_since(cell.window_start) < stale_after);
+                *last = now;
+            }
+        }
     }
 
     Ok(())

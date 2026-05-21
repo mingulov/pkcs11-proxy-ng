@@ -219,14 +219,14 @@ pub(crate) async fn derive_key(
         }
     }
 
-    if let Some(ref mut params) = mechanism.params
-        && let Err(rv) = resolve_sp800_108_key_handle_data_params(ctx_mgr, &ctx_id, params).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
-            ck_rv: rv.0,
-            key_handle: 0,
-            mechanism_out: None,
-        }));
+    if let Some(ref mut params) = mechanism.params {
+        if let Err(rv) = resolve_sp800_108_key_handle_data_params(ctx_mgr, &ctx_id, params).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+                ck_rv: rv.0,
+                key_handle: 0,
+                mechanism_out: None,
+            }));
+        }
     }
 
     let template = match convert_template(&req.template) {
@@ -257,10 +257,10 @@ pub(crate) async fn derive_key(
             } else {
                 0
             };
-            if derive_result.rv.is_ok()
-                && let Some(ref mut params) = derive_result.mechanism_out
-            {
-                virtualize_sp800_108_additional_handles(ctx_mgr, &ctx_id, params).await;
+            if derive_result.rv.is_ok() {
+                if let Some(ref mut params) = derive_result.mechanism_out {
+                    virtualize_sp800_108_additional_handles(ctx_mgr, &ctx_id, params).await;
+                }
             }
             let mechanism_out = derive_result.mechanism_out.map(|params| {
                 pkcs11_proxy_ng_proto::Mechanism::from(&pkcs11_proxy_ng_types::CkMechanism {

@@ -155,14 +155,14 @@ fn shim_dispatch_functions() -> Vec<String> {
         let content = std::fs::read_to_string(&path).expect("cannot read file");
         for line in content.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("pub unsafe extern")
-                && trimmed.contains("fn c_")
-                && let Some(after_fn) = trimmed.split("fn ").nth(1)
-                && let Some(name) = after_fn.split('(').next()
-            {
-                let name = name.trim();
-                if !name.starts_with("c_not_supported") {
-                    fns.push(name.to_string());
+            if trimmed.starts_with("pub unsafe extern") && trimmed.contains("fn c_") {
+                if let Some(after_fn) = trimmed.split("fn ").nth(1) {
+                    if let Some(name) = after_fn.split('(').next() {
+                        let name = name.trim();
+                        if !name.starts_with("c_not_supported") {
+                            fns.push(name.to_string());
+                        }
+                    }
                 }
             }
         }

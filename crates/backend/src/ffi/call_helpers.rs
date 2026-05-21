@@ -349,11 +349,11 @@ impl FfiBackend {
             Vec::new()
         };
 
-        if !sessions.is_empty()
-            && let Ok(mut cache) = self.mech_cache.lock()
-        {
-            for s in &sessions {
-                cache.remove(s);
+        if !sessions.is_empty() {
+            if let Ok(mut cache) = self.mech_cache.lock() {
+                for s in &sessions {
+                    cache.remove(s);
+                }
             }
         }
     }
