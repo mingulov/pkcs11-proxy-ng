@@ -11,7 +11,7 @@ use handlers::run_command;
 use mechanisms::MECHANISM_NAMES;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn core::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();

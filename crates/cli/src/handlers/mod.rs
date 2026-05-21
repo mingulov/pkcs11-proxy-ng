@@ -9,7 +9,7 @@ use pkcs11_proxy_ng_types::*;
 use crate::cli::Commands;
 use crate::pkcs11_names::object_class_name;
 
-pub(crate) type CliResult = Result<(), Box<dyn std::error::Error>>;
+pub(crate) type CliResult = Result<(), Box<dyn core::error::Error>>;
 
 pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) -> CliResult {
     match command {
@@ -109,7 +109,7 @@ pub(crate) async fn open_session(
     client: &mut Pkcs11Client,
     slot_id: u64,
     flags: CkSessionFlags,
-) -> Result<CkSessionHandle, Box<dyn std::error::Error>> {
+) -> Result<CkSessionHandle, Box<dyn core::error::Error>> {
     client
         .open_session(CkSlotId(slot_id), flags)
         .await
@@ -120,7 +120,7 @@ pub(crate) async fn login_user(
     client: &mut Pkcs11Client,
     session: CkSessionHandle,
     pin: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn core::error::Error>> {
     client
         .login(session, CkUserType::User, Some(pin.as_bytes()))
         .await
@@ -131,7 +131,7 @@ pub(crate) async fn login_if_present(
     client: &mut Pkcs11Client,
     session: CkSessionHandle,
     pin: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn core::error::Error>> {
     if let Some(pin) = pin {
         login_user(client, session, pin).await?;
     }
@@ -154,7 +154,7 @@ pub(crate) async fn find_key_by_label(
     session: CkSessionHandle,
     key_label: &str,
     class: CkObjectClass,
-) -> Result<CkObjectHandle, Box<dyn std::error::Error>> {
+) -> Result<CkObjectHandle, Box<dyn core::error::Error>> {
     let template = vec![
         CkAttribute {
             attr_type: CkAttributeType::LABEL,

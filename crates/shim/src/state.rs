@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use cryptoki_sys::{CK_SESSION_HANDLE, CK_SLOT_ID};
@@ -105,25 +105,18 @@ pub type SessionByteCacheMap = Mutex<HashMap<CK_SESSION_HANDLE, Vec<u8>>>;
 pub type SessionSlotMap = Mutex<HashMap<CK_SESSION_HANDLE, CK_SLOT_ID>>;
 type SessionMechanismParamMap = Mutex<HashMap<CK_SESSION_HANDLE, usize>>;
 
-static SESSION_SLOTS: OnceLock<SessionSlotMap> = OnceLock::new();
-static DELAYED_GCM_WRITEBACK: OnceLock<SessionMechanismParamMap> = OnceLock::new();
-
-fn session_slots() -> &'static SessionSlotMap {
-    SESSION_SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn delayed_gcm_writebacks() -> &'static SessionMechanismParamMap {
-    DELAYED_GCM_WRITEBACK.get_or_init(|| Mutex::new(HashMap::new()))
-}
+static SESSION_SLOTS: LazyLock<SessionSlotMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static DELAYED_GCM_WRITEBACK: LazyLock<SessionMechanismParamMap> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn remember_session_slot(h_session: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
-    if let Ok(mut map) = session_slots().lock() {
+    if let Ok(mut map) = SESSION_SLOTS.lock() {
         map.insert(h_session, slot_id);
     }
 }
 
 fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
-    if let Ok(mut map) = session_slots().lock() {
+    if let Ok(mut map) = SESSION_SLOTS.lock() {
         map.remove(&h_session);
     }
 }
@@ -132,30 +125,34 @@ pub(crate) fn remember_delayed_gcm_writeback(
     h_session: CK_SESSION_HANDLE,
     mechanism_param_addr: usize,
 ) {
-    if let Ok(mut map) = delayed_gcm_writebacks().lock() {
+    if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
         map.insert(h_session, mechanism_param_addr);
     }
 }
 
 pub(crate) fn take_delayed_gcm_writeback(h_session: CK_SESSION_HANDLE) -> Option<usize> {
-    delayed_gcm_writebacks().lock().ok().and_then(|mut map| map.remove(&h_session))
+    DELAYED_GCM_WRITEBACK.lock().ok().and_then(|mut map| map.remove(&h_session))
 }
 
 pub(crate) fn clear_delayed_gcm_writeback(h_session: CK_SESSION_HANDLE) {
-    if let Ok(mut map) = delayed_gcm_writebacks().lock() {
+    if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
         map.remove(&h_session);
     }
 }
 
-pub struct ByteResultCache(OnceLock<SessionByteCacheMap>);
+/// Lazily-initialised holder for a per-session byte-output cache, used
+/// by the two-call `C_*` patterns (`C_Sign`, `C_SignFinal`, `C_Digest`,
+/// etc.). The macro `byte_cache!` below declares one static per
+/// PKCS#11 op so each op gets its own cache.
+pub struct ByteResultCache(LazyLock<SessionByteCacheMap>);
 
 impl ByteResultCache {
     pub const fn new() -> Self {
-        Self(OnceLock::new())
+        Self(LazyLock::new(|| Mutex::new(HashMap::new())))
     }
 
     pub fn get(&self) -> &SessionByteCacheMap {
-        self.0.get_or_init(|| Mutex::new(HashMap::new()))
+        &self.0
     }
 }
 
@@ -367,10 +364,10 @@ pub(crate) fn clear_all_caches() {
     if let Ok(mut map) = encapsulate_cache().lock() {
         map.clear();
     }
-    if let Ok(mut map) = session_slots().lock() {
+    if let Ok(mut map) = SESSION_SLOTS.lock() {
         map.clear();
     }
-    if let Ok(mut map) = delayed_gcm_writebacks().lock() {
+    if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
         map.clear();
     }
 }
@@ -400,7 +397,7 @@ pub(crate) fn evict_session_caches(h_session: CK_SESSION_HANDLE) {
 ///
 /// Called from `c_close_all_sessions` after the server confirms the close.
 pub(crate) fn evict_slot_session_caches(slot_id: CK_SLOT_ID) {
-    let sessions = if let Ok(mut map) = session_slots().lock() {
+    let sessions = if let Ok(mut map) = SESSION_SLOTS.lock() {
         let sessions: Vec<_> =
             map.iter().filter(|(_, slot)| **slot == slot_id).map(|(session, _)| *session).collect();
         for session in &sessions {

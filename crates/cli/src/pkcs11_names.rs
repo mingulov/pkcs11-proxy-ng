@@ -1,6 +1,6 @@
 use pkcs11_proxy_ng_types::*;
 
-pub(crate) fn parse_attr_type(s: &str) -> Result<CkAttributeType, Box<dyn std::error::Error>> {
+pub(crate) fn parse_attr_type(s: &str) -> Result<CkAttributeType, Box<dyn core::error::Error>> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         return u64::from_str_radix(hex, 16)
             .map(CkAttributeType)

@@ -4,7 +4,7 @@ use pkcs11_proxy_ng_types::*;
 use super::super::{CliResult, close_session, find_key_by_label, login_user, open_session};
 use crate::mechanisms::parse_mechanism;
 
-fn parameterless_mechanism(name: &str) -> Result<CkMechanism, Box<dyn std::error::Error>> {
+fn parameterless_mechanism(name: &str) -> Result<CkMechanism, Box<dyn core::error::Error>> {
     let mechanism_type = parse_mechanism(name)?;
     Ok(CkMechanism { mechanism_type: CkMechanismType(mechanism_type), params: None })
 }

@@ -6,7 +6,7 @@ use super::super::{
 };
 use crate::mechanisms::parse_mechanism;
 
-fn parameterless_mechanism(name: &str) -> Result<CkMechanism, Box<dyn std::error::Error>> {
+fn parameterless_mechanism(name: &str) -> Result<CkMechanism, Box<dyn core::error::Error>> {
     let mechanism_type = parse_mechanism(name)?;
     Ok(CkMechanism { mechanism_type: CkMechanismType(mechanism_type), params: None })
 }

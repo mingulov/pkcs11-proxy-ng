@@ -8,7 +8,7 @@ use pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource;
 use pkcs11_proxy_ng::server;
 use pkcs11_proxy_ng::server::health;
 
-type BoxError = Box<dyn std::error::Error>;
+type BoxError = Box<dyn core::error::Error>;
 type Backend = Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>;
 
 #[derive(Debug, Parser)]
