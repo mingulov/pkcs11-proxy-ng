@@ -12,14 +12,20 @@ members = [
 
 [workspace.package]
 edition = "2024"
-# MSRV lowered from 1.94 to 1.85 (edition-2024 baseline) so the workspace
-# builds with the stock Rust shipped on Alpine 3.22 (1.87), Alpine 3.23
-# (>=1.91), and Amazon Linux 2023 (~1.86). See AGENTS.md rule 5 and
-# doc/superpowers/specs/2026-05-20-pkcs11-proxy-ng-packaging-and-vendor-config-design.md
-# for the rationale. If a build target's stock Rust is older than 1.85,
-# bump this value to the smallest viable version rather than expanding the
-# distro support matrix.
-rust-version = "1.85"
+# MSRV raised from 1.85 to 1.88 so the workspace can use let-chains
+# (`if cond && let X = e { ... }`), stabilised in Rust 1.88. The pre-
+# existing codebase had 7 let-chain sites that were silently above the
+# old MSRV; this version reflects reality.
+#
+# Distribution matrix (see AGENTS.md §5):
+#   * Alpine 3.23  — stock rustc ≥ 1.91. Supported by stock toolchain.
+#   * Alpine 3.22  — stock rustc 1.87. NOT supported (below MSRV).
+#                    Drop in favour of Alpine 3.23.
+#   * Amazon Linux 2023 — stock rustc ~1.86. Below MSRV; users must
+#                    install Rust via rustup or vendor toolchain.
+# If a build target's stock Rust is older than 1.88, expect rustup-
+# installed toolchain rather than expanding the distro matrix.
+rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]

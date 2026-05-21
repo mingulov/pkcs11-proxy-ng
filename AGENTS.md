@@ -63,12 +63,21 @@ AI agents, automation, and human contributors.
 - Avoid “clever” abstractions that make PKCS#11 call flow harder to audit.
 - Prefer named PKCS#11 constants and typed wrappers; do not introduce magic
   numbers for `CKR_*`, mechanisms, attributes, or object classes.
-- Maintain edition `2024` and MSRV `1.85` compatibility. The MSRV was
-  lowered from `1.94` so the workspace builds with the stock Rust shipped
-  by Alpine 3.22 (1.87), Alpine 3.23 (≥1.91), and Amazon Linux 2023
-  (~1.86). Do not raise MSRV above the lowest of those values without
-  extending the distribution matrix. New code may not use language or
-  library features stabilized after Rust 1.85.
+- Maintain edition `2024` and MSRV `1.88` compatibility. MSRV is set
+  to 1.88 to enable let-chains (`if cond && let X = e { ... }`), which
+  the codebase already uses in 7+ places. The previous declared MSRV
+  of 1.85 was aspirational — let-chains stabilised in Rust 1.88
+  (May 2025), so 1.85 was inconsistent with actual usage. Distribution
+  matrix:
+  * **Alpine 3.23** — stock `rustc` ≥ 1.91; build with stock toolchain.
+  * **Alpine 3.22** — stock `rustc` 1.87; **NOT supported** (below
+    MSRV). Use Alpine 3.23 instead.
+  * **Amazon Linux 2023** — stock `rustc` ~1.86; **install Rust via
+    `rustup`** rather than relying on the system package.
+  If a build target's stock Rust is older than 1.88, expect callers to
+  install a `rustup`-managed toolchain rather than expanding the distro
+  matrix. New code may not use language or library features stabilised
+  after Rust 1.88.
 
 ## 6. Refactor Rules
 
