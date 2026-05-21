@@ -22,7 +22,14 @@ testing only.
 ```bash
 cd tests/r2_resilience/slow_backend
 cargo build --release
-# → target/release/libslow_backend.so
+# → target/release/libslow_backend.so (glibc, for host use)
+
+# For Alpine / musl daemon containers, build via rust:alpine:
+docker run --rm -v "$PWD:/src" -w /src --entrypoint sh \
+    rust:1.94-alpine -c \
+    "apk add --no-cache build-base >/dev/null && \
+     RUSTFLAGS='-C target-feature=-crt-static' cargo build --release"
+# → target/release/libslow_backend.so (musl, for Alpine daemon)
 ```
 
 The crate is intentionally NOT a workspace member (`[workspace]`
