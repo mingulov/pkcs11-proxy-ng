@@ -81,18 +81,19 @@ pub(super) fn convert_template(
     attrs.iter().map(|a| CkAttribute::try_from(a).map_err(|e| e.0)).collect()
 }
 
-pub(super) fn attr_value_to_bytes(v: &CkAttributeValue) -> Vec<u8> {
+/// Encode a `CkAttributeValue` into the on-wire `bytes` representation
+/// the proto uses for `AttributeResult.value`.
+///
+/// Consumes the value by move: the `Bytes` and `String` variants return
+/// their inner allocation directly (no clone). The two scalar variants
+/// (`Bool`, `Ulong`) construct a fresh small `Vec` because there's no
+/// owned buffer to move out of an integer.
+pub(super) fn attr_value_to_bytes(v: CkAttributeValue) -> Vec<u8> {
     match v {
-        CkAttributeValue::Bool(b) => {
-            if *b {
-                vec![1]
-            } else {
-                vec![0]
-            }
-        }
+        CkAttributeValue::Bool(b) => vec![u8::from(b)],
         CkAttributeValue::Ulong(u) => u.to_le_bytes().to_vec(),
-        CkAttributeValue::Bytes(b) => b.clone(),
-        CkAttributeValue::String(s) => s.as_bytes().to_vec(),
+        CkAttributeValue::Bytes(b) => b,
+        CkAttributeValue::String(s) => s.into_bytes(),
     }
 }
 

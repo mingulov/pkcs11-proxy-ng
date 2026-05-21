@@ -73,7 +73,7 @@ pub(super) async fn get_attribute_value(
 
     Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueResponse {
         ck_rv: ck_rv_only(result),
-        results: attribute_results(&template),
+        results: attribute_results(template),
     }))
 }
 
