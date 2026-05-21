@@ -46,10 +46,11 @@ pub unsafe extern "C" fn c_wrap_key(
                 // Only write back on a successful, buffer-present call.
                 // Size-query (NULL output) doesn't trigger HSM-side IV
                 // generation on most providers, so there's nothing to copy.
-                if rv == rv_ok() && spec.buffer_present {
-                    if let (Some(addr), Some(params)) = (mech_writeback_addr, mechanism_out) {
-                        unsafe { write_delayed_gcm_output_params(addr, &params) };
-                    }
+                if rv == rv_ok()
+                    && spec.buffer_present
+                    && let (Some(addr), Some(params)) = (mech_writeback_addr, mechanism_out)
+                {
+                    unsafe { write_delayed_gcm_output_params(addr, &params) };
                 }
                 rv
             }

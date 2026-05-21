@@ -26,13 +26,13 @@ pub(super) async fn get_backend_interfaces(
     registry_source: &MechanismRegistrySource,
     request: Request<pkcs11_proxy_ng_proto::GetBackendInterfacesRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetBackendInterfacesResponse>, Status> {
-    if let Some(peer) = request.remote_addr() {
-        if let Err(retry_after) = rate_limit::check(peer.ip()) {
-            return Err(Status::resource_exhausted(format!(
-                "rate limit exceeded; retry after {} ms",
-                retry_after.as_millis()
-            )));
-        }
+    if let Some(peer) = request.remote_addr()
+        && let Err(retry_after) = rate_limit::check(peer.ip())
+    {
+        return Err(Status::resource_exhausted(format!(
+            "rate limit exceeded; retry after {} ms",
+            retry_after.as_millis()
+        )));
     }
     let _request = request;
     // NOTE: get_interface_capabilities is pure metadata (reads the .so's

@@ -391,12 +391,11 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // would cancel the handler Future before spawn_backend can decrement
     // IN_FLIGHT, causing circuit breaker leaks under heavy load.
     let mut builder = Server::builder();
-    if let Some(ref tcp_cfg) = config.listener.remote {
-        if let Some(tls_config) =
+    if let Some(ref tcp_cfg) = config.listener.remote
+        && let Some(tls_config) =
             server::transport::server_tls_config(tcp_cfg).map_err(std::io::Error::other)?
-        {
-            builder = builder.tls_config(tls_config)?;
-        }
+    {
+        builder = builder.tls_config(tls_config)?;
     }
     if config.proxy.http2_keepalive_interval_secs > 0 {
         builder = builder

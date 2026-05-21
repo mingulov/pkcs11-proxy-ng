@@ -104,18 +104,16 @@ pub unsafe extern "C" fn c_get_attribute_value(
                             // Nested (CKF_ARRAY_ATTRIBUTE): write back sub-attribute
                             // results into the caller's CK_ATTRIBUTE[] template.
                             write_nested_result_to_ffi(c_attr, result);
-                        } else if query.buffer_present {
-                            if let Some(bytes) = result.value.as_ref() {
-                                if bytes.len() <= query.buffer_len as usize
-                                    && !c_attr.pValue.is_null()
-                                {
-                                    std::ptr::copy_nonoverlapping(
-                                        bytes.as_ptr(),
-                                        c_attr.pValue as *mut u8,
-                                        bytes.len(),
-                                    );
-                                }
-                            }
+                        } else if query.buffer_present
+                            && let Some(bytes) = result.value.as_ref()
+                            && bytes.len() <= query.buffer_len as usize
+                            && !c_attr.pValue.is_null()
+                        {
+                            std::ptr::copy_nonoverlapping(
+                                bytes.as_ptr(),
+                                c_attr.pValue as *mut u8,
+                                bytes.len(),
+                            );
                         }
                         c_attr.ulValueLen = result.returned_len as CK_ULONG;
                     }
