@@ -1,76 +1,46 @@
 #!/usr/bin/env bash
 # R8 scenario 6 — TLS cert expiry.
 #
-# Mint a CA, a 60-second-lifetime server cert (signed by CA), and a
-# long-lived client cert (signed by CA). Start a daemon variant with
-# mTLS using those certs. Run a consumer probe loop for 90 seconds.
-# Capture the CK_RV / connect error the consumer sees post-expiry.
+# Mint a CA, a SHORT-LIVED server cert (default 15s), and a longer-
+# lived client cert via the rcgen-based cert-minter helper. Start a
+# daemon variant with mTLS using those certs. Run a 60-second
+# consumer probe loop. Capture the connect/handshake outcome each
+# tick; expect probes to succeed before t=15s and fail after.
 #
 # Pass criteria:
-#   - Before expiry: probe succeeds.
-#   - After expiry: NEW connection attempts fail at TLS handshake.
-#     The shim's bounded-backoff retry loop trips its budget and
-#     returns CKR_DEVICE_ERROR (lifecycle path: CKR_GENERAL_ERROR
-#     per the R3 spec-conformance rule).
+#   - At least one handshake succeeds before t=cert-expiry.
+#   - At least one handshake FAILS after t=cert-expiry.
 #   - Daemon does NOT crash.
+#
+# Replaces the day-granular openssl -days flag — R8-FOLLOWUP-tls-
+# cert-expiry-minter is closed by this script.
 
 set -euo pipefail
 
 WORK="$(mktemp -d)"
 SCENARIO_DIR="$(cd "$(dirname "$0")" && pwd)"
+SUBMODULE_ROOT="$(cd "$SCENARIO_DIR/../../.." && pwd)"
+MINTER="$SUBMODULE_ROOT/tests/chaos/cert_minter/target/release/cert-minter"
+SERVER_TTL="${SERVER_TTL:-15}"
+PROBE_SECS="${PROBE_SECS:-60}"
+PROBE_INTERVAL="${PROBE_INTERVAL:-3}"
 
 echo "=== R8 scenario 6: TLS cert expiry ==="
-echo "  work dir: $WORK"
+echo "  work dir:     $WORK"
+echo "  server TTL:   ${SERVER_TTL}s"
+echo "  probe window: ${PROBE_SECS}s @ ${PROBE_INTERVAL}s ticks"
 
-# ─── Mint certs (short-lived server, long-lived CA + client) ──────────────
-openssl genrsa -out "$WORK/ca.key" 2048 >/dev/null 2>&1
-openssl req -new -x509 -days 7 -key "$WORK/ca.key" \
-    -out "$WORK/ca.crt" -subj "/CN=r8-test-ca" >/dev/null 2>&1
+if [ ! -x "$MINTER" ]; then
+    echo ">>> Building cert-minter (rcgen helper, one-shot)…"
+    (cd "$SUBMODULE_ROOT/tests/chaos/cert_minter" && cargo build --release)
+fi
 
-# Server: 60-second lifetime.
-openssl genrsa -out "$WORK/server.key" 2048 >/dev/null 2>&1
-openssl req -new -key "$WORK/server.key" \
-    -out "$WORK/server.csr" -subj "/CN=chaos-daemon" >/dev/null 2>&1
-cat > "$WORK/server.ext" <<EOF
-subjectAltName = DNS:chaos-daemon,DNS:localhost,IP:127.0.0.1
-EOF
-# OpenSSL's -days flag has 1-day granularity; use -enddate for seconds.
-# Computed below by formatting `date +%Y%m%d%H%M%SZ` for now+60s.
-# OpenSSL CLI signs with day-granular -days. For sub-day expiry we'd
-# need `faketime` (or libfaketime preload) to backdate the issuing
-# clock, OR a small custom minter (Python cryptography / Rust rcgen).
-# Neither is in the test host's dependencies by default; tagged
-# R8-FOLLOWUP-tls-cert-expiry-minter.
-#
-# As a workable approximation: mint with -days 1 and SLEEP 23h59m
-# between mint and probe — practical only as a slow soak. The
-# default below uses -days 1 so the script SUCCEEDS at the cert
-# mint step; the 90-second probe loop will see all-OK handshakes.
-# Operators running this scenario for real should swap in faketime
-# (`faketime '1d ago' openssl x509 -req ...`) before calling the
-# x509 -req line below.
-openssl x509 -req -in "$WORK/server.csr" -CA "$WORK/ca.crt" -CAkey "$WORK/ca.key" \
-    -CAcreateserial -out "$WORK/server.crt" \
-    -extfile "$WORK/server.ext" -days 1 >/dev/null 2>&1
+"$MINTER" \
+    --out-dir "$WORK" \
+    --server-expires-in-seconds "$SERVER_TTL" \
+    --client-expires-in-seconds 600 \
+    --ca-expires-in-seconds 3600
 
-# Client: 7-day lifetime.
-openssl genrsa -out "$WORK/client.key" 2048 >/dev/null 2>&1
-openssl req -new -key "$WORK/client.key" \
-    -out "$WORK/client.csr" -subj "/CN=r8-test-client" >/dev/null 2>&1
-openssl x509 -req -in "$WORK/client.csr" -CA "$WORK/ca.crt" -CAkey "$WORK/ca.key" \
-    -CAserial "$WORK/ca.srl" -days 7 -out "$WORK/client.crt" >/dev/null 2>&1
-
-# mTLS private key MUST be 0600 (R9 hardening).
-chmod 0600 "$WORK/server.key" "$WORK/client.key"
-
-server_expiry=$(openssl x509 -enddate -noout -in "$WORK/server.crt" | sed 's/notAfter=//')
-echo "  CA       : $WORK/ca.crt"
-echo "  server   : $WORK/server.crt  expires=$server_expiry"
-echo "  client   : $WORK/client.crt"
-
-# ─── Bring up daemon variant with mTLS + chaos-daemon image ──────────────
-# We can't reuse the chaos-daemon image directly because it bakes in
-# auth="none". Mount-override the proxy.toml + cert files.
 cat > "$WORK/proxy.toml" <<EOF
 [backend]
 module = "/opt/slow_backend/libslow_backend.so"
@@ -97,44 +67,76 @@ docker rm -f r8-tls-daemon >/dev/null 2>&1 || true
 docker run -d --name r8-tls-daemon \
     --network host \
     -v "$WORK:/etc/r8:ro" \
-    -v "$SCENARIO_DIR/../../../tests/r2_resilience/slow_backend/target/release:/opt/slow_backend:ro" \
+    -v "$SUBMODULE_ROOT/tests/r2_resilience/slow_backend/target/release:/opt/slow_backend:ro" \
     --entrypoint /usr/bin/pkcs11-proxy-ng \
-    pkcs11-proxy-ng:chaos-daemon /etc/r8/proxy.toml >/dev/null 2>&1
+    pkcs11-proxy-ng:chaos-daemon /etc/r8/proxy.toml >/dev/null
 sleep 4
 
-echo "=== consumer probe loop (90 s) ==="
-end=$(( $(date +%s) + 90 ))
+start_ts=$(date +%s)
+end_ts=$(( start_ts + PROBE_SECS ))
+first_ok_t=
+last_ok_t=
 first_fail_t=
-while [ "$(date +%s)" -lt "$end" ]; do
-    elapsed=$(( 90 - (end - $(date +%s)) ))
+
+echo "=== consumer probe loop ==="
+while [ "$(date +%s)" -lt "$end_ts" ]; do
+    now=$(date +%s)
+    elapsed=$(( now - start_ts ))
     if openssl s_client -connect 127.0.0.1:7512 -CAfile "$WORK/ca.crt" \
             -cert "$WORK/client.crt" -key "$WORK/client.key" \
             -tls1_2 -verify_return_error </dev/null >/dev/null 2>&1; then
         echo "[t=${elapsed}s] handshake OK"
+        if [ -z "$first_ok_t" ]; then first_ok_t=$elapsed; fi
+        last_ok_t=$elapsed
     else
-        if [ -z "$first_fail_t" ]; then first_fail_t=$elapsed; fi
         echo "[t=${elapsed}s] handshake FAIL"
+        if [ -z "$first_fail_t" ]; then first_fail_t=$elapsed; fi
     fi
-    sleep 5
+    sleep "$PROBE_INTERVAL"
 done
 
+echo
 echo "=== verdict ==="
+verdict_failed=0
 if docker inspect --format '{{.State.Running}}' r8-tls-daemon | grep -q true; then
-    echo "  daemon survived 90 s mTLS probing: PASS"
+    echo "  daemon survived ${PROBE_SECS}s mTLS probing: PASS"
 else
     echo "  daemon died: FAIL"
+    verdict_failed=1
 fi
 
-# With -days 1 (no sub-day minter), all handshakes should have
-# succeeded — that's the smoke-test bar. Expiry-time observation
-# only happens when faketime is wired up (R8-FOLLOWUP-tls-cert-
-# expiry-minter).
-if [ -z "$first_fail_t" ]; then
-    echo "  no handshake failures observed (cert valid for full 90 s): scenario6 = PARTIAL"
-    echo "  full expiry-mode behaviour observation defers to R8-FOLLOWUP-tls-cert-expiry-minter"
+if [ -n "$first_ok_t" ]; then
+    echo "  first handshake OK at t=${first_ok_t}s: PASS"
 else
-    echo "  first handshake failure at t=${first_fail_t}s: $first_fail_t"
+    echo "  no handshake ever succeeded: FAIL"
+    verdict_failed=1
 fi
+
+# Verify OK→FAIL transition: cert was honoured at start, then post-expiry
+# failures observed. Wall-clock timing varies by ~5s (cert is minted before
+# daemon container starts), so we don't pin the exact t-value.
+if [ -n "$first_fail_t" ] && [ -n "$last_ok_t" ] && [ "$first_fail_t" -gt "$last_ok_t" ]; then
+    echo "  OK→FAIL transition: last OK at t=${last_ok_t}s, first FAIL at t=${first_fail_t}s: PASS"
+elif [ -n "$first_fail_t" ]; then
+    echo "  first FAIL at t=${first_fail_t}s but no OK before it: FAIL"
+    verdict_failed=1
+else
+    echo "  no handshake failure observed in ${PROBE_SECS}s probe window: FAIL"
+    verdict_failed=1
+fi
+
+echo "  cert lifetime ${SERVER_TTL}s; last OK t=${last_ok_t:-none}s; first FAIL t=${first_fail_t:-none}s"
+
+docker logs r8-tls-daemon 2>&1 | tail -20 > "$WORK/daemon.log"
+echo "  daemon log tail: $WORK/daemon.log"
 
 docker rm -f r8-tls-daemon >/dev/null 2>&1 || true
-rm -rf "$WORK"
+
+if [ "$verdict_failed" -eq 0 ]; then
+    echo "  OVERALL: PASS"
+    rm -rf "$WORK"
+    exit 0
+else
+    echo "  OVERALL: FAIL  (work dir kept: $WORK)"
+    exit 1
+fi

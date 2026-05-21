@@ -17,6 +17,12 @@ struct Args {
     /// Path to daemon TOML config.
     #[arg(value_name = "CONFIG", default_value = "config.toml", value_hint = clap::ValueHint::FilePath)]
     config: std::path::PathBuf,
+
+    /// Print the table of environment variables the daemon recognises
+    /// (and the TOML field each one overrides), then exit. Closes
+    /// R9-FOLLOWUP-env-var-cli-help.
+    #[arg(long)]
+    print_env_vars: bool,
 }
 
 /// Wait for either SIGINT (ctrl-c) or SIGTERM, then log and return.
@@ -275,10 +281,14 @@ fn spawn_eviction_task(
 }
 
 fn main() -> Result<(), BoxError> {
+    // Parse early so --print-env-vars doesn't pull in JSON tracing.
+    let args = Args::parse();
+    if args.print_env_vars {
+        print!("{}", config::env_var_help());
+        return Ok(());
+    }
     init_tracing();
 
-    // Parse config early (before runtime) to get max_blocking_threads.
-    let args = Args::parse();
     let config = config::DaemonConfig::load(&args.config)?;
     validate_runtime_listener_support(&config)?;
 

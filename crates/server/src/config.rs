@@ -1,6 +1,43 @@
 use serde::Deserialize;
 use std::{fmt, path::PathBuf};
 
+/// Human-readable table of env vars the daemon honours, printed by
+/// `pkcs11-proxy-ng --print-env-vars`. Keep this aligned with the body
+/// of [`DaemonConfig::apply_env_overrides`].
+pub fn env_var_help() -> String {
+    let rows: &[(&str, &str, &str)] = &[
+        (
+            "PKCS11_PROXY_BIND",
+            "listener.remote.bind",
+            "TCP listen address; creates an insecure-TCP listener if [listener.remote] is absent.",
+        ),
+        (
+            "PKCS11_PROXY_BACKEND_MODULE",
+            "backend.module",
+            "Absolute path to the backend PKCS#11 .so the daemon dlopens.",
+        ),
+        (
+            "PKCS11_PROXY_BACKEND_ARGS",
+            "backend.initialize_args",
+            "Backend-specific C_Initialize args string (e.g. NSS config dir spec).",
+        ),
+        (
+            "PKCS11_PROXY_MECHANISMS_CONFIG",
+            "mechanisms.config_path",
+            "Path to the mechanism_params.toml registry served to shims.",
+        ),
+    ];
+    let var_w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
+    let field_w = rows.iter().map(|r| r.1.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    out.push_str("Environment variables (override the corresponding TOML field):\n\n");
+    for (var, field, desc) in rows {
+        out.push_str(&format!("  {var:var_w$}  →  {field:field_w$}    {desc}\n"));
+    }
+    out.push_str("\nPrecedence (lowest → highest): TOML defaults < TOML file < environment.\n");
+    out
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DaemonConfig {
     pub backend: BackendConfig,
@@ -345,6 +382,8 @@ impl DaemonConfig {
     /// - `PKCS11_PROXY_BACKEND_ARGS`      → `backend.initialize_args`
     /// - `PKCS11_PROXY_MECHANISMS_CONFIG` → `mechanisms.config_path`
     pub fn apply_env_overrides(&mut self) {
+        // Keep this list in sync with env_var_help() below — both surface the
+        // same canonical env-var → TOML-field mapping.
         if let Ok(v) = std::env::var("PKCS11_PROXY_BACKEND_MODULE") {
             self.backend.module = std::path::PathBuf::from(v);
         }
