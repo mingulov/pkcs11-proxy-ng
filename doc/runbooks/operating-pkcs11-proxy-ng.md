@@ -31,12 +31,12 @@ docker pull <registry>/pkcs11-proxy-ng:<version>-alpine3.23
 kubectl apply -f pkcs11-proxy-ng/examples/k8s/
 
 # 3) Edit the ConfigMap to point at your backend module.
-kubectl -n r4-sre edit configmap r4-daemon-config
+kubectl -n pkcs11-proxy-demo edit configmap daemon-config
 # Replace [backend].module with the path inside the daemon container.
 
 # 4) Trigger a rollout to pick up the edited config.
-kubectl -n r4-sre rollout restart deploy/r4-daemon
-kubectl -n r4-sre rollout status deploy/r4-daemon
+kubectl -n pkcs11-proxy-demo rollout restart deploy/daemon
+kubectl -n pkcs11-proxy-demo rollout status deploy/daemon
 ```
 
 **Smoke test.** Run a single sign through the shim from a consumer

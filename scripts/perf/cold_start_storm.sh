@@ -37,7 +37,7 @@ $COMPOSE --profile softhsm2 up -d daemon-softhsm2 consumer-shell >/dev/null
 sleep 5  # workaround for FOLLOWUP-shim-startup-race; remove when fixed.
 
 # 2. Find the daemon's PID (inside the container) for CPU+RSS sampling.
-daemon_pid=$(docker inspect --format '{{.State.Pid}}' r5-daemon)
+daemon_pid=$(docker inspect --format '{{.State.Pid}}' consumer-matrix-daemon)
 echo "daemon PID (host): $daemon_pid"
 
 # 3. Sample daemon RSS + CPU during the storm.

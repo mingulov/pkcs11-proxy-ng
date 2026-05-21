@@ -35,7 +35,7 @@ echo "=== Soak: ${DURATION}s @ ${RPS}rps ==="
 $COMPOSE --profile softhsm2 up -d daemon-softhsm2 consumer-shell >/dev/null
 sleep 5  # FOLLOWUP-shim-startup-race workaround
 
-daemon_pid=$(docker inspect --format '{{.State.Pid}}' r5-daemon)
+daemon_pid=$(docker inspect --format '{{.State.Pid}}' consumer-matrix-daemon)
 echo "daemon PID (host): $daemon_pid"
 
 # We sample RSS via host /proc and FDs via docker exec; reading the
@@ -45,7 +45,7 @@ sample_rss_kb() {
     awk '/^VmRSS:/ { print $2 }' "/proc/$daemon_pid/status" 2>/dev/null || echo 0
 }
 sample_fd_count() {
-    docker exec r5-daemon sh -c 'ls /proc/1/fd 2>/dev/null | wc -l' 2>/dev/null || echo 0
+    docker exec consumer-matrix-daemon sh -c 'ls /proc/1/fd 2>/dev/null | wc -l' 2>/dev/null || echo 0
 }
 
 # 2. Provision the test key once (so the load loop doesn't repeat it).
