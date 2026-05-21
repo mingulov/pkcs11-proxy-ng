@@ -1,6 +1,6 @@
 # Reference k8s deployment for pkcs11-proxy-ng
 
-This directory contains the manifests the R4 (SRE/ops) audit
+This directory contains the manifests the SRE/ops audit
 exercises. It is the recommended starting point for operators
 adapting pkcs11-proxy-ng to their cluster — copy these files into
 your overlay / Helm chart and tune for your environment.
@@ -44,7 +44,7 @@ against the Service hostname (`r4-daemon.default.svc:7512`).
 The Service's `sessionAffinity: ClientIP` is **load-bearing** — without
 it, a shim reconnecting after a transient network failure can land
 on a different daemon replica and lose its `client_context_id`. The
-R2 audit documented this; the manifest enforces it.
+resilience audit documented this; the manifest enforces it.
 
 ## Quick start (with `kind`)
 
@@ -73,7 +73,7 @@ kubectl -n r4-sre rollout status deploy/r4-daemon --timeout=120s
 kubectl -n r4-sre logs -f sts/r4-consumer
 ```
 
-## Rolling restart under load (the R4 scenario)
+## Rolling restart under load
 
 ```bash
 # In one terminal, watch the consumer's success/failure counters:

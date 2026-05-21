@@ -7,7 +7,7 @@ pub(crate) mod interface_probe;
 mod state;
 
 /// Test-only surface used by `crates/shim/tests/stress_registry.rs`
-/// and similar concurrency-audit fixtures (see R7 audit). Not part
+/// and similar concurrency-audit fixtures. Not part
 /// of the shim's public API; do NOT depend on it from consumers.
 #[doc(hidden)]
 pub mod __test_api {

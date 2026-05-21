@@ -1,9 +1,9 @@
 # slow-backend — stub PKCS#11 `.so` with configurable delays
 
-Closes `R2-FOLLOWUP-slow-backend` (cross-references
-`R4-FOLLOWUP-mock-backend`).
+Closes `FOLLOWUP-slow-backend` (cross-references
+`FOLLOWUP-mock-backend`).
 
-The R2 resilience round can simulate network slowness via toxiproxy
+The resilience fixture can simulate network slowness via toxiproxy
 but cannot simulate slow backends. This stub `.so` exposes a minimal
 PKCS#11 v2.40 surface and reads three env vars on each call:
 

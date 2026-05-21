@@ -1,4 +1,4 @@
-//! R6 — latency histogram for shim→daemon→shim overhead.
+//! Latency histogram for shim→daemon→shim overhead.
 //!
 //! Runs N C_Sign operations against a real gRPC daemon backed by
 //! MockBackend over loopback, records each call's latency in a
@@ -7,7 +7,7 @@
 //! Uses MockBackend to keep the backend FFI time near-zero; this is
 //! the "shim+daemon+gRPC overhead only" measurement. The
 //! direct-SoftHSM2-subtraction measurement lives in
-//! `scripts/perf/measure_softhsm_latency.sh` (R6-2).
+//! `scripts/perf/measure_softhsm_latency.sh`.
 //!
 //! Run: `cargo bench --bench proxy_latency_histogram -- 10000`
 //! (positional arg = sample count; default 10_000).

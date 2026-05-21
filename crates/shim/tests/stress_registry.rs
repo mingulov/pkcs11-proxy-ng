@@ -1,4 +1,4 @@
-//! R7 concurrency-audit stress test for the `MECHANISM_REGISTRY` swap
+//! Concurrency-audit stress test for the `MECHANISM_REGISTRY` swap
 //! pattern (`OnceLock<RwLock<Arc<MechanismRegistry>>>`).
 //!
 //! 16 reader threads spin-loop calling `mechanism_registry()`; one

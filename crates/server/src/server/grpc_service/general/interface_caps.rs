@@ -17,7 +17,7 @@ use super::super::super::context_manager::ContextManager;
 /// current mechanism registry payload so shims can refresh their
 /// param-shape / parameterless data without restarting.
 ///
-/// Rate-limited per peer IP (R3-FOLLOWUP-rate-limit). Disabled by
+/// Rate-limited per peer IP (FOLLOWUP-rate-limit). Disabled by
 /// default — see `proxy.rate_limit_get_backend_interfaces` in
 /// proxy.toml.
 pub(super) async fn get_backend_interfaces(
@@ -38,8 +38,8 @@ pub(super) async fn get_backend_interfaces(
     // NOTE: get_interface_capabilities is pure metadata (reads the .so's
     // function-list NULL pointers — no PKCS#11 call into the backend).
     // We deliberately do NOT route it through spawn_backend, because
-    // that path emits Success events to the backend-health gate. R8
-    // scenario 2 needs the gate to see only real backend-call outcomes;
+    // that path emits Success events to the backend-health gate. The
+    // chaos scenario 2 needs the gate to see only real backend-call outcomes;
     // routing this metadata read through spawn_backend would emit
     // spurious Successes interleaved with the actual failing C_Sign
     // events and reset the consecutive-failure counter.

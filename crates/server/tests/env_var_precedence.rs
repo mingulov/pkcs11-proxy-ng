@@ -1,4 +1,4 @@
-//! R9 — env-var override precedence table-driven test.
+//! Env-var override precedence table-driven test.
 //!
 //! Verifies that each documented daemon env var overrides the
 //! corresponding TOML field. Tests:

@@ -10,7 +10,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 publish = false
-description = "Sub-day X.509 cert minter for R8 scenario 6 (TLS cert expiry). Uses rcgen to mint a CA, a short-lived server cert, and a long-lived client cert with second-granular not_after."
+description = "Sub-day X.509 cert minter for chaos scenario 6 (TLS cert expiry). Uses rcgen to mint a CA, a short-lived server cert, and a long-lived client cert with second-granular not_after."
 
 [dependencies]
 rcgen = "0.13"

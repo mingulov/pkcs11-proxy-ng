@@ -1,7 +1,7 @@
 //! Minimal PKCS#11 stub backend with env-var-controlled delays.
 //!
-//! Closes `R2-FOLLOWUP-slow-backend` (cross-references
-//! `R4-FOLLOWUP-mock-backend`). The R2 resilience round only exercises
+//! Closes `FOLLOWUP-slow-backend` (cross-references
+//! `FOLLOWUP-mock-backend`). The resilience fixture only exercises
 //! NETWORK slowness via toxiproxy; this backend gives us BACKEND
 //! slowness so the daemon's `request_timeout_secs` and circuit-breaker
 //! paths can be tested end-to-end against a real `.so`.
@@ -21,7 +21,7 @@
 //!                                 consumer "warm up" through Login /
 //!                                 FindObjects normally, then drive a
 //!                                 monotonically-failing tail used by
-//!                                 R8 scenario 2 to flip backend health.
+//!                                 chaos scenario 2 to flip backend health.
 //!   SLOW_BACKEND_BREAK_RV_HEX   — CK_RV to return after the break.
 //!                                 Defaults to 0x2 (CKR_HOST_MEMORY).
 //!
@@ -83,7 +83,7 @@ unsafe extern "C" fn c_get_info(info: CK_INFO_PTR) -> CK_RV {
         cryptokiVersion: CK_VERSION { major: 3, minor: 0 },
         manufacturerID: ascii32(b"slow-backend stub"),
         flags: 0,
-        libraryDescription: ascii32(b"R6 audit stub backend"),
+        libraryDescription: ascii32(b"slow-backend stub"),
         libraryVersion: CK_VERSION { major: 0, minor: 1 },
     };
     unsafe { *info = stub; }
@@ -268,7 +268,7 @@ unsafe extern "C" fn c_sign(
         return rv;
     }
     maybe_sleep("SLOW_BACKEND_SIGN_DELAY_MS");
-    // R8 scenario 2: optionally return a forced error code instead
+    // Chaos scenario 2: optionally return a forced error code instead
     // of OK. Useful for exercising the daemon's circuit-breaker /
     // backend-health gating.
     if let Some(rv) = env_rv("SLOW_BACKEND_SIGN_RV_HEX") {
@@ -303,7 +303,7 @@ fn env_rv(name: &str) -> Option<CK_RV> {
 /// `SLOW_BACKEND_BREAK_AFTER_CALLS`, every subsequent call returns
 /// `SLOW_BACKEND_BREAK_RV_HEX` (default 0x2 = CKR_HOST_MEMORY).
 ///
-/// Used by R8 scenario 2 to flip backend-health to NOT_SERVING
+/// Used by chaos scenario 2 to flip backend-health to NOT_SERVING
 /// after `backend_health_consecutive_failures` consecutive backend
 /// errors — without the consumer-side warmup calls (Login,
 /// FindObjects, GetAttributeValue, …) registering as Successes and
@@ -464,7 +464,7 @@ unsafe extern "C" fn c_get_attribute_value(
 // not used — kept for macro slot count compatibility, but the macro
 // will be removed for this name below.
 unsupported!(c_set_attribute_value, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG);
-// R8 scenarios need real FindObjects support so pkcs11-tool --sign
+// Chaos scenarios need real FindObjects support so pkcs11-tool --sign
 // can resolve a key handle. We return a fixed handle (42) on first
 // invocation, then 0-results on subsequent invocations of the same
 // FindObjects sequence. Thread-unsafe; the chaos fixture is

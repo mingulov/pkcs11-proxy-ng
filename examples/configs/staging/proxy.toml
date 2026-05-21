@@ -8,7 +8,7 @@
 #   RUST_LOG=pkcs11_proxy_ng=info
 #   LOG_FORMAT=json
 #
-# File-permission requirements (R9):
+# File-permission requirements:
 #   server_key   0600 (owner-only; daemon refuses to start otherwise)
 #   server_cert  0644 OK
 #   ca_cert      0644 OK

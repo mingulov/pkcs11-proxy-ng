@@ -1,7 +1,7 @@
-# R5 — PKCS#11 Consumer Compatibility Matrix
+# PKCS#11 Consumer Compatibility Matrix
 
-Fixture for the R5 SRE/Compat round. Runs every supported consumer
-toolchain through the shim against every supported backend.
+Fixture for the SRE/Compat consumer matrix. Runs every supported
+consumer toolchain through the shim against every supported backend.
 
 ## Layout
 

@@ -41,7 +41,7 @@ pub fn server_tls_config(tcp: &TcpListenerConfig) -> Result<Option<ServerTlsConf
 }
 
 /// Refuse to start when the mTLS private key file is readable by anyone
-/// other than the owner. Closes R9 "file permissions" verification.
+/// other than the owner. Closes the "file permissions" verification.
 ///
 /// The check is unix-only; on other platforms it's a no-op since file
 /// modes don't map cleanly.

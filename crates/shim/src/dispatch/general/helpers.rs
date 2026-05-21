@@ -29,7 +29,7 @@ macro_rules! with_client {
             let mut $client = crate::state::client().lock().await;
             $call.await
         });
-        // R6-9 / R2-FOLLOWUP-dns-reresolve: if the call surfaced a
+        // FOLLOWUP-dns-reresolve: if the call surfaced a
         // transport-level failure (CkRv::DEVICE_ERROR from a session-
         // scoped RPC or CkRv::GENERAL_ERROR from a lifecycle RPC),
         // mark the client for reconnect. The next call rebuilds the

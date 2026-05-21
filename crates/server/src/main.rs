@@ -20,7 +20,7 @@ struct Args {
 
     /// Print the table of environment variables the daemon recognises
     /// (and the TOML field each one overrides), then exit. Closes
-    /// R9-FOLLOWUP-env-var-cli-help.
+    /// FOLLOWUP-env-var-cli-help.
     #[arg(long)]
     print_env_vars: bool,
 }
@@ -357,8 +357,8 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     spawn_sighup_handler(registry_source.clone());
     let addr = resolve_bind_address(&config)?;
 
-    // Bind the TCP listener *before* flipping Health/SERVING. R5
-    // surfaced a race where shim consumers saw the daemon's gRPC
+    // Bind the TCP listener *before* flipping Health/SERVING. The
+    // consumer matrix surfaced a race where shim consumers saw the daemon's gRPC
     // health probe report SERVING but their TCP connect was refused
     // because tonic hadn't yet bound the listener. Binding here makes
     // the SERVING flip below truthful: by the time external probes

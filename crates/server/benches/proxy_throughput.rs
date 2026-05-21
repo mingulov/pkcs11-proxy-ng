@@ -1,4 +1,4 @@
-//! R6 — throughput at varying queue depth.
+//! Throughput at varying queue depth.
 //!
 //! Drives sustained C_Sign load with N concurrent client tasks
 //! (one shared connection per task) for 10 seconds. Reports ops/sec

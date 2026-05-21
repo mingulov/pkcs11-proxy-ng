@@ -600,7 +600,7 @@ max_concurrent_backend_calls = 0
 
 #[test]
 fn validate_max_concurrent_backend_calls_must_not_exceed_max_blocking_threads() {
-    // R7-4: a config in which the circuit-breaker limit is allowed
+    // A config in which the circuit-breaker limit is allowed
     // to exceed the tokio blocking-pool size could deadlock the
     // daemon — every blocking thread holds a backend call that's
     // waiting for some resource only released by another backend

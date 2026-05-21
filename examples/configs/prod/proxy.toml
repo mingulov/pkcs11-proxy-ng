@@ -8,10 +8,10 @@
 #   RUST_LOG=pkcs11_proxy_ng=warn,pkcs11_proxy_ng_backend=warn
 #   LOG_FORMAT=json
 #
-# File-permission requirements (R9):
+# File-permission requirements:
 #   server_key   0600 — daemon refuses to start otherwise
 #
-# Recommended k8s readiness probe (R6-12 grpc-health-probe):
+# Recommended k8s readiness probe (grpc-health-probe):
 #   exec: ["/usr/bin/pkcs11-proxy-ng-cli", "--endpoint",
 #          "http://127.0.0.1:7512", "health"]
 
@@ -40,7 +40,7 @@ backend_health_consecutive_failures = 3
 http2_keepalive_interval_secs = 15
 http2_keepalive_timeout_secs = 5
 # Cap the registry-probe rate per peer when the trust model widens
-# beyond intra-VPC (R3-FOLLOWUP-rate-limit). 0 disables; bump as needed.
+# beyond intra-VPC (FOLLOWUP-rate-limit). 0 disables; bump as needed.
 rate_limit_get_backend_interfaces = 0
 rate_limit_window_secs = 1
 

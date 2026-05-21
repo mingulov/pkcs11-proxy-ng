@@ -529,7 +529,7 @@ pub fn client() -> &'static tokio::sync::Mutex<Pkcs11Client> {
     CLIENT.get().expect("BUG: client() called before ensure_client_connected()")
 }
 
-/// Bounded exponential backoff with jitter, matching the R2 resilience
+/// Bounded exponential backoff with jitter, matching the resilience
 /// contract:
 ///
 /// * Attempt 1: no delay (immediate connect).

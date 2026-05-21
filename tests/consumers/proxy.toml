@@ -1,4 +1,4 @@
-# Daemon config for R5 consumer matrix. The backend.module value is
+# Daemon config for the consumer matrix. The backend.module value is
 # templated per-backend by each Dockerfile.daemon.* via sed.
 
 [backend]

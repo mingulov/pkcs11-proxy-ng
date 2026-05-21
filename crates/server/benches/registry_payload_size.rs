@@ -1,4 +1,4 @@
-//! R6 — registry payload size for the upper-bound vendor case.
+//! Registry payload size for the upper-bound vendor case.
 //!
 //! Synthesizes a MechanismRegistry with N vendor mechanism entries
 //! distributed across common param shapes, converts it to the proto
@@ -73,9 +73,9 @@ fn main() {
         first = false;
     }
     out_json.push(']');
-    if let Ok(path) = std::env::var("R6_REGISTRY_OUT") {
+    if let Ok(path) = std::env::var("REGISTRY_OUT") {
         std::fs::write(path, out_json).unwrap();
     }
     println!();
-    println!("R6 target: < 16 KiB (16384 bytes) for 100 vendor mechanisms.");
+    println!("Target: < 16 KiB (16384 bytes) for 100 vendor mechanisms.");
 }

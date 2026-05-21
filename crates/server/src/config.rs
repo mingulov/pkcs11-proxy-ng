@@ -180,7 +180,7 @@ pub struct ProxyConfig {
     #[serde(default = "default_backend_health_consecutive_failures")]
     pub backend_health_consecutive_failures: u32,
     /// Max GetBackendInterfaces RPCs allowed per peer IP per
-    /// `rate_limit_window_secs` window. Closes R3-FOLLOWUP-rate-limit
+    /// `rate_limit_window_secs` window. Closes FOLLOWUP-rate-limit
     /// — defends against a noisy peer spamming the discovery RPC.
     /// 0 = disabled (default; trust the network boundary).
     #[serde(default = "default_rate_limit_get_backend_interfaces")]

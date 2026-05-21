@@ -1,6 +1,6 @@
 //! Per-peer rate limiter for `GetBackendInterfaces`.
 //!
-//! Closes `R3-FOLLOWUP-rate-limit`. The threat is unauthenticated TCP
+//! Closes `FOLLOWUP-rate-limit`. The threat is unauthenticated TCP
 //! peers fanning out registry probes at high QPS; though the trust
 //! model already requires intra-VPC network isolation, defence in
 //! depth caps the per-peer rate to a configurable budget.

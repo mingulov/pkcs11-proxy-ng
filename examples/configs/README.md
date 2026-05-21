@@ -1,4 +1,4 @@
-# Example daemon configs (R9)
+# Example daemon configs
 
 Three environment-tier reference configs that drop straight into a
 k8s `ConfigMap` or a bare-metal `/etc/pkcs11-proxy-ng/proxy.toml`.
@@ -23,7 +23,7 @@ target/debug/pkcs11-proxy-ng examples/configs/dev/proxy.toml
 
 ## File permission requirements
 
-The daemon refuses to start (R9 verification 2) if any mTLS private
+The daemon refuses to start if any mTLS private
 key file is group/world-readable. Recommended modes:
 
 ```bash
@@ -34,7 +34,7 @@ chmod 0644 /etc/pkcs11-proxy-ng/proxy.toml
 chmod 0644 /etc/pkcs11-proxy-ng/mechanism_params.toml
 ```
 
-## ConfigMap subPath caveat (R9 verification 4)
+## ConfigMap subPath caveat
 
 K8s ConfigMaps mounted via `subPath` **do not auto-update** when the
 ConfigMap is edited. Use a regular volume mount (no `subPath`) so the
@@ -59,7 +59,7 @@ containers:
       #   subPath: proxy.toml
 ```
 
-## Forward compatibility (R9 verification 5)
+## Forward compatibility
 
 New `[proxy]` fields ship with `#[serde(default)]` so older configs
 parse cleanly against newer daemons. Validate before deploy:

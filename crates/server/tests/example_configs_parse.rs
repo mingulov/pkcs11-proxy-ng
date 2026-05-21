@@ -1,4 +1,4 @@
-//! R9 — example configs dry-run + forward-compat check.
+//! Example configs dry-run + forward-compat check.
 //!
 //! For each `examples/configs/<tier>/proxy.toml`, verify that the
 //! daemon's `DaemonConfig::load` parses it cleanly. We patch the
@@ -6,9 +6,9 @@
 //! existence check passes (the shipped paths point at vendor .sos
 //! that may not be present on every test host).
 //!
-//! Forward-compat: round-trip the R2-fixture's proxy.toml (the
-//! oldest TOML we ship) through the current daemon's parser. Any
-//! schema drift that breaks older deployments shows up here.
+//! Forward-compat: round-trip the resilience-fixture's proxy.toml
+//! (the oldest TOML we ship) through the current daemon's parser.
+//! Any schema drift that breaks older deployments shows up here.
 
 use std::path::PathBuf;
 
@@ -102,12 +102,37 @@ fn example_prod_parses() {
     pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path()).expect("prod parses");
 }
 
+#[test]
+fn example_fips_parses() {
+    let p = submodule_root().join("examples/configs/fips/proxy.toml");
+    let raw = std::fs::read_to_string(&p).expect("fips/proxy.toml");
+    let patched = rewrite_for_test(&raw);
+    let tmp = write_temp(&patched);
+    pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path()).expect("fips parses");
+}
+
+#[test]
+fn example_fips_mechanism_params_parses() {
+    use pkcs11_proxy_ng_types::MechanismRegistry;
+    let p = submodule_root().join("examples/configs/fips/mechanism_params.toml");
+    let registry =
+        MechanismRegistry::load(Some(&p)).expect("fips/mechanism_params.toml must parse");
+    // The FIPS allow-list must be in Filtered discovery mode (the
+    // whole point — without it the daemon would advertise more than
+    // the FIPS subset).
+    assert_eq!(
+        registry.discovery_mode(),
+        pkcs11_proxy_ng_types::DiscoveryMode::Filtered,
+        "fips registry must enable filtered discovery"
+    );
+}
+
 /// Forward-compat: an older shipped proxy.toml (the one used by the
-/// R2 resilience fixture, predating R6's new fields) must still
+/// resilience fixture, predating later-added fields) must still
 /// parse cleanly with the current daemon. New fields default.
 #[test]
 fn forward_compat_r2_fixture_proxy_toml_parses() {
-    // The R2 fixture embeds its proxy.toml directly in the daemon
+    // The resilience fixture embeds its proxy.toml directly in the daemon
     // Dockerfile (heredoc). We reproduce the same TOML body here so
     // the test is independent of Docker.
     let older_toml = r#"
@@ -129,8 +154,8 @@ allow_insecure_tcp = true
 "#;
     let tmp = write_temp(older_toml);
     let cfg = pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path())
-        .expect("older R2 proxy.toml must still parse");
-    // Spot-check a few R6-era fields filled in from defaults:
+        .expect("older proxy.toml must still parse");
+    // Spot-check a few fields filled in from defaults:
     assert!(cfg.proxy.rate_limit_window_secs > 0);
     assert_eq!(cfg.proxy.rate_limit_get_backend_interfaces, 0);
 }

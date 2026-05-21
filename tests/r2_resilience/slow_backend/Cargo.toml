@@ -10,7 +10,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 publish = false
-description = "PKCS#11 stub backend that injects configurable delays. Used in the R6 perf round to exercise the daemon's timeout + circuit-breaker code paths without touching SoftHSM2."
+description = "PKCS#11 stub backend that injects configurable delays. Used to exercise the daemon's timeout + circuit-breaker code paths without touching SoftHSM2."
 
 [lib]
 name = "slow_backend"

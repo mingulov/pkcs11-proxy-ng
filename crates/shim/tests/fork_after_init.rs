@@ -1,4 +1,4 @@
-//! R7 concurrency-audit test for fork-after-C_Initialize.
+//! Concurrency-audit test for fork-after-C_Initialize.
 //!
 //! PKCS#11 v3.0 §5.4 says behaviour after `fork()` is undefined.
 //! Real-world PKCS#11 libraries that hold thread / socket / mutex

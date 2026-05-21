@@ -26,6 +26,7 @@ dashmap.workspace = true
 x509-parser.workspace = true
 tonic-health.workspace = true
 sha2.workspace = true
+zeroize.workspace = true
 tokio-stream = "0.1"
 tower = "0.5"
 tower-layer = "0.3"

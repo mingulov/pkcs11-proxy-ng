@@ -25,10 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // R4-FOLLOWUP-grpc-health-probe: a no-side-effects health check that
+    // FOLLOWUP-grpc-health-probe: a no-side-effects health check that
     // honours the daemon's backend-health gating (the daemon registers
     // its main service and flips NOT_SERVING on N consecutive backend
-    // failures per R1). Exits 0/1/2 so k8s exec probes can interpret.
+    // failures). Exits 0/1/2 so k8s exec probes can interpret.
     if let Commands::Health { service } = &cli.command {
         use tonic_health::pb::HealthCheckRequest;
         use tonic_health::pb::health_check_response::ServingStatus;

@@ -43,6 +43,7 @@ tonic-health = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
 
 # Release profile tuned for size and runtime over build time. The shim
 # cdylib and daemon binary shrink ~25-30%; CI build cost rises by ~30s.

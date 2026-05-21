@@ -1,4 +1,4 @@
-//! Sub-day cert minter for R8 scenario 6.
+//! Sub-day cert minter for chaos scenario 6.
 //!
 //! Replaces the day-granular `openssl x509 -days N` invocation in
 //! `scenario6_tls_cert_expiry.sh` so the scenario can observe an
@@ -7,7 +7,7 @@
 //! Writes six PEM files into `--out-dir`:
 //! `ca.crt`, `ca.key`, `server.crt`, `server.key`,
 //! `client.crt`, `client.key`. The server key file is `chmod 0600`
-//! to satisfy the R9 mTLS-private-key permissions check.
+//! to satisfy the mTLS-private-key permissions check.
 
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
@@ -23,7 +23,7 @@ use rcgen::{
 use time::{Duration, OffsetDateTime};
 
 #[derive(Parser)]
-#[command(about = "Mint CA + server (short-lived) + client cert chain for R8 scenario 6.")]
+#[command(about = "Mint CA + server (short-lived) + client cert chain for chaos scenario 6.")]
 struct Cli {
     /// Where to write the six PEM files. Must already exist.
     #[arg(long)]
