@@ -46,6 +46,10 @@ AI agents, automation, and human contributors.
 
 - Never log PINs, keys, raw secrets, certificates’ private material, or other
   sensitive request payloads.
+- Do not switch the release profile to `panic = "abort"`. Several PIN/key
+  handling structs in `crates/types/src/mechanism.rs` rely on
+  `ZeroizeOnDrop` running during stack unwinding to wipe password buffers
+  on panic. With `panic = "abort"` those drops do not run.
 - Never add `Debug` logging of PKCS#11 request types that can contain secret
   fields.
 - Preserve existing mTLS, peer-credential, and policy boundaries.

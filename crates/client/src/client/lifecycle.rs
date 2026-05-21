@@ -5,6 +5,25 @@ use tonic::transport::Channel;
 use super::{ConnectionSource, Pkcs11Client};
 use crate::error::{RpcKind, grpc_status_to_ck_rv_kind};
 
+/// Per-call message size cap (64 MiB), matching the server's
+/// `proxy.max_message_bytes` ceiling defined in `crates/server/src/config.rs`.
+///
+/// Tonic's default decode limit is 4 MiB, so without this an operator
+/// who raises the server's `max_message_bytes` (e.g. for large
+/// `C_Decrypt` plaintexts or wrapped-key blobs) would silently get a
+/// `CKR_GENERAL_ERROR` on the client side from the decode-too-large
+/// status. Keep the client cap aligned with the server's cap so large
+/// payloads succeed end-to-end and oversized payloads fail at the
+/// server (where the operator can configure the bound) rather than
+/// invisibly at the client.
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
+fn new_grpc_client(channel: Channel) -> GrpcClient<Channel> {
+    GrpcClient::new(channel)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
+}
+
 /// Result of a `get_backend_interfaces` probe — the backend's interface
 /// capabilities plus the server's mechanism registry payload (absent on
 /// older daemons predating the field).
@@ -40,7 +59,7 @@ impl Pkcs11Client {
     /// Connect to the proxy daemon at `endpoint` (e.g. `"http://127.0.0.1:50051"`).
     pub async fn connect(endpoint: &str) -> Result<Self, String> {
         let channel = connect_channel(endpoint, None).await?;
-        let grpc = GrpcClient::new(channel);
+        let grpc = new_grpc_client(channel);
         Ok(Self {
             grpc,
             context_id: None,
@@ -54,7 +73,7 @@ impl Pkcs11Client {
         tls_files: crate::tls::ClientTlsFiles,
     ) -> Result<Self, String> {
         let channel = connect_channel(endpoint, Some(tls_files.clone())).await?;
-        let grpc = GrpcClient::new(channel);
+        let grpc = new_grpc_client(channel);
         Ok(Self {
             grpc,
             context_id: None,
@@ -69,7 +88,7 @@ impl Pkcs11Client {
     /// channel sharing). Reconnection will not be available.
     pub fn from_channel(channel: tonic::transport::Channel) -> Self {
         Self {
-            grpc: GrpcClient::new(channel),
+            grpc: new_grpc_client(channel),
             context_id: None,
             source: ConnectionSource::SharedChannel,
         }
@@ -153,7 +172,7 @@ impl Pkcs11Client {
                 let channel = connect_channel(endpoint, tls_files.clone())
                     .await
                     .map_err(|_| CkRv::DEVICE_ERROR)?;
-                self.grpc = GrpcClient::new(channel);
+                self.grpc = new_grpc_client(channel);
                 if let Some(ref ctx) = self.context_id {
                     let req = pkcs11_proxy_ng_proto::GetSlotListRequest {
                         client_context_id: ctx.clone(),
