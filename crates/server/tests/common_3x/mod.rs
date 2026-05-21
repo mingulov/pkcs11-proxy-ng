@@ -70,3 +70,35 @@ pub async fn init_client(endpoint: &str) -> Pkcs11Client {
     client.initialize().await.unwrap();
     client
 }
+
+/// Bind a TCP listener on `127.0.0.1:0`, build a tonic `Server` around
+/// the caller-supplied `Pkcs11ProxyService`, and spawn the server task.
+///
+/// Returns `(endpoint, shutdown_tx)`. The server stops when
+/// `shutdown_tx` is dropped or sent `true`.
+///
+/// Use this when you need a custom `Pkcs11ProxyService` configuration
+/// (auth policy, mTLS, fault injection, etc.) but want to reuse the
+/// listener / serve_with_incoming_shutdown / settle-sleep boilerplate
+/// instead of reinventing it per test.
+pub async fn spawn_service(svc: Pkcs11ProxyService) -> (String, tokio::sync::watch::Sender<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = format!("http://127.0.0.1:{}", addr.port());
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let _ = Server::builder()
+            .add_service(pkcs11_proxy_ng_proto::Pkcs11ProxyServer::new(svc))
+            .serve_with_incoming_shutdown(incoming, async move {
+                let mut rx = server_shutdown;
+                let _ = rx.changed().await;
+            })
+            .await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (endpoint, shutdown_tx)
+}

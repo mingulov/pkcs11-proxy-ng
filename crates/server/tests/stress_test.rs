@@ -14,8 +14,7 @@ use pkcs11_proxy_ng_backend::mock::MockBackend;
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
 
-use tokio::net::TcpListener;
-use tonic::transport::Server;
+mod common_3x;
 
 fn mock_backend(slots: &[u64], mechs: &[u64]) -> MockBackend {
     MockBackend::new(
@@ -38,16 +37,11 @@ async fn mock_daemon_with_lease(
     ctx.populate_slots(&backend_trait).await.expect("populate_slots");
 
     let svc = Pkcs11ProxyService::insecure_for_tests(ctx.clone(), backend_trait);
+    let (endpoint, shutdown_tx) = common_3x::spawn_service(svc).await;
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let endpoint = format!("http://127.0.0.1:{}", addr.port());
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-    let evict_ctx = ctx.clone();
+    let evict_ctx = ctx;
     let evict_backend: Arc<dyn Pkcs11Backend> = backend;
-    let mut evict_shutdown = shutdown_rx.clone();
+    let mut evict_shutdown = shutdown_tx.subscribe();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(eviction_interval);
         loop {
@@ -60,19 +54,6 @@ async fn mock_daemon_with_lease(
         }
     });
 
-    let server_shutdown = shutdown_rx.clone();
-    tokio::spawn(async move {
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-        let _ = Server::builder()
-            .add_service(pkcs11_proxy_ng_proto::Pkcs11ProxyServer::new(svc))
-            .serve_with_incoming_shutdown(incoming, async move {
-                let mut rx = server_shutdown;
-                let _ = rx.changed().await;
-            })
-            .await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
     (endpoint, shutdown_tx)
 }
 

@@ -7,13 +7,10 @@ use pkcs11_proxy_ng::server::context_manager::{ClientContextId, ContextManager};
 use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::MockBackend;
-use pkcs11_proxy_ng_proto::{
-    GetSlotListRequest, OpenSessionRequest, Pkcs11ProxyClient, Pkcs11ProxyServer,
-};
+use pkcs11_proxy_ng_proto::{GetSlotListRequest, OpenSessionRequest, Pkcs11ProxyClient};
 use pkcs11_proxy_ng_types::*;
-use tokio::net::TcpListener;
-use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::Server;
+
+mod common_3x;
 
 const MTLS_IDENTITY: &str = "x509:issuer=CN=Root CA;subject=CN=client";
 
@@ -45,23 +42,7 @@ async fn start_daemon(
         pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource::load(None).unwrap(),
     );
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let endpoint = format!("http://127.0.0.1:{}", addr.port());
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-    tokio::spawn(async move {
-        let incoming = TcpListenerStream::new(listener);
-        let _ = Server::builder()
-            .add_service(Pkcs11ProxyServer::new(service))
-            .serve_with_incoming_shutdown(incoming, async move {
-                let mut shutdown_rx = shutdown_rx;
-                let _ = shutdown_rx.changed().await;
-            })
-            .await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (endpoint, shutdown_tx) = common_3x::spawn_service(service).await;
     (endpoint, context_id, shutdown_tx)
 }
 
