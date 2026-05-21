@@ -5,50 +5,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // FOLLOWUP-proto-bytes (deferred, multi-PR project)
     //
-    // Enabling `.bytes(".")` here would make prost decode `bytes`
-    // fields as `prost::bytes::Bytes` (Arc'd, zero-copy from the
-    // network buffer) instead of `Vec<u8>`. Per-call allocation cuts
-    // are real for big payloads (`C_Sign`/`C_Decrypt`/`CKA_VALUE`
-    // attributes, wrapped-key blobs) — potentially MB per call.
+    // Migrating selected `bytes` proto fields from `Vec<u8>` to
+    // `prost::bytes::Bytes` saves one full-payload memcpy on the
+    // gRPC decode path (tonic delivers a `Bytes` slice over the
+    // network receive buffer; prost can reference it directly).
+    // The win is meaningful for large payloads — `C_Sign` /
+    // `C_Decrypt` results, `CKA_VALUE` attribute reads, wrapped-key
+    // blobs — potentially MB per call. Negligible for small fields
+    // (IVs, nonces, AADs, handles, mechanism IDs).
     //
-    // Why this is deferred to a focused PR rather than done piecemeal:
+    // ------------------------------------------------------------------
+    // SECURITY: 11 `bytes` fields hold PIN / password material and are
+    // wrapped in `Zeroizing<Vec<u8>>` on the server, or live inside
+    // `ZeroizeOnDrop`-deriving Rust types in `crates/types`. The
+    // `bytes::Bytes` type has NO `Zeroize` impl, and its backing buffer
+    // lives in tonic's network receive pool that we cannot reach to
+    // wipe. These fields MUST stay `Vec<u8>` to preserve PIN-zeroization
+    // (see AGENTS.md §4 and the `panic = "abort"` ban):
     //
-    // 1. The benefit ONLY materialises if the native Rust mirrors in
-    //    `crates/types/src/{mechanism,attribute,output}.rs` ALSO
-    //    switch from `Vec<u8>` to `Bytes`. Without that cascade,
-    //    every From/TryFrom conversion site allocates a fresh
-    //    `Vec<u8>` via `.to_vec()` — same per-call allocation count
-    //    as today, just with extra `.into()` / `.to_vec()` noise.
+    //   * service.proto: LoginRequest.pin
+    //   * service.proto: LoginUserRequest.{pin, username}
+    //   * service.proto: InitTokenRequest.so_pin
+    //   * service.proto: InitPinRequest.pin
+    //   * service.proto: SetPinRequest.{old_pin, new_pin}
+    //   * mechanism_params.proto: PbeParams.password
+    //   * mechanism_params.proto: Pkcs5Pbkd2Params.password
+    //   * mechanism_params.proto: SkipjackPrivateWrapParams.password
+    //   * mechanism_params.proto: SkipjackRelayxParams.{old_password,
+    //                                                     new_password}
     //
-    // 2. Per-field `bytes_type` overrides (e.g. switching only the
-    //    `signature` / `plaintext` / `wrapped_key` fields) give
-    //    inconsistent native types across sibling fields. A handler
-    //    matching on one message would have `Bytes`-typed and
-    //    `Vec<u8>`-typed neighbours: harder to maintain than either
-    //    extreme, and confuses the audit signal for shim consumers
-    //    that match on attribute types uniformly.
+    // A global `.bytes(".")` flip would silently regress all of these.
+    // That is NOT the destination of this migration.
+    // ------------------------------------------------------------------
     //
-    // 3. Verified experimentally that the build.rs flip alone
-    //    produces 299 type-mismatch errors across
-    //    `crates/proto/src/convert/*`,
-    //    `crates/server/src/server/grpc_service/`, and `crates/shim/`,
-    //    every one a Vec↔Bytes mismatch. Total touched-file scope is
-    //    ~50 files.
+    // The right shape of the migration:
     //
-    // Recommended rollout (separate PR):
-    //   (a) Add a `Bytes`-using alias module in `crates/types`
-    //       behind a feature flag (off by default).
-    //   (b) Migrate one type at a time (e.g. `CkAttributeValue::Bytes`
-    //       first, then `mechanism::*::data/iv/aad` byte fields),
-    //       each as a self-contained commit that compiles and
-    //       passes the full test suite.
-    //   (c) Add the bench harness from
-    //       FOLLOWUP-shim-multiplex-bench to measure the per-payload-size
-    //       win.
-    //   (d) Flip `.bytes(".")` once every native consumer is on Bytes.
+    // 1. Add a `criterion` bench in `crates/proto` measuring decode-side
+    //    allocations at 4 KiB / 64 KiB / 1 MiB / 4 MiB payloads.
+    //    Commit baseline numbers BEFORE any flip. Without this, every
+    //    per-field migration is unverified.
     //
-    // Until that PR lands, keep `Vec<u8>` everywhere — the consistency
-    // is more valuable than a half-measure.
+    // 2. Migrate one field per PR via prost-build's per-field path
+    //    override:
+    //
+    //        tonic_prost_build::configure()
+    //            .bytes(&[".pkcs11_proxy_ng.v1.ByteOutputExactResponse.value",
+    //                     ...])
+    //            ...
+    //
+    //    NOT `.bytes(".")` — the destination is per-field forever.
+    //
+    // 3. Each per-field PR MUST land the full cascade together so the
+    //    client public API doesn't reintroduce the memcpy via
+    //    `Bytes::to_vec()` to preserve its `Vec<u8>` signature:
+    //
+    //    a. proto field override (this build.rs)
+    //    b. the corresponding `crates/types` field
+    //       (e.g. `CkOutputBufferResult.value`, `CkAttributeValue::Bytes`)
+    //    c. proto `From`/`TryFrom` conversion code
+    //    d. client public API return types
+    //       (e.g. `client/src/client/crypto/sign_verify.rs`)
+    //    e. shim helper signatures
+    //       (`shim/src/dispatch/general/helpers.rs::write_exact_output`)
+    //    f. all `vec![..]` test literals on that field
+    //       → `Bytes::from(vec![..])`
+    //
+    // Quick-win candidates (large payload, non-sensitive, isolated):
+    //
+    //   * `ByteOutputExactResponse.value` — covers Sign / Decrypt /
+    //     Digest / Encrypt / WrapKey and 13 more via the exact path.
+    //   * `AttributeQueryResult.value` — `C_GetAttributeValueExact`.
+    //
+    // Skip per the security list above. Skip every mechanism-param
+    // byte field that is an IV / nonce / AAD / short scalar — no win.
+    //
+    // Until that PR series lands, keep `Vec<u8>` everywhere — the
+    // consistency is more valuable than a half-measure.
     tonic_prost_build::configure().build_server(true).build_client(true).compile_protos(
         &[
             "../../proto/pkcs11-proxy-ng/v1/service.proto",
