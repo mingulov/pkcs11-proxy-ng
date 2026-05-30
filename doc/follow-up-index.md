@@ -8,21 +8,24 @@ phKey).
 - ✅ **Fixed & verified vs real backend:** A1 (in-flight-aware eviction), B1
   (generic Hash-ML-DSA/SLH-DSA), **B2 (message-init GCM/CCM param)**, **C2 (legacy
   PBE/PBA: registry gap + generic generate-key `pInitVector` writeback)**, **D1
-  (bouncyhsm 3.0-interface fallback — `C_SessionCancel` reachability)**. Plus the
-  earlier ML-DSA + TLS key-and-mac fixes.
+  (bouncyhsm 3.0-interface fallback — `C_SessionCancel` reachability)**, **D2
+  (AES-GMAC param: registry mis-classification)**. Plus the earlier ML-DSA + TLS
+  key-and-mac fixes. **Every mechanism-transparency regression from the sweep is
+  now fixed.**
 - 📐 **ADR + staged plan:** A2 (backend process isolation — ADR-0007). Multi-day;
-  not rushed into the correctness-critical path.
-- 🔍 **Root-caused + planned (multi-layer, deferred):** D2 (GMAC multipart).
+  not rushed into the correctness-critical path. The only remaining open work item.
 - 📌 **Deferred TODO:** A3 (multi-client concurrency validation round — after the
   mechanism work).
 - 📎 **Known-diff / optional:** C3 (wrap-key negative-path), C1 (unix socket — the
   user marked this review-later/optional).
 
-The fixes that were tractable were landed — including D1 (a one-spot
-interface-loading bug, not the operation-state rework first assumed) and B2 (the
-6-file message-init param change, verified on real kryoptic); the remaining
-mechanism items (C2/D2) and the architectural one (A2) are root-caused with a
-concrete plan rather than rushed — each is its own focused, reviewable change to
+Every mechanism-transparency regression the sweep surfaced has been fixed and
+verified against a real backend — including D1 (a one-spot interface-loading bug,
+not the operation-state rework first assumed), B2 (the 6-file message-init param
+change on kryoptic), C2 (PBE/PBA on NSS), and D2 (a one-line GMAC registry
+reclassification on bouncyhsm). The only remaining selected item is the
+architectural one (A2), root-caused with a concrete ADR rather than rushed — its
+own focused, reviewable change to
 the proxy's correctness-critical
 paths.
 
@@ -138,9 +141,10 @@ paths.
 
 opencryptoki-master and tpm2: **0 regressions, PASS** (the supervisor crash-recovery
 fix auto-recovers pkcsslotd/swtpm crashes). bouncyhsm: 832 regressions pre-fix,
-of which **513 (the largest cluster, D1) are now eliminated** by the
-3.0-interface fallback below; the rest are: ~87 GMAC multipart param (D2) and
-~12 MCT multiblock timeouts (known proxy-latency class).
+now reduced to ~12: **513 (the largest cluster, D1)** eliminated by the
+3.0-interface fallback (`C_SessionCancel`), and **87 (D2)** by the AES-GMAC
+registry fix below; the remaining ~12 are MCT multiblock timeouts (known
+proxy-latency class, a documented known-diff — not a transparency bug).
 
 - **D1. bouncyhsm AEAD `CKR_OPERATION_ACTIVE` cascade** — ✅ **FIXED (2026-05-30)**.
   Root cause (proven, not a pkcs11-check limitation): the daemon populated
@@ -166,8 +170,19 @@ of which **513 (the largest cluster, D1) are now eliminated** by the
   CCM decrypt slice `OPERATION_ACTIVE` 9→0 (== direct's 0). The 3.0 stubs
   BouncyHSM does *not* implement (message API, `C_LoginUser`) still return
   `FUNCTION_NOT_SUPPORTED`, matching direct — no new divergence.
-- **D2. Multipart MAC param** (~87 `CKR_MECHANISM_PARAM_INVALID`, e.g. `AES_GMAC`
-  multipart) — a mechanism-param/multipart gap. Medium.
+- **D2. AES-GMAC param** (87 `CKR_MECHANISM_PARAM_INVALID`) — ✅ **FIXED
+  (2026-05-30)**. Root cause: `CKM_AES_GMAC` (0x108E) was mis-listed as
+  **parameterless** in the registry, so `check_operation` locally rejected the
+  IV/nonce parameter (`MECHANISM_PARAM_INVALID`) in the shim before it ever
+  reached the backend. (Not multipart-specific — single-shot `test_aes_gmac`
+  failed too; the IV is only at init.) BouncyHSM is the only backend that
+  supports GMAC (kryoptic/others skip it), and it takes the bare IV bytes (the
+  spec models `CK_GCM_PARAMS`, but the proxy must forward what the native module
+  accepts). **Fix:** moved 0x108E from `parameterless` to the existing `iv`
+  shape — a length-preserving verbatim passthrough of the parameter buffer, so
+  the backend receives it byte-identically to a direct call (registry-only;
+  AGENTS.md §12.6). Verified on real bouncyhsm: GMAC 418/418 outcomes == direct
+  (411 pass + 7 skip), 0 regressions.
 - MCT multiblock timeouts (~12) — known proxy-latency, already a known-diff class.
 
 ## Separate repo — pkcs11-check
