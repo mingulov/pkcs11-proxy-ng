@@ -207,8 +207,16 @@ volumes:
 
 ### CKR_DEVICE_ERROR (0x30)
 
-**Most likely cause.** Transport-level failure to the daemon — pod
-restart, network partition, daemon overload (circuit-breaker trip).
+**Most likely cause — ambiguous, two sources.** Either (a) a transport-level
+failure to the daemon — pod restart, network partition, daemon overload
+(circuit-breaker trip); or (b) a **backend-reported error** forwarded unchanged.
+Some modules use `CKR_DEVICE_ERROR` as a catch-all: e.g. kryoptic returns it for its
+crypto-backend (OpenSSL) path, so a rejected `C_Verify`, an integrity failure, or an
+unmapped crypto error surfaces here too. The proxy does not invent a "network error"
+code (ADR-0003 §5), so this value alone cannot tell the two apart. **To distinguish:**
+a transport failure clears on the shim's automatic reconnect/retry; a backend error
+persists on retry. The authoritative "daemon restarted, re-initialize" signal is
+`CKR_CRYPTOKI_NOT_INITIALIZED` (below), **not** this code.
 
 **Triage.**
 
