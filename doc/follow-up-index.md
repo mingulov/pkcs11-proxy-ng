@@ -40,6 +40,28 @@ paths.
   worker opt-in first, then worker pool / per-token + reduced-privilege (seccomp/
   uid). Multi-day change — deliberately staged behind an ADR, not rushed.
 
+- **A3. Multi-client concurrency validation round** — 📌 **DEFERRED (TODO, revisit
+  after B2/C2/A2)**. The proxy is a many-clients-to-one-shared-backend service, but
+  the Docker sweep runs **one daemon per container** (isolation only) so it never
+  exercises that path against a REAL backend. Grounded state (2026-05-30 review):
+  multi-client support is architecturally solid and unit-tested — per-client UUID
+  `ClientContextId` with isolated virtual→backend handle/session maps, login state,
+  and in-flight counter (no cross-client handle collisions); backend calls run
+  **concurrently** (tokio blocking pool, module loaded `CKF_OS_LOCKING_OK`, no global
+  backend mutex). Existing tests: `crates/server/tests/stress_test.rs`
+  (8-client sign, 6-client encrypt/decrypt on MockBackend) +
+  `concurrency_and_recovery_test.rs` (cross-client handle isolation; `#[ignore]`'d
+  8-client SoftHSM2). **Real gaps:** (1) no end-to-end multi-client run through the
+  harness against a real backend (N shims → 1 daemon → 1 backend), and (2) no
+  fairness/exhaustion tests for the GLOBAL knobs — the 200-call circuit breaker
+  (`IN_FLIGHT`) and 1000-context cap are process-global, so one aggressive client
+  can starve others. **Leading approach (to discuss later):** hybrid — replay the
+  transparency corpus under a shared daemon via `pytest-xdist -n N` (each worker =
+  a separate client process; diff each worker vs the direct baseline to catch
+  cross-client state corruption across all mechanisms) PLUS a small adversarial
+  flood-vs-victim probe for breaker/context-cap fairness. Not started — mechanisms
+  first.
+
 ## Tier B — mechanism-transparency completeness
 
 - **B1. Generic `CKM_HASH_ML_DSA` / `CKM_HASH_SLH_DSA`** — ✅ **FIXED (2026-05-30)**.
