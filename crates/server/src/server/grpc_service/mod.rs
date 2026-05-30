@@ -236,6 +236,16 @@ macro_rules! impl_proxy_service {
                     &self,
                     request: Request<pkcs11_proxy_ng_proto::$request>,
                 ) -> Result<Response<pkcs11_proxy_ng_proto::$response>, Status> {
+                    // Hold the context un-evictable for the whole operation so a
+                    // long backend call (keygen/derive on a slow HSM, larger than
+                    // the lease) is never reaped MID-CALL. Every dispatched
+                    // request carries client_context_id; if the context is already
+                    // gone the guard is None and the handler returns the right CKR.
+                    let _op = self.context_manager.begin_operation(
+                        &$crate::server::context_manager::ClientContextId(
+                            request.get_ref().client_context_id.clone(),
+                        ),
+                    );
                     $module(&self.context_manager, &self.backend, request).await
                 }
             )+

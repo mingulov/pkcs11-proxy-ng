@@ -6,11 +6,11 @@ phKey). These are the remaining items.
 
 ## Tier A — real correctness / robustness (production-relevant)
 
-- **A1. In-flight-aware context eviction** — `follow-up-inflight-eviction.md`.
-  A single backend op longer than `lease_seconds` (DH param-gen ~37s, large
-  RSA/DH keygen) is evicted MID-CALL → `CKR_SESSION_HANDLE_INVALID`. Breaks real
-  slow HSM ops. Contained fix (per-context in-flight guard; eviction skips busy
-  contexts). **Highest priority** — affects normal production, not just tests.
+- **A1. In-flight-aware context eviction** — ✅ **FIXED (2026-05-30)**.
+  `follow-up-inflight-eviction.md`. Per-context `in_flight` counter +
+  `OperationGuard` taken once in the gRPC dispatch macro; eviction skips busy
+  contexts. Verified: DH param-gen 2 failed → 6 passed at the default lease=30
+  (plus a unit test). No per-handler churn.
 
 - **A2. Backend process isolation + reduced-privilege worker** —
   `follow-up-backend-crash-isolation.md` (incl. full feasibility/gap analysis).
