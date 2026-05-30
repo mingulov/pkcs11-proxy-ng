@@ -454,6 +454,20 @@ impl FfiMechanism {
                     additional_derived_keys: derived_keys.output_keys(),
                 }))
             }
+            FfiParamBacking::Pbe(pbe, init_vector, _password, _salt)
+                if !pbe.pInitVector.is_null() =>
+            {
+                // CK_PBE_PARAMS.pInitVector is OUT — the HSM writes the generated
+                // 8-byte IV here during PBE key generation. Surface ONLY the IV;
+                // the password and salt are caller-supplied secrets/inputs and
+                // must never be echoed back over the wire (AGENTS.md §4).
+                Some(CkMechanismParams::Pbe(PbeParams {
+                    init_vector: init_vector.clone(),
+                    password: Vec::new(),
+                    salt: Vec::new(),
+                    iteration: pbe.ulIteration as u64,
+                }))
+            }
             _ => None,
         }
     }

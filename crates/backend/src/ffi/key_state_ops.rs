@@ -203,6 +203,30 @@ impl FfiBackend {
         )
     }
 
+    /// `C_GenerateKey` capturing HSM-written mechanism params (e.g. the
+    /// generated `CK_PBE_PARAMS.pInitVector`). Mirrors `ffi_derive_key_with_output`.
+    pub(super) fn ffi_generate_key_with_output(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        template: &[CkAttribute],
+    ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
+        let ffi_attrs = FfiAttrs::from_slice(template);
+        Self::call_object_with_mechanism_output(
+            unsafe { (*self.func_list).C_GenerateKey },
+            mechanism,
+            |function, mech, handle| unsafe {
+                function(
+                    Self::session_handle(session),
+                    mech,
+                    Self::ffi_attr_ptr(&ffi_attrs),
+                    Self::ffi_attr_len(&ffi_attrs),
+                    handle,
+                )
+            },
+        )
+    }
+
     pub(super) fn ffi_generate_key_pair(
         &self,
         session: CkSessionHandle,

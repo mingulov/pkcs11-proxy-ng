@@ -258,6 +258,9 @@ fn backend_methods_have_proto_rpcs() {
         "wrap_key_exact_with_output",
         "derive_key_with_output",
         "derive_key_with_output_result",
+        // Reuses the GenerateKey RPC, surfacing HSM-written mechanism params
+        // (CK_PBE_PARAMS.pInitVector) via GenerateKeyResponse.mechanism_out.
+        "generate_key_with_output",
         "get_operation_state_exact",
         // Helper used by the simple Encrypt/Decrypt + Update/Final RPCs to
         // surface HSM-mutated mechanism params. Not its own RPC; populates

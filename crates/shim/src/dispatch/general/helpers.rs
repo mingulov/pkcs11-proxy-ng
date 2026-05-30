@@ -2810,6 +2810,25 @@ pub(crate) unsafe fn write_mechanism_output_params(
                 );
             }
         }
+        CkMechanismParams::Pbe(pbe_out) => {
+            // CK_PBE_PARAMS.pInitVector is OUT — the HSM writes the generated
+            // 8-byte IV here during PBE key generation. Only the IV is written
+            // back; pPassword/pSalt are caller-supplied inputs and are left
+            // untouched (the backend never echoes them back).
+            if mechanism.ulParameterLen < std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG
+                || mechanism.pParameter.is_null()
+            {
+                return;
+            }
+            let pbe = unsafe { &*(mechanism.pParameter as *const CK_PBE_PARAMS) };
+            if !pbe.pInitVector.is_null() && !pbe_out.init_vector.is_empty() {
+                // PBE IV is 8 bytes; copy no more than the caller's buffer holds.
+                let n = pbe_out.init_vector.len().min(8);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(pbe_out.init_vector.as_ptr(), pbe.pInitVector, n);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -5434,6 +5453,79 @@ mod message_parameter_tests {
 
         assert_eq!(version.major, 3);
         assert_eq!(version.minor, 3);
+    }
+
+    #[test]
+    fn write_mechanism_output_params_writes_pbe_init_vector() {
+        // C2: the HSM-generated CK_PBE_PARAMS.pInitVector must be written back
+        // into the caller's buffer after PBE key generation. Only the IV is
+        // written; pPassword/pSalt are left untouched.
+        use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, PbeParams};
+
+        let mut iv_buf = [0u8; 8];
+        let password = *b"secret";
+        let salt = *b"saltsalt";
+        let mut params = CK_PBE_PARAMS {
+            pInitVector: iv_buf.as_mut_ptr(),
+            pPassword: password.as_ptr() as *mut _,
+            ulPasswordLen: password.len() as CK_ULONG,
+            pSalt: salt.as_ptr() as *mut _,
+            ulSaltLen: salt.len() as CK_ULONG,
+            ulIteration: 1000,
+        };
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CkMechanismType::PBE_SHA1_DES3_EDE_CBC.0,
+            pParameter: &mut params as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
+        };
+
+        let generated_iv = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let mech_out = CkMechanismParams::Pbe(PbeParams {
+            init_vector: generated_iv.clone(),
+            password: Vec::new(),
+            salt: Vec::new(),
+            iteration: 1000,
+        });
+
+        unsafe {
+            super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        }
+
+        // The generated IV landed in the caller's buffer; password/salt intact.
+        assert_eq!(&iv_buf[..], generated_iv.as_slice());
+        assert_eq!(&password[..], b"secret");
+        assert_eq!(&salt[..], b"saltsalt");
+    }
+
+    #[test]
+    fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
+        // PBA (HMAC key gen) passes pInitVector = NULL — the writeback must be a
+        // no-op rather than dereferencing NULL.
+        use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, PbeParams};
+
+        let mut params = CK_PBE_PARAMS {
+            pInitVector: std::ptr::null_mut(),
+            pPassword: std::ptr::null_mut(),
+            ulPasswordLen: 0,
+            pSalt: std::ptr::null_mut(),
+            ulSaltLen: 0,
+            ulIteration: 1,
+        };
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CkMechanismType::PBA_SHA1_WITH_SHA1_HMAC.0,
+            pParameter: &mut params as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
+        };
+        let mech_out = CkMechanismParams::Pbe(PbeParams {
+            init_vector: vec![9u8; 8],
+            password: Vec::new(),
+            salt: Vec::new(),
+            iteration: 1,
+        });
+        // Must not panic / deref NULL.
+        unsafe {
+            super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        }
     }
 
     #[test]

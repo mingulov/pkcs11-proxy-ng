@@ -282,6 +282,20 @@ pub trait Pkcs11Backend: Send + Sync {
         mechanism: &CkMechanism,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle>;
+
+    /// `C_GenerateKey` returning both the key handle AND any mechanism-param
+    /// mutations the HSM performed during the call — notably the generated
+    /// `CK_PBE_PARAMS.pInitVector` for PBE key generation. Default delegates to
+    /// `generate_key` and reports no mutation, preserving prior behaviour for
+    /// backends that don't implement it. Mirrors `derive_key_with_output`.
+    fn generate_key_with_output(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        template: &[CkAttribute],
+    ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
+        self.generate_key(session, mechanism, template).map(|h| (h, None))
+    }
     fn generate_key_pair(
         &self,
         session: CkSessionHandle,

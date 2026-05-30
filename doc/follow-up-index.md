@@ -6,13 +6,13 @@ phKey).
 
 **Status (2026-05-30 follow-up session):**
 - ✅ **Fixed & verified vs real backend:** A1 (in-flight-aware eviction), B1
-  (generic Hash-ML-DSA/SLH-DSA), **B2 (message-init GCM/CCM param)**, **D1
+  (generic Hash-ML-DSA/SLH-DSA), **B2 (message-init GCM/CCM param)**, **C2 (legacy
+  PBE/PBA: registry gap + generic generate-key `pInitVector` writeback)**, **D1
   (bouncyhsm 3.0-interface fallback — `C_SessionCancel` reachability)**. Plus the
   earlier ML-DSA + TLS key-and-mac fixes.
 - 📐 **ADR + staged plan:** A2 (backend process isolation — ADR-0007). Multi-day;
   not rushed into the correctness-critical path.
-- 🔍 **Root-caused + planned (multi-layer, deferred):** C2 (PBE writeback),
-  D2 (GMAC multipart).
+- 🔍 **Root-caused + planned (multi-layer, deferred):** D2 (GMAC multipart).
 - 📌 **Deferred TODO:** A3 (multi-client concurrency validation round — after the
   mechanism work).
 - 📎 **Known-diff / optional:** C3 (wrap-key negative-path), C1 (unix socket — the
@@ -111,9 +111,23 @@ paths.
   prevented the nss cascade, which was a supervisor crash-recovery bug). Low
   urgency.
 
-- **C2. Legacy PBE `pInitVector` writeback** — `C_GenerateKey` + `CK_PBE_PARAMS`
-  doesn't propagate the generated init vector (4 nss tests). Deprecated mechanism;
-  multi-layer like the SSL3/TLS key-mat writeback. Low.
+- **C2. Legacy PBE `CK_PBE_PARAMS` (4 nss tests)** — ✅ **FIXED (2026-05-30)**.
+  Two distinct gaps, not one: (A) `CKM_PBA_SHA1_WITH_SHA1_HMAC` (0x03C0) was not
+  mapped to the `pbe` param shape → `CKR_MECHANISM_PARAM_INVALID` (2 tests). One-
+  line registry add (it reuses `CK_PBE_PARAMS`; AGENTS.md §12.6). (B) the
+  generated `CK_PBE_PARAMS.pInitVector` (spec: "receives the 8-byte IV") wasn't
+  written back after `C_GenerateKey` (2 tests). `C_GenerateKey` had no
+  mechanism-output path (unlike derive), so mirrored the `derive_key_with_output`
+  precedent: `GenerateKeyResponse.mechanism_out` + a default-delegating
+  `generate_key_with_output` trait method (FfiBackend reuses
+  `call_object_with_mechanism_output`) + a client `generate_key_with_mechanism_out`
+  + shim writeback via the existing generic `write_mechanism_output_params`. Added
+  the missing `Pbe` arms to `output_params()` (backend) and
+  `write_mechanism_output_params()` (shim) — the IV ONLY; the password/salt are
+  never echoed back (AGENTS.md §4). This makes generate-key writeback **generic**:
+  any future output-param keygen mechanism needs only an arm, no new RPC plumbing.
+  Verified: 2 shim writeback unit tests + **real NSS** — all 4 tests pass,
+  `test_pbe.py` 22/23 pass + 1 skip == direct, 0 regressions.
 
 - **C3. softhsm2 wrap-key error code** — undersized AES wrap key →
   `CKR_GENERAL_ERROR` (proxied) vs `CKR_WRAPPING_KEY_SIZE_RANGE` (direct). Both

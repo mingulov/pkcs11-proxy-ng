@@ -664,6 +664,15 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_generate_key(session, mechanism, template)
     }
 
+    fn generate_key_with_output(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        template: &[CkAttribute],
+    ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
+        self.ffi_generate_key_with_output(session, mechanism, template)
+    }
+
     fn create_object(
         &self,
         session: CkSessionHandle,

@@ -796,6 +796,10 @@ message GenerateKeyRequest {
 message GenerateKeyResponse {
   uint64 ck_rv = 1;
   uint64 key_handle = 2;
+  // HSM-written mechanism param mutations (e.g. CK_PBE_PARAMS.pInitVector
+  // generated during PBE key generation). Absent when the mechanism has no
+  // output params. Mirrors DeriveKeyResponse.mechanism_out.
+  Mechanism mechanism_out = 3;
 }
 
 message GenerateKeyPairRequest {

@@ -173,9 +173,19 @@ pub unsafe extern "C" fn c_generate_key(
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
-        match with_client!(client => client.generate_key(CkSessionHandle(h_session), &mech, &template))
-        {
-            Ok(handle) => {
+        match with_client!(client => client.generate_key_with_mechanism_out(
+            CkSessionHandle(h_session),
+            &mech,
+            &template,
+        )) {
+            Ok((handle, mechanism_out)) => {
+                // Write any HSM-mutated mechanism field back into the caller's
+                // CK_MECHANISM — for PBE key generation this is the generated
+                // CK_PBE_PARAMS.pInitVector. A no-op for mechanisms without
+                // output params.
+                if let Some(params) = mechanism_out {
+                    unsafe { write_mechanism_output_params(p_mechanism, &params) };
+                }
                 unsafe { write_object_handle_output(handle, ph_key) };
                 rv_ok()
             }
