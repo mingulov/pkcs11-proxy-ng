@@ -2,7 +2,22 @@
 
 Prioritized by impact. The mechanism-transparency regressions found in the sweep
 were FIXED (ML-DSA/SLH-DSA hash-variant context params; SSL3/TLS key-and-mac NULL
-phKey). These are the remaining items.
+phKey).
+
+**Status (2026-05-30 follow-up session):**
+- ✅ **Fixed & verified vs real backend:** A1 (in-flight-aware eviction), B1
+  (generic Hash-ML-DSA/SLH-DSA). Plus the earlier ML-DSA + TLS key-and-mac fixes.
+- 📐 **ADR + staged plan:** A2 (backend process isolation — ADR-0007). Multi-day;
+  not rushed into the correctness-critical path.
+- 🔍 **Root-caused + planned (multi-layer, deferred):** B2 (message-init GCM param),
+  C2 (PBE writeback), D1 (bouncyhsm operation-active), D2 (GMAC multipart).
+- 📎 **Known-diff / optional:** C3 (wrap-key negative-path), C1 (unix socket — the
+  user marked this review-later/optional).
+
+The fixes that were tractable and low-risk were landed; the substantial mechanism/
+operation-state changes (B2/C2/D1) and the architectural one (A2) are root-caused
+with a concrete plan rather than rushed — each is its own focused, reviewable
+change to the proxy's correctness-critical paths.
 
 ## Tier A — real correctness / robustness (production-relevant)
 
@@ -12,12 +27,14 @@ phKey). These are the remaining items.
   contexts. Verified: DH param-gen 2 failed → 6 passed at the default lease=30
   (plus a unit test). No per-handler churn.
 
-- **A2. Backend process isolation + reduced-privilege worker** —
-  `follow-up-backend-crash-isolation.md` (incl. full feasibility/gap analysis).
-  Backend runs in-process, so any client's crash-input downs the shared daemon for
-  ALL clients. Move the backend into a worker subprocess (the `Pkcs11Backend` trait
-  is the ready-made seam) so a crash kills only the worker; bonus privilege
-  separation (seccomp/uid). ADR + staged rollout. Big robustness + security win.
+- **A2. Backend process isolation + reduced-privilege worker** — 📐 **ADR written
+  (ADR-0007, root `doc/adr/`)**; implementation staged. `follow-up-backend-crash-
+  isolation.md` has the full feasibility/gap analysis. Backend runs in-process, so
+  any client's crash-input downs the shared daemon for ALL clients. Add an
+  `IpcBackend` (the `Pkcs11Backend` trait is the ready-made seam) forwarding to a
+  worker subprocess hosting `FfiBackend`; a crash kills only the worker. Single-
+  worker opt-in first, then worker pool / per-token + reduced-privilege (seccomp/
+  uid). Multi-day change — deliberately staged behind an ADR, not rushed.
 
 ## Tier B — mechanism-transparency completeness
 
@@ -29,9 +46,18 @@ phKey). These are the remaining items.
   direct exactly (25/9/8); pure ML-DSA unchanged (263/72/80). Round-trip + FFI
   unit tests added.
 
-- **B2. Message-based API remoting** — `C_MessageEncryptInit` etc. with
-  `CK_GCM_MESSAGE_PARAMS` are not remoted (known gap on kryoptic AND nss message
-  tests). Medium.
+- **B2. Message-based API INIT param** — 🔍 **root-caused (2026-05-30), planned**.
+  The message API itself IS remoted (`message_ops.rs` has GCM/CCM message params
+  + IV writeback). The gap: `C_MessageEncryptInit(CKM_AES_GCM)` is passed a
+  `CK_GCM_MESSAGE_PARAMS` in its *mechanism* (via `mech_gcm_message`), but the shim
+  reads the mechanism with the CLASSIC `gcm` shape (`CK_GCM_PARAMS`), so it ships
+  the wrong struct → backend `CKR_MECHANISM_PARAM_INVALID`. Fix = represent the
+  message param in the mechanism path: add `CkMechanismParams::GcmMessage` /
+  `CcmMessage` (reuse the existing `GcmMessageParams`/`CcmMessageParams` types +
+  proto), have the message-init dispatch read the message shape, and reconstruct
+  `CK_GCM_MESSAGE_PARAMS` in `mechanism_to_ffi`. Multi-layer (touches the
+  correctness-critical param path) — niche v3.0 feature, planned not yet done.
+  Related: D2 (GMAC multipart) shares the message/multipart param surface.
 
 ## Tier C — minor / optional
 
