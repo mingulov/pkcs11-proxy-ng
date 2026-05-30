@@ -44,6 +44,131 @@ macro_rules! two_call_message {
     }};
 }
 
+/// Returns a writable pointer into `buf`, or NULL for an empty buffer (matching
+/// the `call_with_*_message_param` convention).
+fn message_buf_ptr(buf: &mut [u8]) -> *mut cryptoki_sys::CK_BYTE {
+    if buf.is_empty() { std::ptr::null_mut() } else { buf.as_mut_ptr() }
+}
+
+/// Copy `src` into a buffer of exactly `len` bytes (zero-padded / truncated),
+/// so HSM-writable fields (tag/MAC) always have room for the token's output.
+fn message_buf_sized(src: &[u8], len: usize) -> Vec<u8> {
+    if src.len() >= len {
+        src.to_vec()
+    } else {
+        let mut buf = vec![0u8; len];
+        buf[..src.len()].copy_from_slice(src);
+        buf
+    }
+}
+
+/// Owns a reconstructed `CK_*_MESSAGE_PARAMS` C struct and its backing
+/// IV/tag/nonce/MAC buffers so that a `CK_MECHANISM` can reference them across a
+/// `C_Message{Encrypt,Decrypt}Init` FFI call. The params struct is boxed (stable
+/// heap address) and the buffers live in `_buffers`; both survive a move of this
+/// holder, so the raw pointers stored in `ck_mechanism` and the params struct
+/// stay valid for as long as the holder is alive.
+struct MessageInitMechanism {
+    ck_mechanism: cryptoki_sys::CK_MECHANISM,
+    _gcm: Option<Box<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>>,
+    _ccm: Option<Box<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>>,
+    _salsa: Option<Box<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>>,
+    _buffers: Vec<Vec<u8>>,
+}
+
+/// Build a `CK_MECHANISM` pointing at a boxed `T` (stable heap address).
+fn message_mechanism_for<T>(
+    mech_type: cryptoki_sys::CK_MECHANISM_TYPE,
+    boxed: &mut Box<T>,
+) -> cryptoki_sys::CK_MECHANISM {
+    cryptoki_sys::CK_MECHANISM {
+        mechanism: mech_type,
+        pParameter: (&mut **boxed as *mut T).cast(),
+        ulParameterLen: std::mem::size_of::<T>() as cryptoki_sys::CK_ULONG,
+    }
+}
+
+/// Reconstruct an AEAD message-based init mechanism (`CK_GCM_MESSAGE_PARAMS` /
+/// `CK_CCM_MESSAGE_PARAMS` / `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`) from the
+/// structured `MessageParameter` carried alongside a message-init request.
+///
+/// The message API passes these params to `C_Message{Encrypt,Decrypt}Init` (not
+/// to the per-message call), but the same mechanism type (`CKM_AES_GCM`, …) is
+/// also used by classic single-shot encryption, so the param SHAPE cannot be
+/// inferred from the mechanism type alone — the shim flags the message variant
+/// by sending it through this dedicated init field. Field handling mirrors the
+/// `call_with_*_message_param` helpers; the difference is that init keeps the
+/// struct alive instead of running an output operation.
+fn build_message_init_mechanism(
+    mech_type: cryptoki_sys::CK_MECHANISM_TYPE,
+    param: &MessageParameter,
+) -> CkResult<MessageInitMechanism> {
+    match param {
+        MessageParameter::GcmMessage(gcm) => {
+            let mut iv = gcm.iv.clone();
+            let mut tag = message_buf_sized(&gcm.tag, (gcm.tag_bits as usize).div_ceil(8));
+            let mut boxed = Box::new(cryptoki_sys::CK_GCM_MESSAGE_PARAMS {
+                pIv: message_buf_ptr(&mut iv),
+                ulIvLen: iv.len() as cryptoki_sys::CK_ULONG,
+                ulIvFixedBits: gcm.iv_fixed_bits as cryptoki_sys::CK_ULONG,
+                ivGenerator: gcm.iv_generator as cryptoki_sys::CK_ULONG,
+                pTag: message_buf_ptr(&mut tag),
+                ulTagBits: gcm.tag_bits as cryptoki_sys::CK_ULONG,
+            });
+            let ck_mechanism = message_mechanism_for(mech_type, &mut boxed);
+            Ok(MessageInitMechanism {
+                ck_mechanism,
+                _gcm: Some(boxed),
+                _ccm: None,
+                _salsa: None,
+                _buffers: vec![iv, tag],
+            })
+        }
+        MessageParameter::CcmMessage(ccm) => {
+            let mut nonce = ccm.nonce.clone();
+            let mut mac = message_buf_sized(&ccm.mac, ccm.mac_len as usize);
+            let mut boxed = Box::new(cryptoki_sys::CK_CCM_MESSAGE_PARAMS {
+                ulDataLen: ccm.data_len as cryptoki_sys::CK_ULONG,
+                pNonce: message_buf_ptr(&mut nonce),
+                ulNonceLen: nonce.len() as cryptoki_sys::CK_ULONG,
+                ulNonceFixedBits: ccm.nonce_fixed_bits as cryptoki_sys::CK_ULONG,
+                nonceGenerator: ccm.nonce_generator as cryptoki_sys::CK_GENERATOR_FUNCTION,
+                pMAC: message_buf_ptr(&mut mac),
+                ulMACLen: ccm.mac_len as cryptoki_sys::CK_ULONG,
+            });
+            let ck_mechanism = message_mechanism_for(mech_type, &mut boxed);
+            Ok(MessageInitMechanism {
+                ck_mechanism,
+                _gcm: None,
+                _ccm: Some(boxed),
+                _salsa: None,
+                _buffers: vec![nonce, mac],
+            })
+        }
+        MessageParameter::SalaChacha(s) => {
+            let mut nonce = s.nonce.clone();
+            // Poly1305 tag is always 16 bytes.
+            let mut tag = message_buf_sized(&s.tag, 16);
+            let mut boxed = Box::new(cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS {
+                pNonce: message_buf_ptr(&mut nonce),
+                ulNonceLen: nonce.len() as cryptoki_sys::CK_ULONG,
+                pTag: message_buf_ptr(&mut tag),
+            });
+            let ck_mechanism = message_mechanism_for(mech_type, &mut boxed);
+            Ok(MessageInitMechanism {
+                ck_mechanism,
+                _gcm: None,
+                _ccm: None,
+                _salsa: Some(boxed),
+                _buffers: vec![nonce, tag],
+            })
+        }
+        // Raw bytes can carry an unknown layout (possibly embedded pointers);
+        // refuse rather than ship something the backend can't safely interpret.
+        MessageParameter::Raw(_) => Err(CkRv::MECHANISM_PARAM_INVALID),
+    }
+}
+
 impl FfiBackend {
     // --- Message Encrypt ---
 
@@ -51,10 +176,24 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
+        init_param: Option<&MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
-        match mechanism {
-            Some(mech) => {
+        match (mechanism, init_param) {
+            // AEAD message-based init: reconstruct CK_*_MESSAGE_PARAMS.
+            (Some(mech), Some(param)) => {
+                let mech_type = mech.mechanism_type.0 as cryptoki_sys::CK_MECHANISM_TYPE;
+                let mut init_mech = build_message_init_mechanism(mech_type, param)?;
+                call_3x_fn!(
+                    self,
+                    func_list_3_0,
+                    C_MessageEncryptInit,
+                    Self::session_handle(session),
+                    &mut init_mech.ck_mechanism as *mut cryptoki_sys::CK_MECHANISM,
+                    Self::object_handle(key)
+                )
+            }
+            (Some(mech), None) => {
                 let mut ffi_mech = mechanism_to_ffi(mech)?;
                 call_3x_fn!(
                     self,
@@ -65,7 +204,7 @@ impl FfiBackend {
                     Self::object_handle(key)
                 )
             }
-            None => {
+            (None, _) => {
                 // NULL mechanism = cancel active message-encrypt state
                 call_3x_fn!(
                     self,
@@ -89,10 +228,24 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
+        init_param: Option<&MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
-        match mechanism {
-            Some(mech) => {
+        match (mechanism, init_param) {
+            // AEAD message-based init: reconstruct CK_*_MESSAGE_PARAMS.
+            (Some(mech), Some(param)) => {
+                let mech_type = mech.mechanism_type.0 as cryptoki_sys::CK_MECHANISM_TYPE;
+                let mut init_mech = build_message_init_mechanism(mech_type, param)?;
+                call_3x_fn!(
+                    self,
+                    func_list_3_0,
+                    C_MessageDecryptInit,
+                    Self::session_handle(session),
+                    &mut init_mech.ck_mechanism as *mut cryptoki_sys::CK_MECHANISM,
+                    Self::object_handle(key)
+                )
+            }
+            (Some(mech), None) => {
                 let mut ffi_mech = mechanism_to_ffi(mech)?;
                 call_3x_fn!(
                     self,
@@ -103,7 +256,7 @@ impl FfiBackend {
                     Self::object_handle(key)
                 )
             }
-            None => {
+            (None, _) => {
                 // NULL mechanism = cancel active message-decrypt state
                 call_3x_fn!(
                     self,
@@ -1416,5 +1569,104 @@ impl FfiBackend {
                 ),
             _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// B2: an AEAD message-based init param (`CK_GCM_MESSAGE_PARAMS`) must be
+    /// reconstructed into a `CK_MECHANISM` carrying the real message-params C
+    /// struct — not the classic `CK_GCM_PARAMS` the registry would pick for the
+    /// shared `CKM_AES_GCM` type. Verifies the struct layout, size, and that the
+    /// mechanism points at it with HSM-writable tag room.
+    #[test]
+    fn gcm_message_init_reconstructs_message_params_struct() {
+        let iv = vec![0x11u8; 12];
+        let param = MessageParameter::GcmMessage(GcmMessageParams {
+            iv: iv.clone(),
+            iv_fixed_bits: 0,
+            iv_generator: 0,
+            tag: Vec::new(), // empty input tag — backend writes it
+            tag_bits: 128,
+        });
+
+        let init = build_message_init_mechanism(
+            cryptoki_sys::CKM_AES_GCM as cryptoki_sys::CK_MECHANISM_TYPE,
+            &param,
+        )
+        .expect("GCM message params reconstruct");
+
+        assert_eq!(
+            init.ck_mechanism.mechanism,
+            cryptoki_sys::CKM_AES_GCM as cryptoki_sys::CK_MECHANISM_TYPE
+        );
+        assert_eq!(
+            init.ck_mechanism.ulParameterLen as usize,
+            std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>(),
+            "init must advertise the MESSAGE params size, not classic CK_GCM_PARAMS",
+        );
+        assert!(!init.ck_mechanism.pParameter.is_null());
+
+        // The mechanism param must be the reconstructed message struct.
+        let p = unsafe {
+            &*(init.ck_mechanism.pParameter as *const cryptoki_sys::CK_GCM_MESSAGE_PARAMS)
+        };
+        assert_eq!(p.ulIvLen as usize, iv.len());
+        assert_eq!(p.ulTagBits, 128);
+        assert!(!p.pIv.is_null());
+        // Tag buffer is zero-padded to ceil(tag_bits/8) so the token has room.
+        assert!(!p.pTag.is_null());
+        let ivs = unsafe { std::slice::from_raw_parts(p.pIv, p.ulIvLen as usize) };
+        assert_eq!(ivs, iv.as_slice());
+    }
+
+    /// CCM mirrors GCM: a `CK_CCM_MESSAGE_PARAMS` must round-trip through the
+    /// reconstruction with its `ulDataLen` and MAC room intact.
+    #[test]
+    fn ccm_message_init_reconstructs_message_params_struct() {
+        let nonce = vec![0x22u8; 13];
+        let param = MessageParameter::CcmMessage(CcmMessageParams {
+            data_len: 64,
+            nonce: nonce.clone(),
+            nonce_fixed_bits: 0,
+            nonce_generator: 0,
+            mac: Vec::new(),
+            mac_len: 16,
+        });
+
+        let init = build_message_init_mechanism(
+            cryptoki_sys::CKM_AES_CCM as cryptoki_sys::CK_MECHANISM_TYPE,
+            &param,
+        )
+        .expect("CCM message params reconstruct");
+
+        assert_eq!(
+            init.ck_mechanism.ulParameterLen as usize,
+            std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>(),
+        );
+        let p = unsafe {
+            &*(init.ck_mechanism.pParameter as *const cryptoki_sys::CK_CCM_MESSAGE_PARAMS)
+        };
+        assert_eq!(p.ulDataLen, 64);
+        assert_eq!(p.ulNonceLen as usize, nonce.len());
+        assert_eq!(p.ulMACLen, 16);
+        assert!(!p.pMAC.is_null(), "MAC buffer must be allocated for the token to write");
+    }
+
+    /// Raw (unrecognised) message params can't be safely reconstructed into a
+    /// typed struct and must be rejected rather than shipped blindly.
+    #[test]
+    fn raw_message_init_param_is_rejected() {
+        let param = MessageParameter::Raw(vec![0u8; 8]);
+        let result = build_message_init_mechanism(
+            cryptoki_sys::CKM_AES_GCM as cryptoki_sys::CK_MECHANISM_TYPE,
+            &param,
+        );
+        assert!(
+            matches!(result, Err(CkRv::MECHANISM_PARAM_INVALID)),
+            "raw message param must be rejected",
+        );
     }
 }

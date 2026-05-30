@@ -1775,6 +1775,7 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
+        _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let state = self.state.lock().unwrap();
@@ -1838,6 +1839,7 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
+        _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let state = self.state.lock().unwrap();

@@ -1053,6 +1053,10 @@ message MessageEncryptInitRequest {
   uint64 session_handle = 2;
   optional Mechanism mechanism = 3;  // absent = cancel active state
   uint64 key_handle = 4;
+  // AEAD message-based init params (CK_GCM/CCM_MESSAGE_PARAMS). When present,
+  // `mechanism` carries only the type and this carries the message params;
+  // the backend reconstructs the *_MESSAGE_PARAMS struct for C_MessageEncryptInit.
+  optional MessageParameter init_message_parameter = 5;
 }
 message MessageEncryptInitResponse { uint64 ck_rv = 1; }
 
@@ -1109,6 +1113,9 @@ message MessageDecryptInitRequest {
   uint64 session_handle = 2;
   optional Mechanism mechanism = 3;  // absent = cancel active state
   uint64 key_handle = 4;
+  // AEAD message-based init params (CK_GCM/CCM_MESSAGE_PARAMS); see
+  // MessageEncryptInitRequest.init_message_parameter.
+  optional MessageParameter init_message_parameter = 5;
 }
 message MessageDecryptInitResponse { uint64 ck_rv = 1; }
 

@@ -746,6 +746,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _mechanism: Option<&CkMechanism>,
+        _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -790,6 +791,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _mechanism: Option<&CkMechanism>,
+        _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _key: CkObjectHandle,
     ) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)

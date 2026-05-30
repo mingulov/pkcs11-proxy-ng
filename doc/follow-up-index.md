@@ -6,21 +6,24 @@ phKey).
 
 **Status (2026-05-30 follow-up session):**
 - ✅ **Fixed & verified vs real backend:** A1 (in-flight-aware eviction), B1
-  (generic Hash-ML-DSA/SLH-DSA), **D1 (bouncyhsm 3.0-interface fallback —
-  `C_SessionCancel` reachability)**. Plus the earlier ML-DSA + TLS key-and-mac
-  fixes.
+  (generic Hash-ML-DSA/SLH-DSA), **B2 (message-init GCM/CCM param)**, **D1
+  (bouncyhsm 3.0-interface fallback — `C_SessionCancel` reachability)**. Plus the
+  earlier ML-DSA + TLS key-and-mac fixes.
 - 📐 **ADR + staged plan:** A2 (backend process isolation — ADR-0007). Multi-day;
   not rushed into the correctness-critical path.
-- 🔍 **Root-caused + planned (multi-layer, deferred):** B2 (message-init GCM param),
-  C2 (PBE writeback), D2 (GMAC multipart).
+- 🔍 **Root-caused + planned (multi-layer, deferred):** C2 (PBE writeback),
+  D2 (GMAC multipart).
+- 📌 **Deferred TODO:** A3 (multi-client concurrency validation round — after the
+  mechanism work).
 - 📎 **Known-diff / optional:** C3 (wrap-key negative-path), C1 (unix socket — the
   user marked this review-later/optional).
 
-The fixes that were tractable and low-risk were landed (now including D1, whose
-deep root-cause turned out to be a one-spot interface-loading bug, not an
-operation-state rework); the substantial mechanism changes (B2/C2/D2) and the
-architectural one (A2) are root-caused with a concrete plan rather than rushed —
-each is its own focused, reviewable change to the proxy's correctness-critical
+The fixes that were tractable were landed — including D1 (a one-spot
+interface-loading bug, not the operation-state rework first assumed) and B2 (the
+6-file message-init param change, verified on real kryoptic); the remaining
+mechanism items (C2/D2) and the architectural one (A2) are root-caused with a
+concrete plan rather than rushed — each is its own focused, reviewable change to
+the proxy's correctness-critical
 paths.
 
 ## Tier A — real correctness / robustness (production-relevant)
@@ -72,29 +75,32 @@ paths.
   direct exactly (25/9/8); pure ML-DSA unchanged (263/72/80). Round-trip + FFI
   unit tests added.
 
-- **B2. Message-based API INIT param** — 🔍 **fully root-caused + implementation
-  plan (2026-05-30); deferred (6-file change)**. The message API itself IS remoted
-  (`message_ops.rs` has GCM/CCM message params + IV writeback). The gap:
-  `C_MessageEncryptInit(CKM_AES_GCM)` is passed a `CK_GCM_MESSAGE_PARAMS` in its
-  *mechanism* (via `mech_gcm_message`), but the shim reads the mechanism with the
-  CLASSIC `gcm` shape (`CK_GCM_PARAMS`) → ships the wrong struct → backend
+- **B2. Message-based API INIT param** — ✅ **FIXED (2026-05-30)**. PKCS#11 v3.0
+  passes the AEAD params (`CK_GCM_MESSAGE_PARAMS`) to `C_MessageEncryptInit`, but
+  the shim read the mechanism with the CLASSIC `gcm` shape (`CK_GCM_PARAMS`) — the
+  same `CKM_AES_GCM` type is shared with single-shot encryption, so the param
+  shape can't be inferred from the type — and shipped the wrong struct → backend
   `CKR_MECHANISM_PARAM_INVALID`.
-  **Plan (option B — DRY, reuses the existing message machinery):** `MessageParameter`
-  lives in the *proto* crate while `CkMechanismParams` is in *types* (which can't
-  depend on proto), so do NOT bend the mechanism path. Instead:
-  1. proto: add `optional MessageParameter init_message_parameter` to
-     `MessageEncryptInitRequest` + `MessageDecryptInitRequest`.
-  2. shim `c_message_encrypt_init`/`decrypt_init`: send the mechanism TYPE only and
-     read the init param via the existing `try_read_message_parameter`.
-  3. client/server: thread the new field.
-  4. `Pkcs11Backend::message_encrypt_init`/`decrypt_init`: add
-     `init_param: Option<&MessageParameter>` (ripples to `FfiBackend` + `MockBackend`);
-     when present, build `CK_GCM/CCM_MESSAGE_PARAMS` (reuse the `message_ops` builder,
-     mind `pIv`/`pTag` buffer lifetimes) and attach it for `C_MessageEncryptInit`.
-  5. verify on kryoptic (`test_mech_message.py`) + existing message tests.
-  Deferred from this session: a 6-file change with FFI pointer-lifetime handling +
-  a trait-signature ripple through the message-crypto path — a focused, reviewable
-  change, not a session-end sprint. Related: D2 (GMAC multipart) shares this surface.
+  **Fix (option B — DRY, reuses the message machinery; no new mechanism shape):**
+  1. proto: `optional MessageParameter init_message_parameter` on
+     `Message{Encrypt,Decrypt}InitRequest`.
+  2. shim `read_message_init_mechanism`: on a recognised `CK_*_MESSAGE_PARAMS`
+     (via `try_read_message_parameter`), send the mechanism TYPE only + the
+     structured param; parameterless/Raw falls back to the classic `read_mechanism`.
+  3. client/server thread the field (server converts proto→`MessageParameter`).
+  4. `Pkcs11Backend::message_{encrypt,decrypt}_init` gain
+     `init_param: Option<&MessageParameter>` (FfiBackend + MockBackend + test
+     backends). `build_message_init_mechanism` reconstructs `CK_GCM/CCM/SALSA_…_
+     MESSAGE_PARAMS` (boxed for a stable address; IV/tag/nonce/MAC buffers kept
+     alive in the holder across the FFI call — same lifetime discipline as
+     `FfiMechanism`).
+  Verified: 3 FFI reconstruction unit tests + wave6 integration; **real kryoptic
+  backend** — the 2 regressions (`test_message_encrypt_decrypt_aes_gcm`,
+  `…rejects_decrypt_only_key`) now PASS == direct; `test_mech_message.py` 4/4 and
+  `test_message_crypto.py` 11/11 outcomes match direct (0 regressions). The
+  generated-IV-writeback test now fails IDENTICALLY to direct (a kryoptic
+  limitation, previously masked by the param-invalid skip). Related: D2 (GMAC
+  multipart) shares this surface.
 
 ## Tier C — minor / optional
 
