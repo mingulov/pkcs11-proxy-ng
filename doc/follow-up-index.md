@@ -46,18 +46,29 @@ change to the proxy's correctness-critical paths.
   direct exactly (25/9/8); pure ML-DSA unchanged (263/72/80). Round-trip + FFI
   unit tests added.
 
-- **B2. Message-based API INIT param** — 🔍 **root-caused (2026-05-30), planned**.
-  The message API itself IS remoted (`message_ops.rs` has GCM/CCM message params
-  + IV writeback). The gap: `C_MessageEncryptInit(CKM_AES_GCM)` is passed a
-  `CK_GCM_MESSAGE_PARAMS` in its *mechanism* (via `mech_gcm_message`), but the shim
-  reads the mechanism with the CLASSIC `gcm` shape (`CK_GCM_PARAMS`), so it ships
-  the wrong struct → backend `CKR_MECHANISM_PARAM_INVALID`. Fix = represent the
-  message param in the mechanism path: add `CkMechanismParams::GcmMessage` /
-  `CcmMessage` (reuse the existing `GcmMessageParams`/`CcmMessageParams` types +
-  proto), have the message-init dispatch read the message shape, and reconstruct
-  `CK_GCM_MESSAGE_PARAMS` in `mechanism_to_ffi`. Multi-layer (touches the
-  correctness-critical param path) — niche v3.0 feature, planned not yet done.
-  Related: D2 (GMAC multipart) shares the message/multipart param surface.
+- **B2. Message-based API INIT param** — 🔍 **fully root-caused + implementation
+  plan (2026-05-30); deferred (6-file change)**. The message API itself IS remoted
+  (`message_ops.rs` has GCM/CCM message params + IV writeback). The gap:
+  `C_MessageEncryptInit(CKM_AES_GCM)` is passed a `CK_GCM_MESSAGE_PARAMS` in its
+  *mechanism* (via `mech_gcm_message`), but the shim reads the mechanism with the
+  CLASSIC `gcm` shape (`CK_GCM_PARAMS`) → ships the wrong struct → backend
+  `CKR_MECHANISM_PARAM_INVALID`.
+  **Plan (option B — DRY, reuses the existing message machinery):** `MessageParameter`
+  lives in the *proto* crate while `CkMechanismParams` is in *types* (which can't
+  depend on proto), so do NOT bend the mechanism path. Instead:
+  1. proto: add `optional MessageParameter init_message_parameter` to
+     `MessageEncryptInitRequest` + `MessageDecryptInitRequest`.
+  2. shim `c_message_encrypt_init`/`decrypt_init`: send the mechanism TYPE only and
+     read the init param via the existing `try_read_message_parameter`.
+  3. client/server: thread the new field.
+  4. `Pkcs11Backend::message_encrypt_init`/`decrypt_init`: add
+     `init_param: Option<&MessageParameter>` (ripples to `FfiBackend` + `MockBackend`);
+     when present, build `CK_GCM/CCM_MESSAGE_PARAMS` (reuse the `message_ops` builder,
+     mind `pIv`/`pTag` buffer lifetimes) and attach it for `C_MessageEncryptInit`.
+  5. verify on kryoptic (`test_mech_message.py`) + existing message tests.
+  Deferred from this session: a 6-file change with FFI pointer-lifetime handling +
+  a trait-signature ripple through the message-crypto path — a focused, reviewable
+  change, not a session-end sprint. Related: D2 (GMAC multipart) shares this surface.
 
 ## Tier C — minor / optional
 
