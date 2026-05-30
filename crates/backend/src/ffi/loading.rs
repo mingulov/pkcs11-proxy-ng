@@ -32,12 +32,34 @@ impl FfiBackend {
 
         // Attempt to discover 3.0 and 3.2 function lists. These are optional;
         // a 2.40-only module will simply leave both as None.
+        //
+        // Some 3.x modules answer an *explicit* versioned `C_GetInterface`
+        // query for {3,0} with a NULL interface even though they implement the
+        // 3.0 functions — BouncyHSM, for instance, exposes a 3.1 default
+        // interface and a 3.2 interface but no literal "3.0" one. Because the
+        // 3.0 function list is a prefix of every higher 3.x list, the primary
+        // interface (already resolved into `func_list`) can serve the 3.0
+        // functions whenever it is itself >= 3.0. Without this fallback,
+        // 3.0-only dispatch (e.g. `C_SessionCancel`) wrongly returns
+        // `CKR_FUNCTION_NOT_SUPPORTED` through the proxy on such modules.
+        //
+        // The first field of every `CK_FUNCTION_LIST*` variant is `version`,
+        // so reading it through the 2.40-typed pointer is always sound.
+        let primary_version = unsafe { (*func_list).version };
+        let primary_at_least = |major: u8, minor: u8| {
+            primary_version.major > major
+                || (primary_version.major == major && primary_version.minor >= minor)
+        };
         let get_iface_sym = Self::resolve_get_interface(&lib);
         let func_list_3_0 = get_iface_sym
             .and_then(|sym| Self::try_get_versioned_interface(sym, 3, 0))
+            .or_else(|| primary_at_least(3, 0).then_some(func_list as *mut std::ffi::c_void))
             .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_0);
         let func_list_3_2 = get_iface_sym
             .and_then(|sym| Self::try_get_versioned_interface(sym, 3, 2))
+            // 3.2-only fields are valid only on an actual >= 3.2 list, so this
+            // fallback is gated on the stricter version than the 3.0 one above.
+            .or_else(|| primary_at_least(3, 2).then_some(func_list as *mut std::ffi::c_void))
             .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_2);
 
         let initialize_args = initialize_args
@@ -198,5 +220,48 @@ mod tests {
             Some(std::ptr::NonNull::dangling().as_ptr());
         assert!(sentinel_3_0.is_some());
         assert!(sentinel_3_2.is_some());
+    }
+
+    /// Regression test for the 3.0-interface fallback (see `load_with_init_args`).
+    ///
+    /// BouncyHSM answers an explicit `C_GetInterface` query for {3,0} with a
+    /// NULL interface even though its 3.1 default interface implements the 3.0
+    /// functions (notably `C_SessionCancel`). Before the fallback, the daemon
+    /// left `func_list_3_0` as None and every 3.0-only call returned
+    /// `CKR_FUNCTION_NOT_SUPPORTED` through the proxy, breaking pkcs11-check's
+    /// post-failure `C_SessionCancel` cleanup and cascading
+    /// `CKR_OPERATION_ACTIVE` across subsequent AEAD tests.
+    ///
+    /// `load()` only does dlopen + `C_GetInterface` (static tables), so no
+    /// backend server is needed. The test is skipped when the module is absent
+    /// (e.g. CI) — point `PKCS11_PROXY_NG_BOUNCYHSM_MODULE` at the `.so` to run
+    /// it. This quirk is module-specific: SoftHSM2/NSS answer {3,0} correctly
+    /// and would not exercise the fallback.
+    #[test]
+    fn bouncyhsm_3_0_interface_falls_back_to_primary() {
+        use std::path::Path;
+
+        const DEFAULT_MODULE: &str = concat!(
+            "/home/user/.nuget/packages/bouncyhsm.client/2.0.1/",
+            "runtimes/linux-x64/native/BouncyHsm.Pkcs11Lib.so"
+        );
+        let module = std::env::var("PKCS11_PROXY_NG_BOUNCYHSM_MODULE")
+            .unwrap_or_else(|_| DEFAULT_MODULE.to_string());
+        if !Path::new(&module).exists() {
+            eprintln!("skipping: BouncyHSM module not found at {module}");
+            return;
+        }
+
+        let backend = super::FfiBackend::load(Path::new(&module))
+            .expect("BouncyHSM module should load via C_GetInterface");
+        // The fallback must surface a usable 3.0 list even though the explicit
+        // {3,0} query returns a NULL interface for this module.
+        assert!(
+            backend.has_3_0_interface(),
+            "func_list_3_0 must fall back to the 3.1 primary interface so 3.0 \
+             functions (C_SessionCancel) are reachable through the proxy",
+        );
+        // BouncyHSM also offers an explicit 3.2 interface.
+        assert!(backend.has_3_2_interface(), "BouncyHSM advertises a 3.2 interface");
     }
 }

@@ -6,18 +6,22 @@ phKey).
 
 **Status (2026-05-30 follow-up session):**
 - ✅ **Fixed & verified vs real backend:** A1 (in-flight-aware eviction), B1
-  (generic Hash-ML-DSA/SLH-DSA). Plus the earlier ML-DSA + TLS key-and-mac fixes.
+  (generic Hash-ML-DSA/SLH-DSA), **D1 (bouncyhsm 3.0-interface fallback —
+  `C_SessionCancel` reachability)**. Plus the earlier ML-DSA + TLS key-and-mac
+  fixes.
 - 📐 **ADR + staged plan:** A2 (backend process isolation — ADR-0007). Multi-day;
   not rushed into the correctness-critical path.
 - 🔍 **Root-caused + planned (multi-layer, deferred):** B2 (message-init GCM param),
-  C2 (PBE writeback), D1 (bouncyhsm operation-active), D2 (GMAC multipart).
+  C2 (PBE writeback), D2 (GMAC multipart).
 - 📎 **Known-diff / optional:** C3 (wrap-key negative-path), C1 (unix socket — the
   user marked this review-later/optional).
 
-The fixes that were tractable and low-risk were landed; the substantial mechanism/
-operation-state changes (B2/C2/D1) and the architectural one (A2) are root-caused
-with a concrete plan rather than rushed — each is its own focused, reviewable
-change to the proxy's correctness-critical paths.
+The fixes that were tractable and low-risk were landed (now including D1, whose
+deep root-cause turned out to be a one-spot interface-loading bug, not an
+operation-state rework); the substantial mechanism changes (B2/C2/D2) and the
+architectural one (A2) are root-caused with a concrete plan rather than rushed —
+each is its own focused, reviewable change to the proxy's correctness-critical
+paths.
 
 ## Tier A — real correctness / robustness (production-relevant)
 
@@ -91,15 +95,35 @@ change to the proxy's correctness-critical paths.
 ## Tier-2 provider findings (2026-05-30 — opencryptoki/tpm2/bouncyhsm)
 
 opencryptoki-master and tpm2: **0 regressions, PASS** (the supervisor crash-recovery
-fix auto-recovers pkcsslotd/swtpm crashes). bouncyhsm: 832 regressions, dominated by:
+fix auto-recovers pkcsslotd/swtpm crashes). bouncyhsm: 832 regressions pre-fix,
+of which **513 (the largest cluster, D1) are now eliminated** by the
+3.0-interface fallback below; the rest are: ~87 GMAC multipart param (D2) and
+~12 MCT multiblock timeouts (known proxy-latency class).
 
-- **D1. bouncyhsm AEAD/multipart `CKR_OPERATION_ACTIVE`** (722) — proxied returns
-  `CKR_OPERATION_ACTIVE` where direct returns `CKR_OK`, on CCM/GCM decrypt + multipart.
-  `C_SessionCancel` IS remoted, so this is an operation-STATE interaction (the
-  exact/two-call AEAD path likely leaves an op active vs direct, or the pkcs11-check
-  `CKR_OPERATION_ACTIVE` recovery doesn't clear it through the proxy). Bouncyhsm-
-  specific so far (kryoptic/softhsm2/nss clean). Needs a deep operation-state review.
-  Medium–high; the single biggest remaining regression cluster.
+- **D1. bouncyhsm AEAD `CKR_OPERATION_ACTIVE` cascade** — ✅ **FIXED (2026-05-30)**.
+  Root cause (proven, not a pkcs11-check limitation): the daemon populated
+  `func_list_3_0` **only** from an explicit `C_GetInterface("PKCS 11", {3,0})`
+  query. BouncyHSM answers that with `CKR_OK` **and a NULL interface** (its
+  interfaces are a 3.1 default + a 3.2, no literal "3.0"), so `func_list_3_0`
+  stayed `None` and `ffi_session_cancel` (dispatched solely via `func_list_3_0`,
+  no fallback) returned `CKR_FUNCTION_NOT_SUPPORTED` — even though
+  `C_SessionCancel` is a live pointer in both the 3.1 and 3.2 lists. BouncyHSM
+  leaves the AEAD decrypt op active after `CKR_ENCRYPTED_DATA_INVALID`;
+  pkcs11-check's post-failure `_cancel_operation` (`C_SessionCancel`) cleans it
+  up direct but the proxy's `FUNCTION_NOT_SUPPORTED` broke that, cascading
+  `OPERATION_ACTIVE` across subsequent CCM tests (513 regressions, all
+  `OPERATION_ACTIVE`; 0 were param-marshalling — the GENERAL_ERROR/
+  ENCRYPTED_DATA_INVALID cases fail direct too = bouncyhsm's own CCM gaps).
+  **Fix:** `crates/backend/src/ffi/loading.rs` — when the explicit versioned
+  query yields nothing, fall back to the primary interface for `func_list_3_0`
+  when it is itself ≥ 3.0 (the 3.0 list is a prefix of every higher 3.x list);
+  symmetric, version-gated fallback for `func_list_3_2`. Zero effect on modules
+  that answer the explicit query (kryoptic/softhsm2/nss/opencryptoki). Verified:
+  real-module loader test (fails without the fallback, passes with); end-to-end
+  on bouncyhsm — `TestSessionCancel` 3/3 pass (were skip/`FUNCTION_NOT_SUPPORTED`),
+  CCM decrypt slice `OPERATION_ACTIVE` 9→0 (== direct's 0). The 3.0 stubs
+  BouncyHSM does *not* implement (message API, `C_LoginUser`) still return
+  `FUNCTION_NOT_SUPPORTED`, matching direct — no new divergence.
 - **D2. Multipart MAC param** (~87 `CKR_MECHANISM_PARAM_INVALID`, e.g. `AES_GMAC`
   multipart) — a mechanism-param/multipart gap. Medium.
 - MCT multiblock timeouts (~12) — known proxy-latency, already a known-diff class.
