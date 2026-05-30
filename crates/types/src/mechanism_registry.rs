@@ -404,6 +404,32 @@ mod tests {
     }
 
     #[test]
+    fn ml_dsa_and_slh_dsa_hash_variants_use_sign_additional_context() {
+        // Regression guard: pure CKM_ML_DSA already mapped, but the hash-specific
+        // ML-DSA / SLH-DSA mechanisms take the SAME plain CK_SIGN_ADDITIONAL_CONTEXT
+        // (the hash is implied by the mechanism — OASIS PKCS#11 v3.2 ml_dsa.md
+        // §"CKM_HASH_ML_DSA_*"). If they are NOT mapped here, the shim ships their
+        // context parameter via the Raw path (which serialises a host pointer) and
+        // a real backend rejects it with CKR_MECHANISM_PARAM_INVALID.
+        let reg = MechanismRegistry::load_with_override_str(None).unwrap();
+        for mech in [
+            0x001D, // CKM_ML_DSA (pure)
+            0x002E, // CKM_SLH_DSA (pure)
+            0x0024, // CKM_HASH_ML_DSA_SHA256
+            0x0026, // CKM_HASH_ML_DSA_SHA512
+            0x002C, // CKM_HASH_ML_DSA_SHAKE256
+            0x0037, // CKM_HASH_SLH_DSA_SHA256
+            0x003F, // CKM_HASH_SLH_DSA_SHAKE256
+        ] {
+            assert_eq!(
+                reg.param_shape(mech),
+                Some("sign_additional_context"),
+                "mechanism {mech:#06x} should map to sign_additional_context"
+            );
+        }
+    }
+
+    #[test]
     fn check_operation_parameterless_always_ok() {
         let reg = MechanismRegistry::load_with_override_str(None).unwrap();
         // Unknown mechanism with no params is always fine.
