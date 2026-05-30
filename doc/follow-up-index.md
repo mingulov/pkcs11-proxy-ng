@@ -12,8 +12,10 @@ phKey).
   (AES-GMAC param: registry mis-classification)**. Plus the earlier ML-DSA + TLS
   key-and-mac fixes. **Every mechanism-transparency regression from the sweep is
   now fixed.**
-- 📐 **ADR + staged plan:** A2 (backend process isolation — ADR-0007). Multi-day;
-  not rushed into the correctness-critical path. The only remaining open work item.
+- 🚫 **Deferred — superseded operationally:** A2 (backend process isolation — ADR-0007).
+  Decided 2026-05-30 after a deep review: backend-crash isolation is handled by **running
+  multiple daemon instances + sticky client routing + client reconnect**, not an in-process
+  worker. The worker design (spec + ADR) is kept as a documented fallback. No code work.
 - 📌 **Deferred TODO:** A3 (multi-client concurrency validation round — after the
   mechanism work).
 - 📎 **Known-diff / optional:** C3 (wrap-key negative-path), C1 (unix socket — the
@@ -23,11 +25,9 @@ Every mechanism-transparency regression the sweep surfaced has been fixed and
 verified against a real backend — including D1 (a one-spot interface-loading bug,
 not the operation-state rework first assumed), B2 (the 6-file message-init param
 change on kryoptic), C2 (PBE/PBA on NSS), and D2 (a one-line GMAC registry
-reclassification on bouncyhsm). The only remaining selected item is the
-architectural one (A2), root-caused with a concrete ADR rather than rushed — its
-own focused, reviewable change to
-the proxy's correctness-critical
-paths.
+reclassification on bouncyhsm). A2 (the one architectural item) was analyzed in depth and then **deferred**: backend-crash
+isolation is better handled operationally — multiple daemon instances + sticky client routing
++ client reconnect — than by an in-process worker, for this project's needs. See A2 below.
 
 ## Tier A — real correctness / robustness (production-relevant)
 
@@ -37,14 +37,22 @@ paths.
   contexts. Verified: DH param-gen 2 failed → 6 passed at the default lease=30
   (plus a unit test). No per-handler churn.
 
-- **A2. Backend process isolation + reduced-privilege worker** — 📐 **ADR written
-  (ADR-0007, root `doc/adr/`)**; implementation staged. `follow-up-backend-crash-
-  isolation.md` has the full feasibility/gap analysis. Backend runs in-process, so
-  any client's crash-input downs the shared daemon for ALL clients. Add an
-  `IpcBackend` (the `Pkcs11Backend` trait is the ready-made seam) forwarding to a
-  worker subprocess hosting `FfiBackend`; a crash kills only the worker. Single-
-  worker opt-in first, then worker pool / per-token + reduced-privilege (seccomp/
-  uid). Multi-day change — deliberately staged behind an ADR, not rushed.
+- **A2. Backend process isolation** — 🚫 **DEFERRED (2026-05-30) — superseded by
+  operational multi-daemon isolation.** Deep review concluded: an in-process worker does
+  **not** make a backend crash transparent (PKCS#11 session/login/op state is un-serializable
+  and dies with the backend regardless; the client must re-establish it either way), and its
+  only unique wins (keeping the shared daemon's connections alive through a crash; killing a
+  *hung* backend, `config.rs:138` orphaned thread) are **low value for this project**, which is
+  fine with full restarts and client reconnection. Backend-crash isolation is instead achieved
+  by **running multiple `pkcs11-proxy-ng` instances**, partitioning clients across them with
+  **sticky** routing (a session is valid only on the daemon that created it — never round-robin
+  per call), and letting the orchestrator restart a dead instance. The actual lever for the
+  observed failure cascade is **client-side reconnect/re-open** (the shim already retries connects
+  with backoff, `state.rs:597` `MAX_ATTEMPTS=10`; the `CKR_DEVICE_ERROR` cascade is the *client*,
+  `client/src/error.rs:36`, mapping `Unavailable` while the daemon is down). The worker design is
+  retained as a documented fallback: design spec `doc/plans/2026-05-30-backend-process-isolation-design.md`,
+  decision record ADR-0007, full analysis `follow-up-backend-crash-isolation.md`. **No code work
+  planned.**
 
 - **A3. Multi-client concurrency validation round** — 📌 **DEFERRED (TODO, revisit
   after B2/C2/A2)**. The proxy is a many-clients-to-one-shared-backend service, but
