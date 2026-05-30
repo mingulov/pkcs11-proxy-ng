@@ -115,6 +115,7 @@ async fn start_mtls_daemon() -> MtlsFixture {
         context_manager,
         backend,
         TcpAuthMode::Mtls,
+        pkcs11_proxy_ng::config::UnixAuthMode::None,
         Arc::new(token_policy),
         pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource::load(None).unwrap(),
     );

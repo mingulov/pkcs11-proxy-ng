@@ -107,12 +107,28 @@ paths.
 
 ## Tier C — minor / optional
 
-- **C1. Unix-domain-socket transport for the shim/client** (optional). Today the
-  client only dials `http://` (no unix connector) and the server binds TCP
-  (`UnixListenerConfig` exists but is unwired) — so it needs BOTH ends. Value:
-  on-host perf + `SO_PEERCRED` peer-auth; NOT a robustness fix (it would not have
-  prevented the nss cascade, which was a supervisor crash-recovery bug). Low
-  urgency.
+- **C1. Unix-domain-socket transport for the shim/client** — ✅ **IMPLEMENTED
+  (2026-05-30)**. Scope (per the review): a **local-user** transport (and
+  ssh-forwardable); the multi-client production path stays TCP+mTLS. Auth is
+  `peer_cred` (`SO_PEERCRED` kernel-verified uid → existing token policy) — the
+  local-IPC equivalent of mutual auth; **no mTLS on the socket** (a Unix socket
+  has no network to secure, and a cert proves key-possession not process
+  identity). The PKCS#11 PIN (`C_Login`) remains the independent end-to-end key
+  gate. **Server** (`main.rs`): multi-listener serve (TCP and/or UDS) under a
+  shared watch-shutdown; `bind_unix_listener` removes a stale socket (never a
+  non-socket), pins `0600` owner-only, removes the socket on exit; the old
+  "reject until wired" guard is replaced by a parent-dir check. **Identity**
+  (`request_identity`): a request carrying tonic's `UdsConnectInfo` → `PeerCred`
+  (or `Unauthenticated` for `auth=none`; peer_cred with no creds fails closed),
+  else the existing mTLS path; service carries `unix_auth_mode`. **Client**
+  (`lifecycle.rs`): a `unix:` endpoint dials via `connect_with_connector` +
+  `TokioIo<UnixStream>`; the shim's `PKCS11_PROXY_ENDPOINT=unix:/path` flows
+  through unchanged. Verified: 4 `request_identity` unit tests + 2 runtime
+  validation tests + **2 end-to-end UDS tests** (real socket: matching uid sees
+  the slot; non-matching uid is filtered, proving the real peer uid is derived).
+  Example: `examples/config-unix-local.toml`. (Pre-existing, unrelated:
+  `mtls_authorization_test` fails on HEAD too — a TLS-cert/env issue in the
+  sandbox, confirmed by stashing this work.)
 
 - **C2. Legacy PBE `CK_PBE_PARAMS` (4 nss tests)** — ✅ **FIXED (2026-05-30)**.
   Two distinct gaps, not one: (A) `CKM_PBA_SHA1_WITH_SHA1_HMAC` (0x03C0) was not
