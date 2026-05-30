@@ -37,19 +37,17 @@ macro_rules! with_client {
             let mut $client = crate::state::client().lock().await.clone();
             $call.await
         });
-        // FOLLOWUP-dns-reresolve: if the call surfaced a
-        // transport-level failure (CkRv::DEVICE_ERROR from a session-
-        // scoped RPC or CkRv::GENERAL_ERROR from a lifecycle RPC),
-        // mark the client for reconnect. The next call rebuilds the
-        // channel via `Endpoint::from_shared`, which re-resolves the
-        // hostname — this is what lets a shim follow a daemon whose
-        // DNS A-record changed (k8s rolling deploy, blue/green).
-        if let Err(rv) = &__result {
-            use pkcs11_proxy_ng_types::CkRv;
-            if matches!(*rv, CkRv::DEVICE_ERROR | CkRv::GENERAL_ERROR) {
-                crate::state::mark_client_reconnect_required();
-            }
-        }
+        // FOLLOWUP-dns-reresolve: reconnect-on-transport-failure is driven
+        // by the client crate's transport-failure hook (registered in
+        // c_initialize), which fires ONLY when a gRPC transport `Status` is
+        // mapped to a CK_RV — never on a backend `ck_rv`. The next call then
+        // rebuilds the channel via `Endpoint::from_shared`, re-resolving the
+        // hostname, letting a shim follow a daemon whose DNS A-record changed
+        // (k8s rolling deploy / blue-green). We deliberately do NOT key the
+        // reconnect off the returned CK_RV here: kryoptic uses
+        // CKR_DEVICE_ERROR (OpenSSL catch-all) and CKR_GENERAL_ERROR
+        // (internal catch-all) as ordinary results, so doing so churned the
+        // channel on every routine backend error.
         __result
     }};
 }
