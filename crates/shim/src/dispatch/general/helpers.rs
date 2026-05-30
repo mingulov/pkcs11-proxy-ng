@@ -1137,11 +1137,16 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
         }
 
         Some("sign_additional_context") => {
-            // CK_SIGN_ADDITIONAL_CONTEXT: { CK_ULONG hedgeVariant, CK_BYTE_PTR pContext, CK_ULONG ulContextLen }
-            let min_size = std::mem::size_of::<CK_ULONG>()
+            // Accept both CK_SIGN_ADDITIONAL_CONTEXT
+            //   { CK_ULONG hedgeVariant, CK_BYTE_PTR pContext, CK_ULONG ulContextLen }
+            // and CK_HASH_SIGN_ADDITIONAL_CONTEXT (the same, plus a trailing
+            //   CK_MECHANISM_TYPE hash) used by the generic CKM_HASH_ML_DSA /
+            // CKM_HASH_SLH_DSA. The larger struct is detected by ulParameterLen.
+            let base_size = std::mem::size_of::<CK_ULONG>()
                 + std::mem::size_of::<*mut u8>()
                 + std::mem::size_of::<CK_ULONG>();
-            if param_len < min_size {
+            let hash_size = base_size + std::mem::size_of::<CK_ULONG>();
+            if param_len < base_size {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
                     data: unsafe { read_raw_bytes(param_ptr, param_len) },
                 }))
@@ -1156,9 +1161,16 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 } else {
                     unsafe { std::slice::from_raw_parts(ctx_ptr, ctx_len as usize) }.to_vec()
                 };
+                let hash = if param_len >= hash_size {
+                    let hash_offset = len_offset + std::mem::size_of::<CK_ULONG>();
+                    unsafe { *(param_ptr.add(hash_offset) as *const CK_ULONG) as u64 }
+                } else {
+                    0
+                };
                 Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                     hedge_variant: hedge_variant as u64,
                     context,
+                    hash,
                 }))
             }
         }

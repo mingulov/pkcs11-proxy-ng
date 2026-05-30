@@ -573,6 +573,7 @@ enum FfiParamBacking {
     ),
     RsaAesKeyWrap(Box<FfiRsaAesKeyWrapParams>, Box<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>, Vec<u8>),
     SignAdditionalContext(Box<FfiSignAdditionalContext>, Vec<u8>),
+    HashSignAdditionalContext(Box<FfiHashSignAdditionalContext>, Vec<u8>),
     Kmac(Box<FfiKmacParams>, Vec<u8>),
     MuGen(Box<FfiMuGenParams>, Vec<u8>, Vec<u8>),
     Pkcs5Pbkd2(Box<cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2>, Vec<u8>, Vec<u8>, Vec<u8>),
@@ -713,6 +714,16 @@ struct FfiSignAdditionalContext {
     hedge_variant: cryptoki_sys::CK_ULONG,
     p_context: *mut cryptoki_sys::CK_BYTE,
     ul_context_len: cryptoki_sys::CK_ULONG,
+}
+
+/// CK_HASH_SIGN_ADDITIONAL_CONTEXT — CK_SIGN_ADDITIONAL_CONTEXT plus the explicit
+/// `hash` mechanism, for the generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA.
+#[repr(C)]
+struct FfiHashSignAdditionalContext {
+    hedge_variant: cryptoki_sys::CK_ULONG,
+    p_context: *mut cryptoki_sys::CK_BYTE,
+    ul_context_len: cryptoki_sys::CK_ULONG,
+    hash: cryptoki_sys::CK_MECHANISM_TYPE,
 }
 
 /// CK_KMAC_PARAMS — not in cryptoki-sys, defined by the working OASIS spec.
@@ -1208,18 +1219,34 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             Ok(FfiMechanism::with_param(mech_type, ptr, len, FfiParamBacking::Bytes(buf)))
         }
 
-        // -- SignAdditionalContext: CK_SIGN_ADDITIONAL_CONTEXT (ML-DSA hedge) -
+        // -- SignAdditionalContext: CK_SIGN_ADDITIONAL_CONTEXT (hash == 0) or
+        //    CK_HASH_SIGN_ADDITIONAL_CONTEXT (hash != 0, generic CKM_HASH_*_DSA).
+        //    `from_box` sets the exact ulParameterLen from the chosen struct.
         CkMechanismParams::SignAdditionalContext(p) => {
             let mut ctx = p.context.clone();
             let ctx_ptr = if ctx.is_empty() { std::ptr::null_mut() } else { ctx.as_mut_ptr() };
-            let sac = Box::new(FfiSignAdditionalContext {
-                hedge_variant: p.hedge_variant as cryptoki_sys::CK_ULONG,
-                p_context: ctx_ptr,
-                ul_context_len: ctx.len() as cryptoki_sys::CK_ULONG,
-            });
-            Ok(FfiMechanism::from_box(mech_type, sac, |b| {
-                FfiParamBacking::SignAdditionalContext(b, ctx)
-            }))
+            let hedge = p.hedge_variant as cryptoki_sys::CK_ULONG;
+            let ctx_len = ctx.len() as cryptoki_sys::CK_ULONG;
+            if p.hash == 0 {
+                let sac = Box::new(FfiSignAdditionalContext {
+                    hedge_variant: hedge,
+                    p_context: ctx_ptr,
+                    ul_context_len: ctx_len,
+                });
+                Ok(FfiMechanism::from_box(mech_type, sac, |b| {
+                    FfiParamBacking::SignAdditionalContext(b, ctx)
+                }))
+            } else {
+                let sac = Box::new(FfiHashSignAdditionalContext {
+                    hedge_variant: hedge,
+                    p_context: ctx_ptr,
+                    ul_context_len: ctx_len,
+                    hash: p.hash as cryptoki_sys::CK_MECHANISM_TYPE,
+                });
+                Ok(FfiMechanism::from_box(mech_type, sac, |b| {
+                    FfiParamBacking::HashSignAdditionalContext(b, ctx)
+                }))
+            }
         }
 
         // -- KMAC: CK_KMAC_PARAMS -----------------------------------------
@@ -2953,6 +2980,7 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant: 1,
                 context: vec![0xA1, 0xA2, 0xA3],
+                hash: 0,
             }),
         );
 
@@ -2967,6 +2995,34 @@ mod mechanism_to_ffi_tests {
         let context =
             unsafe { std::slice::from_raw_parts(params.p_context, params.ul_context_len as usize) };
         assert_eq!(context, [0xA1, 0xA2, 0xA3]);
+    }
+
+    #[test]
+    fn hash_sign_additional_context_reconstructs_c_struct() {
+        // hash != 0 → the larger CK_HASH_SIGN_ADDITIONAL_CONTEXT (generic
+        // CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA), with the trailing hash mechanism.
+        let ffi = convert(
+            CkMechanismType(0x0000_001F), // CKM_HASH_ML_DSA
+            CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
+                hedge_variant: 1,
+                context: vec![0xB1, 0xB2],
+                hash: 0x0000_0250, // CKM_SHA256
+            }),
+        );
+
+        assert_eq!(
+            ffi.ck_mechanism.ulParameterLen,
+            std::mem::size_of::<super::FfiHashSignAdditionalContext>() as cryptoki_sys::CK_ULONG
+        );
+        let params = unsafe {
+            &*(ffi.ck_mechanism.pParameter as *const super::FfiHashSignAdditionalContext)
+        };
+        assert_eq!(params.hedge_variant, 1);
+        assert_eq!(params.ul_context_len, 2);
+        assert_eq!(params.hash, 0x0000_0250);
+        let context =
+            unsafe { std::slice::from_raw_parts(params.p_context, params.ul_context_len as usize) };
+        assert_eq!(context, [0xB1, 0xB2]);
     }
 
     #[test]

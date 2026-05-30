@@ -21,11 +21,13 @@ phKey). These are the remaining items.
 
 ## Tier B — mechanism-transparency completeness
 
-- **B1. Generic `CKM_HASH_ML_DSA` / `CKM_HASH_SLH_DSA`** — need the
-  `CK_HASH_SIGN_ADDITIONAL_CONTEXT` shape (adds a `hash` CK_MECHANISM_TYPE field vs
-  the plain `CK_SIGN_ADDITIONAL_CONTEXT` already supported). Closes the 4 residual
-  kryoptic behaviour-Δ (`CKR_FUNCTION_NOT_SUPPORTED` direct → `CKR_MECHANISM_PARAM_INVALID`
-  proxied). New param shape through all layers (proto/types/ffi/registry + tests).
+- **B1. Generic `CKM_HASH_ML_DSA` / `CKM_HASH_SLH_DSA`** — ✅ **FIXED (2026-05-30)**.
+  Extended `SignAdditionalContext` with an optional `hash` field (size-aware shim
+  read + dual C-struct reconstruction CK_SIGN_/CK_HASH_SIGN_ADDITIONAL_CONTEXT,
+  mirroring the SSL3-vs-TLS12 key-mat precedent — DRY, no new shape) and mapped
+  0x1F/0x34 to the shape. Verified: kryoptic hash-ML-DSA & hash-SLH-DSA proxied ==
+  direct exactly (25/9/8); pure ML-DSA unchanged (263/72/80). Round-trip + FFI
+  unit tests added.
 
 - **B2. Message-based API remoting** — `C_MessageEncryptInit` etc. with
   `CK_GCM_MESSAGE_PARAMS` are not remoted (known gap on kryoptic AND nss message
@@ -48,6 +50,22 @@ phKey). These are the remaining items.
   `CKR_GENERAL_ERROR` (proxied) vs `CKR_WRAPPING_KEY_SIZE_RANGE` (direct). Both
   reject (negative path). Confirm whether the proxied `C_CreateObject` of the
   undersized key is byte-identical to direct (the one unverified bit). Low.
+
+## Tier-2 provider findings (2026-05-30 — opencryptoki/tpm2/bouncyhsm)
+
+opencryptoki-master and tpm2: **0 regressions, PASS** (the supervisor crash-recovery
+fix auto-recovers pkcsslotd/swtpm crashes). bouncyhsm: 832 regressions, dominated by:
+
+- **D1. bouncyhsm AEAD/multipart `CKR_OPERATION_ACTIVE`** (722) — proxied returns
+  `CKR_OPERATION_ACTIVE` where direct returns `CKR_OK`, on CCM/GCM decrypt + multipart.
+  `C_SessionCancel` IS remoted, so this is an operation-STATE interaction (the
+  exact/two-call AEAD path likely leaves an op active vs direct, or the pkcs11-check
+  `CKR_OPERATION_ACTIVE` recovery doesn't clear it through the proxy). Bouncyhsm-
+  specific so far (kryoptic/softhsm2/nss clean). Needs a deep operation-state review.
+  Medium–high; the single biggest remaining regression cluster.
+- **D2. Multipart MAC param** (~87 `CKR_MECHANISM_PARAM_INVALID`, e.g. `AES_GMAC`
+  multipart) — a mechanism-param/multipart gap. Medium.
+- MCT multiblock timeouts (~12) — known proxy-latency, already a known-diff class.
 
 ## Separate repo — pkcs11-check
 See `docker/proxy-test/pool/pkcs11-check-backlog.md` (root repo): structured
