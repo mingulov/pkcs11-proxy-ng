@@ -67,7 +67,9 @@ hand-rolling a config.
 
 The core beta claim — "the proxy does not materially change observed PKCS#11
 behavior for the validated providers" — is backed by repeatable direct-vs-proxied
-checking, not by assertion.
+checking, not by assertion. See the full
+[beta support matrix](./doc/release/beta-support-matrix.md) and the
+[parity methodology](./doc/release/parity-validation.md).
 
 ## Documentation
 
@@ -83,6 +85,8 @@ checking, not by assertion.
 - [`doc/provider-support-tables.md`](./doc/provider-support-tables.md) /
   [`doc/oasis-profile-coverage.md`](./doc/oasis-profile-coverage.md) — provider
   and PKCS#11 spec coverage
+- [`doc/release/`](./doc/release/) — beta support matrix, mTLS setup, parity
+  validation methodology, and the `0.x` release checklist
 
 ## Release dry run
 
