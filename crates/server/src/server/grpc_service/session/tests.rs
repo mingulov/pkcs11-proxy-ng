@@ -699,3 +699,32 @@ async fn destroy_object_evicts_the_virtual_handle() {
         .flatten();
     assert!(after.is_none(), "destroyed object handle must be evicted, found {after:?}");
 }
+
+#[tokio::test]
+async fn wait_for_slot_event_does_not_leak_raw_backend_slot() {
+    use crate::server::grpc_service::state_ops::wait_for_slot_event;
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    // An event for a backend slot the daemon never registered (no virtual map).
+    mock.enqueue_slot_event(CkSlotId(99));
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await; // only slot 0 is mapped; 99 is not
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+    let resp = wait_for_slot_event(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1, // CKF_DONT_BLOCK — return the queued event immediately
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_ne!(resp.slot_id, 99, "must never surface the raw backend slot id for an unmapped slot");
+}
