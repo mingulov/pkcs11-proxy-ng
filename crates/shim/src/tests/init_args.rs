@@ -101,6 +101,30 @@ fn initialize_connect_failure_is_not_device_error() {
 }
 
 #[test]
+fn initialize_rejects_library_cant_create_os_threads() {
+    // The shim runs a tokio runtime that spawns OS worker threads, so it cannot
+    // honor a caller that forbids library threads. Per PKCS#11 §5.4 this must
+    // be reported up front as CKR_NEED_TO_CREATE_THREADS, not silently accepted.
+    let _guard = shim_state_test_guard();
+    let mut args = CK_C_INITIALIZE_ARGS {
+        CreateMutex: None,
+        DestroyMutex: None,
+        LockMutex: None,
+        UnlockMutex: None,
+        flags: CKF_LIBRARY_CANT_CREATE_OS_THREADS,
+        pReserved: std::ptr::null_mut(),
+    };
+    let rv = unsafe { dispatch::general::c_initialize(&mut args as *mut _ as CK_VOID_PTR) };
+    assert_eq!(
+        rv, CKR_NEED_TO_CREATE_THREADS as CK_RV,
+        "CKF_LIBRARY_CANT_CREATE_OS_THREADS must be rejected"
+    );
+    if rv == CKR_OK as CK_RV {
+        let _ = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+    }
+}
+
+#[test]
 fn initialize_mutex_callbacks_with_os_locking_ok_accepted() {
     let _guard = shim_state_test_guard();
     let mut args = CK_C_INITIALIZE_ARGS {

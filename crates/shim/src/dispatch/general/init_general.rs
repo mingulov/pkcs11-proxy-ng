@@ -17,9 +17,10 @@ use std::path::PathBuf;
 ///   (per §5.4, library may ignore callbacks and use OS locking; this is
 ///   the combination used by GnuTLS/p11-kit)
 /// - `CKF_OS_LOCKING_OK` set, no custom callbacks → accepted
-/// - `CKF_LIBRARY_CANT_CREATE_OS_THREADS` → accepted (tokio threads are
-///   started at library load time, not at initialize time; the flag
-///   arrives too late to change runtime behavior in Phase 1)
+/// - `CKF_LIBRARY_CANT_CREATE_OS_THREADS` → rejected with
+///   `CKR_NEED_TO_CREATE_THREADS` (the shim's tokio runtime spawns OS worker
+///   threads on first use, so a caller forbidding library threads cannot be
+///   honored)
 /// - null pInitArgs → accepted (spec allows, treated as OS-locking default)
 ///
 /// Returns `None` on success, `Some(rv)` on error.
@@ -48,6 +49,12 @@ unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
         return Some(CKR_CANT_LOCK as CK_RV);
     }
     // If all_mutex && CKF_OS_LOCKING_OK: accept, we'll use OS locking (tokio).
+
+    // The shim's tokio runtime spawns OS worker threads (lazily, on first use),
+    // so a caller that forbids library threads cannot be honored.
+    if (args.flags & CKF_LIBRARY_CANT_CREATE_OS_THREADS) != 0 {
+        return Some(CKR_NEED_TO_CREATE_THREADS as CK_RV);
+    }
 
     None // Accept everything else.
 }
