@@ -2618,7 +2618,12 @@ unsafe fn read_sp800_108_derived_keys(
     unsafe { std::slice::from_raw_parts(derived_keys, count as usize) }
         .iter()
         .map(|derived| {
-            let template = unsafe { ck_attrs_to_rust(derived.pTemplate, derived.ulAttributeCount) };
+            // Inputs are pre-validated by `sp800_108_derived_keys_invalid`, so
+            // the fallible path is unreachable here; use the checked variant
+            // (empty template on the impossible error) rather than panicking.
+            let template =
+                unsafe { ck_attrs_to_rust_checked(derived.pTemplate, derived.ulAttributeCount) }
+                    .unwrap_or_default();
             let key_handle =
                 if derived.phKey.is_null() { 0 } else { unsafe { *derived.phKey as u64 } };
             Sp800108DerivedKey { template, key_handle }
@@ -3222,14 +3227,6 @@ pub(crate) unsafe fn write_message_parameter_back(
 /// Maximum template entry count we will serialize.  No real PKCS#11
 /// template has more than 64 K attributes.
 pub(crate) const MAX_TEMPLATE_COUNT: usize = 65_536;
-
-pub(crate) unsafe fn ck_attrs_to_rust(
-    p_template: *const CK_ATTRIBUTE,
-    count: CK_ULONG,
-) -> Vec<CkAttribute> {
-    unsafe { ck_attrs_to_rust_result(p_template, count, false) }
-        .unwrap_or_else(|_| panic!("attribute template exceeds serializable limits"))
-}
 
 pub(crate) unsafe fn ck_attrs_to_rust_checked(
     p_template: *const CK_ATTRIBUTE,
