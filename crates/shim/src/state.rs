@@ -278,10 +278,8 @@ pub fn encapsulate_cache() -> &'static SessionEncapsulateCacheMap {
     ENCAPSULATE_CACHE.get()
 }
 
-/// Remove all cached two-call-pattern data for the given session handle.
-///
-/// Called from `c_close_session` after the server confirms the close,
-/// so that stale entries do not accumulate and leak memory.
+/// Run `f` against each per-session byte cache (input and output) so callers
+/// can query or evict entries across all of them.
 fn with_all_byte_caches(mut f: impl FnMut(&SessionByteCacheMap)) {
     let byte_caches: &[&SessionByteCacheMap] = &[
         sig_cache(),
@@ -386,8 +384,11 @@ fn evict_output_caches_for_session(h_session: CK_SESSION_HANDLE) {
 
 /// Remove all cached two-call-pattern data for the given session handle.
 ///
-/// Called from `c_close_session` after the server confirms the close,
-/// so that stale entries do not accumulate and leak memory.
+/// Called from `c_close_session` on the close *attempt*, unconditionally — the
+/// caches are dropped regardless of the server's `CK_RV`, so stale entries do
+/// not accumulate and leak memory. (If a close fails and the caller
+/// legitimately retries on the same handle, the next two-call sequence simply
+/// re-primes the caches.)
 pub(crate) fn evict_session_caches(h_session: CK_SESSION_HANDLE) {
     forget_session_slot(h_session);
     evict_output_caches_for_session(h_session);
@@ -395,7 +396,8 @@ pub(crate) fn evict_session_caches(h_session: CK_SESSION_HANDLE) {
 
 /// Remove all cached two-call-pattern data for sessions opened on one slot.
 ///
-/// Called from `c_close_all_sessions` after the server confirms the close.
+/// Called from `c_close_all_sessions` on the close attempt, unconditionally
+/// (dropped regardless of the server's `CK_RV`).
 pub(crate) fn evict_slot_session_caches(slot_id: CK_SLOT_ID) {
     let sessions = if let Ok(mut map) = SESSION_SLOTS.lock() {
         let sessions: Vec<_> =
