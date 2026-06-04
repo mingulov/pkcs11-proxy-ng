@@ -36,10 +36,11 @@ cargo build --workspace --release
 RUST_LOG=pkcs11_proxy_ng=info LOG_FORMAT=plain \
     ./target/release/pkcs11-proxy-ng examples/configs/dev/proxy.toml &
 
-# 5. Drive a sign through the shim.
+# 5. Verify the shim reaches the daemon and backend (list slots).
 PKCS11_PROXY_ENDPOINT=http://127.0.0.1:7512 \
     pkcs11-tool --module ./target/release/libpkcs11_proxy_ng_shim.so \
-    --pin 1234 --list-slots
+    --list-slots
+# (then exercise crypto, e.g. --login --pin 1234 --sign --mechanism RSA-PKCS ...)
 ```
 
 For anything beyond local dev, start from a template in
