@@ -71,26 +71,55 @@ pub(super) async fn login(
         }
     };
 
+    // Wrap PIN bytes in `Zeroizing` so the backing buffer is overwritten when
+    // dropped. Read it up-front and pre-hash it so the logical-login path can
+    // validate the PIN and the verifier can be stored after the PIN is moved
+    // into the backend call.
+    let pin = req.pin.map(Zeroizing::new);
+    let pin_hash = ctx_mgr.hash_pin(pin.as_deref().map(Vec::as_slice));
+
     if current_login_state.is_none()
         && let Some(requested) = requested_login_state
+        && let Some(other_login_state) = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id)
     {
-        if let Some(other_login_state) = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id)
-        {
-            if other_login_state == requested {
-                let _ = ctx_mgr
-                    .get_context(&ctx_id, |ctx| {
-                        ctx.login_state.insert(slot, requested);
-                    })
-                    .await;
-                info!(
-                    context_id = %ctx_id.0,
-                    user_type = req.user_type,
-                    "Login completed logically"
-                );
-                return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-                    ck_rv: CkRv::OK.0,
-                }));
+        if other_login_state == requested {
+            // The shared backend token is already logged in (another logical
+            // client holds this state), so a second backend C_Login would
+            // answer USER_ALREADY_LOGGED_IN WITHOUT checking the PIN. Validate
+            // against the verifier captured at the first successful login so a
+            // wrong PIN is rejected rather than synthesized OK (A1; ADR-0008).
+            match ctx_mgr.verify_pin_hash(slot, requested, &pin_hash) {
+                Some(true) => {
+                    let _ = ctx_mgr
+                        .get_context(&ctx_id, |ctx| {
+                            ctx.login_state.insert(slot, requested);
+                        })
+                        .await;
+                    info!(
+                        context_id = %ctx_id.0,
+                        user_type = req.user_type,
+                        "Login completed logically"
+                    );
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+                        ck_rv: CkRv::OK.0,
+                    }));
+                }
+                Some(false) => {
+                    warn!(
+                        context_id = %ctx_id.0,
+                        user_type = req.user_type,
+                        "Logical login rejected: PIN does not match"
+                    );
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+                        ck_rv: CkRv::PIN_INCORRECT.0,
+                    }));
+                }
+                // No verifier recorded (e.g. the original login used the
+                // protected-auth path): cannot validate, so fall through to a
+                // real backend login rather than synthesize an unvalidated OK.
+                None => {}
             }
+        } else {
             return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
                 ck_rv: already_logged_in_rv(other_login_state, requested).0,
             }));
@@ -98,9 +127,6 @@ pub(super) async fn login(
     }
 
     let user_type_raw = req.user_type;
-    // Wrap PIN bytes in `Zeroizing` so the backing buffer is
-    // overwritten when the spawned closure is dropped.
-    let pin = req.pin.map(Zeroizing::new);
     let backend = backend_ref.clone();
     let result =
         spawn_backend(move || backend.login(session, user_type, pin.as_deref().map(Vec::as_slice)))
@@ -109,6 +135,9 @@ pub(super) async fn login(
     let ck_rv = match &result {
         Ok(()) => {
             if let Some(login_state) = requested_login_state {
+                // Capture the verifier so co-located logical clients can be
+                // PIN-validated (A1) without a second backend login.
+                ctx_mgr.store_pin_verifier_hash(slot, login_state, pin_hash);
                 let _ = ctx_mgr
                     .get_context(&ctx_id, |ctx| {
                         ctx.login_state.insert(slot, login_state);
@@ -184,6 +213,11 @@ pub(super) async fn logout(
 
     let ck_rv = match result {
         Ok(()) => {
+            // Last holder logged out: the shared token is now logged out, so
+            // drop the per-slot PIN verifier (a fresh login re-captures it).
+            if let Some(state) = current_login_state {
+                ctx_mgr.clear_pin_verifier(slot, state);
+            }
             let _ = ctx_mgr
                 .get_context(&ctx_id, |ctx| {
                     ctx.login_state.remove(&slot);

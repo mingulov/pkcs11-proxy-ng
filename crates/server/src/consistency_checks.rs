@@ -424,6 +424,7 @@ fn adr_files_exist() {
         "ADR-0005-phase-1-authorization-model.md",
         "ADR-0006-32-64-bit-cross-platform-compatibility.md",
         "ADR-0007-backend-process-isolation.md",
+        "ADR-0008-cross-client-login-pin-verifier.md",
     ];
     for name in &expected {
         let path = adr_dir.join(name);

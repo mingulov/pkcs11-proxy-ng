@@ -728,3 +728,53 @@ async fn wait_for_slot_event_does_not_leak_raw_backend_slot() {
 
     assert_ne!(resp.slot_id, 99, "must never surface the raw backend slot id for an unmapped slot");
 }
+
+#[tokio::test]
+async fn cross_client_login_with_wrong_pin_is_rejected() {
+    // A1: when a fresh logical client logs in to a slot another client already
+    // holds, the shared backend token is logged in, so a second backend
+    // C_Login returns USER_ALREADY_LOGGED_IN without validating the PIN. The
+    // proxy must therefore validate the presented PIN against the verifier
+    // captured at the first successful login — never synthesize CKR_OK for an
+    // unvalidated/incorrect PIN.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    // ctx_a logs in with the correct PIN ("1234" per login_response).
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+
+    // ctx_b attempts a logical login with a WRONG PIN.
+    let wrong = login(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+            client_context_id: ctx_b.0.clone(),
+            session_handle: session_b,
+            user_type: CkUserType::User as u64,
+            pin: Some(b"WRONG-PIN".to_vec()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(
+        wrong,
+        CkRv::PIN_INCORRECT.0,
+        "cross-client login with a wrong PIN must be CKR_PIN_INCORRECT, not synthesized OK"
+    );
+
+    // ctx_b with the CORRECT PIN still succeeds (feature preserved).
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
+        CkRv::OK.0,
+        "cross-client login with the correct PIN must still succeed"
+    );
+}

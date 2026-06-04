@@ -20,7 +20,7 @@ impl ClientContextId {
 }
 
 /// Per-context login state for a single token (ADR-0002 §6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LoginState {
     Public,
     User,
@@ -132,6 +132,14 @@ pub struct ContextManager {
     slot_map: Arc<RwLock<SlotMap>>,
     lease_duration: std::time::Duration,
     max_contexts: usize,
+    /// Per-(slot, login state) PIN verifiers (salted SHA-256), captured at the
+    /// first successful backend login so a co-located logical client can be
+    /// PIN-validated without a second backend `C_Login` (which the shared,
+    /// already-logged-in token answers `USER_ALREADY_LOGGED_IN` without
+    /// checking the PIN). Stores a salted hash, never the raw PIN. See ADR-0008.
+    pin_verifiers: Arc<DashMap<(CkSlotId, LoginState), [u8; 32]>>,
+    /// Random per-process salt for the PIN-verifier hashes.
+    pin_salt: [u8; 16],
 }
 
 /// RAII guard marking a backend operation in flight for one context. While it
@@ -160,7 +168,48 @@ impl ContextManager {
             slot_map: Arc::new(RwLock::new(SlotMap::new())),
             lease_duration,
             max_contexts,
+            pin_verifiers: Arc::new(DashMap::new()),
+            pin_salt: *Uuid::new_v4().as_bytes(),
         }
+    }
+
+    /// Salted hash of a PIN for verifier storage/comparison. A `None` PIN
+    /// (protected-auth path) hashes to a value distinct from an empty PIN.
+    pub fn hash_pin(&self, pin: Option<&[u8]>) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.pin_salt);
+        match pin {
+            Some(p) => {
+                hasher.update([1u8]);
+                hasher.update(p);
+            }
+            None => hasher.update([0u8]),
+        }
+        hasher.finalize().into()
+    }
+
+    /// Capture the PIN verifier for `(slot, state)` after a successful backend
+    /// login so later co-located logical logins can be PIN-validated.
+    pub fn store_pin_verifier_hash(&self, slot: CkSlotId, state: LoginState, hash: [u8; 32]) {
+        self.pin_verifiers.insert((slot, state), hash);
+    }
+
+    /// Validate a presented PIN's hash against the stored verifier for
+    /// `(slot, state)`. `None` means no verifier is recorded — the caller must
+    /// not synthesize a login (it cannot validate the PIN).
+    pub fn verify_pin_hash(
+        &self,
+        slot: CkSlotId,
+        state: LoginState,
+        hash: &[u8; 32],
+    ) -> Option<bool> {
+        self.pin_verifiers.get(&(slot, state)).map(|stored| *stored == *hash)
+    }
+
+    /// Drop the PIN verifier for `(slot, state)` (on the last real logout).
+    pub fn clear_pin_verifier(&self, slot: CkSlotId, state: LoginState) {
+        self.pin_verifiers.remove(&(slot, state));
     }
 
     /// Populate slot map from backend's C_GetSlotList.
