@@ -647,3 +647,55 @@ fn source_code_never_logs_pin_fields() {
         }
     }
 }
+
+#[tokio::test]
+async fn destroy_object_evicts_the_virtual_handle() {
+    use crate::server::grpc_service::object::{create_object, destroy_object};
+
+    let (ctx_mgr, backend, ctx_id, session) = setup_session().await;
+
+    // Create a live backend object so destroy has something to remove.
+    let created = create_object(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            template: vec![],
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(created.ck_rv, CkRv::OK.0, "setup: create_object failed");
+    let vobj = created.object_handle;
+    assert_ne!(vobj, 0, "create_object must return a virtual handle");
+
+    let before = ctx_mgr
+        .get_context(&ctx_id, |ctx| ctx.object_handles.resolve(VirtualHandle(vobj)))
+        .await
+        .flatten();
+    assert!(before.is_some(), "the virtual object handle should resolve before destroy");
+
+    let destroyed = destroy_object(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            object_handle: vobj,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(destroyed.ck_rv, CkRv::OK.0, "destroy_object failed");
+
+    // After a successful destroy the virtual->backend mapping must be gone, so
+    // a recycled backend object number can never alias this stale handle.
+    let after = ctx_mgr
+        .get_context(&ctx_id, |ctx| ctx.object_handles.resolve(VirtualHandle(vobj)))
+        .await
+        .flatten();
+    assert!(after.is_none(), "destroyed object handle must be evicted, found {after:?}");
+}
