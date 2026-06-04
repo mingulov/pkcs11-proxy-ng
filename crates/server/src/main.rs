@@ -119,6 +119,11 @@ async fn build_service(
         );
     }
 
+    // The authorization (token) policy is loaded ONCE at startup and is NOT
+    // reloaded on SIGHUP (unlike the mechanism registry — see
+    // spawn_sighup_handler). Changing `[auth.policy]` therefore requires a
+    // daemon restart, and contexts already open keep the grants captured at
+    // their `C_Initialize`. (Hot policy reload is a deliberate Phase-2 item.)
     let token_policy = Arc::new(
         server::auth::policy::TokenPolicy::from_config(&config.auth)
             .map_err(std::io::Error::other)?,
@@ -225,6 +230,10 @@ fn validate_runtime_listener_support(config: &config::DaemonConfig) -> Result<()
 /// served payload atomically. Reload failures retain the current
 /// registry — the daemon must never crash because the operator pushed
 /// a malformed TOML file mid-rollout.
+///
+/// NOTE: only the mechanism registry is reloaded. The `[auth.policy]`
+/// authorization policy is load-once (see `token_policy` in `main`); changing
+/// it requires a daemon restart.
 #[cfg(unix)]
 fn spawn_sighup_handler(registry_source: MechanismRegistrySource) {
     tokio::spawn(async move {
