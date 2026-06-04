@@ -400,6 +400,19 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         );
     }
 
+    // Loud one-time warning if the Unix listener runs without peer-credential
+    // auth (requires the explicit allow_insecure_unix opt-in to even start).
+    if let Some(local) = config.listener.local.as_ref()
+        && matches!(local.auth, config::UnixAuthMode::None)
+        && local.allow_insecure_unix
+    {
+        tracing::warn!(
+            path = %local.path.display(),
+            "listening on unix socket without peer-credential authentication; every \
+             local user can reach every token. only for trusted single-user hosts."
+        );
+    }
+
     // Wire backend-health gating: spawn_backend reports each outcome
     // through an unbounded channel; this task counts consecutive
     // transport-level failures and flips tonic-health to NOT_SERVING

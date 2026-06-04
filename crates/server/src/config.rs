@@ -276,6 +276,11 @@ pub struct UnixListenerConfig {
     pub path: PathBuf,
     #[serde(default)]
     pub auth: UnixAuthMode,
+    /// Explicit opt-in required to run a Unix listener with `auth = "none"`,
+    /// which disables peer-credential authentication and lets every local user
+    /// reach every token. Mirrors `allow_insecure_tcp`.
+    #[serde(default)]
+    pub allow_insecure_unix: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -521,6 +526,12 @@ impl DaemonConfig {
                     tcp.bind
                 ));
             }
+        }
+        if let Some(ref local) = self.listener.local
+            && matches!(local.auth, UnixAuthMode::None)
+            && !local.allow_insecure_unix
+        {
+            return Err("Unix listener with auth='none' requires allow_insecure_unix=true".into());
         }
         // Warn (via error) if no listeners are configured
         if self.listener.local.is_none() && self.listener.remote.is_none() {
