@@ -99,7 +99,10 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
         if state::ensure_client_connected().is_err() {
             tracing::error!("Failed to connect to proxy daemon");
             state::mark_finalized();
-            return rv_err(CkRv::DEVICE_ERROR);
+            // CKR_DEVICE_ERROR is not in the OASIS-permitted return set for
+            // C_Initialize; use the lifecycle-class CKR_GENERAL_ERROR so the
+            // shim matches a native module's error contract (AGENTS.md §2).
+            return rv_err(CkRv::GENERAL_ERROR);
         }
 
         let rt = state::runtime();
