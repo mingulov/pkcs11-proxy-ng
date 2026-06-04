@@ -9,7 +9,7 @@ pub fn env_var_help() -> String {
         (
             "PKCS11_PROXY_BIND",
             "listener.remote.bind",
-            "TCP listen address; creates an insecure-TCP listener if [listener.remote] is absent.",
+            "TCP listen address; with no [listener.remote] block it creates an unauthenticated listener only if PKCS11_PROXY_ALLOW_INSECURE=1.",
         ),
         (
             "PKCS11_PROXY_BACKEND_MODULE",
@@ -25,6 +25,11 @@ pub fn env_var_help() -> String {
             "PKCS11_PROXY_MECHANISMS_CONFIG",
             "mechanisms.config_path",
             "Path to the mechanism_params.toml registry served to shims.",
+        ),
+        (
+            "PKCS11_PROXY_ALLOW_INSECURE",
+            "listener.remote.allow_insecure_tcp",
+            "Set to 1 to let PKCS11_PROXY_BIND create an unauthenticated TCP listener.",
         ),
     ];
     let var_w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
@@ -400,20 +405,25 @@ impl DaemonConfig {
         }
         if let Ok(v) = std::env::var("PKCS11_PROXY_BIND") {
             // Bind override applies to whichever TCP listener is already
-            // configured; if there's no [listener.remote] block, the env
-            // var implicitly creates a TCP listener with insecure-TCP
-            // default. Tighter listener semantics (auth, TLS) still have
-            // to come from the TOML.
+            // configured; if there's no [listener.remote] block, the env var
+            // creates an unauthenticated TCP listener — but only when
+            // PKCS11_PROXY_ALLOW_INSECURE is explicitly set; otherwise
+            // validate() rejects it, so a single env var can never silently
+            // provision an open listener. Tighter listener semantics (auth,
+            // TLS) still have to come from the TOML.
             match self.listener.remote.as_mut() {
                 Some(tcp) => tcp.bind = v,
                 None => {
+                    let allow_insecure_tcp = std::env::var("PKCS11_PROXY_ALLOW_INSECURE")
+                        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
                     self.listener.remote = Some(TcpListenerConfig {
                         bind: v,
                         auth: TcpAuthMode::None,
                         ca_cert: None,
                         server_cert: None,
                         server_key: None,
-                        allow_insecure_tcp: true,
+                        allow_insecure_tcp,
                     });
                 }
             }

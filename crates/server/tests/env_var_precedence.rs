@@ -34,6 +34,7 @@ const ALL_VARS: &[&str] = &[
     "PKCS11_PROXY_BACKEND_MODULE",
     "PKCS11_PROXY_BACKEND_ARGS",
     "PKCS11_PROXY_MECHANISMS_CONFIG",
+    "PKCS11_PROXY_ALLOW_INSECURE",
 ];
 
 fn clear_all_env() {
@@ -180,9 +181,30 @@ module = "{}"
     );
     let cfg_file = write_temp_config(&toml);
     unsafe { std::env::set_var("PKCS11_PROXY_BIND", "0.0.0.0:8888") };
+    unsafe { std::env::set_var("PKCS11_PROXY_ALLOW_INSECURE", "1") };
     let cfg = DaemonConfig::load(cfg_file.path()).expect("load");
     let tcp = cfg.listener.remote.as_ref().expect("env should create the listener");
     assert_eq!(tcp.bind, "0.0.0.0:8888");
     assert!(tcp.allow_insecure_tcp);
+    clear_all_env();
+}
+
+#[test]
+fn bind_env_without_allow_insecure_is_rejected() {
+    let _env = env_guard();
+    clear_all_env();
+    let dummy = dummy_backend_module();
+    // TOML with NO [listener.remote] — the env var alone would create one.
+    let toml =
+        format!("\n[backend]\nmodule = \"{}\"\n\n[proxy]\n\n[auth]\n", dummy.to_str().unwrap());
+    let cfg_file = write_temp_config(&toml);
+    unsafe { std::env::set_var("PKCS11_PROXY_BIND", "0.0.0.0:9999") };
+    // PKCS11_PROXY_ALLOW_INSECURE intentionally NOT set.
+    let err = DaemonConfig::load(cfg_file.path())
+        .expect_err("PKCS11_PROXY_BIND alone must not auto-create an unauthenticated listener");
+    assert!(
+        err.contains("allow_insecure"),
+        "error should require an explicit insecure opt-in: {err}"
+    );
     clear_all_env();
 }
