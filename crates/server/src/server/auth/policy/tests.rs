@@ -198,9 +198,12 @@ fn parse_bare_string_defaults_to_label() {
 }
 
 #[test]
-fn parse_pkcs11_uri_selector() {
-    let s = TokenSelector::parse("pkcs11:token=foo;serial=bar").unwrap();
-    assert_eq!(s, TokenSelector::Uri("pkcs11:token=foo;serial=bar".into()));
+fn parse_rejects_pkcs11_uri_selector() {
+    // pkcs11: URI selectors are not implemented; they would match nothing and
+    // silently deny, locking the operator out. parse() must reject them loudly
+    // at config load instead.
+    let err = TokenSelector::parse("pkcs11:token=foo;serial=bar").unwrap_err();
+    assert!(err.contains("pkcs11:"), "error should name the unsupported form: {err}");
 }
 
 #[test]
