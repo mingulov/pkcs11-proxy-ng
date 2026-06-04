@@ -3301,6 +3301,22 @@ mod tests {
     }
 
     #[test]
+    fn catch_panics_converts_panic_to_general_error() {
+        // AGENTS.md §3: a panic inside an extern "C" entry must be CAUGHT and
+        // surfaced as CKR_GENERAL_ERROR at runtime, never unwind across the C
+        // boundary. Source-substring audits pass even if catch_panics were
+        // gutted to `f()`; this runtime check would not.
+        let rv = super::catch_panics(|| panic!("boom across the FFI boundary"));
+        assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::GENERAL_ERROR.0);
+    }
+
+    #[test]
+    fn catch_panics_passes_through_non_panicking_rv() {
+        let rv = super::catch_panics(|| pkcs11_proxy_ng_types::CkRv::OK.0);
+        assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::OK.0);
+    }
+
+    #[test]
     fn longer_src_truncated_to_dest_len() {
         let mut buf = [0u8; 4];
         pad_string(&mut buf, "ABCDEFGH");
