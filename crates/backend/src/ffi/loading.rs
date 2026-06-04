@@ -27,6 +27,7 @@ impl FfiBackend {
     pub fn load_with_init_args(path: &Path, initialize_args: Option<&str>) -> Result<Self, String> {
         let lib = unsafe { Library::new(path).map_err(|e| format!("dlopen failed: {e}"))? };
 
+        let primary_from_interface = Self::resolve_get_interface(&lib).is_some();
         let func_list =
             Self::try_get_interface(&lib).or_else(|_| Self::try_get_function_list(&lib))?;
 
@@ -43,23 +44,16 @@ impl FfiBackend {
         // 3.0-only dispatch (e.g. `C_SessionCancel`) wrongly returns
         // `CKR_FUNCTION_NOT_SUPPORTED` through the proxy on such modules.
         //
-        // The first field of every `CK_FUNCTION_LIST*` variant is `version`,
-        // so reading it through the 2.40-typed pointer is always sound.
-        let primary_version = unsafe { (*func_list).version };
-        let primary_at_least = |major: u8, minor: u8| {
-            primary_version.major > major
-                || (primary_version.major == major && primary_version.minor >= minor)
-        };
         let get_iface_sym = Self::resolve_get_interface(&lib);
         let func_list_3_0 = get_iface_sym
             .and_then(|sym| Self::try_get_versioned_interface(sym, 3, 0))
-            .or_else(|| primary_at_least(3, 0).then_some(func_list as *mut std::ffi::c_void))
+            .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 0))
             .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_0);
         let func_list_3_2 = get_iface_sym
             .and_then(|sym| Self::try_get_versioned_interface(sym, 3, 2))
             // 3.2-only fields are valid only on an actual >= 3.2 list, so this
             // fallback is gated on the stricter version than the 3.0 one above.
-            .or_else(|| primary_at_least(3, 2).then_some(func_list as *mut std::ffi::c_void))
+            .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 2))
             .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_2);
 
         let initialize_args = initialize_args
@@ -147,6 +141,26 @@ impl FfiBackend {
         Self::get_interface_with_name(get_interface, major, minor, false)
     }
 
+    fn primary_interface_fallback(
+        func_list: *mut cryptoki_sys::CK_FUNCTION_LIST,
+        primary_from_interface: bool,
+        major: u8,
+        minor: u8,
+    ) -> Option<*mut std::ffi::c_void> {
+        if !primary_from_interface {
+            return None;
+        }
+        // The first field of every `CK_FUNCTION_LIST*` variant is `version`,
+        // so reading it through the 2.40-typed pointer is sound. Using fields
+        // beyond the base list is only sound when this pointer came from a
+        // `CK_INTERFACE`; `C_GetFunctionList` can still return a base-size list
+        // whose version field reports 3.x.
+        let primary_version = unsafe { (*func_list).version };
+        let primary_at_least = primary_version.major > major
+            || (primary_version.major == major && primary_version.minor >= minor);
+        primary_at_least.then_some(func_list as *mut std::ffi::c_void)
+    }
+
     fn get_interface_with_name(
         get_interface: GetInterfaceFn,
         major: u8,
@@ -220,6 +234,33 @@ mod tests {
             Some(std::ptr::NonNull::dangling().as_ptr());
         assert!(sentinel_3_0.is_some());
         assert!(sentinel_3_2.is_some());
+    }
+
+    #[test]
+    fn primary_fallback_ignores_c_get_function_list_version_3_x() {
+        let mut base_list: cryptoki_sys::CK_FUNCTION_LIST = unsafe { std::mem::zeroed() };
+        base_list.version = cryptoki_sys::CK_VERSION { major: 3, minor: 2 };
+        let base_ptr = &mut base_list as *mut cryptoki_sys::CK_FUNCTION_LIST;
+
+        assert!(
+            super::FfiBackend::primary_interface_fallback(base_ptr, false, 3, 0).is_none(),
+            "a C_GetFunctionList pointer is only known to be base-size even when \
+             its version field reports 3.x",
+        );
+        assert!(
+            super::FfiBackend::primary_interface_fallback(base_ptr, false, 3, 2).is_none(),
+            "3.2 fallback must also be rejected for C_GetFunctionList pointers",
+        );
+
+        assert!(
+            super::FfiBackend::primary_interface_fallback(base_ptr, true, 3, 0).is_some(),
+            "a primary pointer obtained from C_GetInterface can be reused for \
+             lower 3.x versions",
+        );
+        assert!(
+            super::FfiBackend::primary_interface_fallback(base_ptr, true, 3, 2).is_some(),
+            "a 3.2 CK_INTERFACE function list can be reused for 3.2 calls",
+        );
     }
 
     /// Regression test for the 3.0-interface fallback (see `load_with_init_args`).

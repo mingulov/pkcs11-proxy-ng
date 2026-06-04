@@ -84,7 +84,22 @@ impl LogicalClientInstance {
                 backend_handles.push(bh);
             }
         }
+        self.login_state.remove(&slot);
         backend_handles
+    }
+
+    /// Remove one session. If it was the final session this logical client
+    /// held for the slot, clear the corresponding logical login state.
+    pub fn remove_session(&mut self, session: VirtualHandle) -> Option<BackendHandle> {
+        let slot = self.session_slots.remove(&session);
+        let backend_handle = self.session_handles.remove(session);
+        if let Some(slot) = slot {
+            let has_remaining_session_for_slot = self.session_slots.values().any(|s| *s == slot);
+            if !has_remaining_session_for_slot {
+                self.login_state.remove(&slot);
+            }
+        }
+        backend_handle
     }
 
     /// Prepare teardown: collect backend session handles, then clear maps.
@@ -238,6 +253,16 @@ impl ContextManager {
         self.contexts.get_mut(id).map(|mut ctx| {
             ctx.touch();
             f(ctx.value_mut())
+        })
+    }
+
+    pub fn first_login_state_for_slot_excluding(
+        &self,
+        slot: CkSlotId,
+        excluded_id: &ClientContextId,
+    ) -> Option<LoginState> {
+        self.contexts.iter().find_map(|ctx| {
+            if ctx.key() == excluded_id { None } else { ctx.login_state.get(&slot).copied() }
         })
     }
 

@@ -14,7 +14,10 @@ pub unsafe extern "C" fn c_find_objects_init(
     ul_count: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
+        let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         unit_result_to_rv(with_client!(client => client.find_objects_init(
             CkSessionHandle(h_session),
             &template,
@@ -232,7 +235,10 @@ pub unsafe extern "C" fn c_create_object(
         if ph_object.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
+        let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         match with_client!(client => client.create_object(CkSessionHandle(h_session), &template)) {
             Ok(handle) => {
                 unsafe { write_object_handle_output(handle, ph_object) };
@@ -254,7 +260,10 @@ pub unsafe extern "C" fn c_copy_object(
         if ph_new_object.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
+        let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         match with_client!(client => client.copy_object(
             CkSessionHandle(h_session),
             CkObjectHandle(h_object),
@@ -312,7 +321,10 @@ pub unsafe extern "C" fn c_set_attribute_value(
     ul_count: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
+        let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         unit_result_to_rv(with_client!(client => client.set_attribute_value(
             CkSessionHandle(h_session),
             CkObjectHandle(h_object),
