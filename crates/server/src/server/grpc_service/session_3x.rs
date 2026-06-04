@@ -45,7 +45,9 @@ pub(super) async fn login_user(
     // PIN bytes are zeroized when the closure drops.
     // DO NOT log pin or username at any tracing level.
     let pin = Zeroizing::new(req.pin);
-    let username = req.username;
+    // Usernames can be sensitive account identifiers tied to the PIN
+    // (build.rs flags LoginUserRequest.username secret-bearing); wipe on drop.
+    let username = Zeroizing::new(req.username);
     let backend = backend_ref.clone();
     let result =
         spawn_backend(move || backend.login_user(session, user_type, &username, &pin)).await?;
