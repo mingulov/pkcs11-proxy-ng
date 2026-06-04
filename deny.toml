@@ -40,7 +40,6 @@ allow = [
     "Unicode-DFS-2016",
     "CC0-1.0",
     "Zlib",
-    "OpenSSL",
 ]
 # Crates that ship with no SPDX license expression in their
 # Cargo.toml. Each must be reviewed individually before being added
