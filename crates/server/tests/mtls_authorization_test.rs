@@ -211,22 +211,44 @@ async fn mtls_listener_rejects_client_without_certificate() {
         .connect()
         .await;
 
-    if let Ok(channel) = channel {
-        let status = Pkcs11ProxyClient::new(channel)
-            .initialize(InitializeRequest { client_context_id: String::new() })
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                status.code(),
-                Code::Unauthenticated | Code::Unavailable | Code::Internal | Code::Unknown
-            ),
-            "unexpected status for missing client cert: {status}"
-        );
-        let status_text = format!("{status:?}");
-        assert!(
-            status_text.contains("CertificateRequired") || status.message().contains("transport"),
-            "missing client cert should fail at TLS transport: {status_text}"
-        );
+    // A certless client MUST NOT reach an authenticated RPC. Depending on
+    // whether tonic handshakes eagerly, that shows up either as a failed
+    // connect (Err) or as a failed RPC (Ok + error). Both branches must assert
+    // — the old `if let Ok` form passed vacuously when connect() returned Err,
+    // so a regression that opened the listener would not be caught.
+    match channel {
+        Ok(channel) => {
+            let status = Pkcs11ProxyClient::new(channel)
+                .initialize(InitializeRequest { client_context_id: String::new() })
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    status.code(),
+                    Code::Unauthenticated | Code::Unavailable | Code::Internal | Code::Unknown
+                ),
+                "unexpected status for missing client cert: {status}"
+            );
+            let status_text = format!("{status:?}");
+            assert!(
+                status_text.contains("CertificateRequired")
+                    || status.message().contains("transport"),
+                "missing client cert should fail at TLS transport: {status_text}"
+            );
+        }
+        Err(err) => {
+            // The daemon is up (start_mtls_daemon), so a failed connect is the
+            // server actively rejecting the certless TLS handshake. Confirm it
+            // is a transport/TLS failure, not an unrelated/unreachable error.
+            let text = format!("{err:?}").to_lowercase();
+            assert!(
+                text.contains("transport")
+                    || text.contains("tls")
+                    || text.contains("certificate")
+                    || text.contains("handshake")
+                    || text.contains("connect"),
+                "certless connect should fail at TLS transport, got: {text}"
+            );
+        }
     }
 }
