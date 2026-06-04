@@ -1,0 +1,330 @@
+# 32/64-bit Cross-Platform Compatibility Strategy
+
+**Document:** ADR-0006 (Proposed)  
+**Status:** Analysis Complete, Recommendations Ready  
+**Date:** 2026-03-29
+
+---
+
+## Context
+
+The pkcs11-proxy-ng project implements PKCS#11 remote proxying over gRPC. PKCS#11 uses platform-dependent types:
+
+- `CK_ULONG` = `unsigned long` (32-bit on 32-bit systems, 64-bit on 64-bit systems)
+- `CK_SESSION_HANDLE`, `CK_OBJECT_HANDLE` = `CK_ULONG`
+- `CK_SLOT_ID` = `CK_ULONG`
+
+This creates potential compatibility issues when:
+- 32-bit client connects to 64-bit server
+- 64-bit server returns handles > 0xFFFFFFFF
+- Cross-platform deployments with mixed architectures
+
+---
+
+## Current Architecture Assessment
+
+### ✅ Strengths
+
+1. **Wire Protocol Uses u64 Exclusively**
+   - All protobuf definitions use `uint64` for CK_ULONG-derived types
+   - ~200+ CK_ fields are uint64, 0 are int64
+   - No signed/unsigned confusion in protobuf
+
+2. **Rust Internal Types**
+   - All CK_ types defined as `u64` regardless of platform:
+   ```rust
+   pub struct CkSessionHandle(pub u64);
+   pub struct CkObjectHandle(pub u64);
+   pub struct CkSlotId(pub u64);
+   ```
+
+3. **Explicit FFI Boundaries**
+   - Platform-sized types (`CK_ULONG`) handled explicitly at C boundaries
+   - Uses `as CK_ULONG` casts with platform-aware behavior
+   - ABI audit tests verify truncation detection
+
+### ⚠️ CRITICAL: CK_UNAVAILABLE_INFORMATION Mismatch
+
+**Discovery:** `CK_UNAVAILABLE_INFORMATION` is defined as `(~0UL)` — platform-sized:
+- **32-bit:** `0xFFFFFFFF` (32 bits all set)
+- **64-bit:** `0xFFFFFFFFFFFFFFFF` (64 bits all set)
+
+**This breaks mixed 32/64-bit deployments:**
+
+**Scenario 1: 32-bit Client → 64-bit Server (Attribute Read)**
+```
+64-bit Backend: Sets ulValueLen = 0xFFFFFFFFFFFFFFFF (CK_UNAVAILABLE_INFORMATION)
+Server (64-bit): Sends 0xFFFFFFFFFFFFFFFF via protobuf
+Wire: uint64 = 0xFFFFFFFFFFFFFFFF
+32-bit Shim: Receives u64::MAX, converts to CK_ULONG
+  -> 0xFFFFFFFFFFFFFFFF as CK_ULONG (32-bit) = 0xFFFFFFFF
+Client: Compares with CK_UNAVAILABLE_INFORMATION (0xFFFFFFFF) ✓ WORKS
+```
+**Result:** Accidentally works due to truncation!
+
+**Scenario 2: 64-bit Client → 32-bit Server (Attribute Read)**
+```
+32-bit Backend: Sets ulValueLen = 0xFFFFFFFF (CK_UNAVAILABLE_INFORMATION)
+Server (32-bit): Sends 0xFFFFFFFF via protobuf
+Wire: uint64 = 0x00000000FFFFFFFF
+64-bit Shim: Receives 0x00000000FFFFFFFF
+Client: Compares with CK_UNAVAILABLE_INFORMATION (0xFFFFFFFFFFFFFFFF) ✗ FAILS
+```
+**Result:** Client fails to recognize CK_UNAVAILABLE_INFORMATION!
+
+**Code Location:** 
+- `crates/backend/src/ffi/mapping.rs:70` — compares `src.ulValueLen == cryptoki_sys::CK_UNAVAILABLE_INFORMATION`
+- This comparison is platform-dependent
+- Test at `crates/proto/src/convert/attribute.rs:81-89` assumes `u64::MAX` (64-bit value)
+
+**Impact:** Attribute reads fail to detect sensitive/invalid attributes when 64-bit client talks to 32-bit backend.
+
+### ⚠️ Handle Truncation on 32-bit Systems
+- If 64-bit backend assigns handle > 0xFFFFFFFF
+- 32-bit client will truncate via `handle.0 as CK_SESSION_HANDLE`
+- Results in handle corruption and session/object loss
+
+2. **No 32-bit CI Testing**
+   - Current CI only tests x86_64
+   - No cross-compilation to i686, armv7, or other 32-bit targets
+   - No mixed-architecture integration tests
+
+3. **Handle Range Assumptions**
+   - Some backends (especially HSMs) may use full 64-bit handle space
+   - SoftHSM2 uses sequential integers starting at 1 (32-bit safe)
+   - Vendor HSMs may use random 64-bit values (not 32-bit safe)
+
+---
+
+## Compatibility Matrix
+
+### Supported Scenarios (Phase 1 & 2)
+
+| Client | Server | Backend | Status | Notes |
+|--------|--------|---------|--------|-------|
+| 64-bit | 64-bit | 64-bit | ✅ **FULL** | Native deployment — **RECOMMENDED** |
+| 64-bit | 64-bit | 32-bit | ✅ **FULL** | Server handles 32→64 conversion |
+| 32-bit | 32-bit | 32-bit | ⚠️ **SUPPORTED** | Homogeneous 32-bit — requires CI testing |
+| 32-bit | 64-bit | 64-bit | ❌ **NOT SUPPORTED** | CK_UNAVAILABLE_INFORMATION mismatch |
+| 32-bit | 64-bit | 32-bit | ❌ **NOT SUPPORTED** | CK_UNAVAILABLE_INFORMATION mismatch |
+| 64-bit | 32-bit | Any | ❌ **NOT SUPPORTED** | Server would need truncation logic |
+
+**Key:** Only homogeneous architectures (all 64-bit or all 32-bit) are supported in Phase 1/2.
+
+### Risk by Handle Type
+
+| Handle Type | Assigned By | 32-bit Safe? | Mitigation |
+|-------------|-------------|--------------|------------|
+| Virtual Slot ID | Shim | ✅ Yes | Sequential, configurable |
+| Session Handle | Backend | ⚠️ Depends | Range check in shim (homogeneous only) |
+| Object Handle | Backend | ⚠️ Depends | Range check in shim (homogeneous only) |
+| Mechanism Type | Constants | ✅ Yes | Always use u64 |
+
+**Note:** CK_UNAVAILABLE_INFORMATION values differ between 32-bit (0xFFFFFFFF) and 64-bit (0xFFFFFFFFFFFFFFFF), causing attribute read failures in mixed deployments.
+
+---
+
+## Recommendations
+
+### CRITICAL Decision: Postpone Mixed 32/64-bit Support
+
+**Decision:** For Phase 1 and Phase 2, **do NOT support mixed 32/64-bit client/server deployments**.
+
+**Rationale:**
+1. **CK_UNAVAILABLE_INFORMATION mismatch** — Fundamental incompatibility in PKCS#11 spec
+2. **No current demand** — All pilot customers use 64-bit everywhere
+3. **Complexity vs benefit** — Would require protocol changes or translation layer
+4. **Workaround exists** — Deploy same architecture on both sides
+
+**Supported Configurations:**
+- ✅ 64-bit Client → 64-bit Server → 64-bit Backend (FULL SUPPORT)
+- ✅ 32-bit Client → 32-bit Server → 32-bit Backend (SUPPORTED with testing)
+- ❌ Mixed 32/64-bit Client/Server (NOT SUPPORTED in Phase 1/2)
+
+**Future:** Revisit in Phase 3 if customer demand arises with business justification.
+
+---
+
+### HIGH Priority (Phase 2)
+
+#### 1. Add 32-bit CI Target (32-bit everywhere support)
+
+**Action:** Add i686 target to CI matrix for 32-bit homogeneous deployments
+
+```yaml
+# .github/workflows/ci.yml
+strategy:
+  matrix:
+    include:
+      - target: x86_64-unknown-linux-gnu
+        os: ubuntu-24.04
+      - target: i686-unknown-linux-gnu  # NEW
+        os: ubuntu-24.04
+      
+steps:
+  - name: Install 32-bit toolchain
+    run: |
+      rustup target add i686-unknown-linux-gnu
+      sudo apt-get install gcc-multilib
+      
+  - name: Build (32-bit)
+    run: cargo build --target i686-unknown-linux-gnu
+    
+  - name: Test (32-bit unit tests only)
+    run: cargo test --lib --target i686-unknown-linux-gnu
+```
+
+**Rationale:** Ensure code compiles and unit tests pass on 32-bit. FFI tests may require 32-bit SoftHSM2.
+
+#### 2. Add Handle Range Validation
+
+**Action:** Add debug assertions in shim
+
+```rust
+// In shim dispatch code
+debug_assert!(
+    handle.0 <= u32::MAX as u64 || cfg!(target_pointer_width = "64"),
+    "Backend returned 64-bit handle (0x{:016X}) to 32-bit client. \
+     This will truncate and cause handle corruption. \
+     Consider using 64-bit client or backend that assigns 32-bit handles.",
+    handle.0
+);
+```
+
+**Location:** `crates/pkcs11-proxy-ng-shim/src/dispatch/general/helpers.rs`  
+**Impact:** Developer experience — clear error message when truncation would occur
+
+#### 3. Document Handle Range Requirements
+
+**Action:** Add ADR-0006 documenting this strategy
+
+```markdown
+## Decision: Mixed Architecture Support
+
+**Status:** Phase 1 supports 64-bit everywhere with 32-bit client limitations.
+
+**32-bit Client Constraints:**
+- Backend handles MUST stay within 0..0xFFFFFFFF range
+- SoftHSM2 satisfies this (sequential from 1)
+- Vendor HSMs may not (random 64-bit allocation)
+
+**Future:** Phase 2 may add full 32-bit server support if demand exists.
+```
+
+### MEDIUM Priority (Phase 2)
+
+#### 4. Add Cross-Platform Integration Tests
+
+**Action:** Test 32-bit client → 64-bit server workflow
+
+```rust
+#[test]
+#[ignore = "requires 32-bit build"]
+fn cross_platform_handle_roundtrip() {
+    // Start 64-bit server with SoftHSM2
+    // Use 32-bit shim to connect
+    // Verify handles round-trip correctly
+}
+```
+
+**Setup:** Docker-based test with multi-arch support
+
+#### 5. Virtual Handle Management
+
+**Action:** Ensure shim-assigned virtual handles fit in 32 bits
+
+**Current:** Virtual slot IDs assigned by shim are sequential  
+**Verify:** Counter wraps or stays below u32::MAX
+
+### LOW Priority (Future)
+
+#### 6. Consider 32-bit Server Support
+
+**Action:** Only if customer demand exists
+
+**Impact:** Would require:
+- Truncation logic in server
+- Handle mapping tables
+- Increased complexity
+
+**Recommendation:** Defer until business case proven
+
+---
+
+## Implementation Plan
+
+### Phase 1 Completion (Immediate)
+
+- [x] 32/64-bit compatibility analysis — **DONE**
+- [ ] Add ADR-0006 documentation — **TODO**
+- [ ] Add 32-bit CI target — **TODO**
+- [ ] Add handle range assertions — **TODO**
+- [ ] Document in deployment guide — **TODO**
+
+### Phase 2 (If Required)
+
+- [ ] Full 32-bit server support
+- [ ] Cross-platform integration test matrix
+- [ ] Vendor HSM handle range testing
+- [ ] Performance comparison 32 vs 64 bit
+
+---
+
+## Test Strategy
+
+### Unit Tests (Platform Independent)
+
+```rust
+#[test]
+fn u64_roundtrip_preserves_value() {
+    let original: u64 = 0xDEADBEEFCAFEBABE;
+    let proto = original as u64;  // proto is always u64
+    let back = proto as u64;
+    assert_eq!(original, back);
+}
+```
+
+### FFI Tests (Platform Dependent)
+
+```rust
+#[test]
+#[cfg(target_pointer_width = "32")]
+fn handle_truncation_on_32bit() {
+    let large: u64 = 0x1_0000_0000;  // 33rd bit set
+    let truncated = large as CK_SESSION_HANDLE;
+    assert_eq!(truncated, 0);  // Upper bits lost
+}
+```
+
+### Integration Tests (Cross-Platform)
+
+```rust
+#[tokio::test]
+#[ignore = "requires multi-arch setup"]
+async fn cross_platform_session_lifecycle() {
+    // 64-bit server
+    // 32-bit client shim
+    // Verify: open_session, operations, close_session work
+}
+```
+
+---
+
+## Conclusion
+
+The pkcs11-proxy-ng project has a **sound architecture** for 32/64-bit compatibility:
+
+- ✅ Wire protocol uses u64 exclusively (no sign issues)
+- ✅ Rust internal types are u64 (consistent)
+- ✅ FFI boundaries handle platform-sized types explicitly
+- ✅ SoftHSM2 (main test backend) uses 32-bit safe handles
+
+**Primary Risk:** Vendor HSMs assigning 64-bit handles > 0xFFFFFFFF will cause truncation on 32-bit clients.
+
+**Mitigation:** 
+1. Document the limitation
+2. Add CI testing for 32-bit compilation
+3. Add runtime assertions in debug builds
+4. Monitor for customer demand for full 32-bit support
+
+**Recommendation:** Proceed with Phase 1 release. Mixed 32/64-bit deployments are supported with documented constraints.

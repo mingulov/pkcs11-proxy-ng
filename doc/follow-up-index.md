@@ -210,6 +210,6 @@ proxy-latency class, a documented known-diff — not a transparency bug).
 - MCT multiblock timeouts (~12) — known proxy-latency, already a known-diff class.
 
 ## Separate repo — pkcs11-check
-See `docker/proxy-test/pool/pkcs11-check-backlog.md` (root repo): structured
+Tracked with the project's `pkcs11-check` parity tooling: structured
 per-call CK_RV trace, 10000× C_Initialize churn/exhaustion test, mid-file
 daemon-restart handling.

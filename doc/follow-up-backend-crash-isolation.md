@@ -6,8 +6,8 @@
 > client must re-establish it regardless), and its unique wins are low-value for a project
 > that accepts full restarts + client reconnection. The chosen strategy is to **run multiple
 > daemon instances + sticky client routing + client reconnect**, supervised by the
-> orchestrator. This document and ADR-0007 / the design spec
-> (`doc/plans/2026-05-30-backend-process-isolation-design.md`, root repo) are kept as a
+> orchestrator. This document and ADR-0007
+> (`doc/adr/ADR-0007-backend-process-isolation.md`) are kept as a
 > documented fallback. See the A2 entry in `follow-up-index.md`.
 
 ## The gap

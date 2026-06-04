@@ -408,8 +408,7 @@ encounter; they are scope of follow-up rounds:
 | Backend crash blast radius: a vendor-`.so` SIGSEGV downs the whole daemon process (backend is in-process; A2/in-process-worker deferred) | Run **multiple instances + sticky routing** (§4a); consumers reconnect + re-open (§6) | Deployment + application code |
 
 Earlier follow-ups (DNS re-resolve, slow-backend test, per-RPC
-trace ID, gRPC health probe, rate-limiter) are closed; the
-umbrella audit history lives in the parent repo.
+trace ID, gRPC health probe, rate-limiter) are closed.
 
 ## 10. Escalation
 
