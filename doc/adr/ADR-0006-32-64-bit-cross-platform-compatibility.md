@@ -1,8 +1,27 @@
 # 32/64-bit Cross-Platform Compatibility Strategy
 
-**Document:** ADR-0006 (Proposed)  
-**Status:** Analysis Complete, Recommendations Ready  
-**Date:** 2026-03-29
+**Document:** ADR-0006  
+**Status:** Accepted — 32-bit / mixed-arch **deferred** (out of scope for the `0.x` beta)  
+**Date:** 2026-03-29 (decision recorded 2026-06-04)
+
+---
+
+## Decision (scope for the beta)
+
+The `0.x` public beta supports **Linux `x86_64` only**. 32-bit and mixed
+32/64-bit deployments are **deferred**: they are not supported and not a beta
+claim (see [beta support matrix](../release/beta-support-matrix.md)).
+
+The analysis below — in particular the `CK_UNAVAILABLE_INFORMATION` /
+platform-sized-sentinel issue — is retained because it documents *why* mixed
+architecture is deferred and what a future 32-bit track must handle. It is not a
+present-scope commitment.
+
+Note on handles: session and object handles are **virtualized per logical client
+instance** by the daemon (see
+[ADR-0002](./ADR-0002-handle-session-identity-model.md)); backend handle values
+are not exposed to clients. Handle-width concerns therefore live at the
+daemon↔backend boundary, not on the wire to the client.
 
 ---
 
