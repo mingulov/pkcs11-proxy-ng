@@ -68,6 +68,48 @@ fn teardown_clears_login_state() {
 }
 
 #[test]
+fn remove_session_evicts_only_its_recorded_session_objects() {
+    // B2: closing a session evicts the session objects recorded under it, but
+    // leaves other sessions' objects (and unrecorded token objects) intact.
+    let mut ctx = LogicalClientInstance::new(None);
+    let session_a = ctx.session_handles.insert(BackendHandle(10));
+    let session_b = ctx.session_handles.insert(BackendHandle(20));
+
+    let sess_obj_a = ctx.object_handles.insert(BackendHandle(100));
+    let sess_obj_b = ctx.object_handles.insert(BackendHandle(200));
+    let token_obj = ctx.object_handles.insert(BackendHandle(300)); // not recorded
+    ctx.record_session_object(session_a, sess_obj_a);
+    ctx.record_session_object(session_b, sess_obj_b);
+
+    ctx.remove_session(session_a);
+
+    assert_eq!(ctx.object_handles.resolve(sess_obj_a), None, "A's session object evicted");
+    assert_eq!(
+        ctx.object_handles.resolve(sess_obj_b),
+        Some(BackendHandle(200)),
+        "B's session object untouched"
+    );
+    assert_eq!(
+        ctx.object_handles.resolve(token_obj),
+        Some(BackendHandle(300)),
+        "unrecorded (token) object persists"
+    );
+}
+
+#[test]
+fn remove_sessions_for_slot_evicts_their_session_objects() {
+    let mut ctx = LogicalClientInstance::new(None);
+    let session = ctx.session_handles.insert(BackendHandle(11));
+    ctx.session_slots.insert(session, CkSlotId(7));
+    let obj = ctx.object_handles.insert(BackendHandle(111));
+    ctx.record_session_object(session, obj);
+
+    ctx.remove_sessions_for_slot(CkSlotId(7));
+
+    assert_eq!(ctx.object_handles.resolve(obj), None, "slot-close evicts session objects");
+}
+
+#[test]
 fn session_and_object_handle_spaces_are_independent() {
     let mut ctx = LogicalClientInstance::new(None);
     let svirt = ctx.session_handles.insert(BackendHandle(1));

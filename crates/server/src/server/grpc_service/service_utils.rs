@@ -454,6 +454,44 @@ pub(super) async fn register_object_handle(
         .unwrap_or(0)
 }
 
+/// True when `template` declares `CKA_TOKEN` as a true value — i.e. a token
+/// object, whose handle persists across the application's sessions and must NOT
+/// be evicted on session close. The bool may arrive as a typed `Bool`, a raw
+/// `CK_BBOOL` byte, or a ulong, so all encodings are accepted (B2).
+pub(super) fn template_declares_token_object(template: &[CkAttribute]) -> bool {
+    template.iter().any(|attr| {
+        attr.attr_type == CkAttributeType::TOKEN
+            && match &attr.value {
+                Some(CkAttributeValue::Bool(b)) => *b,
+                Some(CkAttributeValue::Bytes(bytes)) => bytes.first().is_some_and(|&b| b != 0),
+                Some(CkAttributeValue::Ulong(u)) => *u != 0,
+                _ => false,
+            }
+    })
+}
+
+/// Register a backend object handle and, when it is a session object, record it
+/// under `session` so it is evicted when that session closes (B2). Returns the
+/// virtual object handle (0 if the context is gone).
+pub(super) async fn register_session_object_handle(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    session: VirtualHandle,
+    backend_handle: CkObjectHandle,
+    is_token_object: bool,
+) -> u64 {
+    ctx_mgr
+        .get_context(ctx_id, |ctx| {
+            let virtual_object = ctx.object_handles.insert(BackendHandle(backend_handle.0));
+            if !is_token_object {
+                ctx.record_session_object(session, virtual_object);
+            }
+            virtual_object.0
+        })
+        .await
+        .unwrap_or(0)
+}
+
 pub(super) async fn register_session_handle(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,

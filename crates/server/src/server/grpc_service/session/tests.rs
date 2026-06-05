@@ -685,6 +685,84 @@ fn source_code_never_logs_pin_fields() {
 }
 
 #[tokio::test]
+async fn closing_a_session_evicts_session_objects_not_token_objects() {
+    // B2: a session object's virtual handle must be evicted when its session
+    // closes (the backend destroys it, and a recycled backend object number
+    // must not alias the stale handle). A token object's handle persists — it
+    // is valid across the application's sessions.
+    use crate::server::grpc_service::object::create_object;
+    use crate::server::grpc_service::session::close_session;
+
+    let (ctx_mgr, backend, ctx_id, session) = setup_session().await;
+
+    let create = |template: Vec<pkcs11_proxy_ng_proto::Attribute>| {
+        let ctx_mgr = ctx_mgr.clone();
+        let backend = backend.clone();
+        let ctx = ctx_id.0.clone();
+        async move {
+            create_object(
+                &ctx_mgr,
+                &backend,
+                Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
+                    client_context_id: ctx,
+                    session_handle: session,
+                    template,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .object_handle
+        }
+    };
+
+    let session_obj = create(vec![]).await;
+    let token_obj = create(vec![pkcs11_proxy_ng_proto::Attribute {
+        attr_type: CkAttributeType::TOKEN.0,
+        value: Some(pkcs11_proxy_ng_proto::attribute::Value::BoolValue(true)),
+    }])
+    .await;
+    assert_ne!(session_obj, 0);
+    assert_ne!(token_obj, 0);
+
+    let resolves = |vobj: u64| {
+        let ctx_mgr = ctx_mgr.clone();
+        let ctx = ctx_id.clone();
+        async move {
+            ctx_mgr
+                .get_context(&ctx, |c| c.object_handles.resolve(VirtualHandle(vobj)))
+                .await
+                .flatten()
+                .is_some()
+        }
+    };
+    assert!(resolves(session_obj).await, "setup: session object should resolve");
+    assert!(resolves(token_obj).await, "setup: token object should resolve");
+
+    let closed = close_session(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(closed.ck_rv, CkRv::OK.0, "close_session failed");
+
+    assert!(
+        !resolves(session_obj).await,
+        "session object handle must be evicted when its session closes"
+    );
+    assert!(
+        resolves(token_obj).await,
+        "token object handle must persist across the application's sessions"
+    );
+}
+
+#[tokio::test]
 async fn destroy_object_evicts_the_virtual_handle() {
     use crate::server::grpc_service::object::{create_object, destroy_object};
 

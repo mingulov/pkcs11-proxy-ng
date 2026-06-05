@@ -35,8 +35,14 @@ pub struct LogicalClientInstance {
     pub session_handles: HandleMap, // virtual session → backend session
     pub session_slots: HashMap<VirtualHandle, CkSlotId>, // session → slot ownership (ADR-0002 §7)
     pub object_handles: HandleMap,  // virtual object → backend object
+    /// Virtual object handles created as SESSION objects (CKA_TOKEN=false) in
+    /// each virtual session. Evicted when that session closes so a recycled
+    /// backend object number can never alias a stale handle (B2). Token objects
+    /// are intentionally absent — their handles persist across the application's
+    /// sessions.
+    pub session_objects: HashMap<VirtualHandle, Vec<VirtualHandle>>,
     pub login_state: HashMap<CkSlotId, LoginState>, // per-token login
-    pub authenticated_identity: Option<String>, // bound at creation (ADR-0005 §4)
+    pub authenticated_identity: Option<String>,     // bound at creation (ADR-0005 §4)
     /// Count of backend operations currently in flight for this context.
     /// Eviction never reaps a context with `in_flight > 0`, so a single
     /// long backend call (DH/RSA keygen, slow-HSM op) is not evicted MID-CALL
@@ -55,6 +61,7 @@ impl LogicalClientInstance {
             session_handles: HandleMap::new(),
             session_slots: HashMap::new(),
             object_handles: HandleMap::new(),
+            session_objects: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
             in_flight: Arc::new(AtomicI64::new(0)),
@@ -80,6 +87,12 @@ impl LogicalClientInstance {
         let mut backend_handles = Vec::with_capacity(to_remove.len());
         for vh in to_remove {
             self.session_slots.remove(&vh);
+            // Evict each closed session's session objects (B2).
+            if let Some(objects) = self.session_objects.remove(&vh) {
+                for object in objects {
+                    self.object_handles.remove(object);
+                }
+            }
             if let Some(bh) = self.session_handles.remove(vh) {
                 backend_handles.push(bh);
             }
@@ -88,11 +101,25 @@ impl LogicalClientInstance {
         backend_handles
     }
 
+    /// Record `object` as a session object (CKA_TOKEN=false) created in
+    /// `session`, so its virtual handle is evicted when that session closes (B2).
+    pub fn record_session_object(&mut self, session: VirtualHandle, object: VirtualHandle) {
+        self.session_objects.entry(session).or_default().push(object);
+    }
+
     /// Remove one session. If it was the final session this logical client
     /// held for the slot, clear the corresponding logical login state.
     pub fn remove_session(&mut self, session: VirtualHandle) -> Option<BackendHandle> {
         let slot = self.session_slots.remove(&session);
         let backend_handle = self.session_handles.remove(session);
+        // Evict the session's session objects: the backend destroys them on
+        // close, so the virtual handles must not linger and alias a recycled
+        // backend object number (B2).
+        if let Some(objects) = self.session_objects.remove(&session) {
+            for object in objects {
+                self.object_handles.remove(object);
+            }
+        }
         if let Some(slot) = slot {
             let has_remaining_session_for_slot = self.session_slots.values().any(|s| *s == slot);
             if !has_remaining_session_for_slot {
@@ -115,6 +142,7 @@ impl LogicalClientInstance {
         self.session_handles.clear();
         self.session_slots.clear();
         self.object_handles.clear();
+        self.session_objects.clear();
         self.login_state.clear();
         backend_sessions
     }
