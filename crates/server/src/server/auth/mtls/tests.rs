@@ -61,6 +61,20 @@ fn invalid_der_is_error() {
 }
 
 #[test]
+fn empty_subject_dn_is_rejected() {
+    // G1: a cert with no subject DN would rely on the SubjectAltName for its
+    // identity, which Phase 1 does not consult. Accepting it would collapse
+    // every such cert from a CA onto one ambiguous empty-subject identity, so
+    // it must be rejected (fail closed) rather than silently shared.
+    let mut ca_dn = DistinguishedName::new();
+    ca_dn.push(DnType::CommonName, "Root CA");
+    let empty_subject = DistinguishedName::new();
+    let der = gen_ca_signed(&ca_dn, &empty_subject);
+    let err = extract_identity(&der).unwrap_err();
+    assert!(err.contains("empty subject"), "error: {err}");
+}
+
+#[test]
 fn self_signed_cn_only() {
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "TestCA");

@@ -55,16 +55,20 @@ pub fn validate_cert_file(path: &Path) -> Result<String, String> {
 }
 
 /// Extract issuer and subject Distinguished Names from a DER-encoded X.509
-/// certificate, returning them as RFC 4514 strings.
+/// certificate. The DN strings are produced by `x509-parser`'s RFC 4514
+/// serializer (comma-separated, leaf-to-root, short attribute names, values
+/// escaped per RFC 4514 §2.4 — this function does not re-implement that).
 ///
-/// The resulting strings are used as identity keys in the authorization policy
-/// (via `AuthenticatedIdentity::Mtls`). Operators must use the same RFC 4514
-/// format in policy files for identity matching to work.
+/// These strings become identity keys in the authorization policy (via
+/// `AuthenticatedIdentity::Mtls`); the identity's *own* string form additionally
+/// escapes its `;subject=` join delimiter so distinct DN pairs cannot collide
+/// (see `identity.rs`). Operators must use the same DN serialization in policy
+/// files for identity matching to work.
 ///
-/// RFC 4514 rules applied:
-/// - Attributes are comma-separated in reverse order (leaf-to-root)
-/// - Standard attribute types use short names: CN, O, OU, C, ST, L, etc.
-/// - Values are escaped per RFC 4514 §2.4
+/// Fails closed when the subject DN is empty: such a certificate would rely on
+/// its SubjectAltName for identity, which Phase 1 does not consult, and would
+/// otherwise collapse every empty-subject cert from a CA onto one ambiguous
+/// identity. (SAN-based identity is a deliberate Phase 1 gap.)
 pub fn extract_identity(cert_der: &[u8]) -> Result<(String, String), String> {
     if cert_der.is_empty() {
         return Err("empty certificate".into());
@@ -74,6 +78,12 @@ pub fn extract_identity(cert_der: &[u8]) -> Result<(String, String), String> {
 
     let issuer = cert.issuer().to_string();
     let subject = cert.subject().to_string();
+
+    if subject.is_empty() {
+        return Err("certificate has an empty subject DN; SubjectAltName-based identity is not \
+             supported in Phase 1"
+            .into());
+    }
 
     Ok((issuer, subject))
 }

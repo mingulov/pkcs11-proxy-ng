@@ -42,9 +42,16 @@ identity is represented in a canonical form derived from the certificate
 
 `x509:issuer=CN=Example Root,O=Example;subject=CN=pki-service,O=Example`
 
-The daemon canonicalizes issuer and subject using RFC 4514 string form before
-building the identity string. This is the required mode for any TCP listener
-that carries production traffic.
+The daemon canonicalizes issuer and subject using the RFC 4514 string form
+(via `x509-parser`) before building the identity string. Within that identity
+string a literal `\` and `;` in either DN are escaped (`\\`, `\;`) so the
+`;subject=` join delimiter is unambiguous: the string form is **injective**
+(distinct issuer/subject DN pairs can never collide on the same key, which would
+otherwise let one certificate match another's policy entry or slip past the
+per-request ownership check of ADR-0009). A certificate with an **empty subject
+DN** is rejected — Phase 1 does not consult the SubjectAltName, and an empty
+subject would collapse every such certificate from a CA onto one identity. This
+mTLS mode is required for any TCP listener that carries production traffic.
 
 ### 2. Default behavior per listener type
 
