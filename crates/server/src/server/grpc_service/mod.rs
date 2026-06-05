@@ -241,6 +241,30 @@ macro_rules! impl_proxy_service {
                 .await
             }
 
+            async fn wait_for_slot_event(
+                &self,
+                request: Request<pkcs11_proxy_ng_proto::WaitForSlotEventRequest>,
+            ) -> Result<Response<pkcs11_proxy_ng_proto::WaitForSlotEventResponse>, Status> {
+                // Hand-written (not via the dispatch macro) because it needs the
+                // token policy to suppress events for unauthorized slots (M13).
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
+                // A blocking wait (CKF_DONT_BLOCK omitted) must not be reaped
+                // mid-call, exactly as the dispatch macro guards its RPCs.
+                let _op = self.context_manager.begin_operation(
+                    &super::context_manager::ClientContextId(
+                        request.get_ref().client_context_id.clone(),
+                    ),
+                );
+                state_ops::wait_for_slot_event_with_policy(
+                    &self.context_manager,
+                    &self.backend,
+                    self.token_policy.as_ref(),
+                    request,
+                )
+                .await
+            }
+
             async fn open_session(
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::OpenSessionRequest>,
@@ -408,12 +432,6 @@ impl_proxy_service!(
     (wrap_key, WrapKeyRequest, WrapKeyResponse, key_ops::wrap_key),
     (unwrap_key, UnwrapKeyRequest, UnwrapKeyResponse, key_ops::unwrap_key),
     (generate_random, GenerateRandomRequest, GenerateRandomResponse, state_ops::generate_random),
-    (
-        wait_for_slot_event,
-        WaitForSlotEventRequest,
-        WaitForSlotEventResponse,
-        state_ops::wait_for_slot_event
-    ),
     (
         get_operation_state,
         GetOperationStateRequest,

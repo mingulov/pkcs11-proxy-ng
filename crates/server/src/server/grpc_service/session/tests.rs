@@ -888,7 +888,7 @@ async fn object_handles_are_isolated_per_context() {
 
 #[tokio::test]
 async fn wait_for_slot_event_does_not_leak_raw_backend_slot() {
-    use crate::server::grpc_service::state_ops::wait_for_slot_event;
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
 
     let mock = MockBackend::default_test();
     mock.initialize().unwrap();
@@ -899,10 +899,15 @@ async fn wait_for_slot_event_does_not_leak_raw_backend_slot() {
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
     ctx_mgr.register_slot(CkSlotId(0)).await; // only slot 0 is mapped; 99 is not
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .unwrap();
 
-    let resp = wait_for_slot_event(
+    let resp = wait_for_slot_event_with_policy(
         &ctx_mgr,
         &backend,
+        &policy,
         Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
             client_context_id: ctx_id.0.clone(),
             flags: 1, // CKF_DONT_BLOCK — return the queued event immediately
@@ -913,6 +918,51 @@ async fn wait_for_slot_event_does_not_leak_raw_backend_slot() {
     .into_inner();
 
     assert_ne!(resp.slot_id, 99, "must never surface the raw backend slot id for an unmapped slot");
+}
+
+#[tokio::test]
+async fn wait_for_slot_event_suppresses_events_for_unauthorized_slots() {
+    // M13: an authenticated client must not learn that a token it has no policy
+    // access to had a slot event — that would disclose insertion/removal of
+    // tokens outside its authorization. The event is reported as no-event.
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    mock.enqueue_slot_event(CkSlotId(0)); // event for a MAPPED slot with a token
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+    // An authenticated identity that the (empty, deny-by-default) policy denies.
+    let ctx_id =
+        ctx_mgr.create_context(Some("x509:issuer=CN=CA;subject=CN=denied".into())).await.unwrap();
+    let policy =
+        crate::server::auth::policy::TokenPolicy::from_config(&crate::config::AuthConfig {
+            allow_all_authenticated: false,
+            policy: vec![],
+        })
+        .unwrap();
+
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(
+        resp.ck_rv,
+        CkRv::NO_EVENT.0,
+        "an event for an unauthorized slot must be suppressed (no-event)"
+    );
+    assert_eq!(resp.slot_id, 0, "no slot id is surfaced when suppressed");
 }
 
 #[tokio::test]

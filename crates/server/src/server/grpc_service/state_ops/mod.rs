@@ -4,6 +4,7 @@ use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 
+use super::super::auth::policy::TokenPolicy;
 use super::super::context_manager::ContextManager;
 
 mod operation_state;
@@ -18,12 +19,13 @@ pub(super) async fn generate_random(
     random::generate_random(ctx_mgr, backend_ref, request).await
 }
 
-pub(super) async fn wait_for_slot_event(
+pub(super) async fn wait_for_slot_event_with_policy(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    token_policy: &TokenPolicy,
     request: Request<pkcs11_proxy_ng_proto::WaitForSlotEventRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WaitForSlotEventResponse>, Status> {
-    slot_event::wait_for_slot_event(ctx_mgr, backend_ref, request).await
+    slot_event::wait_for_slot_event(ctx_mgr, backend_ref, token_policy, request).await
 }
 
 pub(super) async fn get_operation_state(
