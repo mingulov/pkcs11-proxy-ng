@@ -701,6 +701,78 @@ async fn destroy_object_evicts_the_virtual_handle() {
 }
 
 #[tokio::test]
+async fn object_handles_are_isolated_per_context() {
+    // H4 (non-ignored regression guard for the A1/A2/B1/B2 isolation work):
+    // an object created by one logical client must not be reachable through
+    // another client's context. This is sharp because per-context virtual
+    // handles BOTH start numbering at 1 — ctx_b creates no object, so ctx_a's
+    // handle simply does not exist in ctx_b's map and must not alias anything.
+    // Runs on MockBackend, so it guards isolation in CI without a real HSM.
+    use crate::server::grpc_service::object::{create_object, get_attribute_value};
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    // ctx_a creates an object; ctx_b creates none (its handle map stays empty).
+    let created = create_object(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
+            client_context_id: ctx_a.0.clone(),
+            session_handle: session_a,
+            template: vec![],
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(created.ck_rv, CkRv::OK.0, "setup: create_object failed");
+    let vobj = created.object_handle;
+    assert_ne!(vobj, 0, "create_object must return a virtual handle");
+
+    let get = |ctx: String, session: u64| {
+        let ctx_mgr = ctx_mgr.clone();
+        let backend = backend.clone();
+        async move {
+            get_attribute_value(
+                &ctx_mgr,
+                &backend,
+                Request::new(pkcs11_proxy_ng_proto::GetAttributeValueRequest {
+                    client_context_id: ctx,
+                    session_handle: session,
+                    object_handle: vobj,
+                    template: vec![],
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        }
+    };
+
+    // ctx_b cannot reach ctx_a's object through the shared numeric handle value.
+    assert_eq!(
+        get(ctx_b.0.clone(), session_b).await,
+        CkRv::OBJECT_HANDLE_INVALID.0,
+        "a foreign context must not resolve another client's object handle"
+    );
+    // ctx_a still owns it.
+    assert_eq!(
+        get(ctx_a.0.clone(), session_a).await,
+        CkRv::OK.0,
+        "the owning context must still resolve its own object handle"
+    );
+}
+
+#[tokio::test]
 async fn wait_for_slot_event_does_not_leak_raw_backend_slot() {
     use crate::server::grpc_service::state_ops::wait_for_slot_event;
 
