@@ -1,3 +1,16 @@
+//! Client session methods.
+//!
+//! PIN/secret handling note (E3): the PIN bytes a caller passes here are copied
+//! once, into the prost-generated request struct, and that struct is then moved
+//! into the tonic client to be encoded and sent. From that point the client no
+//! longer owns the copy, so it cannot wipe it; and the prost field type is
+//! deliberately kept a plain `Vec<u8>` (see `crates/proto/build.rs`) rather than
+//! a wiping newtype. Wrapping the request field in `Zeroizing` here would only
+//! add a second copy without wiping the one tonic holds, so it is intentionally
+//! omitted. This is the send-side mirror of the documented receive-side
+//! limitation (tonic's transport buffers are not reachable for zeroization); the
+//! application owns its own PIN buffer and is responsible for wiping it.
+
 use pkcs11_proxy_ng_types::*;
 
 use super::Pkcs11Client;
