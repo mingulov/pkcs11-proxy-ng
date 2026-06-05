@@ -77,6 +77,14 @@ fn max_concurrent_backend_calls() -> usize {
     *MAX_BACKEND_CALLS.get().unwrap_or(&200)
 }
 
+/// Per-context in-flight cap: a quarter of the global backend-call budget (at
+/// least 1). Under the global circuit breaker, this stops a single noisy logical
+/// client from draining the whole budget and tipping every other tenant into
+/// DEVICE_ERROR (M2). Scales with the configured global limit.
+pub(super) fn per_context_max_in_flight() -> usize {
+    (max_concurrent_backend_calls() / 4).max(1)
+}
+
 /// Current number of in-flight backend calls (for health checks / metrics).
 pub fn backend_in_flight() -> usize {
     IN_FLIGHT.load(Ordering::Relaxed)

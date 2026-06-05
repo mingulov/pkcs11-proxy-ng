@@ -1,6 +1,32 @@
 use super::*;
 use crate::server::handle_map::BackendHandle;
 
+#[tokio::test]
+async fn begin_operation_capped_enforces_the_per_context_limit() {
+    // M2: a context can hold at most `max_in_flight` concurrent operations; the
+    // next is rejected (Err) so one client cannot drain the shared budget. A
+    // freed slot allows a new op, and a missing context yields Ok(None).
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let ctx = mgr.create_context(None).await.unwrap();
+    let cap = 3;
+    let mut guards = Vec::new();
+    for _ in 0..cap {
+        guards.push(
+            mgr.begin_operation_capped(&ctx, cap).expect("under cap").expect("context exists"),
+        );
+    }
+    assert!(mgr.begin_operation_capped(&ctx, cap).is_err(), "must reject at the per-context cap");
+
+    guards.pop(); // free one in-flight slot
+    assert!(mgr.begin_operation_capped(&ctx, cap).is_ok(), "a freed slot must allow a new op");
+
+    let gone = ClientContextId("nonexistent".into());
+    assert!(
+        matches!(mgr.begin_operation_capped(&gone, cap), Ok(None)),
+        "a missing context yields Ok(None), not a cap rejection"
+    );
+}
+
 #[test]
 fn token_info_cache_serves_within_ttl_and_expires_after() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);

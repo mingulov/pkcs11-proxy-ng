@@ -402,6 +402,44 @@ impl ContextManager {
     /// `last_active` so a long op that just finished isn't evicted before the
     /// client's next call. Returns `None` when the context doesn't exist — the
     /// caller then errors out normally and no guard is needed.
+    /// Like [`begin_operation`](Self::begin_operation) but enforces a
+    /// per-context in-flight cap (M2): `Ok(Some(guard))` when the context exists
+    /// and is under `max_in_flight`, `Ok(None)` when the context is gone (the
+    /// handler then returns the right CK_RV), and `Err(())` when the context is
+    /// at its cap (the caller should reject the request so one client cannot
+    /// monopolise the shared backend-call budget).
+    pub fn begin_operation_capped(
+        self: &Arc<Self>,
+        id: &ClientContextId,
+        max_in_flight: i64,
+    ) -> Result<Option<OperationGuard>, ()> {
+        let counter = {
+            let Some(entry) = self.contexts.get(id) else { return Ok(None) };
+            // Reserve a slot with a CAS so the cap is exact even under concurrent
+            // reservations on the same context (all under this shard read lock).
+            loop {
+                let current = entry.in_flight.load(Ordering::Relaxed);
+                if max_in_flight > 0 && current >= max_in_flight {
+                    return Err(());
+                }
+                if entry
+                    .in_flight
+                    .compare_exchange_weak(
+                        current,
+                        current + 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+            entry.in_flight.clone()
+        };
+        Ok(Some(OperationGuard { manager: Arc::clone(self), id: id.clone(), counter }))
+    }
+
     pub fn begin_operation(self: &Arc<Self>, id: &ClientContextId) -> Option<OperationGuard> {
         // Increment in_flight WHILE holding the shard lock (the `get` guard), so
         // the eviction path's `remove_if` — which takes the shard write lock and

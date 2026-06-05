@@ -324,14 +324,24 @@ macro_rules! impl_proxy_service {
                     .await?;
                     // Hold the context un-evictable for the whole operation so a
                     // long backend call (keygen/derive on a slow HSM, larger than
-                    // the lease) is never reaped MID-CALL. Every dispatched
-                    // request carries client_context_id; if the context is already
-                    // gone the guard is None and the handler returns the right CKR.
-                    let _op = self.context_manager.begin_operation(
+                    // the lease) is never reaped MID-CALL, AND enforce the
+                    // per-context in-flight cap so one noisy client cannot drain
+                    // the shared backend-call budget and DEVICE_ERROR every tenant
+                    // (M2). A context that is already gone yields Ok(None) and the
+                    // handler returns the right CKR.
+                    let _op = match self.context_manager.begin_operation_capped(
                         &$crate::server::context_manager::ClientContextId(
                             request.get_ref().client_context_id.clone(),
                         ),
-                    );
+                        service_utils::per_context_max_in_flight() as i64,
+                    ) {
+                        Ok(guard) => guard,
+                        Err(()) => {
+                            return Err(Status::resource_exhausted(
+                                "per-context concurrency limit exceeded",
+                            ));
+                        }
+                    };
                     $module(&self.context_manager, &self.backend, request).await
                 }
             )+
