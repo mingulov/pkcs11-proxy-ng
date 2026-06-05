@@ -5,6 +5,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 
 use super::super::ck_result_to_rv;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     ck_rv_only, parse_mechanism, resolve_session, resolve_session_and_key, spawn_backend,
 };
@@ -40,12 +41,17 @@ pub(crate) async fn sign_init(
             }
         };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
+    }
 
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.sign_init(session, &mechanism, key)).await?;
@@ -162,7 +168,7 @@ pub(crate) async fn sign_recover_init(
             }
         };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
@@ -170,6 +176,11 @@ pub(crate) async fn sign_recover_init(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse { ck_rv: rv.0 }));
+    }
 
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.sign_recover_init(session, &mechanism, key)).await?;

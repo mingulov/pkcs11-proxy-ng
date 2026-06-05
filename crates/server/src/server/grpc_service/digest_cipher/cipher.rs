@@ -6,6 +6,7 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::CkMechanism;
 
 use super::super::ck_result_to_rv;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     ck_rv_only, mechanism_output_to_proto, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend,
@@ -49,7 +50,7 @@ pub(crate) async fn encrypt_init(
             }
         };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse {
@@ -58,6 +59,14 @@ pub(crate) async fn encrypt_init(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse {
+            ck_rv: rv.0,
+            mechanism_out: None,
+        }));
+    }
 
     let mechanism_type = mechanism.mechanism_type;
     let backend = Arc::clone(backend_ref);
@@ -201,7 +210,7 @@ pub(crate) async fn decrypt_init(
             }
         };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse {
@@ -210,6 +219,14 @@ pub(crate) async fn decrypt_init(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse {
+            ck_rv: rv.0,
+            mechanism_out: None,
+        }));
+    }
 
     let mechanism_type = mechanism.mechanism_type;
     let backend = Arc::clone(backend_ref);

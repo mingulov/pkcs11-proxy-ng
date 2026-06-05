@@ -7,6 +7,7 @@ use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
 use super::super::ck_result_to_rv;
 use super::super::convert_template;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     parse_mechanism, register_object_handle, resolve_session_and_object,
     resolve_session_and_two_objects, spawn_backend,
@@ -39,7 +40,7 @@ pub(crate) async fn wrap_key(
         }
     };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
@@ -48,6 +49,14 @@ pub(crate) async fn wrap_key(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
+            ck_rv: rv.0,
+            wrapped_key: Vec::new(),
+        }));
+    }
 
     let backend = Arc::clone(backend_ref);
     let result =
@@ -84,7 +93,7 @@ pub(crate) async fn unwrap_key(
         }
     };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
@@ -93,6 +102,14 @@ pub(crate) async fn unwrap_key(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
 
     let template = match convert_template(&req.template) {
         Ok(template) => template,

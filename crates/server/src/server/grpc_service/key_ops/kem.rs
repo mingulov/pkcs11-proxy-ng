@@ -11,6 +11,7 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 
 use super::super::convert_template;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     parse_mechanism, register_object_handle, resolve_session_and_key, spawn_backend,
 };
@@ -38,7 +39,7 @@ pub(crate) async fn encapsulate_key(
             }
         };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
@@ -48,6 +49,15 @@ pub(crate) async fn encapsulate_key(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+            ck_rv: rv.0,
+            ciphertext: Vec::new(),
+            key_handle: 0,
+        }));
+    }
 
     let template = match convert_template(&req.template) {
         Ok(template) => template,
@@ -103,7 +113,7 @@ pub(crate) async fn decapsulate_key(
             }
         };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
@@ -112,6 +122,14 @@ pub(crate) async fn decapsulate_key(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
 
     let template = match convert_template(&req.template) {
         Ok(template) => template,
@@ -170,7 +188,7 @@ pub(crate) async fn encapsulate_key_exact(
             }
         };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
@@ -183,6 +201,18 @@ pub(crate) async fn encapsulate_key_exact(
             }));
         }
     };
+
+    // B1: remap object handles embedded in the mechanism parameters.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+            result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                ck_rv: rv.0,
+                returned_len: 0,
+                value: None,
+                object_handle: 0,
+            }),
+        }));
+    }
 
     let template = match convert_template(&req.template) {
         Ok(template) => template,

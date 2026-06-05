@@ -6,6 +6,7 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::{CkMechanismParams, CkObjectHandle, CkRv, Sp800108DerivedKey};
 
 use super::super::convert_template;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     parse_mechanism, register_object_handle, register_object_pair, resolve_session,
     resolve_session_and_object, spawn_backend,
@@ -209,27 +210,17 @@ pub(crate) async fn derive_key(
         }
     };
 
-    // CKM_CONCATENATE_BASE_AND_KEY passes an object handle inside the
-    // mechanism parameter.  Translate the client's virtual handle to the
-    // backend's real handle so the backend can resolve it.
-    if let Some(pkcs11_proxy_ng_types::CkMechanismParams::ObjectHandle(ref mut p)) =
-        mechanism.params
-    {
-        let resolved = ctx_mgr
-            .get_context(&ctx_id, |ctx| ctx.object_handles.resolve(VirtualHandle(p.handle)))
-            .await;
-        match resolved {
-            Some(Some(backend_handle)) => {
-                p.handle = backend_handle.0;
-            }
-            _ => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
-                    ck_rv: CkRv::OBJECT_HANDLE_INVALID.0,
-                    key_handle: 0,
-                    mechanism_out: None,
-                }));
-            }
-        }
+    // Translate every embedded object handle carried inside the mechanism
+    // parameters (HKDF salt key, ECDH/MQV private-data keys, TLS key-material
+    // secrets, CKM_CONCATENATE_BASE_AND_KEY handle, …) from the caller's
+    // virtual handle space to the backend's (B1). SP800-108's byte-encoded
+    // input key handles are handled separately just below.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }));
     }
 
     if let Some(ref mut params) = mechanism.params

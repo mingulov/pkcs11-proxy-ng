@@ -22,6 +22,7 @@ use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::context_manager::{ClientContextId, ContextManager};
+use super::mechanism_handles::remap_mechanism_handles;
 use super::service_utils::{
     ck_rv_only, parse_mechanism, resolve_session, resolve_session_and_key, spawn_backend,
 };
@@ -52,7 +53,7 @@ pub(crate) async fn message_encrypt_init(
                 }
             };
 
-        let mechanism = match parse_mechanism(req.mechanism) {
+        let mut mechanism = match parse_mechanism(req.mechanism) {
             Ok(m) => m,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
@@ -60,6 +61,13 @@ pub(crate) async fn message_encrypt_init(
                 }));
             }
         };
+
+        // B1: remap object handles embedded in the mechanism parameters.
+        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                ck_rv: rv.0,
+            }));
+        }
 
         let init_param =
             match req.init_message_parameter.as_ref().map(MessageParameter::try_from).transpose() {
@@ -173,7 +181,7 @@ pub(crate) async fn message_decrypt_init(
                 }
             };
 
-        let mechanism = match parse_mechanism(req.mechanism) {
+        let mut mechanism = match parse_mechanism(req.mechanism) {
             Ok(m) => m,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
@@ -181,6 +189,13 @@ pub(crate) async fn message_decrypt_init(
                 }));
             }
         };
+
+        // B1: remap object handles embedded in the mechanism parameters.
+        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                ck_rv: rv.0,
+            }));
+        }
 
         let init_param =
             match req.init_message_parameter.as_ref().map(MessageParameter::try_from).transpose() {
@@ -294,7 +309,7 @@ pub(crate) async fn message_sign_init(
                 }
             };
 
-        let mechanism = match parse_mechanism(req.mechanism) {
+        let mut mechanism = match parse_mechanism(req.mechanism) {
             Ok(m) => m,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
@@ -302,6 +317,13 @@ pub(crate) async fn message_sign_init(
                 }));
             }
         };
+
+        // B1: remap object handles embedded in the mechanism parameters.
+        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                ck_rv: rv.0,
+            }));
+        }
 
         let backend = Arc::clone(backend_ref);
         let result =
@@ -401,7 +423,7 @@ pub(crate) async fn message_verify_init(
                 }
             };
 
-        let mechanism = match parse_mechanism(req.mechanism) {
+        let mut mechanism = match parse_mechanism(req.mechanism) {
             Ok(m) => m,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
@@ -409,6 +431,13 @@ pub(crate) async fn message_verify_init(
                 }));
             }
         };
+
+        // B1: remap object handles embedded in the mechanism parameters.
+        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                ck_rv: rv.0,
+            }));
+        }
 
         let backend = Arc::clone(backend_ref);
         let result =
