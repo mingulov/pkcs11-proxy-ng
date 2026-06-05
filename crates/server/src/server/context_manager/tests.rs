@@ -2,6 +2,45 @@ use super::*;
 use crate::server::handle_map::BackendHandle;
 
 #[tokio::test]
+async fn capacity_eviction_skips_contexts_with_open_backend_sessions() {
+    // M4: the inline capacity-eviction path must NOT drop an expired context
+    // that still holds open backend sessions — it cannot close them (no backend
+    // ref here), so doing so would leak them. Those are left to the background
+    // reaper (evict_expired), which closes them properly. At capacity with only
+    // such a context present, creation is rejected rather than leaking.
+    let mgr = ContextManager::new(std::time::Duration::from_millis(1), 1);
+    let ctx_a = mgr.create_context(None).await.unwrap();
+    mgr.get_context(&ctx_a, |c| {
+        c.register_session(BackendHandle(100), CkSlotId(0));
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await; // expire ctx_a
+
+    let result = mgr.create_context(None).await;
+    assert!(result.is_err(), "must not inline-evict a context with open backend sessions");
+    assert!(
+        mgr.get_context(&ctx_a, |_| ()).await.is_some(),
+        "ctx_a with an open backend session must survive inline capacity-eviction"
+    );
+}
+
+#[tokio::test]
+async fn capacity_eviction_reclaims_sessionless_expired_contexts() {
+    // A sessionless expired context leaks nothing, so it IS reclaimed inline to
+    // make room (M4).
+    let mgr = ContextManager::new(std::time::Duration::from_millis(1), 1);
+    let ctx_a = mgr.create_context(None).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await; // expire ctx_a
+
+    let ctx_b = mgr.create_context(None).await;
+    assert!(ctx_b.is_ok(), "a sessionless expired context must be inline-reclaimed");
+    assert!(
+        mgr.get_context(&ctx_a, |_| ()).await.is_none(),
+        "the sessionless expired context should be evicted"
+    );
+}
+
+#[tokio::test]
 async fn create_and_get_context() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let id = mgr.create_context(None).await.unwrap();

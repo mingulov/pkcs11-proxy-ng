@@ -283,12 +283,20 @@ impl ContextManager {
         // transiently by the number of racing creators — acceptable
         // because the limit is a soft cap, not a correctness gate.
         if self.max_contexts > 0 && self.contexts.len() >= self.max_contexts {
-            // Try evicting expired contexts first.
+            // Try evicting expired contexts first — but ONLY those holding no
+            // open backend sessions. This path has no backend handle and so
+            // cannot close backend sessions; dropping a context that holds them
+            // would leak them. Contexts with open sessions are reclaimed by the
+            // background reaper (`evict_expired`), which closes them properly
+            // (M4).
             let now = std::time::Instant::now();
             let expired: Vec<_> = self
                 .contexts
                 .iter()
-                .filter(|entry| self.is_reapable(entry.value(), now))
+                .filter(|entry| {
+                    self.is_reapable(entry.value(), now)
+                        && entry.value().session_handles.virtual_handles().next().is_none()
+                })
                 .map(|entry| entry.key().clone())
                 .collect();
             for id in &expired {
