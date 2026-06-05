@@ -82,6 +82,14 @@ pub(super) async fn login(
             }
         };
 
+    // Serialize login on this slot (M5): hold the per-slot lock across the
+    // cross-context login-state scan, the backend C_Login, and the login_state
+    // insert. Otherwise two clients racing the first login on the shared token
+    // both see "no other login" and both take the real-login path, and the
+    // second is answered USER_ALREADY_LOGGED_IN instead of the logical OK.
+    let login_guard = ctx_mgr.slot_login_lock(slot);
+    let _login_lock = login_guard.lock().await;
+
     // Wrap PIN bytes in `Zeroizing` so the backing buffer is overwritten when
     // dropped. Read it up-front and pre-hash it so the logical-login path can
     // validate the PIN and the verifier can be stored after the PIN is moved
@@ -182,6 +190,11 @@ pub(super) async fn logout(
                 return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv: rv.0 }));
             }
         };
+
+    // Serialize logout against concurrent login/logout on the same slot (M5),
+    // so the cross-context scan and the login_state removal stay atomic.
+    let login_guard = ctx_mgr.slot_login_lock(slot);
+    let _login_lock = login_guard.lock().await;
 
     let other_login_state = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id);
 

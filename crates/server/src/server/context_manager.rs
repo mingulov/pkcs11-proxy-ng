@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 /// Opaque context identifier (ADR-0002 §3).
@@ -176,6 +176,14 @@ pub struct ContextManager {
     /// re-read within at most the TTL — the cache never authorizes against a
     /// token-identity older than that.
     token_info_cache: Arc<DashMap<CkSlotId, (Instant, String, String)>>,
+    /// Per-slot serialization lock for login/logout (M5). The cross-context
+    /// login-state scan, the backend `C_Login`, and the `login_state` insert
+    /// must be atomic per slot. Without it, two clients racing the FIRST login
+    /// on a shared token both observe "no other login", both take the real
+    /// `C_Login` path, and the second is answered `USER_ALREADY_LOGGED_IN` by
+    /// the already-logged-in token instead of the synthesized logical OK. One
+    /// lock per slot id; different slots log in concurrently.
+    login_locks: Arc<DashMap<CkSlotId, Arc<Mutex<()>>>>,
 }
 
 /// Maximum age of a cached `(label, serial)` before an authorization check
@@ -212,7 +220,17 @@ impl ContextManager {
             pin_verifiers: Arc::new(DashMap::new()),
             pin_salt: *Uuid::new_v4().as_bytes(),
             token_info_cache: Arc::new(DashMap::new()),
+            login_locks: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Per-slot login/logout serialization lock (M5). Acquire it (`.lock().await`)
+    /// after resolving the slot and hold it across the cross-context login-state
+    /// scan, the backend `C_Login`/`C_Logout`, and the `login_state` mutation, so
+    /// concurrent logins on the same shared token cannot both take the real-login
+    /// path. The lock is keyed by slot, so different slots are unaffected.
+    pub fn slot_login_lock(&self, slot: CkSlotId) -> Arc<Mutex<()>> {
+        self.login_locks.entry(slot).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 
     /// Cached `(label, serial)` for `backend_slot` if it was read within

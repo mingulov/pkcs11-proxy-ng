@@ -1086,6 +1086,86 @@ async fn cross_client_login_with_wrong_pin_is_rejected() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_first_login_serializes_to_one_backend_login() {
+    // M5: two clients racing the FIRST login on the same shared token must not
+    // both take the real-login path. Per-slot login serialization makes the
+    // first do the real C_Login (capturing the verifier) and the second take
+    // the logical path (verifier-validated OK) — exactly one backend C_Login.
+    //
+    // Deterministic harness: a login gate holds client A inside the backend
+    // C_Login (still holding the per-slot lock) while client B starts, so B is
+    // guaranteed to race. Without the lock, B would scan "no other login" before
+    // A inserts its state and issue a SECOND backend login (count == 2); with it,
+    // B blocks on the lock, then sees A's state and takes the logical path.
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    // Gate: each real backend login signals `entered`, then blocks on `proceed`.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let proceed = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    mock.set_login_gate(entered_tx, proceed.clone());
+
+    let login_req = |ctx: &ClientContextId, session: u64| {
+        Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+            client_context_id: ctx.0.clone(),
+            session_handle: session,
+            user_type: CkUserType::User as u64,
+            pin: Some(b"1234".to_vec()), // the MockBackend default PIN
+        })
+    };
+
+    // Client A starts and blocks inside the real backend C_Login holding the lock.
+    let a = {
+        let (ctx_mgr, backend, req) =
+            (ctx_mgr.clone(), backend.clone(), login_req(&ctx_a, session_a));
+        tokio::spawn(
+            async move { login(&ctx_mgr, &backend, req).await.unwrap().into_inner().ck_rv },
+        )
+    };
+    // Wait (off the executor) until A is actually inside the backend login.
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap()).await.unwrap();
+
+    // Client B now races: with serialization it must block on the per-slot lock.
+    let b = {
+        let (ctx_mgr, backend, req) =
+            (ctx_mgr.clone(), backend.clone(), login_req(&ctx_b, session_b));
+        tokio::spawn(
+            async move { login(&ctx_mgr, &backend, req).await.unwrap().into_inner().ck_rv },
+        )
+    };
+
+    // Release A; it finishes the real login, captures the verifier, drops the
+    // lock; B then sees A's login state and takes the logical path.
+    {
+        let (lock, cv) = &*proceed;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+
+    let rv_a = a.await.unwrap();
+    let rv_b = b.await.unwrap();
+
+    assert_eq!(rv_a, CkRv::OK.0, "the first login should succeed");
+    assert_eq!(
+        rv_b,
+        CkRv::OK.0,
+        "the raced second login must be a logical OK, not USER_ALREADY_LOGGED_IN"
+    );
+    assert_eq!(
+        mock.login_call_count(),
+        1,
+        "per-slot serialization must yield exactly one real backend C_Login"
+    );
+}
+
 #[tokio::test]
 async fn set_pin_refreshes_the_cross_client_login_verifier() {
     // A1 follow-up (ADR-0008): after a PIN change, a co-located logical login

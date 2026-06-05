@@ -4,7 +4,15 @@ use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+
+/// Test gate for deterministically forcing the M5 cross-context first-login
+/// race: when installed, each real backend `login` signals on `entered` and
+/// then blocks until `proceed`'s flag is set and the condvar is notified.
+struct LoginGate {
+    entered: std::sync::mpsc::Sender<()>,
+    proceed: Arc<(Mutex<bool>, Condvar)>,
+}
 
 mod crypto_ops;
 mod mock_types;
@@ -148,6 +156,9 @@ pub struct MockBackend {
     interface_capabilities: Mutex<Option<InterfaceCapabilities>>,
     login_calls: AtomicUsize,
     token_info_calls: AtomicUsize,
+    /// Test-only gate (M5 harness): when `Some`, each real backend `login`
+    /// signals + blocks on it. `None` (default) makes `login` a no-op gate.
+    login_gate: Mutex<Option<LoginGate>>,
 }
 
 impl MockBackend {
@@ -190,7 +201,20 @@ impl MockBackend {
             interface_capabilities: Mutex::new(None),
             login_calls: AtomicUsize::new(0),
             token_info_calls: AtomicUsize::new(0),
+            login_gate: Mutex::new(None),
         }
+    }
+
+    /// Install a login gate (M5 test harness). Each subsequent real backend
+    /// `login` signals on `entered`, then blocks until `proceed`'s flag is set
+    /// and the condvar notified. Lets a test deterministically hold the first
+    /// client inside `C_Login` while it starts a second, forcing the race.
+    pub fn set_login_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        proceed: Arc<(Mutex<bool>, Condvar)>,
+    ) {
+        *self.login_gate.lock().unwrap() = Some(LoginGate { entered, proceed });
     }
 
     /// Build a mock backend that advertises every mechanism registered by
@@ -973,6 +997,24 @@ impl Pkcs11Backend for MockBackend {
         _pin: Option<&[u8]>,
     ) -> CkResult<()> {
         self.login_calls.fetch_add(1, Ordering::SeqCst);
+        // M5 test gate: clone the handles out from under the gate lock, then
+        // signal + block WITHOUT holding that lock, so a concurrent login can
+        // also reach the gate (otherwise the second login would serialize on the
+        // gate's own mutex instead of exercising the real race).
+        let gate = self
+            .login_gate
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|g| (g.entered.clone(), Arc::clone(&g.proceed)));
+        if let Some((entered, proceed)) = gate {
+            let _ = entered.send(());
+            let (lock, cv) = &*proceed;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = cv.wait(released).unwrap();
+            }
+        }
         self.login_impl(session, user_type)
     }
 
