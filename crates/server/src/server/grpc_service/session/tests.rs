@@ -8,7 +8,6 @@ use pkcs11_proxy_ng_types::*;
 use std::io;
 use std::sync::{Arc, Mutex, OnceLock};
 use tonic::Request;
-use tracing::instrument::WithSubscriber;
 use tracing_subscriber::fmt::MakeWriter;
 
 /// Shared buffer that captures tracing output for assertions.
@@ -41,6 +40,46 @@ impl<'a> MakeWriter<'a> for CapturedWriter {
 }
 
 static LOG_CAPTURE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+/// The single buffer that the global capture subscriber routes events into.
+/// Only one capture runs at a time (serialized by `LOG_CAPTURE_LOCK`), so a
+/// single slot is sufficient and avoids the thread-local/callsite-interest
+/// races that made per-future subscribers flaky under full-suite parallelism.
+static ACTIVE_CAPTURE: Mutex<Option<CapturedWriter>> = Mutex::new(None);
+
+/// Writer installed on the process-global subscriber; forwards to whichever
+/// capture is currently active and discards otherwise.
+struct RoutingWriter;
+
+impl io::Write for RoutingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(writer) = ACTIVE_CAPTURE.lock().unwrap().as_ref() {
+            writer.buf.lock().unwrap().extend_from_slice(buf);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Install the global TRACE subscriber exactly once. Setting it globally (vs a
+/// per-future thread-local) registers callsite interest permanently, so audit
+/// events — including any emitted off the test's poll thread — are never cached
+/// as disabled and then missed.
+fn ensure_capture_subscriber() {
+    static SUBSCRIBER_INIT: OnceLock<()> = OnceLock::new();
+    SUBSCRIBER_INIT.get_or_init(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(|| RoutingWriter)
+            .finish();
+        // If another global default is already installed, capture falls back to
+        // it; in this crate's test binary nothing else sets one.
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+}
 
 async fn setup_session() -> (Arc<ContextManager>, Arc<dyn Pkcs11Backend>, ClientContextId, u64) {
     let mock = MockBackend::default_test();
@@ -377,14 +416,11 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let _capture_guard = LOG_CAPTURE_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+    ensure_capture_subscriber();
     let writer = CapturedWriter::default();
-    let subscriber = tracing_subscriber::fmt()
-        .json()
-        .with_max_level(tracing::Level::TRACE)
-        .with_writer(writer.clone())
-        .finish();
-
-    f().with_subscriber(subscriber).await;
+    *ACTIVE_CAPTURE.lock().unwrap() = Some(writer.clone());
+    f().await;
+    *ACTIVE_CAPTURE.lock().unwrap() = None;
     writer.output()
 }
 
