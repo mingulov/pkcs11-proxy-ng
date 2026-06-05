@@ -492,6 +492,32 @@ pub(super) async fn register_session_object_handle(
         .unwrap_or(0)
 }
 
+/// Register a generated key pair, recording each key as a session object under
+/// `session` unless its own template marks it a token object (B2).
+pub(super) async fn register_session_object_pair(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    session: VirtualHandle,
+    first_backend_handle: CkObjectHandle,
+    first_is_token: bool,
+    second_backend_handle: CkObjectHandle,
+    second_is_token: bool,
+) -> Option<(u64, u64)> {
+    ctx_mgr
+        .get_context(ctx_id, |ctx| {
+            let first = ctx.object_handles.insert(BackendHandle(first_backend_handle.0));
+            let second = ctx.object_handles.insert(BackendHandle(second_backend_handle.0));
+            if !first_is_token {
+                ctx.record_session_object(session, first);
+            }
+            if !second_is_token {
+                ctx.record_session_object(session, second);
+            }
+            (first.0, second.0)
+        })
+        .await
+}
+
 pub(super) async fn register_session_handle(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
@@ -514,21 +540,6 @@ pub(super) async fn register_object_handles(
                 .iter()
                 .map(|handle| ctx.object_handles.insert(BackendHandle(handle.0)).0)
                 .collect()
-        })
-        .await
-}
-
-pub(super) async fn register_object_pair(
-    ctx_mgr: &Arc<ContextManager>,
-    ctx_id: &ClientContextId,
-    first_backend_handle: CkObjectHandle,
-    second_backend_handle: CkObjectHandle,
-) -> Option<(u64, u64)> {
-    ctx_mgr
-        .get_context(ctx_id, |ctx| {
-            let first = ctx.object_handles.insert(BackendHandle(first_backend_handle.0)).0;
-            let second = ctx.object_handles.insert(BackendHandle(second_backend_handle.0)).0;
-            (first, second)
         })
         .await
 }

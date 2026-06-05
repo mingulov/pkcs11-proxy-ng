@@ -8,8 +8,9 @@ use pkcs11_proxy_ng_types::{CkMechanismParams, CkObjectHandle, CkRv, Sp800108Der
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    parse_mechanism, register_object_handle, register_object_pair, resolve_session,
-    resolve_session_and_object, spawn_backend,
+    parse_mechanism, register_object_handle, register_session_object_handle,
+    register_session_object_pair, resolve_session, resolve_session_and_object, spawn_backend,
+    template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
 use crate::server::handle_map::VirtualHandle;
@@ -68,6 +69,11 @@ pub(crate) async fn generate_key_pair(
         }
     };
 
+    // Each generated key is a session object unless its template marks
+    // CKA_TOKEN; classify before the templates move into the backend call (B2).
+    let public_is_token = template_declares_token_object(&public_key_template);
+    let private_is_token = template_declares_token_object(&private_key_template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.generate_key_pair(session, &mechanism, &public_key_template, &private_key_template)
@@ -76,11 +82,14 @@ pub(crate) async fn generate_key_pair(
 
     match result {
         Ok((public_key, private_key)) => {
-            let virtual_handles = register_object_pair(
+            let virtual_handles = register_session_object_pair(
                 ctx_mgr,
                 &ctx_id,
+                virtual_session,
                 CkObjectHandle(public_key.0),
+                public_is_token,
                 CkObjectHandle(private_key.0),
+                private_is_token,
             )
             .await;
             match virtual_handles {
@@ -148,6 +157,10 @@ pub(crate) async fn generate_key(
     };
 
     let mechanism_type = mechanism.mechanism_type;
+    // A generated key is a session object unless its template marks CKA_TOKEN;
+    // classify before the template moves into the backend call (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result =
         spawn_backend(move || backend.generate_key_with_output(session, &mechanism, &template))
@@ -155,8 +168,14 @@ pub(crate) async fn generate_key(
 
     match result {
         Ok((object, mechanism_out_params)) => {
-            let key_handle =
-                register_object_handle(ctx_mgr, &ctx_id, CkObjectHandle(object.0)).await;
+            let key_handle = register_session_object_handle(
+                ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                CkObjectHandle(object.0),
+                is_token,
+            )
+            .await;
             let mechanism_out = mechanism_out_params.map(|params| {
                 pkcs11_proxy_ng_proto::Mechanism::from(&pkcs11_proxy_ng_types::CkMechanism {
                     mechanism_type,
@@ -245,6 +264,9 @@ pub(crate) async fn derive_key(
     };
 
     let mechanism_type = mechanism.mechanism_type;
+    // A derived key is a session object unless CKA_TOKEN is set (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.derive_key_with_output_result(session, &mechanism, base_key, &template)
@@ -255,7 +277,16 @@ pub(crate) async fn derive_key(
         Ok(mut derive_result) => {
             let key_handle = if derive_result.rv.is_ok() {
                 match derive_result.key_handle {
-                    Some(object) => register_object_handle(ctx_mgr, &ctx_id, object).await,
+                    Some(object) => {
+                        register_session_object_handle(
+                            ctx_mgr,
+                            &ctx_id,
+                            virtual_session,
+                            object,
+                            is_token,
+                        )
+                        .await
+                    }
                     None => 0,
                 }
             } else {

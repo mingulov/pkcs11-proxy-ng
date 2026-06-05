@@ -13,9 +13,11 @@ use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    parse_mechanism, register_object_handle, resolve_session_and_key, spawn_backend,
+    parse_mechanism, register_session_object_handle, resolve_session_and_key, spawn_backend,
+    template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::handle_map::VirtualHandle;
 
 pub(crate) async fn encapsulate_key(
     ctx_mgr: &Arc<ContextManager>,
@@ -70,6 +72,9 @@ pub(crate) async fn encapsulate_key(
         }
     };
 
+    // An encapsulated key is a session object unless CKA_TOKEN is set (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result =
         spawn_backend(move || backend.encapsulate_key(session, &mechanism, public_key, &template))
@@ -77,7 +82,14 @@ pub(crate) async fn encapsulate_key(
 
     match result {
         Ok((ciphertext, key)) => {
-            let key_handle = register_object_handle(ctx_mgr, &ctx_id, CkObjectHandle(key.0)).await;
+            let key_handle = register_session_object_handle(
+                ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                CkObjectHandle(key.0),
+                is_token,
+            )
+            .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
                 ck_rv: CkRv::OK.0,
                 ciphertext,
@@ -141,6 +153,9 @@ pub(crate) async fn decapsulate_key(
         }
     };
 
+    // A decapsulated key is a session object unless CKA_TOKEN is set (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let ciphertext = req.ciphertext;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
@@ -150,7 +165,14 @@ pub(crate) async fn decapsulate_key(
 
     match result {
         Ok(key) => {
-            let key_handle = register_object_handle(ctx_mgr, &ctx_id, CkObjectHandle(key.0)).await;
+            let key_handle = register_session_object_handle(
+                ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                CkObjectHandle(key.0),
+                is_token,
+            )
+            .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
                 ck_rv: CkRv::OK.0,
                 key_handle,
@@ -234,6 +256,9 @@ pub(crate) async fn encapsulate_key_exact(
         .map(|s| CkOutputBufferSpec { buffer_present: s.buffer_present, buffer_len: s.buffer_len })
         .unwrap_or(CkOutputBufferSpec { buffer_present: false, buffer_len: 0 });
 
+    // The exact-encapsulated key is a session object unless CKA_TOKEN is set (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.encapsulate_key_exact(session, &mechanism, public_key, &template, &spec)
@@ -244,7 +269,14 @@ pub(crate) async fn encapsulate_key_exact(
         Ok(r) => {
             // Register the returned object handle through the context manager
             let virtual_handle = if r.ck_rv == CkRv::OK && r.object_handle.0 != 0 {
-                register_object_handle(ctx_mgr, &ctx_id, r.object_handle).await
+                register_session_object_handle(
+                    ctx_mgr,
+                    &ctx_id,
+                    virtual_session,
+                    r.object_handle,
+                    is_token,
+                )
+                .await
             } else {
                 0
             };

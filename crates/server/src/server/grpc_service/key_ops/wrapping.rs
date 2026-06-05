@@ -9,10 +9,11 @@ use super::super::ck_result_to_rv;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    parse_mechanism, register_object_handle, resolve_session_and_object,
-    resolve_session_and_two_objects, spawn_backend,
+    parse_mechanism, register_session_object_handle, resolve_session_and_object,
+    resolve_session_and_two_objects, spawn_backend, template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::handle_map::VirtualHandle;
 
 pub(crate) async fn wrap_key(
     ctx_mgr: &Arc<ContextManager>,
@@ -121,6 +122,9 @@ pub(crate) async fn unwrap_key(
         }
     };
 
+    // An unwrapped key is a session object unless CKA_TOKEN is set (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let wrapped_key = req.wrapped_key;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
@@ -130,8 +134,14 @@ pub(crate) async fn unwrap_key(
 
     match result {
         Ok(object) => {
-            let key_handle =
-                register_object_handle(ctx_mgr, &ctx_id, CkObjectHandle(object.0)).await;
+            let key_handle = register_session_object_handle(
+                ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                CkObjectHandle(object.0),
+                is_token,
+            )
+            .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
                 ck_rv: CkRv::OK.0,
                 key_handle,
