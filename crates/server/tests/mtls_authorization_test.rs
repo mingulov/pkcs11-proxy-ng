@@ -197,6 +197,33 @@ async fn mtls_context_identity_filters_tokens_by_client_certificate() {
 }
 
 #[tokio::test]
+async fn mtls_authorized_identity_can_open_session() {
+    // Faithful, A2-consistent replacement for the former authz_policy_test
+    // open-session case. The policy grants client-a's certificate identity, so
+    // it can discover the token's slot and open a session on it. Because the
+    // context identity is derived from the very certificate that authenticates
+    // each request, the per-request ownership gate (A2) is satisfied by
+    // construction — the impossible "mTLS identity over a no-auth transport"
+    // state the old test relied on no longer compiles past the gate.
+    let fixture = start_mtls_daemon().await;
+
+    let mut client_a =
+        Pkcs11Client::connect_with_tls_files(&fixture.endpoint, fixture.client_a.clone())
+            .await
+            .unwrap();
+    client_a.initialize().await.unwrap();
+
+    let slots = client_a.get_slot_list(true).await.unwrap();
+    assert_eq!(slots.len(), 1);
+
+    let session = client_a
+        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
+        .await
+        .unwrap();
+    assert_ne!(session.0, 0);
+}
+
+#[tokio::test]
 async fn mtls_listener_rejects_client_without_certificate() {
     let fixture = start_mtls_daemon().await;
     let ca = std::fs::read(&fixture.ca_cert).unwrap();

@@ -5,8 +5,11 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
 use tonic::Status;
 
+use crate::config::{TcpAuthMode, UnixAuthMode};
+
 use super::super::auth::identity::AuthenticatedIdentity;
 use super::super::auth::policy::TokenPolicy;
+use super::super::auth::request_identity::identity_from_request;
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::service_utils::{context_exists, spawn_backend};
 
@@ -46,6 +49,50 @@ pub(super) async fn slot_is_authorized(
         Ok(info) => Ok(Ok(token_policy.allows(&identity, &info.label, &info.serial_number))),
         Err(CkRv::TOKEN_NOT_PRESENT) => Ok(Ok(false)),
         Err(error) => Ok(Err(error)),
+    }
+}
+
+/// A2 ownership gate (pure core): decide whether a request bearing a
+/// `client_context_id` may proceed, given the identity captured for that
+/// context at C_Initialize (`stored`; `None` when no such context is recorded)
+/// and the caller's live transport identity (`live`).
+///
+/// The `client_context_id` is an unauthenticated bearer token on the wire;
+/// without this check a co-located peer that learned another client's id could
+/// drive that client's context. A `None` `stored` is allowed here on purpose —
+/// the absence of the context is surfaced by the handler as the proper PKCS#11
+/// error, not masked as a permission failure.
+pub(super) fn context_owner_allowed(stored: Option<&str>, live: &AuthenticatedIdentity) -> bool {
+    match stored {
+        None => true,
+        Some(expected) => expected == live.to_string(),
+    }
+}
+
+/// Enforce A2 context ownership for a request that carries `client_context_id`.
+/// Re-derives the caller's transport identity on every call and rejects with
+/// `permission_denied` when it does not match the identity bound to the context
+/// at C_Initialize. A context that does not exist (or carries no recorded
+/// identity) passes here and is reported by the handler as the proper CK_RV.
+pub(super) async fn enforce_context_owner<T>(
+    ctx_mgr: &Arc<ContextManager>,
+    request: &tonic::Request<T>,
+    ctx_id: &ClientContextId,
+    tcp_auth: TcpAuthMode,
+    unix_auth: UnixAuthMode,
+) -> Result<(), Status> {
+    let stored = ctx_mgr.context_identity(ctx_id).await;
+    let live = identity_from_request(request, tcp_auth, unix_auth)?;
+    if context_owner_allowed(stored.as_deref(), &live) {
+        Ok(())
+    } else {
+        tracing::warn!(
+            context_id = %ctx_id.0,
+            "rejected request: client_context_id presented by a different transport identity"
+        );
+        Err(Status::permission_denied(
+            "client_context_id does not belong to the calling transport identity",
+        ))
     }
 }
 
@@ -112,5 +159,61 @@ mod tests {
             .unwrap();
 
         assert!(authorized);
+    }
+
+    // --- A2: per-request context-ownership gate (the pure decision core) ---
+
+    #[test]
+    fn owner_check_allows_when_no_context_recorded() {
+        // A missing context is not an ownership failure: the handler maps it to
+        // the proper CK_RV (CRYPTOKI_NOT_INITIALIZED). The gate must not turn
+        // that into a permission failure.
+        assert!(context_owner_allowed(None, &AuthenticatedIdentity::PeerCred { uid: 1000 }));
+    }
+
+    #[test]
+    fn owner_check_allows_matching_peer_cred() {
+        assert!(context_owner_allowed(
+            Some("uid=1000"),
+            &AuthenticatedIdentity::PeerCred { uid: 1000 }
+        ));
+    }
+
+    #[test]
+    fn owner_check_rejects_mismatched_peer_cred() {
+        // The bearer-token attack: a different uid presenting another client's
+        // client_context_id must be rejected.
+        assert!(!context_owner_allowed(
+            Some("uid=1000"),
+            &AuthenticatedIdentity::PeerCred { uid: 2000 }
+        ));
+    }
+
+    #[test]
+    fn owner_check_rejects_unauthenticated_caller_claiming_authenticated_context() {
+        assert!(!context_owner_allowed(Some("uid=1000"), &AuthenticatedIdentity::Unauthenticated));
+    }
+
+    #[test]
+    fn owner_check_allows_matching_unauthenticated() {
+        assert!(context_owner_allowed(
+            Some("unauthenticated"),
+            &AuthenticatedIdentity::Unauthenticated
+        ));
+    }
+
+    #[test]
+    fn owner_check_matches_mtls_identity_exactly() {
+        let owner = AuthenticatedIdentity::Mtls {
+            issuer: "CN=Root CA".into(),
+            subject: "CN=client".into(),
+        };
+        assert!(context_owner_allowed(Some(MTLS_IDENTITY), &owner));
+
+        let impostor = AuthenticatedIdentity::Mtls {
+            issuer: "CN=Root CA".into(),
+            subject: "CN=attacker".into(),
+        };
+        assert!(!context_owner_allowed(Some(MTLS_IDENTITY), &impostor));
     }
 }

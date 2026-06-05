@@ -82,6 +82,27 @@ impl Pkcs11ProxyService {
             registry,
         )
     }
+
+    /// A2: reject any request whose live transport identity does not own the
+    /// `client_context_id` it presents. The id is an unauthenticated bearer
+    /// token, so it is re-bound to the caller's identity on every RPC (the
+    /// identity is captured once at C_Initialize). `raw_ctx_id` is the request's
+    /// `client_context_id` field; an unknown context passes here and the handler
+    /// returns the proper CK_RV.
+    async fn check_context_owner<T>(
+        &self,
+        request: &Request<T>,
+        raw_ctx_id: &str,
+    ) -> Result<(), Status> {
+        authorization::enforce_context_owner(
+            &self.context_manager,
+            request,
+            &super::context_manager::ClientContextId(raw_ctx_id.to_owned()),
+            self.tcp_auth_mode,
+            self.unix_auth_mode,
+        )
+        .await
+    }
 }
 
 pub(super) fn ck_result_to_rv<T>(r: CkResult<T>) -> (u64, Option<T>) {
@@ -135,6 +156,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::GetSlotListRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetSlotListResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 slot::get_slot_list_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -148,6 +171,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::GetSlotInfoRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetSlotInfoResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 slot::get_slot_info_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -161,6 +186,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::GetTokenInfoRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetTokenInfoResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 slot::get_token_info_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -174,6 +201,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::GetMechanismListRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetMechanismListResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 slot::get_mechanism_list_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -187,6 +216,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::GetMechanismInfoRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetMechanismInfoResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 slot::get_mechanism_info_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -213,6 +244,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::OpenSessionRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::OpenSessionResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 session::open_session_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -226,6 +259,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::CloseAllSessionsRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::CloseAllSessionsResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 session::close_all_sessions_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -239,6 +274,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::InitTokenRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::InitTokenResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 session::init_token_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -253,6 +290,13 @@ macro_rules! impl_proxy_service {
                     &self,
                     request: Request<pkcs11_proxy_ng_proto::$request>,
                 ) -> Result<Response<pkcs11_proxy_ng_proto::$response>, Status> {
+                    // A2: bind the caller's transport identity to the context it
+                    // claims before touching any state.
+                    self.check_context_owner(
+                        &request,
+                        &request.get_ref().client_context_id,
+                    )
+                    .await?;
                     // Hold the context un-evictable for the whole operation so a
                     // long backend call (keygen/derive on a slow HSM, larger than
                     // the lease) is never reaped MID-CALL. Every dispatched
