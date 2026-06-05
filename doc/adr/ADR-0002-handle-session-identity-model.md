@@ -136,6 +136,19 @@ Login state is scoped to **logical client instance + token**:
   instance's sessions, even if both are authenticated by the same mTLS
   certificate.
 
+**Concurrency note (M5).** The cross-context check for an existing per-slot login
+and the recording of a new login state are not performed under a single lock:
+they straddle the backend `C_Login` await. Two logical clients logging into the
+*same* slot concurrently may therefore both take the real-login path; the shared,
+process-wide token serialises them, so the second receives
+`CKR_USER_ALREADY_LOGGED_IN` from the backend instead of a synthesised logical
+`CKR_OK`. This is a valid PKCS#11 response (two native threads racing `C_Login`
+behave the same) and the PIN is still validated (ADR-0008), so the race is
+bounded to a transparency nuance under concurrent same-slot login. Making it
+exact requires an authoritative per-slot login owner/refcount under one lock;
+that is deferred to a focused change with a deterministic concurrency-test
+harness rather than an unverifiable inline fix.
+
 ### 7. Session Cleanup
 
 `C_CloseAllSessions(slotID)` closes only the sessions opened by the calling
