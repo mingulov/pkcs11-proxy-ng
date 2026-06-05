@@ -779,6 +779,16 @@ struct FfiMuGenParams {
 /// allocate the appropriate C struct on the heap (via `Box`) so that
 /// `pParameter` has a stable address for the lifetime of the returned
 /// `FfiMechanism`.
+///
+/// Takes `&CkMechanism` by reference and clones each parameter buffer (IV, AAD,
+/// salt, …) into the `FfiParamBacking`. Taking it *by value* to move those
+/// buffers (M10) was evaluated and deliberately not adopted: it would require
+/// changing every `Pkcs11Backend` crypto method to own its `CkMechanism`,
+/// rippling through all backend implementors and every server call site — the
+/// highest-risk FFI boundary — to remove a per-`*Init` copy of small buffers
+/// that is already dominated by the protobuf decode which copied the same
+/// fields a few microseconds earlier. Revisit only if profiling shows mechanism
+/// backing copies as a hotspot (e.g. very large-AAD AEAD workloads).
 pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism> {
     let mech_type = mechanism.mechanism_type.0 as cryptoki_sys::CK_MECHANISM_TYPE;
 
