@@ -159,7 +159,13 @@ where
                 "Backend call timed out. Consider increasing \
                  proxy.request_timeout_secs or investigating HSM responsiveness."
             );
-            Ok(Err(CkRv::DEVICE_ERROR))
+            // A timeout is a transport-level failure of the daemon's own making.
+            // Report it to the readiness gauge HERE, then return early, so the
+            // ck_rv classifier never sees this proxy-generated DEVICE_ERROR and
+            // can treat a backend-RETURNED DEVICE_ERROR as a per-request
+            // response rather than a daemon-health signal (M1).
+            report_backend_outcome(false);
+            return Ok(Err(CkRv::DEVICE_ERROR));
         }
     };
 
@@ -193,22 +199,23 @@ where
 fn classify_backend_outcome<T>(result: &Result<CkResult<T>, Status>) -> bool {
     match result {
         Ok(Ok(_)) => true,
-        // CkRv values that indicate the backend ITSELF is unhealthy
-        // (not just that the application's request was malformed).
-        // After N consecutive of these, the daemon flips
-        // tonic-health to NOT_SERVING so k8s pulls the pod out of
-        // the Service endpoint pool. Chaos scenario 2 verifies this.
-        Ok(Err(rv))
-            if *rv == CkRv::DEVICE_ERROR        // timeout / breaker trip
-                || *rv == CkRv::HOST_MEMORY     // HSM resource exhaustion
-                || *rv == CkRv::DEVICE_REMOVED  // HSM disconnected
-                || *rv == CkRv::TOKEN_NOT_PRESENT =>
-        {
+        // Genuine backend/HSM-down signals: the device reports that it is gone
+        // or out of memory. A single client's request shape cannot induce these,
+        // so repeated occurrences remain a daemon-readiness signal.
+        Ok(Err(rv)) if *rv == CkRv::DEVICE_REMOVED || *rv == CkRv::HOST_MEMORY => {
             tracing::debug!(?rv, "backend outcome: unhealthy");
             false
         }
-        Ok(Err(_)) => true, // normal application-level PKCS#11 error
-        Err(_) => false,    // blocking-pool panic / transport break
+        // Any OTHER backend-RETURNED CK_RV is a per-request response, NOT daemon
+        // health — including the `CKR_DEVICE_ERROR` catch-all (kryoptic & other
+        // backends return it for many request-specific conditions) and
+        // `CKR_TOKEN_NOT_PRESENT`. Letting these flip readiness would let one
+        // noisy client evict the pod for every tenant (M1). The daemon's own
+        // transport failures — timeout, circuit-breaker trip, blocking-pool
+        // panic — are reported separately and are the only request-path inputs
+        // that flip readiness.
+        Ok(Err(_)) => true,
+        Err(_) => false, // blocking-pool panic / transport break
     }
 }
 
@@ -686,24 +693,28 @@ mod tests {
     }
 
     #[test]
-    fn classify_device_error_is_unhealthy() {
-        // CKR_DEVICE_ERROR is what spawn_backend produces on the
-        // timeout and circuit-breaker-trip paths. PKCS#11
-        // application errors must NOT use CKR_DEVICE_ERROR — that
-        // invariant is enforced by the proto layer (see
-        // ADR-0003 §3).
-        let result: Result<CkResult<()>, Status> = Ok(Err(CkRv::DEVICE_ERROR));
-        assert!(!classify_backend_outcome(&result));
+    fn classify_backend_returned_device_error_and_token_not_present_are_healthy() {
+        // M1: a backend-RETURNED CKR_DEVICE_ERROR (kryoptic's request-specific
+        // catch-all) or CKR_TOKEN_NOT_PRESENT is a per-request response, not a
+        // daemon-health signal — they must NOT flip readiness, or one noisy
+        // client could evict the pod. The daemon's own timeout/breaker DEVICE_ERROR
+        // is reported separately in spawn_backend before classification.
+        for rv in [CkRv::DEVICE_ERROR, CkRv::TOKEN_NOT_PRESENT] {
+            let result: Result<CkResult<()>, Status> = Ok(Err(rv));
+            assert!(
+                classify_backend_outcome(&result),
+                "backend-returned CkRv {:?} must be classified as healthy",
+                rv
+            );
+        }
     }
 
     #[test]
-    fn classify_resource_exhaustion_is_unhealthy() {
-        // Chaos scenario 2: persistent CKR_HOST_MEMORY (HSM out of
-        // memory), CKR_DEVICE_REMOVED (HSM disconnected), or
-        // CKR_TOKEN_NOT_PRESENT (token gone) are backend-health
-        // signals, not application errors. Repeated occurrences
-        // flip readiness so k8s pulls the pod out of the Service.
-        for rv in [CkRv::HOST_MEMORY, CkRv::DEVICE_REMOVED, CkRv::TOKEN_NOT_PRESENT] {
+    fn classify_genuine_hsm_down_signals_are_unhealthy() {
+        // CKR_HOST_MEMORY (HSM out of memory) and CKR_DEVICE_REMOVED (HSM
+        // disconnected) report that the device itself is down — not inducible
+        // by one client's request shape — so they remain readiness signals.
+        for rv in [CkRv::HOST_MEMORY, CkRv::DEVICE_REMOVED] {
             let result: Result<CkResult<()>, Status> = Ok(Err(rv));
             assert!(
                 !classify_backend_outcome(&result),
