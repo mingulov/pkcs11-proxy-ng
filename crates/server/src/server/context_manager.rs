@@ -359,8 +359,16 @@ impl ContextManager {
     /// client's next call. Returns `None` when the context doesn't exist — the
     /// caller then errors out normally and no guard is needed.
     pub fn begin_operation(self: &Arc<Self>, id: &ClientContextId) -> Option<OperationGuard> {
-        let counter = self.contexts.get(id)?.in_flight.clone();
-        counter.fetch_add(1, Ordering::Relaxed);
+        // Increment in_flight WHILE holding the shard lock (the `get` guard), so
+        // the eviction path's `remove_if` — which takes the shard write lock and
+        // is therefore mutually exclusive with this read lock — cannot observe
+        // in_flight==0 and reap this context between the read and the increment
+        // (L10). The Arc is cloned for the guard before the lock is released.
+        let counter = {
+            let entry = self.contexts.get(id)?;
+            entry.in_flight.fetch_add(1, Ordering::Relaxed);
+            entry.in_flight.clone()
+        };
         Some(OperationGuard { manager: Arc::clone(self), id: id.clone(), counter })
     }
 
@@ -401,19 +409,18 @@ impl ContextManager {
     }
 
     fn drain_expired_contexts(&self, expired: &[ClientContextId]) -> Vec<u64> {
-        // Re-check expiry under the per-shard lock so a context that
-        // got touched between `collect_expired_context_ids` and here
-        // is not evicted on stale data. The first scan is best-effort
-        // (no lock held across shards); this scan is authoritative.
+        // Re-check expiry and remove ATOMICALLY under the per-shard write lock:
+        // `remove_if` evaluates the predicate while holding the lock, so a
+        // context touched (last_active bumped) or that started an operation
+        // (in_flight incremented under the read lock) since the best-effort first
+        // scan is not evicted on stale data — closing the get-then-remove TOCTOU
+        // (L10). The first scan is just a cheap candidate filter.
         let now = Instant::now();
         let mut backend_sessions = Vec::new();
         for id in expired {
-            let still_expired =
-                self.contexts.get(id).is_some_and(|entry| self.is_reapable(&entry, now));
-            if !still_expired {
-                continue;
-            }
-            if let Some((_, mut ctx)) = self.contexts.remove(id) {
+            if let Some((_, mut ctx)) =
+                self.contexts.remove_if(id, |_, ctx| self.is_reapable(ctx, now))
+            {
                 backend_sessions.extend(ctx.teardown());
             }
         }
