@@ -778,3 +778,58 @@ async fn cross_client_login_with_wrong_pin_is_rejected() {
         "cross-client login with the correct PIN must still succeed"
     );
 }
+
+#[tokio::test]
+async fn set_pin_refreshes_the_cross_client_login_verifier() {
+    // A1 follow-up (ADR-0008): after a PIN change, a co-located logical login
+    // with the NEW PIN must be accepted — the verifier is refreshed, not left
+    // failing closed against the old PIN.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    // ctx_a logs in with "1234" (verifier captured), then changes it to "5678".
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    let set_rv = set_pin(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::SetPinRequest {
+            client_context_id: ctx_a.0.clone(),
+            session_handle: session_a,
+            old_pin: Some(b"1234".to_vec()),
+            new_pin: Some(b"5678".to_vec()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(set_rv, CkRv::OK.0, "SetPIN should succeed");
+
+    // ctx_b's logical login with the NEW PIN must now be accepted.
+    let rv = login(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+            client_context_id: ctx_b.0.clone(),
+            session_handle: session_b,
+            user_type: CkUserType::User as u64,
+            pin: Some(b"5678".to_vec()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(
+        rv,
+        CkRv::OK.0,
+        "a logical login with the new PIN must be accepted after SetPIN refreshes the verifier"
+    );
+}

@@ -66,9 +66,11 @@ shared token is then logged out; a fresh login re-captures it).
   login. Given that an attacker with daemon memory already holds the live,
   logged-in backend session, this does not materially widen exposure; the salt
   guards against rainbow-table recovery of the PIN value for reuse elsewhere.
-- **Known limitation (follow-up):** the verifier is not yet refreshed on
-  `C_SetPIN` / `C_InitPIN`; after a PIN change a logical login with the *new*
-  PIN fails closed (`PIN_INCORRECT`) until the next real login re-captures it.
+- The verifier is refreshed on `C_SetPIN` (the new PIN is re-hashed for the
+  slot's current login state), so a logical login with the new PIN is accepted
+  immediately. `C_InitPIN` needs no refresh: it requires an SO session, and a
+  token cannot be SO- and User-logged-in at once, so no concurrent User
+  verifier can exist for that slot to go stale.
 - **Out of scope:** true per-client access isolation (a co-located client doing
   crypto without its own valid login) requires backend-per-client isolation
   (A2 / ADR-0007). This ADR fixes the login-response contract only.
