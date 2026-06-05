@@ -14,7 +14,7 @@ use super::super::handle_map::{BackendHandle, VirtualHandle};
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();
-static HEALTH_EVENT_TX: OnceLock<mpsc::UnboundedSender<BackendHealthEvent>> = OnceLock::new();
+static HEALTH_EVENT_TX: OnceLock<mpsc::Sender<BackendHealthEvent>> = OnceLock::new();
 /// Tracks whether the LAST sent health event was `Success`. Initialized
 /// to `true` because the health-gate task assumes the daemon starts in
 /// `SERVING`. Used by [`report_backend_outcome`] to suppress
@@ -45,28 +45,27 @@ pub fn configure_backend_guard(timeout_secs: u64, max_calls: usize) {
 /// to the health-gating task. Called once at startup. If never called,
 /// backend outcomes are silently dropped — health gating is disabled
 /// and `tonic-health` stays at whatever startup last set it to.
-pub fn configure_backend_health_events(tx: mpsc::UnboundedSender<BackendHealthEvent>) {
+pub fn configure_backend_health_events(tx: mpsc::Sender<BackendHealthEvent>) {
     HEALTH_EVENT_TX.set(tx).ok();
 }
 
 fn report_backend_outcome(success: bool) {
     let Some(tx) = HEALTH_EVENT_TX.get() else { return };
+    // The channel is BOUNDED (L11): use non-blocking try_send from this sync
+    // data-plane path. Dropping on a full buffer is safe — Success events are
+    // already coalesced to unhealthy->healthy transitions (rare; the buffer is
+    // draining by then), and a dropped Failure is harmless because a full buffer
+    // already holds far more consecutive failures than the gate's flip threshold.
     if success {
-        // Coalesce: only send a Success event when transitioning from
-        // a previously-unhealthy state. The gate's only use for
-        // Success is to reset its consecutive_failures counter; once
-        // reset, repeated Success events do nothing. Suppressing them
-        // removes one MPSC push (+ allocation) from every successful
-        // data-plane RPC.
+        // Only signal Success on a transition from a previously-unhealthy state:
+        // the gate uses it solely to reset its consecutive-failure counter, so
+        // repeated successes are noise on every data-plane RPC.
         if !LAST_SENT_HEALTHY.swap(true, Ordering::Relaxed) {
-            let _ = tx.send(BackendHealthEvent::Success);
+            let _ = tx.try_send(BackendHealthEvent::Success);
         }
     } else {
-        // Failures always go through: the gate counts consecutive
-        // failures toward its threshold. Coalescing would make the
-        // counter never advance.
         LAST_SENT_HEALTHY.store(false, Ordering::Relaxed);
-        let _ = tx.send(BackendHealthEvent::Failure);
+        let _ = tx.try_send(BackendHealthEvent::Failure);
     }
 }
 

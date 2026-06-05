@@ -270,9 +270,7 @@ fn spawn_sighup_handler(registry_source: MechanismRegistrySource) {
 /// reaches `threshold`, and flips it back to `SERVING` on the next
 /// successful backend call. Driven by `proxy.backend_health_consecutive_failures`.
 fn spawn_backend_health_gate(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<
-        server::grpc_service::service_utils::BackendHealthEvent,
-    >,
+    mut rx: tokio::sync::mpsc::Receiver<server::grpc_service::service_utils::BackendHealthEvent>,
     mut reporter: tonic_health::server::HealthReporter,
     threshold: u32,
 ) {
@@ -423,10 +421,14 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     }
 
     // Wire backend-health gating: spawn_backend reports each outcome
-    // through an unbounded channel; this task counts consecutive
-    // transport-level failures and flips tonic-health to NOT_SERVING
-    // once `proxy.backend_health_consecutive_failures` is exceeded.
-    let (health_tx, health_rx) = tokio::sync::mpsc::unbounded_channel();
+    // through a BOUNDED channel (L11 — never grows without bound under a failure
+    // storm); this task counts consecutive transport-level failures and flips
+    // tonic-health to NOT_SERVING once
+    // `proxy.backend_health_consecutive_failures` is exceeded. The producer uses
+    // try_send, dropping on a full buffer (safe: Success is coalesced to rare
+    // transitions, and a full buffer already holds far more failures than the
+    // flip threshold).
+    let (health_tx, health_rx) = tokio::sync::mpsc::channel(256);
     server::grpc_service::service_utils::configure_backend_health_events(health_tx);
     spawn_backend_health_gate(
         health_rx,
