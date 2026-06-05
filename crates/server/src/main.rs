@@ -344,7 +344,7 @@ fn spawn_eviction_task(
             }
 
             // Resource-aware logging
-            let ctx_count = context_manager.context_count().await;
+            let ctx_count = context_manager.context_count();
             if max_contexts > 0 && ctx_count > max_contexts * 80 / 100 {
                 tracing::warn!(contexts = ctx_count, max = max_contexts, "context usage above 80%");
             }

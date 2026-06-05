@@ -199,7 +199,7 @@ fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
 
 fn backend_object_handle(daemon: &TestDaemon, object: CK_OBJECT_HANDLE) -> CkObjectHandle {
     daemon.block_on(async {
-        let context_ids = daemon.context_manager.context_ids().await;
+        let context_ids = daemon.context_manager.context_ids();
         assert_eq!(context_ids.len(), 1, "expected one active shim context");
         let backend_handle = daemon
             .context_manager

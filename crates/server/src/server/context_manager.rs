@@ -364,15 +364,24 @@ impl ContextManager {
     }
 
     /// Returns the current number of active contexts.
-    pub async fn context_count(&self) -> usize {
+    // Not `async`: a DashMap read needs no `.await` (L5).
+    pub fn context_count(&self) -> usize {
         self.contexts.len()
     }
 
     /// Returns the currently active context IDs.
-    pub async fn context_ids(&self) -> Vec<ClientContextId> {
+    // Not `async`: a DashMap read needs no `.await` (L5).
+    pub fn context_ids(&self) -> Vec<ClientContextId> {
         self.contexts.iter().map(|entry| entry.key().clone()).collect()
     }
 
+    /// Run `f` against the mutable context for `id`, touching its lease.
+    ///
+    /// Intentionally `async` even though it only touches the `DashMap`: this is
+    /// the per-RPC accessor with 60+ call sites, and keeping it `async` keeps a
+    /// uniform awaited-accessor shape across the manager (alongside the RwLock-
+    /// backed slot accessors) and preserves room to await inside later without a
+    /// call-site-wide churn. The empty future is zero-cost (L5).
     pub async fn get_context<F, R>(&self, id: &ClientContextId, f: F) -> Option<R>
     where
         F: FnOnce(&mut LogicalClientInstance) -> R,
@@ -454,11 +463,13 @@ impl ContextManager {
         Some(OperationGuard { manager: Arc::clone(self), id: id.clone(), counter })
     }
 
-    pub async fn context_identity(&self, id: &ClientContextId) -> Option<String> {
+    // Not `async`: a DashMap read needs no `.await` (L5).
+    pub fn context_identity(&self, id: &ClientContextId) -> Option<String> {
         self.contexts.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
     }
 
-    pub async fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
+    // Not `async`: a DashMap remove needs no `.await` (L5).
+    pub fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
         self.contexts.remove(id).map(|(_k, v)| v)
     }
 

@@ -21,7 +21,7 @@ pub(super) async fn context_identity(
         return Err(CkRv::CRYPTOKI_NOT_INITIALIZED);
     }
 
-    let Some(identity) = ctx_mgr.context_identity(ctx_id).await else {
+    let Some(identity) = ctx_mgr.context_identity(ctx_id) else {
         return Ok(AuthenticatedIdentity::Unauthenticated);
     };
 
@@ -98,7 +98,7 @@ pub(super) async fn enforce_context_owner<T>(
     tcp_auth: TcpAuthMode,
     unix_auth: UnixAuthMode,
 ) -> Result<(), Status> {
-    let stored = ctx_mgr.context_identity(ctx_id).await;
+    let stored = ctx_mgr.context_identity(ctx_id);
     let live = identity_from_request(request, tcp_auth, unix_auth)?;
     if context_owner_allowed(stored.as_deref(), &live) {
         Ok(())

@@ -110,7 +110,7 @@ async fn unknown_context_returns_none() {
 async fn remove_context() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let id = mgr.create_context(None).await.unwrap();
-    assert!(mgr.remove_context(&id).await.is_some());
+    assert!(mgr.remove_context(&id).is_some());
     assert!(mgr.get_context(&id, |_| ()).await.is_none());
 }
 
@@ -238,7 +238,7 @@ async fn remove_context_removes_exactly_one() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let id1 = mgr.create_context(None).await.unwrap();
     let id2 = mgr.create_context(None).await.unwrap();
-    mgr.remove_context(&id1).await;
+    mgr.remove_context(&id1);
     assert!(mgr.get_context(&id1, |_| ()).await.is_none());
     assert!(mgr.get_context(&id2, |_| ()).await.is_some());
 }
@@ -406,7 +406,7 @@ async fn virtual_handles_from_removed_context_invisible_in_other_context() {
     let id2 = mgr.create_context(None).await.unwrap();
     let virt =
         mgr.get_context(&id1, |ctx| ctx.session_handles.insert(BackendHandle(99))).await.unwrap();
-    mgr.remove_context(&id1).await;
+    mgr.remove_context(&id1);
     let resolved = mgr.get_context(&id2, |ctx| ctx.session_handles.resolve(virt)).await.unwrap();
     assert_eq!(resolved, None, "removed context handles must not bleed into other contexts");
 }
