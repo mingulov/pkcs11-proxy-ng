@@ -1298,6 +1298,7 @@ dependencies = [
  "pkcs11-proxy-ng-proto",
  "pkcs11-proxy-ng-types",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

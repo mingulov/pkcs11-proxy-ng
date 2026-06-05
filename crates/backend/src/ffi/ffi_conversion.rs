@@ -4,6 +4,7 @@
 
 use cryptoki_sys::{CK_STATE, CK_UTF8CHAR};
 use pkcs11_proxy_ng_types::*;
+use zeroize::Zeroizing;
 
 /// Trim trailing spaces/nulls from a fixed-size byte array and convert to String.
 /// Uses lossy UTF-8 decoding so that ISO 8859-1 bytes from real HSMs are preserved
@@ -590,7 +591,8 @@ enum FfiParamBacking {
     HashSignAdditionalContext(Box<FfiHashSignAdditionalContext>, Vec<u8>),
     Kmac(Box<FfiKmacParams>, Vec<u8>),
     MuGen(Box<FfiMuGenParams>, Vec<u8>, Vec<u8>),
-    Pkcs5Pbkd2(Box<cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2>, Vec<u8>, Vec<u8>, Vec<u8>),
+    // Last field is the caller password — wiped on drop (E1).
+    Pkcs5Pbkd2(Box<cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2>, Vec<u8>, Vec<u8>, Zeroizing<Vec<u8>>),
     Tls12MasterKeyDerive(
         Box<cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS>,
         Vec<u8>,
@@ -632,7 +634,8 @@ enum FfiParamBacking {
         Vec<u8>,
         Vec<u8>,
     ),
-    Pbe(Box<cryptoki_sys::CK_PBE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    // Middle field is the caller password — wiped on drop (E1).
+    Pbe(Box<cryptoki_sys::CK_PBE_PARAMS>, Vec<u8>, Zeroizing<Vec<u8>>, Vec<u8>),
     EcdhAesKeyWrap(Box<cryptoki_sys::CK_ECDH_AES_KEY_WRAP_PARAMS>, Vec<u8>),
     Ecdh2Derive(Box<cryptoki_sys::CK_ECDH2_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
     EcmqvDerive(Box<cryptoki_sys::CK_ECMQV_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
@@ -696,22 +699,22 @@ enum FfiParamBacking {
     ),
     SkipjackPrivateWrap(
         Box<cryptoki_sys::CK_SKIPJACK_PRIVATE_WRAP_PARAMS>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
+        Zeroizing<Vec<u8>>, // password — wiped on drop (E1)
+        Vec<u8>,            // public_data
+        Vec<u8>,            // random_a
+        Vec<u8>,            // prime_p
+        Vec<u8>,            // base_g
+        Vec<u8>,            // subprime_q
     ),
     SkipjackRelayx(
         Box<cryptoki_sys::CK_SKIPJACK_RELAYX_PARAMS>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
+        Vec<u8>,            // old_wrapped_x
+        Zeroizing<Vec<u8>>, // old_password — wiped on drop (E1)
+        Vec<u8>,            // old_public_data
+        Vec<u8>,            // old_random_a
+        Zeroizing<Vec<u8>>, // new_password — wiped on drop (E1)
+        Vec<u8>,            // new_public_data
+        Vec<u8>,            // new_random_a
     ),
 }
 
@@ -1350,7 +1353,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
         CkMechanismParams::Pkcs5Pbkd2(p) => {
             let mut salt = p.salt_source_data.clone();
             let mut prf_data = p.prf_data.clone();
-            let mut password = p.password.clone();
+            let mut password = Zeroizing::new(p.password.clone());
             let salt_ptr =
                 if salt.is_empty() { std::ptr::null_mut() } else { salt.as_mut_ptr() as *mut _ };
             let prf_ptr = if prf_data.is_empty() {
@@ -1611,7 +1614,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
         // -- PBE: struct with 3 pointers (init_vector, password, salt) -----------
         CkMechanismParams::Pbe(p) => {
             let mut init_vector = p.init_vector.clone();
-            let mut password = p.password.clone();
+            let mut password = Zeroizing::new(p.password.clone());
             let mut salt = p.salt.clone();
             let iv_ptr = if init_vector.is_empty() {
                 std::ptr::null_mut()
@@ -2336,7 +2339,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
 
         // -- Skipjack Private Wrap: struct with many pointers -------------------
         CkMechanismParams::SkipjackPrivateWrap(p) => {
-            let mut password = p.password.clone();
+            let mut password = Zeroizing::new(p.password.clone());
             let mut public_data = p.public_data.clone();
             let mut random_a = p.random_a.clone();
             let mut prime_p = p.prime_p.clone();
@@ -2389,10 +2392,10 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
         // -- Skipjack Relayx: struct with 7 pointers ----------------------------
         CkMechanismParams::SkipjackRelayx(p) => {
             let mut old_wrapped_x = p.old_wrapped_x.clone();
-            let mut old_password = p.old_password.clone();
+            let mut old_password = Zeroizing::new(p.old_password.clone());
             let mut old_public_data = p.old_public_data.clone();
             let mut old_random_a = p.old_random_a.clone();
-            let mut new_password = p.new_password.clone();
+            let mut new_password = Zeroizing::new(p.new_password.clone());
             let mut new_public_data = p.new_public_data.clone();
             let mut new_random_a = p.new_random_a.clone();
             let owx_ptr = if old_wrapped_x.is_empty() {
@@ -2489,9 +2492,9 @@ mod mechanism_to_ffi_tests {
         AesCmacKeyDerivationParams, AesCtrParams, CkMechanism, CkMechanismParams, CkMechanismType,
         CkRv, DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams, IvParams,
         KeyDerivationStringData, KmacParams, KyberParams, MuGenParams, ObjectHandleParam,
-        RawMechanismParams, RsaPkcsOaepParams, RsaPkcsPssParams, SignAdditionalContext,
-        Ssl3KeyMatParams, SslRandomData, VendorObjectExtractParams, VendorObjectInsertParams,
-        WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsRandomData,
+        PbeParams, Pkcs5Pbkd2Params, RawMechanismParams, RsaPkcsOaepParams, RsaPkcsPssParams,
+        SignAdditionalContext, Ssl3KeyMatParams, SslRandomData, VendorObjectExtractParams,
+        VendorObjectInsertParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsRandomData,
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
@@ -2645,6 +2648,51 @@ mod mechanism_to_ffi_tests {
         let aad = unsafe { std::slice::from_raw_parts(gcm.pAAD, gcm.ulAADLen as usize) };
         assert_eq!(iv, [0x10; 12]);
         assert_eq!(aad, [0xAA, 0xBB, 0xCC]);
+    }
+
+    // E1: the PBE/PBKDF2 password is held in the FFI backing via `Zeroizing`
+    // (wiped on drop). These guard that wrapping the password in `Zeroizing`
+    // did not break the C-struct contract — the pointer must still address the
+    // correct password bytes while the `FfiMechanism` is alive.
+    #[test]
+    fn pbe_params_password_reaches_c_struct_through_zeroizing_backing() {
+        let password = vec![0xAB, 0xCD, 0xEF, 0x12, 0x34];
+        let ffi = convert(
+            CkMechanismType(0x0000_03A1), // CKM_PBE_MD5_DES_CBC
+            CkMechanismParams::Pbe(PbeParams {
+                init_vector: vec![0x01; 8],
+                password: password.clone(),
+                salt: vec![0x02; 4],
+                iteration: 1000,
+            }),
+        );
+        let pbe = unsafe { &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_PBE_PARAMS) };
+        assert_eq!(pbe.ulPasswordLen, password.len() as cryptoki_sys::CK_ULONG);
+        assert_eq!(pbe.ulIteration, 1000);
+        let pass = unsafe { std::slice::from_raw_parts(pbe.pPassword, pbe.ulPasswordLen as usize) };
+        assert_eq!(pass, password.as_slice());
+    }
+
+    #[test]
+    fn pkcs5_pbkd2_password_reaches_c_struct_through_zeroizing_backing() {
+        let password = vec![0x55, 0x66, 0x77];
+        let ffi = convert(
+            CkMechanismType(0x0000_03B0), // CKM_PKCS5_PBKD2
+            CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
+                salt_source: 1,
+                salt_source_data: vec![0x09; 8],
+                iterations: 2048,
+                prf: 2,
+                prf_data: vec![],
+                password: password.clone(),
+            }),
+        );
+        let p = unsafe {
+            &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2)
+        };
+        assert_eq!(p.ulPasswordLen, password.len() as cryptoki_sys::CK_ULONG);
+        let pass = unsafe { std::slice::from_raw_parts(p.pPassword, p.ulPasswordLen as usize) };
+        assert_eq!(pass, password.as_slice());
     }
 
     #[test]
