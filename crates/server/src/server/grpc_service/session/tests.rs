@@ -965,6 +965,77 @@ async fn wait_for_slot_event_suppresses_events_for_unauthorized_slots() {
     assert_eq!(resp.slot_id, 0, "no slot id is surfaced when suppressed");
 }
 
+async fn setup_session_with_mock() -> (Arc<ContextManager>, Arc<MockBackend>, ClientContextId, u64)
+{
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    (ctx_mgr, mock, ctx_id, session)
+}
+
+#[tokio::test]
+async fn close_session_keeps_mapping_on_transient_backend_failure() {
+    // M3: a transient backend close failure must NOT orphan the backend session
+    // behind a deleted virtual handle — the mapping is kept so the client can
+    // retry (the old code removed it before the backend close).
+    let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    mock.inject_close_error(CkRv::DEVICE_ERROR);
+
+    let rv = close_session(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(rv, CkRv::DEVICE_ERROR.0);
+
+    let still = ctx_mgr
+        .get_context(&ctx_id, |c| c.session_handles.resolve(VirtualHandle(session)))
+        .await
+        .flatten();
+    assert!(still.is_some(), "a transient close failure must keep the session mapping for retry");
+}
+
+#[tokio::test]
+async fn close_session_drops_mapping_when_backend_reports_already_gone() {
+    // M3: a terminal result (backend says the session is already invalid) must
+    // drop the stale mapping rather than leaving it to linger.
+    let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    mock.inject_close_error(CkRv::SESSION_HANDLE_INVALID);
+
+    let rv = close_session(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(rv, CkRv::SESSION_HANDLE_INVALID.0);
+
+    let gone = ctx_mgr
+        .get_context(&ctx_id, |c| c.session_handles.resolve(VirtualHandle(session)))
+        .await
+        .flatten();
+    assert!(gone.is_none(), "a terminal 'already gone' close must drop the stale mapping");
+}
+
 #[tokio::test]
 async fn cross_client_login_with_wrong_pin_is_rejected() {
     // A1: when a fresh logical client logs in to a slot another client already

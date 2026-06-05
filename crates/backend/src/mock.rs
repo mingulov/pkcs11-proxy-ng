@@ -99,6 +99,11 @@ pub struct MockBackend {
     /// token-not-present, or device errors.  Set via `inject_error()`, clear via
     /// `clear_error()`.
     injected_error: Mutex<Option<CkRv>>,
+    /// Error that `close_session` specifically returns. The general
+    /// `injected_error` deliberately does NOT block close, so close-failure
+    /// paths are exercised through this separate hook. Set via
+    /// `inject_close_error()`.
+    injected_close_error: Mutex<Option<CkRv>>,
     /// Optional mechanism parameters to return from `C_EncryptInit`.
     ///
     /// Real providers may mutate selected init parameters, for example by
@@ -172,6 +177,7 @@ impl MockBackend {
             enforce_source_grounded_workflows: false,
             attribute_store: Mutex::new(HashMap::new()),
             injected_error: Mutex::new(None),
+            injected_close_error: Mutex::new(None),
             encrypt_init_output: Mutex::new(None),
             encrypt_operation_output: Mutex::new(None),
             encrypt_exact_output: Mutex::new(None),
@@ -296,6 +302,12 @@ impl MockBackend {
     /// Clear any previously injected error.
     pub fn clear_error(&self) {
         *self.injected_error.lock().unwrap() = None;
+    }
+
+    /// Make the next (and subsequent) `close_session` calls return `rv` until
+    /// cleared, so close-failure handling can be tested.
+    pub fn inject_close_error(&self, rv: CkRv) {
+        *self.injected_close_error.lock().unwrap() = Some(rv);
     }
 
     /// Configure optional mechanism parameters returned by `encrypt_init`.
