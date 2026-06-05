@@ -218,26 +218,103 @@ fn catch_panics_source_coverage() {
 
 #[test]
 fn shim_source_never_formats_pin_data() {
-    let dispatch_sources = &[
-        include_str!("../dispatch/general/admin.rs"),
-        include_str!("../dispatch/general/session.rs"),
-    ];
+    // H5: walk the WHOLE dispatch tree (not a hardcoded file list) so a new
+    // handler cannot slip PIN logging past this gate, and broaden the patterns.
+    let dispatch_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dispatch");
+    let mut files = Vec::new();
+    collect_rs_files(&dispatch_dir, &mut files);
+    assert!(!files.is_empty(), "no dispatch sources found under {}", dispatch_dir.display());
 
-    for src in dispatch_sources {
+    // Identifiers whose VALUE is secret. The bare names are legitimate to use
+    // (read from a pointer, pass to the client); only *logging* their value leaks.
+    const SECRET_IDENTS: &[&str] = &["pin", "so_pin", "new_pin", "old_pin", "password"];
+    // Debug/print sinks that would dump any value they are given.
+    const DEBUG_SINKS: &[&str] = &["dbg!(", "{:?}", "{:#?}", "println!", "eprintln!"];
+
+    for path in &files {
+        let src = std::fs::read_to_string(path).expect("read dispatch source");
+        // A file "handles a secret" if it binds/uses a secret identifier as a
+        // whole token — only there do Debug sinks risk dumping a PIN.
+        let handles_secret = SECRET_IDENTS.iter().any(|id| contains_ident_token(&src, id));
+
         for (lineno, line) in src.lines().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("//") {
                 continue;
             }
-            for forbidden in &["dbg!(", "{:?}", "println!"] {
+            let where_ = format!("{}:{}", path.display(), lineno + 1);
+
+            // Tracing field captures / interpolation of a secret value
+            // (`?pin`, `%pin`, `{pin}`) leak in ANY macro — info!/trace!/etc.
+            for id in SECRET_IDENTS {
                 assert!(
-                    !trimmed.contains(forbidden),
-                    "shim line {}: must not use Debug formatting (found '{}'): {}",
-                    lineno + 1,
-                    forbidden,
-                    trimmed
+                    !logs_secret_sigil(trimmed, id),
+                    "{where_}: logs the value of secret '{id}' (?/%/{{}} capture): {trimmed}",
                 );
+            }
+            if handles_secret {
+                for sink in DEBUG_SINKS {
+                    assert!(
+                        !trimmed.contains(sink),
+                        "{where_}: Debug/print sink '{sink}' in a secret-handling file may dump a \
+                         PIN: {trimmed}",
+                    );
+                }
             }
         }
     }
+}
+
+/// Recursively collect `.rs` files under `dir`.
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// True if `ident` appears in `text` as a whole token (not as a substring of a
+/// larger identifier such as `pin_hash` or `spinning`).
+fn contains_ident_token(text: &str, ident: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(ident) {
+        let start = from + rel;
+        let end = start + ident.len();
+        let before_ok = start == 0 || !is_ident_char(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !is_ident_char(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// True if `line` captures the value of `ident` via a tracing sigil (`?ident`,
+/// `%ident`) or interpolates it (`{ident}`), with `ident` as a whole token.
+fn logs_secret_sigil(line: &str, ident: &str) -> bool {
+    let bytes = line.as_bytes();
+    for sigil in ['?', '%'] {
+        let pat = format!("{sigil}{ident}");
+        let mut from = 0;
+        while let Some(rel) = line[from..].find(&pat) {
+            let start = from + rel;
+            let end = start + pat.len();
+            if end >= bytes.len() || !is_ident_char(bytes[end]) {
+                return true;
+            }
+            from = start + 1;
+        }
+    }
+    line.contains(&format!("{{{ident}}}"))
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
