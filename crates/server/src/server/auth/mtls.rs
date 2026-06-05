@@ -29,29 +29,39 @@ pub fn validate_cert_file(path: &Path) -> Result<String, String> {
     let pem_data = std::fs::read(path)
         .map_err(|e| format!("cannot read certificate file '{}': {e}", path.display()))?;
 
-    let (_, pem) = x509_parser::pem::parse_x509_pem(&pem_data)
-        .map_err(|e| format!("invalid PEM in '{}': {e}", path.display()))?;
-
-    let (_, cert) = X509Certificate::from_der(&pem.contents)
-        .map_err(|e| format!("invalid X.509 in '{}': {e}", path.display()))?;
-
     let now = ASN1Time::now();
-    if cert.validity().not_after < now {
-        return Err(format!(
-            "certificate in '{}' has expired (not_after: {})",
-            path.display(),
-            cert.validity().not_after,
-        ));
-    }
-    if cert.validity().not_before > now {
-        return Err(format!(
-            "certificate in '{}' is not yet valid (not_before: {})",
-            path.display(),
-            cert.validity().not_before,
-        ));
+    // A PEM file may carry a whole chain (leaf + intermediate(s) + CA). Validate
+    // EVERY certificate in it, not just the first — an expired or not-yet-valid
+    // entry anywhere in the bundle must be rejected at startup (L3).
+    let mut leaf_subject: Option<String> = None;
+    for pem in x509_parser::pem::Pem::iter_from_buffer(&pem_data) {
+        let pem = pem.map_err(|e| format!("invalid PEM in '{}': {e}", path.display()))?;
+        if pem.label != "CERTIFICATE" {
+            continue; // ignore non-certificate PEM blocks
+        }
+        let (_, cert) = X509Certificate::from_der(&pem.contents)
+            .map_err(|e| format!("invalid X.509 in '{}': {e}", path.display()))?;
+        if cert.validity().not_after < now {
+            return Err(format!(
+                "certificate in '{}' has expired (not_after: {})",
+                path.display(),
+                cert.validity().not_after,
+            ));
+        }
+        if cert.validity().not_before > now {
+            return Err(format!(
+                "certificate in '{}' is not yet valid (not_before: {})",
+                path.display(),
+                cert.validity().not_before,
+            ));
+        }
+        // Conventionally the leaf is first; report its subject for logging.
+        if leaf_subject.is_none() {
+            leaf_subject = Some(cert.subject().to_string());
+        }
     }
 
-    Ok(cert.subject().to_string())
+    leaf_subject.ok_or_else(|| format!("no certificate found in '{}'", path.display()))
 }
 
 /// Extract issuer and subject Distinguished Names from a DER-encoded X.509

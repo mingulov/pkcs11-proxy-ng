@@ -220,6 +220,28 @@ fn validate_cert_file_expired() {
 }
 
 #[test]
+fn validate_cert_file_rejects_expired_cert_in_a_bundle() {
+    // L3: a PEM file may hold a chain (leaf + intermediate/CA). EVERY
+    // certificate must be validated, not just the first — an expired second
+    // entry must be rejected rather than silently accepted.
+    let now = OffsetDateTime::now_utc();
+    let leaf = gen_self_signed_pem_with_validity(
+        "leaf",
+        now - Duration::hours(1),
+        now + Duration::days(30),
+    );
+    let expired_ca = gen_self_signed_pem_with_validity(
+        "intermediate",
+        now - Duration::days(365),
+        now - Duration::hours(1),
+    );
+    let bundle = format!("{leaf}{expired_ca}");
+    let f = write_pem_to_tempfile(&bundle);
+    let err = super::validate_cert_file(f.path()).unwrap_err();
+    assert!(err.contains("expired"), "an expired cert in the bundle must be rejected: {err}");
+}
+
+#[test]
 fn validate_cert_file_not_yet_valid() {
     let now = OffsetDateTime::now_utc();
     let pem = gen_self_signed_pem_with_validity(
@@ -245,8 +267,14 @@ fn validate_cert_file_not_pem() {
     let mut f = tempfile::NamedTempFile::new().unwrap();
     f.write_all(b"this is not a PEM file").unwrap();
     f.flush().unwrap();
+    // A file with no certificate PEM blocks is rejected (the message changed
+    // from "invalid PEM" to "no certificate" when validation began iterating the
+    // whole bundle — L3).
     let err = super::validate_cert_file(f.path()).unwrap_err();
-    assert!(err.contains("invalid PEM"), "error: {err}");
+    assert!(
+        err.contains("no certificate") || err.contains("invalid PEM"),
+        "a non-certificate file must be rejected: {err}"
+    );
 }
 
 #[test]
