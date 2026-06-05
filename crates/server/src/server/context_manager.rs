@@ -435,7 +435,10 @@ impl ContextManager {
     /// handler then returns the right CK_RV), and `Err(())` when the context is
     /// at its cap (the caller should reject the request so one client cannot
     /// monopolise the shared backend-call budget).
-    pub fn begin_operation_capped(
+    ///
+    /// `pub(crate)`: a crate-internal helper, so the `Err(())` at-capacity signal
+    /// needs no richer error type (it would otherwise trip `result_unit_err`).
+    pub(crate) fn begin_operation_capped(
         self: &Arc<Self>,
         id: &ClientContextId,
         max_in_flight: i64,

@@ -193,6 +193,9 @@ impl FfiBackend {
         )
     }
 
+    // `CKF_VERIFY` is `CK_FLAGS` (`CK_ULONG`): u64 on 64-bit (where the cast is a
+    // no-op clippy flags) but u32 on 32-bit, where `as u64` is a needed widening.
+    #[allow(clippy::unnecessary_cast)]
     pub(super) fn ffi_verify_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
         self.ffi_session_cancel(session, CkFlags(cryptoki_sys::CKF_VERIFY as u64))?;
         self.drop_mech_cache(session);
@@ -245,6 +248,9 @@ impl FfiBackend {
         )
     }
 
+    // `CKF_DIGEST` is `CK_FLAGS` (`CK_ULONG`): u64 on 64-bit (cast is a no-op
+    // clippy flags) but u32 on 32-bit, where `as u64` is a needed widening.
+    #[allow(clippy::unnecessary_cast)]
     pub(super) fn ffi_digest_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
         self.ffi_session_cancel(session, CkFlags(cryptoki_sys::CKF_DIGEST as u64))?;
         self.drop_mech_cache(session);
