@@ -27,6 +27,35 @@ fn already_logged_in_rv(current: LoginState, requested: LoginState) -> CkRv {
     }
 }
 
+/// Resolve a virtual session to its backend session, owning slot, and current
+/// login state in a single context-locked read (shared by login/logout — M7).
+/// Returns the CK_RV the caller should surface when the context is gone
+/// (`CRYPTOKI_NOT_INITIALIZED`) or the session handle is unknown
+/// (`SESSION_HANDLE_INVALID`).
+async fn resolve_session_slot_login(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    session_handle: u64,
+) -> Result<(CkSessionHandle, CkSlotId, Option<LoginState>), CkRv> {
+    let resolved = ctx_mgr
+        .get_context(ctx_id, |ctx| {
+            let virtual_session = VirtualHandle(session_handle);
+            let backend_session = ctx.session_handles.resolve(virtual_session);
+            let slot = ctx.session_slots.get(&virtual_session).copied();
+            let current_login_state = slot.and_then(|slot| ctx.login_state.get(&slot).copied());
+            (backend_session, slot, current_login_state)
+        })
+        .await;
+
+    match resolved {
+        None => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
+        Some((Some(backend_session), Some(slot), current_login_state)) => {
+            Ok((CkSessionHandle(backend_session.0), slot, current_login_state))
+        }
+        Some(_) => Err(CkRv::SESSION_HANDLE_INVALID),
+    }
+}
+
 pub(super) async fn login(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
@@ -45,31 +74,13 @@ pub(super) async fn login(
     };
     let requested_login_state = login_state_for_user_type(user_type);
 
-    let session_context = ctx_mgr
-        .get_context(&ctx_id, |ctx| {
-            let virtual_session = VirtualHandle(req.session_handle);
-            let backend_session = ctx.session_handles.resolve(virtual_session);
-            let slot = ctx.session_slots.get(&virtual_session).copied();
-            let current_login_state = slot.and_then(|slot| ctx.login_state.get(&slot).copied());
-            (backend_session, slot, current_login_state)
-        })
-        .await;
-
-    let (session, slot, current_login_state) = match session_context {
-        None => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-                ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
-            }));
-        }
-        Some((Some(backend_session), Some(slot), current_login_state)) => {
-            (CkSessionHandle(backend_session.0), slot, current_login_state)
-        }
-        Some(_) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-                ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
-            }));
-        }
-    };
+    let (session, slot, current_login_state) =
+        match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
+            Ok(resolved) => resolved,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse { ck_rv: rv.0 }));
+            }
+        };
 
     // Wrap PIN bytes in `Zeroizing` so the backing buffer is overwritten when
     // dropped. Read it up-front and pre-hash it so the logical-login path can
@@ -164,31 +175,13 @@ pub(super) async fn logout(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let session_context = ctx_mgr
-        .get_context(&ctx_id, |ctx| {
-            let virtual_session = VirtualHandle(req.session_handle);
-            let backend_session = ctx.session_handles.resolve(virtual_session);
-            let slot = ctx.session_slots.get(&virtual_session).copied();
-            let current_login_state = slot.and_then(|slot| ctx.login_state.get(&slot).copied());
-            (backend_session, slot, current_login_state)
-        })
-        .await;
-
-    let (session, slot, current_login_state) = match session_context {
-        None => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse {
-                ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
-            }));
-        }
-        Some((Some(backend_session), Some(slot), current_login_state)) => {
-            (CkSessionHandle(backend_session.0), slot, current_login_state)
-        }
-        Some(_) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse {
-                ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
-            }));
-        }
-    };
+    let (session, slot, current_login_state) =
+        match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
+            Ok(resolved) => resolved,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv: rv.0 }));
+            }
+        };
 
     let other_login_state = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id);
 
