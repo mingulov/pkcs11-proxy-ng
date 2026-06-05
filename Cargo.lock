@@ -1284,6 +1284,7 @@ name = "pkcs11-proxy-ng-backend"
 version = "0.1.0"
 dependencies = [
  "cryptoki-sys",
+ "dashmap",
  "libloading",
  "pkcs11-proxy-ng-proto",
  "pkcs11-proxy-ng-types",

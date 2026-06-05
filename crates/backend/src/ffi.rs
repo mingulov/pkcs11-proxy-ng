@@ -1,10 +1,10 @@
 // crates/pkcs11-backend/src/ffi.rs
 use crate::traits::{CkDeriveKeyOutputResult, Pkcs11Backend};
+use dashmap::DashMap;
 use libloading::Library;
 use pkcs11_proxy_ng_types::*;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::CString;
-use std::sync::Mutex;
 
 #[path = "ffi/authenticated_wrap_ops.rs"]
 mod authenticated_wrap_ops;
@@ -136,11 +136,18 @@ pub struct FfiBackend {
     /// The spec says backends should copy, but for compatibility we keep the
     /// FfiMechanism (and its backing `Vec<u8>` buffers) alive until the next
     /// Init call or session close replaces it.
-    mech_cache: Mutex<HashMap<u64, ffi_conversion::FfiMechanism>>,
-    /// Reverse map of session handle -> slot id, used to evict per-slot
-    /// `mech_cache` entries on `C_CloseAllSessions`. Populated on successful
-    /// `ffi_open_session`, drained on close paths.
-    session_slot_map: Mutex<HashMap<u64, u64>>,
+    ///
+    /// Sharded (`DashMap`) so concurrent sessions doing crypto `*Init` calls on
+    /// the shared backend do not serialise on one global lock (L4).
+    mech_cache: DashMap<u64, ffi_conversion::FfiMechanism>,
+    /// Map of session handle -> slot id. Lets a per-session close path find the
+    /// owning slot in O(1) to keep [`slot_sessions`](Self::slot_sessions)
+    /// consistent. Populated on successful `ffi_open_session`, drained on close.
+    session_slot_map: DashMap<u64, u64>,
+    /// Reverse index slot id -> set of session handles open on that slot. Lets
+    /// `C_CloseAllSessions` evict exactly the sessions on one slot in
+    /// O(sessions-on-slot) instead of scanning every session (L4).
+    slot_sessions: DashMap<u64, HashSet<u64>>,
 }
 
 // Safety: PKCS#11 spec requires modules loaded with CKF_OS_LOCKING_OK to be
@@ -1348,8 +1355,9 @@ mod tests {
             func_list_3_0: None,
             func_list_3_2: None,
             initialize_args: None,
-            mech_cache: Mutex::new(HashMap::new()),
-            session_slot_map: Mutex::new(HashMap::new()),
+            mech_cache: DashMap::new(),
+            session_slot_map: DashMap::new(),
+            slot_sessions: DashMap::new(),
         };
 
         (backend, functions)
@@ -1358,8 +1366,9 @@ mod tests {
     fn seed_cache(backend: &FfiBackend) {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
-        backend.mech_cache.lock().unwrap().insert(7, ffi_mechanism);
-        backend.session_slot_map.lock().unwrap().insert(7, 11);
+        backend.mech_cache.insert(7, ffi_mechanism);
+        // Use the public path so the forward map and reverse index stay in sync.
+        backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
     }
 
     #[test]
@@ -1369,8 +1378,8 @@ mod tests {
 
         assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
 
-        assert!(backend.mech_cache.lock().unwrap().contains_key(&7));
-        assert_eq!(backend.session_slot_map.lock().unwrap().get(&7), Some(&11));
+        assert!(backend.mech_cache.contains_key(&7));
+        assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
     }
 
     #[test]
@@ -1380,7 +1389,51 @@ mod tests {
 
         backend.finalize().unwrap();
 
-        assert!(backend.mech_cache.lock().unwrap().is_empty());
-        assert!(backend.session_slot_map.lock().unwrap().is_empty());
+        assert!(backend.mech_cache.is_empty());
+        assert!(backend.session_slot_map.is_empty());
+        assert!(backend.slot_sessions.is_empty());
+    }
+
+    #[test]
+    fn drop_mech_cache_for_slot_evicts_only_that_slots_sessions() {
+        // L4: per-slot eviction drops exactly the sessions open on the target
+        // slot (resolved via the reverse index) and leaves other slots intact.
+        let (backend, _functions) = backend_with_finalize(Some(finalize_ok));
+        for (session, slot) in [(7u64, 11u64), (8, 11), (9, 22)] {
+            let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+            backend
+                .mech_cache
+                .insert(session, ffi_conversion::mechanism_to_ffi(&mechanism).unwrap());
+            backend.remember_session_slot(CkSessionHandle(session), CkSlotId(slot));
+        }
+
+        backend.drop_mech_cache_for_slot(CkSlotId(11));
+
+        for evicted in [7u64, 8] {
+            assert!(!backend.mech_cache.contains_key(&evicted));
+            assert!(backend.session_slot_map.get(&evicted).is_none());
+        }
+        assert!(backend.mech_cache.contains_key(&9));
+        assert_eq!(backend.session_slot_map.get(&9).as_deref(), Some(&22));
+        // The emptied slot-11 reverse entry is pruned; slot 22 still maps to {9}.
+        assert!(backend.slot_sessions.get(&11).is_none());
+        assert!(backend.slot_sessions.get(&22).is_some());
+    }
+
+    #[test]
+    fn forget_session_slot_prunes_the_reverse_index() {
+        // L4: forgetting a session removes it from the reverse index, and the
+        // slot entry itself is dropped once its last session is gone.
+        let (backend, _functions) = backend_with_finalize(Some(finalize_ok));
+        backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+        backend.remember_session_slot(CkSessionHandle(8), CkSlotId(11));
+
+        backend.forget_session_slot(CkSessionHandle(7));
+        assert_eq!(backend.slot_sessions.get(&11).map(|s| s.len()), Some(1));
+        assert!(backend.slot_sessions.get(&11).unwrap().contains(&8));
+
+        backend.forget_session_slot(CkSessionHandle(8));
+        assert!(backend.slot_sessions.get(&11).is_none());
+        assert!(backend.session_slot_map.is_empty());
     }
 }
