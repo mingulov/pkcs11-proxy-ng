@@ -90,8 +90,19 @@ The `client_context_id` issued by the daemon (see ADR-0002) is bound to the auth
 - The daemon records which authenticated identity created each context.
 - A request that presents a `client_context_id` created by a different identity is rejected. One client cannot adopt, resume, or inspect another client's context.
 - A single authenticated identity may hold multiple concurrent contexts. This is normal when the same identity is used by multiple processes or service replicas.
-- Policy checks still run on every request against the identity bound to the
-  context. Existing contexts do not bypass later policy changes.
+- **Per-request identity ownership** is enforced on every request: a request is
+  re-bound to the caller's transport identity and rejected on mismatch (ADR-0009).
+- **Token-access policy** is enforced at the points where a client *gains*
+  access to a token — slot/token/mechanism **discovery** and **C_OpenSession /
+  C_InitToken** all run `slot_is_authorized` against the bound identity
+  (`C_WaitForSlotEvent` too; see M13). Operations on an **already-open session**
+  (crypto, object access) are not re-evaluated against the policy per request;
+  they inherit the authorization established when the session was opened.
+  Consequently a policy *tightening* does not retroactively revoke an open
+  session — its effective revocation latency is the session's lifetime, and a
+  client must reopen to pick up the change. Per-request policy re-evaluation is
+  deliberately deferred for Phase 1 because it would add a backend
+  `C_GetTokenInfo` to every crypto/object call (the M14 decision).
 
 ### 5. Auth failure error mapping (relationship to ADR-0003)
 
