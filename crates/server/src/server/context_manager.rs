@@ -168,7 +168,20 @@ pub struct ContextManager {
     pin_verifiers: Arc<DashMap<(CkSlotId, LoginState), [u8; 32]>>,
     /// Random per-process salt for the PIN-verifier hashes.
     pin_salt: [u8; 16],
+    /// Cache of `(label, serial)` per backend slot, captured when the daemon
+    /// last read `C_GetTokenInfo` for an authorization check (M9). Authorization
+    /// is otherwise a blocking backend call on every discovery/open. Entries are
+    /// invalidated explicitly on slot re-registration AND expire after
+    /// `TOKEN_INFO_CACHE_TTL`, so a token swapped without a re-registration is
+    /// re-read within at most the TTL — the cache never authorizes against a
+    /// token-identity older than that.
+    token_info_cache: Arc<DashMap<CkSlotId, (Instant, String, String)>>,
 }
+
+/// Maximum age of a cached `(label, serial)` before an authorization check
+/// re-reads `C_GetTokenInfo`. Bounds the staleness of token-policy decisions
+/// after an undetected runtime token change (M9).
+const TOKEN_INFO_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// RAII guard marking a backend operation in flight for one context. While it
 /// lives, eviction skips that context (see `ContextManager::begin_operation`).
@@ -198,7 +211,35 @@ impl ContextManager {
             max_contexts,
             pin_verifiers: Arc::new(DashMap::new()),
             pin_salt: *Uuid::new_v4().as_bytes(),
+            token_info_cache: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Cached `(label, serial)` for `backend_slot` if it was read within
+    /// `TOKEN_INFO_CACHE_TTL`; otherwise `None` (the caller must re-read it).
+    pub fn cached_token_info(&self, backend_slot: CkSlotId) -> Option<(String, String)> {
+        self.cached_token_info_within(backend_slot, TOKEN_INFO_CACHE_TTL)
+    }
+
+    fn cached_token_info_within(
+        &self,
+        backend_slot: CkSlotId,
+        ttl: std::time::Duration,
+    ) -> Option<(String, String)> {
+        self.token_info_cache.get(&backend_slot).and_then(|entry| {
+            let (cached_at, label, serial) = entry.value();
+            (cached_at.elapsed() < ttl).then(|| (label.clone(), serial.clone()))
+        })
+    }
+
+    /// Record the `(label, serial)` read for `backend_slot`.
+    pub fn cache_token_info(&self, backend_slot: CkSlotId, label: String, serial: String) {
+        self.token_info_cache.insert(backend_slot, (Instant::now(), label, serial));
+    }
+
+    /// Drop any cached token info for `backend_slot` (the token may have changed).
+    pub fn invalidate_token_info(&self, backend_slot: CkSlotId) {
+        self.token_info_cache.remove(&backend_slot);
     }
 
     /// Salted hash of a PIN for verifier storage/comparison. A `None` PIN
@@ -258,6 +299,9 @@ impl ContextManager {
 
     /// Register a single backend slot discovered at runtime.
     pub async fn register_slot(&self, backend_slot: CkSlotId) {
+        // A (re-)registration may reflect a changed token in the slot, so drop
+        // any cached token info for it (M9).
+        self.invalidate_token_info(backend_slot);
         self.slot_map.write().await.register(backend_slot);
     }
 

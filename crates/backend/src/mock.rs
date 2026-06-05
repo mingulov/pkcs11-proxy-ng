@@ -147,6 +147,7 @@ pub struct MockBackend {
     /// default 2.40/3.0/3.2 catalog with no NULL functions.
     interface_capabilities: Mutex<Option<InterfaceCapabilities>>,
     login_calls: AtomicUsize,
+    token_info_calls: AtomicUsize,
 }
 
 impl MockBackend {
@@ -188,6 +189,7 @@ impl MockBackend {
             verify_signature_accumulator: Mutex::new(HashMap::new()),
             interface_capabilities: Mutex::new(None),
             login_calls: AtomicUsize::new(0),
+            token_info_calls: AtomicUsize::new(0),
         }
     }
 
@@ -268,6 +270,12 @@ impl MockBackend {
 
     pub fn login_call_count(&self) -> usize {
         self.login_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of `C_GetTokenInfo` calls — used to assert the token-info cache
+    /// (M9) deduplicates repeated authorization checks.
+    pub fn token_info_call_count(&self) -> usize {
+        self.token_info_calls.load(Ordering::SeqCst)
     }
 
     /// Configure a slot-specific mechanism list.
@@ -906,6 +914,7 @@ impl Pkcs11Backend for MockBackend {
     }
 
     fn get_token_info(&self, slot_id: CkSlotId) -> CkResult<CkTokenInfo> {
+        self.token_info_calls.fetch_add(1, Ordering::SeqCst);
         self.token_info(slot_id)
     }
 

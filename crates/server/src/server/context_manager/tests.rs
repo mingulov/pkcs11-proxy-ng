@@ -1,6 +1,31 @@
 use super::*;
 use crate::server::handle_map::BackendHandle;
 
+#[test]
+fn token_info_cache_serves_within_ttl_and_expires_after() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "SN1".into());
+    assert_eq!(
+        mgr.cached_token_info_within(CkSlotId(0), std::time::Duration::from_secs(60)),
+        Some(("MockToken".to_string(), "SN1".to_string())),
+        "a fresh entry must be served"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    assert_eq!(
+        mgr.cached_token_info_within(CkSlotId(0), std::time::Duration::from_millis(1)),
+        None,
+        "an entry older than the TTL must not be served"
+    );
+}
+
+#[test]
+fn invalidate_token_info_drops_the_entry() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "SN1".into());
+    mgr.invalidate_token_info(CkSlotId(0));
+    assert_eq!(mgr.cached_token_info(CkSlotId(0)), None);
+}
+
 #[tokio::test]
 async fn capacity_eviction_skips_contexts_with_open_backend_sessions() {
     // M4: the inline capacity-eviction path must NOT drop an expired context

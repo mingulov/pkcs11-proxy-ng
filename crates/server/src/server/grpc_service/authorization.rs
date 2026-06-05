@@ -44,12 +44,29 @@ pub(super) async fn slot_is_authorized(
         return Ok(Ok(true));
     }
 
-    let backend = backend_ref.clone();
-    match spawn_backend(move || backend.get_token_info(backend_slot)).await? {
-        Ok(info) => Ok(Ok(token_policy.allows(&identity, &info.label, &info.serial_number))),
-        Err(CkRv::TOKEN_NOT_PRESENT) => Ok(Ok(false)),
-        Err(error) => Ok(Err(error)),
-    }
+    // Serve the token (label, serial) from the per-slot cache when fresh, so a
+    // burst of authorization checks (discovery, open) does not issue a blocking
+    // C_GetTokenInfo each time (M9). A cache miss reads the backend and records
+    // the result; TOKEN_NOT_PRESENT and other errors are not cached.
+    let (label, serial) = match ctx_mgr.cached_token_info(backend_slot) {
+        Some(cached) => cached,
+        None => {
+            let backend = backend_ref.clone();
+            match spawn_backend(move || backend.get_token_info(backend_slot)).await? {
+                Ok(info) => {
+                    ctx_mgr.cache_token_info(
+                        backend_slot,
+                        info.label.clone(),
+                        info.serial_number.clone(),
+                    );
+                    (info.label, info.serial_number)
+                }
+                Err(CkRv::TOKEN_NOT_PRESENT) => return Ok(Ok(false)),
+                Err(error) => return Ok(Err(error)),
+            }
+        }
+    };
+    Ok(Ok(token_policy.allows(&identity, &label, &serial)))
 }
 
 /// A2 ownership gate (pure core): decide whether a request bearing a
@@ -159,6 +176,33 @@ mod tests {
             .unwrap();
 
         assert!(authorized);
+    }
+
+    #[tokio::test]
+    async fn token_info_is_cached_across_authorization_checks() {
+        // M9: repeated authorization checks for the same slot reuse the cached
+        // (label, serial) instead of issuing a blocking C_GetTokenInfo each
+        // time; a slot re-registration invalidates the cache.
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
+        let policy = policy_for_identity(MTLS_IDENTITY);
+
+        for _ in 0..3 {
+            slot_is_authorized(&ctx_mgr, &backend, &policy, &ctx_id, CkSlotId(0))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(mock.token_info_call_count(), 1, "repeat checks must hit the cache");
+
+        ctx_mgr.register_slot(CkSlotId(0)).await; // invalidates the cached token info
+        slot_is_authorized(&ctx_mgr, &backend, &policy, &ctx_id, CkSlotId(0))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mock.token_info_call_count(), 2, "re-registration must re-read token info");
     }
 
     // --- A2: per-request context-ownership gate (the pure decision core) ---
