@@ -16,11 +16,20 @@ no-default-features = false
 feature-depth = 1
 
 [advisories]
+# Opt into the v2 schema (cargo-deny 0.16+): vulnerability and unsound
+# advisories are always hard errors, so the old per-type severity keys are
+# gone. Vulnerabilities still fail the check on any advisory >= LOW.
+version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# Fail the check on any advisory >= LOW. The default in cargo-deny
-# 0.19+ is to fail on all advisories; we keep that.
-yanked = "warn"
+# Treat an unmaintained-crate advisory as an error whether the crate is a
+# direct or transitive dependency (R3 supply-chain hygiene). A flagged crate
+# is either replaced or, if genuinely unavoidable, pinned in `ignore` with a
+# written justification — never silently tolerated.
+unmaintained = "all"
+# A yanked release usually signals a pulled-back security or correctness
+# problem, so block it rather than warn.
+yanked = "deny"
 ignore = []
 
 [licenses]
@@ -53,11 +62,12 @@ exceptions = []
 clarify = []
 
 [bans]
-# Reject multiple major-version copies of the same crate where
-# possible — most are upgraded via `cargo update` rather than
-# tolerated. Warning rather than deny so transitive divergences in
-# the wider Rust ecosystem don't block the build.
-multiple-versions = "warn"
+# Reject multiple major-version copies of the same crate. Our own direct
+# duplicates (e.g. libloading, aligned to cryptoki-sys's 0.8) are collapsed;
+# the only remaining duplicates are ecosystem-forced transitive pins, each
+# enumerated in `skip` below. With this set to `deny`, any NEW uncurated
+# duplicate fails the build and forces a deliberate review.
+multiple-versions = "deny"
 wildcards = "deny"
 # In-workspace path deps don't carry a version constraint (they
 # track the workspace's own version), which cargo-deny flags as a
@@ -71,7 +81,18 @@ deny = [
     # the slow-backend mock from R2 or any new vendor extension.
 ]
 
-skip = []
+# Ecosystem-forced duplicate versions we have reviewed and accept. They come
+# from transitive dependencies that pin an older major; we cannot collapse them
+# without forking upstream. Skipping the older copy leaves a single un-skipped
+# version per crate, so `multiple-versions = "deny"` still fires on anything
+# new. Revisit on every dependency bump: a stale skip means the duplicate it
+# covered is already gone and the entry should be removed.
+skip = [
+    { crate = "getrandom@0.2.17" },   # 0.2 line still used across the rand stack; 0.4.x is the other
+    { crate = "hashbrown@0.14.5" },   # pulled by older transitive deps; newest in tree is 0.16.x
+    { crate = "hashbrown@0.15.5" },   # intermediate line, same reason
+    { crate = "windows-sys@0.52.0" }, # transitive only; host target is Linux so it is never built
+]
 
 [sources]
 # Only allow git and crates.io as sources. No local-path overrides in

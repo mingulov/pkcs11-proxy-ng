@@ -449,7 +449,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1fd850498411e4057f1cba79e6e2bc7cbe960544c1046ab46d4685c403a1121"
 dependencies = [
- "libloading 0.8.9",
+ "libloading",
 ]
 
 [[package]]
@@ -965,16 +965,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1261,7 +1251,7 @@ dependencies = [
  "hdrhistogram",
  "http",
  "libc",
- "libloading 0.9.0",
+ "libloading",
  "nix",
  "pkcs11-proxy-ng-backend",
  "pkcs11-proxy-ng-client",
@@ -1294,7 +1284,7 @@ name = "pkcs11-proxy-ng-backend"
 version = "0.1.0"
 dependencies = [
  "cryptoki-sys",
- "libloading 0.9.0",
+ "libloading",
  "pkcs11-proxy-ng-proto",
  "pkcs11-proxy-ng-types",
  "tracing",
