@@ -688,7 +688,15 @@ enum FfiParamBacking {
     X2RatchetInitialize(Box<cryptoki_sys::CK_X2RATCHET_INITIALIZE_PARAMS>, Vec<u8>),
     X2RatchetRespond(Box<cryptoki_sys::CK_X2RATCHET_RESPOND_PARAMS>, Vec<u8>),
     Otp(Box<cryptoki_sys::CK_OTP_PARAMS>, Vec<cryptoki_sys::CK_OTP_PARAM>, Vec<Vec<u8>>),
-    Kip(Box<cryptoki_sys::CK_KIP_PARAMS>, Box<cryptoki_sys::CK_MECHANISM>, Vec<u8>),
+    // Last field keeps the inner mechanism's own parameter backing alive for as
+    // long as the KIP params reference its C struct (L8 — replaces a mem::forget
+    // that permanently leaked the inner backing).
+    Kip(
+        Box<cryptoki_sys::CK_KIP_PARAMS>,
+        Box<cryptoki_sys::CK_MECHANISM>,
+        Vec<u8>,
+        Box<FfiParamBacking>,
+    ),
     CmsSig(
         Box<cryptoki_sys::CK_CMS_SIG_PARAMS>,
         Box<cryptoki_sys::CK_MECHANISM>,
@@ -696,6 +704,9 @@ enum FfiParamBacking {
         Vec<u8>,
         Vec<u8>,
         Vec<u8>,
+        // Inner signing/digest mechanism backings, kept alive (L8).
+        Box<FfiParamBacking>,
+        Box<FfiParamBacking>,
     ),
     SkipjackPrivateWrap(
         Box<cryptoki_sys::CK_SKIPJACK_PRIVATE_WRAP_PARAMS>,
@@ -2286,14 +2297,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 pSeed: seed_ptr,
                 ulSeedLen: seed.len() as cryptoki_sys::CK_ULONG,
             });
-            // Note: inner_ffi._backing must also be kept alive, but our Kip variant
-            // only holds Box<CK_KIP_PARAMS> + Box<CK_MECHANISM> + Vec<u8>.
-            // The inner backing is dropped here. For mechanisms with pointer params,
-            // this is unsafe. But KIP is extremely rare and its inner mechanism is
-            // typically parameterless or scalar-only, so this is acceptable.
-            std::mem::forget(inner_ffi._backing);
+            // Keep the inner mechanism's parameter backing alive by moving it
+            // into the KIP backing, so any pointers the inner C struct holds
+            // stay valid for the call and are freed afterwards (L8 — was a
+            // mem::forget that leaked it permanently).
             Ok(FfiMechanism::from_box(mech_type, kip, |b| {
-                FfiParamBacking::Kip(b, inner_mech, seed)
+                FfiParamBacking::Kip(b, inner_mech, seed, Box::new(inner_ffi._backing))
             }))
         }
 
@@ -2322,9 +2331,8 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 pRequiredAttributes: reqd_ptr,
                 ulRequiredAttributesLen: reqd_attrs.len() as cryptoki_sys::CK_ULONG,
             });
-            // Keep inner backings alive (same caveat as KIP)
-            std::mem::forget(sign_ffi._backing);
-            std::mem::forget(digest_ffi._backing);
+            // Keep both inner mechanism backings alive by moving them into the
+            // CmsSig backing (L8 — was a mem::forget that leaked them).
             Ok(FfiMechanism::from_box(mech_type, cms, |b| {
                 FfiParamBacking::CmsSig(
                     b,
@@ -2333,6 +2341,8 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     content_type,
                     req_attrs,
                     reqd_attrs,
+                    Box::new(sign_ffi._backing),
+                    Box::new(digest_ffi._backing),
                 )
             }))
         }
