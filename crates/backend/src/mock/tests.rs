@@ -5122,4 +5122,64 @@ fn sign_rejects_null_with_nonzero_len() {
     assert_eq!(backend.sign(session, CkInBuf::Null { len: 5 }).unwrap_err(), CkRv::ARGUMENTS_BAD,);
 }
 
+#[test]
+fn digest_update_rejects_null_with_nonzero_len() {
+    // `digest_update` must validate its data argument and reject Null { len > 0 }.
+    let backend = MockBackend::default_test();
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let sha256 = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
+    backend.digest_init(session, &sha256).unwrap();
+    assert_eq!(
+        backend.digest_update(session, CkInBuf::Null { len: 5 }).unwrap_err(),
+        CkRv::ARGUMENTS_BAD,
+    );
+}
+
+#[test]
+fn encrypt_message_rejects_null_aad_with_nonzero_len() {
+    // `encrypt_message` must validate the aad argument and reject Null { len > 0 }.
+    let backend = MockBackend::default_test();
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let key = live_key(&backend, session);
+    let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+    backend.message_encrypt_init(session, Some(&mech), None, key).unwrap();
+    let mut parameter = vec![0x11, 0x22, 0x33, 0x44];
+    assert_eq!(
+        backend
+            .encrypt_message(
+                session,
+                &mut parameter,
+                CkInBuf::Null { len: 5 },
+                CkInBuf::Bytes(b"plaintext"),
+            )
+            .unwrap_err(),
+        CkRv::ARGUMENTS_BAD,
+    );
+}
+
+#[test]
+fn decrypt_message_rejects_null_aad_with_nonzero_len() {
+    // `decrypt_message` must validate the aad argument and reject Null { len > 0 }.
+    let backend = MockBackend::default_test();
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let key = live_key(&backend, session);
+    let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+    backend.message_decrypt_init(session, Some(&mech), None, key).unwrap();
+    let mut parameter = vec![0x11, 0x22, 0x33, 0x44];
+    assert_eq!(
+        backend
+            .decrypt_message(
+                session,
+                &mut parameter,
+                CkInBuf::Null { len: 5 },
+                CkInBuf::Bytes(b"ciphertext"),
+            )
+            .unwrap_err(),
+        CkRv::ARGUMENTS_BAD,
+    );
+}
+
 include!("tests_rest.rs");

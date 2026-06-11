@@ -1152,7 +1152,8 @@ impl Pkcs11Backend for MockBackend {
     fn digest(&self, s: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.digest_impl(s, Self::resolve_input(data)?)
     }
-    fn digest_update(&self, s: CkSessionHandle, _p: CkInBuf<'_>) -> CkResult<()> {
+    fn digest_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
+        let _ = Self::resolve_input(p)?;
         self.digest_update_impl(s)
     }
     fn digest_key(&self, s: CkSessionHandle, k: CkObjectHandle) -> CkResult<()> {
@@ -1949,9 +1950,10 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
         plaintext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let _ = Self::resolve_input(aad)?;
         if !self.state.lock().unwrap().has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
@@ -2014,9 +2016,10 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let _ = Self::resolve_input(aad)?;
         if !self.state.lock().unwrap().has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
