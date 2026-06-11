@@ -61,6 +61,24 @@ other clients' sessions.
    protect the daemon from non-cooperating clients. Enabling it deliberately
    trades transparency for availability.
 
+## Limits — transport-impossible inputs
+
+Faithful forwarding requires materializing the client's buffer to cross the
+wire; where that is physically impossible, a synthesized return value is
+forced and is documented here as an acknowledged transparency limit, NOT an
+exception that licenses other synthesis:
+
+- Lengths whose byte size overflows or exceeds the serialization cap
+  (`MAX_SERIALIZABLE_BYTES`, currently 512 MiB) cannot be forwarded. The shim
+  returns one documented, stable RV for this class (today `CKR_GENERAL_ERROR`
+  via the panic guard; the Scope 2 plan will finalize the value and tests).
+  Direct modules return their own provider-specific RVs without reading the
+  buffer, so this class is a known, tested divergence.
+- Caps on mechanism/message parameter payloads (`MAX_MECHANISM_PARAM_LEN`)
+  must be large enough that only unmaterializable inputs hit them — a cap
+  that rejects legitimate inputs (e.g. valid AAD sizes) is a bug, not a
+  limit.
+
 ## Consequences
 
 - Proxied NULL-mechanism init behavior now matches each module's direct
@@ -74,8 +92,11 @@ other clients' sessions.
 - Scope 2 extends the same fidelity to data-input pointers: the wire format
   must carry "pointer was NULL" and "claimed length N" independently, the
   daemon reconstructs the call verbatim, and `sanitize_inputs` gates the
-  optional rejection path. Design: umbrella
-  `doc/plans/2026-06-11-transparent-forwarding-design.md`.
+  optional rejection path. This covers not only operation data but PIN inputs
+  (NULL PIN = protected authentication path — currently conflated with an
+  empty PIN), attribute templates, and NULL-able pointers embedded in
+  mechanism/message parameter structs. Design + input-class taxonomy:
+  umbrella `doc/plans/2026-06-11-transparent-forwarding-design.md`.
 - Future "compatibility" fixes that would synthesize or translate a `CK_RV` on
   the default path are rejected by policy; they belong behind `sanitize_inputs`
   or in the backend module itself.
