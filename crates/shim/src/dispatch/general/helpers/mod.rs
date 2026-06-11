@@ -826,8 +826,10 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 }))
             } else {
                 let salsa = unsafe { &*(param_ptr as *const CK_SALSA20_PARAMS) };
+                let nonce_bytes = (salsa.ulNonceBits as usize).div_ceil(8);
                 if salsa.pBlockCounter.is_null()
                     || missing_embedded_pointer(salsa.pNonce, salsa.ulNonceBits)
+                    || nonce_bytes > MAX_SERIALIZABLE_BYTES
                 {
                     Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
@@ -836,7 +838,7 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                     let nonce = if salsa.pNonce.is_null() || salsa.ulNonceBits == 0 {
                         Vec::new()
                     } else {
-                        let nonce_bytes = (salsa.ulNonceBits as usize).div_ceil(8);
+                        // Safety: pNonce is non-null, nonce_bytes <= MAX_SERIALIZABLE_BYTES.
                         unsafe { std::slice::from_raw_parts(salsa.pNonce, nonce_bytes) }.to_vec()
                     };
                     Some(CkMechanismParams::Salsa20(Salsa20Params {

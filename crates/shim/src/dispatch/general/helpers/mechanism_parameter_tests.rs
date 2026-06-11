@@ -2313,3 +2313,30 @@ fn pbe_password_unmaterializable_len_rejected_not_wild_read() {
         other => panic!("expected Raw fallback for unmaterializable password len, got {other:?}"),
     }
 }
+
+/// ADR-0010 Scope 2: an unmaterializable nonce bit-length (CK_ULONG::MAX) on a
+/// Salsa20 parameter must NOT cause a wild read.  The shim falls back to the
+/// raw-bytes path rather than calling `slice::from_raw_parts` with the absurd
+/// derived byte count.
+#[test]
+fn salsa20_nonce_unmaterializable_bits_rejected_not_wild_read() {
+    ensure_registry();
+    let mut salsa20 = CK_SALSA20_PARAMS {
+        pBlockCounter: std::ptr::dangling_mut::<u8>(),
+        pNonce: std::ptr::dangling_mut::<u8>(),
+        ulNonceBits: CK_ULONG::MAX,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_SALSA20,
+        pParameter: &mut salsa20 as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_SALSA20_PARAMS>() as CK_ULONG,
+    };
+    // Must not crash or do a wild read.  With the guard the shim falls back to
+    // the raw path; without it `slice::from_raw_parts` would be called with
+    // size usize::MAX (UB).
+    let result = unsafe { read_mechanism_with_shape(&mechanism, Some("salsa20")) };
+    match result.params.expect("params") {
+        CkMechanismParams::Raw(_) => {} // expected: safe Raw fallback
+        other => panic!("expected Raw fallback for unmaterializable nonce bits, got {other:?}"),
+    }
+}
