@@ -114,6 +114,42 @@ pub(crate) unsafe fn classify_input<'a>(ptr: *const u8, len: CK_ULONG) -> InputB
     }
 }
 
+/// Convert a classified input to the backend-facing type. TooLarge is the
+/// transport-impossible class: documented stable RV (ADR-0010 Limits).
+pub(crate) fn input_buf_to_ck_in_buf(buf: InputBuf<'_>) -> Result<CkInBuf<'_>, CkRv> {
+    match buf {
+        InputBuf::Bytes(b) => Ok(CkInBuf::Bytes(b)),
+        InputBuf::Null { len } => Ok(CkInBuf::Null { len }),
+        InputBuf::TooLarge { .. } => Err(CkRv::ARGUMENTS_BAD),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_buf_to_ck_in_buf_too_large_returns_arguments_bad() {
+        let buf = InputBuf::TooLarge { len: u64::MAX };
+        assert_eq!(input_buf_to_ck_in_buf(buf).unwrap_err(), CkRv::ARGUMENTS_BAD);
+    }
+
+    #[test]
+    fn input_buf_to_ck_in_buf_bytes_roundtrips() {
+        let data = b"hello";
+        let buf = InputBuf::Bytes(data);
+        let result = input_buf_to_ck_in_buf(buf).unwrap();
+        assert!(matches!(result, CkInBuf::Bytes(b) if b == data));
+    }
+
+    #[test]
+    fn input_buf_to_ck_in_buf_null_roundtrips() {
+        let buf = InputBuf::Null { len: 42 };
+        let result = input_buf_to_ck_in_buf(buf).unwrap();
+        assert!(matches!(result, CkInBuf::Null { len: 42 }));
+    }
+}
+
 pub(crate) unsafe fn write_output_slice<'a, T>(ptr: *mut T, len: usize) -> &'a mut [T] {
     if ptr.is_null() || len == 0 {
         return &mut [];

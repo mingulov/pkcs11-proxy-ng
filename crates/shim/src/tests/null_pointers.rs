@@ -455,6 +455,7 @@ mod decrypt_null_e2e {
     impl Drop for DecryptDaemon {
         fn drop(&mut self) {
             let _ = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+            unsafe { std::env::remove_var("PKCS11_PROXY_ENDPOINT") };
         }
     }
 
@@ -587,11 +588,7 @@ mod decrypt_null_e2e {
                 &mut out_len,
             )
         };
-        // Must differ from CKR_ARGUMENTS_BAD caused by Null{len>0}. The mock
-        // will return CKR_OK (xor of empty is empty, returned_len=0).
-        assert_ne!(
-            rv, CKR_ARGUMENTS_BAD as CK_RV,
-            "Null{{len:0}} must not be rejected by the null-input handler"
-        );
+        // NULL input + zero len = empty = mock returns CKR_OK.
+        assert_eq!(rv, CKR_OK as CK_RV);
     }
 }

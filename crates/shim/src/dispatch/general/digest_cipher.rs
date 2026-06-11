@@ -345,13 +345,12 @@ pub unsafe extern "C" fn c_decrypt(
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         // ADR-0010 Scope 2: preserve pointer class faithfully.
-        let encrypted_data =
-            match unsafe { classify_input(p_encrypted_data, ul_encrypted_data_len) } {
-                InputBuf::Bytes(b) => CkInBuf::Bytes(b),
-                InputBuf::Null { len } => CkInBuf::Null { len },
-                // Transport-impossible: documented stable RV (ADR-0010 Limits).
-                InputBuf::TooLarge { .. } => return rv_err(CkRv::ARGUMENTS_BAD),
-            };
+        let encrypted_data = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_encrypted_data, ul_encrypted_data_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_data, pul_data_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session),

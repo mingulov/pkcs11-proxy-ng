@@ -10,8 +10,8 @@ use pkcs11_proxy_ng_types::{
 
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::service_utils::{
-    mechanism_output_to_proto, parse_mechanism, resolve_session, resolve_session_and_two_objects,
-    spawn_backend,
+    input_from_wire, mechanism_output_to_proto, parse_mechanism, resolve_session,
+    resolve_session_and_two_objects, spawn_backend,
 };
 
 pub(super) async fn byte_output_exact(
@@ -166,18 +166,6 @@ fn dispatch_session_only(
         // Return CKR_FUNCTION_NOT_SUPPORTED instead so a panic across the
         // tonic boundary becomes a clean client-visible error.
         _ => Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED),
-    }
-}
-
-/// Reconstruct a `CkInBuf` from its two wire fields.
-///
-/// When `null_len` is `Some(len)`, the original pointer was NULL with the
-/// caller's claimed length, so we reconstruct `CkInBuf::Null { len }`.
-/// Otherwise the bytes field holds the actual input data.
-fn input_from_wire(bytes: &[u8], null_len: Option<u64>) -> CkInBuf<'_> {
-    match null_len {
-        Some(len) => CkInBuf::Null { len },
-        None => CkInBuf::Bytes(bytes),
     }
 }
 

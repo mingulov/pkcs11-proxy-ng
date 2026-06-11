@@ -558,6 +558,18 @@ pub(super) async fn register_object_handles(
         .await
 }
 
+/// Reconstruct a `CkInBuf` from its two wire fields.
+///
+/// When `null_len` is `Some(len)`, the original pointer was NULL with the
+/// caller's claimed length, so we reconstruct `CkInBuf::Null { len }`.
+/// Otherwise the bytes field holds the actual input data.
+pub(super) fn input_from_wire(bytes: &[u8], null_len: Option<u64>) -> CkInBuf<'_> {
+    match null_len {
+        Some(len) => CkInBuf::Null { len },
+        None => CkInBuf::Bytes(bytes),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
