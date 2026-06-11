@@ -116,7 +116,7 @@ them.
 
 ### 5. `panic!()` for oversized buffers in shim helpers (style only)
 
-`crates/shim/src/dispatch/general/helpers.rs:55,68` panics when the
+`crates/shim/src/dispatch/general/helpers/mod.rs` (`read_input_slice`/`write_output_slice`) panics when the
 caller passes a buffer length above `MAX_SERIALIZABLE_BYTES` (512 MiB).
 The panic is caught by `catch_panics` and converted to
 `CKR_GENERAL_ERROR`, so there's no UB risk despite the red-team

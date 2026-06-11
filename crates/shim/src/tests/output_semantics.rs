@@ -868,6 +868,50 @@ fn close_all_sessions_evicts_only_target_slot_output_caches() {
 }
 
 #[test]
+fn failed_close_session_still_evicts_session_output_caches() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+
+    state::dig_cache().lock().unwrap().insert(session, vec![0xAA]);
+    state::wrap_cache().lock().unwrap().insert(session, vec![0xBB]);
+
+    let daemon = TestDaemon::shared();
+    daemon.backend.inject_close_error(CkRv::FUNCTION_FAILED);
+    let failed_rv = unsafe { dispatch::general::c_close_session(session) };
+    daemon.backend.clear_close_error();
+    assert_eq!(failed_rv, CKR_FUNCTION_FAILED as CK_RV);
+
+    // `state::evict_session_caches` contract: caches are dropped on the close
+    // attempt, regardless of the server's CK_RV.
+    assert!(!state::dig_cache().lock().unwrap().contains_key(&session));
+    assert!(!state::wrap_cache().lock().unwrap().contains_key(&session));
+
+    // The transient failure kept the handle valid (M3), so a retry succeeds
+    // and simply finds the caches already evicted.
+    let retry_rv = unsafe { dispatch::general::c_close_session(session) };
+    assert_eq!(retry_rv, CKR_OK as CK_RV);
+}
+
+#[test]
+fn failed_close_all_sessions_still_evicts_slot_session_caches() {
+    let _guard = shim_state_test_guard();
+    let _shim = ShimSession::new();
+
+    let unknown_slot: CK_SLOT_ID = 999;
+    let phantom_session: CK_SESSION_HANDLE = 0xDEAD_BEEF;
+    state::remember_session_slot(phantom_session, unknown_slot);
+    state::dig_cache().lock().unwrap().insert(phantom_session, vec![0xCC]);
+
+    let close_all_rv = unsafe { dispatch::general::c_close_all_sessions(unknown_slot) };
+    assert_ne!(close_all_rv, CKR_OK as CK_RV);
+
+    // `state::evict_slot_session_caches` contract: dropped on the attempt,
+    // regardless of the server's CK_RV.
+    assert!(!state::dig_cache().lock().unwrap().contains_key(&phantom_session));
+}
+
+#[test]
 fn one_shot_digest_output_is_not_replayed_through_digest_final() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();

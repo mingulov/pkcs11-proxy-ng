@@ -342,6 +342,11 @@ impl MockBackend {
         *self.injected_close_error.lock().unwrap() = Some(rv);
     }
 
+    /// Clear a previously injected `close_session` error.
+    pub fn clear_close_error(&self) {
+        *self.injected_close_error.lock().unwrap() = None;
+    }
+
     /// Configure optional mechanism parameters returned by `encrypt_init`.
     pub fn set_encrypt_init_output(&self, output: Option<CkMechanismParams>) {
         *self.encrypt_init_output.lock().unwrap() = output;
