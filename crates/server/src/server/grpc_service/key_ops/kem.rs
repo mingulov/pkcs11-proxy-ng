@@ -8,13 +8,13 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkInBuf, CkObjectHandle, CkOutputBufferSpec, CkRv};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    parse_mechanism, register_session_object_handle, resolve_session_and_key, spawn_backend,
-    template_declares_token_object,
+    input_from_wire, parse_mechanism, register_session_object_handle, resolve_session_and_key,
+    spawn_backend, template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
 use crate::server::handle_map::VirtualHandle;
@@ -157,6 +157,7 @@ pub(crate) async fn decapsulate_key(
     let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let ciphertext = req.ciphertext;
+    let ciphertext_null_len = req.ciphertext_null_len;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.decapsulate_key(
@@ -164,7 +165,7 @@ pub(crate) async fn decapsulate_key(
             &mechanism,
             private_key,
             &template,
-            CkInBuf::Bytes(&ciphertext),
+            input_from_wire(&ciphertext, ciphertext_null_len),
         )
     })
     .await?;

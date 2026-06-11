@@ -68,7 +68,12 @@ pub unsafe extern "C" fn c_set_operation_state(
         if p_operation_state.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let state_bytes = unsafe { read_input_slice(p_operation_state, ul_operation_state_len) };
+        let state_bytes = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_operation_state, ul_operation_state_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let result = with_client!(client => client.set_operation_state(
             CkSessionHandle(h_session),
             state_bytes,

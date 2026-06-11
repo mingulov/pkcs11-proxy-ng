@@ -12,17 +12,18 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
         key: CkObjectHandle,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::VerifySignatureInitRequest {
+        let mut req = pkcs11_proxy_ng_proto::VerifySignatureInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: mechanism.map(Self::proto_mechanism),
             key_handle: key.0,
-            signature: signature.to_vec(),
+            signature: Vec::new(),
             signature_null_len: None,
         };
+        Self::fill_input(signature, &mut req.signature, &mut req.signature_null_len);
         pkcs11_unary_ok!(self.grpc.verify_signature_init(req), true)
     }
 
@@ -31,15 +32,16 @@ impl Pkcs11Client {
     pub async fn verify_signature(
         &mut self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::VerifySignatureRequest {
+        let mut req = pkcs11_proxy_ng_proto::VerifySignatureRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            data: data.to_vec(),
+            data: Vec::new(),
             data_null_len: None,
         };
+        Self::fill_input(data, &mut req.data, &mut req.data_null_len);
         pkcs11_unary_ok!(self.grpc.verify_signature(req), true)
     }
 
@@ -48,15 +50,16 @@ impl Pkcs11Client {
     pub async fn verify_signature_update(
         &mut self,
         session: CkSessionHandle,
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::VerifySignatureUpdateRequest {
+        let mut req = pkcs11_proxy_ng_proto::VerifySignatureUpdateRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            data_part: data_part.to_vec(),
+            data_part: Vec::new(),
             data_part_null_len: None,
         };
+        Self::fill_input(data_part, &mut req.data_part, &mut req.data_part_null_len);
         pkcs11_unary_ok!(self.grpc.verify_signature_update(req), true)
     }
 

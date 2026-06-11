@@ -8,8 +8,8 @@ use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend, mock::MockAttributeSlo
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_proto::Pkcs11ProxyServer;
 use pkcs11_proxy_ng_types::{
-    CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkMechanismParams,
-    CkMechanismType, CkObjectHandle, CkOutputBufferResult, CkOutputBufferSpec,
+    CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkInBuf,
+    CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult, CkOutputBufferSpec,
     CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSlotId, GcmParams, InterfaceCapabilities,
     InterfaceInfo, ParameterOutputFunction,
 };
@@ -2018,8 +2018,8 @@ fn exact_encrypt_message_size_query_returns_length() {
                 session,
                 ParameterOutputFunction::EncryptMessage,
                 &output_spec,
-                b"plaintext",
-                b"aad",
+                CkInBuf::Bytes(b"plaintext"),
+                CkInBuf::Bytes(b"aad"),
                 &[0xAA; 12],
                 &param_out_spec,
                 0,
@@ -2092,8 +2092,8 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
                 session,
                 ParameterOutputFunction::WrapKeyAuthenticated,
                 &output_spec,
-                &[],
-                b"aad_data",
+                CkInBuf::Bytes(&[]),
+                CkInBuf::Bytes(b"aad_data"),
                 &[0xBB; 16],
                 &param_out_spec,
                 0,

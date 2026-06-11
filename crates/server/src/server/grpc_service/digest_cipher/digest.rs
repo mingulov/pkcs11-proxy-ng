@@ -3,11 +3,11 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::CkInBuf;
 
 use super::super::ck_result_to_rv;
 use super::super::service_utils::{
-    ck_rv_only, parse_mechanism, resolve_session, resolve_session_and_key, spawn_backend,
+    ck_rv_only, input_from_wire, parse_mechanism, resolve_session, resolve_session_and_key,
+    spawn_backend,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
 
@@ -65,8 +65,11 @@ pub(crate) async fn digest(
     };
 
     let data = req.data;
+    let data_null_len = req.data_null_len;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.digest(session, CkInBuf::Bytes(&data))).await?;
+    let result =
+        spawn_backend(move || backend.digest(session, input_from_wire(&data, data_null_len)))
+            .await?;
     let (ck_rv, digest) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestResponse {
         ck_rv,
@@ -90,9 +93,12 @@ pub(crate) async fn digest_update(
     };
 
     let part = req.part;
+    let part_null_len = req.part_null_len;
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.digest_update(session, CkInBuf::Bytes(&part))).await?;
+    let result = spawn_backend(move || {
+        backend.digest_update(session, input_from_wire(&part, part_null_len))
+    })
+    .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestUpdateResponse { ck_rv: ck_rv_only(result) }))
 }
 

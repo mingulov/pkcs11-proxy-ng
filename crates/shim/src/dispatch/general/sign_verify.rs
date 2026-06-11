@@ -50,13 +50,16 @@ pub unsafe extern "C" fn c_sign(
         if pul_signature_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let data = unsafe { read_input_slice(p_data, ul_data_len) };
+        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session),
             ByteOutputFunction::Sign,
             &spec,
-            CkInBuf::Bytes(data),
+            data,
             None,
             0,
             0,
@@ -74,7 +77,10 @@ pub unsafe extern "C" fn c_sign_update(
     ul_part_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let part = unsafe { read_input_slice(p_part, ul_part_len) };
+        let part = match input_buf_to_ck_in_buf(unsafe { classify_input(p_part, ul_part_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         unit_result_to_rv(
             with_client!(client => client.sign_update(CkSessionHandle(h_session), part)),
         )
@@ -146,8 +152,16 @@ pub unsafe extern "C" fn c_verify(
     ul_signature_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let data = unsafe { read_input_slice(p_data, ul_data_len) };
-        let signature = unsafe { read_input_slice(p_signature, ul_signature_len) };
+        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
+        let signature = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_signature, ul_signature_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         unit_result_to_rv(with_client!(client => client.verify(
             CkSessionHandle(h_session),
             data,
@@ -162,7 +176,10 @@ pub unsafe extern "C" fn c_verify_update(
     ul_part_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let part = unsafe { read_input_slice(p_part, ul_part_len) };
+        let part = match input_buf_to_ck_in_buf(unsafe { classify_input(p_part, ul_part_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         unit_result_to_rv(with_client!(client => client.verify_update(
             CkSessionHandle(h_session),
             part,
@@ -176,7 +193,12 @@ pub unsafe extern "C" fn c_verify_final(
     ul_signature_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let signature = unsafe { read_input_slice(p_signature, ul_signature_len) };
+        let signature = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_signature, ul_signature_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         unit_result_to_rv(with_client!(client => client.verify_final(
             CkSessionHandle(h_session),
             signature,
@@ -232,13 +254,16 @@ pub unsafe extern "C" fn c_sign_recover(
         if pul_signature_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let data = unsafe { read_input_slice(p_data, ul_data_len) };
+        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session),
             ByteOutputFunction::SignRecover,
             &spec,
-            CkInBuf::Bytes(data),
+            data,
             None,
             0,
             0,
@@ -295,13 +320,18 @@ pub unsafe extern "C" fn c_verify_recover(
         if pul_data_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let signature = unsafe { read_input_slice(p_signature, ul_signature_len) };
+        let signature = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_signature, ul_signature_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_data, pul_data_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session),
             ByteOutputFunction::VerifyRecover,
             &spec,
-            CkInBuf::Bytes(signature),
+            signature,
             None,
             0,
             0,

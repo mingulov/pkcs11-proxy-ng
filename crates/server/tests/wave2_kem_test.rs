@@ -88,8 +88,10 @@ async fn decapsulate_key_returns_synthetic_handle_through_full_stack() {
 
     let (session, key) = setup_session_with_key(&mut client).await;
 
-    let decapsulated_key =
-        client.decapsulate_key(session, &test_mechanism(), key, &[], &[0xAA, 0xBB]).await.unwrap();
+    let decapsulated_key = client
+        .decapsulate_key(session, &test_mechanism(), key, &[], CkInBuf::Bytes(&[0xAA, 0xBB]))
+        .await
+        .unwrap();
 
     assert_ne!(decapsulated_key, CkObjectHandle(0));
 }
@@ -103,8 +105,10 @@ async fn decapsulate_key_with_empty_ciphertext() {
     let (session, key) = setup_session_with_key(&mut client).await;
 
     // Empty ciphertext should still reach the backend.
-    let decapsulated_key =
-        client.decapsulate_key(session, &test_mechanism(), key, &[], &[]).await.unwrap();
+    let decapsulated_key = client
+        .decapsulate_key(session, &test_mechanism(), key, &[], CkInBuf::Bytes(&[]))
+        .await
+        .unwrap();
 
     assert_ne!(decapsulated_key, CkObjectHandle(0));
 }
@@ -141,7 +145,13 @@ async fn decapsulate_key_rejects_invalid_session() {
 
     let bad_session = CkSessionHandle(999_999);
     let err = client
-        .decapsulate_key(bad_session, &test_mechanism(), CkObjectHandle(1), &[], &[0xCC])
+        .decapsulate_key(
+            bad_session,
+            &test_mechanism(),
+            CkObjectHandle(1),
+            &[],
+            CkInBuf::Bytes(&[0xCC]),
+        )
         .await
         .unwrap_err();
 
@@ -185,7 +195,13 @@ async fn decapsulate_key_returns_backend_error_for_unknown_key_handle() {
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
     let err = client
-        .decapsulate_key(session, &test_mechanism(), CkObjectHandle(999_999), &[], &[0xAA])
+        .decapsulate_key(
+            session,
+            &test_mechanism(),
+            CkObjectHandle(999_999),
+            &[],
+            CkInBuf::Bytes(&[0xAA]),
+        )
         .await
         .unwrap_err();
 

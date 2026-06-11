@@ -38,14 +38,19 @@ impl Pkcs11Client {
         pkcs11_unary_map!(self.grpc.digest(req), true, resp => resp.digest)
     }
 
-    pub async fn digest_update(&mut self, session: CkSessionHandle, part: &[u8]) -> CkResult<()> {
+    pub async fn digest_update(
+        &mut self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::DigestUpdateRequest {
+        let mut req = pkcs11_proxy_ng_proto::DigestUpdateRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            part: part.to_vec(),
+            part: Vec::new(),
             part_null_len: None,
         };
+        Self::fill_input(part, &mut req.part, &mut req.part_null_len);
         pkcs11_unary_ok!(self.grpc.digest_update(req), true)
     }
 

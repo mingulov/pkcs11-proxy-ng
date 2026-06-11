@@ -10,7 +10,8 @@ use pkcs11_proxy_ng_types::{
 
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::service_utils::{
-    parse_mechanism, resolve_session, resolve_session_and_two_objects, spawn_backend,
+    input_from_wire, parse_mechanism, resolve_session, resolve_session_and_two_objects,
+    spawn_backend,
 };
 
 pub(super) async fn parameter_output_exact(
@@ -52,7 +53,9 @@ pub(super) async fn parameter_output_exact(
         .unwrap_or(CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None });
 
     let input_data = req.input_data;
+    let input_data_null_len = req.input_data_null_len;
     let associated_data = req.associated_data;
+    let associated_data_null_len = req.associated_data_null_len;
     let parameter = req.parameter;
     let flags = CkFlags(req.flags);
 
@@ -87,7 +90,7 @@ pub(super) async fn parameter_output_exact(
                     &mechanism,
                     wrapping_key,
                     key,
-                    CkInBuf::Bytes(&associated_data),
+                    input_from_wire(&associated_data, associated_data_null_len),
                     &output_spec,
                     &param_out_spec,
                 )
@@ -122,8 +125,8 @@ pub(super) async fn parameter_output_exact(
                         &*backend,
                         session,
                         &mp,
-                        &associated_data,
-                        &input_data,
+                        input_from_wire(&associated_data, associated_data_null_len),
+                        input_from_wire(&input_data, input_data_null_len),
                         &output_spec,
                     )
                 })
@@ -139,8 +142,8 @@ pub(super) async fn parameter_output_exact(
                     &*backend,
                     session,
                     &parameter,
-                    &associated_data,
-                    &input_data,
+                    input_from_wire(&associated_data, associated_data_null_len),
+                    input_from_wire(&input_data, input_data_null_len),
                     &output_spec,
                     &param_out_spec,
                 )
@@ -173,7 +176,7 @@ pub(super) async fn parameter_output_exact(
                         &*backend,
                         session,
                         &mp,
-                        &input_data,
+                        input_from_wire(&input_data, input_data_null_len),
                         flags,
                         &output_spec,
                     )
@@ -189,7 +192,7 @@ pub(super) async fn parameter_output_exact(
                     &*backend,
                     session,
                     &parameter,
-                    &input_data,
+                    input_from_wire(&input_data, input_data_null_len),
                     flags,
                     &output_spec,
                     &param_out_spec,
@@ -207,8 +210,8 @@ fn dispatch_message_oneshot(
     backend: &dyn Pkcs11Backend,
     session: pkcs11_proxy_ng_types::CkSessionHandle,
     parameter: &[u8],
-    associated_data: &[u8],
-    input_data: &[u8],
+    associated_data: CkInBuf<'_>,
+    input_data: CkInBuf<'_>,
     output_spec: &CkOutputBufferSpec,
     param_out_spec: &CkParameterRoundtripSpec,
 ) -> pkcs11_proxy_ng_types::CkResult<(
@@ -219,26 +222,22 @@ fn dispatch_message_oneshot(
         ParameterOutputFunction::EncryptMessage => backend.encrypt_message_exact(
             session,
             parameter,
-            CkInBuf::Bytes(associated_data),
-            CkInBuf::Bytes(input_data),
+            associated_data,
+            input_data,
             output_spec,
             param_out_spec,
         ),
         ParameterOutputFunction::DecryptMessage => backend.decrypt_message_exact(
             session,
             parameter,
-            CkInBuf::Bytes(associated_data),
-            CkInBuf::Bytes(input_data),
+            associated_data,
+            input_data,
             output_spec,
             param_out_spec,
         ),
-        ParameterOutputFunction::SignMessage => backend.sign_message_exact(
-            session,
-            parameter,
-            CkInBuf::Bytes(input_data),
-            output_spec,
-            param_out_spec,
-        ),
+        ParameterOutputFunction::SignMessage => {
+            backend.sign_message_exact(session, parameter, input_data, output_spec, param_out_spec)
+        }
         // Defensive: parent dispatch routes only matching variants here; a future
         // variant added without updating the parent would otherwise panic across
         // the gRPC boundary. Return CKR_FUNCTION_NOT_SUPPORTED instead.
@@ -251,7 +250,7 @@ fn dispatch_message_next(
     backend: &dyn Pkcs11Backend,
     session: pkcs11_proxy_ng_types::CkSessionHandle,
     parameter: &[u8],
-    input_data: &[u8],
+    input_data: CkInBuf<'_>,
     flags: CkFlags,
     output_spec: &CkOutputBufferSpec,
     param_out_spec: &CkParameterRoundtripSpec,
@@ -263,7 +262,7 @@ fn dispatch_message_next(
         ParameterOutputFunction::EncryptMessageNext => backend.encrypt_message_next_exact(
             session,
             parameter,
-            CkInBuf::Bytes(input_data),
+            input_data,
             flags,
             output_spec,
             param_out_spec,
@@ -271,7 +270,7 @@ fn dispatch_message_next(
         ParameterOutputFunction::DecryptMessageNext => backend.decrypt_message_next_exact(
             session,
             parameter,
-            CkInBuf::Bytes(input_data),
+            input_data,
             flags,
             output_spec,
             param_out_spec,
@@ -279,7 +278,7 @@ fn dispatch_message_next(
         ParameterOutputFunction::SignMessageNext => backend.sign_message_next_exact(
             session,
             parameter,
-            CkInBuf::Bytes(input_data),
+            input_data,
             output_spec,
             param_out_spec,
         ),
@@ -293,8 +292,8 @@ fn dispatch_message_oneshot_msg(
     backend: &dyn Pkcs11Backend,
     session: pkcs11_proxy_ng_types::CkSessionHandle,
     msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-    associated_data: &[u8],
-    input_data: &[u8],
+    associated_data: CkInBuf<'_>,
+    input_data: CkInBuf<'_>,
     output_spec: &CkOutputBufferSpec,
 ) -> pkcs11_proxy_ng_types::CkResult<(
     pkcs11_proxy_ng_types::CkOutputBufferResult,
@@ -304,23 +303,20 @@ fn dispatch_message_oneshot_msg(
         ParameterOutputFunction::EncryptMessage => backend.encrypt_message_exact_msg(
             session,
             msg_param,
-            CkInBuf::Bytes(associated_data),
-            CkInBuf::Bytes(input_data),
+            associated_data,
+            input_data,
             output_spec,
         ),
         ParameterOutputFunction::DecryptMessage => backend.decrypt_message_exact_msg(
             session,
             msg_param,
-            CkInBuf::Bytes(associated_data),
-            CkInBuf::Bytes(input_data),
+            associated_data,
+            input_data,
             output_spec,
         ),
-        ParameterOutputFunction::SignMessage => backend.sign_message_exact_msg(
-            session,
-            msg_param,
-            CkInBuf::Bytes(input_data),
-            output_spec,
-        ),
+        ParameterOutputFunction::SignMessage => {
+            backend.sign_message_exact_msg(session, msg_param, input_data, output_spec)
+        }
         // Defensive: parent dispatch routes only matching variants here; a future
         // variant added without updating the parent would otherwise panic across
         // the gRPC boundary. Return CKR_FUNCTION_NOT_SUPPORTED instead.
@@ -333,7 +329,7 @@ fn dispatch_message_next_msg(
     backend: &dyn Pkcs11Backend,
     session: pkcs11_proxy_ng_types::CkSessionHandle,
     msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-    input_data: &[u8],
+    input_data: CkInBuf<'_>,
     flags: CkFlags,
     output_spec: &CkOutputBufferSpec,
 ) -> pkcs11_proxy_ng_types::CkResult<(
@@ -344,23 +340,20 @@ fn dispatch_message_next_msg(
         ParameterOutputFunction::EncryptMessageNext => backend.encrypt_message_next_exact_msg(
             session,
             msg_param,
-            CkInBuf::Bytes(input_data),
+            input_data,
             flags,
             output_spec,
         ),
         ParameterOutputFunction::DecryptMessageNext => backend.decrypt_message_next_exact_msg(
             session,
             msg_param,
-            CkInBuf::Bytes(input_data),
+            input_data,
             flags,
             output_spec,
         ),
-        ParameterOutputFunction::SignMessageNext => backend.sign_message_next_exact_msg(
-            session,
-            msg_param,
-            CkInBuf::Bytes(input_data),
-            output_spec,
-        ),
+        ParameterOutputFunction::SignMessageNext => {
+            backend.sign_message_next_exact_msg(session, msg_param, input_data, output_spec)
+        }
         // Defensive: see `dispatch_message_oneshot` for rationale.
         _ => Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED),
     }

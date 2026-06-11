@@ -8,12 +8,12 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkInBuf, CkObjectHandle, CkRv};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
 use super::super::convert_template;
 use super::super::service_utils::{
-    parse_mechanism, register_session_object_handle, resolve_session_and_two_objects,
-    spawn_backend, template_declares_token_object,
+    input_from_wire, parse_mechanism, register_session_object_handle,
+    resolve_session_and_two_objects, spawn_backend, template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
 use crate::server::handle_map::VirtualHandle;
@@ -57,9 +57,16 @@ pub(crate) async fn wrap_key_authenticated(
     };
 
     let aad = req.associated_data;
+    let aad_null_len = req.associated_data_null_len;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.wrap_key_authenticated(session, &mechanism, wrapping_key, key, CkInBuf::Bytes(&aad))
+        backend.wrap_key_authenticated(
+            session,
+            &mechanism,
+            wrapping_key,
+            key,
+            input_from_wire(&aad, aad_null_len),
+        )
     })
     .await?;
 
@@ -128,7 +135,9 @@ pub(crate) async fn unwrap_key_authenticated(
     };
 
     let wrapped_key = req.wrapped_key;
+    let wrapped_key_null_len = req.wrapped_key_null_len;
     let aad = req.associated_data;
+    let aad_null_len = req.associated_data_null_len;
     // An authenticated-unwrapped key is a session object unless CKA_TOKEN is set (B2).
     let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
@@ -138,9 +147,9 @@ pub(crate) async fn unwrap_key_authenticated(
             session,
             &mechanism,
             unwrapping_key,
-            CkInBuf::Bytes(&wrapped_key),
+            input_from_wire(&wrapped_key, wrapped_key_null_len),
             &template,
-            CkInBuf::Bytes(&aad),
+            input_from_wire(&aad, aad_null_len),
         )
     })
     .await?;

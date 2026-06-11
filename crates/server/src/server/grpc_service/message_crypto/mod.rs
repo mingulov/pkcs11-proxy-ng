@@ -24,7 +24,8 @@ use pkcs11_proxy_ng_types::*;
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::mechanism_handles::remap_mechanism_handles;
 use super::service_utils::{
-    ck_rv_only, parse_mechanism, resolve_session, resolve_session_and_key, spawn_backend,
+    ck_rv_only, input_from_wire, parse_mechanism, resolve_session, resolve_session_and_key,
+    spawn_backend,
 };
 
 // ---------------------------------------------------------------------------
@@ -542,14 +543,16 @@ pub(crate) async fn encrypt_message(
 
     let mut parameter = req.parameter;
     let aad = req.associated_data;
+    let aad_null_len = req.associated_data_null_len;
     let plaintext = req.plaintext;
+    let plaintext_null_len = req.plaintext_null_len;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.encrypt_message(
             session,
             &mut parameter,
-            CkInBuf::Bytes(&aad),
-            CkInBuf::Bytes(&plaintext),
+            input_from_wire(&aad, aad_null_len),
+            input_from_wire(&plaintext, plaintext_null_len),
         )
     })
     .await?;
@@ -594,9 +597,10 @@ pub(crate) async fn encrypt_message_begin(
 
     let mut parameter = req.parameter;
     let aad = req.associated_data;
+    let aad_null_len = req.associated_data_null_len;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.encrypt_message_begin(session, &mut parameter, CkInBuf::Bytes(&aad))
+        backend.encrypt_message_begin(session, &mut parameter, input_from_wire(&aad, aad_null_len))
     })
     .await?;
 
@@ -639,13 +643,14 @@ pub(crate) async fn encrypt_message_next(
 
     let mut parameter = req.parameter;
     let plaintext_part = req.plaintext_part;
+    let plaintext_part_null_len = req.plaintext_part_null_len;
     let flags = CkFlags(req.flags);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.encrypt_message_next(
             session,
             &mut parameter,
-            CkInBuf::Bytes(&plaintext_part),
+            input_from_wire(&plaintext_part, plaintext_part_null_len),
             flags,
         )
     })
@@ -692,14 +697,16 @@ pub(crate) async fn decrypt_message(
 
     let mut parameter = req.parameter;
     let aad = req.associated_data;
+    let aad_null_len = req.associated_data_null_len;
     let ciphertext = req.ciphertext;
+    let ciphertext_null_len = req.ciphertext_null_len;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.decrypt_message(
             session,
             &mut parameter,
-            CkInBuf::Bytes(&aad),
-            CkInBuf::Bytes(&ciphertext),
+            input_from_wire(&aad, aad_null_len),
+            input_from_wire(&ciphertext, ciphertext_null_len),
         )
     })
     .await?;
@@ -744,9 +751,10 @@ pub(crate) async fn decrypt_message_begin(
 
     let mut parameter = req.parameter;
     let aad = req.associated_data;
+    let aad_null_len = req.associated_data_null_len;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.decrypt_message_begin(session, &mut parameter, CkInBuf::Bytes(&aad))
+        backend.decrypt_message_begin(session, &mut parameter, input_from_wire(&aad, aad_null_len))
     })
     .await?;
 
@@ -789,13 +797,14 @@ pub(crate) async fn decrypt_message_next(
 
     let mut parameter = req.parameter;
     let ciphertext_part = req.ciphertext_part;
+    let ciphertext_part_null_len = req.ciphertext_part_null_len;
     let flags = CkFlags(req.flags);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.decrypt_message_next(
             session,
             &mut parameter,
-            CkInBuf::Bytes(&ciphertext_part),
+            input_from_wire(&ciphertext_part, ciphertext_part_null_len),
             flags,
         )
     })
@@ -842,10 +851,12 @@ pub(crate) async fn sign_message(
 
     let mut parameter = req.parameter;
     let data = req.data;
+    let data_null_len = req.data_null_len;
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.sign_message(session, &mut parameter, CkInBuf::Bytes(&data)))
-            .await?;
+    let result = spawn_backend(move || {
+        backend.sign_message(session, &mut parameter, input_from_wire(&data, data_null_len))
+    })
+    .await?;
 
     match result {
         Ok((parameter_out, signature)) => {
@@ -926,13 +937,14 @@ pub(crate) async fn sign_message_next(
 
     let mut parameter = req.parameter;
     let data_part = req.data_part;
+    let data_part_null_len = req.data_part_null_len;
     let request_signature = req.request_signature;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.sign_message_next(
             session,
             &mut parameter,
-            CkInBuf::Bytes(&data_part),
+            input_from_wire(&data_part, data_part_null_len),
             request_signature,
         )
     })
@@ -975,14 +987,16 @@ pub(crate) async fn verify_message(
 
     let parameter = req.parameter;
     let data = req.data;
+    let data_null_len = req.data_null_len;
     let signature = req.signature;
+    let signature_null_len = req.signature_null_len;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.verify_message(
             session,
             &parameter,
-            CkInBuf::Bytes(&data),
-            CkInBuf::Bytes(&signature),
+            input_from_wire(&data, data_null_len),
+            input_from_wire(&signature, signature_null_len),
         )
     })
     .await?;
@@ -1045,16 +1059,18 @@ pub(crate) async fn verify_message_next(
 
     let parameter = req.parameter;
     let data_part = req.data_part;
+    let data_part_null_len = req.data_part_null_len;
     let is_final = req.is_final;
     let signature = req.signature;
+    let signature_null_len = req.signature_null_len;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.verify_message_next(
             session,
             &parameter,
-            CkInBuf::Bytes(&data_part),
+            input_from_wire(&data_part, data_part_null_len),
             is_final,
-            CkInBuf::Bytes(&signature),
+            input_from_wire(&signature, signature_null_len),
         )
     })
     .await?;

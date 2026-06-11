@@ -2,12 +2,10 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::CkInBuf;
-
 use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::ck_result_to_rv;
-use super::super::service_utils::{ck_rv_only, resolve_session, spawn_backend};
+use super::super::service_utils::{ck_rv_only, input_from_wire, resolve_session, spawn_backend};
+use pkcs11_proxy_ng_backend::Pkcs11Backend;
 
 pub(super) async fn generate_random(
     ctx_mgr: &Arc<ContextManager>,
@@ -54,8 +52,11 @@ pub(super) async fn seed_random(
     };
 
     let seed = req.seed;
+    let seed_null_len = req.seed_null_len;
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.seed_random(session, CkInBuf::Bytes(&seed))).await?;
+    let result =
+        spawn_backend(move || backend.seed_random(session, input_from_wire(&seed, seed_null_len)))
+            .await?;
 
     Ok(Response::new(pkcs11_proxy_ng_proto::SeedRandomResponse { ck_rv: ck_rv_only(result) }))
 }

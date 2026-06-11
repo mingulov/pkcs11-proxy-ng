@@ -15,7 +15,8 @@ use pkcs11_proxy_ng_types::*;
 
 use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::service_utils::{
-    ck_rv_only, parse_mechanism, resolve_session, resolve_session_and_key, spawn_backend,
+    ck_rv_only, input_from_wire, parse_mechanism, resolve_session, resolve_session_and_key,
+    spawn_backend,
 };
 
 // ---------------------------------------------------------------------------
@@ -54,13 +55,14 @@ pub(crate) async fn verify_signature_init(
         };
 
         let signature = req.signature;
+        let signature_null_len = req.signature_null_len;
         let backend = Arc::clone(backend_ref);
         let result = spawn_backend(move || {
             backend.verify_signature_init(
                 session,
                 Some(&mechanism),
                 key,
-                CkInBuf::Bytes(&signature),
+                input_from_wire(&signature, signature_null_len),
             )
         })
         .await?;
@@ -129,9 +131,12 @@ pub(crate) async fn verify_signature(
     };
 
     let data = req.data;
+    let data_null_len = req.data_null_len;
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.verify_signature(session, CkInBuf::Bytes(&data))).await?;
+    let result = spawn_backend(move || {
+        backend.verify_signature(session, input_from_wire(&data, data_null_len))
+    })
+    .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureResponse { ck_rv: ck_rv_only(result) }))
 }
 
@@ -157,10 +162,12 @@ pub(crate) async fn verify_signature_update(
     };
 
     let data_part = req.data_part;
+    let data_part_null_len = req.data_part_null_len;
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.verify_signature_update(session, CkInBuf::Bytes(&data_part)))
-            .await?;
+    let result = spawn_backend(move || {
+        backend.verify_signature_update(session, input_from_wire(&data_part, data_part_null_len))
+    })
+    .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureUpdateResponse {
         ck_rv: ck_rv_only(result),
     }))

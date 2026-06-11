@@ -124,32 +124,6 @@ pub(crate) fn input_buf_to_ck_in_buf(buf: InputBuf<'_>) -> Result<CkInBuf<'_>, C
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn input_buf_to_ck_in_buf_too_large_returns_arguments_bad() {
-        let buf = InputBuf::TooLarge { len: u64::MAX };
-        assert_eq!(input_buf_to_ck_in_buf(buf).unwrap_err(), CkRv::ARGUMENTS_BAD);
-    }
-
-    #[test]
-    fn input_buf_to_ck_in_buf_bytes_roundtrips() {
-        let data = b"hello";
-        let buf = InputBuf::Bytes(data);
-        let result = input_buf_to_ck_in_buf(buf).unwrap();
-        assert!(matches!(result, CkInBuf::Bytes(b) if b == data));
-    }
-
-    #[test]
-    fn input_buf_to_ck_in_buf_null_roundtrips() {
-        let buf = InputBuf::Null { len: 42 };
-        let result = input_buf_to_ck_in_buf(buf).unwrap();
-        assert!(matches!(result, CkInBuf::Null { len: 42 }));
-    }
-}
-
 pub(crate) unsafe fn write_output_slice<'a, T>(ptr: *mut T, len: usize) -> &'a mut [T] {
     if ptr.is_null() || len == 0 {
         return &mut [];
@@ -3469,6 +3443,30 @@ mod tests {
             super::InputBuf::TooLarge { len } => assert_eq!(len, u64::MAX),
             other => panic!("expected TooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn input_buf_to_ck_in_buf_too_large_returns_arguments_bad() {
+        let buf = super::InputBuf::TooLarge { len: u64::MAX };
+        assert_eq!(
+            super::input_buf_to_ck_in_buf(buf).unwrap_err(),
+            pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD
+        );
+    }
+
+    #[test]
+    fn input_buf_to_ck_in_buf_bytes_roundtrips() {
+        let data = b"hello";
+        let buf = super::InputBuf::Bytes(data);
+        let result = super::input_buf_to_ck_in_buf(buf).unwrap();
+        assert!(matches!(result, pkcs11_proxy_ng_types::CkInBuf::Bytes(b) if b == data));
+    }
+
+    #[test]
+    fn input_buf_to_ck_in_buf_null_roundtrips() {
+        let buf = super::InputBuf::Null { len: 42 };
+        let result = super::input_buf_to_ck_in_buf(buf).unwrap();
+        assert!(matches!(result, pkcs11_proxy_ng_types::CkInBuf::Null { len: 42 }));
     }
 }
 

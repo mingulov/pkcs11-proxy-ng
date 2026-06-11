@@ -134,19 +134,21 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-        aad: &[u8],
-        plaintext: &[u8],
+        aad: CkInBuf<'_>,
+        plaintext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::EncryptMessageRequest {
+        let mut req = pkcs11_proxy_ng_proto::EncryptMessageRequest {
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
-            associated_data: aad.to_vec(),
-            plaintext: plaintext.to_vec(),
+            associated_data: Vec::new(),
+            plaintext: Vec::new(),
             associated_data_null_len: None,
             plaintext_null_len: None,
         };
+        Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
+        Self::fill_input(plaintext, &mut req.plaintext, &mut req.plaintext_null_len);
         let resp = pkcs11_unary_call!(self.grpc.encrypt_message(req), true);
         Ok((resp.parameter_out, resp.ciphertext))
     }
@@ -157,16 +159,17 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-        aad: &[u8],
+        aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
+        let mut req = pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
-            associated_data: aad.to_vec(),
+            associated_data: Vec::new(),
             associated_data_null_len: None,
         };
+        Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         let resp = pkcs11_unary_call!(self.grpc.encrypt_message_begin(req), true);
         Ok(resp.parameter_out)
     }
@@ -177,18 +180,19 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-        plaintext_part: &[u8],
+        plaintext_part: CkInBuf<'_>,
         flags: CkFlags,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::EncryptMessageNextRequest {
+        let mut req = pkcs11_proxy_ng_proto::EncryptMessageNextRequest {
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
-            plaintext_part: plaintext_part.to_vec(),
+            plaintext_part: Vec::new(),
             flags: flags.0,
             plaintext_part_null_len: None,
         };
+        Self::fill_input(plaintext_part, &mut req.plaintext_part, &mut req.plaintext_part_null_len);
         let resp = pkcs11_unary_call!(self.grpc.encrypt_message_next(req), true);
         Ok((resp.parameter_out, resp.ciphertext_part))
     }
@@ -199,19 +203,21 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-        aad: &[u8],
-        ciphertext: &[u8],
+        aad: CkInBuf<'_>,
+        ciphertext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::DecryptMessageRequest {
+        let mut req = pkcs11_proxy_ng_proto::DecryptMessageRequest {
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
-            associated_data: aad.to_vec(),
-            ciphertext: ciphertext.to_vec(),
+            associated_data: Vec::new(),
+            ciphertext: Vec::new(),
             associated_data_null_len: None,
             ciphertext_null_len: None,
         };
+        Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
+        Self::fill_input(ciphertext, &mut req.ciphertext, &mut req.ciphertext_null_len);
         let resp = pkcs11_unary_call!(self.grpc.decrypt_message(req), true);
         Ok((resp.parameter_out, resp.plaintext))
     }
@@ -222,16 +228,17 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-        aad: &[u8],
+        aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::DecryptMessageBeginRequest {
+        let mut req = pkcs11_proxy_ng_proto::DecryptMessageBeginRequest {
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
-            associated_data: aad.to_vec(),
+            associated_data: Vec::new(),
             associated_data_null_len: None,
         };
+        Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         let resp = pkcs11_unary_call!(self.grpc.decrypt_message_begin(req), true);
         Ok(resp.parameter_out)
     }
@@ -242,18 +249,23 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-        ciphertext_part: &[u8],
+        ciphertext_part: CkInBuf<'_>,
         flags: CkFlags,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::DecryptMessageNextRequest {
+        let mut req = pkcs11_proxy_ng_proto::DecryptMessageNextRequest {
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
-            ciphertext_part: ciphertext_part.to_vec(),
+            ciphertext_part: Vec::new(),
             flags: flags.0,
             ciphertext_part_null_len: None,
         };
+        Self::fill_input(
+            ciphertext_part,
+            &mut req.ciphertext_part,
+            &mut req.ciphertext_part_null_len,
+        );
         let resp = pkcs11_unary_call!(self.grpc.decrypt_message_next(req), true);
         Ok((resp.parameter_out, resp.plaintext_part))
     }
@@ -264,16 +276,17 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data: &[u8],
+        data: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::SignMessageRequest {
+        let mut req = pkcs11_proxy_ng_proto::SignMessageRequest {
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
-            data: data.to_vec(),
+            data: Vec::new(),
             data_null_len: None,
         };
+        Self::fill_input(data, &mut req.data, &mut req.data_null_len);
         let resp = pkcs11_unary_call!(self.grpc.sign_message(req), true);
         Ok((resp.parameter_out, resp.signature))
     }
@@ -301,18 +314,19 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
         request_signature: bool,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::SignMessageNextRequest {
+        let mut req = pkcs11_proxy_ng_proto::SignMessageNextRequest {
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
-            data_part: data_part.to_vec(),
+            data_part: Vec::new(),
             request_signature,
             data_part_null_len: None,
         };
+        Self::fill_input(data_part, &mut req.data_part, &mut req.data_part_null_len);
         let resp = pkcs11_unary_call!(self.grpc.sign_message_next(req), true);
         Ok((resp.parameter_out, resp.signature))
     }
@@ -323,19 +337,21 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data: &[u8],
-        signature: &[u8],
+        data: CkInBuf<'_>,
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::VerifyMessageRequest {
+        let mut req = pkcs11_proxy_ng_proto::VerifyMessageRequest {
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
-            data: data.to_vec(),
-            signature: signature.to_vec(),
+            data: Vec::new(),
+            signature: Vec::new(),
             data_null_len: None,
             signature_null_len: None,
         };
+        Self::fill_input(data, &mut req.data, &mut req.data_null_len);
+        Self::fill_input(signature, &mut req.signature, &mut req.signature_null_len);
         pkcs11_unary_ok!(self.grpc.verify_message(req), true)
     }
 
@@ -361,21 +377,23 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
         is_final: bool,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::VerifyMessageNextRequest {
+        let mut req = pkcs11_proxy_ng_proto::VerifyMessageNextRequest {
             client_context_id: ctx,
             session_handle: session.0,
             parameter: parameter.to_vec(),
-            data_part: data_part.to_vec(),
+            data_part: Vec::new(),
             is_final,
-            signature: signature.to_vec(),
+            signature: Vec::new(),
             data_part_null_len: None,
             signature_null_len: None,
         };
+        Self::fill_input(data_part, &mut req.data_part, &mut req.data_part_null_len);
+        Self::fill_input(signature, &mut req.signature, &mut req.signature_null_len);
         pkcs11_unary_ok!(self.grpc.verify_message_next(req), true)
     }
 }

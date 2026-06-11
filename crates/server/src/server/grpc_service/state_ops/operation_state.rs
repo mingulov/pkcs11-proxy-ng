@@ -3,12 +3,12 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkInBuf, CkObjectHandle, CkRv, CkSessionHandle};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, CkSessionHandle};
 
 use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::ck_result_to_rv;
-use super::super::service_utils::{ck_rv_only, spawn_backend};
+use super::super::service_utils::{ck_rv_only, input_from_wire, spawn_backend};
 
 async fn resolve_state_handles(
     ctx_mgr: &Arc<ContextManager>,
@@ -98,11 +98,12 @@ pub(super) async fn set_operation_state(
     };
 
     let operation_state = req.operation_state;
+    let operation_state_null_len = req.operation_state_null_len;
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
         backend.set_operation_state(
             session,
-            CkInBuf::Bytes(&operation_state),
+            input_from_wire(&operation_state, operation_state_null_len),
             encryption_key,
             authentication_key,
         )

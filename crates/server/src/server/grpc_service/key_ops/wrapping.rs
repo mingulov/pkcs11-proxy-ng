@@ -3,13 +3,13 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkInBuf, CkObjectHandle, CkRv};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
 use super::super::ck_result_to_rv;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    parse_mechanism, register_session_object_handle, resolve_session_and_object,
+    input_from_wire, parse_mechanism, register_session_object_handle, resolve_session_and_object,
     resolve_session_and_two_objects, spawn_backend, template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
@@ -126,13 +126,14 @@ pub(crate) async fn unwrap_key(
     let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let wrapped_key = req.wrapped_key;
+    let wrapped_key_null_len = req.wrapped_key_null_len;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.unwrap_key(
             session,
             &mechanism,
             unwrapping_key,
-            CkInBuf::Bytes(&wrapped_key),
+            input_from_wire(&wrapped_key, wrapped_key_null_len),
             &template,
         )
     })

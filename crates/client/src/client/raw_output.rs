@@ -90,8 +90,8 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         function: ParameterOutputFunction,
         output_spec: &CkOutputBufferSpec,
-        input_data: &[u8],
-        associated_data: &[u8],
+        input_data: CkInBuf<'_>,
+        associated_data: CkInBuf<'_>,
         parameter: &[u8],
         param_out_spec: &CkParameterRoundtripSpec,
         flags: u64,
@@ -110,15 +110,15 @@ impl Pkcs11Client {
         CkRv,
     > {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+        let mut req = pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
             client_context_id: ctx,
             session_handle: session.0,
             function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
                 function,
             ),
             output_spec: Some(Self::proto_output_buffer_spec(output_spec)),
-            input_data: input_data.to_vec(),
-            associated_data: associated_data.to_vec(),
+            input_data: Vec::new(),
+            associated_data: Vec::new(),
             parameter: parameter.to_vec(),
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(param_out_spec)),
             flags,
@@ -129,6 +129,12 @@ impl Pkcs11Client {
             input_data_null_len: None,
             associated_data_null_len: None,
         };
+        Self::fill_input(input_data, &mut req.input_data, &mut req.input_data_null_len);
+        Self::fill_input(
+            associated_data,
+            &mut req.associated_data,
+            &mut req.associated_data_null_len,
+        );
         let resp = self
             .grpc
             .parameter_output_exact(req)

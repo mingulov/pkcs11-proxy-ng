@@ -4872,14 +4872,12 @@ fn ffi_init_cancel_paths_forward_null_mechanism_init_verbatim() {
 /// PIN/template readers (admin.rs, object.rs, session*.rs) are classes 2-3
 /// and are also exempt.
 ///
-/// This test is left `#[ignore]`d until the Task-5 wave migration completes;
-/// it must fail when run manually (TDD red) — run it with:
+/// Run it with:
 ///
 /// ```text
-/// cargo test -p pkcs11-proxy-ng --test local_quality_gate_test class1 -- --ignored 2>&1 | tail -5
+/// cargo test -p pkcs11-proxy-ng --test local_quality_gate_test class1 2>&1 | tail -5
 /// ```
 #[test]
-#[ignore = "un-ignored in Scope-2 wave migration (Task 5)"]
 fn class1_dispatch_sites_use_classified_input_reader() {
     let root = workspace_root();
     for file in [
