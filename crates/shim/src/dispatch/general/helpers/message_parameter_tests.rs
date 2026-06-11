@@ -24,7 +24,7 @@ fn oversized_message_parameter_is_rejected_before_reading() {
     let err = unsafe {
         try_read_message_parameter(
             &mut byte as *mut _ as *const _,
-            (super::MAX_MECHANISM_PARAM_LEN + 1) as CK_ULONG,
+            (super::MAX_MECHANISM_PARAM_STRUCT_LEN + 1) as CK_ULONG,
         )
     }
     .unwrap_err();
@@ -56,7 +56,7 @@ fn message_roundtrip_spec_rejects_oversized_len_before_reading() {
     let err = unsafe {
         message_parameter_roundtrip_spec(
             &mut byte as *mut _ as *mut _,
-            (super::MAX_MECHANISM_PARAM_LEN + 1) as CK_ULONG,
+            (super::MAX_MECHANISM_PARAM_STRUCT_LEN + 1) as CK_ULONG,
         )
     }
     .unwrap_err();

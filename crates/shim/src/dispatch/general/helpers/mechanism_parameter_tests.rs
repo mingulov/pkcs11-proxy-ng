@@ -2246,3 +2246,40 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
 
     assert_eq!(additional_key_handle, 0xCAFE);
 }
+
+/// ADR-0010 Scope 2: an unmaterializable AAD length (CK_ULONG::MAX) on a GCM
+/// parameter must NOT cause a wild read / process abort.  The shim must fall
+/// back to the raw-bytes path (or return a length-error) rather than
+/// constructing a slice via `slice::from_raw_parts` with an absurd length.
+///
+/// The test is intentionally written as a "survives without aborting" check:
+/// `read_mechanism_with_shape` returns `CkMechanism`, not a `Result`, so the
+/// observable contract is (a) no crash, and (b) the result is the safe `Raw`
+/// fallback rather than a typed `Gcm` variant.
+#[test]
+fn gcm_aad_unmaterializable_len_rejected_not_wild_read() {
+    ensure_registry();
+    let mut gcm = CK_GCM_PARAMS {
+        pIv: std::ptr::null_mut(),
+        ulIvLen: 0,
+        ulIvBits: 0,
+        // Non-null pointer, but an absurd claimed length — must never be
+        // dereferenced as a slice of this size.
+        pAAD: std::ptr::dangling_mut::<u8>(),
+        ulAADLen: CK_ULONG::MAX,
+        ulTagBits: 128,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: &mut gcm as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    // Must not crash.  With the guard in place the shim falls back to the raw
+    // path; without the guard it would construct a slice of size usize::MAX
+    // (UB) and typically kill the process.
+    let result = unsafe { read_mechanism_with_shape(&mechanism, Some("gcm")) };
+    match result.params.expect("params") {
+        CkMechanismParams::Raw(_) => {} // expected: safe fallback
+        other => panic!("expected Raw fallback for unmaterializable AAD len, got {other:?}"),
+    }
+}
