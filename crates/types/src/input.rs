@@ -7,7 +7,18 @@ pub enum CkInBuf<'a> {
 }
 
 impl<'a> CkInBuf<'a> {
-    /// (pointer, length) exactly as the backend FFI call must receive them.
+    /// Returns `(pointer, length)` exactly as the backend FFI call must receive them.
+    ///
+    /// The returned pointer is **borrowed from `self`** (lifetime enforced by the
+    /// borrow checker, stated here for FFI readers who inspect the raw pointer).
+    ///
+    /// - For `Bytes`: the pointer is **non-null** even for an empty slice (it is a
+    ///   valid dangling pointer into the slice's allocation and **must not be
+    ///   dereferenced** when `len` is 0).
+    /// - For `Null`: the pointer is `ptr::null()` regardless of the claimed `len`.
+    ///
+    /// Consumers must pass the `(pointer, len)` pair to the PKCS#11 call verbatim
+    /// and must **never dereference** the pointer themselves.
     pub fn as_ptr_len(&self) -> (*const u8, u64) {
         match self {
             CkInBuf::Bytes(b) => (b.as_ptr(), b.len() as u64),
@@ -39,5 +50,12 @@ mod tests {
         let (p, l) = CkInBuf::from(&data[..]).as_ptr_len();
         assert!(!p.is_null());
         assert_eq!(l, 2);
+    }
+
+    #[test]
+    fn ck_in_buf_bytes_empty_slice_gives_non_null_dangling_ptr_and_zero_len() {
+        let (p, l) = CkInBuf::Bytes(&[]).as_ptr_len();
+        assert!(!p.is_null());
+        assert_eq!(l, 0);
     }
 }

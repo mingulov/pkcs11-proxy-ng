@@ -10,14 +10,9 @@ use crate::traits::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
 use std::sync::Mutex;
 
-/// Convert `CkInBuf` to `&[u8]` for test backend operations.
-/// `Null { len: 0 }` → empty slice; `Null { len > 0 }` → `ARGUMENTS_BAD`.
+// resolve_input delegates to MockBackend::resolve_input (same crate, pub(crate)).
 fn resolve_input(input: CkInBuf<'_>) -> CkResult<&'_ [u8]> {
-    match input {
-        CkInBuf::Bytes(b) => Ok(b),
-        CkInBuf::Null { len: 0 } => Ok(&[]),
-        CkInBuf::Null { .. } => Err(CkRv::ARGUMENTS_BAD),
-    }
+    MockBackend::resolve_input(input)
 }
 
 /// Test-only 3.x backend state.
@@ -414,8 +409,9 @@ impl Pkcs11Backend for TestBackend3x {
         _mechanism: &CkMechanism,
         _private_key: CkObjectHandle,
         _template: &[CkAttribute],
-        _ciphertext: CkInBuf<'_>,
+        ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
+        let _ = resolve_input(ciphertext)?;
         Ok(CkObjectHandle(9002))
     }
 
@@ -435,9 +431,10 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         _session: CkSessionHandle,
         parameter: &mut [u8],
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
         plaintext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let _ = resolve_input(aad)?;
         let plaintext = resolve_input(plaintext)?;
         let ciphertext = Self::xor_aa(plaintext);
         // Return order: (parameter_out, ciphertext)
@@ -448,8 +445,9 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         _session: CkSessionHandle,
         parameter: &mut [u8],
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
+        let _ = resolve_input(aad)?;
         Ok(parameter.to_vec())
     }
 
@@ -486,9 +484,10 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         _session: CkSessionHandle,
         parameter: &mut [u8],
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let _ = resolve_input(aad)?;
         // XOR with 0xAA is self-inverse
         let plaintext = Self::xor_aa(resolve_input(ciphertext)?);
         // Return order: (parameter_out, plaintext)
@@ -499,8 +498,9 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         _session: CkSessionHandle,
         parameter: &mut [u8],
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
+        let _ = resolve_input(aad)?;
         Ok(parameter.to_vec())
     }
 
@@ -665,8 +665,9 @@ impl Pkcs11Backend for TestBackend3x {
         _mechanism: &CkMechanism,
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let _ = resolve_input(aad)?;
         Ok((vec![0xBB; 16], vec![0xCC; 12]))
     }
 
@@ -675,10 +676,12 @@ impl Pkcs11Backend for TestBackend3x {
         _session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _unwrapping_key: CkObjectHandle,
-        _wrapped_key: CkInBuf<'_>,
+        wrapped_key: CkInBuf<'_>,
         _template: &[CkAttribute],
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
+        let _ = resolve_input(wrapped_key)?;
+        let _ = resolve_input(aad)?;
         Ok((CkObjectHandle(9003), vec![0xCC; 12]))
     }
 

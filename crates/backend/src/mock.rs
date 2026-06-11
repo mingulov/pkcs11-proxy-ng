@@ -392,7 +392,12 @@ impl MockBackend {
     /// `Bytes(b)` → `Ok(b)` (zero-copy borrow).
     /// `Null { len: 0 }` → `Ok(&[])` (NULL with zero length is treated as empty).
     /// `Null { len > 0 }` → `Err(ARGUMENTS_BAD)` (NULL with non-zero length is rejected).
-    fn resolve_input(input: CkInBuf<'_>) -> CkResult<&'_ [u8]> {
+    ///
+    /// The mock plays a strict softhsm2-like token so that proxy-level tests can
+    /// assert NULL pass-through end-to-end: any method that accepts data must call
+    /// this helper, making `Null { len > 0 }` uniformly rejected on every migrated
+    /// method.
+    pub(crate) fn resolve_input(input: CkInBuf<'_>) -> CkResult<&'_ [u8]> {
         match input {
             CkInBuf::Bytes(b) => Ok(b),
             CkInBuf::Null { len: 0 } => Ok(&[]),
@@ -1071,10 +1076,12 @@ impl Pkcs11Backend for MockBackend {
     fn sign_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
         self.init_cancel_impl(s, MultiPartOp::Sign)
     }
-    fn sign(&self, s: CkSessionHandle, _d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn sign(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+        let _ = Self::resolve_input(d)?;
         self.sign_impl(s)
     }
-    fn sign_update(&self, s: CkSessionHandle, _p: CkInBuf<'_>) -> CkResult<()> {
+    fn sign_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
+        let _ = Self::resolve_input(p)?;
         self.sign_update_impl(s)
     }
     fn sign_final(&self, s: CkSessionHandle) -> CkResult<Vec<u8>> {
@@ -1092,7 +1099,8 @@ impl Pkcs11Backend for MockBackend {
     fn sign_recover_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
         self.init_cancel_impl(s, MultiPartOp::SignRecover)
     }
-    fn sign_recover(&self, s: CkSessionHandle, _d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn sign_recover(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+        let _ = Self::resolve_input(d)?;
         self.state.lock().unwrap().end_op(s, MultiPartOp::SignRecover)?;
         Ok(vec![0xDE, 0xAD])
     }
@@ -1108,7 +1116,8 @@ impl Pkcs11Backend for MockBackend {
     fn verify_recover_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
         self.init_cancel_impl(s, MultiPartOp::VerifyRecover)
     }
-    fn verify_recover(&self, s: CkSessionHandle, _sig: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn verify_recover(&self, s: CkSessionHandle, sig: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+        let _ = Self::resolve_input(sig)?;
         self.state.lock().unwrap().end_op(s, MultiPartOp::VerifyRecover)?;
         self.verify_recover_impl()
     }
@@ -1120,13 +1129,17 @@ impl Pkcs11Backend for MockBackend {
     fn verify_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
         self.init_cancel_impl(s, MultiPartOp::Verify)
     }
-    fn verify(&self, s: CkSessionHandle, _d: CkInBuf<'_>, _sig: CkInBuf<'_>) -> CkResult<()> {
+    fn verify(&self, s: CkSessionHandle, d: CkInBuf<'_>, sig: CkInBuf<'_>) -> CkResult<()> {
+        let _ = Self::resolve_input(d)?;
+        let _ = Self::resolve_input(sig)?;
         self.verify_impl(s)
     }
-    fn verify_update(&self, s: CkSessionHandle, _p: CkInBuf<'_>) -> CkResult<()> {
+    fn verify_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
+        let _ = Self::resolve_input(p)?;
         self.verify_update_impl(s)
     }
-    fn verify_final(&self, s: CkSessionHandle, _sig: CkInBuf<'_>) -> CkResult<()> {
+    fn verify_final(&self, s: CkSessionHandle, sig: CkInBuf<'_>) -> CkResult<()> {
+        let _ = Self::resolve_input(sig)?;
         self.verify_final_impl(s)
     }
     fn digest_init(&self, s: CkSessionHandle, m: &CkMechanism) -> CkResult<()> {
@@ -1277,9 +1290,10 @@ impl Pkcs11Backend for MockBackend {
         session: CkSessionHandle,
         m: &CkMechanism,
         unwrapping_key: CkObjectHandle,
-        _wrapped_key: CkInBuf<'_>,
+        wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
+        let _ = Self::resolve_input(wrapped_key)?;
         self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::UNWRAP)?;
         let state = self.state.lock().unwrap();
         self.require_live_key(&state, session, unwrapping_key)?;
@@ -1356,7 +1370,8 @@ impl Pkcs11Backend for MockBackend {
         self.restore_operation_state(s, Self::resolve_input(state)?)
     }
 
-    fn seed_random(&self, s: CkSessionHandle, _seed: CkInBuf<'_>) -> CkResult<()> {
+    fn seed_random(&self, s: CkSessionHandle, seed: CkInBuf<'_>) -> CkResult<()> {
+        let _ = Self::resolve_input(seed)?;
         self.require_open_session(s)?;
         self.seed_random_impl()
     }
@@ -1371,9 +1386,10 @@ impl Pkcs11Backend for MockBackend {
     fn sign_exact(
         &self,
         s: CkSessionHandle,
-        _data: CkInBuf<'_>,
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let _ = Self::resolve_input(data)?;
         self.sign_exact_impl(s, spec)
     }
 
@@ -1388,18 +1404,20 @@ impl Pkcs11Backend for MockBackend {
     fn sign_recover_exact(
         &self,
         s: CkSessionHandle,
-        _data: CkInBuf<'_>,
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let _ = Self::resolve_input(data)?;
         self.sign_recover_exact_impl(s, spec)
     }
 
     fn verify_recover_exact(
         &self,
         s: CkSessionHandle,
-        _signature: CkInBuf<'_>,
+        signature: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let _ = Self::resolve_input(signature)?;
         self.verify_recover_exact_impl(s, spec)
     }
 
@@ -1817,10 +1835,11 @@ impl Pkcs11Backend for MockBackend {
         mechanism: &CkMechanism,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
+        let _ = Self::resolve_input(aad)?;
         self.require_mechanism_workflow_for_session(s, mechanism, CkMechanismFlags::WRAP)?;
         let state = self.state.lock().unwrap();
         self.require_live_keys(&state, s, &[wrapping_key, key])?;
@@ -1896,8 +1915,9 @@ impl Pkcs11Backend for MockBackend {
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
         template: &[CkAttribute],
-        _ciphertext: CkInBuf<'_>,
+        ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
+        let _ = Self::resolve_input(ciphertext)?;
         self.require_mechanism_workflow_for_session(
             session,
             mechanism,
@@ -1942,8 +1962,9 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
+        let _ = Self::resolve_input(aad)?;
         if self.state.lock().unwrap().has_session(session) {
             Ok(parameter.to_vec())
         } else {
@@ -2006,8 +2027,9 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
+        let _ = Self::resolve_input(aad)?;
         if self.state.lock().unwrap().has_session(session) {
             Ok(parameter.to_vec())
         } else {
@@ -2240,8 +2262,9 @@ impl Pkcs11Backend for MockBackend {
         mechanism: &CkMechanism,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let _ = Self::resolve_input(aad)?;
         self.require_mechanism_workflow_for_session(session, mechanism, CkMechanismFlags::WRAP)?;
         let state = self.state.lock().unwrap();
         self.require_live_keys(&state, session, &[wrapping_key, key])?;
@@ -2253,10 +2276,12 @@ impl Pkcs11Backend for MockBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
-        _wrapped_key: CkInBuf<'_>,
+        wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
-        _aad: CkInBuf<'_>,
+        aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
+        let _ = Self::resolve_input(wrapped_key)?;
+        let _ = Self::resolve_input(aad)?;
         self.require_mechanism_workflow_for_session(session, mechanism, CkMechanismFlags::UNWRAP)?;
         let mut state = self.state.lock().unwrap();
         self.require_live_key(&state, session, unwrapping_key)?;
