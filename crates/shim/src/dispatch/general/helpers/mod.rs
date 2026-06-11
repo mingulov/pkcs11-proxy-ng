@@ -76,6 +76,35 @@ pub(crate) unsafe fn read_input_slice<'a, T>(ptr: *const T, len: CK_ULONG) -> &'
     }
 }
 
+/// Pointer-class-faithful input reader (ADR-0010 Scope 2). Unlike
+/// `read_input_slice`, NULL is preserved as NULL (with the caller's claimed
+/// length) and unmaterializable lengths become a value, not a panic, so the
+/// dispatch layer can return the documented stable RV (CKR_ARGUMENTS_BAD)
+/// instead of GENERAL_ERROR.
+// Not yet wired into dispatch; will be connected in the Scope-2 wave migration
+// (Tasks 4-5). Allow dead_code until then.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) enum InputBuf<'a> {
+    Bytes(&'a [u8]),
+    Null { len: u64 },
+    TooLarge { len: u64 },
+}
+
+#[allow(dead_code)]
+pub(crate) unsafe fn classify_input<'a>(ptr: *const u8, len: CK_ULONG) -> InputBuf<'a> {
+    if ptr.is_null() {
+        return InputBuf::Null { len: len as u64 };
+    }
+    let count = len as usize;
+    match count.checked_mul(std::mem::size_of::<u8>()) {
+        Some(n) if n <= MAX_SERIALIZABLE_BYTES => {
+            InputBuf::Bytes(unsafe { std::slice::from_raw_parts(ptr, count) })
+        }
+        _ => InputBuf::TooLarge { len: len as u64 },
+    }
+}
+
 pub(crate) unsafe fn write_output_slice<'a, T>(ptr: *mut T, len: usize) -> &'a mut [T] {
     if ptr.is_null() || len == 0 {
         return &mut [];
@@ -3285,6 +3314,7 @@ unsafe fn ck_attrs_to_rust_result(
 #[cfg(test)]
 mod tests {
     use super::pad_string;
+    use cryptoki_sys::CK_ULONG;
 
     #[test]
     fn short_src_pads_remainder_with_spaces() {
@@ -3355,6 +3385,45 @@ mod tests {
         let long = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBB";
         pad_string(&mut label, long);
         assert!(label.iter().all(|&b| b == b'A'));
+    }
+
+    #[test]
+    fn classify_input_valid_pointer() {
+        let buf = [1u8, 2, 3];
+        match unsafe { super::classify_input(buf.as_ptr(), 3) } {
+            super::InputBuf::Bytes(s) => assert_eq!(s, &[1, 2, 3]),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_input_null_with_len_is_preserved_not_flattened() {
+        match unsafe { super::classify_input(std::ptr::null::<u8>(), 7) } {
+            super::InputBuf::Null { len } => assert_eq!(len, 7),
+            other => panic!("expected Null{{7}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_input_null_len0_and_valid_len0_both_empty_null_flagged() {
+        assert!(matches!(
+            unsafe { super::classify_input(std::ptr::null::<u8>(), 0) },
+            super::InputBuf::Null { len: 0 }
+        ));
+        let b = [0u8; 1];
+        assert!(matches!(
+            unsafe { super::classify_input(b.as_ptr(), 0) },
+            super::InputBuf::Bytes(&[])
+        ));
+    }
+
+    #[test]
+    fn classify_input_unmaterializable_len_is_too_large_not_panic() {
+        let b = [0u8; 1];
+        match unsafe { super::classify_input(b.as_ptr(), u64::MAX as CK_ULONG) } {
+            super::InputBuf::TooLarge { len } => assert_eq!(len, u64::MAX),
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
     }
 }
 
