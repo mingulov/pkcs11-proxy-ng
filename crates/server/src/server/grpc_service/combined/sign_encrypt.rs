@@ -24,6 +24,7 @@ async fn resolve_backend_session(
     }
 }
 
+// NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(super) async fn digest_encrypt_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
@@ -53,6 +54,7 @@ pub(super) async fn digest_encrypt_update(
     }))
 }
 
+// NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(super) async fn sign_encrypt_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,

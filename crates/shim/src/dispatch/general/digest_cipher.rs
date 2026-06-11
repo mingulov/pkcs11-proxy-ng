@@ -356,7 +356,6 @@ pub unsafe extern "C" fn c_decrypt(
         if pul_data_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        // ADR-0010 Scope 2: preserve pointer class faithfully.
         let encrypted_data = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_encrypted_data, ul_encrypted_data_len)
         }) {

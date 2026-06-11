@@ -27,6 +27,7 @@ impl Pkcs11Client {
         pkcs11_unary_ok!(self.grpc.digest_init(req), true)
     }
 
+    // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
     pub async fn digest(&mut self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::DigestRequest {
@@ -116,6 +117,7 @@ impl Pkcs11Client {
         Ok(bytes)
     }
 
+    // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
     /// `C_Encrypt` returning ciphertext plus any HSM-mutated mechanism
     /// params (e.g. AES-GCM IV).  Backwards-compatible sibling of
     /// [`Self::encrypt`].
@@ -145,6 +147,7 @@ impl Pkcs11Client {
         Ok(bytes)
     }
 
+    // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
     /// `C_EncryptUpdate` returning the partial ciphertext plus any
     /// HSM-mutated mechanism params.  Backwards-compatible sibling of
     /// [`Self::encrypt_update`].
@@ -238,6 +241,7 @@ impl Pkcs11Client {
         Ok(bytes)
     }
 
+    // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
     /// `C_Decrypt` returning plaintext plus any HSM-mutated mechanism
     /// params.  Backwards-compatible sibling of [`Self::decrypt`].
     pub async fn decrypt_with_mechanism_out(
@@ -266,6 +270,7 @@ impl Pkcs11Client {
         Ok(bytes)
     }
 
+    // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
     /// `C_DecryptUpdate` returning the partial plaintext plus any
     /// HSM-mutated mechanism params.  Backwards-compatible sibling of
     /// [`Self::decrypt_update`].
