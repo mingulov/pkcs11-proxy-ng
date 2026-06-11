@@ -2284,6 +2284,37 @@ fn gcm_aad_unmaterializable_len_rejected_not_wild_read() {
     }
 }
 
+/// ADR-0010 Scope 2: RSA OAEP params with a dangling (non-null) pSourceData
+/// and ulSourceDataLen = CK_ULONG::MAX must NOT cause a wild read.  The shim
+/// falls back to the raw-bytes path rather than calling
+/// `slice::from_raw_parts` with an absurd length.
+#[test]
+fn rsa_oaep_unmaterializable_source_data_len_falls_back_to_raw() {
+    ensure_registry();
+    let mut oaep = CK_RSA_PKCS_OAEP_PARAMS {
+        hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        mgf: 1,
+        source: 1,
+        pSourceData: std::ptr::dangling_mut::<u8>() as CK_VOID_PTR,
+        ulSourceDataLen: CK_ULONG::MAX,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::RSA_PKCS_OAEP.0 as CK_MECHANISM_TYPE,
+        pParameter: &mut oaep as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
+    };
+    // Must not crash or do a wild read.  With the guard the shim falls back to
+    // the raw path; without it `slice::from_raw_parts` would be called with
+    // size usize::MAX (UB).
+    let result = unsafe { read_ck_mechanism(&mechanism) };
+    match result {
+        CkMechanismParams::Raw(_) => {} // expected: safe Raw fallback
+        other => {
+            panic!("expected Raw fallback for unmaterializable source data len, got {other:?}")
+        }
+    }
+}
+
 /// ADR-0010 Scope 2: an unmaterializable password length (CK_ULONG::MAX) on a
 /// PBE parameter must NOT cause a wild read.  The shim falls back to the
 /// raw-bytes path rather than calling `slice::from_raw_parts` with an absurd

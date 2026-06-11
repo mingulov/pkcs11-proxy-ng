@@ -445,6 +445,10 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
 /// ADR-0010 Scope 2: a GCM message parameter with ulIvLen = CK_ULONG::MAX must
 /// not cause a wild read.  The reader clamps to an empty IV (same behavior as
 /// a null pIv) rather than constructing a slice of size usize::MAX.
+///
+/// Empty-Vec outcome is the deliberate class-5 status quo: embedded-pointer
+/// handling in message params is deferred to its own follow-up plan; mechanism
+/// arms use the Raw fallback instead.  See ADR-0010 Scope 2 input classes.
 #[test]
 fn gcm_message_params_unmaterializable_iv_len_yields_empty_not_crash() {
     let tag = [0xAAu8; 16];
@@ -467,6 +471,10 @@ fn gcm_message_params_unmaterializable_iv_len_yields_empty_not_crash() {
 /// produces a tag_bytes of ~2^61, which exceeds MAX_SERIALIZABLE_BYTES.  The
 /// reader must return an empty tag rather than calling `slice::from_raw_parts`
 /// with an absurd length.
+///
+/// Empty-Vec outcome is the deliberate class-5 status quo: embedded-pointer
+/// handling in message params is deferred to its own follow-up plan; mechanism
+/// arms use the Raw fallback instead.  See ADR-0010 Scope 2 input classes.
 #[test]
 fn gcm_message_params_absurd_tag_bits_yields_empty_not_crash() {
     let params = CK_GCM_MESSAGE_PARAMS {
@@ -480,4 +488,52 @@ fn gcm_message_params_absurd_tag_bits_yields_empty_not_crash() {
     let result =
         unsafe { super::read_gcm_message_params(&params as *const _ as *const std::ffi::c_void) };
     assert!(result.tag.is_empty(), "absurd ulTagBits must yield empty tag, not a wild read");
+}
+
+/// ADR-0010 Scope 2: CCM message reader — unmaterializable `ulNonceLen` must
+/// yield an empty nonce, and unmaterializable `ulMACLen` must yield an empty
+/// mac.  Neither should cause a wild read.
+#[test]
+fn ccm_message_params_unmaterializable_lens_yield_empty_not_crash() {
+    // ulNonceLen = CK_ULONG::MAX: dangling pNonce must not be dereferenced.
+    let params = CK_CCM_MESSAGE_PARAMS {
+        ulDataLen: 16,
+        pNonce: std::ptr::dangling_mut::<u8>(),
+        ulNonceLen: CK_ULONG::MAX,
+        ulNonceFixedBits: 0,
+        nonceGenerator: 0,
+        pMAC: std::ptr::dangling_mut::<u8>(),
+        ulMACLen: CK_ULONG::MAX,
+    };
+    let result =
+        unsafe { super::read_ccm_message_params(&params as *const _ as *const std::ffi::c_void) };
+    assert!(
+        result.nonce.is_empty(),
+        "unmaterializable ulNonceLen must yield empty nonce, not a wild read"
+    );
+    assert!(
+        result.mac.is_empty(),
+        "unmaterializable ulMACLen must yield empty mac, not a wild read"
+    );
+}
+
+/// ADR-0010 Scope 2: Salsa/ChaCha message reader — unmaterializable `ulNonceLen`
+/// must yield an empty nonce.  The dangling pNonce must not be dereferenced.
+#[test]
+fn salsa_chacha_message_params_unmaterializable_nonce_len_yields_empty_not_crash() {
+    let tag = [0xBBu8; 16];
+    let params = CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS {
+        pNonce: std::ptr::dangling_mut::<u8>(),
+        ulNonceLen: CK_ULONG::MAX,
+        pTag: tag.as_ptr() as *mut u8,
+    };
+    let result = unsafe {
+        super::read_salsa_chacha_message_params(&params as *const _ as *const std::ffi::c_void)
+    };
+    assert!(
+        result.nonce.is_empty(),
+        "unmaterializable ulNonceLen must yield empty nonce, not a wild read"
+    );
+    // pTag with fixed 16-byte length must still be read correctly.
+    assert_eq!(result.tag, vec![0xBBu8; 16]);
 }

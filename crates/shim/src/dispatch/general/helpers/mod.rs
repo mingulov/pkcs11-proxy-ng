@@ -379,27 +379,6 @@ where
     }
 }
 
-/// Validate that the proxy can forward a mechanism invocation.
-///
-/// Uses the global [`MechanismRegistry`] to check whether parameterized
-/// mechanisms have a known parameter shape.  Parameterless invocations
-/// are always allowed.
-///
-/// The check is done against the raw `CK_MECHANISM` pointer so that the
-/// proxy rejects mechanisms whose parameter shapes are not modeled in the
-/// registry before attempting conversion. For mechanisms with known shapes,
-/// `read_mechanism` will properly parse the C struct; for unknown shapes
-/// it falls back to raw bytes, but `validate_mechanism` prevents those
-/// from reaching the server.
-///
-/// Returns `rv_ok()` when the mechanism is acceptable, or
-/// `CKR_MECHANISM_PARAM_INVALID` when the mechanism has unmodeled
-/// parameters that the proxy cannot safely serialize.
-///
-/// # Safety
-///
-/// `p_mechanism` must point to a valid `CK_MECHANISM` (caller already
-/// checked non-null before calling this).
 /// Maximum mechanism **parameter-struct** byte length.  No standard PKCS#11
 /// mechanism parameter struct exceeds a few hundred bytes; 64 KiB is
 /// extremely generous.  This constant bounds `ulParameterLen` of a mechanism
@@ -439,6 +418,27 @@ struct CkMuGenParams {
     ul_ctx_len: CK_ULONG,
 }
 
+/// Validate that the proxy can forward a mechanism invocation.
+///
+/// Uses the global [`MechanismRegistry`] to check whether parameterized
+/// mechanisms have a known parameter shape.  Parameterless invocations
+/// are always allowed.
+///
+/// The check is done against the raw `CK_MECHANISM` pointer so that the
+/// proxy rejects mechanisms whose parameter shapes are not modeled in the
+/// registry before attempting conversion. For mechanisms with known shapes,
+/// `read_mechanism` will properly parse the C struct; for unknown shapes
+/// it falls back to raw bytes, but `validate_mechanism` prevents those
+/// from reaching the server.
+///
+/// Returns `rv_ok()` when the mechanism is acceptable, or
+/// `CKR_MECHANISM_PARAM_INVALID` when the mechanism has unmodeled
+/// parameters that the proxy cannot safely serialize.
+///
+/// # Safety
+///
+/// `p_mechanism` must point to a valid `CK_MECHANISM` (caller already
+/// checked non-null before calling this).
 pub(crate) unsafe fn validate_mechanism(p_mechanism: *const CK_MECHANISM) -> CK_RV {
     let c_mech = unsafe { &*p_mechanism };
     let has_params = !c_mech.pParameter.is_null() && c_mech.ulParameterLen > 0;
@@ -534,13 +534,16 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 // Safety: caller guarantees pParameter points to a valid
                 // CK_RSA_PKCS_OAEP_PARAMS and ulParameterLen >= sizeof.
                 let oaep = unsafe { &*(param_ptr as *const CK_RSA_PKCS_OAEP_PARAMS) };
-                if missing_embedded_pointer(oaep.pSourceData, oaep.ulSourceDataLen) {
+                if missing_embedded_pointer(oaep.pSourceData, oaep.ulSourceDataLen)
+                    || !embedded_payload_len_ok(oaep.ulSourceDataLen)
+                {
                     Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
                     let source_data = if oaep.pSourceData.is_null() || oaep.ulSourceDataLen == 0 {
                         Vec::new()
                     } else {
-                        // Safety: pSourceData is non-null, ulSourceDataLen > 0.
+                        // Safety: pSourceData is non-null, ulSourceDataLen > 0,
+                        // and ulSourceDataLen <= MAX_SERIALIZABLE_BYTES (guard above).
                         unsafe {
                             std::slice::from_raw_parts(
                                 oaep.pSourceData as *const u8,
@@ -807,6 +810,7 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                     let nonce = if ch.pNonce.is_null() || ch.ulNonceBits == 0 {
                         Vec::new()
                     } else {
+                        // Safety: pNonce is non-null, nonce_bytes <= MAX_SERIALIZABLE_BYTES.
                         unsafe { std::slice::from_raw_parts(ch.pNonce, nonce_bytes) }.to_vec()
                     };
                     Some(CkMechanismParams::ChaCha20(ChaCha20Params {
@@ -3350,8 +3354,12 @@ unsafe fn read_raw_bytes(ptr: *mut std::ffi::c_void, len: usize) -> Vec<u8> {
 /// # Safety
 ///
 /// `p_parameter` must point to a valid `CK_GCM_MESSAGE_PARAMS` struct.
-/// The embedded `pIv` and `pTag` pointers must be valid and point to
-/// buffers of the sizes specified by `ulIvLen` and `ulTagBits/8`.
+/// `pIv` must be valid for `ulIvLen` bytes only when `pIv` is non-null
+/// and `ulIvLen <= MAX_SERIALIZABLE_BYTES`; otherwise the IV field is
+/// read as empty without dereferencing the pointer.  `pTag` must be
+/// valid for `ulTagBits/8` bytes only when `pTag` is non-null and the
+/// derived byte count is `<= MAX_SERIALIZABLE_BYTES`; otherwise the tag
+/// field is read as empty.
 pub(crate) unsafe fn read_gcm_message_params(
     p_parameter: *const std::ffi::c_void,
 ) -> pkcs11_proxy_ng_proto::convert::message_params::GcmMessageParams {
@@ -3382,6 +3390,11 @@ pub(crate) unsafe fn read_gcm_message_params(
 /// # Safety
 ///
 /// `p_parameter` must point to a valid `CK_CCM_MESSAGE_PARAMS` struct.
+/// `pNonce` must be valid for `ulNonceLen` bytes only when `pNonce` is
+/// non-null and `ulNonceLen <= MAX_SERIALIZABLE_BYTES`; otherwise the
+/// nonce field is read as empty.  `pMAC` must be valid for `ulMACLen`
+/// bytes only when `pMAC` is non-null and `ulMACLen <= MAX_SERIALIZABLE_BYTES`;
+/// otherwise the mac field is read as empty.
 pub(crate) unsafe fn read_ccm_message_params(
     p_parameter: *const std::ffi::c_void,
 ) -> pkcs11_proxy_ng_proto::convert::message_params::CcmMessageParams {
@@ -3414,7 +3427,12 @@ pub(crate) unsafe fn read_ccm_message_params(
 ///
 /// # Safety
 ///
-/// `p_parameter` must point to a valid struct.
+/// `p_parameter` must point to a valid struct.  `pNonce` must be valid
+/// for `ulNonceLen` bytes only when `pNonce` is non-null and
+/// `ulNonceLen <= MAX_SERIALIZABLE_BYTES`; otherwise the nonce field is
+/// read as empty.  `pTag` must be valid for 16 bytes when non-null
+/// (Poly1305 tag is a compile-time constant 16 bytes; no length guard
+/// is required).
 pub(crate) unsafe fn read_salsa_chacha_message_params(
     p_parameter: *const std::ffi::c_void,
 ) -> pkcs11_proxy_ng_proto::convert::message_params::Salsa20ChaCha20Poly1305MessageParams {
