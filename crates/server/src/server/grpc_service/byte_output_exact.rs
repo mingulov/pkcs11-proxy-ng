@@ -52,6 +52,7 @@ pub(super) async fn byte_output_exact(
         .unwrap_or(CkOutputBufferSpec { buffer_present: false, buffer_len: 0 });
 
     let input_data = req.input_data;
+    let input_data_null_len = req.input_data_null_len;
 
     match function {
         // Shape: (session, mechanism, wrapping_key, key, spec) -> wrap_key_exact
@@ -122,7 +123,8 @@ pub(super) async fn byte_output_exact(
             let backend = backend_ref.clone();
             let (result, mechanism_out) = if function == ByteOutputFunction::Encrypt {
                 let result = spawn_backend(move || {
-                    backend.encrypt_exact_with_output(session, CkInBuf::Bytes(&input_data), &spec)
+                    let buf = input_from_wire(&input_data, input_data_null_len);
+                    backend.encrypt_exact_with_output(session, buf, &spec)
                 })
                 .await?;
                 match result {
@@ -131,7 +133,8 @@ pub(super) async fn byte_output_exact(
                 }
             } else {
                 let result = spawn_backend(move || {
-                    dispatch_session_data(function, &*backend, session, &input_data, &spec)
+                    let buf = input_from_wire(&input_data, input_data_null_len);
+                    dispatch_session_data(function, &*backend, session, buf, &spec)
                 })
                 .await?;
                 (result, None)
@@ -166,14 +169,25 @@ fn dispatch_session_only(
     }
 }
 
+/// Reconstruct a `CkInBuf` from its two wire fields.
+///
+/// When `null_len` is `Some(len)`, the original pointer was NULL with the
+/// caller's claimed length, so we reconstruct `CkInBuf::Null { len }`.
+/// Otherwise the bytes field holds the actual input data.
+fn input_from_wire(bytes: &[u8], null_len: Option<u64>) -> CkInBuf<'_> {
+    match null_len {
+        Some(len) => CkInBuf::Null { len },
+        None => CkInBuf::Bytes(bytes),
+    }
+}
+
 fn dispatch_session_data(
     function: ByteOutputFunction,
     backend: &dyn Pkcs11Backend,
     session: pkcs11_proxy_ng_types::CkSessionHandle,
-    data: &[u8],
+    buf: CkInBuf<'_>,
     spec: &CkOutputBufferSpec,
 ) -> pkcs11_proxy_ng_types::CkResult<pkcs11_proxy_ng_types::CkOutputBufferResult> {
-    let buf = CkInBuf::Bytes(data);
     match function {
         ByteOutputFunction::Sign => backend.sign_exact(session, buf, spec),
         ByteOutputFunction::SignRecover => backend.sign_recover_exact(session, buf, spec),

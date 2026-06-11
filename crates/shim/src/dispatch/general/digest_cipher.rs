@@ -55,7 +55,7 @@ pub unsafe extern "C" fn c_digest(
             CkSessionHandle(h_session),
             ByteOutputFunction::Digest,
             &spec,
-            data,
+            CkInBuf::Bytes(data),
             None,
             0,
             0,
@@ -106,7 +106,7 @@ pub unsafe extern "C" fn c_digest_final(
             CkSessionHandle(h_session),
             ByteOutputFunction::DigestFinal,
             &spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             None,
             0,
             0,
@@ -184,7 +184,7 @@ pub unsafe extern "C" fn c_encrypt(
             CkSessionHandle(h_session),
             ByteOutputFunction::Encrypt,
             &spec,
-            data,
+            CkInBuf::Bytes(data),
             None,
             0,
             0,
@@ -259,7 +259,7 @@ pub unsafe extern "C" fn c_encrypt_update(
             CkSessionHandle(h_session),
             ByteOutputFunction::EncryptUpdate,
             &spec,
-            part,
+            CkInBuf::Bytes(part),
             None,
             0,
             0,
@@ -286,7 +286,7 @@ pub unsafe extern "C" fn c_encrypt_final(
             CkSessionHandle(h_session),
             ByteOutputFunction::EncryptFinal,
             &spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             None,
             0,
             0,
@@ -344,7 +344,14 @@ pub unsafe extern "C" fn c_decrypt(
         if pul_data_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let encrypted_data = unsafe { read_input_slice(p_encrypted_data, ul_encrypted_data_len) };
+        // ADR-0010 Scope 2: preserve pointer class faithfully.
+        let encrypted_data =
+            match unsafe { classify_input(p_encrypted_data, ul_encrypted_data_len) } {
+                InputBuf::Bytes(b) => CkInBuf::Bytes(b),
+                InputBuf::Null { len } => CkInBuf::Null { len },
+                // Transport-impossible: documented stable RV (ADR-0010 Limits).
+                InputBuf::TooLarge { .. } => return rv_err(CkRv::ARGUMENTS_BAD),
+            };
         let spec = unsafe { output_buffer_spec(p_data, pul_data_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session),
@@ -379,7 +386,7 @@ pub unsafe extern "C" fn c_decrypt_update(
             CkSessionHandle(h_session),
             ByteOutputFunction::DecryptUpdate,
             &spec,
-            encrypted_part,
+            CkInBuf::Bytes(encrypted_part),
             None,
             0,
             0,
@@ -405,7 +412,7 @@ pub unsafe extern "C" fn c_decrypt_final(
             CkSessionHandle(h_session),
             ByteOutputFunction::DecryptFinal,
             &spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             None,
             0,
             0,

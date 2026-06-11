@@ -81,17 +81,26 @@ pub(crate) unsafe fn read_input_slice<'a, T>(ptr: *const T, len: CK_ULONG) -> &'
 /// length) and unmaterializable lengths become a value, not a panic, so the
 /// dispatch layer can return the documented stable RV (CKR_ARGUMENTS_BAD)
 /// instead of GENERAL_ERROR.
-// Not yet wired into dispatch; will be connected in the Scope-2 wave migration
-// (Tasks 4-5). Allow dead_code until then.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum InputBuf<'a> {
     Bytes(&'a [u8]),
-    Null { len: u64 },
-    TooLarge { len: u64 },
+    Null {
+        len: u64,
+    },
+    TooLarge {
+        #[allow(dead_code)]
+        len: u64,
+    },
 }
 
-#[allow(dead_code)]
+/// Classify a raw C input-pointer pair into a typed `InputBuf`.
+///
+/// # Safety
+///
+/// When `ptr` is non-null, it must point to a valid, readable buffer of at
+/// least `len` bytes (as required by PKCS#11 semantics for input parameters).
+/// The returned `InputBuf::Bytes` slice borrows from that memory and must not
+/// outlive it. When `ptr` is null, no memory is accessed regardless of `len`.
 pub(crate) unsafe fn classify_input<'a>(ptr: *const u8, len: CK_ULONG) -> InputBuf<'a> {
     if ptr.is_null() {
         return InputBuf::Null { len: len as u64 };

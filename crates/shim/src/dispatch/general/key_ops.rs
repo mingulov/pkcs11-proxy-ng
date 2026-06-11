@@ -27,7 +27,7 @@ pub unsafe extern "C" fn c_wrap_key(
             CkSessionHandle(h_session),
             ByteOutputFunction::WrapKey,
             &spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             Some(&mech),
             h_wrapping_key,
             h_key,

@@ -45,7 +45,7 @@ pub unsafe extern "C" fn c_get_operation_state(
             CkSessionHandle(h_session),
             ByteOutputFunction::GetOperationState,
             &spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             None,
             0,
             0,

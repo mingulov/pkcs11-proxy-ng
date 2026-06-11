@@ -4862,3 +4862,45 @@ fn ffi_init_cancel_paths_forward_null_mechanism_init_verbatim() {
         );
     }
 }
+
+/// ADR-0010 Scope 2 completeness gate: every class-1 data-input dispatch site
+/// must use `classify_input` instead of `read_input_slice` so that NULL
+/// pointers are forwarded faithfully to the backend rather than silently
+/// flattened to an empty slice.
+///
+/// Lines reading `p_parameter` are class-5 message parameters — exempt here.
+/// PIN/template readers (admin.rs, object.rs, session*.rs) are classes 2-3
+/// and are also exempt.
+///
+/// This test is left `#[ignore]`d until the Task-5 wave migration completes;
+/// it must fail when run manually (TDD red) — run it with:
+///
+/// ```text
+/// cargo test -p pkcs11-proxy-ng --test local_quality_gate_test class1 -- --ignored 2>&1 | tail -5
+/// ```
+#[test]
+#[ignore = "un-ignored in Scope-2 wave migration (Task 5)"]
+fn class1_dispatch_sites_use_classified_input_reader() {
+    let root = workspace_root();
+    for file in [
+        "crates/shim/src/dispatch/general/digest_cipher.rs",
+        "crates/shim/src/dispatch/general/sign_verify.rs",
+        "crates/shim/src/dispatch/general/verify_signature.rs",
+        "crates/shim/src/dispatch/general/combined.rs",
+        "crates/shim/src/dispatch/general/key_ops.rs",
+        "crates/shim/src/dispatch/general/kem.rs",
+        "crates/shim/src/dispatch/general/state_ops.rs",
+        "crates/shim/src/dispatch/general/message_crypto.rs",
+        "crates/shim/src/dispatch/general/authenticated_wrap.rs",
+    ] {
+        let src = fs::read_to_string(root.join(file)).expect(file);
+        for (i, line) in src.lines().enumerate() {
+            if line.contains("read_input_slice") && !line.contains("p_parameter") {
+                panic!(
+                    "{file}:{} still uses read_input_slice for a class-1 input — use classify_input (ADR-0010)",
+                    i + 1
+                );
+            }
+        }
+    }
+}
