@@ -144,6 +144,8 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             associated_data: aad.to_vec(),
             plaintext: plaintext.to_vec(),
+            associated_data_null_len: None,
+            plaintext_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.encrypt_message(req), true);
         Ok((resp.parameter_out, resp.ciphertext))
@@ -163,6 +165,7 @@ impl Pkcs11Client {
             session_handle: session.0,
             parameter: parameter.to_vec(),
             associated_data: aad.to_vec(),
+            associated_data_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.encrypt_message_begin(req), true);
         Ok(resp.parameter_out)
@@ -184,6 +187,7 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             plaintext_part: plaintext_part.to_vec(),
             flags: flags.0,
+            plaintext_part_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.encrypt_message_next(req), true);
         Ok((resp.parameter_out, resp.ciphertext_part))
@@ -205,6 +209,8 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             associated_data: aad.to_vec(),
             ciphertext: ciphertext.to_vec(),
+            associated_data_null_len: None,
+            ciphertext_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.decrypt_message(req), true);
         Ok((resp.parameter_out, resp.plaintext))
@@ -224,6 +230,7 @@ impl Pkcs11Client {
             session_handle: session.0,
             parameter: parameter.to_vec(),
             associated_data: aad.to_vec(),
+            associated_data_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.decrypt_message_begin(req), true);
         Ok(resp.parameter_out)
@@ -245,6 +252,7 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             ciphertext_part: ciphertext_part.to_vec(),
             flags: flags.0,
+            ciphertext_part_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.decrypt_message_next(req), true);
         Ok((resp.parameter_out, resp.plaintext_part))
@@ -264,6 +272,7 @@ impl Pkcs11Client {
             session_handle: session.0,
             parameter: parameter.to_vec(),
             data: data.to_vec(),
+            data_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.sign_message(req), true);
         Ok((resp.parameter_out, resp.signature))
@@ -302,6 +311,7 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             data_part: data_part.to_vec(),
             request_signature,
+            data_part_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.sign_message_next(req), true);
         Ok((resp.parameter_out, resp.signature))
@@ -323,6 +333,8 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             data: data.to_vec(),
             signature: signature.to_vec(),
+            data_null_len: None,
+            signature_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.verify_message(req), true)
     }
@@ -361,6 +373,8 @@ impl Pkcs11Client {
             data_part: data_part.to_vec(),
             is_final,
             signature: signature.to_vec(),
+            data_part_null_len: None,
+            signature_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.verify_message_next(req), true)
     }

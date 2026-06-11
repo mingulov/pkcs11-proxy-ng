@@ -45,6 +45,7 @@ impl Pkcs11Client {
             private_key_handle: private_key.0,
             template: proto_template,
             ciphertext: ciphertext.to_vec(),
+            ciphertext_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.decapsulate_key(req), true);
         Ok(CkObjectHandle(resp.key_handle))

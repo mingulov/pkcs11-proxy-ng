@@ -46,6 +46,7 @@ impl Pkcs11Client {
             unwrapping_key_handle: unwrapping_key.0,
             wrapped_key: wrapped_key.to_vec(),
             template: proto_template,
+            wrapped_key_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.unwrap_key(req), true);
         Ok(CkObjectHandle(resp.key_handle))
@@ -206,6 +207,7 @@ impl Pkcs11Client {
             operation_state: state.to_vec(),
             encryption_key_handle: enc_key.0,
             authentication_key_handle: auth_key.0,
+            operation_state_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.set_operation_state(req), true)
     }
@@ -216,6 +218,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             seed: seed.to_vec(),
+            seed_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.seed_random(req), true)
     }

@@ -23,6 +23,7 @@ impl Pkcs11Client {
             wrapping_key_handle: wrapping_key.0,
             key_handle: key.0,
             associated_data: aad.to_vec(),
+            associated_data_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.wrap_key_authenticated(req), true);
         Ok((resp.wrapped_key, resp.mechanism_parameter_out))
@@ -49,6 +50,8 @@ impl Pkcs11Client {
             wrapped_key: wrapped_key.to_vec(),
             template: proto_template,
             associated_data: aad.to_vec(),
+            wrapped_key_null_len: None,
+            associated_data_null_len: None,
         };
         let resp = pkcs11_unary_call!(self.grpc.unwrap_key_authenticated(req), true);
         Ok((CkObjectHandle(resp.key_handle), resp.mechanism_parameter_out))

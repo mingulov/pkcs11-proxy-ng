@@ -33,6 +33,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             data: data.to_vec(),
+            data_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.digest(req), true, resp => resp.digest)
     }
@@ -43,6 +44,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             part: part.to_vec(),
+            part_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.digest_update(req), true)
     }
@@ -122,6 +124,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             data: data.to_vec(),
+            data_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.encrypt(req), true, resp => {
             (resp.encrypted_data, Self::parse_mech_out(resp.mechanism_out)?)
@@ -150,6 +153,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             part: part.to_vec(),
+            part_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.encrypt_update(req), true, resp => {
             (resp.encrypted_part, Self::parse_mech_out(resp.mechanism_out)?)
@@ -241,6 +245,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             encrypted_data: encrypted_data.to_vec(),
+            encrypted_data_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.decrypt(req), true, resp => {
             (resp.data, Self::parse_mech_out(resp.mechanism_out)?)
@@ -269,6 +274,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             encrypted_part: encrypted_part.to_vec(),
+            encrypted_part_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.decrypt_update(req), true, resp => {
             (resp.part, Self::parse_mech_out(resp.mechanism_out)?)

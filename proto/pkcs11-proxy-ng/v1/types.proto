@@ -499,6 +499,8 @@ message SignRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes data = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data is then empty.
+  optional uint64 data_null_len = 4;
 }
 message SignResponse {
   uint64 ck_rv = 1;
@@ -509,6 +511,8 @@ message SignUpdateRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes part = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; part is then empty.
+  optional uint64 part_null_len = 4;
 }
 message SignUpdateResponse {
   uint64 ck_rv = 1;
@@ -538,6 +542,10 @@ message VerifyRequest {
   uint64 session_handle = 2;
   bytes data = 3;
   bytes signature = 4;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data is then empty.
+  optional uint64 data_null_len = 5;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; signature is then empty.
+  optional uint64 signature_null_len = 6;
 }
 message VerifyResponse {
   uint64 ck_rv = 1;
@@ -547,6 +555,8 @@ message VerifyUpdateRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes part = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; part is then empty.
+  optional uint64 part_null_len = 4;
 }
 message VerifyUpdateResponse {
   uint64 ck_rv = 1;
@@ -556,6 +566,8 @@ message VerifyFinalRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes signature = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; signature is then empty.
+  optional uint64 signature_null_len = 4;
 }
 message VerifyFinalResponse {
   uint64 ck_rv = 1;
@@ -628,6 +640,8 @@ message DigestRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes data = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data is then empty.
+  optional uint64 data_null_len = 4;
 }
 message DigestResponse {
   uint64 ck_rv = 1;
@@ -638,6 +652,8 @@ message DigestUpdateRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes part = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; part is then empty.
+  optional uint64 part_null_len = 4;
 }
 message DigestUpdateResponse {
   uint64 ck_rv = 1;
@@ -678,6 +694,8 @@ message EncryptRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes data = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data is then empty.
+  optional uint64 data_null_len = 4;
 }
 message EncryptResponse {
   uint64 ck_rv = 1;
@@ -689,6 +707,8 @@ message EncryptUpdateRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes part = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; part is then empty.
+  optional uint64 part_null_len = 4;
 }
 message EncryptUpdateResponse {
   uint64 ck_rv = 1;
@@ -721,6 +741,8 @@ message DecryptRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes encrypted_data = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; encrypted_data is then empty.
+  optional uint64 encrypted_data_null_len = 4;
 }
 message DecryptResponse {
   uint64 ck_rv = 1;
@@ -732,6 +754,8 @@ message DecryptUpdateRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes encrypted_part = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; encrypted_part is then empty.
+  optional uint64 encrypted_part_null_len = 4;
 }
 message DecryptUpdateResponse {
   uint64 ck_rv = 1;
@@ -781,6 +805,8 @@ message UnwrapKeyRequest {
   uint64 unwrapping_key_handle = 4;
   bytes wrapped_key = 5;
   repeated Attribute template = 6;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; wrapped_key is then empty.
+  optional uint64 wrapped_key_null_len = 7;
 }
 message UnwrapKeyResponse {
   uint64 ck_rv = 1;
@@ -830,6 +856,8 @@ message SetOperationStateRequest {
   bytes operation_state = 3;
   uint64 encryption_key_handle = 4;
   uint64 authentication_key_handle = 5;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; operation_state is then empty.
+  optional uint64 operation_state_null_len = 6;
 }
 message SetOperationStateResponse {
   uint64 ck_rv = 1;
@@ -839,6 +867,8 @@ message SeedRandomRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes seed = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; seed is then empty.
+  optional uint64 seed_null_len = 4;
 }
 message SeedRandomResponse {
   uint64 ck_rv = 1;
@@ -891,6 +921,8 @@ message DigestEncryptUpdateRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes part = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; part is then empty.
+  optional uint64 part_null_len = 4;
 }
 message DigestEncryptUpdateResponse {
   uint64 ck_rv = 1;
@@ -901,6 +933,8 @@ message DecryptDigestUpdateRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes encrypted_part = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; encrypted_part is then empty.
+  optional uint64 encrypted_part_null_len = 4;
 }
 message DecryptDigestUpdateResponse {
   uint64 ck_rv = 1;
@@ -911,6 +945,8 @@ message SignEncryptUpdateRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes part = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; part is then empty.
+  optional uint64 part_null_len = 4;
 }
 message SignEncryptUpdateResponse {
   uint64 ck_rv = 1;
@@ -921,6 +957,8 @@ message DecryptVerifyUpdateRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes encrypted_part = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; encrypted_part is then empty.
+  optional uint64 encrypted_part_null_len = 4;
 }
 message DecryptVerifyUpdateResponse {
   uint64 ck_rv = 1;
@@ -943,6 +981,8 @@ message SignRecoverRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes data = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data is then empty.
+  optional uint64 data_null_len = 4;
 }
 message SignRecoverResponse {
   uint64 ck_rv = 1;
@@ -963,6 +1003,8 @@ message VerifyRecoverRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes signature = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; signature is then empty.
+  optional uint64 signature_null_len = 4;
 }
 message VerifyRecoverResponse {
   uint64 ck_rv = 1;
@@ -1045,6 +1087,8 @@ message DecapsulateKeyRequest {
   uint64 private_key_handle = 4;
   repeated Attribute template = 5;
   bytes ciphertext = 6;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; ciphertext is then empty.
+  optional uint64 ciphertext_null_len = 7;
 }
 message DecapsulateKeyResponse {
   uint64 ck_rv = 1;
@@ -1071,6 +1115,10 @@ message EncryptMessageRequest {
   bytes parameter = 3;
   bytes associated_data = 4;
   bytes plaintext = 5;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
+  optional uint64 associated_data_null_len = 6;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; plaintext is then empty.
+  optional uint64 plaintext_null_len = 7;
 }
 message EncryptMessageResponse {
   uint64 ck_rv = 1;
@@ -1084,6 +1132,8 @@ message EncryptMessageBeginRequest {
   uint64 session_handle = 2;
   bytes parameter = 3;
   bytes associated_data = 4;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
+  optional uint64 associated_data_null_len = 5;
 }
 message EncryptMessageBeginResponse {
   uint64 ck_rv = 1;
@@ -1097,6 +1147,8 @@ message EncryptMessageNextRequest {
   bytes parameter = 3;
   bytes plaintext_part = 4;
   uint64 flags = 5;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; plaintext_part is then empty.
+  optional uint64 plaintext_part_null_len = 6;
 }
 message EncryptMessageNextResponse {
   uint64 ck_rv = 1;
@@ -1130,6 +1182,10 @@ message DecryptMessageRequest {
   bytes parameter = 3;
   bytes associated_data = 4;
   bytes ciphertext = 5;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
+  optional uint64 associated_data_null_len = 6;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; ciphertext is then empty.
+  optional uint64 ciphertext_null_len = 7;
 }
 message DecryptMessageResponse {
   uint64 ck_rv = 1;
@@ -1143,6 +1199,8 @@ message DecryptMessageBeginRequest {
   uint64 session_handle = 2;
   bytes parameter = 3;
   bytes associated_data = 4;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
+  optional uint64 associated_data_null_len = 5;
 }
 message DecryptMessageBeginResponse {
   uint64 ck_rv = 1;
@@ -1156,6 +1214,8 @@ message DecryptMessageNextRequest {
   bytes parameter = 3;
   bytes ciphertext_part = 4;
   uint64 flags = 5;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; ciphertext_part is then empty.
+  optional uint64 ciphertext_part_null_len = 6;
 }
 message DecryptMessageNextResponse {
   uint64 ck_rv = 1;
@@ -1185,6 +1245,8 @@ message SignMessageRequest {
   uint64 session_handle = 2;
   bytes parameter = 3;
   bytes data = 4;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data is then empty.
+  optional uint64 data_null_len = 5;
 }
 message SignMessageResponse {
   uint64 ck_rv = 1;
@@ -1210,6 +1272,8 @@ message SignMessageNextRequest {
   bytes parameter = 3;
   bytes data_part = 4;
   bool request_signature = 5;  // true = final part, return signature
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data_part is then empty.
+  optional uint64 data_part_null_len = 6;
 }
 message SignMessageNextResponse {
   uint64 ck_rv = 1;
@@ -1240,6 +1304,10 @@ message VerifyMessageRequest {
   bytes parameter = 3;
   bytes data = 4;
   bytes signature = 5;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data is then empty.
+  optional uint64 data_null_len = 6;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; signature is then empty.
+  optional uint64 signature_null_len = 7;
 }
 message VerifyMessageResponse { uint64 ck_rv = 1; }
 
@@ -1262,6 +1330,10 @@ message VerifyMessageNextRequest {
   bytes data_part = 4;
   bool is_final = 5;
   bytes signature = 6;  // only used when is_final=true
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data_part is then empty.
+  optional uint64 data_part_null_len = 7;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; signature is then empty.
+  optional uint64 signature_null_len = 8;
 }
 message VerifyMessageNextResponse { uint64 ck_rv = 1; }
 
@@ -1279,6 +1351,8 @@ message VerifySignatureInitRequest {
   optional Mechanism mechanism = 3;  // absent = cancel
   uint64 key_handle = 4;            // ignored on cancel
   bytes signature = 5;              // ignored on cancel
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; signature is then empty.
+  optional uint64 signature_null_len = 6;
 }
 message VerifySignatureInitResponse { uint64 ck_rv = 1; }
 
@@ -1287,6 +1361,8 @@ message VerifySignatureRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes data = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data is then empty.
+  optional uint64 data_null_len = 4;
 }
 message VerifySignatureResponse { uint64 ck_rv = 1; }
 
@@ -1295,6 +1371,8 @@ message VerifySignatureUpdateRequest {
   string client_context_id = 1;
   uint64 session_handle = 2;
   bytes data_part = 3;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; data_part is then empty.
+  optional uint64 data_part_null_len = 4;
 }
 message VerifySignatureUpdateResponse { uint64 ck_rv = 1; }
 
@@ -1313,6 +1391,8 @@ message WrapKeyAuthenticatedRequest {
   uint64 wrapping_key_handle = 4;
   uint64 key_handle = 5;
   bytes associated_data = 6;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
+  optional uint64 associated_data_null_len = 7;
 }
 message WrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
@@ -1329,6 +1409,10 @@ message UnwrapKeyAuthenticatedRequest {
   bytes wrapped_key = 5;
   repeated Attribute template = 6;
   bytes associated_data = 7;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; wrapped_key is then empty.
+  optional uint64 wrapped_key_null_len = 8;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
+  optional uint64 associated_data_null_len = 9;
 }
 message UnwrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
@@ -1382,6 +1466,9 @@ message ByteOutputExactRequest {
   optional Mechanism mechanism = 6;      // only for wrap_key
   uint64 wrapping_key_handle = 7;        // only for wrap_key
   uint64 key_handle = 8;                 // only for wrap_key
+  // ADR-0010 Scope 2: present => caller passed a NULL input pointer with this
+  // claimed length; input_data is then empty. Absent => input_data is the input.
+  optional uint64 input_data_null_len = 9;
 }
 message ByteOutputExactResponse {
   OutputBufferResult result = 1;
@@ -1417,6 +1504,10 @@ message ParameterOutputExactRequest {
   uint64 wrapping_key_handle = 11;               // only for wrap_key_authenticated
   uint64 key_handle = 12;                        // only for wrap_key_authenticated
   optional MessageParameter message_parameter = 13; // structured message param (replaces raw `parameter` for message crypto)
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; input_data is then empty.
+  optional uint64 input_data_null_len = 14;
+  // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
+  optional uint64 associated_data_null_len = 15;
 }
 
 message ParameterOutputExactResponse {

@@ -13,6 +13,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             part: part.to_vec(),
+            part_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.digest_encrypt_update(req), true, resp => resp.encrypted_part)
     }
@@ -27,6 +28,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             encrypted_part: encrypted_part.to_vec(),
+            encrypted_part_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.decrypt_digest_update(req), true, resp => resp.part)
     }
@@ -41,6 +43,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             part: part.to_vec(),
+            part_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.sign_encrypt_update(req), true, resp => resp.encrypted_part)
     }
@@ -55,6 +58,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             encrypted_part: encrypted_part.to_vec(),
+            encrypted_part_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.decrypt_verify_update(req), true, resp => resp.part)
     }

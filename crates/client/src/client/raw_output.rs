@@ -126,6 +126,8 @@ impl Pkcs11Client {
             wrapping_key_handle,
             key_handle,
             message_parameter: message_parameter.map(pkcs11_proxy_ng_proto::MessageParameter::from),
+            input_data_null_len: None,
+            associated_data_null_len: None,
         };
         let resp = self
             .grpc
@@ -224,6 +226,7 @@ impl Pkcs11Client {
             mechanism: mechanism.map(pkcs11_proxy_ng_proto::Mechanism::from),
             wrapping_key_handle,
             key_handle,
+            input_data_null_len: None,
         };
         let resp = self
             .grpc

@@ -36,6 +36,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             data: data.to_vec(),
+            data_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.sign(req), true, resp => resp.signature)
     }
@@ -46,6 +47,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             part: part.to_vec(),
+            part_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.sign_update(req), true)
     }
@@ -96,6 +98,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             data: data.to_vec(),
+            data_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.sign_recover(req), true, resp => resp.signature)
     }
@@ -137,6 +140,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             signature: signature.to_vec(),
+            signature_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.verify_recover(req), true, resp => resp.data)
     }
@@ -180,6 +184,8 @@ impl Pkcs11Client {
             session_handle: session.0,
             data: data.to_vec(),
             signature: signature.to_vec(),
+            data_null_len: None,
+            signature_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.verify(req), true)
     }
@@ -190,6 +196,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             part: part.to_vec(),
+            part_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.verify_update(req), true)
     }
@@ -204,6 +211,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             signature: signature.to_vec(),
+            signature_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.verify_final(req), true)
     }

@@ -21,6 +21,7 @@ impl Pkcs11Client {
             mechanism: mechanism.map(Self::proto_mechanism),
             key_handle: key.0,
             signature: signature.to_vec(),
+            signature_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.verify_signature_init(req), true)
     }
@@ -37,6 +38,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             data: data.to_vec(),
+            data_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.verify_signature(req), true)
     }
@@ -53,6 +55,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             data_part: data_part.to_vec(),
+            data_part_null_len: None,
         };
         pkcs11_unary_ok!(self.grpc.verify_signature_update(req), true)
     }
