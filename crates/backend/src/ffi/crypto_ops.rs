@@ -193,11 +193,14 @@ impl FfiBackend {
         )
     }
 
-    // `CKF_VERIFY` is `CK_FLAGS` (`CK_ULONG`): u64 on 64-bit (where the cast is a
-    // no-op clippy flags) but u32 on 32-bit, where `as u64` is a needed widening.
-    #[allow(clippy::unnecessary_cast)]
     pub(super) fn ffi_verify_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
-        self.ffi_session_cancel(session, CkFlags(cryptoki_sys::CKF_VERIFY as u64))?;
+        // Forward C_VerifyInit(NULL mechanism) verbatim, like the five sibling
+        // init-cancel paths, so the module's native RV reaches the client
+        // (ADR-0010 transparent forwarding). A module that SEGVs on it crashes
+        // the daemon — its direct-load behavior, accepted by ADR-0010.
+        Self::call_unit(unsafe { (*self.func_list).C_VerifyInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+        })?;
         self.drop_mech_cache(session);
         Ok(())
     }
@@ -248,11 +251,14 @@ impl FfiBackend {
         )
     }
 
-    // `CKF_DIGEST` is `CK_FLAGS` (`CK_ULONG`): u64 on 64-bit (cast is a no-op
-    // clippy flags) but u32 on 32-bit, where `as u64` is a needed widening.
-    #[allow(clippy::unnecessary_cast)]
     pub(super) fn ffi_digest_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
-        self.ffi_session_cancel(session, CkFlags(cryptoki_sys::CKF_DIGEST as u64))?;
+        // Forward C_DigestInit(NULL mechanism) verbatim (ADR-0010): the module
+        // decides — softhsm2/kryoptic cancel the active digest, others reject.
+        // NSS softokn SEGVs on it; that is its direct-load behavior and an
+        // accepted shared-daemon trade-off per ADR-0010.
+        Self::call_unit(unsafe { (*self.func_list).C_DigestInit }, |function| unsafe {
+            function(Self::session_handle(session), std::ptr::null_mut())
+        })?;
         self.drop_mech_cache(session);
         Ok(())
     }

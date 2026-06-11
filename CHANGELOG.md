@@ -64,11 +64,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BackendProbe` is re-exported from the client crate.
 - `Pkcs11ProxyService::new()` gains a `MechanismRegistrySource`
   argument; test helpers use the embedded default.
+- Split the shim's 6078-line `helpers.rs` into a `helpers/` directory
+  module (no behavior change).
+- tonic features are now selected per-crate, so client-side artifacts
+  no longer pull in the server stack.
+- Workspace builds clippy-clean under `-D warnings`.
 
 ### Removed
 
 - `state::init_mechanism_registry` (the back-compat wrapper) — all
   callers migrated to `replace_mechanism_registry`.
+
+### Fixed
+
+- `C_VerifyInit`/`C_DigestInit` with a NULL mechanism pointer are now
+  forwarded verbatim to the backend module, like the five sibling init
+  paths, so the module's native `CK_RV` (`CKR_ARGUMENTS_BAD`,
+  `CKR_MECHANISM_INVALID`, or a native digest cancel) reaches the
+  client instead of a `C_SessionCancel`-derived result
+  (`CKR_FUNCTION_NOT_SUPPORTED` on 2.40 modules, `CKR_OK` on 3.0
+  modules). Establishes the transparent-forwarding-by-default policy;
+  see ADR-0010 for the decision and the accepted crash trade-off.
+- Shim two-call session caches are now evicted on the close attempt for
+  `C_CloseSession` / `C_CloseAllSessions`, regardless of the returned
+  `CK_RV`, matching the documented eviction contract. Failed closes no
+  longer leave stale per-session cache entries behind.
+- The OASIS coverage inventory script, the source-scan quality gates,
+  and ADR-0006 were updated for the `helpers.rs` → `helpers/` module
+  split, which had left them pointing at the removed file.
+- The CI MSRV job now installs Rust 1.88 to match the declared
+  `rust-version` (it previously built with 1.94, leaving the declared
+  MSRV unverified). The declared MSRV itself moved 1.85 → 1.88 for
+  let-chains; see `AGENTS.md` rule 5.
+
+### Security
+
+- Completed the 2026-06 security review remediation (52 findings, all
+  closed). Highlights: cross-client logical-login PIN validation and
+  per-request context ownership enforcement (ADR-0009); object handles
+  virtualized everywhere, including handles embedded in mechanism
+  parameters; injective mTLS identity keys and validation of every
+  certificate in a PEM bundle; zeroization of password material held in
+  FFI parameter backings; fork-safe current-thread runtime in the shim;
+  per-context concurrency caps; per-slot login/logout serialization
+  closing a first-login race; bind-time umask for UDS socket
+  permissions; `C_WaitForSlotEvent` authorization with unauthorized
+  slot events suppressed; strict `cargo-deny` policy.
 
 ## [0.1.0] - 2026-05-15
 

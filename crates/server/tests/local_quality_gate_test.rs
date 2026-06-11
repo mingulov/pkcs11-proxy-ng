@@ -457,7 +457,7 @@ fn env_driven_provider_fixtures_do_not_synthesize_shared_credentials() {
 #[test]
 fn shim_raw_slice_construction_stays_centralized() {
     let root = workspace_root();
-    let allowed = root.join("crates/shim/src/dispatch/general/helpers.rs");
+    let allowed = root.join("crates/shim/src/dispatch/general/helpers/mod.rs");
     let mut offenders = Vec::new();
 
     for source in rust_sources_under(&root.join("crates/shim/src")) {
@@ -478,7 +478,7 @@ fn shim_raw_slice_construction_stays_centralized() {
 
     assert!(
         offenders.is_empty(),
-        "raw FFI slice construction should stay in helpers.rs; offenders: {offenders:?}"
+        "raw FFI slice construction should stay in helpers/mod.rs; offenders: {offenders:?}"
     );
 }
 
@@ -3195,7 +3195,7 @@ fn oasis_inventory_classifies_unsafe_shim_parameter_read_gaps() {
                 .as_array()
                 .expect("shim read decision evidence should be an array")
                 .iter()
-                .any(|source| source == "crates/shim/src/dispatch/general/helpers.rs"),
+                .any(|source| source == "crates/shim/src/dispatch/general/helpers/mod.rs"),
             "{variant} should cite the shim reader implementation"
         );
     }
@@ -4825,4 +4825,40 @@ fn oasis_inventory_markdown_exposes_human_readable_matrices() {
          `sign_exact`, `sign_final_exact`, `sign_recover_exact`"
     ));
     assert!(markdown.contains("| CKM_AES_GCM | represented | yes |"));
+}
+
+#[test]
+fn ffi_init_cancel_paths_forward_null_mechanism_init_verbatim() {
+    // ADR-0010: a NULL-mechanism C_*Init must reach the backend module as the
+    // original call so its native CK_RV (or crash) is what the client
+    // observes. Routing any of these through C_SessionCancel substitutes
+    // proxy policy for module behavior and regresses transparency both ways
+    // (FUNCTION_NOT_SUPPORTED on 2.40 modules, CKR_OK on 3.0 modules).
+    let root = workspace_root();
+    let source = fs::read_to_string(root.join("crates/backend/src/ffi/crypto_ops.rs"))
+        .expect("crates/backend/src/ffi/crypto_ops.rs should be readable");
+
+    assert!(
+        !source.contains("ffi_session_cancel"),
+        "init-cancel paths in crypto_ops.rs must not route through C_SessionCancel (ADR-0010)"
+    );
+    for (cancel_fn, forwarded_init) in [
+        ("ffi_sign_init_cancel", "C_SignInit"),
+        ("ffi_sign_recover_init_cancel", "C_SignRecoverInit"),
+        ("ffi_verify_init_cancel", "C_VerifyInit"),
+        ("ffi_verify_recover_init_cancel", "C_VerifyRecoverInit"),
+        ("ffi_digest_init_cancel", "C_DigestInit"),
+        ("ffi_encrypt_init_cancel", "C_EncryptInit"),
+        ("ffi_decrypt_init_cancel", "C_DecryptInit"),
+    ] {
+        let start = source
+            .find(&format!("fn {cancel_fn}("))
+            .unwrap_or_else(|| panic!("{cancel_fn} should exist in crypto_ops.rs"));
+        let body = &source[start..];
+        let body = &body[..body[1..].find("pub(super) fn ").map(|i| i + 1).unwrap_or(body.len())];
+        assert!(
+            body.contains(forwarded_init) && body.contains("null_mut"),
+            "{cancel_fn} must forward {forwarded_init}(NULL mechanism) verbatim (ADR-0010)"
+        );
+    }
 }
