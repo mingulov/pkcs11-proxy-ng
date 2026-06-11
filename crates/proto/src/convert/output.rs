@@ -650,4 +650,15 @@ mod tests {
         assert_eq!(decoded.encrypted_data_null_len, None);
         assert_eq!(decoded.encrypted_data, b"ciphertext");
     }
+
+    #[test]
+    fn null_len_present_with_zero_is_distinct_from_absent() {
+        // NULL pointer with claimed length 0 is a real client input class; the
+        // wire must distinguish Some(0) (NULL, len 0) from None (valid pointer).
+        let req =
+            v1_proto::ByteOutputExactRequest { input_data_null_len: Some(0), ..Default::default() };
+        let bytes = prost::Message::encode_to_vec(&req);
+        let back = v1_proto::ByteOutputExactRequest::decode(&bytes[..]).unwrap();
+        assert_eq!(back.input_data_null_len, Some(0));
+    }
 }
