@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
+use pkcs11_proxy_ng_types::{CkInBuf, CkObjectHandle, CkRv};
 
 use super::super::ck_result_to_rv;
 use super::super::convert_template;
@@ -128,7 +128,13 @@ pub(crate) async fn unwrap_key(
     let wrapped_key = req.wrapped_key;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.unwrap_key(session, &mechanism, unwrapping_key, &wrapped_key, &template)
+        backend.unwrap_key(
+            session,
+            &mechanism,
+            unwrapping_key,
+            CkInBuf::Bytes(&wrapped_key),
+            &template,
+        )
     })
     .await?;
 

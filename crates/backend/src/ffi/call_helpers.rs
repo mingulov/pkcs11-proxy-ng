@@ -38,6 +38,11 @@ impl FfiBackend {
         len as cryptoki_sys::CK_ULONG
     }
 
+    #[inline]
+    pub(super) const fn ulong_len_u64(len: u64) -> cryptoki_sys::CK_ULONG {
+        len as cryptoki_sys::CK_ULONG
+    }
+
     /// Map a cryptoki_sys CK_RV to CkResult.
     #[inline]
     pub(super) fn ck_result(rv: cryptoki_sys::CK_RV) -> CkResult<()> {

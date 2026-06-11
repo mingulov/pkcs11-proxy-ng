@@ -156,12 +156,13 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
         template: &[CkAttribute],
-        ciphertext: &[u8],
+        ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         use super::ffi_conversion::FfiAttrs;
 
         let ffi_attrs = FfiAttrs::from_slice(template);
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
+        let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
 
         call_3x_fn!(
@@ -173,8 +174,8 @@ impl FfiBackend {
             Self::object_handle(private_key),
             Self::ffi_attr_ptr(&ffi_attrs),
             Self::ffi_attr_len(&ffi_attrs),
-            ciphertext.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-            Self::ulong_len(ciphertext.len()),
+            ct_ptr as *mut cryptoki_sys::CK_BYTE,
+            Self::ulong_len_u64(ct_len),
             &mut key_handle
         )?;
 

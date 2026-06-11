@@ -5,7 +5,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::output::byte_output_function_from_i32;
 use pkcs11_proxy_ng_types::{
-    ByteOutputFunction, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
+    ByteOutputFunction, CkInBuf, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
 };
 
 use super::super::context_manager::{ClientContextId, ContextManager};
@@ -122,7 +122,7 @@ pub(super) async fn byte_output_exact(
             let backend = backend_ref.clone();
             let (result, mechanism_out) = if function == ByteOutputFunction::Encrypt {
                 let result = spawn_backend(move || {
-                    backend.encrypt_exact_with_output(session, &input_data, &spec)
+                    backend.encrypt_exact_with_output(session, CkInBuf::Bytes(&input_data), &spec)
                 })
                 .await?;
                 match result {
@@ -173,26 +173,27 @@ fn dispatch_session_data(
     data: &[u8],
     spec: &CkOutputBufferSpec,
 ) -> pkcs11_proxy_ng_types::CkResult<pkcs11_proxy_ng_types::CkOutputBufferResult> {
+    let buf = CkInBuf::Bytes(data);
     match function {
-        ByteOutputFunction::Sign => backend.sign_exact(session, data, spec),
-        ByteOutputFunction::SignRecover => backend.sign_recover_exact(session, data, spec),
-        ByteOutputFunction::VerifyRecover => backend.verify_recover_exact(session, data, spec),
-        ByteOutputFunction::Digest => backend.digest_exact(session, data, spec),
-        ByteOutputFunction::Encrypt => backend.encrypt_exact(session, data, spec),
-        ByteOutputFunction::EncryptUpdate => backend.encrypt_update_exact(session, data, spec),
-        ByteOutputFunction::Decrypt => backend.decrypt_exact(session, data, spec),
-        ByteOutputFunction::DecryptUpdate => backend.decrypt_update_exact(session, data, spec),
+        ByteOutputFunction::Sign => backend.sign_exact(session, buf, spec),
+        ByteOutputFunction::SignRecover => backend.sign_recover_exact(session, buf, spec),
+        ByteOutputFunction::VerifyRecover => backend.verify_recover_exact(session, buf, spec),
+        ByteOutputFunction::Digest => backend.digest_exact(session, buf, spec),
+        ByteOutputFunction::Encrypt => backend.encrypt_exact(session, buf, spec),
+        ByteOutputFunction::EncryptUpdate => backend.encrypt_update_exact(session, buf, spec),
+        ByteOutputFunction::Decrypt => backend.decrypt_exact(session, buf, spec),
+        ByteOutputFunction::DecryptUpdate => backend.decrypt_update_exact(session, buf, spec),
         ByteOutputFunction::DigestEncryptUpdate => {
-            backend.digest_encrypt_update_exact(session, data, spec)
+            backend.digest_encrypt_update_exact(session, buf, spec)
         }
         ByteOutputFunction::DecryptDigestUpdate => {
-            backend.decrypt_digest_update_exact(session, data, spec)
+            backend.decrypt_digest_update_exact(session, buf, spec)
         }
         ByteOutputFunction::SignEncryptUpdate => {
-            backend.sign_encrypt_update_exact(session, data, spec)
+            backend.sign_encrypt_update_exact(session, buf, spec)
         }
         ByteOutputFunction::DecryptVerifyUpdate => {
-            backend.decrypt_verify_update_exact(session, data, spec)
+            backend.decrypt_verify_update_exact(session, buf, spec)
         }
         // See `dispatch_session_only` for the rationale: conservative
         // CKR_FUNCTION_NOT_SUPPORTED instead of a panic across gRPC.

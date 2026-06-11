@@ -43,8 +43,10 @@ pub(super) async fn decrypt_digest_update(
 
     let encrypted_part = req.encrypted_part;
     let backend = backend_ref.clone();
-    let result =
-        spawn_backend(move || backend.decrypt_digest_update(session, &encrypted_part)).await?;
+    let result = spawn_backend(move || {
+        backend.decrypt_digest_update(session, CkInBuf::Bytes(&encrypted_part))
+    })
+    .await?;
     let (ck_rv, part) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptDigestUpdateResponse {
         ck_rv,
@@ -71,8 +73,10 @@ pub(super) async fn decrypt_verify_update(
 
     let encrypted_part = req.encrypted_part;
     let backend = backend_ref.clone();
-    let result =
-        spawn_backend(move || backend.decrypt_verify_update(session, &encrypted_part)).await?;
+    let result = spawn_backend(move || {
+        backend.decrypt_verify_update(session, CkInBuf::Bytes(&encrypted_part))
+    })
+    .await?;
     let (ck_rv, part) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptVerifyUpdateResponse {
         ck_rv,

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
+use pkcs11_proxy_ng_types::{CkInBuf, CkObjectHandle, CkRv};
 
 use super::super::convert_template;
 use super::super::service_utils::{
@@ -59,7 +59,7 @@ pub(crate) async fn wrap_key_authenticated(
     let aad = req.associated_data;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.wrap_key_authenticated(session, &mechanism, wrapping_key, key, &aad)
+        backend.wrap_key_authenticated(session, &mechanism, wrapping_key, key, CkInBuf::Bytes(&aad))
     })
     .await?;
 
@@ -138,9 +138,9 @@ pub(crate) async fn unwrap_key_authenticated(
             session,
             &mechanism,
             unwrapping_key,
-            &wrapped_key,
+            CkInBuf::Bytes(&wrapped_key),
             &template,
-            &aad,
+            CkInBuf::Bytes(&aad),
         )
     })
     .await?;

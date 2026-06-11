@@ -357,9 +357,11 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        aad: &[u8],
-        plaintext: &[u8],
+        aad: CkInBuf<'_>,
+        plaintext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+        let (pt_ptr, pt_len) = plaintext.as_ptr_len();
         two_call_message!(
             self,
             C_EncryptMessage,
@@ -368,10 +370,10 @@ impl FfiBackend {
                 Self::session_handle(session),
                 parameter.as_mut_ptr() as *mut _,
                 Self::ulong_len(parameter.len()),
-                aad.as_ptr() as *mut _,
-                Self::ulong_len(aad.len()),
-                plaintext.as_ptr() as *mut _,
-                Self::ulong_len(plaintext.len()),
+                aad_ptr as *mut _,
+                Self::ulong_len_u64(aad_len),
+                pt_ptr as *mut _,
+                Self::ulong_len_u64(pt_len),
             ]
         )
     }
@@ -383,18 +385,19 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        aad: &[u8],
+        aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
         let rv = unsafe {
             f(
                 Self::session_handle(session),
                 parameter.as_mut_ptr() as *mut _,
                 Self::ulong_len(parameter.len()),
-                aad.as_ptr() as *mut _,
-                Self::ulong_len(aad.len()),
+                aad_ptr as *mut _,
+                Self::ulong_len_u64(aad_len),
             )
         };
         Self::ck_result(rv)?;
@@ -408,9 +411,10 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        plaintext_part: &[u8],
+        plaintext_part: CkInBuf<'_>,
         flags: CkFlags,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let (pt_ptr, pt_len) = plaintext_part.as_ptr_len();
         two_call_message!(
             self,
             C_EncryptMessageNext,
@@ -419,8 +423,8 @@ impl FfiBackend {
                 Self::session_handle(session),
                 parameter.as_mut_ptr() as *mut _,
                 Self::ulong_len(parameter.len()),
-                plaintext_part.as_ptr() as *mut _,
-                Self::ulong_len(plaintext_part.len()),
+                pt_ptr as *mut _,
+                Self::ulong_len_u64(pt_len),
             ],
             [flags.0 as cryptoki_sys::CK_FLAGS,]
         )
@@ -433,9 +437,11 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        aad: &[u8],
-        ciphertext: &[u8],
+        aad: CkInBuf<'_>,
+        ciphertext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+        let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         two_call_message!(
             self,
             C_DecryptMessage,
@@ -444,10 +450,10 @@ impl FfiBackend {
                 Self::session_handle(session),
                 parameter.as_mut_ptr() as *mut _,
                 Self::ulong_len(parameter.len()),
-                aad.as_ptr() as *mut _,
-                Self::ulong_len(aad.len()),
-                ciphertext.as_ptr() as *mut _,
-                Self::ulong_len(ciphertext.len()),
+                aad_ptr as *mut _,
+                Self::ulong_len_u64(aad_len),
+                ct_ptr as *mut _,
+                Self::ulong_len_u64(ct_len),
             ]
         )
     }
@@ -459,18 +465,19 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        aad: &[u8],
+        aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
         let rv = unsafe {
             f(
                 Self::session_handle(session),
                 parameter.as_mut_ptr() as *mut _,
                 Self::ulong_len(parameter.len()),
-                aad.as_ptr() as *mut _,
-                Self::ulong_len(aad.len()),
+                aad_ptr as *mut _,
+                Self::ulong_len_u64(aad_len),
             )
         };
         Self::ck_result(rv)?;
@@ -484,9 +491,10 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        ciphertext_part: &[u8],
+        ciphertext_part: CkInBuf<'_>,
         flags: CkFlags,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let (ct_ptr, ct_len) = ciphertext_part.as_ptr_len();
         two_call_message!(
             self,
             C_DecryptMessageNext,
@@ -495,8 +503,8 @@ impl FfiBackend {
                 Self::session_handle(session),
                 parameter.as_mut_ptr() as *mut _,
                 Self::ulong_len(parameter.len()),
-                ciphertext_part.as_ptr() as *mut _,
-                Self::ulong_len(ciphertext_part.len()),
+                ct_ptr as *mut _,
+                Self::ulong_len_u64(ct_len),
             ],
             [flags.0 as cryptoki_sys::CK_FLAGS,]
         )
@@ -509,8 +517,9 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        data: &[u8],
+        data: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        let (data_ptr, data_len) = data.as_ptr_len();
         two_call_message!(
             self,
             C_SignMessage,
@@ -519,8 +528,8 @@ impl FfiBackend {
                 Self::session_handle(session),
                 parameter.as_mut_ptr() as *mut _,
                 Self::ulong_len(parameter.len()),
-                data.as_ptr() as *mut _,
-                Self::ulong_len(data.len()),
+                data_ptr as *mut _,
+                Self::ulong_len_u64(data_len),
             ]
         )
     }
@@ -555,11 +564,13 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
         request_signature: bool,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_SignMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+
+        let (dp_ptr, dp_len) = data_part.as_ptr_len();
 
         if !request_signature {
             // Feed data — pSignature is NULL, pulSignatureLen is NULL
@@ -568,8 +579,8 @@ impl FfiBackend {
                     Self::session_handle(session),
                     parameter.as_mut_ptr() as *mut _,
                     Self::ulong_len(parameter.len()),
-                    data_part.as_ptr() as *mut _,
-                    Self::ulong_len(data_part.len()),
+                    dp_ptr as *mut _,
+                    Self::ulong_len_u64(dp_len),
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
                 )
@@ -588,8 +599,8 @@ impl FfiBackend {
                 Self::session_handle(session),
                 parameter.as_mut_ptr() as *mut _,
                 Self::ulong_len(parameter.len()),
-                data_part.as_ptr() as *mut _,
-                Self::ulong_len(data_part.len()),
+                dp_ptr as *mut _,
+                Self::ulong_len_u64(dp_len),
             ]
         )
     }
@@ -601,9 +612,11 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data: &[u8],
-        signature: &[u8],
+        data: CkInBuf<'_>,
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
+        let (data_ptr, data_len) = data.as_ptr_len();
+        let (sig_ptr, sig_len) = signature.as_ptr_len();
         call_3x_fn!(
             self,
             func_list_3_0,
@@ -611,10 +624,10 @@ impl FfiBackend {
             Self::session_handle(session),
             parameter.as_ptr() as *mut _,
             Self::ulong_len(parameter.len()),
-            data.as_ptr() as *mut _,
-            Self::ulong_len(data.len()),
-            signature.as_ptr() as *mut _,
-            Self::ulong_len(signature.len())
+            data_ptr as *mut _,
+            Self::ulong_len_u64(data_len),
+            sig_ptr as *mut _,
+            Self::ulong_len_u64(sig_len)
         )
     }
 
@@ -645,15 +658,17 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
         is_final: bool,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_VerifyMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (dp_ptr, dp_len) = data_part.as_ptr_len();
+        let (raw_sig_ptr, raw_sig_len) = signature.as_ptr_len();
         let (sig_ptr, sig_len) = if is_final {
-            (signature.as_ptr() as *mut _, Self::ulong_len(signature.len()))
+            (raw_sig_ptr as *mut _, Self::ulong_len_u64(raw_sig_len))
         } else {
             (std::ptr::null_mut(), 0)
         };
@@ -663,8 +678,8 @@ impl FfiBackend {
                 Self::session_handle(session),
                 parameter.as_ptr() as *mut _,
                 Self::ulong_len(parameter.len()),
-                data_part.as_ptr() as *mut _,
-                Self::ulong_len(data_part.len()),
+                dp_ptr as *mut _,
+                Self::ulong_len_u64(dp_len),
                 sig_ptr,
                 sig_len,
             )
@@ -678,14 +693,16 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        aad: &[u8],
-        plaintext: &[u8],
+        aad: CkInBuf<'_>,
+        plaintext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+        let (pt_ptr, pt_len) = plaintext.as_ptr_len();
         Self::single_call_parameter_output_exact(
             output_spec,
             parameter,
@@ -695,10 +712,10 @@ impl FfiBackend {
                     Self::session_handle(session),
                     param_ptr as *mut _,
                     param_len,
-                    aad.as_ptr() as *mut _,
-                    Self::ulong_len(aad.len()),
-                    plaintext.as_ptr() as *mut _,
-                    Self::ulong_len(plaintext.len()),
+                    aad_ptr as *mut _,
+                    Self::ulong_len_u64(aad_len),
+                    pt_ptr as *mut _,
+                    Self::ulong_len_u64(pt_len),
                     output,
                     output_len,
                 )
@@ -710,14 +727,16 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        aad: &[u8],
-        ciphertext: &[u8],
+        aad: CkInBuf<'_>,
+        ciphertext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+        let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         Self::single_call_parameter_output_exact(
             output_spec,
             parameter,
@@ -727,10 +746,10 @@ impl FfiBackend {
                     Self::session_handle(session),
                     param_ptr as *mut _,
                     param_len,
-                    aad.as_ptr() as *mut _,
-                    Self::ulong_len(aad.len()),
-                    ciphertext.as_ptr() as *mut _,
-                    Self::ulong_len(ciphertext.len()),
+                    aad_ptr as *mut _,
+                    Self::ulong_len_u64(aad_len),
+                    ct_ptr as *mut _,
+                    Self::ulong_len_u64(ct_len),
                     output,
                     output_len,
                 )
@@ -742,13 +761,14 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data: &[u8],
+        data: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_SignMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (data_ptr, data_len) = data.as_ptr_len();
         Self::single_call_parameter_output_exact(
             output_spec,
             parameter,
@@ -758,8 +778,8 @@ impl FfiBackend {
                     Self::session_handle(session),
                     param_ptr as *mut _,
                     param_len,
-                    data.as_ptr() as *mut _,
-                    Self::ulong_len(data.len()),
+                    data_ptr as *mut _,
+                    Self::ulong_len_u64(data_len),
                     output,
                     output_len,
                 )
@@ -771,7 +791,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        plaintext_part: &[u8],
+        plaintext_part: CkInBuf<'_>,
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
@@ -779,6 +799,7 @@ impl FfiBackend {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (pt_ptr, pt_len) = plaintext_part.as_ptr_len();
         Self::single_call_parameter_output_exact(
             output_spec,
             parameter,
@@ -788,8 +809,8 @@ impl FfiBackend {
                     Self::session_handle(session),
                     param_ptr as *mut _,
                     param_len,
-                    plaintext_part.as_ptr() as *mut _,
-                    Self::ulong_len(plaintext_part.len()),
+                    pt_ptr as *mut _,
+                    Self::ulong_len_u64(pt_len),
                     output,
                     output_len,
                     flags.0 as cryptoki_sys::CK_FLAGS,
@@ -802,7 +823,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        ciphertext_part: &[u8],
+        ciphertext_part: CkInBuf<'_>,
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
@@ -810,6 +831,7 @@ impl FfiBackend {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (ct_ptr, ct_len) = ciphertext_part.as_ptr_len();
         Self::single_call_parameter_output_exact(
             output_spec,
             parameter,
@@ -819,8 +841,8 @@ impl FfiBackend {
                     Self::session_handle(session),
                     param_ptr as *mut _,
                     param_len,
-                    ciphertext_part.as_ptr() as *mut _,
-                    Self::ulong_len(ciphertext_part.len()),
+                    ct_ptr as *mut _,
+                    Self::ulong_len_u64(ct_len),
                     output,
                     output_len,
                     flags.0 as cryptoki_sys::CK_FLAGS,
@@ -833,13 +855,14 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_SignMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (dp_ptr, dp_len) = data_part.as_ptr_len();
         Self::single_call_parameter_output_exact(
             output_spec,
             parameter,
@@ -849,8 +872,8 @@ impl FfiBackend {
                     Self::session_handle(session),
                     param_ptr as *mut _,
                     param_len,
-                    data_part.as_ptr() as *mut _,
-                    Self::ulong_len(data_part.len()),
+                    dp_ptr as *mut _,
+                    Self::ulong_len_u64(dp_len),
                     output,
                     output_len,
                 )
@@ -1167,13 +1190,15 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &MessageParameter,
-        aad: &[u8],
-        plaintext: &[u8],
+        aad: CkInBuf<'_>,
+        plaintext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+        let (pt_ptr, pt_len) = plaintext.as_ptr_len();
         match msg_param {
             MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
                 gcm,
@@ -1184,10 +1209,10 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        aad.as_ptr() as *mut _,
-                        Self::ulong_len(aad.len()),
-                        plaintext.as_ptr() as *mut _,
-                        Self::ulong_len(plaintext.len()),
+                        aad_ptr as *mut _,
+                        Self::ulong_len_u64(aad_len),
+                        pt_ptr as *mut _,
+                        Self::ulong_len_u64(pt_len),
                         output,
                         output_len,
                     )
@@ -1202,10 +1227,10 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        aad.as_ptr() as *mut _,
-                        Self::ulong_len(aad.len()),
-                        plaintext.as_ptr() as *mut _,
-                        Self::ulong_len(plaintext.len()),
+                        aad_ptr as *mut _,
+                        Self::ulong_len_u64(aad_len),
+                        pt_ptr as *mut _,
+                        Self::ulong_len_u64(pt_len),
                         output,
                         output_len,
                     )
@@ -1221,10 +1246,10 @@ impl FfiBackend {
                             params as *mut _ as *mut _,
                             std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
                                 as cryptoki_sys::CK_ULONG,
-                            aad.as_ptr() as *mut _,
-                            Self::ulong_len(aad.len()),
-                            plaintext.as_ptr() as *mut _,
-                            Self::ulong_len(plaintext.len()),
+                            aad_ptr as *mut _,
+                            Self::ulong_len_u64(aad_len),
+                            pt_ptr as *mut _,
+                            Self::ulong_len_u64(pt_len),
                             output,
                             output_len,
                         )
@@ -1239,13 +1264,15 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &MessageParameter,
-        aad: &[u8],
-        ciphertext: &[u8],
+        aad: CkInBuf<'_>,
+        ciphertext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+        let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         match msg_param {
             MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
                 gcm,
@@ -1256,10 +1283,10 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        aad.as_ptr() as *mut _,
-                        Self::ulong_len(aad.len()),
-                        ciphertext.as_ptr() as *mut _,
-                        Self::ulong_len(ciphertext.len()),
+                        aad_ptr as *mut _,
+                        Self::ulong_len_u64(aad_len),
+                        ct_ptr as *mut _,
+                        Self::ulong_len_u64(ct_len),
                         output,
                         output_len,
                     )
@@ -1274,10 +1301,10 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        aad.as_ptr() as *mut _,
-                        Self::ulong_len(aad.len()),
-                        ciphertext.as_ptr() as *mut _,
-                        Self::ulong_len(ciphertext.len()),
+                        aad_ptr as *mut _,
+                        Self::ulong_len_u64(aad_len),
+                        ct_ptr as *mut _,
+                        Self::ulong_len_u64(ct_len),
                         output,
                         output_len,
                     )
@@ -1293,10 +1320,10 @@ impl FfiBackend {
                             params as *mut _ as *mut _,
                             std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
                                 as cryptoki_sys::CK_ULONG,
-                            aad.as_ptr() as *mut _,
-                            Self::ulong_len(aad.len()),
-                            ciphertext.as_ptr() as *mut _,
-                            Self::ulong_len(ciphertext.len()),
+                            aad_ptr as *mut _,
+                            Self::ulong_len_u64(aad_len),
+                            ct_ptr as *mut _,
+                            Self::ulong_len_u64(ct_len),
                             output,
                             output_len,
                         )
@@ -1311,12 +1338,13 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &MessageParameter,
-        data: &[u8],
+        data: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_SignMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (data_ptr, data_len) = data.as_ptr_len();
         match msg_param {
             MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
                 gcm,
@@ -1327,8 +1355,8 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        data.as_ptr() as *mut _,
-                        Self::ulong_len(data.len()),
+                        data_ptr as *mut _,
+                        Self::ulong_len_u64(data_len),
                         output,
                         output_len,
                     )
@@ -1343,8 +1371,8 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        data.as_ptr() as *mut _,
-                        Self::ulong_len(data.len()),
+                        data_ptr as *mut _,
+                        Self::ulong_len_u64(data_len),
                         output,
                         output_len,
                     )
@@ -1360,8 +1388,8 @@ impl FfiBackend {
                             params as *mut _ as *mut _,
                             std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
                                 as cryptoki_sys::CK_ULONG,
-                            data.as_ptr() as *mut _,
-                            Self::ulong_len(data.len()),
+                            data_ptr as *mut _,
+                            Self::ulong_len_u64(data_len),
                             output,
                             output_len,
                         )
@@ -1376,13 +1404,14 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &MessageParameter,
-        plaintext_part: &[u8],
+        plaintext_part: CkInBuf<'_>,
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (pt_ptr, pt_len) = plaintext_part.as_ptr_len();
         match msg_param {
             MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
                 gcm,
@@ -1393,8 +1422,8 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        plaintext_part.as_ptr() as *mut _,
-                        Self::ulong_len(plaintext_part.len()),
+                        pt_ptr as *mut _,
+                        Self::ulong_len_u64(pt_len),
                         output,
                         output_len,
                         flags.0 as cryptoki_sys::CK_FLAGS,
@@ -1410,8 +1439,8 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        plaintext_part.as_ptr() as *mut _,
-                        Self::ulong_len(plaintext_part.len()),
+                        pt_ptr as *mut _,
+                        Self::ulong_len_u64(pt_len),
                         output,
                         output_len,
                         flags.0 as cryptoki_sys::CK_FLAGS,
@@ -1428,8 +1457,8 @@ impl FfiBackend {
                             params as *mut _ as *mut _,
                             std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
                                 as cryptoki_sys::CK_ULONG,
-                            plaintext_part.as_ptr() as *mut _,
-                            Self::ulong_len(plaintext_part.len()),
+                            pt_ptr as *mut _,
+                            Self::ulong_len_u64(pt_len),
                             output,
                             output_len,
                             flags.0 as cryptoki_sys::CK_FLAGS,
@@ -1445,13 +1474,14 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &MessageParameter,
-        ciphertext_part: &[u8],
+        ciphertext_part: CkInBuf<'_>,
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (ct_ptr, ct_len) = ciphertext_part.as_ptr_len();
         match msg_param {
             MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
                 gcm,
@@ -1462,8 +1492,8 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        ciphertext_part.as_ptr() as *mut _,
-                        Self::ulong_len(ciphertext_part.len()),
+                        ct_ptr as *mut _,
+                        Self::ulong_len_u64(ct_len),
                         output,
                         output_len,
                         flags.0 as cryptoki_sys::CK_FLAGS,
@@ -1479,8 +1509,8 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        ciphertext_part.as_ptr() as *mut _,
-                        Self::ulong_len(ciphertext_part.len()),
+                        ct_ptr as *mut _,
+                        Self::ulong_len_u64(ct_len),
                         output,
                         output_len,
                         flags.0 as cryptoki_sys::CK_FLAGS,
@@ -1497,8 +1527,8 @@ impl FfiBackend {
                             params as *mut _ as *mut _,
                             std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
                                 as cryptoki_sys::CK_ULONG,
-                            ciphertext_part.as_ptr() as *mut _,
-                            Self::ulong_len(ciphertext_part.len()),
+                            ct_ptr as *mut _,
+                            Self::ulong_len_u64(ct_len),
                             output,
                             output_len,
                             flags.0 as cryptoki_sys::CK_FLAGS,
@@ -1514,12 +1544,13 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &MessageParameter,
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_SignMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+        let (dp_ptr, dp_len) = data_part.as_ptr_len();
         match msg_param {
             MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
                 gcm,
@@ -1530,8 +1561,8 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        data_part.as_ptr() as *mut _,
-                        Self::ulong_len(data_part.len()),
+                        dp_ptr as *mut _,
+                        Self::ulong_len_u64(dp_len),
                         output,
                         output_len,
                     )
@@ -1546,8 +1577,8 @@ impl FfiBackend {
                         params as *mut _ as *mut _,
                         std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
                             as cryptoki_sys::CK_ULONG,
-                        data_part.as_ptr() as *mut _,
-                        Self::ulong_len(data_part.len()),
+                        dp_ptr as *mut _,
+                        Self::ulong_len_u64(dp_len),
                         output,
                         output_len,
                     )
@@ -1563,8 +1594,8 @@ impl FfiBackend {
                             params as *mut _ as *mut _,
                             std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
                                 as cryptoki_sys::CK_ULONG,
-                            data_part.as_ptr() as *mut _,
-                            Self::ulong_len(data_part.len()),
+                            dp_ptr as *mut _,
+                            Self::ulong_len_u64(dp_len),
                             output,
                             output_len,
                         )

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_types::CkInBuf;
 
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
@@ -77,7 +78,10 @@ pub(crate) async fn verify(
     let data = req.data;
     let signature = req.signature;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.verify(session, &data, &signature)).await?;
+    let result = spawn_backend(move || {
+        backend.verify(session, CkInBuf::Bytes(&data), CkInBuf::Bytes(&signature))
+    })
+    .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifyResponse { ck_rv: ck_rv_only(result) }))
 }
 
@@ -98,7 +102,8 @@ pub(crate) async fn verify_update(
 
     let part = req.part;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.verify_update(session, &part)).await?;
+    let result =
+        spawn_backend(move || backend.verify_update(session, CkInBuf::Bytes(&part))).await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifyUpdateResponse { ck_rv: ck_rv_only(result) }))
 }
 
@@ -119,7 +124,8 @@ pub(crate) async fn verify_final(
 
     let signature = req.signature;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.verify_final(session, &signature)).await?;
+    let result =
+        spawn_backend(move || backend.verify_final(session, CkInBuf::Bytes(&signature))).await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifyFinalResponse { ck_rv: ck_rv_only(result) }))
 }
 
@@ -199,7 +205,8 @@ pub(crate) async fn verify_recover(
 
     let signature = req.signature;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.verify_recover(session, &signature)).await?;
+    let result =
+        spawn_backend(move || backend.verify_recover(session, CkInBuf::Bytes(&signature))).await?;
     let (ck_rv, data) = super::super::ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifyRecoverResponse {
         ck_rv,

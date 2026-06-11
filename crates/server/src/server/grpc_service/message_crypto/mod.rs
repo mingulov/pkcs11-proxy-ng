@@ -544,9 +544,15 @@ pub(crate) async fn encrypt_message(
     let aad = req.associated_data;
     let plaintext = req.plaintext;
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.encrypt_message(session, &mut parameter, &aad, &plaintext))
-            .await?;
+    let result = spawn_backend(move || {
+        backend.encrypt_message(
+            session,
+            &mut parameter,
+            CkInBuf::Bytes(&aad),
+            CkInBuf::Bytes(&plaintext),
+        )
+    })
+    .await?;
 
     match result {
         Ok((parameter_out, ciphertext)) => {
@@ -589,8 +595,10 @@ pub(crate) async fn encrypt_message_begin(
     let mut parameter = req.parameter;
     let aad = req.associated_data;
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.encrypt_message_begin(session, &mut parameter, &aad)).await?;
+    let result = spawn_backend(move || {
+        backend.encrypt_message_begin(session, &mut parameter, CkInBuf::Bytes(&aad))
+    })
+    .await?;
 
     match result {
         Ok(parameter_out) => {
@@ -634,7 +642,12 @@ pub(crate) async fn encrypt_message_next(
     let flags = CkFlags(req.flags);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.encrypt_message_next(session, &mut parameter, &plaintext_part, flags)
+        backend.encrypt_message_next(
+            session,
+            &mut parameter,
+            CkInBuf::Bytes(&plaintext_part),
+            flags,
+        )
     })
     .await?;
 
@@ -681,9 +694,15 @@ pub(crate) async fn decrypt_message(
     let aad = req.associated_data;
     let ciphertext = req.ciphertext;
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.decrypt_message(session, &mut parameter, &aad, &ciphertext))
-            .await?;
+    let result = spawn_backend(move || {
+        backend.decrypt_message(
+            session,
+            &mut parameter,
+            CkInBuf::Bytes(&aad),
+            CkInBuf::Bytes(&ciphertext),
+        )
+    })
+    .await?;
 
     match result {
         Ok((parameter_out, plaintext)) => {
@@ -726,8 +745,10 @@ pub(crate) async fn decrypt_message_begin(
     let mut parameter = req.parameter;
     let aad = req.associated_data;
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.decrypt_message_begin(session, &mut parameter, &aad)).await?;
+    let result = spawn_backend(move || {
+        backend.decrypt_message_begin(session, &mut parameter, CkInBuf::Bytes(&aad))
+    })
+    .await?;
 
     match result {
         Ok(parameter_out) => {
@@ -771,7 +792,12 @@ pub(crate) async fn decrypt_message_next(
     let flags = CkFlags(req.flags);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.decrypt_message_next(session, &mut parameter, &ciphertext_part, flags)
+        backend.decrypt_message_next(
+            session,
+            &mut parameter,
+            CkInBuf::Bytes(&ciphertext_part),
+            flags,
+        )
     })
     .await?;
 
@@ -818,7 +844,8 @@ pub(crate) async fn sign_message(
     let data = req.data;
     let backend = Arc::clone(backend_ref);
     let result =
-        spawn_backend(move || backend.sign_message(session, &mut parameter, &data)).await?;
+        spawn_backend(move || backend.sign_message(session, &mut parameter, CkInBuf::Bytes(&data)))
+            .await?;
 
     match result {
         Ok((parameter_out, signature)) => {
@@ -902,7 +929,12 @@ pub(crate) async fn sign_message_next(
     let request_signature = req.request_signature;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.sign_message_next(session, &mut parameter, &data_part, request_signature)
+        backend.sign_message_next(
+            session,
+            &mut parameter,
+            CkInBuf::Bytes(&data_part),
+            request_signature,
+        )
     })
     .await?;
 
@@ -945,9 +977,15 @@ pub(crate) async fn verify_message(
     let data = req.data;
     let signature = req.signature;
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.verify_message(session, &parameter, &data, &signature))
-            .await?;
+    let result = spawn_backend(move || {
+        backend.verify_message(
+            session,
+            &parameter,
+            CkInBuf::Bytes(&data),
+            CkInBuf::Bytes(&signature),
+        )
+    })
+    .await?;
 
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifyMessageResponse { ck_rv: ck_rv_only(result) }))
 }
@@ -1011,7 +1049,13 @@ pub(crate) async fn verify_message_next(
     let signature = req.signature;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.verify_message_next(session, &parameter, &data_part, is_final, &signature)
+        backend.verify_message_next(
+            session,
+            &parameter,
+            CkInBuf::Bytes(&data_part),
+            is_final,
+            CkInBuf::Bytes(&signature),
+        )
     })
     .await?;
 

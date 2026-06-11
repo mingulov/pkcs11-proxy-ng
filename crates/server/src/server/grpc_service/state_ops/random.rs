@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_types::CkInBuf;
 
 use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::ck_result_to_rv;
@@ -54,7 +55,7 @@ pub(super) async fn seed_random(
 
     let seed = req.seed;
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.seed_random(session, &seed)).await?;
+    let result = spawn_backend(move || backend.seed_random(session, CkInBuf::Bytes(&seed))).await?;
 
     Ok(Response::new(pkcs11_proxy_ng_proto::SeedRandomResponse { ck_rv: ck_rv_only(result) }))
 }

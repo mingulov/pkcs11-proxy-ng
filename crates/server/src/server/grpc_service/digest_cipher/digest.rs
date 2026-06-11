@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_types::CkInBuf;
 
 use super::super::ck_result_to_rv;
 use super::super::service_utils::{
@@ -65,7 +66,7 @@ pub(crate) async fn digest(
 
     let data = req.data;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.digest(session, &data)).await?;
+    let result = spawn_backend(move || backend.digest(session, CkInBuf::Bytes(&data))).await?;
     let (ck_rv, digest) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestResponse {
         ck_rv,
@@ -90,7 +91,8 @@ pub(crate) async fn digest_update(
 
     let part = req.part;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.digest_update(session, &part)).await?;
+    let result =
+        spawn_backend(move || backend.digest_update(session, CkInBuf::Bytes(&part))).await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestUpdateResponse { ck_rv: ck_rv_only(result) }))
 }
 

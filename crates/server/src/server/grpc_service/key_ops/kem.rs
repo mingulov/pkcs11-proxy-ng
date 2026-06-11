@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
+use pkcs11_proxy_ng_types::{CkInBuf, CkObjectHandle, CkOutputBufferSpec, CkRv};
 
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
@@ -159,7 +159,13 @@ pub(crate) async fn decapsulate_key(
     let ciphertext = req.ciphertext;
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.decapsulate_key(session, &mechanism, private_key, &template, &ciphertext)
+        backend.decapsulate_key(
+            session,
+            &mechanism,
+            private_key,
+            &template,
+            CkInBuf::Bytes(&ciphertext),
+        )
     })
     .await?;
 

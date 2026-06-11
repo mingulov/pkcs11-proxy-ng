@@ -56,7 +56,12 @@ pub(crate) async fn verify_signature_init(
         let signature = req.signature;
         let backend = Arc::clone(backend_ref);
         let result = spawn_backend(move || {
-            backend.verify_signature_init(session, Some(&mechanism), key, &signature)
+            backend.verify_signature_init(
+                session,
+                Some(&mechanism),
+                key,
+                CkInBuf::Bytes(&signature),
+            )
         })
         .await?;
 
@@ -84,7 +89,7 @@ pub(crate) async fn verify_signature_init(
 
         let backend = Arc::clone(backend_ref);
         let result = spawn_backend(move || {
-            backend.verify_signature_init(session, None, CkObjectHandle(0), &[])
+            backend.verify_signature_init(session, None, CkObjectHandle(0), CkInBuf::Bytes(&[]))
         })
         .await?;
 
@@ -125,7 +130,8 @@ pub(crate) async fn verify_signature(
 
     let data = req.data;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.verify_signature(session, &data)).await?;
+    let result =
+        spawn_backend(move || backend.verify_signature(session, CkInBuf::Bytes(&data))).await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureResponse { ck_rv: ck_rv_only(result) }))
 }
 
@@ -153,7 +159,8 @@ pub(crate) async fn verify_signature_update(
     let data_part = req.data_part;
     let backend = Arc::clone(backend_ref);
     let result =
-        spawn_backend(move || backend.verify_signature_update(session, &data_part)).await?;
+        spawn_backend(move || backend.verify_signature_update(session, CkInBuf::Bytes(&data_part)))
+            .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureUpdateResponse {
         ck_rv: ck_rv_only(result),
     }))

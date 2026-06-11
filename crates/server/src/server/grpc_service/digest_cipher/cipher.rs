@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::CkMechanism;
+use pkcs11_proxy_ng_types::{CkInBuf, CkMechanism};
 
 use super::super::ck_result_to_rv;
 use super::super::mechanism_handles::remap_mechanism_handles;
@@ -102,7 +102,7 @@ pub(crate) async fn encrypt(
 
     let data = req.data;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.encrypt(session, &data)).await?;
+    let result = spawn_backend(move || backend.encrypt(session, CkInBuf::Bytes(&data))).await?;
     let (ck_rv, encrypted_data) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptResponse {
@@ -133,7 +133,8 @@ pub(crate) async fn encrypt_update(
 
     let part = req.part;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.encrypt_update(session, &part)).await?;
+    let result =
+        spawn_backend(move || backend.encrypt_update(session, CkInBuf::Bytes(&part))).await?;
     let (ck_rv, encrypted_part) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptUpdateResponse {
@@ -262,7 +263,8 @@ pub(crate) async fn decrypt(
 
     let encrypted_data = req.encrypted_data;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.decrypt(session, &encrypted_data)).await?;
+    let result =
+        spawn_backend(move || backend.decrypt(session, CkInBuf::Bytes(&encrypted_data))).await?;
     let (ck_rv, data) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptResponse {
@@ -293,7 +295,9 @@ pub(crate) async fn decrypt_update(
 
     let encrypted_part = req.encrypted_part;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.decrypt_update(session, &encrypted_part)).await?;
+    let result =
+        spawn_backend(move || backend.decrypt_update(session, CkInBuf::Bytes(&encrypted_part)))
+            .await?;
     let (ck_rv, part) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptUpdateResponse {

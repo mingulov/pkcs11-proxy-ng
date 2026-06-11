@@ -5,7 +5,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::output::parameter_output_function_from_i32;
 use pkcs11_proxy_ng_types::{
-    CkFlags, CkOutputBufferSpec, CkParameterRoundtripSpec, ParameterOutputFunction,
+    CkFlags, CkInBuf, CkOutputBufferSpec, CkParameterRoundtripSpec, ParameterOutputFunction,
 };
 
 use super::super::context_manager::{ClientContextId, ContextManager};
@@ -87,7 +87,7 @@ pub(super) async fn parameter_output_exact(
                     &mechanism,
                     wrapping_key,
                     key,
-                    &associated_data,
+                    CkInBuf::Bytes(&associated_data),
                     &output_spec,
                     &param_out_spec,
                 )
@@ -219,22 +219,26 @@ fn dispatch_message_oneshot(
         ParameterOutputFunction::EncryptMessage => backend.encrypt_message_exact(
             session,
             parameter,
-            associated_data,
-            input_data,
+            CkInBuf::Bytes(associated_data),
+            CkInBuf::Bytes(input_data),
             output_spec,
             param_out_spec,
         ),
         ParameterOutputFunction::DecryptMessage => backend.decrypt_message_exact(
             session,
             parameter,
-            associated_data,
-            input_data,
+            CkInBuf::Bytes(associated_data),
+            CkInBuf::Bytes(input_data),
             output_spec,
             param_out_spec,
         ),
-        ParameterOutputFunction::SignMessage => {
-            backend.sign_message_exact(session, parameter, input_data, output_spec, param_out_spec)
-        }
+        ParameterOutputFunction::SignMessage => backend.sign_message_exact(
+            session,
+            parameter,
+            CkInBuf::Bytes(input_data),
+            output_spec,
+            param_out_spec,
+        ),
         // Defensive: parent dispatch routes only matching variants here; a future
         // variant added without updating the parent would otherwise panic across
         // the gRPC boundary. Return CKR_FUNCTION_NOT_SUPPORTED instead.
@@ -259,7 +263,7 @@ fn dispatch_message_next(
         ParameterOutputFunction::EncryptMessageNext => backend.encrypt_message_next_exact(
             session,
             parameter,
-            input_data,
+            CkInBuf::Bytes(input_data),
             flags,
             output_spec,
             param_out_spec,
@@ -267,7 +271,7 @@ fn dispatch_message_next(
         ParameterOutputFunction::DecryptMessageNext => backend.decrypt_message_next_exact(
             session,
             parameter,
-            input_data,
+            CkInBuf::Bytes(input_data),
             flags,
             output_spec,
             param_out_spec,
@@ -275,7 +279,7 @@ fn dispatch_message_next(
         ParameterOutputFunction::SignMessageNext => backend.sign_message_next_exact(
             session,
             parameter,
-            input_data,
+            CkInBuf::Bytes(input_data),
             output_spec,
             param_out_spec,
         ),
@@ -300,20 +304,23 @@ fn dispatch_message_oneshot_msg(
         ParameterOutputFunction::EncryptMessage => backend.encrypt_message_exact_msg(
             session,
             msg_param,
-            associated_data,
-            input_data,
+            CkInBuf::Bytes(associated_data),
+            CkInBuf::Bytes(input_data),
             output_spec,
         ),
         ParameterOutputFunction::DecryptMessage => backend.decrypt_message_exact_msg(
             session,
             msg_param,
-            associated_data,
-            input_data,
+            CkInBuf::Bytes(associated_data),
+            CkInBuf::Bytes(input_data),
             output_spec,
         ),
-        ParameterOutputFunction::SignMessage => {
-            backend.sign_message_exact_msg(session, msg_param, input_data, output_spec)
-        }
+        ParameterOutputFunction::SignMessage => backend.sign_message_exact_msg(
+            session,
+            msg_param,
+            CkInBuf::Bytes(input_data),
+            output_spec,
+        ),
         // Defensive: parent dispatch routes only matching variants here; a future
         // variant added without updating the parent would otherwise panic across
         // the gRPC boundary. Return CKR_FUNCTION_NOT_SUPPORTED instead.
@@ -337,20 +344,23 @@ fn dispatch_message_next_msg(
         ParameterOutputFunction::EncryptMessageNext => backend.encrypt_message_next_exact_msg(
             session,
             msg_param,
-            input_data,
+            CkInBuf::Bytes(input_data),
             flags,
             output_spec,
         ),
         ParameterOutputFunction::DecryptMessageNext => backend.decrypt_message_next_exact_msg(
             session,
             msg_param,
-            input_data,
+            CkInBuf::Bytes(input_data),
             flags,
             output_spec,
         ),
-        ParameterOutputFunction::SignMessageNext => {
-            backend.sign_message_next_exact_msg(session, msg_param, input_data, output_spec)
-        }
+        ParameterOutputFunction::SignMessageNext => backend.sign_message_next_exact_msg(
+            session,
+            msg_param,
+            CkInBuf::Bytes(input_data),
+            output_spec,
+        ),
         // Defensive: see `dispatch_message_oneshot` for rationale.
         _ => Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED),
     }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, CkSessionHandle};
+use pkcs11_proxy_ng_types::{CkInBuf, CkObjectHandle, CkRv, CkSessionHandle};
 
 use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::super::handle_map::{BackendHandle, VirtualHandle};
@@ -100,7 +100,12 @@ pub(super) async fn set_operation_state(
     let operation_state = req.operation_state;
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
-        backend.set_operation_state(session, &operation_state, encryption_key, authentication_key)
+        backend.set_operation_state(
+            session,
+            CkInBuf::Bytes(&operation_state),
+            encryption_key,
+            authentication_key,
+        )
     })
     .await?;
 

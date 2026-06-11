@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_types::CkInBuf;
 
 use super::super::ck_result_to_rv;
 use super::super::mechanism_handles::remap_mechanism_handles;
@@ -78,7 +79,7 @@ pub(crate) async fn sign(
 
     let data = req.data;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.sign(session, &data)).await?;
+    let result = spawn_backend(move || backend.sign(session, CkInBuf::Bytes(&data))).await?;
     let (ck_rv, signature) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::SignResponse {
         ck_rv,
@@ -103,7 +104,7 @@ pub(crate) async fn sign_update(
 
     let part = req.part;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.sign_update(session, &part)).await?;
+    let result = spawn_backend(move || backend.sign_update(session, CkInBuf::Bytes(&part))).await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::SignUpdateResponse { ck_rv: ck_rv_only(result) }))
 }
 
@@ -207,7 +208,8 @@ pub(crate) async fn sign_recover(
 
     let data = req.data;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || backend.sign_recover(session, &data)).await?;
+    let result =
+        spawn_backend(move || backend.sign_recover(session, CkInBuf::Bytes(&data))).await?;
     let (ck_rv, signature) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverResponse {
         ck_rv,

@@ -28,7 +28,11 @@ impl FfiBackend {
         Ok(())
     }
 
-    pub(super) fn ffi_sign(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    pub(super) fn ffi_sign(
+        &self,
+        session: CkSessionHandle,
+        data: CkInBuf<'_>,
+    ) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_Sign },
             |function, signature, signature_len| {
@@ -37,7 +41,11 @@ impl FfiBackend {
         )
     }
 
-    pub(super) fn ffi_sign_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()> {
+    pub(super) fn ffi_sign_update(
+        &self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<()> {
         Self::call_unit(unsafe { (*self.func_list).C_SignUpdate }, |function| {
             session_unit_input!(session, part, function)
         })
@@ -76,7 +84,7 @@ impl FfiBackend {
     pub(super) fn ffi_sign_recover(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_SignRecover },
@@ -89,7 +97,7 @@ impl FfiBackend {
     pub(super) fn ffi_sign_exact(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
@@ -118,7 +126,7 @@ impl FfiBackend {
     pub(super) fn ffi_sign_recover_exact(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
@@ -133,7 +141,7 @@ impl FfiBackend {
     pub(super) fn ffi_verify_recover_exact(
         &self,
         session: CkSessionHandle,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
@@ -169,7 +177,7 @@ impl FfiBackend {
     pub(super) fn ffi_verify_recover(
         &self,
         session: CkSessionHandle,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_VerifyRecover },
@@ -208,21 +216,27 @@ impl FfiBackend {
     pub(super) fn ffi_verify(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
-        signature: &[u8],
+        data: CkInBuf<'_>,
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
+        let (data_ptr, data_len) = data.as_ptr_len();
+        let (sig_ptr, sig_len) = signature.as_ptr_len();
         Self::call_unit(unsafe { (*self.func_list).C_Verify }, |function| unsafe {
             function(
                 Self::session_handle(session),
-                data.as_ptr() as *mut _,
-                Self::ulong_len(data.len()),
-                signature.as_ptr() as *mut _,
-                Self::ulong_len(signature.len()),
+                data_ptr as *mut _,
+                Self::ulong_len_u64(data_len),
+                sig_ptr as *mut _,
+                Self::ulong_len_u64(sig_len),
             )
         })
     }
 
-    pub(super) fn ffi_verify_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()> {
+    pub(super) fn ffi_verify_update(
+        &self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<()> {
         Self::call_unit(unsafe { (*self.func_list).C_VerifyUpdate }, |function| {
             session_unit_input!(session, part, function)
         })
@@ -231,7 +245,7 @@ impl FfiBackend {
     pub(super) fn ffi_verify_final(
         &self,
         session: CkSessionHandle,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         Self::call_unit(unsafe { (*self.func_list).C_VerifyFinal }, |function| {
             session_unit_input!(session, signature, function)
@@ -263,7 +277,11 @@ impl FfiBackend {
         Ok(())
     }
 
-    pub(super) fn ffi_digest(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    pub(super) fn ffi_digest(
+        &self,
+        session: CkSessionHandle,
+        data: CkInBuf<'_>,
+    ) -> CkResult<Vec<u8>> {
         Self::call_bytes(unsafe { (*self.func_list).C_Digest }, |function, digest, digest_len| {
             session_bytes_input!(session, data, function, digest, digest_len)
         })
@@ -272,7 +290,7 @@ impl FfiBackend {
     pub(super) fn ffi_digest_exact(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
@@ -284,7 +302,11 @@ impl FfiBackend {
         )
     }
 
-    pub(super) fn ffi_digest_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()> {
+    pub(super) fn ffi_digest_update(
+        &self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<()> {
         Self::call_unit(unsafe { (*self.func_list).C_DigestUpdate }, |function| {
             session_unit_input!(session, part, function)
         })
@@ -345,7 +367,11 @@ impl FfiBackend {
         Ok(())
     }
 
-    pub(super) fn ffi_encrypt(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    pub(super) fn ffi_encrypt(
+        &self,
+        session: CkSessionHandle,
+        data: CkInBuf<'_>,
+    ) -> CkResult<Vec<u8>> {
         Self::call_bytes(unsafe { (*self.func_list).C_Encrypt }, |function, output, output_len| {
             session_bytes_input!(session, data, function, output, output_len)
         })
@@ -354,7 +380,7 @@ impl FfiBackend {
     pub(super) fn ffi_encrypt_update(
         &self,
         session: CkSessionHandle,
-        part: &[u8],
+        part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_EncryptUpdate },
@@ -398,7 +424,7 @@ impl FfiBackend {
     pub(super) fn ffi_decrypt(
         &self,
         session: CkSessionHandle,
-        encrypted_data: &[u8],
+        encrypted_data: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         Self::call_bytes(unsafe { (*self.func_list).C_Decrypt }, |function, output, output_len| {
             session_bytes_input!(session, encrypted_data, function, output, output_len)
@@ -408,7 +434,7 @@ impl FfiBackend {
     pub(super) fn ffi_decrypt_update(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         Self::call_bytes(
             unsafe { (*self.func_list).C_DecryptUpdate },
@@ -430,7 +456,7 @@ impl FfiBackend {
     pub(super) fn ffi_encrypt_exact(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
@@ -445,7 +471,7 @@ impl FfiBackend {
     pub(super) fn ffi_encrypt_exact_with_output(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)> {
         let result = Self::call_bytes_exact(
@@ -466,7 +492,7 @@ impl FfiBackend {
     pub(super) fn ffi_encrypt_update_exact(
         &self,
         session: CkSessionHandle,
-        part: &[u8],
+        part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
@@ -495,7 +521,7 @@ impl FfiBackend {
     pub(super) fn ffi_decrypt_exact(
         &self,
         session: CkSessionHandle,
-        encrypted_data: &[u8],
+        encrypted_data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
@@ -510,7 +536,7 @@ impl FfiBackend {
     pub(super) fn ffi_decrypt_update_exact(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Self::call_bytes_exact(
