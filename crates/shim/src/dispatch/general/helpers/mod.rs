@@ -791,29 +791,31 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
             } else {
                 // Safety: pParameter points to a valid CK_CHACHA20_PARAMS.
                 let ch = unsafe { &*(param_ptr as *const CK_CHACHA20_PARAMS) };
-                let block_counter = if ch.pBlockCounter.is_null() {
-                    Vec::new()
+                let bc_bytes = (ch.blockCounterBits as usize).div_ceil(8);
+                let nonce_bytes = (ch.ulNonceBits as usize).div_ceil(8);
+                if bc_bytes > MAX_SERIALIZABLE_BYTES || nonce_bytes > MAX_SERIALIZABLE_BYTES {
+                    Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
-                    // Block counter size is determined by blockCounterBits / 8
-                    let bc_bytes = (ch.blockCounterBits as usize).div_ceil(8);
-                    if bc_bytes > 0 {
+                    let block_counter = if ch.pBlockCounter.is_null() {
+                        Vec::new()
+                    } else if bc_bytes > 0 {
+                        // Safety: pBlockCounter is non-null, bc_bytes <= MAX_SERIALIZABLE_BYTES.
                         unsafe { std::slice::from_raw_parts(ch.pBlockCounter, bc_bytes) }.to_vec()
                     } else {
                         Vec::new()
-                    }
-                };
-                let nonce = if ch.pNonce.is_null() || ch.ulNonceBits == 0 {
-                    Vec::new()
-                } else {
-                    let nonce_bytes = (ch.ulNonceBits as usize).div_ceil(8);
-                    unsafe { std::slice::from_raw_parts(ch.pNonce, nonce_bytes) }.to_vec()
-                };
-                Some(CkMechanismParams::ChaCha20(ChaCha20Params {
-                    block_counter,
-                    block_counter_bits: ch.blockCounterBits,
-                    nonce,
-                    nonce_bits: ch.ulNonceBits,
-                }))
+                    };
+                    let nonce = if ch.pNonce.is_null() || ch.ulNonceBits == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(ch.pNonce, nonce_bytes) }.to_vec()
+                    };
+                    Some(CkMechanismParams::ChaCha20(ChaCha20Params {
+                        block_counter,
+                        block_counter_bits: ch.blockCounterBits,
+                        nonce,
+                        nonce_bits: ch.ulNonceBits,
+                    }))
+                }
             }
         }
 
@@ -2030,30 +2032,37 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_PBE_PARAMS) };
-                let init_vector = if p.pInitVector.is_null() {
-                    Vec::new()
+                if !embedded_payload_len_ok(p.ulPasswordLen)
+                    || !embedded_payload_len_ok(p.ulSaltLen)
+                {
+                    Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
-                    // PBE init vector is typically 8 bytes but length is not explicit
-                    // in the struct. Use 8 as the standard PBE IV size.
-                    unsafe { std::slice::from_raw_parts(p.pInitVector, 8) }.to_vec()
-                };
-                let password = if p.pPassword.is_null() || p.ulPasswordLen == 0 {
-                    Vec::new()
-                } else {
-                    unsafe { std::slice::from_raw_parts(p.pPassword, p.ulPasswordLen as usize) }
-                        .to_vec()
-                };
-                let salt = if p.pSalt.is_null() || p.ulSaltLen == 0 {
-                    Vec::new()
-                } else {
-                    unsafe { std::slice::from_raw_parts(p.pSalt, p.ulSaltLen as usize) }.to_vec()
-                };
-                Some(CkMechanismParams::Pbe(PbeParams {
-                    init_vector,
-                    password,
-                    salt,
-                    iteration: p.ulIteration as u64,
-                }))
+                    let init_vector = if p.pInitVector.is_null() {
+                        Vec::new()
+                    } else {
+                        // PBE init vector is typically 8 bytes but length is not explicit
+                        // in the struct. Use 8 as the standard PBE IV size.
+                        unsafe { std::slice::from_raw_parts(p.pInitVector, 8) }.to_vec()
+                    };
+                    let password = if p.pPassword.is_null() || p.ulPasswordLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pPassword, p.ulPasswordLen as usize) }
+                            .to_vec()
+                    };
+                    let salt = if p.pSalt.is_null() || p.ulSaltLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pSalt, p.ulSaltLen as usize) }
+                            .to_vec()
+                    };
+                    Some(CkMechanismParams::Pbe(PbeParams {
+                        init_vector,
+                        password,
+                        salt,
+                        iteration: p.ulIteration as u64,
+                    }))
+                }
             }
         }
 
@@ -2342,22 +2351,32 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_GOSTR3410_DERIVE_PARAMS) };
-                let public_data = if p.pPublicData.is_null() || p.ulPublicDataLen == 0 {
-                    Vec::new()
+                if missing_embedded_pointer(p.pPublicData, p.ulPublicDataLen)
+                    || missing_embedded_pointer(p.pUKM, p.ulUKMLen)
+                    || !embedded_payload_len_ok(p.ulPublicDataLen)
+                    || !embedded_payload_len_ok(p.ulUKMLen)
+                {
+                    Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
-                    unsafe { std::slice::from_raw_parts(p.pPublicData, p.ulPublicDataLen as usize) }
+                    let public_data = if p.pPublicData.is_null() || p.ulPublicDataLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe {
+                            std::slice::from_raw_parts(p.pPublicData, p.ulPublicDataLen as usize)
+                        }
                         .to_vec()
-                };
-                let ukm = if p.pUKM.is_null() || p.ulUKMLen == 0 {
-                    Vec::new()
-                } else {
-                    unsafe { std::slice::from_raw_parts(p.pUKM, p.ulUKMLen as usize) }.to_vec()
-                };
-                Some(CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams {
-                    kdf: p.kdf as u64,
-                    public_data,
-                    ukm,
-                }))
+                    };
+                    let ukm = if p.pUKM.is_null() || p.ulUKMLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pUKM, p.ulUKMLen as usize) }.to_vec()
+                    };
+                    Some(CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams {
+                        kdf: p.kdf as u64,
+                        public_data,
+                        ukm,
+                    }))
+                }
             }
         }
 
@@ -2368,22 +2387,30 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_GOSTR3410_KEY_WRAP_PARAMS) };
-                let wrap_oid = if p.pWrapOID.is_null() || p.ulWrapOIDLen == 0 {
-                    Vec::new()
+                if missing_embedded_pointer(p.pWrapOID, p.ulWrapOIDLen)
+                    || missing_embedded_pointer(p.pUKM, p.ulUKMLen)
+                    || !embedded_payload_len_ok(p.ulWrapOIDLen)
+                    || !embedded_payload_len_ok(p.ulUKMLen)
+                {
+                    Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
-                    unsafe { std::slice::from_raw_parts(p.pWrapOID, p.ulWrapOIDLen as usize) }
-                        .to_vec()
-                };
-                let ukm = if p.pUKM.is_null() || p.ulUKMLen == 0 {
-                    Vec::new()
-                } else {
-                    unsafe { std::slice::from_raw_parts(p.pUKM, p.ulUKMLen as usize) }.to_vec()
-                };
-                Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
-                    wrap_oid,
-                    ukm,
-                    key_handle: p.hKey as u64,
-                }))
+                    let wrap_oid = if p.pWrapOID.is_null() || p.ulWrapOIDLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pWrapOID, p.ulWrapOIDLen as usize) }
+                            .to_vec()
+                    };
+                    let ukm = if p.pUKM.is_null() || p.ulUKMLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pUKM, p.ulUKMLen as usize) }.to_vec()
+                    };
+                    Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
+                        wrap_oid,
+                        ukm,
+                        key_handle: p.hKey as u64,
+                    }))
+                }
             }
         }
 
@@ -2394,15 +2421,19 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_KEY_WRAP_SET_OAEP_PARAMS) };
-                let x = if p.pX.is_null() || p.ulXLen == 0 {
-                    Vec::new()
+                if missing_embedded_pointer(p.pX, p.ulXLen) || !embedded_payload_len_ok(p.ulXLen) {
+                    Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
-                    unsafe { std::slice::from_raw_parts(p.pX, p.ulXLen as usize) }.to_vec()
-                };
-                Some(CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams {
-                    bc: p.bBC as u32,
-                    x,
-                }))
+                    let x = if p.pX.is_null() || p.ulXLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pX, p.ulXLen as usize) }.to_vec()
+                    };
+                    Some(CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams {
+                        bc: p.bBC as u32,
+                        x,
+                    }))
+                }
             }
         }
 
@@ -2413,29 +2444,37 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_KEA_DERIVE_PARAMS) };
-                let random_len = p.ulRandomLen as usize;
-                let random_a = if p.RandomA.is_null() || random_len == 0 {
-                    Vec::new()
+                if !embedded_payload_len_ok(p.ulRandomLen)
+                    || !embedded_payload_len_ok(p.ulPublicDataLen)
+                {
+                    Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
-                    unsafe { std::slice::from_raw_parts(p.RandomA, random_len) }.to_vec()
-                };
-                let random_b = if p.RandomB.is_null() || random_len == 0 {
-                    Vec::new()
-                } else {
-                    unsafe { std::slice::from_raw_parts(p.RandomB, random_len) }.to_vec()
-                };
-                let public_data = if p.PublicData.is_null() || p.ulPublicDataLen == 0 {
-                    Vec::new()
-                } else {
-                    unsafe { std::slice::from_raw_parts(p.PublicData, p.ulPublicDataLen as usize) }
+                    let random_len = p.ulRandomLen as usize;
+                    let random_a = if p.RandomA.is_null() || random_len == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.RandomA, random_len) }.to_vec()
+                    };
+                    let random_b = if p.RandomB.is_null() || random_len == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.RandomB, random_len) }.to_vec()
+                    };
+                    let public_data = if p.PublicData.is_null() || p.ulPublicDataLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe {
+                            std::slice::from_raw_parts(p.PublicData, p.ulPublicDataLen as usize)
+                        }
                         .to_vec()
-                };
-                Some(CkMechanismParams::KeaDerive(KeaDeriveParams {
-                    is_sender: p.isSender != 0,
-                    random_a,
-                    random_b,
-                    public_data,
-                }))
+                    };
+                    Some(CkMechanismParams::KeaDerive(KeaDeriveParams {
+                        is_sender: p.isSender != 0,
+                        random_a,
+                        random_b,
+                        public_data,
+                    }))
+                }
             }
         }
 
@@ -2446,24 +2485,32 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_IKE_PRF_DERIVE_PARAMS) };
-                let ni = if p.pNi.is_null() || p.ulNiLen == 0 {
-                    Vec::new()
+                if missing_embedded_pointer(p.pNi, p.ulNiLen)
+                    || missing_embedded_pointer(p.pNr, p.ulNrLen)
+                    || !embedded_payload_len_ok(p.ulNiLen)
+                    || !embedded_payload_len_ok(p.ulNrLen)
+                {
+                    Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
-                    unsafe { std::slice::from_raw_parts(p.pNi, p.ulNiLen as usize) }.to_vec()
-                };
-                let nr = if p.pNr.is_null() || p.ulNrLen == 0 {
-                    Vec::new()
-                } else {
-                    unsafe { std::slice::from_raw_parts(p.pNr, p.ulNrLen as usize) }.to_vec()
-                };
-                Some(CkMechanismParams::IkePrfDerive(IkePrfDeriveParams {
-                    prf_mechanism: p.prfMechanism as u64,
-                    data_as_key: p.bDataAsKey != 0,
-                    rekey: p.bRekey != 0,
-                    ni,
-                    nr,
-                    new_key_handle: p.hNewKey as u64,
-                }))
+                    let ni = if p.pNi.is_null() || p.ulNiLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pNi, p.ulNiLen as usize) }.to_vec()
+                    };
+                    let nr = if p.pNr.is_null() || p.ulNrLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pNr, p.ulNrLen as usize) }.to_vec()
+                    };
+                    Some(CkMechanismParams::IkePrfDerive(IkePrfDeriveParams {
+                        prf_mechanism: p.prfMechanism as u64,
+                        data_as_key: p.bDataAsKey != 0,
+                        rekey: p.bRekey != 0,
+                        ni,
+                        nr,
+                        new_key_handle: p.hNewKey as u64,
+                    }))
+                }
             }
         }
 
@@ -2474,25 +2521,35 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_IKE1_PRF_DERIVE_PARAMS) };
-                let ckyi = if p.pCKYi.is_null() || p.ulCKYiLen == 0 {
-                    Vec::new()
+                if missing_embedded_pointer(p.pCKYi, p.ulCKYiLen)
+                    || missing_embedded_pointer(p.pCKYr, p.ulCKYrLen)
+                    || !embedded_payload_len_ok(p.ulCKYiLen)
+                    || !embedded_payload_len_ok(p.ulCKYrLen)
+                {
+                    Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
-                    unsafe { std::slice::from_raw_parts(p.pCKYi, p.ulCKYiLen as usize) }.to_vec()
-                };
-                let ckyr = if p.pCKYr.is_null() || p.ulCKYrLen == 0 {
-                    Vec::new()
-                } else {
-                    unsafe { std::slice::from_raw_parts(p.pCKYr, p.ulCKYrLen as usize) }.to_vec()
-                };
-                Some(CkMechanismParams::Ike1PrfDerive(Ike1PrfDeriveParams {
-                    prf_mechanism: p.prfMechanism as u64,
-                    has_prev_key: p.bHasPrevKey != 0,
-                    keygxy_handle: p.hKeygxy as u64,
-                    prev_key_handle: p.hPrevKey as u64,
-                    ckyi,
-                    ckyr,
-                    key_number: p.keyNumber as u32,
-                }))
+                    let ckyi = if p.pCKYi.is_null() || p.ulCKYiLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pCKYi, p.ulCKYiLen as usize) }
+                            .to_vec()
+                    };
+                    let ckyr = if p.pCKYr.is_null() || p.ulCKYrLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pCKYr, p.ulCKYrLen as usize) }
+                            .to_vec()
+                    };
+                    Some(CkMechanismParams::Ike1PrfDerive(Ike1PrfDeriveParams {
+                        prf_mechanism: p.prfMechanism as u64,
+                        has_prev_key: p.bHasPrevKey != 0,
+                        keygxy_handle: p.hKeygxy as u64,
+                        prev_key_handle: p.hPrevKey as u64,
+                        ckyi,
+                        ckyr,
+                        key_number: p.keyNumber as u32,
+                    }))
+                }
             }
         }
 
@@ -2503,18 +2560,26 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_IKE1_EXTENDED_DERIVE_PARAMS) };
-                let extra_data = if p.pExtraData.is_null() || p.ulExtraDataLen == 0 {
-                    Vec::new()
+                if missing_embedded_pointer(p.pExtraData, p.ulExtraDataLen)
+                    || !embedded_payload_len_ok(p.ulExtraDataLen)
+                {
+                    Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
-                    unsafe { std::slice::from_raw_parts(p.pExtraData, p.ulExtraDataLen as usize) }
+                    let extra_data = if p.pExtraData.is_null() || p.ulExtraDataLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe {
+                            std::slice::from_raw_parts(p.pExtraData, p.ulExtraDataLen as usize)
+                        }
                         .to_vec()
-                };
-                Some(CkMechanismParams::Ike1ExtendedDerive(Ike1ExtendedDeriveParams {
-                    prf_mechanism: p.prfMechanism as u64,
-                    has_keygxy: p.bHasKeygxy != 0,
-                    keygxy_handle: p.hKeygxy as u64,
-                    extra_data,
-                }))
+                    };
+                    Some(CkMechanismParams::Ike1ExtendedDerive(Ike1ExtendedDeriveParams {
+                        prf_mechanism: p.prfMechanism as u64,
+                        has_keygxy: p.bHasKeygxy != 0,
+                        keygxy_handle: p.hKeygxy as u64,
+                        extra_data,
+                    }))
+                }
             }
         }
 
@@ -2525,18 +2590,24 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_IKE2_PRF_PLUS_DERIVE_PARAMS) };
-                let seed_data = if p.pSeedData.is_null() || p.ulSeedDataLen == 0 {
-                    Vec::new()
+                if missing_embedded_pointer(p.pSeedData, p.ulSeedDataLen)
+                    || !embedded_payload_len_ok(p.ulSeedDataLen)
+                {
+                    Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
-                    unsafe { std::slice::from_raw_parts(p.pSeedData, p.ulSeedDataLen as usize) }
-                        .to_vec()
-                };
-                Some(CkMechanismParams::Ike2PrfPlusDerive(Ike2PrfPlusDeriveParams {
-                    prf_mechanism: p.prfMechanism as u64,
-                    has_seed_key: p.bHasSeedKey != 0,
-                    seed_key_handle: p.hSeedKey as u64,
-                    seed_data,
-                }))
+                    let seed_data = if p.pSeedData.is_null() || p.ulSeedDataLen == 0 {
+                        Vec::new()
+                    } else {
+                        unsafe { std::slice::from_raw_parts(p.pSeedData, p.ulSeedDataLen as usize) }
+                            .to_vec()
+                    };
+                    Some(CkMechanismParams::Ike2PrfPlusDerive(Ike2PrfPlusDeriveParams {
+                        prf_mechanism: p.prfMechanism as u64,
+                        has_seed_key: p.bHasSeedKey != 0,
+                        seed_key_handle: p.hSeedKey as u64,
+                        seed_data,
+                    }))
+                }
             }
         }
 
@@ -3283,13 +3354,14 @@ pub(crate) unsafe fn read_gcm_message_params(
     p_parameter: *const std::ffi::c_void,
 ) -> pkcs11_proxy_ng_proto::convert::message_params::GcmMessageParams {
     let p = unsafe { &*(p_parameter as *const CK_GCM_MESSAGE_PARAMS) };
-    let iv = if !p.pIv.is_null() && p.ulIvLen > 0 {
+    let iv = if !p.pIv.is_null() && p.ulIvLen > 0 && (p.ulIvLen as usize) <= MAX_SERIALIZABLE_BYTES
+    {
         unsafe { std::slice::from_raw_parts(p.pIv, p.ulIvLen as usize) }.to_vec()
     } else {
         Vec::new()
     };
     let tag_bytes = (p.ulTagBits as usize).div_ceil(8);
-    let tag = if !p.pTag.is_null() && tag_bytes > 0 {
+    let tag = if !p.pTag.is_null() && tag_bytes > 0 && tag_bytes <= MAX_SERIALIZABLE_BYTES {
         unsafe { std::slice::from_raw_parts(p.pTag, tag_bytes) }.to_vec()
     } else {
         Vec::new()
@@ -3312,16 +3384,20 @@ pub(crate) unsafe fn read_ccm_message_params(
     p_parameter: *const std::ffi::c_void,
 ) -> pkcs11_proxy_ng_proto::convert::message_params::CcmMessageParams {
     let p = unsafe { &*(p_parameter as *const CK_CCM_MESSAGE_PARAMS) };
-    let nonce = if !p.pNonce.is_null() && p.ulNonceLen > 0 {
+    let nonce = if !p.pNonce.is_null()
+        && p.ulNonceLen > 0
+        && (p.ulNonceLen as usize) <= MAX_SERIALIZABLE_BYTES
+    {
         unsafe { std::slice::from_raw_parts(p.pNonce, p.ulNonceLen as usize) }.to_vec()
     } else {
         Vec::new()
     };
-    let mac = if !p.pMAC.is_null() && p.ulMACLen > 0 {
-        unsafe { std::slice::from_raw_parts(p.pMAC, p.ulMACLen as usize) }.to_vec()
-    } else {
-        Vec::new()
-    };
+    let mac =
+        if !p.pMAC.is_null() && p.ulMACLen > 0 && (p.ulMACLen as usize) <= MAX_SERIALIZABLE_BYTES {
+            unsafe { std::slice::from_raw_parts(p.pMAC, p.ulMACLen as usize) }.to_vec()
+        } else {
+            Vec::new()
+        };
     pkcs11_proxy_ng_proto::convert::message_params::CcmMessageParams {
         data_len: p.ulDataLen as u64,
         nonce,
@@ -3341,12 +3417,15 @@ pub(crate) unsafe fn read_salsa_chacha_message_params(
     p_parameter: *const std::ffi::c_void,
 ) -> pkcs11_proxy_ng_proto::convert::message_params::Salsa20ChaCha20Poly1305MessageParams {
     let p = unsafe { &*(p_parameter as *const CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS) };
-    let nonce = if !p.pNonce.is_null() && p.ulNonceLen > 0 {
+    let nonce = if !p.pNonce.is_null()
+        && p.ulNonceLen > 0
+        && (p.ulNonceLen as usize) <= MAX_SERIALIZABLE_BYTES
+    {
         unsafe { std::slice::from_raw_parts(p.pNonce, p.ulNonceLen as usize) }.to_vec()
     } else {
         Vec::new()
     };
-    // Poly1305 tag is always 16 bytes
+    // Poly1305 tag is always 16 bytes (compile-time constant, no length guard needed)
     let tag = if !p.pTag.is_null() {
         unsafe { std::slice::from_raw_parts(p.pTag, 16) }.to_vec()
     } else {

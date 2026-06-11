@@ -2283,3 +2283,33 @@ fn gcm_aad_unmaterializable_len_rejected_not_wild_read() {
         other => panic!("expected Raw fallback for unmaterializable AAD len, got {other:?}"),
     }
 }
+
+/// ADR-0010 Scope 2: an unmaterializable password length (CK_ULONG::MAX) on a
+/// PBE parameter must NOT cause a wild read.  The shim falls back to the
+/// raw-bytes path rather than calling `slice::from_raw_parts` with an absurd
+/// length.
+#[test]
+fn pbe_password_unmaterializable_len_rejected_not_wild_read() {
+    ensure_registry();
+    let mut pbe = CK_PBE_PARAMS {
+        pInitVector: std::ptr::null_mut(),
+        pPassword: std::ptr::dangling_mut::<u8>(),
+        ulPasswordLen: CK_ULONG::MAX,
+        pSalt: std::ptr::null_mut(),
+        ulSaltLen: 0,
+        ulIteration: 1,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_PBE_SHA1_DES3_EDE_CBC,
+        pParameter: &mut pbe as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
+    };
+    // Must not crash or do a wild read.  With the guard the shim falls back to
+    // the raw path; without it `slice::from_raw_parts` would be called with
+    // size usize::MAX (UB).
+    let result = unsafe { read_mechanism_with_shape(&mechanism, Some("pbe")) };
+    match result.params.expect("params") {
+        CkMechanismParams::Raw(_) => {} // expected: safe Raw fallback
+        other => panic!("expected Raw fallback for unmaterializable password len, got {other:?}"),
+    }
+}

@@ -441,3 +441,43 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
     assert_eq!(client_iv, [0xA1, 0xA2, 0xA3, 0xA4]);
     assert_eq!(server_iv, [0xB1, 0xB2, 0xB3, 0xB4]);
 }
+
+/// ADR-0010 Scope 2: a GCM message parameter with ulIvLen = CK_ULONG::MAX must
+/// not cause a wild read.  The reader clamps to an empty IV (same behavior as
+/// a null pIv) rather than constructing a slice of size usize::MAX.
+#[test]
+fn gcm_message_params_unmaterializable_iv_len_yields_empty_not_crash() {
+    let tag = [0xAAu8; 16];
+    let params = CK_GCM_MESSAGE_PARAMS {
+        pIv: std::ptr::dangling_mut::<u8>(),
+        ulIvLen: CK_ULONG::MAX,
+        ulIvFixedBits: 0,
+        ivGenerator: 0,
+        pTag: tag.as_ptr() as *mut u8,
+        ulTagBits: 128,
+    };
+    let result =
+        unsafe { super::read_gcm_message_params(&params as *const _ as *const std::ffi::c_void) };
+    assert!(result.iv.is_empty(), "unmaterializable ulIvLen must yield empty IV, not a wild read");
+    // pTag with sane tag_bytes (128/8=16 <= MAX_SERIALIZABLE_BYTES) must still be read.
+    assert_eq!(result.tag, vec![0xAAu8; 16]);
+}
+
+/// ADR-0010 Scope 2: a GCM message parameter with ulTagBits = CK_ULONG::MAX
+/// produces a tag_bytes of ~2^61, which exceeds MAX_SERIALIZABLE_BYTES.  The
+/// reader must return an empty tag rather than calling `slice::from_raw_parts`
+/// with an absurd length.
+#[test]
+fn gcm_message_params_absurd_tag_bits_yields_empty_not_crash() {
+    let params = CK_GCM_MESSAGE_PARAMS {
+        pIv: std::ptr::null_mut(),
+        ulIvLen: 0,
+        ulIvFixedBits: 0,
+        ivGenerator: 0,
+        pTag: std::ptr::dangling_mut::<u8>(),
+        ulTagBits: CK_ULONG::MAX,
+    };
+    let result =
+        unsafe { super::read_gcm_message_params(&params as *const _ as *const std::ffi::c_void) };
+    assert!(result.tag.is_empty(), "absurd ulTagBits must yield empty tag, not a wild read");
+}
