@@ -45,6 +45,11 @@ pub struct Pkcs11ProxyService {
     /// `GetBackendInterfaces`. Wrapped in a `MechanismRegistrySource`
     /// so SIGHUP can swap the payload while live requests are in flight.
     mechanism_registry_source: MechanismRegistrySource,
+    /// ADR-0010 sanitize_inputs: when true, NULL data pointer with len>0
+    /// and NULL mechanisms on operation init are rejected with
+    /// CKR_ARGUMENTS_BAD before reaching the backend module. Default false
+    /// (transparent forwarding).
+    pub(super) sanitize_inputs: bool,
 }
 
 impl Pkcs11ProxyService {
@@ -63,7 +68,14 @@ impl Pkcs11ProxyService {
             unix_auth_mode,
             token_policy,
             mechanism_registry_source,
+            sanitize_inputs: false,
         }
+    }
+
+    /// Enable sanitize_inputs mode for tests that need daemon-side input rejection.
+    pub fn with_sanitize_inputs(mut self) -> Self {
+        self.sanitize_inputs = true;
+        self
     }
 
     pub fn insecure_for_tests(
@@ -82,6 +94,7 @@ impl Pkcs11ProxyService {
             token_policy,
             registry,
         )
+        // sanitize_inputs defaults to false — transparent forwarding (ADR-0010)
     }
 
     /// A2: reject any request whose live transport identity does not own the
@@ -342,7 +355,7 @@ macro_rules! impl_proxy_service {
                             ));
                         }
                     };
-                    $module(&self.context_manager, &self.backend, request).await
+                    $module(&self.context_manager, &self.backend, self.sanitize_inputs, request).await
                 }
             )+
         }

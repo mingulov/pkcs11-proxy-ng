@@ -13,8 +13,8 @@ use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    input_from_wire, parse_mechanism, register_session_object_handle, resolve_session_and_key,
-    spawn_backend, template_declares_token_object,
+    check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
+    resolve_session_and_key, spawn_backend, template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
 use crate::server::handle_map::VirtualHandle;
@@ -22,6 +22,7 @@ use crate::server::handle_map::VirtualHandle;
 pub(crate) async fn encapsulate_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncapsulateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncapsulateKeyResponse>, Status> {
     let req = request.into_inner();
@@ -107,6 +108,7 @@ pub(crate) async fn encapsulate_key(
 pub(crate) async fn decapsulate_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecapsulateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecapsulateKeyResponse>, Status> {
     let req = request.into_inner();
@@ -158,6 +160,13 @@ pub(crate) async fn decapsulate_key(
     let virtual_session = VirtualHandle(req.session_handle);
     let ciphertext = req.ciphertext;
     let ciphertext_null_len = req.ciphertext_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL ciphertext pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, ciphertext_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.decapsulate_key(
@@ -195,6 +204,7 @@ pub(crate) async fn decapsulate_key(
 pub(crate) async fn encapsulate_key_exact(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncapsulateKeyExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse>, Status> {
     let req = request.into_inner();

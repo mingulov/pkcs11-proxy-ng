@@ -12,7 +12,7 @@ use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
 use super::super::convert_template;
 use super::super::service_utils::{
-    input_from_wire, parse_mechanism, register_session_object_handle,
+    check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
     resolve_session_and_two_objects, spawn_backend, template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
@@ -21,6 +21,7 @@ use crate::server::handle_map::VirtualHandle;
 pub(crate) async fn wrap_key_authenticated(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse>, Status> {
     let req = request.into_inner();
@@ -58,6 +59,14 @@ pub(crate) async fn wrap_key_authenticated(
 
     let aad = req.associated_data;
     let aad_null_len = req.associated_data_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL aad pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
+            ck_rv: rv.0,
+            wrapped_key: Vec::new(),
+            mechanism_parameter_out: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.wrap_key_authenticated(
@@ -89,6 +98,7 @@ pub(crate) async fn wrap_key_authenticated(
 pub(crate) async fn unwrap_key_authenticated(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse>, Status> {
     let req = request.into_inner();
@@ -138,6 +148,21 @@ pub(crate) async fn unwrap_key_authenticated(
     let wrapped_key_null_len = req.wrapped_key_null_len;
     let aad = req.associated_data;
     let aad_null_len = req.associated_data_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL wrapped_key/aad pointers before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, wrapped_key_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_parameter_out: Vec::new(),
+        }));
+    }
+    if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_parameter_out: Vec::new(),
+        }));
+    }
     // An authenticated-unwrapped key is a session object unless CKA_TOKEN is set (B2).
     let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);

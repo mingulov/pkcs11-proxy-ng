@@ -570,6 +570,16 @@ pub(super) fn input_from_wire(bytes: &[u8], null_len: Option<u64>) -> CkInBuf<'_
     }
 }
 
+/// ADR-0010 sanitize_inputs gate: reject a NULL data pointer with non-zero
+/// claimed length before the backend is touched. Call sites construct the
+/// actual CkInBuf via input_from_wire inside the spawn_backend closure.
+pub(super) fn check_sanitize(sanitize: bool, null_len: Option<u64>) -> Result<(), CkRv> {
+    if sanitize && null_len.is_some_and(|len| len > 0) {
+        return Err(CkRv::ARGUMENTS_BAD);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,9 +10,15 @@ use crate::traits::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
 use std::sync::Mutex;
 
-// resolve_input delegates to MockBackend::resolve_input (same crate, pub(crate)).
+/// Validate a `CkInBuf` for use in test_backend_3x handlers: same rules as
+/// `MockBackend::resolve_input` but without the `data_op_calls` counter
+/// (this backend is a separate type, not instrumented for that purpose).
 fn resolve_input(input: CkInBuf<'_>) -> CkResult<&'_ [u8]> {
-    MockBackend::resolve_input(input)
+    match input {
+        CkInBuf::Bytes(b) => Ok(b),
+        CkInBuf::Null { len: 0 } => Ok(&[]),
+        CkInBuf::Null { .. } => Err(CkRv::ARGUMENTS_BAD),
+    }
 }
 
 /// Test-only 3.x backend state.

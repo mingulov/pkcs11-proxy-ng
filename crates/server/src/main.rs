@@ -132,14 +132,18 @@ async fn build_service(
         config.listener.remote.as_ref().map_or(config::TcpAuthMode::None, |tcp| tcp.auth);
     let unix_auth_mode =
         config.listener.local.as_ref().map_or(config::UnixAuthMode::PeerCred, |uds| uds.auth);
-    let service = server::grpc_service::Pkcs11ProxyService::new(
-        context_manager.clone(),
-        backend.clone(),
-        tcp_auth_mode,
-        unix_auth_mode,
-        token_policy,
-        registry_source.clone(),
-    );
+    let sanitize_inputs = config.proxy.sanitize_inputs;
+    let service = {
+        let svc = server::grpc_service::Pkcs11ProxyService::new(
+            context_manager.clone(),
+            backend.clone(),
+            tcp_auth_mode,
+            unix_auth_mode,
+            token_policy,
+            registry_source.clone(),
+        );
+        if sanitize_inputs { svc.with_sanitize_inputs() } else { svc }
+    };
     let grpc_service = pkcs11_proxy_ng_proto::Pkcs11ProxyServer::new(service)
         .max_decoding_message_size(config.proxy.max_message_bytes)
         .max_encoding_message_size(config.proxy.max_message_bytes);

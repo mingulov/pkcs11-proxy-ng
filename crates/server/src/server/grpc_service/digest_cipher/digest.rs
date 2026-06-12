@@ -6,18 +6,26 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 
 use super::super::ck_result_to_rv;
 use super::super::service_utils::{
-    ck_rv_only, input_from_wire, parse_mechanism, resolve_session, resolve_session_and_key,
-    spawn_backend,
+    check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
+    resolve_session_and_key, spawn_backend,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
 
 pub(crate) async fn digest_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DigestInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestInitResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+
+    // ADR-0010 sanitize_inputs: reject NULL mechanism before reaching the module.
+    if sanitize_inputs && req.mechanism.is_none() {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD.0,
+        }));
+    }
 
     let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
         Ok(session) => session,
@@ -49,6 +57,7 @@ pub(crate) async fn digest_init(
 pub(crate) async fn digest(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DigestRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestResponse>, Status> {
     let req = request.into_inner();
@@ -66,6 +75,13 @@ pub(crate) async fn digest(
 
     let data = req.data;
     let data_null_len = req.data_null_len;
+    // ADR-0010 sanitize_inputs: validate before moving into spawn_backend closure.
+    if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DigestResponse {
+            ck_rv: rv.0,
+            digest: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result =
         spawn_backend(move || backend.digest(session, input_from_wire(&data, data_null_len)))
@@ -80,6 +96,7 @@ pub(crate) async fn digest(
 pub(crate) async fn digest_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DigestUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestUpdateResponse>, Status> {
     let req = request.into_inner();
@@ -94,6 +111,10 @@ pub(crate) async fn digest_update(
 
     let part = req.part;
     let part_null_len = req.part_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, part_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DigestUpdateResponse { ck_rv: rv.0 }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.digest_update(session, input_from_wire(&part, part_null_len))
@@ -105,6 +126,7 @@ pub(crate) async fn digest_update(
 pub(crate) async fn digest_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DigestKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestKeyResponse>, Status> {
     let req = request.into_inner();
@@ -126,6 +148,7 @@ pub(crate) async fn digest_key(
 pub(crate) async fn digest_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DigestFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestFinalResponse>, Status> {
     let req = request.into_inner();

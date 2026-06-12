@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkInBuf, CkMechanism};
+use pkcs11_proxy_ng_types::{CkInBuf, CkMechanism, CkRv};
 
 use super::super::ck_result_to_rv;
 use super::super::mechanism_handles::remap_mechanism_handles;
@@ -16,10 +16,19 @@ use crate::server::context_manager::{ClientContextId, ContextManager};
 pub(crate) async fn encrypt_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptInitResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+
+    // ADR-0010 sanitize_inputs: reject NULL mechanism before reaching the module.
+    if sanitize_inputs && req.mechanism.is_none() {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse {
+            ck_rv: CkRv::ARGUMENTS_BAD.0,
+            mechanism_out: None,
+        }));
+    }
 
     if req.mechanism.is_none() {
         let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
@@ -85,6 +94,7 @@ pub(crate) async fn encrypt_init(
 pub(crate) async fn encrypt(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptResponse>, Status> {
     let req = request.into_inner();
@@ -117,6 +127,7 @@ pub(crate) async fn encrypt(
 pub(crate) async fn encrypt_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptUpdateResponse>, Status> {
     let req = request.into_inner();
@@ -149,6 +160,7 @@ pub(crate) async fn encrypt_update(
 pub(crate) async fn encrypt_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptFinalResponse>, Status> {
     let req = request.into_inner();
@@ -179,10 +191,19 @@ pub(crate) async fn encrypt_final(
 pub(crate) async fn decrypt_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptInitResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+
+    // ADR-0010 sanitize_inputs: reject NULL mechanism before reaching the module.
+    if sanitize_inputs && req.mechanism.is_none() {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse {
+            ck_rv: CkRv::ARGUMENTS_BAD.0,
+            mechanism_out: None,
+        }));
+    }
 
     if req.mechanism.is_none() {
         let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
@@ -248,6 +269,7 @@ pub(crate) async fn decrypt_init(
 pub(crate) async fn decrypt(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptResponse>, Status> {
     let req = request.into_inner();
@@ -281,6 +303,7 @@ pub(crate) async fn decrypt(
 pub(crate) async fn decrypt_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptUpdateResponse>, Status> {
     let req = request.into_inner();
@@ -314,6 +337,7 @@ pub(crate) async fn decrypt_update(
 pub(crate) async fn decrypt_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptFinalResponse>, Status> {
     let req = request.into_inner();

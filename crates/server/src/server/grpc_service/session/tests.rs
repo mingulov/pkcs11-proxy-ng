@@ -139,6 +139,7 @@ async fn login_response(
     login(
         ctx_mgr,
         backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -161,6 +162,7 @@ async fn logout_response(
     logout(
         ctx_mgr,
         backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -206,6 +208,7 @@ async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in(
     let logout_b = logout(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
             client_context_id: ctx_b.0.clone(),
             session_handle: session_b,
@@ -270,6 +273,7 @@ async fn closing_last_session_clears_logical_login_state_for_slot() {
     let close_a = close_session(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
@@ -383,6 +387,7 @@ async fn context_specific_login_logout_reaches_backend_without_logical_state() {
     let context_login = login(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -465,6 +470,7 @@ async fn login_produces_audit_log_without_pin() {
         let _ = login(
             &ctx_mgr,
             &backend,
+            false,
             Request::new(pkcs11_proxy_ng_proto::LoginRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -520,6 +526,7 @@ async fn init_pin_produces_audit_log_without_pin() {
         let _ = init_pin(
             &ctx_mgr,
             &backend,
+            false,
             Request::new(pkcs11_proxy_ng_proto::InitPinRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -544,6 +551,7 @@ async fn set_pin_produces_audit_log_without_pins() {
         let _ = set_pin(
             &ctx_mgr,
             &backend,
+            false,
             Request::new(pkcs11_proxy_ng_proto::SetPinRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -569,6 +577,7 @@ async fn logout_produces_audit_log() {
         let _ = login(
             &ctx_mgr,
             &backend,
+            false,
             Request::new(pkcs11_proxy_ng_proto::LoginRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -580,6 +589,7 @@ async fn logout_produces_audit_log() {
         let _ = logout(
             &ctx_mgr,
             &backend,
+            false,
             Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -703,6 +713,7 @@ async fn closing_a_session_evicts_session_objects_not_token_objects() {
             create_object(
                 &ctx_mgr,
                 &backend,
+                false,
                 Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
                     client_context_id: ctx,
                     session_handle: session,
@@ -742,6 +753,7 @@ async fn closing_a_session_evicts_session_objects_not_token_objects() {
     let closed = close_session(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -772,6 +784,7 @@ async fn destroy_object_evicts_the_virtual_handle() {
     let created = create_object(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -794,6 +807,7 @@ async fn destroy_object_evicts_the_virtual_handle() {
     let destroyed = destroy_object(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -838,6 +852,7 @@ async fn object_handles_are_isolated_per_context() {
     let created = create_object(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
@@ -858,6 +873,7 @@ async fn object_handles_are_isolated_per_context() {
             get_attribute_value(
                 &ctx_mgr,
                 &backend,
+                false,
                 Request::new(pkcs11_proxy_ng_proto::GetAttributeValueRequest {
                     client_context_id: ctx,
                     session_handle: session,
@@ -989,6 +1005,7 @@ async fn close_session_keeps_mapping_on_transient_backend_failure() {
     let rv = close_session(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -1018,6 +1035,7 @@ async fn close_session_drops_mapping_when_backend_reports_already_gone() {
     let rv = close_session(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -1061,6 +1079,7 @@ async fn cross_client_login_with_wrong_pin_is_rejected() {
     let wrong = login(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_b.0.clone(),
             session_handle: session_b,
@@ -1126,9 +1145,9 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
     let a = {
         let (ctx_mgr, backend, req) =
             (ctx_mgr.clone(), backend.clone(), login_req(&ctx_a, session_a));
-        tokio::spawn(
-            async move { login(&ctx_mgr, &backend, req).await.unwrap().into_inner().ck_rv },
-        )
+        tokio::spawn(async move {
+            login(&ctx_mgr, &backend, false, req).await.unwrap().into_inner().ck_rv
+        })
     };
     // Wait (off the executor) until A is actually inside the backend login.
     tokio::task::spawn_blocking(move || entered_rx.recv().unwrap()).await.unwrap();
@@ -1137,9 +1156,9 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
     let b = {
         let (ctx_mgr, backend, req) =
             (ctx_mgr.clone(), backend.clone(), login_req(&ctx_b, session_b));
-        tokio::spawn(
-            async move { login(&ctx_mgr, &backend, req).await.unwrap().into_inner().ck_rv },
-        )
+        tokio::spawn(async move {
+            login(&ctx_mgr, &backend, false, req).await.unwrap().into_inner().ck_rv
+        })
     };
 
     // Release A; it finishes the real login, captures the verifier, drops the
@@ -1186,6 +1205,7 @@ async fn set_pin_refreshes_the_cross_client_login_verifier() {
     let set_rv = set_pin(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::SetPinRequest {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
@@ -1203,6 +1223,7 @@ async fn set_pin_refreshes_the_cross_client_login_verifier() {
     let rv = login(
         &ctx_mgr,
         &backend,
+        false,
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_b.0.clone(),
             session_handle: session_b,

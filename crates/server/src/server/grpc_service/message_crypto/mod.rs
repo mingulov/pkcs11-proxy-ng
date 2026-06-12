@@ -24,8 +24,8 @@ use pkcs11_proxy_ng_types::*;
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::mechanism_handles::remap_mechanism_handles;
 use super::service_utils::{
-    ck_rv_only, input_from_wire, parse_mechanism, resolve_session, resolve_session_and_key,
-    spawn_backend,
+    check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
+    resolve_session_and_key, spawn_backend,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,10 +35,18 @@ use super::service_utils::{
 pub(crate) async fn message_encrypt_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::MessageEncryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageEncryptInitResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+
+    // ADR-0010 sanitize_inputs: reject NULL mechanism before reaching the module.
+    if sanitize_inputs && req.mechanism.is_none() {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD.0,
+        }));
+    }
 
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
@@ -135,6 +143,7 @@ pub(crate) async fn message_encrypt_init(
 pub(crate) async fn message_encrypt_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::MessageEncryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageEncryptFinalResponse>, Status> {
     let req = request.into_inner();
@@ -163,10 +172,18 @@ pub(crate) async fn message_encrypt_final(
 pub(crate) async fn message_decrypt_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::MessageDecryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageDecryptInitResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+
+    // ADR-0010 sanitize_inputs: reject NULL mechanism before reaching the module.
+    if sanitize_inputs && req.mechanism.is_none() {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD.0,
+        }));
+    }
 
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
@@ -263,6 +280,7 @@ pub(crate) async fn message_decrypt_init(
 pub(crate) async fn message_decrypt_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::MessageDecryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageDecryptFinalResponse>, Status> {
     let req = request.into_inner();
@@ -291,10 +309,18 @@ pub(crate) async fn message_decrypt_final(
 pub(crate) async fn message_sign_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::MessageSignInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageSignInitResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+
+    // ADR-0010 sanitize_inputs: reject NULL mechanism before reaching the module.
+    if sanitize_inputs && req.mechanism.is_none() {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD.0,
+        }));
+    }
 
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
@@ -379,6 +405,7 @@ pub(crate) async fn message_sign_init(
 pub(crate) async fn message_sign_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::MessageSignFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageSignFinalResponse>, Status> {
     let req = request.into_inner();
@@ -405,10 +432,18 @@ pub(crate) async fn message_sign_final(
 pub(crate) async fn message_verify_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::MessageVerifyInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageVerifyInitResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+
+    // ADR-0010 sanitize_inputs: reject NULL mechanism before reaching the module.
+    if sanitize_inputs && req.mechanism.is_none() {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD.0,
+        }));
+    }
 
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
@@ -493,6 +528,7 @@ pub(crate) async fn message_verify_init(
 pub(crate) async fn message_verify_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::MessageVerifyFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageVerifyFinalResponse>, Status> {
     let req = request.into_inner();
@@ -525,6 +561,7 @@ pub(crate) async fn message_verify_final(
 pub(crate) async fn encrypt_message(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageResponse>, Status> {
     let req = request.into_inner();
@@ -546,6 +583,21 @@ pub(crate) async fn encrypt_message(
     let aad_null_len = req.associated_data_null_len;
     let plaintext = req.plaintext;
     let plaintext_null_len = req.plaintext_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL aad/plaintext pointers before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptMessageResponse {
+            ck_rv: rv.0,
+            parameter_out: Vec::new(),
+            ciphertext: Vec::new(),
+        }));
+    }
+    if let Err(rv) = check_sanitize(sanitize_inputs, plaintext_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptMessageResponse {
+            ck_rv: rv.0,
+            parameter_out: Vec::new(),
+            ciphertext: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.encrypt_message(
@@ -580,6 +632,7 @@ pub(crate) async fn encrypt_message(
 pub(crate) async fn encrypt_message_begin(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageBeginResponse>, Status> {
     let req = request.into_inner();
@@ -598,6 +651,13 @@ pub(crate) async fn encrypt_message_begin(
     let mut parameter = req.parameter;
     let aad = req.associated_data;
     let aad_null_len = req.associated_data_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL aad pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptMessageBeginResponse {
+            ck_rv: rv.0,
+            parameter_out: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.encrypt_message_begin(session, &mut parameter, input_from_wire(&aad, aad_null_len))
@@ -625,6 +685,7 @@ pub(crate) async fn encrypt_message_begin(
 pub(crate) async fn encrypt_message_next(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageNextResponse>, Status> {
     let req = request.into_inner();
@@ -645,6 +706,14 @@ pub(crate) async fn encrypt_message_next(
     let plaintext_part = req.plaintext_part;
     let plaintext_part_null_len = req.plaintext_part_null_len;
     let flags = CkFlags(req.flags);
+    // ADR-0010 sanitize_inputs: validate NULL plaintext_part pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, plaintext_part_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptMessageNextResponse {
+            ck_rv: rv.0,
+            parameter_out: Vec::new(),
+            ciphertext_part: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.encrypt_message_next(
@@ -679,6 +748,7 @@ pub(crate) async fn encrypt_message_next(
 pub(crate) async fn decrypt_message(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageResponse>, Status> {
     let req = request.into_inner();
@@ -700,6 +770,21 @@ pub(crate) async fn decrypt_message(
     let aad_null_len = req.associated_data_null_len;
     let ciphertext = req.ciphertext;
     let ciphertext_null_len = req.ciphertext_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL aad/ciphertext pointers before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptMessageResponse {
+            ck_rv: rv.0,
+            parameter_out: Vec::new(),
+            plaintext: Vec::new(),
+        }));
+    }
+    if let Err(rv) = check_sanitize(sanitize_inputs, ciphertext_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptMessageResponse {
+            ck_rv: rv.0,
+            parameter_out: Vec::new(),
+            plaintext: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.decrypt_message(
@@ -734,6 +819,7 @@ pub(crate) async fn decrypt_message(
 pub(crate) async fn decrypt_message_begin(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageBeginResponse>, Status> {
     let req = request.into_inner();
@@ -752,6 +838,13 @@ pub(crate) async fn decrypt_message_begin(
     let mut parameter = req.parameter;
     let aad = req.associated_data;
     let aad_null_len = req.associated_data_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL aad pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptMessageBeginResponse {
+            ck_rv: rv.0,
+            parameter_out: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.decrypt_message_begin(session, &mut parameter, input_from_wire(&aad, aad_null_len))
@@ -779,6 +872,7 @@ pub(crate) async fn decrypt_message_begin(
 pub(crate) async fn decrypt_message_next(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageNextResponse>, Status> {
     let req = request.into_inner();
@@ -799,6 +893,14 @@ pub(crate) async fn decrypt_message_next(
     let ciphertext_part = req.ciphertext_part;
     let ciphertext_part_null_len = req.ciphertext_part_null_len;
     let flags = CkFlags(req.flags);
+    // ADR-0010 sanitize_inputs: validate NULL ciphertext_part pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, ciphertext_part_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptMessageNextResponse {
+            ck_rv: rv.0,
+            parameter_out: Vec::new(),
+            plaintext_part: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.decrypt_message_next(
@@ -833,6 +935,7 @@ pub(crate) async fn decrypt_message_next(
 pub(crate) async fn sign_message(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SignMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageResponse>, Status> {
     let req = request.into_inner();
@@ -852,6 +955,14 @@ pub(crate) async fn sign_message(
     let mut parameter = req.parameter;
     let data = req.data;
     let data_null_len = req.data_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignMessageResponse {
+            ck_rv: rv.0,
+            parameter_out: Vec::new(),
+            signature: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.sign_message(session, &mut parameter, input_from_wire(&data, data_null_len))
@@ -881,6 +992,7 @@ pub(crate) async fn sign_message(
 pub(crate) async fn sign_message_begin(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SignMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageBeginResponse>, Status> {
     let req = request.into_inner();
@@ -919,6 +1031,7 @@ pub(crate) async fn sign_message_begin(
 pub(crate) async fn sign_message_next(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SignMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageNextResponse>, Status> {
     let req = request.into_inner();
@@ -939,6 +1052,14 @@ pub(crate) async fn sign_message_next(
     let data_part = req.data_part;
     let data_part_null_len = req.data_part_null_len;
     let request_signature = req.request_signature;
+    // ADR-0010 sanitize_inputs: validate NULL data_part pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, data_part_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignMessageNextResponse {
+            ck_rv: rv.0,
+            parameter_out: Vec::new(),
+            signature: Vec::new(),
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.sign_message_next(
@@ -973,6 +1094,7 @@ pub(crate) async fn sign_message_next(
 pub(crate) async fn verify_message(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageResponse>, Status> {
     let req = request.into_inner();
@@ -990,6 +1112,13 @@ pub(crate) async fn verify_message(
     let data_null_len = req.data_null_len;
     let signature = req.signature;
     let signature_null_len = req.signature_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL data/signature pointers before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyMessageResponse { ck_rv: rv.0 }));
+    }
+    if let Err(rv) = check_sanitize(sanitize_inputs, signature_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyMessageResponse { ck_rv: rv.0 }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.verify_message(
@@ -1011,6 +1140,7 @@ pub(crate) async fn verify_message(
 pub(crate) async fn verify_message_begin(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageBeginResponse>, Status> {
     let req = request.into_inner();
@@ -1043,6 +1173,7 @@ pub(crate) async fn verify_message_begin(
 pub(crate) async fn verify_message_next(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageNextResponse>, Status> {
     let req = request.into_inner();
@@ -1063,6 +1194,13 @@ pub(crate) async fn verify_message_next(
     let is_final = req.is_final;
     let signature = req.signature;
     let signature_null_len = req.signature_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL data_part/signature pointers before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, data_part_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyMessageNextResponse { ck_rv: rv.0 }));
+    }
+    if let Err(rv) = check_sanitize(sanitize_inputs, signature_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyMessageNextResponse { ck_rv: rv.0 }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.verify_message_next(

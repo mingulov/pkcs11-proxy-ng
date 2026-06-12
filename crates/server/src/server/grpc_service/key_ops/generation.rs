@@ -20,6 +20,7 @@ const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
 pub(crate) async fn generate_key_pair(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyPairRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyPairResponse>, Status> {
     let req = request.into_inner();
@@ -118,6 +119,7 @@ pub(crate) async fn generate_key_pair(
 pub(crate) async fn generate_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyResponse>, Status> {
     let req = request.into_inner();
@@ -199,6 +201,7 @@ pub(crate) async fn generate_key(
 pub(crate) async fn derive_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DeriveKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DeriveKeyResponse>, Status> {
     let req = request.into_inner();

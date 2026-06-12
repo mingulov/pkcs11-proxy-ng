@@ -10,13 +10,14 @@ use pkcs11_proxy_ng_types::{
 
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::service_utils::{
-    input_from_wire, parse_mechanism, resolve_session, resolve_session_and_two_objects,
-    spawn_backend,
+    check_sanitize, input_from_wire, parse_mechanism, resolve_session,
+    resolve_session_and_two_objects, spawn_backend,
 };
 
 pub(super) async fn parameter_output_exact(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::ParameterOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ParameterOutputExactResponse>, Status> {
     let req = request.into_inner();
@@ -83,6 +84,10 @@ pub(super) async fn parameter_output_exact(
                 }
             };
 
+            // ADR-0010 sanitize_inputs: validate NULL aad pointer before backend call.
+            if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
             let backend = backend_ref.clone();
             let result = spawn_backend(move || {
                 backend.wrap_key_authenticated_exact(
@@ -110,6 +115,14 @@ pub(super) async fn parameter_output_exact(
                     return Ok(Response::new(error_response(error)));
                 }
             };
+
+            // ADR-0010 sanitize_inputs: validate NULL aad/input_data pointers before backend call.
+            if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
+            if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
 
             // If a structured message_parameter is present, use the safe _msg path
             // that reconstructs the C struct with local pointers.
@@ -163,6 +176,11 @@ pub(super) async fn parameter_output_exact(
                     return Ok(Response::new(error_response(error)));
                 }
             };
+
+            // ADR-0010 sanitize_inputs: validate NULL input_data pointer before backend call.
+            if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
 
             let msg_param = req.message_parameter.as_ref().and_then(|mp| {
                 pkcs11_proxy_ng_proto::convert::message_params::MessageParameter::try_from(mp).ok()

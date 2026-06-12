@@ -4,7 +4,9 @@ use tonic::{Request, Response, Status};
 
 use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::ck_result_to_rv;
-use super::super::service_utils::{ck_rv_only, input_from_wire, resolve_session, spawn_backend};
+use super::super::service_utils::{
+    check_sanitize, ck_rv_only, input_from_wire, resolve_session, spawn_backend,
+};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 
 pub(super) async fn generate_random(
@@ -39,6 +41,7 @@ pub(super) async fn generate_random(
 pub(super) async fn seed_random(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SeedRandomRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SeedRandomResponse>, Status> {
     let req = request.into_inner();
@@ -53,6 +56,10 @@ pub(super) async fn seed_random(
 
     let seed = req.seed;
     let seed_null_len = req.seed_null_len;
+    // ADR-0010 sanitize_inputs: validate NULL seed pointer before backend call.
+    if let Err(rv) = check_sanitize(sanitize_inputs, seed_null_len) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SeedRandomResponse { ck_rv: rv.0 }));
+    }
     let backend = backend_ref.clone();
     let result =
         spawn_backend(move || backend.seed_random(session, input_from_wire(&seed, seed_null_len)))
