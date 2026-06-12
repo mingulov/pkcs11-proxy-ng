@@ -127,13 +127,18 @@ correctness claims.
   termination from a rejected call must not depend on `sanitize_inputs` for
   that behavior. This is an accepted trade-off (availability over full
   fidelity) documented here rather than silently fixed.
-- Known bypass: the 8 LEGACY per-operation RPC fields
-  (`EncryptRequest`/`DecryptRequest`/`DigestRequest`/`SignRequest` singles and
-  the 4 combined-update requests) do not carry `*_null_len` semantics and are
-  not `sanitize_inputs`-gated. A hand-crafted non-shim gRPC client using those
-  legacy paths bypasses both the NULL-wire-fidelity and the sanitize gate. The
-  shim routes exclusively through `ByteOutputExact`; this bypass is not
-  reachable through normal shim use.
+- Known bypass: the LEGACY `Encrypt`/`EncryptUpdate`/`Decrypt`/`DecryptUpdate`
+  single-op handlers (`cipher.rs`) hardcode `CkInBuf::Bytes`, ignoring
+  `*_null_len` and skipping `check_sanitize`, as do the 4 combined-update
+  handlers (`sign_encrypt.rs`, `decrypt_digest.rs`) — 8 handlers total where
+  both NULL-wire-fidelity and the sanitize gate are unwired. By contrast, the
+  legacy Sign/SignUpdate/SignRecover/Verify/VerifyUpdate/VerifyFinal/
+  VerifyRecover/Digest/DigestUpdate handlers DO read `*_null_len`, DO call
+  `check_sanitize`, and DO reconstruct via `input_from_wire`. The asymmetry is
+  acceptable: all unwired handlers are marked
+  `// NOTE: legacy per-op RPC — not used by the shim` and are unreachable from
+  normal shim use (the shim routes via `ByteOutputExact`); they are on the
+  follow-up cleanup roster.
 - Future "compatibility" fixes that would synthesize or translate a `CK_RV` on
   the default path are rejected by policy; they belong behind `sanitize_inputs`
   or in the backend module itself.
