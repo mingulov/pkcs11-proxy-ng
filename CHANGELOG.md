@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `sanitize_inputs` daemon config option (default `false`). When enabled, the
+  daemon rejects NULL data pointers with non-zero length and NULL mechanism
+  pointers on init with `CKR_ARGUMENTS_BAD` before they reach the backend
+  module, trading transparency for availability. See ADR-0010 for the
+  accepted divergence (a sanitize-mode reject does not terminate the active
+  backend operation). Configure via `[proxy] sanitize_inputs = true`.
 - Server-driven mechanism registry. The daemon now reads
   `mechanism_params.toml` (or the embedded default) at startup,
   computes a SHA-256-truncated revision string, and publishes the
@@ -77,6 +83,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- NULL data-input pointers now reach the backend module verbatim (Bug B;
+  ADR-0010 Scope 2). The shim serializes `(NULL pointer, claimed length N)`
+  as distinct from an empty byte slice via additive `*_null_len` proto fields;
+  the daemon reconstructs the exact `(NULL, N)` FFI call. Null-argument
+  rejection RVs and operation termination semantics now come from the module
+  rather than being synthesized by the shim.
+- Unreadable data-input lengths (valid pointer, byte size > 512 MiB
+  `MAX_SERIALIZABLE_BYTES` or overflowing) now return stable
+  `CKR_ARGUMENTS_BAD` instead of `CKR_GENERAL_ERROR` (the previous panic-guard
+  path). This is the documented transport-impossible limit per ADR-0010.
+- Absurd lengths on embedded mechanism-parameter payload fields (GCM/CCM AAD,
+  PBE salt, GOST IV/UKM, IKE/KEA public data, derived-key nonce/tag, and ~25
+  others) no longer cause a wild memory read that crashed the client process.
+  The shim now guards all ~30 previously unguarded embedded payload reads;
+  the daemon rejects oversized embedded params with
+  `CKR_MECHANISM_PARAM_INVALID` at the FFI reconstruction boundary.
+- Legitimate embedded mechanism-parameter payloads larger than 64 KiB (e.g.
+  valid GCM/CCM AAD) are no longer rejected. The constant
+  `MAX_MECHANISM_PARAM_STRUCT_LEN` (renamed from `MAX_MECHANISM_PARAM_LEN`)
+  now bounds only the parameter-STRUCT length; embedded data fields are
+  bounded by `MAX_SERIALIZABLE_BYTES` (512 MiB).
 - `C_VerifyInit`/`C_DigestInit` with a NULL mechanism pointer are now
   forwarded verbatim to the backend module, like the five sibling init
   paths, so the module's native `CK_RV` (`CKR_ARGUMENTS_BAD`,
