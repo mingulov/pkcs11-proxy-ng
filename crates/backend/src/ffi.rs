@@ -1431,7 +1431,7 @@ mod tests {
             backend
                 .mech_cache
                 .insert(session, ffi_conversion::mechanism_to_ffi(&mechanism).unwrap());
-            backend.remember_session_slot(CkSessionHandle(session), CkSlotId(slot));
+            backend.remember_session_slot(CkSessionHandle(session as u64), CkSlotId(slot as u64));
         }
 
         backend.drop_mech_cache_for_slot(CkSlotId(11));

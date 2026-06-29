@@ -87,9 +87,9 @@ pub(crate) async fn generate_key_pair(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(public_key.0),
+                CkObjectHandle(public_key.0 as u64),
                 public_is_token,
-                CkObjectHandle(private_key.0),
+                CkObjectHandle(private_key.0 as u64),
                 private_is_token,
             )
             .await;
@@ -174,7 +174,7 @@ pub(crate) async fn generate_key(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(object.0),
+                CkObjectHandle(object.0 as u64),
                 is_token,
             )
             .await;
@@ -412,7 +412,7 @@ async fn virtualize_derived_key_handles(
     for derived_key in derived_keys {
         if derived_key.key_handle != 0 {
             derived_key.key_handle =
-                register_object_handle(ctx_mgr, ctx_id, CkObjectHandle(derived_key.key_handle))
+                register_object_handle(ctx_mgr, ctx_id, CkObjectHandle(derived_key.key_handle as u64))
                     .await;
         }
     }

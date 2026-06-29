@@ -49,7 +49,7 @@ fn slot_scoped_workflows_reject_invalid_slot() {
 fn full_registry_mock_advertises_every_default_registered_mechanism() {
     let registry = MechanismRegistry::load_with_override_str(None).unwrap();
     let expected =
-        registry.registered_mechanisms().into_iter().map(CkMechanismType).collect::<Vec<_>>();
+        registry.registered_mechanisms().into_iter().map(|x| CkMechanismType(x as u64)).collect::<Vec<_>>();
     let backend = MockBackend::with_mechanism_registry(vec![CkSlotId(0)], &registry);
 
     let advertised = backend.get_mechanism_list(CkSlotId(0)).unwrap();
@@ -1079,7 +1079,7 @@ fn mock_mechanism_info_uses_source_grounded_workflow_flags() {
 
     for (mechanism, expected_flags) in cases {
         let info = backend.get_mechanism_info(CkSlotId(0), mechanism).unwrap();
-        assert_eq!(info.flags, CkMechanismFlags(expected_flags), "mechanism {mechanism:?}");
+        assert_eq!(info.flags, CkMechanismFlags(expected_flags as u64), "mechanism {mechanism:?}");
     }
 }
 
@@ -1856,7 +1856,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_core_workflow
 fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows() {
     let registry = MechanismRegistry::load_with_override_str(None).unwrap();
     let mechanisms =
-        registry.registered_mechanisms().into_iter().map(CkMechanismType).collect::<Vec<_>>();
+        registry.registered_mechanisms().into_iter().map(|x| CkMechanismType(x as u64)).collect::<Vec<_>>();
     let backend = MockBackend::with_mechanism_registry(vec![CkSlotId(0)], &registry);
     backend.initialize().unwrap();
 
@@ -1960,7 +1960,7 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
 fn full_registry_mock_accepts_every_registered_mechanism_for_exact_wrap_workflow() {
     let registry = MechanismRegistry::load_with_override_str(None).unwrap();
     let mechanisms =
-        registry.registered_mechanisms().into_iter().map(CkMechanismType).collect::<Vec<_>>();
+        registry.registered_mechanisms().into_iter().map(|x| CkMechanismType(x as u64)).collect::<Vec<_>>();
     let backend = MockBackend::with_mechanism_registry(vec![CkSlotId(0)], &registry);
     backend.initialize().unwrap();
 

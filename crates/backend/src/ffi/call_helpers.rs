@@ -46,7 +46,7 @@ impl FfiBackend {
     /// Map a cryptoki_sys CK_RV to CkResult.
     #[inline]
     pub(super) fn ck_result(rv: cryptoki_sys::CK_RV) -> CkResult<()> {
-        if rv == 0 { Ok(()) } else { Err(CkRv(rv)) }
+        if rv == 0 { Ok(()) } else { Err(CkRv(rv as u64)) }
     }
 
     #[inline]
@@ -93,7 +93,7 @@ impl FfiBackend {
         let mut values = vec![T::default(); capped_count];
         count = capped_count as cryptoki_sys::CK_ULONG;
         let rv = call(values.as_mut_ptr(), &mut count);
-        if rv == CkRv::BUFFER_TOO_SMALL.0 && (count as usize) > values.len() {
+        if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV && (count as usize) > values.len() {
             // Backend needs more space than the size query indicated — retry
             // (still capped to prevent OOM).
             let retry_count = (count as u64)
@@ -436,7 +436,7 @@ impl FfiBackend {
         if !spec.buffer_present {
             // Size query: pass NULL buffer
             let rv = call(std::ptr::null_mut(), &mut out_len);
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 Ok(CkOutputBufferResult {
                     ck_rv: CkRv::OK,
                     returned_len: out_len as u64,
@@ -444,7 +444,7 @@ impl FfiBackend {
                 })
             } else {
                 // Propagate exact CK_RV from backend
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         } else {
             // Data query: allocate caller-specified buffer, capped to prevent
@@ -454,21 +454,21 @@ impl FfiBackend {
             let mut buf = vec![0u8; capped_len as usize];
             let rv = call(buf.as_mut_ptr(), &mut out_len);
 
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 buf.truncate(out_len as usize);
                 Ok(CkOutputBufferResult {
                     ck_rv: CkRv::OK,
                     returned_len: out_len as u64,
                     value: Some(buf),
                 })
-            } else if rv == CkRv::BUFFER_TOO_SMALL.0 {
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
                 Ok(CkOutputBufferResult {
                     ck_rv: CkRv::BUFFER_TOO_SMALL,
                     returned_len: out_len as u64,
                     value: None,
                 })
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         }
     }
@@ -563,7 +563,7 @@ impl FfiBackend {
             Err(rv) => return Ok(CkDeriveKeyOutputResult::error(rv, None)),
         };
         let mut handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
-        let rv = CkRv(call(function, &mut ffi_mech.ck_mechanism, &mut handle));
+        let rv = CkRv(call(function, &mut ffi_mech.ck_mechanism, &mut handle) as u64);
         let mechanism_out = ffi_mech.output_params();
         if rv.is_ok() {
             Ok(CkDeriveKeyOutputResult::ok(CkObjectHandle(handle as u64), mechanism_out))
@@ -663,7 +663,7 @@ impl FfiBackend {
         if !output_spec.buffer_present {
             // Size query: pass NULL buffer for main output.
             let rv = call(param_ptr, param_ck_len, std::ptr::null_mut(), &mut out_len);
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 let output_result = CkOutputBufferResult {
                     ck_rv: CkRv::OK,
                     returned_len: out_len as u64,
@@ -676,7 +676,7 @@ impl FfiBackend {
                 };
                 Ok((output_result, param_result))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         } else {
             // Data query: allocate caller-specified buffer, capped to prevent OOM.
@@ -685,7 +685,7 @@ impl FfiBackend {
             let mut buf = vec![0u8; capped_len as usize];
             let rv = call(param_ptr, param_ck_len, buf.as_mut_ptr(), &mut out_len);
 
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 buf.truncate(out_len as usize);
                 let output_result = CkOutputBufferResult {
                     ck_rv: CkRv::OK,
@@ -698,7 +698,7 @@ impl FfiBackend {
                     value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
                 };
                 Ok((output_result, param_result))
-            } else if rv == CkRv::BUFFER_TOO_SMALL.0 {
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
                 let output_result = CkOutputBufferResult {
                     ck_rv: CkRv::BUFFER_TOO_SMALL,
                     returned_len: out_len as u64,
@@ -711,7 +711,7 @@ impl FfiBackend {
                 };
                 Ok((output_result, param_result))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         }
     }

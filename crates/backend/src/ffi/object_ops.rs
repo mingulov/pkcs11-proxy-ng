@@ -50,7 +50,7 @@ impl FfiBackend {
         // A conformant backend writes at most `cap` handles; clamp `found`
         // defensively so a buggy backend cannot drive an out-of-bounds slice.
         let n = (found as usize).min(cap);
-        Ok(handles[..n].iter().map(|&h| CkObjectHandle(h)).collect())
+        Ok(handles[..n].iter().map(|&h| CkObjectHandle(h as u64)).collect())
     }
 
     pub(super) fn ffi_find_objects_final(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -95,7 +95,7 @@ impl FfiBackend {
                     Self::ulong_len(ffi_queries.attrs.len()),
                 )
             })?;
-        let rv = CkRv(rv);
+        let rv = CkRv(rv as u64);
         Ok((rv, exact_attribute_results_from_ffi(queries, &ffi_queries.attrs, rv)))
     }
 

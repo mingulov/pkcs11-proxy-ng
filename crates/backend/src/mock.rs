@@ -230,7 +230,7 @@ impl MockBackend {
     /// proxy-understood mechanism surface, including vendor override entries.
     pub fn with_mechanism_registry(slots: Vec<CkSlotId>, registry: &MechanismRegistry) -> Self {
         let mechanisms =
-            registry.registered_mechanisms().into_iter().map(CkMechanismType).collect();
+            registry.registered_mechanisms().into_iter().map(|x| CkMechanismType(x as u64)).collect();
         Self::new(slots, mechanisms)
     }
 
@@ -437,7 +437,7 @@ impl MockBackend {
         if self.max_objects > 0 && state.live_objects.len() as u64 >= self.max_objects {
             return Err(CkRv::DEVICE_MEMORY);
         }
-        let handle = CkObjectHandle(state.next_object);
+        let handle = CkObjectHandle(state.next_object as u64);
         state.next_object += 1;
         state.live_objects.insert(handle.0);
         Ok(handle)
@@ -518,7 +518,7 @@ impl MockBackend {
     }
 
     fn require_live_object_if_nonzero(&self, state: &MockState, object: u64) -> CkResult<()> {
-        if object == 0 { Ok(()) } else { self.require_live_object(state, CkObjectHandle(object)) }
+        if object == 0 { Ok(()) } else { self.require_live_object(state, CkObjectHandle(object as u64)) }
     }
 
     fn validate_source_grounded_param_handles(
@@ -532,7 +532,7 @@ impl MockBackend {
 
         match params {
             CkMechanismParams::ObjectHandle(params) => {
-                self.require_live_object(state, CkObjectHandle(params.handle))?;
+                self.require_live_object(state, CkObjectHandle(params.handle as u64))?;
             }
             CkMechanismParams::Kip(params)
                 if matches!(
@@ -543,19 +543,19 @@ impl MockBackend {
                 self.require_live_object_if_nonzero(state, params.key_handle)?;
             }
             CkMechanismParams::Ecdh2Derive(params) => {
-                self.require_live_object(state, CkObjectHandle(params.private_data_handle))?;
+                self.require_live_object(state, CkObjectHandle(params.private_data_handle as u64))?;
             }
             CkMechanismParams::EcmqvDerive(params) => {
                 for handle in [params.private_data_handle, params.public_key_handle] {
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
             }
             CkMechanismParams::X942Dh2Derive(params) => {
-                self.require_live_object(state, CkObjectHandle(params.private_data_handle))?;
+                self.require_live_object(state, CkObjectHandle(params.private_data_handle as u64))?;
             }
             CkMechanismParams::X942MqvDerive(params) => {
                 for handle in [params.private_data_handle, params.public_key_handle] {
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
             }
             CkMechanismParams::X3dhInitiate(params) => {
@@ -567,11 +567,11 @@ impl MockBackend {
                     params.own_identity_handle,
                     params.own_ephemeral_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
             }
             CkMechanismParams::X3dhRespond(params) => {
-                self.require_live_object(state, CkObjectHandle(params.initiator_identity_handle))?;
+                self.require_live_object(state, CkObjectHandle(params.initiator_identity_handle as u64))?;
             }
             CkMechanismParams::X2RatchetInitialize(params) => {
                 for handle in [
@@ -579,7 +579,7 @@ impl MockBackend {
                     params.peer_public_identity_handle,
                     params.own_public_identity_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
             }
             CkMechanismParams::X2RatchetRespond(params) => {
@@ -588,7 +588,7 @@ impl MockBackend {
                     params.initiator_identity_handle,
                     params.own_identity_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
             }
             CkMechanismParams::CmsSig(params) => {
@@ -805,7 +805,7 @@ impl MockBackend {
                 }
                 CK_SP800_108_KEY_HANDLE => {
                     let handle = read_sp800_108_key_handle_value(&data_param.value)?;
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
                 _ => {}
             }

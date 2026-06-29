@@ -157,7 +157,7 @@ impl FfiBackend {
                     &mut out_len,
                 )
             };
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 // Read back mechanism parameter.
                 let param_value = if param_out_spec.buffer_present
                     && !mech_param_ptr.is_null()
@@ -182,7 +182,7 @@ impl FfiBackend {
                 };
                 Ok((output_result, param_result))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         } else {
             // Data query: allocate caller-specified buffer.
@@ -202,7 +202,7 @@ impl FfiBackend {
                 )
             };
 
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 buf.truncate(out_len as usize);
                 // Read back mechanism parameter.
                 let param_value = if param_out_spec.buffer_present
@@ -227,7 +227,7 @@ impl FfiBackend {
                     value: param_value,
                 };
                 Ok((output_result, param_result))
-            } else if rv == CkRv::BUFFER_TOO_SMALL.0 {
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
                 let output_result = CkOutputBufferResult {
                     ck_rv: CkRv::BUFFER_TOO_SMALL,
                     returned_len: out_len as u64,
@@ -240,7 +240,7 @@ impl FfiBackend {
                 };
                 Ok((output_result, param_result))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         }
     }

@@ -369,7 +369,7 @@ fn login_state_variants_are_distinct() {
 fn teardown_clears_login_state_for_all_slots() {
     let mut ctx = LogicalClientInstance::new(None);
     for i in 0..5 {
-        ctx.login_state.insert(CkSlotId(i), LoginState::User);
+        ctx.login_state.insert(CkSlotId(i as u64), LoginState::User);
     }
     let _ = ctx.teardown();
     assert!(ctx.login_state.is_empty(), "teardown must clear all per-slot login state");

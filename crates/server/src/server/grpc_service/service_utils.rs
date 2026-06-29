@@ -348,7 +348,7 @@ pub(super) async fn resolve_slot(
     ctx_mgr: &Arc<ContextManager>,
     slot_id: u64,
 ) -> Result<CkSlotId, CkRv> {
-    ctx_mgr.resolve_slot(CkSlotId(slot_id)).await.ok_or(CkRv::SLOT_ID_INVALID)
+    ctx_mgr.resolve_slot(CkSlotId(slot_id as u64)).await.ok_or(CkRv::SLOT_ID_INVALID)
 }
 
 pub(super) fn parse_mechanism(
@@ -371,7 +371,7 @@ pub(super) async fn resolve_session(
     };
 
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
-    Ok(CkSessionHandle(backend_session.0))
+    Ok(CkSessionHandle(backend_session.0 as u64))
 }
 
 pub(super) async fn resolve_session_and_key(
@@ -398,8 +398,8 @@ pub(super) async fn resolve_session_and_key(
     // CKR_KEY_HANDLE_INVALID locally.  This preserves transparency: the
     // backend decides the error priority (e.g., CKR_FUNCTION_NOT_SUPPORTED
     // vs CKR_KEY_HANDLE_INVALID).
-    let backend_key = key.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
-    Ok((CkSessionHandle(backend_session.0), backend_key))
+    let backend_key = key.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    Ok((CkSessionHandle(backend_session.0 as u64), backend_key))
 }
 
 pub(super) async fn resolve_session_and_object(
@@ -423,8 +423,8 @@ pub(super) async fn resolve_session_and_object(
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
     // Forward CK_INVALID_HANDLE to backend when object is unknown — see
     // resolve_session_and_key for rationale.
-    let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
-    Ok((CkSessionHandle(backend_session.0), backend_object))
+    let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    Ok((CkSessionHandle(backend_session.0 as u64), backend_object))
 }
 
 pub(super) async fn resolve_session_and_two_objects(
@@ -451,10 +451,10 @@ pub(super) async fn resolve_session_and_two_objects(
     // Forward CK_INVALID_HANDLE to backend when either object is unknown; see
     // resolve_session_and_key for rationale. Local context/session validation
     // remains explicit; backend-visible object handle priority stays backend-owned.
-    let first_backend_object = first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
-    let second_backend_object = second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
+    let first_backend_object = first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    let second_backend_object = second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
 
-    Ok((CkSessionHandle(backend_session.0), first_backend_object, second_backend_object))
+    Ok((CkSessionHandle(backend_session.0 as u64), first_backend_object, second_backend_object))
 }
 
 pub(super) async fn register_object_handle(

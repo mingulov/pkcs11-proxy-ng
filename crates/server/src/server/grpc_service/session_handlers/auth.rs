@@ -50,7 +50,7 @@ async fn resolve_session_slot_login(
     match resolved {
         None => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
         Some((Some(backend_session), Some(slot), current_login_state)) => {
-            Ok((CkSessionHandle(backend_session.0), slot, current_login_state))
+            Ok((CkSessionHandle(backend_session.0 as u64), slot, current_login_state))
         }
         Some(_) => Err(CkRv::SESSION_HANDLE_INVALID),
     }

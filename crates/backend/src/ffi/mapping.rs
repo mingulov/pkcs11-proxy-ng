@@ -10,7 +10,7 @@ pub(super) fn info_from_ck(info: &cryptoki_sys::CK_INFO) -> CkInfo {
     CkInfo {
         cryptoki_version: (info.cryptokiVersion.major, info.cryptokiVersion.minor),
         manufacturer_id: utf8_trim(&info.manufacturerID),
-        flags: info.flags,
+        flags: info.flags as u64,
         library_description: utf8_trim(&info.libraryDescription),
         library_version: (info.libraryVersion.major, info.libraryVersion.minor),
     }
@@ -20,7 +20,7 @@ pub(super) fn slot_info_from_ck(info: &cryptoki_sys::CK_SLOT_INFO) -> CkSlotInfo
     CkSlotInfo {
         slot_description: utf8_trim(&info.slotDescription),
         manufacturer_id: utf8_trim(&info.manufacturerID),
-        flags: CkSlotFlags(info.flags),
+        flags: CkSlotFlags(info.flags as u64),
         hardware_version: (info.hardwareVersion.major, info.hardwareVersion.minor),
         firmware_version: (info.firmwareVersion.major, info.firmwareVersion.minor),
     }
@@ -32,17 +32,17 @@ pub(super) fn token_info_from_ck(info: &cryptoki_sys::CK_TOKEN_INFO) -> CkTokenI
         manufacturer_id: utf8_trim(&info.manufacturerID),
         model: utf8_trim(&info.model),
         serial_number: utf8_trim(&info.serialNumber),
-        flags: CkTokenFlags(info.flags),
-        max_session_count: info.ulMaxSessionCount,
-        session_count: info.ulSessionCount,
-        max_rw_session_count: info.ulMaxRwSessionCount,
-        rw_session_count: info.ulRwSessionCount,
-        max_pin_len: info.ulMaxPinLen,
-        min_pin_len: info.ulMinPinLen,
-        total_public_memory: info.ulTotalPublicMemory,
-        free_public_memory: info.ulFreePublicMemory,
-        total_private_memory: info.ulTotalPrivateMemory,
-        free_private_memory: info.ulFreePrivateMemory,
+        flags: CkTokenFlags(info.flags as u64),
+        max_session_count: info.ulMaxSessionCount as u64,
+        session_count: info.ulSessionCount as u64,
+        max_rw_session_count: info.ulMaxRwSessionCount as u64,
+        rw_session_count: info.ulRwSessionCount as u64,
+        max_pin_len: info.ulMaxPinLen as u64,
+        min_pin_len: info.ulMinPinLen as u64,
+        total_public_memory: info.ulTotalPublicMemory as u64,
+        free_public_memory: info.ulFreePublicMemory as u64,
+        total_private_memory: info.ulTotalPrivateMemory as u64,
+        free_private_memory: info.ulFreePrivateMemory as u64,
         hardware_version: (info.hardwareVersion.major, info.hardwareVersion.minor),
         firmware_version: (info.firmwareVersion.major, info.firmwareVersion.minor),
         utc_time: utf8_trim(&info.utcTime),
@@ -51,18 +51,18 @@ pub(super) fn token_info_from_ck(info: &cryptoki_sys::CK_TOKEN_INFO) -> CkTokenI
 
 pub(super) fn mechanism_info_from_ck(info: &cryptoki_sys::CK_MECHANISM_INFO) -> CkMechanismInfo {
     CkMechanismInfo {
-        min_key_size: info.ulMinKeySize,
-        max_key_size: info.ulMaxKeySize,
-        flags: CkMechanismFlags(info.flags),
+        min_key_size: info.ulMinKeySize as u64,
+        max_key_size: info.ulMaxKeySize as u64,
+        flags: CkMechanismFlags(info.flags as u64),
     }
 }
 
 pub(super) fn session_info_from_ck(info: &cryptoki_sys::CK_SESSION_INFO) -> CkSessionInfo {
     CkSessionInfo {
-        slot_id: CkSlotId(info.slotID),
+        slot_id: CkSlotId(info.slotID as u64),
         state: session_state_from_ck(info.state),
-        flags: CkSessionFlags(info.flags),
-        device_error: info.ulDeviceError,
+        flags: CkSessionFlags(info.flags as u64),
+        device_error: info.ulDeviceError as u64,
     }
 }
 
@@ -225,7 +225,7 @@ fn nested_attribute_result_from_ffi(
             };
 
             CkAttributeQueryResult {
-                attr_type: CkAttributeType(sub_attr.type_),
+                attr_type: CkAttributeType(sub_attr.type_ as u64),
                 returned_len: sub_returned_len,
                 value: sub_value,
                 ck_rv: sub_ck_rv,
