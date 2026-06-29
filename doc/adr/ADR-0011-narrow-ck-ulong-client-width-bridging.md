@@ -601,9 +601,33 @@ assumption.
   The classifier is therefore sourced exhaustively from the OASIS attribute-type
   tables and guarded by a consistency test, so the set cannot silently drift.
 
-## Remaining work to schedule (not decisions — execution)
+## Implementation status (2026-06-29)
 
-See the implementation plan above. First landable units: (1) get a narrow target
-compiling + into CI (M2); (2) complete the attribute classification from the
-OASIS inventory (C1/H3); (3) fix `CKA_ALLOWED_MECHANISMS` routing (C2) — a
-standalone 64-bit bug fix.
+**Done & committed** (submodule):
+- Pure width-translation core (`types/src/width.rs`) with the full cross-width
+  unit matrix.
+- `CK_UNAVAILABLE_INFORMATION` canonicalization (D10) — attribute `returned_len`
+  and `CK_TOKEN_INFO` fields.
+- Attribute classifier: `is_ulong()` complete (50 scalar) + `is_ulong_array()`
+  (3), OASIS-sourced, pinned by a `cryptoki-sys`-cross-checked consistency test.
+- D2/D6 advertisement: `backend_ulong_size` + `backend_byte_order` on
+  `GetBackendInterfacesResponse`; backend `host_abi`; server fills; client
+  `BackendProbe`; shim probe consumes (D9 fallback / D6 refuse-mismatch).
+- Value bridge: shim `width_bridge` wired into `C_GetAttributeValue` output
+  (scalar + array) and ulong-array input re-encode in `ck_attrs_to_rust_result`.
+  Scalar input is width-independent via the typed `ulong_value`.
+- LLP64 Bucket 2: `#[cfg_attr(windows, repr(packed))]` on the 7 hand-rolled
+  `#[repr(C)]` param structs (5 backend + 2 shim).
+- i686: whole workspace builds; types/proto/backend/client/shim lib suites green
+  on x86_64; shim cross-compiles on i686.
+
+**Remaining (scheduled):**
+- Nested `CK_ATTRIBUTE[]` template ulong sub-values (output) — entangled with the
+  orthogonal local-ABI `CK_ATTRIBUTE`-size axis; scoped follow-up.
+- **D4 server-input checked narrowing** (`ffi_conversion.rs`) — the 64c/32b
+  direction; D3-gated (narrow-backend track), never fires on the shipping 64-bit
+  backend; deferred with the 32-bit-server track.
+- Windows **client**: cfg-gate the UDS path (tcp/mTLS-only on Windows) — in
+  progress; verified via `cargo xwin`.
+- Windows **server** OS port (Bucket 3) and the 32-bit-server track — D3-gated.
+- Integration tests: i686 cross-topology + Windows wine smoke; CI promotion.
