@@ -42,7 +42,10 @@ unsafe fn read_message_init_mechanism(
         // Recognised AEAD message params: ship the mechanism type only and let
         // the backend rebuild the CK_*_MESSAGE_PARAMS struct from this.
         Some(mp) if !matches!(mp, MessageParameter::Raw(_)) => Ok((
-            Some(CkMechanism { mechanism_type: CkMechanismType(c_mech.mechanism as u64), params: None }),
+            Some(CkMechanism {
+                mechanism_type: CkMechanismType(c_mech.mechanism as u64),
+                params: None,
+            }),
             Some(mp),
         )),
         // Parameterless / unrecognised: preserve the classic shim behaviour.

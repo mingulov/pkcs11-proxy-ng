@@ -203,7 +203,9 @@ fn backend_object_handle(daemon: &TestDaemon, object: CK_OBJECT_HANDLE) -> CkObj
         assert_eq!(context_ids.len(), 1, "expected one active shim context");
         let backend_handle = daemon
             .context_manager
-            .get_context(&context_ids[0], |ctx| ctx.object_handles.resolve(VirtualHandle(object as _)))
+            .get_context(&context_ids[0], |ctx| {
+                ctx.object_handles.resolve(VirtualHandle(object as _))
+            })
             .await
             .flatten()
             .expect("backend object handle");

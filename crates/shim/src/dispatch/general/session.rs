@@ -92,7 +92,9 @@ pub unsafe extern "C" fn c_login(
         } else {
             Some(unsafe { read_input_slice(p_pin, ul_pin_len) })
         };
-        unit_result_to_rv(with_client!(client => client.login(CkSessionHandle(h_session as u64), ut, pin)))
+        unit_result_to_rv(
+            with_client!(client => client.login(CkSessionHandle(h_session as u64), ut, pin)),
+        )
     })
 }
 

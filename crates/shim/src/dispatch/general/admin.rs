@@ -66,7 +66,8 @@ pub unsafe extern "C" fn c_set_pin(
         } else {
             Some(unsafe { read_input_slice(p_new_pin, ul_new_len) })
         };
-        match with_client!(client => client.set_pin(CkSessionHandle(h_session as u64), old_pin, new_pin)) {
+        match with_client!(client => client.set_pin(CkSessionHandle(h_session as u64), old_pin, new_pin))
+        {
             Ok(()) => rv_ok(),
             Err(e) => rv_err(e),
         }

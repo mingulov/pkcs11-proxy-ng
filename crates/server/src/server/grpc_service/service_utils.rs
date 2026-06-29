@@ -451,8 +451,10 @@ pub(super) async fn resolve_session_and_two_objects(
     // Forward CK_INVALID_HANDLE to backend when either object is unknown; see
     // resolve_session_and_key for rationale. Local context/session validation
     // remains explicit; backend-visible object handle priority stays backend-owned.
-    let first_backend_object = first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
-    let second_backend_object = second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    let first_backend_object =
+        first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    let second_backend_object =
+        second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
 
     Ok((CkSessionHandle(backend_session.0 as u64), first_backend_object, second_backend_object))
 }

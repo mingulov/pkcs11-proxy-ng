@@ -411,9 +411,12 @@ async fn virtualize_derived_key_handles(
 ) {
     for derived_key in derived_keys {
         if derived_key.key_handle != 0 {
-            derived_key.key_handle =
-                register_object_handle(ctx_mgr, ctx_id, CkObjectHandle(derived_key.key_handle as u64))
-                    .await;
+            derived_key.key_handle = register_object_handle(
+                ctx_mgr,
+                ctx_id,
+                CkObjectHandle(derived_key.key_handle as u64),
+            )
+            .await;
         }
     }
 }

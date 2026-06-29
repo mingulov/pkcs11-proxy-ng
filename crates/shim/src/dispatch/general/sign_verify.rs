@@ -124,8 +124,7 @@ pub unsafe extern "C" fn c_verify_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            let result =
-                with_client!(client => client.verify_init_cancel(CkSessionHandle(h_session as u64)));
+            let result = with_client!(client => client.verify_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_operation_state_cache(h_session);
             }
@@ -217,8 +216,7 @@ pub unsafe extern "C" fn c_sign_recover_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            let result =
-                with_client!(client => client.sign_recover_init_cancel(CkSessionHandle(h_session as u64)));
+            let result = with_client!(client => client.sign_recover_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_sign_recover_output_cache(h_session);
                 state::clear_operation_state_cache(h_session);

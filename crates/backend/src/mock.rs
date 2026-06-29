@@ -229,8 +229,11 @@ impl MockBackend {
     /// This is useful for protocol/workflow tests that need the complete
     /// proxy-understood mechanism surface, including vendor override entries.
     pub fn with_mechanism_registry(slots: Vec<CkSlotId>, registry: &MechanismRegistry) -> Self {
-        let mechanisms =
-            registry.registered_mechanisms().into_iter().map(|x| CkMechanismType(x as u64)).collect();
+        let mechanisms = registry
+            .registered_mechanisms()
+            .into_iter()
+            .map(|x| CkMechanismType(x as u64))
+            .collect();
         Self::new(slots, mechanisms)
     }
 
@@ -518,7 +521,11 @@ impl MockBackend {
     }
 
     fn require_live_object_if_nonzero(&self, state: &MockState, object: u64) -> CkResult<()> {
-        if object == 0 { Ok(()) } else { self.require_live_object(state, CkObjectHandle(object as u64)) }
+        if object == 0 {
+            Ok(())
+        } else {
+            self.require_live_object(state, CkObjectHandle(object as u64))
+        }
     }
 
     fn validate_source_grounded_param_handles(
@@ -571,7 +578,10 @@ impl MockBackend {
                 }
             }
             CkMechanismParams::X3dhRespond(params) => {
-                self.require_live_object(state, CkObjectHandle(params.initiator_identity_handle as u64))?;
+                self.require_live_object(
+                    state,
+                    CkObjectHandle(params.initiator_identity_handle as u64),
+                )?;
             }
             CkMechanismParams::X2RatchetInitialize(params) => {
                 for handle in [

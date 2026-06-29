@@ -43,7 +43,9 @@ impl FfiBackend {
                     &mut key_handle,
                 )
             };
-            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV || rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV
+                || rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV
+            {
                 // Both CKR_OK and CKR_BUFFER_TOO_SMALL are valid size-query
                 // responses (NSS returns BUFFER_TOO_SMALL). Propagate the
                 // returned length so the caller can allocate correctly.

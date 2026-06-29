@@ -1028,9 +1028,7 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 // Safety: pParameter points to a CK_MAC_GENERAL_PARAMS
                 // (which is a CK_ULONG).
                 let val = unsafe { *(param_ptr as *const CK_MAC_GENERAL_PARAMS) };
-                Some(CkMechanismParams::MacGeneral(MacGeneralParams {
-                    mac_length: val as u64,
-                }))
+                Some(CkMechanismParams::MacGeneral(MacGeneralParams { mac_length: val as u64 }))
             }
         }
 
@@ -1253,9 +1251,7 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
             } else {
                 // Safety: pParameter points to a valid CK_XEDDSA_PARAMS.
                 let xed = unsafe { &*(param_ptr as *const CK_XEDDSA_PARAMS) };
-                Some(CkMechanismParams::Xeddsa(XeddsaParams {
-                    hash: xed.hash as u64,
-                }))
+                Some(CkMechanismParams::Xeddsa(XeddsaParams { hash: xed.hash as u64 }))
             }
         }
 

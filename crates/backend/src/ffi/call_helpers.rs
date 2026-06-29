@@ -93,7 +93,8 @@ impl FfiBackend {
         let mut values = vec![T::default(); capped_count];
         count = capped_count as cryptoki_sys::CK_ULONG;
         let rv = call(values.as_mut_ptr(), &mut count);
-        if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV && (count as usize) > values.len() {
+        if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV && (count as usize) > values.len()
+        {
             // Backend needs more space than the size query indicated — retry
             // (still capped to prevent OOM).
             let retry_count = (count as u64)

@@ -16,8 +16,7 @@ pub unsafe extern "C" fn c_digest_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            let result =
-                with_client!(client => client.digest_init_cancel(CkSessionHandle(h_session as u64)));
+            let result = with_client!(client => client.digest_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_digest_output_caches(h_session);
                 state::clear_operation_state_cache(h_session);
@@ -29,7 +28,8 @@ pub unsafe extern "C" fn c_digest_init(
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let result = with_client!(client => client.digest_init(CkSessionHandle(h_session as u64), &mech));
+        let result =
+            with_client!(client => client.digest_init(CkSessionHandle(h_session as u64), &mech));
         if result.is_ok() {
             state::clear_digest_output_caches(h_session);
             state::clear_operation_state_cache(h_session);
@@ -135,8 +135,7 @@ pub unsafe extern "C" fn c_encrypt_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            let result =
-                with_client!(client => client.encrypt_init_cancel(CkSessionHandle(h_session as u64)));
+            let result = with_client!(client => client.encrypt_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_delayed_gcm_writeback(h_session);
                 state::clear_encrypt_output_caches(h_session);
@@ -319,8 +318,7 @@ pub unsafe extern "C" fn c_decrypt_init(
 ) -> CK_RV {
     catch_panics(|| {
         if p_mechanism.is_null() {
-            let result =
-                with_client!(client => client.decrypt_init_cancel(CkSessionHandle(h_session as u64)));
+            let result = with_client!(client => client.decrypt_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_decrypt_output_caches(h_session);
                 state::clear_operation_state_cache(h_session);

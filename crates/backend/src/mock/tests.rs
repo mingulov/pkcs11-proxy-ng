@@ -48,8 +48,11 @@ fn slot_scoped_workflows_reject_invalid_slot() {
 #[test]
 fn full_registry_mock_advertises_every_default_registered_mechanism() {
     let registry = MechanismRegistry::load_with_override_str(None).unwrap();
-    let expected =
-        registry.registered_mechanisms().into_iter().map(|x| CkMechanismType(x as u64)).collect::<Vec<_>>();
+    let expected = registry
+        .registered_mechanisms()
+        .into_iter()
+        .map(|x| CkMechanismType(x as u64))
+        .collect::<Vec<_>>();
     let backend = MockBackend::with_mechanism_registry(vec![CkSlotId(0)], &registry);
 
     let advertised = backend.get_mechanism_list(CkSlotId(0)).unwrap();
@@ -1855,8 +1858,11 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_core_workflow
 #[test]
 fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows() {
     let registry = MechanismRegistry::load_with_override_str(None).unwrap();
-    let mechanisms =
-        registry.registered_mechanisms().into_iter().map(|x| CkMechanismType(x as u64)).collect::<Vec<_>>();
+    let mechanisms = registry
+        .registered_mechanisms()
+        .into_iter()
+        .map(|x| CkMechanismType(x as u64))
+        .collect::<Vec<_>>();
     let backend = MockBackend::with_mechanism_registry(vec![CkSlotId(0)], &registry);
     backend.initialize().unwrap();
 
@@ -1959,8 +1965,11 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
 #[test]
 fn full_registry_mock_accepts_every_registered_mechanism_for_exact_wrap_workflow() {
     let registry = MechanismRegistry::load_with_override_str(None).unwrap();
-    let mechanisms =
-        registry.registered_mechanisms().into_iter().map(|x| CkMechanismType(x as u64)).collect::<Vec<_>>();
+    let mechanisms = registry
+        .registered_mechanisms()
+        .into_iter()
+        .map(|x| CkMechanismType(x as u64))
+        .collect::<Vec<_>>();
     let backend = MockBackend::with_mechanism_registry(vec![CkSlotId(0)], &registry);
     backend.initialize().unwrap();
 
