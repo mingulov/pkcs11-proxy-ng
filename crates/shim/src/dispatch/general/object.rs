@@ -130,14 +130,17 @@ pub unsafe extern "C" fn c_get_attribute_value(
 
 /// Build a `CkAttributeQuery` from a caller-provided `CK_ATTRIBUTE`.
 ///
-/// If the attribute type has the `CKF_ARRAY_ATTRIBUTE` flag and `pValue` is
-/// non-null, interprets `pValue` as a `CK_ATTRIBUTE[]` template and builds
-/// nested sub-queries for each entry.
+/// If the attribute type is a `CK_ATTRIBUTE[]` template (CKA_WRAP_TEMPLATE /
+/// CKA_UNWRAP_TEMPLATE / CKA_DERIVE_TEMPLATE) and `pValue` is non-null,
+/// interprets `pValue` as a `CK_ATTRIBUTE[]` template and builds nested
+/// sub-queries for each entry. Other array-flagged attributes (e.g.
+/// CKA_ALLOWED_MECHANISMS, a `CK_MECHANISM_TYPE[]`) are treated as opaque
+/// values, not nested templates.
 fn build_attribute_query(a: &CK_ATTRIBUTE) -> CkResult<CkAttributeQuery> {
     let attr_type = CkAttributeType(a.type_);
     let buffer_present = !a.pValue.is_null();
 
-    if attr_type.is_array_attribute() && buffer_present {
+    if attr_type.is_attribute_template() && buffer_present {
         let ck_attr_size = std::mem::size_of::<CK_ATTRIBUTE>();
         let raw_len = usize::try_from(a.ulValueLen).map_err(|_| CkRv::ARGUMENTS_BAD)?;
         if ck_attr_size > 0 && raw_len % ck_attr_size != 0 {
@@ -336,3 +339,51 @@ pub unsafe extern "C" fn c_set_attribute_value(
 // ---------------------------------------------------------------------------
 // Signing
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ptr;
+
+    // CKA_ALLOWED_MECHANISMS carries the CKF_ARRAY_ATTRIBUTE flag, but its value
+    // is a CK_MECHANISM_TYPE[] (an array of CK_ULONG) -- NOT a CK_ATTRIBUTE[]
+    // template like CKA_WRAP_TEMPLATE. It must not be parsed as a nested
+    // template, which would reject a caller buffer sized for N mechanisms
+    // (N * sizeof(CK_ULONG)) because N*8 % sizeof(CK_ATTRIBUTE) != 0.
+    #[test]
+    fn allowed_mechanisms_is_not_parsed_as_attribute_template() {
+        let mut buf = [0u8; 8]; // one CK_MECHANISM_TYPE on a 64-bit client
+        let attr = CK_ATTRIBUTE {
+            type_: CkAttributeType::ALLOWED_MECHANISMS.0 as CK_ATTRIBUTE_TYPE,
+            pValue: buf.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: buf.len() as CK_ULONG,
+        };
+        let q = build_attribute_query(&attr)
+            .expect("CKA_ALLOWED_MECHANISMS must not be rejected as a malformed template");
+        assert!(
+            q.nested.is_none(),
+            "CKA_ALLOWED_MECHANISMS is a ulong array, not a CK_ATTRIBUTE[] template"
+        );
+        assert!(q.buffer_present);
+        assert_eq!(q.buffer_len, 8);
+    }
+
+    // Regression guard: real CK_ATTRIBUTE[] templates must STILL build nested
+    // sub-queries after the routing fix.
+    #[test]
+    fn wrap_template_still_builds_nested_subqueries() {
+        let mut sub = CK_ATTRIBUTE {
+            type_: CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE,
+            pValue: ptr::null_mut(),
+            ulValueLen: 0,
+        };
+        let attr = CK_ATTRIBUTE {
+            type_: CkAttributeType::WRAP_TEMPLATE.0 as CK_ATTRIBUTE_TYPE,
+            pValue: &mut sub as *mut CK_ATTRIBUTE as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_ATTRIBUTE>() as CK_ULONG,
+        };
+        let q = build_attribute_query(&attr).expect("WRAP_TEMPLATE must parse");
+        let nested = q.nested.expect("WRAP_TEMPLATE must build nested sub-queries");
+        assert_eq!(nested.len(), 1);
+    }
+}

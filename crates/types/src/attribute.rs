@@ -51,6 +51,19 @@ impl CkAttributeType {
         (self.0 & Self::ARRAY_ATTRIBUTE_FLAG) == Self::ARRAY_ATTRIBUTE_FLAG
     }
 
+    /// Returns true if this attribute's value is a nested `CK_ATTRIBUTE[]`
+    /// template: `CKA_WRAP_TEMPLATE`, `CKA_UNWRAP_TEMPLATE`, or
+    /// `CKA_DERIVE_TEMPLATE`.
+    ///
+    /// Distinct from [`is_array_attribute`](Self::is_array_attribute): other
+    /// array-flagged attributes such as `CKA_ALLOWED_MECHANISMS` carry
+    /// `CKF_ARRAY_ATTRIBUTE` but hold an array of `CK_MECHANISM_TYPE`
+    /// (`CK_ULONG`), not `CK_ATTRIBUTE`, and must not be parsed as a nested
+    /// template.
+    pub fn is_attribute_template(self) -> bool {
+        matches!(self, Self::WRAP_TEMPLATE | Self::UNWRAP_TEMPLATE | Self::DERIVE_TEMPLATE)
+    }
+
     /// Returns true if this attribute type has a boolean value.
     pub fn is_bool(self) -> bool {
         matches!(
