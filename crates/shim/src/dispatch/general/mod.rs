@@ -25,6 +25,7 @@ mod slot;
 mod state_ops;
 mod unsupported;
 mod verify_signature;
+mod width_bridge;
 
 // Re-export all dispatch functions so `general::c_*` continues to work.
 pub use admin::*;
