@@ -47,12 +47,25 @@ async fn connect_channel(
     // Unix-domain-socket endpoint (`unix:/abs/path` or `unix:///abs/path`):
     // dial the local socket. No TLS — a Unix socket carries no network to
     // secure; the daemon authenticates the peer via SO_PEERCRED. Intended for
-    // local-user / ssh-forwarded use.
+    // local-user / ssh-forwarded use. Windows has no UDS peer-cred path, so a
+    // Windows client is tcp/mTLS-only (ADR-0011 Bucket 3, client side).
     if let Some(path) = endpoint.strip_prefix("unix:") {
-        if tls_files.is_some() {
-            tracing::debug!("TLS configuration ignored for unix-socket endpoint (peer-cred auth)");
+        #[cfg(unix)]
+        {
+            if tls_files.is_some() {
+                tracing::debug!(
+                    "TLS configuration ignored for unix-socket endpoint (peer-cred auth)"
+                );
+            }
+            return connect_unix_channel(path).await;
         }
-        return connect_unix_channel(path).await;
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            return Err("unix-domain-socket endpoints are not supported on this platform; \
+                        use a tcp/mTLS endpoint such as https://host:port"
+                .to_string());
+        }
     }
 
     let mut builder = tonic::transport::Endpoint::from_shared(endpoint.to_owned())
@@ -74,6 +87,7 @@ async fn connect_channel(
 }
 
 /// Connect a gRPC channel over a Unix-domain socket at `raw_path`.
+#[cfg(unix)]
 async fn connect_unix_channel(raw_path: &str) -> Result<Channel, String> {
     // Tolerate the authority form `unix://<path>` by dropping a leading "//".
     let path = raw_path.strip_prefix("//").unwrap_or(raw_path).to_owned();

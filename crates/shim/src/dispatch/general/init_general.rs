@@ -40,10 +40,18 @@ unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
     // also set, the library may ignore the custom callbacks and use OS locking.
     // GnuTLS/p11-kit passes all four callbacks + CKF_OS_LOCKING_OK; rejecting
     // that combination breaks consumer compatibility.
-    let all_mutex = args.CreateMutex.is_some()
-        && args.DestroyMutex.is_some()
-        && args.LockMutex.is_some()
-        && args.UnlockMutex.is_some();
+    // Copy each Option<fn> field by value before calling `.is_some()` (which
+    // takes `&self`): on Windows (LLP64) CK_C_INITIALIZE_ARGS is `#[repr(packed)]`
+    // in the cryptoki-sys binding, so referencing a field in place is E0793. The
+    // fields are Copy, so the by-value reads are sound and a no-op elsewhere.
+    let create_mutex = args.CreateMutex;
+    let destroy_mutex = args.DestroyMutex;
+    let lock_mutex = args.LockMutex;
+    let unlock_mutex = args.UnlockMutex;
+    let all_mutex = create_mutex.is_some()
+        && destroy_mutex.is_some()
+        && lock_mutex.is_some()
+        && unlock_mutex.is_some();
     if all_mutex && (args.flags & CKF_OS_LOCKING_OK) == 0 {
         // Caller demands custom mutexes without allowing OS locking — reject.
         return Some(CKR_CANT_LOCK as CK_RV);
