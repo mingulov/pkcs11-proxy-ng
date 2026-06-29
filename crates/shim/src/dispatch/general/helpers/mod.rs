@@ -3690,8 +3690,10 @@ unsafe fn ck_attrs_to_rust_result(
                 let v = unsafe { *(attr.pValue as *const CK_BBOOL) };
                 Some(CkAttributeValue::Bool(v != 0))
             } else if ck_type.is_ulong() && len == std::mem::size_of::<CK_ULONG>() {
+                // `CK_ULONG` is u32 on narrow (32-bit-CK_ULONG) targets; widen to
+                // the wire's u64 so the shim compiles on i686/armv7/Windows-x64.
                 let v = unsafe { *(attr.pValue as *const CK_ULONG) };
-                Some(CkAttributeValue::Ulong(v))
+                Some(CkAttributeValue::Ulong(v as u64))
             } else if len > MAX_SERIALIZABLE_BYTES {
                 return Err(CkRv::ARGUMENTS_BAD);
             } else {

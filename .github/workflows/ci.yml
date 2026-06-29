@@ -126,3 +126,36 @@ jobs:
 
       - name: cargo build --workspace (MSRV)
         run: cargo build --workspace
+
+  # ── Tier 0e: narrow-CK_ULONG client (i686) ─────────────────────────────────
+  # Compiles + tests the client-side crates for a 32-bit-CK_ULONG target
+  # (i686-unknown-linux-gnu, ILP32). This is the surfacing mechanism for the
+  # narrow-CK_ULONG width bridge (ADR-0011): it catches ABI/width compile gaps
+  # (e.g. `CK_ULONG`-as-u32 conversions) that the x86_64 build cannot.
+  #
+  # `continue-on-error: true` while the narrow build is being made green
+  # (ADR-0011 implementation step 1); promote to a required gate once it passes.
+  narrow-client-i686:
+    name: Narrow CK_ULONG client (i686)
+    runs-on: ubuntu-24.04
+    needs: fmt
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system dependencies (protobuf + 32-bit toolchain for ring)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler gcc-multilib libc6-dev-i386
+
+      - name: Install stable toolchain with i686 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+
+      - name: cargo test (client-side crates, i686)
+        run: |
+          cargo test --target i686-unknown-linux-gnu \
+            -p pkcs11-proxy-ng-types \
+            -p pkcs11-proxy-ng-shim \
+            -p pkcs11-proxy-ng-client
