@@ -34,9 +34,9 @@ pub unsafe extern "C" fn c_encapsulate_key(
         let spec = unsafe { output_buffer_spec(p_ciphertext, pul_ciphertext_len) };
 
         let result = with_client!(client => client.encapsulate_key_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_public_key),
+            CkObjectHandle(h_public_key as u64),
             &template,
             &spec,
         ));
@@ -91,9 +91,9 @@ pub unsafe extern "C" fn c_decapsulate_key(
             Err(e) => return rv_err(e),
         };
         match with_client!(client => client.decapsulate_key(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_private_key),
+            CkObjectHandle(h_private_key as u64),
             &template,
             ciphertext,
         )) {

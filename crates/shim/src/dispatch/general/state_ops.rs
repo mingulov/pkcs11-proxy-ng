@@ -15,7 +15,7 @@ pub unsafe extern "C" fn c_wait_for_slot_event(
         if p_slot.is_null() || !p_reserved.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        match with_client!(client => client.wait_for_slot_event(flags)) {
+        match with_client!(client => client.wait_for_slot_event(flags.into())) {
             Ok(slot) => {
                 unsafe {
                     *p_slot = slot.0 as CK_SLOT_ID;
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn c_get_operation_state(
         }
         let spec = unsafe { output_buffer_spec(p_operation_state, pul_operation_state_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::GetOperationState,
             &spec,
             CkInBuf::Bytes(&[]),
@@ -75,10 +75,10 @@ pub unsafe extern "C" fn c_set_operation_state(
             Err(e) => return rv_err(e),
         };
         let result = with_client!(client => client.set_operation_state(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             state_bytes,
-            CkObjectHandle(h_encryption_key),
-            CkObjectHandle(h_authentication_key),
+            CkObjectHandle(h_encryption_key as u64),
+            CkObjectHandle(h_authentication_key as u64),
         ));
         if result.is_ok() {
             state::evict_session_caches(h_session);

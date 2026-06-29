@@ -44,7 +44,7 @@ pub unsafe extern "C" fn c_get_slot_info(slot_id: CK_SLOT_ID, p_info: CK_SLOT_IN
         if p_info.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        match with_client!(client => client.get_slot_info(CkSlotId(slot_id))) {
+        match with_client!(client => client.get_slot_info(CkSlotId(slot_id as u64))) {
             Ok(info) => {
                 unsafe {
                     let out = &mut *p_info;
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn c_get_token_info(slot_id: CK_SLOT_ID, p_info: CK_TOKEN_
         if p_info.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        match with_client!(client => client.get_token_info(CkSlotId(slot_id))) {
+        match with_client!(client => client.get_token_info(CkSlotId(slot_id as u64))) {
             Ok(info) => {
                 unsafe {
                     let out = &mut *p_info;
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn c_get_mechanism_list(
         if pul_count.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        match with_client!(client => client.get_mechanism_list(CkSlotId(slot_id))) {
+        match with_client!(client => client.get_mechanism_list(CkSlotId(slot_id as u64))) {
             Ok(mechs) => {
                 let registry = state::mechanism_registry();
                 let filtered: Vec<u64> =
@@ -154,8 +154,8 @@ pub unsafe extern "C" fn c_get_mechanism_info(
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         match with_client!(client => client.get_mechanism_info(
-            CkSlotId(slot_id),
-            CkMechanismType(mechanism_type)
+            CkSlotId(slot_id as u64),
+            CkMechanismType(mechanism_type as u64)
         )) {
             Ok(info) => {
                 unsafe {

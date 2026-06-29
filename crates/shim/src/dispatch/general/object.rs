@@ -19,7 +19,7 @@ pub unsafe extern "C" fn c_find_objects_init(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(with_client!(client => client.find_objects_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &template,
         )))
     })
@@ -36,7 +36,7 @@ pub unsafe extern "C" fn c_find_objects(
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         match with_client!(client => client.find_objects(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ul_max_object_count as u32,
         )) {
             Ok(handles) => {
@@ -57,7 +57,7 @@ pub unsafe extern "C" fn c_find_objects(
 pub unsafe extern "C" fn c_find_objects_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(with_client!(client => client.find_objects_final(
-            CkSessionHandle(h_session)
+            CkSessionHandle(h_session as u64)
         )))
     })
 }
@@ -86,8 +86,8 @@ pub unsafe extern "C" fn c_get_attribute_value(
         };
 
         match with_client!(client => client.get_attribute_value_exact(
-            CkSessionHandle(h_session),
-            CkObjectHandle(h_object),
+            CkSessionHandle(h_session as u64),
+            CkObjectHandle(h_object as u64),
             &queries,
         )) {
             Ok((server_rv, results)) => {
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn c_get_attribute_value(
 /// CKA_ALLOWED_MECHANISMS, a `CK_MECHANISM_TYPE[]`) are treated as opaque
 /// values, not nested templates.
 fn build_attribute_query(a: &CK_ATTRIBUTE) -> CkResult<CkAttributeQuery> {
-    let attr_type = CkAttributeType(a.type_);
+    let attr_type = CkAttributeType(a.type_ as u64);
     let buffer_present = !a.pValue.is_null();
 
     if attr_type.is_attribute_template() && buffer_present {
@@ -158,7 +158,7 @@ fn build_attribute_query(a: &CK_ATTRIBUTE) -> CkResult<CkAttributeQuery> {
             let nested: Vec<CkAttributeQuery> = sub_attrs
                 .iter()
                 .map(|sub| CkAttributeQuery {
-                    attr_type: CkAttributeType(sub.type_),
+                    attr_type: CkAttributeType(sub.type_ as u64),
                     buffer_present: !sub.pValue.is_null(),
                     buffer_len: sub.ulValueLen as u64,
                     nested: None,
@@ -242,7 +242,7 @@ pub unsafe extern "C" fn c_create_object(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        match with_client!(client => client.create_object(CkSessionHandle(h_session), &template)) {
+        match with_client!(client => client.create_object(CkSessionHandle(h_session as u64), &template)) {
             Ok(handle) => {
                 unsafe { write_object_handle_output(handle, ph_object) };
                 rv_ok()
@@ -268,8 +268,8 @@ pub unsafe extern "C" fn c_copy_object(
             Err(e) => return rv_err(e),
         };
         match with_client!(client => client.copy_object(
-            CkSessionHandle(h_session),
-            CkObjectHandle(h_object),
+            CkSessionHandle(h_session as u64),
+            CkObjectHandle(h_object as u64),
             &template,
         )) {
             Ok(handle) => {
@@ -287,8 +287,8 @@ pub unsafe extern "C" fn c_destroy_object(
 ) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(with_client!(client => client.destroy_object(
-            CkSessionHandle(h_session),
-            CkObjectHandle(h_object),
+            CkSessionHandle(h_session as u64),
+            CkObjectHandle(h_object as u64),
         )))
     })
 }
@@ -303,8 +303,8 @@ pub unsafe extern "C" fn c_get_object_size(
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         match with_client!(client => client.get_object_size(
-            CkSessionHandle(h_session),
-            CkObjectHandle(h_object),
+            CkSessionHandle(h_session as u64),
+            CkObjectHandle(h_object as u64),
         )) {
             Ok(size) => {
                 unsafe {
@@ -329,8 +329,8 @@ pub unsafe extern "C" fn c_set_attribute_value(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(with_client!(client => client.set_attribute_value(
-            CkSessionHandle(h_session),
-            CkObjectHandle(h_object),
+            CkSessionHandle(h_session as u64),
+            CkObjectHandle(h_object as u64),
             &template,
         )))
     })

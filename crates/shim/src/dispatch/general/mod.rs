@@ -1,3 +1,12 @@
+// CK_ULONG-derived C types (CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_SLOT_ID,
+// CK_FLAGS, CK_MECHANISM_TYPE) are u32 on narrow-CK_ULONG targets (i686, armv7,
+// Windows x64) and u64 on 64-bit Unix. The wire newtypes are u64, so the shim
+// widens with `as u64` / `.into()` at construction; that cast/conversion is a
+// no-op (and thus "unnecessary"/"useless") only on 64-bit Unix. Allow both
+// module-wide for the dispatch layer so the same source compiles on every
+// target. (ADR-0011.)
+#![allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+
 mod admin;
 mod async_ops;
 mod authenticated_wrap;

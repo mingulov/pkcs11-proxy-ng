@@ -448,7 +448,7 @@ pub(crate) unsafe fn validate_mechanism(p_mechanism: *const CK_MECHANISM) -> CK_
     if has_params && (c_mech.ulParameterLen as usize) > MAX_MECHANISM_PARAM_STRUCT_LEN {
         return rv_err(CkRv::MECHANISM_PARAM_INVALID);
     }
-    match crate::state::mechanism_registry().check_operation(c_mech.mechanism, has_params) {
+    match crate::state::mechanism_registry().check_operation(c_mech.mechanism.into(), has_params) {
         Ok(()) => rv_ok(),
         Err(rv) => rv_err(rv),
     }
@@ -474,7 +474,7 @@ pub(crate) unsafe fn read_mechanism(p_mechanism: *const CK_MECHANISM) -> CkMecha
     // returned `&str` borrows from the Arc, so dropping it before the call
     // below would leave a dangling reference.
     let registry = crate::state::mechanism_registry();
-    let shape = registry.param_shape(c_mech.mechanism);
+    let shape = registry.param_shape(c_mech.mechanism.into());
     unsafe { read_mechanism_with_shape(c_mech, shape) }
 }
 
@@ -485,13 +485,13 @@ pub(crate) unsafe fn read_wrap_key_mechanism(p_mechanism: *const CK_MECHANISM) -
     let shape = match c_mech.mechanism {
         CKM_AES_GCM if param_len == std::mem::size_of::<CK_GCM_WRAP_PARAMS>() => Some("gcm_wrap"),
         CKM_AES_CCM if param_len == std::mem::size_of::<CK_CCM_WRAP_PARAMS>() => Some("ccm_wrap"),
-        _ => registry.param_shape(c_mech.mechanism),
+        _ => registry.param_shape(c_mech.mechanism.into()),
     };
     unsafe { read_mechanism_with_shape(c_mech, shape) }
 }
 
 unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) -> CkMechanism {
-    let mech_type = CkMechanismType(c_mech.mechanism);
+    let mech_type = CkMechanismType(c_mech.mechanism as u64);
 
     if c_mech.pParameter.is_null() || c_mech.ulParameterLen == 0 {
         return CkMechanism { mechanism_type: mech_type, params: None };
@@ -518,9 +518,9 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 // CK_RSA_PKCS_PSS_PARAMS and ulParameterLen >= sizeof.
                 let pss = unsafe { &*(param_ptr as *const CK_RSA_PKCS_PSS_PARAMS) };
                 Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
-                    hash_alg: CkMechanismType(pss.hashAlg),
-                    mgf: pss.mgf,
-                    salt_len: pss.sLen,
+                    hash_alg: CkMechanismType(pss.hashAlg as u64),
+                    mgf: pss.mgf as u64,
+                    salt_len: pss.sLen as u64,
                 }))
             }
         }
@@ -553,9 +553,9 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                         .to_vec()
                     };
                     Some(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
-                        hash_alg: CkMechanismType(oaep.hashAlg),
-                        mgf: oaep.mgf,
-                        source: oaep.source,
+                        hash_alg: CkMechanismType(oaep.hashAlg as u64),
+                        mgf: oaep.mgf as u64,
+                        source: oaep.source as u64,
                         source_data,
                     }))
                 }
@@ -591,10 +591,10 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                     };
                     Some(CkMechanismParams::Gcm(GcmParams {
                         iv,
-                        iv_bits: gcm.ulIvBits,
+                        iv_bits: gcm.ulIvBits as u64,
                         iv_buffer_len: gcm_iv_buffer_len(gcm),
                         aad,
-                        tag_bits: gcm.ulTagBits,
+                        tag_bits: gcm.ulTagBits as u64,
                     }))
                 }
             }
@@ -628,10 +628,10 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                             .to_vec()
                     };
                     Some(CkMechanismParams::Ccm(CcmParams {
-                        data_len: ccm.ulDataLen,
+                        data_len: ccm.ulDataLen as u64,
                         nonce,
                         aad,
-                        mac_len: ccm.ulMACLen,
+                        mac_len: ccm.ulMACLen as u64,
                     }))
                 }
             }
@@ -675,7 +675,7 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                         .to_vec()
                     };
                     Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
-                        kdf: ecdh.kdf,
+                        kdf: ecdh.kdf as u64,
                         shared_data,
                         public_data,
                     }))
@@ -692,7 +692,7 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 // Safety: pParameter points to a valid CK_AES_CTR_PARAMS.
                 let ctr = unsafe { &*(param_ptr as *const CK_AES_CTR_PARAMS) };
                 Some(CkMechanismParams::AesCtr(AesCtrParams {
-                    counter_bits: ctr.ulCounterBits,
+                    counter_bits: ctr.ulCounterBits as u64,
                     cb: ctr.cb.to_vec(),
                 }))
             }
@@ -707,7 +707,7 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 // Safety: pParameter points to a valid CK_CAMELLIA_CTR_PARAMS.
                 let ctr = unsafe { &*(param_ptr as *const CK_CAMELLIA_CTR_PARAMS) };
                 Some(CkMechanismParams::CamelliaCtr(CamelliaCtrParams {
-                    counter_bits: ctr.ulCounterBits,
+                    counter_bits: ctr.ulCounterBits as u64,
                     cb: ctr.cb.to_vec(),
                 }))
             }
@@ -743,10 +743,10 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                     Some(CkMechanismParams::Hkdf(HkdfParams {
                         extract: hkdf.bExtract != 0,
                         expand: hkdf.bExpand != 0,
-                        prf_hash_mechanism: hkdf.prfHashMechanism,
-                        salt_type: hkdf.ulSaltType,
+                        prf_hash_mechanism: hkdf.prfHashMechanism as u64,
+                        salt_type: hkdf.ulSaltType as u64,
                         salt,
-                        salt_key_handle: hkdf.hSaltKey,
+                        salt_key_handle: hkdf.hSaltKey as u64,
                         info,
                     }))
                 }
@@ -815,9 +815,9 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                     };
                     Some(CkMechanismParams::ChaCha20(ChaCha20Params {
                         block_counter,
-                        block_counter_bits: ch.blockCounterBits,
+                        block_counter_bits: ch.blockCounterBits as u64,
                         nonce,
-                        nonce_bits: ch.ulNonceBits,
+                        nonce_bits: ch.ulNonceBits as u64,
                     }))
                 }
             }
@@ -848,7 +848,7 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                     Some(CkMechanismParams::Salsa20(Salsa20Params {
                         block_counter,
                         nonce,
-                        nonce_bits: salsa.ulNonceBits,
+                        nonce_bits: salsa.ulNonceBits as u64,
                     }))
                 }
             }
@@ -1028,7 +1028,9 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 // Safety: pParameter points to a CK_MAC_GENERAL_PARAMS
                 // (which is a CK_ULONG).
                 let val = unsafe { *(param_ptr as *const CK_MAC_GENERAL_PARAMS) };
-                Some(CkMechanismParams::MacGeneral(MacGeneralParams { mac_length: val }))
+                Some(CkMechanismParams::MacGeneral(MacGeneralParams {
+                    mac_length: val as u64,
+                }))
             }
         }
 
@@ -1109,10 +1111,10 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                     };
                     Some(CkMechanismParams::GcmWrap(GcmWrapParams {
                         iv,
-                        iv_fixed_bits: gw.ulIvFixedBits,
-                        iv_generator: gw.ivGenerator,
+                        iv_fixed_bits: gw.ulIvFixedBits as u64,
+                        iv_generator: gw.ivGenerator as u64,
                         aad,
-                        tag_bits: gw.ulTagBits,
+                        tag_bits: gw.ulTagBits as u64,
                     }))
                 }
             }
@@ -1146,12 +1148,12 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                             .to_vec()
                     };
                     Some(CkMechanismParams::CcmWrap(CcmWrapParams {
-                        data_len: cw.ulDataLen,
+                        data_len: cw.ulDataLen as u64,
                         nonce,
-                        nonce_fixed_bits: cw.ulNonceFixedBits,
-                        nonce_generator: cw.nonceGenerator,
+                        nonce_fixed_bits: cw.ulNonceFixedBits as u64,
+                        nonce_generator: cw.nonceGenerator as u64,
                         aad,
-                        mac_len: cw.ulMACLen,
+                        mac_len: cw.ulMACLen as u64,
                     }))
                 }
             }
@@ -1166,8 +1168,8 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 // Safety: pParameter points to a valid CK_RC5_PARAMS.
                 let rc5 = unsafe { &*(param_ptr as *const CK_RC5_PARAMS) };
                 Some(CkMechanismParams::Rc5(Rc5Params {
-                    word_size: rc5.ulWordsize,
-                    rounds: rc5.ulRounds,
+                    word_size: rc5.ulWordsize as u64,
+                    rounds: rc5.ulRounds as u64,
                 }))
             }
         }
@@ -1180,9 +1182,9 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
             } else {
                 let rc5 = unsafe { &*(param_ptr as *const CK_RC5_MAC_GENERAL_PARAMS) };
                 Some(CkMechanismParams::Rc5MacGeneral(Rc5MacGeneralParams {
-                    word_size: rc5.ulWordsize,
-                    rounds: rc5.ulRounds,
-                    mac_length: rc5.ulMacLength,
+                    word_size: rc5.ulWordsize as u64,
+                    rounds: rc5.ulRounds as u64,
+                    mac_length: rc5.ulMacLength as u64,
                 }))
             }
         }
@@ -1206,8 +1208,8 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                             .to_vec()
                     };
                     Some(CkMechanismParams::Rc5Cbc(Rc5CbcParams {
-                        word_size: rc5.ulWordsize,
-                        rounds: rc5.ulRounds,
+                        word_size: rc5.ulWordsize as u64,
+                        rounds: rc5.ulRounds as u64,
                         iv,
                     }))
                 }
@@ -1223,7 +1225,7 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 // Safety: pParameter points to a valid CK_RC2_CBC_PARAMS.
                 let rc2 = unsafe { &*(param_ptr as *const CK_RC2_CBC_PARAMS) };
                 Some(CkMechanismParams::Rc2Cbc(Rc2CbcParams {
-                    effective_bits: rc2.ulEffectiveBits,
+                    effective_bits: rc2.ulEffectiveBits as u64,
                     iv: rc2.iv.to_vec(),
                 }))
             }
@@ -1237,8 +1239,8 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
             } else {
                 let rc2 = unsafe { &*(param_ptr as *const CK_RC2_MAC_GENERAL_PARAMS) };
                 Some(CkMechanismParams::Rc2MacGeneral(Rc2MacGeneralParams {
-                    effective_bits: rc2.ulEffectiveBits,
-                    mac_length: rc2.ulMacLength,
+                    effective_bits: rc2.ulEffectiveBits as u64,
+                    mac_length: rc2.ulMacLength as u64,
                 }))
             }
         }
@@ -1251,7 +1253,9 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
             } else {
                 // Safety: pParameter points to a valid CK_XEDDSA_PARAMS.
                 let xed = unsafe { &*(param_ptr as *const CK_XEDDSA_PARAMS) };
-                Some(CkMechanismParams::Xeddsa(XeddsaParams { hash: xed.hash }))
+                Some(CkMechanismParams::Xeddsa(XeddsaParams {
+                    hash: xed.hash as u64,
+                }))
             }
         }
 
@@ -1264,9 +1268,9 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 // Safety: pParameter points to a valid CK_TLS_MAC_PARAMS.
                 let tls = unsafe { &*(param_ptr as *const CK_TLS_MAC_PARAMS) };
                 Some(CkMechanismParams::TlsMac(TlsMacParams {
-                    prf_hash_mechanism: tls.prfHashMechanism,
-                    mac_length: tls.ulMacLength,
-                    server_or_client: tls.ulServerOrClient,
+                    prf_hash_mechanism: tls.prfHashMechanism as u64,
+                    mac_length: tls.ulMacLength as u64,
+                    server_or_client: tls.ulServerOrClient as u64,
                 }))
             }
         }
@@ -1316,9 +1320,9 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                         Some(CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
                             aes_key_bits: aes_key_bits as u64,
                             oaep_params: RsaPkcsOaepParams {
-                                hash_alg: CkMechanismType(oaep.hashAlg),
-                                mgf: oaep.mgf,
-                                source: oaep.source,
+                                hash_alg: CkMechanismType(oaep.hashAlg as u64),
+                                mgf: oaep.mgf as u64,
+                                source: oaep.source as u64,
                                 source_data,
                             },
                         }))
@@ -3676,7 +3680,7 @@ unsafe fn ck_attrs_to_rust_result(
     let slice = unsafe { std::slice::from_raw_parts(p_template, count as usize) };
     let mut result = Vec::with_capacity(count as usize);
     for attr in slice {
-        let ck_type = CkAttributeType(attr.type_);
+        let ck_type = CkAttributeType(attr.type_ as u64);
         let value = if attr.pValue.is_null() {
             if attr.ulValueLen != 0 && reject_null_nonzero_count {
                 return Err(CkRv::ARGUMENTS_BAD);

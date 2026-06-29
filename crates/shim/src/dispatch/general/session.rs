@@ -15,7 +15,7 @@ pub unsafe extern "C" fn c_open_session(
         if ph_session.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        match with_client!(client => client.open_session(CkSlotId(slot_id), CkSessionFlags(flags)))
+        match with_client!(client => client.open_session(CkSlotId(slot_id as u64), CkSessionFlags(flags as u64)))
         {
             Ok(handle) => {
                 let raw_handle = handle.0 as CK_SESSION_HANDLE;
@@ -31,7 +31,7 @@ pub unsafe extern "C" fn c_open_session(
 pub unsafe extern "C" fn c_close_session(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
         let result = with_client!(client => client.close_session(
-            CkSessionHandle(h_session)
+            CkSessionHandle(h_session as u64)
         ));
         // Evicted on the attempt, regardless of CK_RV (see evict_session_caches).
         crate::state::evict_session_caches(h_session);
@@ -41,7 +41,7 @@ pub unsafe extern "C" fn c_close_session(h_session: CK_SESSION_HANDLE) -> CK_RV 
 
 pub unsafe extern "C" fn c_close_all_sessions(slot_id: CK_SLOT_ID) -> CK_RV {
     catch_panics(|| {
-        let result = with_client!(client => client.close_all_sessions(CkSlotId(slot_id)));
+        let result = with_client!(client => client.close_all_sessions(CkSlotId(slot_id as u64)));
         // Evicted on the attempt, regardless of CK_RV (see evict_slot_session_caches).
         crate::state::evict_slot_session_caches(slot_id);
         unit_result_to_rv(result)
@@ -56,7 +56,7 @@ pub unsafe extern "C" fn c_get_session_info(
         if p_info.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        match with_client!(client => client.get_session_info(CkSessionHandle(h_session))) {
+        match with_client!(client => client.get_session_info(CkSessionHandle(h_session as u64))) {
             Ok(info) => {
                 unsafe {
                     let out = &mut *p_info;
@@ -83,7 +83,7 @@ pub unsafe extern "C" fn c_login(
     ul_pin_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let ut = match CkUserType::from_raw(user_type) {
+        let ut = match CkUserType::from_raw(user_type.into()) {
             Some(ut) => ut,
             None => return rv_err(CkRv::USER_TYPE_INVALID),
         };
@@ -92,14 +92,14 @@ pub unsafe extern "C" fn c_login(
         } else {
             Some(unsafe { read_input_slice(p_pin, ul_pin_len) })
         };
-        unit_result_to_rv(with_client!(client => client.login(CkSessionHandle(h_session), ut, pin)))
+        unit_result_to_rv(with_client!(client => client.login(CkSessionHandle(h_session as u64), ut, pin)))
     })
 }
 
 pub unsafe extern "C" fn c_logout(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(with_client!(client => client.logout(
-            CkSessionHandle(h_session)
+            CkSessionHandle(h_session as u64)
         )))
     })
 }
@@ -111,7 +111,7 @@ pub unsafe extern "C" fn c_logout(h_session: CK_SESSION_HANDLE) -> CK_RV {
 pub unsafe extern "C" fn c_get_function_status(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(with_client!(client => client.get_function_status(
-            CkSessionHandle(h_session)
+            CkSessionHandle(h_session as u64)
         )))
     })
 }
@@ -119,7 +119,7 @@ pub unsafe extern "C" fn c_get_function_status(h_session: CK_SESSION_HANDLE) -> 
 pub unsafe extern "C" fn c_cancel_function(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(with_client!(client => client.cancel_function(
-            CkSessionHandle(h_session)
+            CkSessionHandle(h_session as u64)
         )))
     })
 }

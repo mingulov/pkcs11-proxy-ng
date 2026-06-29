@@ -38,9 +38,9 @@ pub unsafe extern "C" fn c_verify_signature_init(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(with_client!(client => client.verify_signature_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             mech.as_ref(),
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
             signature,
         )))
     })
@@ -61,7 +61,7 @@ pub unsafe extern "C" fn c_verify_signature(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(
-            with_client!(client => client.verify_signature(CkSessionHandle(h_session), data)),
+            with_client!(client => client.verify_signature(CkSessionHandle(h_session as u64), data)),
         )
     })
 }
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn c_verify_signature_update(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(
-            with_client!(client => client.verify_signature_update(CkSessionHandle(h_session), part)),
+            with_client!(client => client.verify_signature_update(CkSessionHandle(h_session as u64), part)),
         )
     })
 }
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn c_verify_signature_update(
 pub unsafe extern "C" fn c_verify_signature_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(
-            with_client!(client => client.verify_signature_final(CkSessionHandle(h_session))),
+            with_client!(client => client.verify_signature_final(CkSessionHandle(h_session as u64))),
         )
     })
 }

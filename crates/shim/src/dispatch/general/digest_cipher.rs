@@ -17,7 +17,7 @@ pub unsafe extern "C" fn c_digest_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result =
-                with_client!(client => client.digest_init_cancel(CkSessionHandle(h_session)));
+                with_client!(client => client.digest_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_digest_output_caches(h_session);
                 state::clear_operation_state_cache(h_session);
@@ -29,7 +29,7 @@ pub unsafe extern "C" fn c_digest_init(
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let result = with_client!(client => client.digest_init(CkSessionHandle(h_session), &mech));
+        let result = with_client!(client => client.digest_init(CkSessionHandle(h_session as u64), &mech));
         if result.is_ok() {
             state::clear_digest_output_caches(h_session);
             state::clear_operation_state_cache(h_session);
@@ -55,7 +55,7 @@ pub unsafe extern "C" fn c_digest(
         };
         let spec = unsafe { output_buffer_spec(p_digest, pul_digest_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::Digest,
             &spec,
             data,
@@ -81,7 +81,7 @@ pub unsafe extern "C" fn c_digest_update(
             Err(e) => return rv_err(e),
         };
         unit_result_to_rv(
-            with_client!(client => client.digest_update(CkSessionHandle(h_session), part)),
+            with_client!(client => client.digest_update(CkSessionHandle(h_session as u64), part)),
         )
     })
 }
@@ -92,8 +92,8 @@ pub unsafe extern "C" fn c_digest_key(
 ) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(with_client!(client => client.digest_key(
-            CkSessionHandle(h_session),
-            CkObjectHandle(h_key),
+            CkSessionHandle(h_session as u64),
+            CkObjectHandle(h_key as u64),
         )))
     })
 }
@@ -109,7 +109,7 @@ pub unsafe extern "C" fn c_digest_final(
         }
         let spec = unsafe { output_buffer_spec(p_digest, pul_digest_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::DigestFinal,
             &spec,
             CkInBuf::Bytes(&[]),
@@ -136,7 +136,7 @@ pub unsafe extern "C" fn c_encrypt_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result =
-                with_client!(client => client.encrypt_init_cancel(CkSessionHandle(h_session)));
+                with_client!(client => client.encrypt_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_delayed_gcm_writeback(h_session);
                 state::clear_encrypt_output_caches(h_session);
@@ -152,9 +152,9 @@ pub unsafe extern "C" fn c_encrypt_init(
         let delayed_gcm_param = unsafe { delayed_gcm_parameter_addr(p_mechanism) };
         state::clear_delayed_gcm_writeback(h_session);
         let result = with_client!(client => client.encrypt_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         ));
         match result {
             Ok(output_params) => {
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn c_encrypt(
         };
         let spec = unsafe { output_buffer_spec(p_encrypted_data, pul_encrypted_data_len) };
         let result = with_client!(client => client.byte_output_exact_with_mechanism_out(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::Encrypt,
             &spec,
             data,
@@ -268,7 +268,7 @@ pub unsafe extern "C" fn c_encrypt_update(
         };
         let spec = unsafe { output_buffer_spec(p_encrypted_part, pul_encrypted_part_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::EncryptUpdate,
             &spec,
             part,
@@ -295,7 +295,7 @@ pub unsafe extern "C" fn c_encrypt_final(
         let spec =
             unsafe { output_buffer_spec(p_last_encrypted_part, pul_last_encrypted_part_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::EncryptFinal,
             &spec,
             CkInBuf::Bytes(&[]),
@@ -320,7 +320,7 @@ pub unsafe extern "C" fn c_decrypt_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result =
-                with_client!(client => client.decrypt_init_cancel(CkSessionHandle(h_session)));
+                with_client!(client => client.decrypt_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
                 state::clear_decrypt_output_caches(h_session);
                 state::clear_operation_state_cache(h_session);
@@ -333,9 +333,9 @@ pub unsafe extern "C" fn c_decrypt_init(
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         let result = with_client!(client => client.decrypt_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         ));
         if result.is_ok() {
             state::clear_decrypt_output_caches(h_session);
@@ -364,7 +364,7 @@ pub unsafe extern "C" fn c_decrypt(
         };
         let spec = unsafe { output_buffer_spec(p_data, pul_data_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::Decrypt,
             &spec,
             encrypted_data,
@@ -398,7 +398,7 @@ pub unsafe extern "C" fn c_decrypt_update(
         };
         let spec = unsafe { output_buffer_spec(p_part, pul_part_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::DecryptUpdate,
             &spec,
             encrypted_part,
@@ -424,7 +424,7 @@ pub unsafe extern "C" fn c_decrypt_final(
         }
         let spec = unsafe { output_buffer_spec(p_last_part, pul_last_part_len) };
         let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ByteOutputFunction::DecryptFinal,
             &spec,
             CkInBuf::Bytes(&[]),
