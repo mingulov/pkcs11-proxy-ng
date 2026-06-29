@@ -730,7 +730,11 @@ enum FfiParamBacking {
 }
 
 /// CK_RSA_AES_KEY_WRAP_PARAMS -- not in cryptoki-sys, defined per PKCS#11 v3 spec.
+// LLP64 (Windows x64): the PKCS#11 headers `#pragma pack(1)` their structs, so
+// a hand-rolled mirror must be packed there to match `ulParameterLen` /
+// field offsets. Natural alignment is correct on LP64/ILP32 (ADR-0011 Bucket 2).
 #[repr(C)]
+#[cfg_attr(windows, repr(packed))]
 struct FfiRsaAesKeyWrapParams {
     ul_aes_key_bits: cryptoki_sys::CK_ULONG,
     p_oaep_params: *mut cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS,
@@ -738,6 +742,7 @@ struct FfiRsaAesKeyWrapParams {
 
 /// CK_SIGN_ADDITIONAL_CONTEXT — not in cryptoki-sys, defined per PKCS#11 3.2 spec.
 #[repr(C)]
+#[cfg_attr(windows, repr(packed))] // LLP64: match `#pragma pack(1)` (ADR-0011 Bucket 2)
 struct FfiSignAdditionalContext {
     hedge_variant: cryptoki_sys::CK_ULONG,
     p_context: *mut cryptoki_sys::CK_BYTE,
@@ -747,6 +752,7 @@ struct FfiSignAdditionalContext {
 /// CK_HASH_SIGN_ADDITIONAL_CONTEXT — CK_SIGN_ADDITIONAL_CONTEXT plus the explicit
 /// `hash` mechanism, for the generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA.
 #[repr(C)]
+#[cfg_attr(windows, repr(packed))] // LLP64: match `#pragma pack(1)` (ADR-0011 Bucket 2)
 struct FfiHashSignAdditionalContext {
     hedge_variant: cryptoki_sys::CK_ULONG,
     p_context: *mut cryptoki_sys::CK_BYTE,
@@ -756,6 +762,7 @@ struct FfiHashSignAdditionalContext {
 
 /// CK_KMAC_PARAMS — not in cryptoki-sys, defined by the working OASIS spec.
 #[repr(C)]
+#[cfg_attr(windows, repr(packed))] // LLP64: match `#pragma pack(1)` (ADR-0011 Bucket 2)
 struct FfiKmacParams {
     h_key: cryptoki_sys::CK_OBJECT_HANDLE,
     ul_mac_length: cryptoki_sys::CK_ULONG,
@@ -765,6 +772,7 @@ struct FfiKmacParams {
 
 /// CK_MU_GEN_PARAMS — not in cryptoki-sys, defined by the working OASIS spec.
 #[repr(C)]
+#[cfg_attr(windows, repr(packed))] // LLP64: match `#pragma pack(1)` (ADR-0011 Bucket 2)
 struct FfiMuGenParams {
     h_key: cryptoki_sys::CK_OBJECT_HANDLE,
     p_tr: cryptoki_sys::CK_BYTE_PTR,

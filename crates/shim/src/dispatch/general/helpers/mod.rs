@@ -401,7 +401,13 @@ fn embedded_payload_len_ok(len: CK_ULONG) -> bool {
     (len as usize) <= MAX_SERIALIZABLE_BYTES
 }
 
+// LLP64 (Windows x64): the app passes these param structs laid out per the
+// `#pragma pack(1)` PKCS#11 headers, so the shim's mirror must be packed there
+// to read the fields at the right offsets. Natural alignment is correct on
+// LP64/ILP32 (ADR-0011 Bucket 2). Fields are read by value (never `&field`),
+// so packed access stays E0793-safe.
 #[repr(C)]
+#[cfg_attr(windows, repr(packed))]
 struct CkKmacParams {
     h_key: CK_OBJECT_HANDLE,
     ul_mac_length: CK_ULONG,
@@ -410,6 +416,7 @@ struct CkKmacParams {
 }
 
 #[repr(C)]
+#[cfg_attr(windows, repr(packed))] // LLP64: match `#pragma pack(1)` (ADR-0011 Bucket 2)
 struct CkMuGenParams {
     h_key: CK_OBJECT_HANDLE,
     p_tr: CK_BYTE_PTR,
