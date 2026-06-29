@@ -203,7 +203,7 @@ fn backend_object_handle(daemon: &TestDaemon, object: CK_OBJECT_HANDLE) -> CkObj
         assert_eq!(context_ids.len(), 1, "expected one active shim context");
         let backend_handle = daemon
             .context_manager
-            .get_context(&context_ids[0], |ctx| ctx.object_handles.resolve(VirtualHandle(object)))
+            .get_context(&context_ids[0], |ctx| ctx.object_handles.resolve(VirtualHandle(object as _)))
             .await
             .flatten()
             .expect("backend object handle");
@@ -2664,7 +2664,7 @@ fn slot_list_too_small_buffer_returns_buffer_too_small() {
     assert!(count >= 1, "need at least 1 slot for this test");
 
     // Now call with a buffer that is too small (size 0).
-    let mut slots = vec![0_u64; 0];
+    let mut slots = vec![0 as CK_SLOT_ID; 0];
     let mut too_small_count: CK_ULONG = 0;
     let rv2 = unsafe {
         dispatch::general::c_get_slot_list(CK_FALSE, slots.as_mut_ptr(), &mut too_small_count)
@@ -2693,7 +2693,7 @@ fn mechanism_list_count_reflects_filtered_count() {
     assert_eq!(count, 4, "expected 4 mechanisms from MockBackend (transparent mode)");
 
     // Fetch into a correctly sized buffer.
-    let mut mechs = vec![0_u64; count as usize];
+    let mut mechs = vec![0 as CK_MECHANISM_TYPE; count as usize];
     let mut fill_count = count;
     let rv2 = unsafe {
         dispatch::general::c_get_mechanism_list(shim.slot_id, mechs.as_mut_ptr(), &mut fill_count)
@@ -2702,7 +2702,7 @@ fn mechanism_list_count_reflects_filtered_count() {
     assert_eq!(fill_count, count, "fill count should match count-only count");
 
     // Buffer-too-small: pass a buffer smaller than the actual count.
-    let mut small_mechs = vec![0_u64; 0];
+    let mut small_mechs = vec![0 as CK_MECHANISM_TYPE; 0];
     let mut small_count: CK_ULONG = 0;
     let rv3 = unsafe {
         dispatch::general::c_get_mechanism_list(

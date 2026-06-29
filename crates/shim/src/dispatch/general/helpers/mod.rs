@@ -3737,13 +3737,13 @@ mod tests {
         // boundary. Source-substring audits pass even if catch_panics were
         // gutted to `f()`; this runtime check would not.
         let rv = super::catch_panics(|| panic!("boom across the FFI boundary"));
-        assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::GENERAL_ERROR.0);
+        assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::GENERAL_ERROR.0 as _);
     }
 
     #[test]
     fn catch_panics_passes_through_non_panicking_rv() {
-        let rv = super::catch_panics(|| pkcs11_proxy_ng_types::CkRv::OK.0);
-        assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::OK.0);
+        let rv = super::catch_panics(|| pkcs11_proxy_ng_types::CkRv::OK.0 as _);
+        assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::OK.0 as _);
     }
 
     #[test]

@@ -1,3 +1,10 @@
+// CK_ULONG-derived C types are u32 on narrow-CK_ULONG targets (i686, armv7,
+// Windows x64). Crate-wide allow so the shim (incl. its test modules, which
+// build C structs from canonical u64 constants and so cast the other way) and
+// the dispatch layer compile on every target with explicit `as`/`.into()`
+// width conversions (ADR-0011).
+#![allow(clippy::unnecessary_cast, clippy::useless_conversion)]
+
 mod dispatch;
 mod function_list;
 mod function_list_3_0;

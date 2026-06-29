@@ -258,7 +258,7 @@ mod tests {
                 nested: None,
             }],
             &[cryptoki_sys::CK_ATTRIBUTE {
-                type_: CkAttributeType::LABEL.0,
+                type_: CkAttributeType::LABEL.0 as _,
                 pValue: std::ptr::null_mut(),
                 ulValueLen: 3,
             }],
@@ -287,7 +287,7 @@ mod tests {
                 nested: None,
             }],
             &[cryptoki_sys::CK_ATTRIBUTE {
-                type_: CkAttributeType::VALUE.0,
+                type_: CkAttributeType::VALUE.0 as _,
                 pValue: std::ptr::null_mut(),
                 ulValueLen: cryptoki_sys::CK_UNAVAILABLE_INFORMATION,
             }],
@@ -316,7 +316,7 @@ mod tests {
                 nested: None,
             }],
             &[cryptoki_sys::CK_ATTRIBUTE {
-                type_: CkAttributeType::VALUE.0,
+                type_: CkAttributeType::VALUE.0 as _,
                 pValue: std::ptr::null_mut(),
                 ulValueLen: cryptoki_sys::CK_UNAVAILABLE_INFORMATION,
             }],
@@ -354,12 +354,12 @@ mod tests {
             ],
             &[
                 cryptoki_sys::CK_ATTRIBUTE {
-                    type_: CkAttributeType::VALUE.0,
+                    type_: CkAttributeType::VALUE.0 as _,
                     pValue: std::ptr::null_mut(),
                     ulValueLen: cryptoki_sys::CK_UNAVAILABLE_INFORMATION,
                 },
                 cryptoki_sys::CK_ATTRIBUTE {
-                    type_: CkAttributeType::LABEL.0,
+                    type_: CkAttributeType::LABEL.0 as _,
                     pValue: std::ptr::null_mut(),
                     ulValueLen: cryptoki_sys::CK_UNAVAILABLE_INFORMATION,
                 },
@@ -398,7 +398,7 @@ mod tests {
                 nested: None,
             }],
             &[cryptoki_sys::CK_ATTRIBUTE {
-                type_: CkAttributeType::VALUE.0,
+                type_: CkAttributeType::VALUE.0 as _,
                 pValue: std::ptr::null_mut(),
                 ulValueLen: cryptoki_sys::CK_UNAVAILABLE_INFORMATION,
             }],
