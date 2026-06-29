@@ -31,6 +31,13 @@ fn new_grpc_client(channel: Channel) -> GrpcClient<Channel> {
 pub struct BackendProbe {
     pub interfaces: Vec<(u8, u8, Vec<String>)>,
     pub mechanism_registry: Option<MechanismRegistryPayload>,
+    /// Backend `sizeof(CK_ULONG)` in bytes (4 or 8), advertised for the width
+    /// bridge (ADR-0011 D2). `None` against an older daemon that predates the
+    /// field — the caller falls back to 8 with a warning (D9).
+    pub backend_ulong_size: Option<u32>,
+    /// Backend `CK_ULONG` byte order (1 = little, 2 = big; ADR-0011 D6).
+    /// `None` against an older daemon.
+    pub backend_byte_order: Option<u32>,
 }
 
 async fn connect_channel(
@@ -199,7 +206,12 @@ impl Pkcs11Client {
             .map(|info| (info.version_major as u8, info.version_minor as u8, info.null_functions))
             .collect();
 
-        Ok(BackendProbe { interfaces, mechanism_registry: resp.mechanism_registry })
+        Ok(BackendProbe {
+            interfaces,
+            mechanism_registry: resp.mechanism_registry,
+            backend_ulong_size: resp.backend_ulong_size,
+            backend_byte_order: resp.backend_byte_order,
+        })
     }
 
     /// Re-dial the endpoint (if it was created via `connect`) and probe the

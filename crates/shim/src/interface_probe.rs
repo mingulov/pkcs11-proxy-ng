@@ -7,6 +7,7 @@
 //! get the static (all-non-null) function lists; post-`C_Initialize`
 //! callers get the patched versions.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use cryptoki_sys::*;
@@ -46,6 +47,77 @@ unsafe impl Send for InterfaceState {}
 unsafe impl Sync for InterfaceState {}
 
 static INTERFACE_STATE: RwLock<Option<&'static InterfaceState>> = RwLock::new(None);
+
+/// Backend `sizeof(CK_ULONG)` advertised by the daemon at probe (ADR-0011 D2).
+/// `0` = not yet probed, or a daemon predating the advertisement; readers fall
+/// back to 8 bytes (D9).
+static BACKEND_ULONG_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+/// The backend's `CK_ULONG` width in bytes for the value bridge (ADR-0011).
+///
+/// Returns the daemon-advertised width, or 8 (LP64) when talking to a daemon
+/// that predates the D2 advertisement (D9 graceful fallback — correct for every
+/// supported x86_64 Linux server). Compare against the shim's own
+/// `size_of::<CK_ULONG>()`: the bridge engages only when they differ.
+// Consumed by the attribute-value width bridge (ADR-0011 task #4), wired next.
+#[allow(dead_code)]
+pub fn backend_ulong_size() -> usize {
+    match BACKEND_ULONG_SIZE.load(Ordering::Relaxed) {
+        0 => 8,
+        n => n,
+    }
+}
+
+/// Resolve the backend `CK_ULONG` width to store from a daemon's advertised
+/// `(size, byte_order)` (ADR-0011 D2/D6/D9) — pure, so the policy is unit
+/// tested without touching the global state.
+///
+/// - D6: a byte-order mismatch is refused (`Err`) — the wire carries native
+///   ulong bytes, so a mismatch would corrupt every multi-byte ulong. All
+///   supported targets are little-endian.
+/// - D2: a valid advertised width (4 or 8) is used; any other value is hostile
+///   and refused.
+/// - D9: an absent width falls back to 8 (LP64) — correct for every supported
+///   x86_64 Linux daemon. `Ok(None)` signals "fell back" so the caller can warn.
+fn resolve_backend_ulong_size(
+    size: Option<u32>,
+    order: Option<u32>,
+) -> Result<(usize, bool), String> {
+    match order {
+        Some(2) if cfg!(target_endian = "little") => {
+            return Err("backend advertises big-endian CK_ULONG but this client is \
+                        little-endian; refusing to avoid silent corruption (ADR-0011 D6)"
+                .to_string());
+        }
+        Some(1) if cfg!(target_endian = "big") => {
+            return Err("backend advertises little-endian CK_ULONG but this client is \
+                        big-endian; refusing (ADR-0011 D6)"
+                .to_string());
+        }
+        _ => {}
+    }
+    match size {
+        Some(n @ (4 | 8)) => Ok((n as usize, false)),
+        Some(other) => {
+            Err(format!("backend advertised an invalid CK_ULONG size {other} (expected 4 or 8)"))
+        }
+        None => Ok((8, true)),
+    }
+}
+
+/// Record the backend's advertised `CK_ULONG` width/byte order (ADR-0011 D2/D6).
+fn record_backend_abi(size: Option<u32>, order: Option<u32>) -> Result<(), String> {
+    let (width, fell_back) = resolve_backend_ulong_size(size, order)?;
+    BACKEND_ULONG_SIZE.store(width, Ordering::Relaxed);
+    if fell_back && std::mem::size_of::<CK_ULONG>() != 8 {
+        tracing::warn!(
+            "daemon does not advertise its backend CK_ULONG width; assuming 8 bytes \
+             (ADR-0011 D9). This narrow client cannot verify the backend width — \
+             upgrade the daemon to advertise it."
+        );
+    }
+    Ok(())
+}
 
 /// Null-terminated name used for all interface entries.
 const IFACE_NAME_PKCS11: &[u8] = b"PKCS 11\0";
@@ -437,6 +509,10 @@ fn probe_backend() -> Result<InterfaceState, String> {
         client.get_backend_interfaces().await
     })?;
 
+    // Record the backend CK_ULONG width/byte order for the value bridge
+    // (ADR-0011 D2/D6) before anything else uses it.
+    record_backend_abi(probe.backend_ulong_size, probe.backend_byte_order)?;
+
     // Install the server-published registry whenever the daemon
     // includes one. Older daemons predate the field — in that case we
     // keep whatever the shim's embedded-default fallback already
@@ -603,6 +679,8 @@ pub fn reprobe() {
 pub fn clear_cache() {
     let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
     *guard = None;
+    // Drop the advertised backend width so a fresh probe re-reads it (D2).
+    BACKEND_ULONG_SIZE.store(0, Ordering::Relaxed);
 }
 
 /// Return a pointer to the v2.40 function list.
@@ -787,3 +865,41 @@ pub fn find_interface(
 struct FallbackCatalog([CK_INTERFACE; 3]);
 unsafe impl Send for FallbackCatalog {}
 unsafe impl Sync for FallbackCatalog {}
+
+#[cfg(test)]
+mod backend_abi_tests {
+    use super::resolve_backend_ulong_size;
+
+    #[test]
+    fn valid_advertised_widths_pass_through() {
+        assert_eq!(resolve_backend_ulong_size(Some(4), Some(1)), Ok((4, false)));
+        assert_eq!(resolve_backend_ulong_size(Some(8), Some(1)), Ok((8, false)));
+        // Byte order may be unspecified (older daemon set the size only).
+        assert_eq!(resolve_backend_ulong_size(Some(8), None), Ok((8, false)));
+    }
+
+    #[test]
+    fn absent_width_falls_back_to_eight_d9() {
+        // D9: no advertisement → assume 8 (LP64), flagged so the caller can warn.
+        assert_eq!(resolve_backend_ulong_size(None, None), Ok((8, true)));
+        assert_eq!(resolve_backend_ulong_size(None, Some(1)), Ok((8, true)));
+    }
+
+    #[test]
+    fn invalid_width_is_refused() {
+        assert!(resolve_backend_ulong_size(Some(2), Some(1)).is_err());
+        assert!(resolve_backend_ulong_size(Some(16), Some(1)).is_err());
+        assert!(resolve_backend_ulong_size(Some(0), Some(1)).is_err());
+    }
+
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn big_endian_backend_refused_on_le_client_d6() {
+        // D6: the wire carries native ulong bytes; a BE backend would corrupt
+        // every multi-byte ulong for this LE client.
+        assert!(resolve_backend_ulong_size(Some(8), Some(2)).is_err());
+        // A little-endian or unspecified order is accepted.
+        assert!(resolve_backend_ulong_size(Some(8), Some(1)).is_ok());
+        assert!(resolve_backend_ulong_size(Some(8), None).is_ok());
+    }
+}

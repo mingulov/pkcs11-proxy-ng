@@ -7,6 +7,7 @@
 #![allow(clippy::unnecessary_cast, clippy::useless_conversion)]
 
 pub mod ffi;
+pub mod host_abi;
 pub mod mock;
 pub mod test_backend_3x;
 pub mod traits;
