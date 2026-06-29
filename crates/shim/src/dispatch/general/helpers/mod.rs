@@ -3673,6 +3673,11 @@ unsafe fn ck_attrs_to_rust_result(
     if count as usize > MAX_TEMPLATE_COUNT {
         return Err(CkRv::ARGUMENTS_BAD);
     }
+    // Width bridge (ADR-0011): a ulong array whose element width differs between
+    // this client and the backend is re-encoded here, on the client edge.
+    // (Scalar ulongs already travel width-independently as a typed `ulong_value`.)
+    let client_ulong_width = std::mem::size_of::<CK_ULONG>();
+    let backend_ulong_width = crate::interface_probe::backend_ulong_size();
     let slice = unsafe { std::slice::from_raw_parts(p_template, count as usize) };
     let mut result = Vec::with_capacity(count as usize);
     for attr in slice {
@@ -3696,6 +3701,26 @@ unsafe fn ck_attrs_to_rust_result(
                 Some(CkAttributeValue::Ulong(v as u64))
             } else if len > MAX_SERIALIZABLE_BYTES {
                 return Err(CkRv::ARGUMENTS_BAD);
+            } else if ck_type.is_ulong_array()
+                && client_ulong_width != backend_ulong_width
+                && len.is_multiple_of(client_ulong_width)
+            {
+                // A ulong array (e.g. CKA_ALLOWED_MECHANISMS) whose element width
+                // differs from the backend's: re-encode each element to the
+                // backend width here, then send as opaque bytes the server writes
+                // verbatim (ADR-0011). Same-width arrays fall through to the
+                // raw-bytes path below, byte-identical to before.
+                let bytes = unsafe { std::slice::from_raw_parts(attr.pValue as *const u8, len) };
+                match pkcs11_proxy_ng_types::width::reencode_ulong(
+                    bytes,
+                    client_ulong_width,
+                    backend_ulong_width,
+                    pkcs11_proxy_ng_types::width::ByteOrder::Little,
+                ) {
+                    Ok(reencoded) => Some(CkAttributeValue::Bytes(reencoded)),
+                    // D4: an element exceeds the backend's CK_ULONG range.
+                    Err(_) => return Err(CkRv::ATTRIBUTE_VALUE_INVALID),
+                }
             } else {
                 let bytes =
                     unsafe { std::slice::from_raw_parts(attr.pValue as *const u8, len) }.to_vec();
