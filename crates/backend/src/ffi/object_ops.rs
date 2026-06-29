@@ -199,6 +199,9 @@ mod find_objects_cap_tests {
     #[test]
     fn bound_is_a_tiny_fraction_of_u32_max() {
         assert!(MAX_FIND_OBJECTS_PER_CALL < u32::MAX as usize);
-        assert_eq!(MAX_FIND_OBJECTS_PER_CALL, 512 * 1024 * 1024 / 8);
+        assert_eq!(
+            MAX_FIND_OBJECTS_PER_CALL,
+            512 * 1024 * 1024 / std::mem::size_of::<cryptoki_sys::CK_OBJECT_HANDLE>()
+        );
     }
 }

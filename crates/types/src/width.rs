@@ -40,11 +40,7 @@ const fn is_valid_width(w: usize) -> bool {
 /// The platform-sized `CK_UNAVAILABLE_INFORMATION` sentinel (`~0UL`) for a given
 /// `CK_ULONG` byte width: `0xFFFF_FFFF` for 4, `0xFFFF_FFFF_FFFF_FFFF` for 8.
 pub const fn all_ones(width: usize) -> u64 {
-    if width >= 8 {
-        u64::MAX
-    } else {
-        (1u64 << (8 * width as u32)) - 1
-    }
+    if width >= 8 { u64::MAX } else { (1u64 << (8 * width as u32)) - 1 }
 }
 
 fn read_uint(bytes: &[u8], order: ByteOrder) -> u64 {
@@ -105,17 +101,78 @@ pub fn reencode_ulong(
     Ok(out)
 }
 
+/// The canonical, width-independent wire encoding of
+/// `CK_UNAVAILABLE_INFORMATION` ("no information available").
+///
+/// Each C-ABI edge maps its own native all-ones sentinel to/from this single
+/// value, so the sentinel survives every width combination with one `== ` check
+/// and needs no backend-width knowledge (see [`canonicalize_ulong`] /
+/// [`decanonicalize_ulong`] for value fields, and [`translate_ulong_len`] for
+/// lengths). ADR-0011.
+pub const CANONICAL_UNAVAILABLE: u64 = u64::MAX;
+
+/// Backend edge: map a source-width `CK_ULONG` value to its canonical wire form.
+///
+/// The source-width all-ones sentinel (`CK_UNAVAILABLE_INFORMATION`) becomes the
+/// canonical [`CANONICAL_UNAVAILABLE`]; every other value passes through. Use for
+/// plain `CK_ULONG`-valued fields (e.g. `CK_TOKEN_INFO` counts/sizes) so the
+/// sentinel is recognised by any-width client.
+pub fn canonicalize_ulong(value: u64, src_width: usize) -> u64 {
+    if value == all_ones(src_width) { CANONICAL_UNAVAILABLE } else { value }
+}
+
+/// Client edge: map a canonical wire `CK_ULONG` value to the destination-width
+/// native value (returned as `u64`, to be cast to the native `CK_ULONG`).
+///
+/// The canonical sentinel becomes the destination-width all-ones
+/// (`CK_UNAVAILABLE_INFORMATION`); other values pass through, rejecting one that
+/// does not fit the destination width (D4/D5). Use for plain `CK_ULONG`-valued
+/// fields; lengths use [`translate_ulong_len`] and byte values use
+/// [`reencode_ulong`].
+pub fn decanonicalize_ulong(wire: u64, dst_width: usize) -> Result<u64, WidthError> {
+    if wire == CANONICAL_UNAVAILABLE {
+        return Ok(all_ones(dst_width));
+    }
+    if wire > all_ones(dst_width) {
+        return Err(WidthError::Overflow);
+    }
+    Ok(wire)
+}
+
+/// Client edge: narrow a canonical wire `CK_ULONG` info-struct field to the
+/// destination-width native value (returned as `u64`, to be cast to the native
+/// `CK_ULONG`).
+///
+/// Info-struct fields such as the `CK_TOKEN_INFO` session counts and memory
+/// sizes use `CK_UNAVAILABLE_INFORMATION` (all-ones) as a "no information"
+/// sentinel, and unlike attribute values there is no caller buffer to reject a
+/// too-large value against — `C_GetTokenInfo` must still succeed. So, unlike
+/// [`decanonicalize_ulong`], this never errors:
+///
+/// - The canonical [`CANONICAL_UNAVAILABLE`] sentinel becomes the
+///   destination-width all-ones (`CK_UNAVAILABLE_INFORMATION` in the caller's
+///   width).
+/// - A genuine value that does not fit the destination width is reported as
+///   `CK_UNAVAILABLE_INFORMATION` rather than silently truncated: the value
+///   exists but cannot be represented for a narrower caller, which is precisely
+///   what that sentinel means.
+/// - Every representable value (including `CK_EFFECTIVELY_INFINITE`, i.e. `0`)
+///   passes through unchanged.
+pub fn narrow_info_field(wire: u64, dst_width: usize) -> u64 {
+    let ones = all_ones(dst_width);
+    if wire == CANONICAL_UNAVAILABLE || wire > ones { ones } else { wire }
+}
+
 /// Translate a `CK_ULONG`-typed attribute's `ulValueLen` from the source edge's
 /// width to the destination edge's width.
 ///
-/// - The platform-sized `CK_UNAVAILABLE_INFORMATION` sentinel (all-ones of the
-///   *source* width) maps to all-ones of the *destination* width — the
-///   sentinel-widening asymmetry of ADR-0011 (free when narrowing by
-///   truncation, explicit when widening).
+/// - The canonical [`CANONICAL_UNAVAILABLE`] sentinel maps to all-ones of the
+///   *destination* width (`CK_UNAVAILABLE_INFORMATION`). Because the sentinel is
+///   canonicalised at the backend edge, this is width-independent and symmetric.
 /// - Otherwise the length is a byte count of `src_width`-wide elements and is
 ///   rescaled to `dst_width`-wide elements: `(len / src_width) * dst_width`.
 pub fn translate_ulong_len(src_len: u64, src_width: usize, dst_width: usize) -> u64 {
-    if src_len == all_ones(src_width) {
+    if src_len == CANONICAL_UNAVAILABLE {
         return all_ones(dst_width);
     }
     let elements = src_len / src_width as u64;
@@ -221,13 +278,57 @@ mod tests {
     }
 
     #[test]
-    fn translate_len_preserves_unavailable_sentinel_both_directions() {
-        // narrowing: 0xFFFF_FFFF_FFFF_FFFF -> 0xFFFF_FFFF
-        assert_eq!(translate_ulong_len(u64::MAX, 8, 4), 0xFFFF_FFFF);
-        // widening: 0xFFFF_FFFF -> 0xFFFF_FFFF_FFFF_FFFF (must NOT zero-extend)
-        assert_eq!(translate_ulong_len(0xFFFF_FFFF, 4, 8), u64::MAX);
-        // identity
-        assert_eq!(translate_ulong_len(u64::MAX, 8, 8), u64::MAX);
-        assert_eq!(translate_ulong_len(0xFFFF_FFFF, 4, 4), 0xFFFF_FFFF);
+    fn translate_len_maps_canonical_sentinel_to_native_both_directions() {
+        // The wire sentinel is canonical (u64::MAX) regardless of backend width;
+        // it maps to the destination-width all-ones in every direction.
+        assert_eq!(translate_ulong_len(CANONICAL_UNAVAILABLE, 8, 4), 0xFFFF_FFFF);
+        assert_eq!(translate_ulong_len(CANONICAL_UNAVAILABLE, 4, 8), u64::MAX);
+        assert_eq!(translate_ulong_len(CANONICAL_UNAVAILABLE, 8, 8), u64::MAX);
+        assert_eq!(translate_ulong_len(CANONICAL_UNAVAILABLE, 4, 4), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn canonicalize_maps_native_sentinel_to_canonical() {
+        assert_eq!(canonicalize_ulong(0xFFFF_FFFF, 4), CANONICAL_UNAVAILABLE); // 32-bit backend
+        assert_eq!(canonicalize_ulong(u64::MAX, 8), CANONICAL_UNAVAILABLE); // 64-bit backend
+        assert_eq!(canonicalize_ulong(5, 4), 5); // regular value untouched
+        assert_eq!(canonicalize_ulong(0, 8), 0); // CK_EFFECTIVELY_INFINITE (0) untouched
+    }
+
+    #[test]
+    fn decanonicalize_maps_canonical_sentinel_to_native() {
+        assert_eq!(decanonicalize_ulong(CANONICAL_UNAVAILABLE, 4), Ok(0xFFFF_FFFF));
+        assert_eq!(decanonicalize_ulong(CANONICAL_UNAVAILABLE, 8), Ok(u64::MAX));
+        assert_eq!(decanonicalize_ulong(5, 4), Ok(5));
+        assert_eq!(decanonicalize_ulong(0x1_0000_0000, 4), Err(WidthError::Overflow));
+    }
+
+    #[test]
+    fn narrow_info_field_maps_sentinel_overflow_and_values() {
+        // The canonical wire sentinel becomes the destination-width
+        // CK_UNAVAILABLE_INFORMATION in either width.
+        assert_eq!(narrow_info_field(CANONICAL_UNAVAILABLE, 4), 0xFFFF_FFFF);
+        assert_eq!(narrow_info_field(CANONICAL_UNAVAILABLE, 8), u64::MAX);
+        // Representable values pass through unchanged.
+        assert_eq!(narrow_info_field(42, 4), 42);
+        assert_eq!(narrow_info_field(42, 8), 42);
+        // CK_EFFECTIVELY_INFINITE (0) is a real value, untouched.
+        assert_eq!(narrow_info_field(0, 4), 0);
+        // A genuine value that does not fit the destination width is reported
+        // as CK_UNAVAILABLE_INFORMATION rather than silently truncated: the
+        // value exists but cannot be represented for a narrower caller, which
+        // is exactly what that sentinel means.
+        assert_eq!(narrow_info_field(0x1_0000_0000, 4), 0xFFFF_FFFF);
+        assert_eq!(narrow_info_field(5_000_000_000, 4), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn sentinel_roundtrips_across_widths() {
+        // 32-bit backend sentinel -> canonical wire -> 64-bit client native sentinel
+        let wire = canonicalize_ulong(0xFFFF_FFFF, 4);
+        assert_eq!(decanonicalize_ulong(wire, 8), Ok(u64::MAX));
+        // regular value survives any direction
+        assert_eq!(decanonicalize_ulong(canonicalize_ulong(7, 4), 8), Ok(7));
+        assert_eq!(decanonicalize_ulong(canonicalize_ulong(7, 8), 4), Ok(7));
     }
 }

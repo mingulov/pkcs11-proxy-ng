@@ -131,7 +131,7 @@ impl MockBackend {
                         overall_rv = CkRv::BUFFER_TOO_SMALL;
                         CkAttributeQueryResult {
                             attr_type: query.attr_type,
-                            returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                            returned_len: u64::MAX,
                             value: None,
                             ck_rv: Some(CkRv::BUFFER_TOO_SMALL),
                             nested: None,
@@ -155,7 +155,7 @@ impl MockBackend {
                     }
                     CkAttributeQueryResult {
                         attr_type: query.attr_type,
-                        returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                        returned_len: u64::MAX,
                         value: None,
                         ck_rv: Some(CkRv::ATTRIBUTE_SENSITIVE),
                         nested: None,
@@ -167,7 +167,7 @@ impl MockBackend {
                     }
                     CkAttributeQueryResult {
                         attr_type: query.attr_type,
-                        returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                        returned_len: u64::MAX,
                         value: None,
                         ck_rv: Some(CkRv::ATTRIBUTE_TYPE_INVALID),
                         nested: None,
@@ -209,7 +209,7 @@ impl MockBackend {
             *overall_rv = CkRv::BUFFER_TOO_SMALL;
             return CkAttributeQueryResult {
                 attr_type: query.attr_type,
-                returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                returned_len: u64::MAX,
                 value: None,
                 ck_rv: Some(CkRv::BUFFER_TOO_SMALL),
                 nested: None,
@@ -243,7 +243,7 @@ impl MockBackend {
                         has_sub_too_small = true;
                         nested_results.push(CkAttributeQueryResult {
                             attr_type: *sub_type,
-                            returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                            returned_len: u64::MAX,
                             value: None,
                             ck_rv: Some(CkRv::BUFFER_TOO_SMALL),
                             nested: None,
@@ -263,7 +263,7 @@ impl MockBackend {
                     // are not expected in normal usage; treat as invalid type.
                     nested_results.push(CkAttributeQueryResult {
                         attr_type: *sub_type,
-                        returned_len: cryptoki_sys::CK_UNAVAILABLE_INFORMATION as u64,
+                        returned_len: u64::MAX,
                         value: None,
                         ck_rv: Some(CkRv::ATTRIBUTE_TYPE_INVALID),
                         nested: None,
