@@ -616,6 +616,10 @@ assumption.
 - Value bridge: shim `width_bridge` wired into `C_GetAttributeValue` output
   (scalar + array) and ulong-array input re-encode in `ck_attrs_to_rust_result`.
   Scalar input is width-independent via the typed `ulong_value`.
+- Nested `CK_ATTRIBUTE[]` templates (`CKA_*_TEMPLATE`): each ulong sub-value is
+  bridged on output and the template length is reported in the client's
+  `CK_ATTRIBUTE` layout (`N * sizeof(client CK_ATTRIBUTE)`, from the wire result
+  count) — correct across differing pointer widths, not just `CK_ULONG` widths.
 - LLP64 Bucket 2: `#[cfg_attr(windows, repr(packed))]` on the 7 hand-rolled
   `#[repr(C)]` param structs (5 backend + 2 shim).
 - i686: whole workspace builds; types/proto/backend/client/shim lib suites green

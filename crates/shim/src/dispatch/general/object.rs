@@ -109,12 +109,10 @@ pub unsafe extern "C" fn c_get_attribute_value(
                         let result = &results[i];
 
                         if query.nested.is_some() {
-                            // Nested (CKF_ARRAY_ATTRIBUTE): write back sub-attribute
-                            // results into the caller's CK_ATTRIBUTE[] template.
-                            // (Nested ulong sub-values are bridged in a follow-up;
-                            // the template's own length is a local-ABI concern.)
-                            write_nested_result_to_ffi(c_attr, result);
-                            c_attr.ulValueLen = result.returned_len as CK_ULONG;
+                            // Nested CK_ATTRIBUTE[] template: write back the
+                            // sub-attribute results (width-bridging each ulong
+                            // sub-value and reporting a client-layout length).
+                            write_nested_result_to_ffi(c_attr, result, client_width, backend_width);
                             continue;
                         }
 
@@ -195,11 +193,22 @@ fn build_attribute_query(
             };
             let nested: Vec<CkAttributeQuery> = sub_attrs
                 .iter()
-                .map(|sub| CkAttributeQuery {
-                    attr_type: CkAttributeType(sub.type_ as u64),
-                    buffer_present: !sub.pValue.is_null(),
-                    buffer_len: sub.ulValueLen as u64,
-                    nested: None,
+                .map(|sub| {
+                    let sub_type = CkAttributeType(sub.type_ as u64);
+                    CkAttributeQuery {
+                        attr_type: sub_type,
+                        buffer_present: !sub.pValue.is_null(),
+                        // Inflate a ulong sub-attribute's buffer length to the
+                        // backend width (no-op otherwise) so the backend's nested
+                        // template buffer holds the full-width value.
+                        buffer_len: super::width_bridge::bridge_request_buffer_len(
+                            sub_type,
+                            sub.ulValueLen as u64,
+                            client_width,
+                            backend_width,
+                        ),
+                        nested: None,
+                    }
                 })
                 .collect();
             return Ok(CkAttributeQuery {
@@ -233,16 +242,32 @@ fn build_attribute_query(
 ///
 /// `c_attr.pValue` must point to a valid `CK_ATTRIBUTE[]` array with at least
 /// as many entries as `result.nested` contains.
-unsafe fn write_nested_result_to_ffi(c_attr: &mut CK_ATTRIBUTE, result: &CkAttributeQueryResult) {
+unsafe fn write_nested_result_to_ffi(
+    c_attr: &mut CK_ATTRIBUTE,
+    result: &CkAttributeQueryResult,
+    client_width: usize,
+    backend_width: usize,
+) {
     let Some(nested_results) = result.nested.as_ref() else {
+        // Not actually a nested template result; preserve the backend length.
+        c_attr.ulValueLen = result.returned_len as CK_ULONG;
         return;
     };
 
+    let ck_attr_size = std::mem::size_of::<CK_ATTRIBUTE>();
+    // The template's required output size is N *client-layout* CK_ATTRIBUTEs. N
+    // is the wire result count; the local CK_ATTRIBUTE size (a pointer/packing
+    // concern) is the client's own and is independent of the backend's struct
+    // size — so this is correct across differing pointer widths, not just
+    // differing CK_ULONG widths.
+    let needed_len = (nested_results.len() * ck_attr_size) as CK_ULONG;
+
     if c_attr.pValue.is_null() {
+        // Size query: report the client-layout template size.
+        c_attr.ulValueLen = needed_len;
         return;
     }
 
-    let ck_attr_size = std::mem::size_of::<CK_ATTRIBUTE>();
     let capacity = (c_attr.ulValueLen as usize).checked_div(ck_attr_size).unwrap_or(0);
     let count = nested_results.len().min(capacity);
 
@@ -253,20 +278,41 @@ unsafe fn write_nested_result_to_ffi(c_attr: &mut CK_ATTRIBUTE, result: &CkAttri
         // Per PKCS#11 spec: type_ is set on output (ignored on input)
         sub_attr.type_ = sub_result.attr_type.0 as CK_ATTRIBUTE_TYPE;
 
-        if let Some(bytes) = sub_result.value.as_ref()
-            && !sub_attr.pValue.is_null()
-            && bytes.len() <= sub_attr.ulValueLen as usize
-        {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(),
-                    sub_attr.pValue as *mut u8,
-                    bytes.len(),
-                );
+        // Caller's original sub-buffer size (we overwrite ulValueLen last).
+        let sub_buf_len = sub_attr.ulValueLen as usize;
+        // Width-bridge a ulong sub-value to the client width (no-op for opaque
+        // sub-attributes and same-width edges).
+        match super::width_bridge::bridge_output_value(
+            sub_result.attr_type,
+            sub_result.value.as_deref(),
+            sub_result.returned_len,
+            backend_width,
+            client_width,
+        ) {
+            Ok((client_value, client_len)) => {
+                if let Some(bytes) = client_value.as_ref()
+                    && !sub_attr.pValue.is_null()
+                    && bytes.len() <= sub_buf_len
+                {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            sub_attr.pValue as *mut u8,
+                            bytes.len(),
+                        );
+                    }
+                }
+                sub_attr.ulValueLen = client_len as CK_ULONG;
+            }
+            Err(_overflow) => {
+                // D4: a genuine sub-value exceeds the client's CK_ULONG range.
+                sub_attr.ulValueLen = CK_UNAVAILABLE_INFORMATION;
             }
         }
-        sub_attr.ulValueLen = sub_result.returned_len as CK_ULONG;
     }
+    // Report the full needed (client-layout) size, even if the caller's buffer
+    // held fewer entries — matches PKCS#11 buffer-too-small semantics.
+    c_attr.ulValueLen = needed_len;
 }
 
 // ---------------------------------------------------------------------------
@@ -433,5 +479,72 @@ mod tests {
         let q = build_attribute_query(&attr, w, w).expect("WRAP_TEMPLATE must parse");
         let nested = q.nested.expect("WRAP_TEMPLATE must build nested sub-queries");
         assert_eq!(nested.len(), 1);
+    }
+
+    // Nested template write-back: each ulong sub-value is bridged and the
+    // template length is reported in the client's CK_ATTRIBUTE layout. Exercised
+    // here at same width (a no-op for the values); the cross-width re-encode is
+    // covered by width_bridge's unit matrix.
+    #[test]
+    fn write_nested_writes_subattrs_and_client_layout_length() {
+        use pkcs11_proxy_ng_types::CkAttributeQueryResult;
+
+        let w = std::mem::size_of::<CK_ULONG>();
+        let ck_attr_size = std::mem::size_of::<CK_ATTRIBUTE>();
+
+        // Caller's CK_ATTRIBUTE[2] sub-template: one ulong, one byte-string.
+        let mut ul_buf = vec![0u8; w];
+        let mut label_buf = [0u8; 8];
+        let mut subs = [
+            CK_ATTRIBUTE {
+                type_: 0, // set on output
+                pValue: ul_buf.as_mut_ptr() as CK_VOID_PTR,
+                ulValueLen: w as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: 0,
+                pValue: label_buf.as_mut_ptr() as CK_VOID_PTR,
+                ulValueLen: label_buf.len() as CK_ULONG,
+            },
+        ];
+        let mut c_attr = CK_ATTRIBUTE {
+            type_: CkAttributeType::WRAP_TEMPLATE.0 as CK_ATTRIBUTE_TYPE,
+            pValue: subs.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: (2 * ck_attr_size) as CK_ULONG,
+        };
+
+        let key_type_bytes = (0x1f as CK_ULONG).to_ne_bytes().to_vec(); // CKK_AES
+        let result = CkAttributeQueryResult {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            returned_len: (2 * ck_attr_size) as u64,
+            value: None,
+            ck_rv: None,
+            nested: Some(vec![
+                CkAttributeQueryResult {
+                    attr_type: CkAttributeType::KEY_TYPE,
+                    returned_len: w as u64,
+                    value: Some(key_type_bytes.clone()),
+                    ck_rv: None,
+                    nested: None,
+                },
+                CkAttributeQueryResult {
+                    attr_type: CkAttributeType::LABEL,
+                    returned_len: 1,
+                    value: Some(b"k".to_vec()),
+                    ck_rv: None,
+                    nested: None,
+                },
+            ]),
+        };
+
+        unsafe { write_nested_result_to_ffi(&mut c_attr, &result, w, w) };
+
+        assert_eq!(c_attr.ulValueLen as usize, 2 * ck_attr_size, "client-layout template size");
+        assert_eq!(subs[0].type_ as u64, CkAttributeType::KEY_TYPE.0);
+        assert_eq!(subs[0].ulValueLen as usize, w);
+        assert_eq!(ul_buf, key_type_bytes, "ulong sub-value written");
+        assert_eq!(subs[1].type_ as u64, CkAttributeType::LABEL.0);
+        assert_eq!(subs[1].ulValueLen, 1);
+        assert_eq!(&label_buf[..1], b"k", "byte sub-value written");
     }
 }
