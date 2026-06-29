@@ -562,6 +562,44 @@ assumption.
   talking to a daemon that does not advertise its backend width falls back to
   assuming 8 bytes **with a warning** (correct for every supported x86_64 Linux
   server) rather than refusing — graceful degradation.
+- **D10 — `CK_UNAVAILABLE_INFORMATION` sentinel: canonicalized on the wire
+  (width-independent), implemented 2026-06-29.** The "no information" sentinel is
+  all-ones of the *native* `CK_ULONG` width — `0xFFFF_FFFF` on a 32-bit edge,
+  `u64::MAX` on a 64-bit edge. Real ulong values cross the wire as native bytes
+  interpreted via the D2 width, so a naively widened 32-bit sentinel
+  (`0x0000_0000_FFFF_FFFF`) would be read by a 64-bit client as a literal
+  ~4-billion value, not "unavailable" (narrowing the other way survives only by
+  the accident of truncation). To make the sentinel robust **independently of
+  D2** — so it survives even the D9 fallback or a mis-advertising daemon — the
+  *length/sentinel* fields are canonicalized at the backend edge to one
+  width-independent wire value `CANONICAL_UNAVAILABLE = u64::MAX`
+  (`width::canonicalize_ulong`) and mapped back to the destination-width
+  all-ones at the client edge (`width::decanonicalize_ulong` /
+  `width::narrow_info_field`). Scope: (a) the per-attribute `returned_len`
+  "unavailable" marker in the exact `C_GetAttributeValue` path
+  (`backend/ffi/mapping.rs`), and (b) the `CK_TOKEN_INFO` session-count and
+  memory fields the spec allows to be `CK_UNAVAILABLE_INFORMATION`
+  (`token_info_from_ck` → shim `c_get_token_info`). It touches **only**
+  length/status and genuine `CK_ULONG` info fields — **never** opaque attribute
+  *value* bytes — so it does not weaken the Option-A backend-verbatim principle
+  (real values still travel native and are bridged via D2). For info fields with
+  **no caller buffer** to reject against (`narrow_info_field`), a genuine value
+  exceeding a narrower client's `CK_ULONG` range is **also** reported as
+  `CK_UNAVAILABLE_INFORMATION` rather than truncated: D4's hard reject would
+  break the must-succeed `C_GetTokenInfo`, and "the value exists but cannot be
+  represented for you" is exactly what that sentinel means. The full
+  cross-width matrix is unit-tested in `types/src/width.rs`; on same-width
+  topologies every transform is a verified no-op.
+
+  **Classification completeness is a correctness prerequisite (not just an
+  optimization).** The input path reads a ulong attribute at the client's native
+  `CK_ULONG` width *only* when `CkAttributeType::is_ulong()` (or the new
+  `is_ulong_array()`) returns true; otherwise it falls back to raw opaque bytes
+  (D7). At **same** width raw bytes are byte-identical to the typed read, so a
+  missing classifier entry is **invisible** — but cross-width a 32-bit client's
+  4-byte value then reaches a 64-bit backend as a malformed 8-byte `CK_ULONG`.
+  The classifier is therefore sourced exhaustively from the OASIS attribute-type
+  tables and guarded by a consistency test, so the set cannot silently drift.
 
 ## Remaining work to schedule (not decisions — execution)
 
