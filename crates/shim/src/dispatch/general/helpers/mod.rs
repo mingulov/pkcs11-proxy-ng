@@ -803,7 +803,10 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
                 let ch = unsafe { &*(param_ptr as *const CK_CHACHA20_PARAMS) };
                 let bc_bytes = (ch.blockCounterBits as usize).div_ceil(8);
                 let nonce_bytes = (ch.ulNonceBits as usize).div_ceil(8);
-                if bc_bytes > MAX_SERIALIZABLE_BYTES || nonce_bytes > MAX_SERIALIZABLE_BYTES {
+                // `>=`, not `>`: on a 32-bit CK_ULONG target div_ceil(u32::MAX, 8)
+                // equals MAX_SERIALIZABLE_BYTES exactly, so `>` is unreachable and
+                // the guard would wild-read at the boundary (i686 SIGSEGV).
+                if bc_bytes >= MAX_SERIALIZABLE_BYTES || nonce_bytes >= MAX_SERIALIZABLE_BYTES {
                     Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
                     let block_counter = if ch.pBlockCounter.is_null() {
@@ -838,9 +841,12 @@ unsafe fn read_mechanism_with_shape(c_mech: &CK_MECHANISM, shape: Option<&str>) 
             } else {
                 let salsa = unsafe { &*(param_ptr as *const CK_SALSA20_PARAMS) };
                 let nonce_bytes = (salsa.ulNonceBits as usize).div_ceil(8);
+                // `>=`, not `>`: on a 32-bit CK_ULONG target div_ceil(u32::MAX, 8)
+                // equals MAX_SERIALIZABLE_BYTES exactly, so `>` is unreachable and
+                // the guard would wild-read at the boundary (i686 SIGSEGV).
                 if salsa.pBlockCounter.is_null()
                     || missing_embedded_pointer(salsa.pNonce, salsa.ulNonceBits)
-                    || nonce_bytes > MAX_SERIALIZABLE_BYTES
+                    || nonce_bytes >= MAX_SERIALIZABLE_BYTES
                 {
                     Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
@@ -3377,9 +3383,12 @@ pub(crate) unsafe fn read_gcm_message_params(
     } else {
         Vec::new()
     };
-    let tag_bytes = (p.ulTagBits as usize).div_ceil(8);
-    let tag = if !p.pTag.is_null() && tag_bytes > 0 && tag_bytes <= MAX_SERIALIZABLE_BYTES {
-        unsafe { std::slice::from_raw_parts(p.pTag, tag_bytes) }.to_vec()
+    // Compute in u64 and reject at the cap (`<`, not `<=`): on a 32-bit CK_ULONG
+    // target a near-u32::MAX bit count's byte length sits AT MAX_SERIALIZABLE_BYTES,
+    // so `<=` would wild-read a dangling/short pTag at the boundary (i686 SIGSEGV).
+    let tag_bytes = (p.ulTagBits as u64).div_ceil(8);
+    let tag = if !p.pTag.is_null() && tag_bytes > 0 && tag_bytes < MAX_SERIALIZABLE_BYTES as u64 {
+        unsafe { std::slice::from_raw_parts(p.pTag, tag_bytes as usize) }.to_vec()
     } else {
         Vec::new()
     };
@@ -3848,8 +3857,11 @@ mod tests {
     #[test]
     fn classify_input_unmaterializable_len_is_too_large_not_panic() {
         let b = [0u8; 1];
-        match unsafe { super::classify_input(b.as_ptr(), u64::MAX as CK_ULONG) } {
-            super::InputBuf::TooLarge { len } => assert_eq!(len, u64::MAX),
+        // CK_ULONG::MAX, not `u64::MAX as CK_ULONG`: on a 32-bit CK_ULONG target
+        // the latter truncates to 0xFFFF_FFFF, so the returned (widened) len would
+        // not equal u64::MAX. Both are far above MAX_SERIALIZABLE_BYTES → TooLarge.
+        match unsafe { super::classify_input(b.as_ptr(), CK_ULONG::MAX) } {
+            super::InputBuf::TooLarge { len } => assert_eq!(len, CK_ULONG::MAX as u64),
             other => panic!("expected TooLarge, got {other:?}"),
         }
     }
