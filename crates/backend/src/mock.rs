@@ -740,6 +740,33 @@ impl MockBackend {
         self.require_mechanism_workflow_for_state(&state, session, mechanism, required_flag)
     }
 
+    /// Deterministic IV writeback for `CK_GCM_WRAP_PARAMS` whose generator
+    /// asks the token to produce the IV (anything but CKG_NO_GENERATE = 1):
+    /// the caller's `iv_fixed_bits` prefix is preserved and the tail is a
+    /// stable echo of (session, fixed prefix) — assertable byte-exact,
+    /// distinct per session.
+    fn generated_iv_writeback(
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+    ) -> Option<CkMechanismParams> {
+        let Some(CkMechanismParams::GcmWrap(p)) = &mechanism.params else {
+            return None;
+        };
+        if p.iv_generator <= 1 || p.iv.is_empty() {
+            return None;
+        }
+        let fixed_bytes = ((p.iv_fixed_bits as usize) / 8).min(p.iv.len());
+        let mut iv = p.iv[..fixed_bytes].to_vec();
+        iv.extend(echo::echo_bytes(
+            "gcm-iv",
+            &[&session.0.to_le_bytes(), &p.iv[..fixed_bytes]],
+            p.iv.len() - fixed_bytes,
+        ));
+        let mut generated = p.clone();
+        generated.iv = iv;
+        Some(CkMechanismParams::GcmWrap(generated))
+    }
+
     fn xor_bytes(data: &[u8]) -> Vec<u8> {
         data.iter().map(|byte| byte ^ 0x42).collect()
     }
@@ -1288,7 +1315,14 @@ impl Pkcs11Backend for MockBackend {
     ) -> CkResult<Option<CkMechanismParams>> {
         self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::ENCRYPT)?;
         self.encrypt_init_impl(s, k)?;
-        let output = self.encrypt_init_output.lock().unwrap().clone();
+        // Injected test output wins; otherwise IV-generating GCM-wrap
+        // params produce a deterministic writeback.
+        let output = self
+            .encrypt_init_output
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| Self::generated_iv_writeback(s, m));
         match &output {
             Some(params) => {
                 self.session_mechanism_output.lock().unwrap().insert(s.0, params.clone());

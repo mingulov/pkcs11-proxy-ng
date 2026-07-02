@@ -5358,3 +5358,49 @@ fn registryless_mock_stays_permissive_about_params() {
     let key = backend.create_object(session, &[]).unwrap();
     backend.encrypt_init(session, &gcm_no_params, key).expect("no registry, no validation");
 }
+
+#[test]
+fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let key = backend.create_object(session, &[]).unwrap();
+
+    let mech = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::GcmWrap(GcmWrapParams {
+            iv: vec![0xA1, 0xA2, 0xA3, 0xA4, 0, 0, 0, 0, 0, 0, 0, 0],
+            iv_fixed_bits: 32,
+            iv_generator: 4, // CKG_GENERATE_RANDOM
+            aad: vec![],
+            tag_bits: 128,
+        })),
+    };
+
+    let output = backend.encrypt_init(session, &mech, key).unwrap();
+    let Some(CkMechanismParams::GcmWrap(generated)) = output else {
+        panic!("generator != NO_GENERATE must yield writeback params, got {output:?}");
+    };
+    assert_eq!(generated.iv.len(), 12, "IV length preserved");
+    assert_eq!(&generated.iv[..4], &[0xA1, 0xA2, 0xA3, 0xA4], "fixed prefix preserved");
+    assert_ne!(&generated.iv[4..], &[0u8; 8][..], "generated tail is non-zero");
+
+    // Determinism: the same session re-initializing gets the same IV.
+    backend.encrypt_init_cancel(session).unwrap();
+    let again = backend.encrypt_init(session, &mech, key).unwrap();
+    assert_eq!(again, Some(CkMechanismParams::GcmWrap(generated)));
+
+    // NO_GENERATE yields no writeback.
+    backend.encrypt_init_cancel(session).unwrap();
+    let mech_no_gen = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::GcmWrap(GcmWrapParams {
+            iv: vec![0; 12],
+            iv_fixed_bits: 0,
+            iv_generator: 1, // CKG_NO_GENERATE
+            aad: vec![],
+            tag_bits: 128,
+        })),
+    };
+    assert_eq!(backend.encrypt_init(session, &mech_no_gen, key).unwrap(), None);
+}
