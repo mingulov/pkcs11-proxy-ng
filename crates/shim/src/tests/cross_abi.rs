@@ -273,3 +273,22 @@ fn nested_template_sub_too_small_yields_client_width_sentinel() {
         );
     }
 }
+
+#[test]
+fn big_endian_backend_is_refused_at_initialize() {
+    // D6: the wire carries backend-native ulong bytes, so a byte-order
+    // mismatch would corrupt every multi-byte value. The shim must refuse
+    // at C_Initialize — loudly, before any value can be parsed — with the
+    // lifecycle-class error, never connect-and-corrupt.
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared_big_endian();
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon.endpoint);
+    }
+    let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
+    if rv == CKR_OK as CK_RV {
+        // Clean up so a failing assertion doesn't poison other tests.
+        let _ = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+    }
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV, "a D6 byte-order mismatch must fail C_Initialize");
+}

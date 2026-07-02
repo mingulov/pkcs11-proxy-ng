@@ -134,8 +134,26 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
             state::mark_finalized();
         } else {
             // Re-probe the backend so function lists reflect actual
-            // capabilities (BUG-001).
-            crate::interface_probe::reprobe();
+            // capabilities (BUG-001). A transient probe failure is
+            // tolerated (previous/fallback state stays in use); an ABI
+            // refusal (D6 byte-order mismatch) is fatal — every ulong
+            // byte from this daemon would be unparseable, so fail the
+            // initialization instead of connecting-and-corrupting.
+            if let Err(e) = crate::interface_probe::reprobe() {
+                tracing::error!(error = %e, "C_Initialize refused: incompatible backend ABI");
+                // Best-effort: release the daemon-side context we created.
+                let _ = state::runtime().block_on(async {
+                    let mut client = state::client().lock().await;
+                    client.finalize().await
+                });
+                state::mark_finalized();
+                // The cached channel points at the refused daemon; force the
+                // next C_Initialize to re-read the environment and reconnect,
+                // and drop any probe state captured from it.
+                state::mark_client_reconnect_required();
+                crate::interface_probe::clear_cache();
+                return rv_err(CkRv::GENERAL_ERROR);
+            }
         }
         rv
     })

@@ -27,6 +27,7 @@ use super::*;
 static TEST_DAEMON: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_ILP32: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_LLP64: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_BIG_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
 
 pub(super) struct TestDaemon {
     runtime: Runtime,
@@ -51,21 +52,32 @@ impl TestDaemon {
         }
     }
 
+    /// A daemon whose backend ADVERTISES big-endian (D6 poison config).
+    pub(super) fn shared_big_endian() -> &'static Self {
+        TEST_DAEMON_BIG_ENDIAN.get_or_init(|| Self::start_configured(MockAbi::host(), true))
+    }
+
     fn start(abi: MockAbi) -> Self {
+        Self::start_configured(abi, false)
+    }
+
+    fn start_configured(abi: MockAbi, big_endian: bool) -> Self {
         let runtime = Runtime::new().expect("test runtime");
         let (endpoint, backend, context_manager, shutdown) = runtime.block_on(async {
-            let backend = Arc::new(
-                MockBackend::new(
-                    vec![CkSlotId(0), CkSlotId(1)],
-                    vec![
-                        CkMechanismType::SHA256,
-                        CkMechanismType::RSA_PKCS,
-                        CkMechanismType::AES_ECB,
-                        CkMechanismType::AES_GCM,
-                    ],
-                )
-                .with_abi(abi),
-            );
+            let mut mock = MockBackend::new(
+                vec![CkSlotId(0), CkSlotId(1)],
+                vec![
+                    CkMechanismType::SHA256,
+                    CkMechanismType::RSA_PKCS,
+                    CkMechanismType::AES_ECB,
+                    CkMechanismType::AES_GCM,
+                ],
+            )
+            .with_abi(abi);
+            if big_endian {
+                mock = mock.with_big_endian_advertisement();
+            }
+            let backend = Arc::new(mock);
             backend.set_interface_capabilities(InterfaceCapabilities {
                 interfaces: vec![
                     InterfaceInfo { version_major: 2, version_minor: 40, null_functions: vec![] },

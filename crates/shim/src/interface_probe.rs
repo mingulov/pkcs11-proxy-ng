@@ -532,25 +532,50 @@ fn build_patched_function_list_3_2(null_names: &[String]) -> CK_FUNCTION_LIST_3_
 
 /// Contact the backend and build an `InterfaceState` with patched function
 /// lists reflecting the backend's capabilities. Also pulls the server's
+/// Why a probe failed — the two classes propagate differently.
+///
+/// A transient failure (transport, daemon restart) keeps the previous
+/// state and is retried later. An ABI refusal (D6 byte-order mismatch,
+/// hostile advertisement) is a hard incompatibility: every ulong byte
+/// the daemon would send is unparseable, so `C_Initialize` must fail.
+pub(crate) enum ProbeFailure {
+    Transient(String),
+    AbiMismatch(String),
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transient(e) => write!(f, "{e}"),
+            Self::AbiMismatch(e) => write!(f, "incompatible backend ABI: {e}"),
+        }
+    }
+}
+
 /// mechanism registry payload (when provided) and atomically swaps the
 /// shim's in-memory registry to match.
-fn probe_backend() -> Result<InterfaceState, String> {
+fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
     // Ensure the gRPC channel is up (returns Err(CkRv) on failure).
-    state::ensure_client_connected().map_err(|e| format!("connect failed: {e:?}"))?;
+    state::ensure_client_connected()
+        .map_err(|e| ProbeFailure::Transient(format!("connect failed: {e:?}")))?;
 
     let rt = state::runtime();
-    let probe = rt.block_on(async {
-        let mut client = state::client().lock().await;
-        client.get_backend_interfaces().await
-    })?;
+    let probe = rt
+        .block_on(async {
+            let mut client = state::client().lock().await;
+            client.get_backend_interfaces().await
+        })
+        .map_err(ProbeFailure::Transient)?;
 
     // Record the backend CK_ULONG width/byte order for the value bridge
-    // (ADR-0011 D2/D6) before anything else uses it.
+    // (ADR-0011 D2/D6) before anything else uses it. A refusal here is
+    // FATAL: the wire representation itself is incompatible.
     record_backend_abi(
         probe.backend_ulong_size,
         probe.backend_byte_order,
         probe.backend_attribute_stride,
-    )?;
+    )
+    .map_err(ProbeFailure::AbiMismatch)?;
 
     // Install the server-published registry whenever the daemon
     // includes one. Older daemons predate the field — in that case we
@@ -688,7 +713,7 @@ pub fn ensure_probed() -> Result<(), String> {
         }
     }
     // Slow path: probe and store.
-    let st = probe_backend()?;
+    let st = probe_backend().map_err(|e| e.to_string())?;
     let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(leak_fixed_state(st));
@@ -700,14 +725,22 @@ pub fn ensure_probed() -> Result<(), String> {
 ///
 /// Called from `C_Initialize` after a successful server init so that the
 /// function lists reflect the current backend.
-pub fn reprobe() {
+pub fn reprobe() -> Result<(), String> {
     match probe_backend() {
         Ok(st) => {
             let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
             *guard = Some(leak_fixed_state(st));
+            Ok(())
         }
-        Err(e) => {
+        Err(ProbeFailure::Transient(e)) => {
+            // BUG-001 contract: a transient probe failure must not fail
+            // C_Initialize; the cached (or fallback) state stays in use.
             tracing::warn!("interface reprobe failed, keeping previous state: {e}");
+            Ok(())
+        }
+        Err(fatal @ ProbeFailure::AbiMismatch(_)) => {
+            tracing::error!("{fatal}; refusing to operate against this daemon (ADR-0011 D6)");
+            Err(fatal.to_string())
         }
     }
 }
