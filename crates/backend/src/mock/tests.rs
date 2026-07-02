@@ -4120,7 +4120,10 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
             )
             .unwrap();
         assert_eq!(rv, CkRv::OK);
-        assert_eq!(size_results[0].returned_len, 8);
+        assert_eq!(
+            size_results[0].returned_len,
+            std::mem::size_of::<cryptoki_sys::CK_ULONG>() as u64
+        );
         assert_eq!(size_results[1].returned_len, "sp800 extra".len() as u64);
 
         let (rv, data_results) = backend

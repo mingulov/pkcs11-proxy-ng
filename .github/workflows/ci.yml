@@ -128,21 +128,17 @@ jobs:
         run: cargo build --workspace
 
   # ── Tier 0e: narrow-CK_ULONG client (i686) ─────────────────────────────────
-  # Compiles + tests the client-side crates for a 32-bit-CK_ULONG target
-  # (i686-unknown-linux-gnu, ILP32). This is the surfacing mechanism for the
-  # narrow-CK_ULONG width bridge (ADR-0011): it catches ABI/width compile gaps
-  # (e.g. `CK_ULONG`-as-u32 conversions) that the x86_64 build cannot.
+  # Compiles + tests for a 32-bit-CK_ULONG target (i686-unknown-linux-gnu,
+  # ILP32). This is the surfacing mechanism for the narrow-CK_ULONG width
+  # bridge (ADR-0011): it catches ABI/width gaps — compile-time
+  # `CK_ULONG`-as-u32 conversions AND runtime width assumptions such as
+  # 8-byte ulong attribute encodings — that the x86_64 build cannot.
   #
-  # Required gate for the ADR-0011 width bridge on a 32-bit-CK_ULONG target:
-  # the pure width logic (types), the shim's dispatch-layer unit tests (the
-  # classifier, value bridge, D2/D6 probe policy, and mechanism/message param
-  # readers — including the bits-derived-length wild-read guards), and a full
-  # ABI compile of the client crates.
-  #
-  # NOTE: the shim's `tests::` integration modules (the in-process TestDaemon
-  # tonic/tokio fixture) currently HANG on i686 — a pre-existing 32-bit runtime
-  # issue unrelated to the width bridge — so they are not run here; tracked as a
-  # separate follow-up. They run on the x86_64 Build & Test job.
+  # Runs the full shim lib suite (dispatch units + the TestDaemon integration
+  # modules), the backend lib suite (MockBackend emulates a narrow-native
+  # backend here), the pure width logic (types), and an ABI compile of the
+  # client crates. Real-.so backend tests skip themselves on ELF-class
+  # mismatch (64-bit provider modules cannot load into a 32-bit process).
   narrow-client-i686:
     name: Narrow CK_ULONG client (i686)
     runs-on: ubuntu-24.04
@@ -160,10 +156,11 @@ jobs:
         with:
           targets: i686-unknown-linux-gnu
 
-      - name: cargo test width logic + shim dispatch units (i686)
+      - name: cargo test types + shim + backend (i686)
         run: |
           cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng-types
-          cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng-shim --lib dispatch::general
+          cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng-shim --lib
+          cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng-backend --lib
 
       - name: cargo build client crates (i686 ABI compile)
         run: |

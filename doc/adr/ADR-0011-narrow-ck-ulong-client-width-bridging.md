@@ -601,7 +601,7 @@ assumption.
   The classifier is therefore sourced exhaustively from the OASIS attribute-type
   tables and guarded by a consistency test, so the set cannot silently drift.
 
-## Implementation status (2026-06-29)
+## Implementation status (2026-07-02)
 
 **Done & committed** (submodule):
 - Pure width-translation core (`types/src/width.rs`) with the full cross-width
@@ -622,16 +622,26 @@ assumption.
   count) — correct across differing pointer widths, not just `CK_ULONG` widths.
 - LLP64 Bucket 2: `#[cfg_attr(windows, repr(packed))]` on the 7 hand-rolled
   `#[repr(C)]` param structs (5 backend + 2 shim).
-- i686: whole workspace builds; types/proto/backend/client/shim lib suites green
-  on x86_64; shim cross-compiles on i686.
+- Windows **client** shim compiles for `x86_64-pc-windows-msvc` (UDS path
+  cfg-gated to Unix; tcp/mTLS-only on Windows); verified via `cargo xwin` and
+  gated in CI.
+- MockBackend emits ulong attribute values at the **host's native `CK_ULONG`
+  width** (the wire contract above), so same-width narrow topologies stay
+  bridging-free; an always-8-byte encoding was fixed after the full i686 suite
+  flagged it in the nested-template integration tests.
+- i686 gate runs the **full** shim lib suite (dispatch units + TestDaemon
+  integration modules), the backend lib suite, the types suite, and a client
+  ABI compile. An earlier claim that the TestDaemon fixture "hangs on i686"
+  was a misdiagnosis: the suite was slow on **every** architecture because
+  parallel tests raced on the process-global `PKCS11_PROXY_ENDPOINT` and each
+  race victim slept through the full connect backoff (~21 s x queued tests).
+  Fixed via `PKCS11_PROXY_CONNECT_ATTEMPTS` (lower-only retry-cap override)
+  plus test-guard hygiene; the suite now completes in well under a minute on
+  x86_64 and i686 alike.
 
-**Remaining (scheduled):**
-- Nested `CK_ATTRIBUTE[]` template ulong sub-values (output) — entangled with the
-  orthogonal local-ABI `CK_ATTRIBUTE`-size axis; scoped follow-up.
+**Remaining (tracked in the umbrella plan `doc/plans/` — cross-ABI closure):**
 - **D4 server-input checked narrowing** (`ffi_conversion.rs`) — the 64c/32b
-  direction; D3-gated (narrow-backend track), never fires on the shipping 64-bit
-  backend; deferred with the 32-bit-server track.
-- Windows **client**: cfg-gate the UDS path (tcp/mTLS-only on Windows) — in
-  progress; verified via `cargo xwin`.
-- Windows **server** OS port (Bucket 3) and the 32-bit-server track — D3-gated.
-- Integration tests: i686 cross-topology + Windows wine smoke; CI promotion.
+  direction; only fires with a narrow-`CK_ULONG` **backend** host (D3 track).
+- Windows **server** OS port (Bucket 3) — D3-gated (UDS/peer-cred -> mTLS-only).
+- Runtime cross-topology integration: i686 shim <-> x86_64 daemon (real
+  narrow-client/wide-backend path) and a Windows/wine LLP64 smoke.
