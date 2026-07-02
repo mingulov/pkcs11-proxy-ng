@@ -39,18 +39,6 @@ pub fn bridge_request_buffer_len(
     width::translate_ulong_len(client_len, client_width, backend_width)
 }
 
-/// Re-encode a ulong-typed attribute's backend-width output value to the client
-/// width and translate its `returned_len`.
-///
-/// Returns `(value_for_caller, client_returned_len)`:
-/// - Opaque (non-ulong) attributes and same-width edges pass through unchanged.
-/// - For a ulong scalar/array, the value bytes are re-encoded element-by-element
-///   and the length is rescaled by element count; the canonical
-///   `CK_UNAVAILABLE_INFORMATION` sentinel maps to the client-width all-ones.
-/// - [`WidthError::Overflow`] is returned if a genuine backend value exceeds the
-///   client's `CK_ULONG` range (D4) — the caller surfaces that attribute as
-///   `CK_UNAVAILABLE_INFORMATION` rather than truncating or failing the whole
-///   call.
 /// Outer `CKA_*_TEMPLATE` buffer length, client layout -> backend layout.
 ///
 /// Template byte lengths count whole `CK_ATTRIBUTE` structs, whose size is
@@ -76,6 +64,18 @@ pub fn bridge_template_output_len(
     bridge_template_request_len(backend_len, backend_stride, client_stride)
 }
 
+/// Re-encode a ulong-typed attribute's backend-width output value to the client
+/// width and translate its `returned_len`.
+///
+/// Returns `(value_for_caller, client_returned_len)`:
+/// - Opaque (non-ulong) attributes and same-width edges pass through unchanged.
+/// - For a ulong scalar/array, the value bytes are re-encoded element-by-element
+///   and the length is rescaled by element count; the canonical
+///   `CK_UNAVAILABLE_INFORMATION` sentinel maps to the client-width all-ones.
+/// - [`WidthError::Overflow`] is returned if a genuine backend value exceeds the
+///   client's `CK_ULONG` range (D4) — the caller surfaces that attribute as
+///   `CK_UNAVAILABLE_INFORMATION` rather than truncating or failing the whole
+///   call.
 pub fn bridge_output_value(
     attr_type: CkAttributeType,
     value: Option<&[u8]>,
