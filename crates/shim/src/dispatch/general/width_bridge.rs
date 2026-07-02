@@ -51,6 +51,31 @@ pub fn bridge_request_buffer_len(
 ///   client's `CK_ULONG` range (D4) — the caller surfaces that attribute as
 ///   `CK_UNAVAILABLE_INFORMATION` rather than truncating or failing the whole
 ///   call.
+/// Outer `CKA_*_TEMPLATE` buffer length, client layout -> backend layout.
+///
+/// Template byte lengths count whole `CK_ATTRIBUTE` structs, whose size is
+/// an ABI property of each edge (24 LP64 / 12 ILP32 / 16 LLP64-packed).
+/// Rescale by entry count; a zero stride (defensive) passes through.
+pub fn bridge_template_request_len(
+    client_len: u64,
+    client_stride: usize,
+    backend_stride: usize,
+) -> u64 {
+    if client_stride == 0 || backend_stride == 0 || client_stride == backend_stride {
+        return client_len;
+    }
+    (client_len / client_stride as u64) * backend_stride as u64
+}
+
+/// Pure size query: backend-layout template byte length -> client layout.
+pub fn bridge_template_output_len(
+    backend_len: u64,
+    backend_stride: usize,
+    client_stride: usize,
+) -> u64 {
+    bridge_template_request_len(backend_len, backend_stride, client_stride)
+}
+
 pub fn bridge_output_value(
     attr_type: CkAttributeType,
     value: Option<&[u8]>,
@@ -79,6 +104,35 @@ mod tests {
     const SCALAR: CkAttributeType = CkAttributeType::CLASS;
     const ARRAY: CkAttributeType = CkAttributeType::ALLOWED_MECHANISMS;
     const OPAQUE: CkAttributeType = CkAttributeType::MODULUS; // byte array
+
+    #[test]
+    fn template_request_len_rescales_by_stride() {
+        // 2 client CK_ATTRIBUTEs -> 2 backend CK_ATTRIBUTEs.
+        assert_eq!(bridge_template_request_len(48, 24, 12), 24); // LP64 client -> ILP32 backend
+        assert_eq!(bridge_template_request_len(48, 24, 16), 32); // LP64 client -> LLP64 backend
+        assert_eq!(bridge_template_request_len(24, 12, 24), 48); // ILP32 client -> LP64 backend
+        assert_eq!(bridge_template_request_len(32, 16, 24), 48); // LLP64 client -> LP64 backend
+    }
+
+    #[test]
+    fn template_len_same_stride_is_identity() {
+        assert_eq!(bridge_template_request_len(48, 24, 24), 48);
+        assert_eq!(bridge_template_output_len(24, 12, 12), 24);
+    }
+
+    #[test]
+    fn template_len_zero_stride_passes_through() {
+        assert_eq!(bridge_template_request_len(48, 0, 24), 48);
+        assert_eq!(bridge_template_output_len(48, 24, 0), 48);
+    }
+
+    #[test]
+    fn template_output_len_rescales_backend_to_client() {
+        // Pure size query: backend-layout template bytes -> client layout.
+        assert_eq!(bridge_template_output_len(24, 12, 24), 48); // ILP32 backend -> LP64 client
+        assert_eq!(bridge_template_output_len(32, 16, 24), 48); // LLP64 backend -> LP64 client
+        assert_eq!(bridge_template_output_len(48, 24, 16), 32); // LP64 backend -> LLP64 client
+    }
 
     #[test]
     fn request_len_same_width_is_identity() {

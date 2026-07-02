@@ -75,8 +75,6 @@ pub fn backend_ulong_size() -> usize {
 /// Falls back to `3 * backend_ulong_size()` (correct for LP64/ILP32 Unix
 /// layouts) when the daemon predates the advertisement; an LLP64 backend's
 /// packed stride (16) requires the advertisement.
-// Consumed by the nested-template stride bridge, wired in the next commit.
-#[allow(dead_code)]
 pub fn backend_attribute_stride() -> usize {
     match BACKEND_ATTRIBUTE_STRIDE.load(Ordering::Relaxed) {
         0 => 3 * backend_ulong_size(),

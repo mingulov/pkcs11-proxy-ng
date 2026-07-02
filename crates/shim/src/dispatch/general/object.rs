@@ -81,9 +81,14 @@ pub unsafe extern "C" fn c_get_attribute_value(
         // case every bridge step below is a verified no-op.
         let client_width = std::mem::size_of::<CK_ULONG>();
         let backend_width = crate::interface_probe::backend_ulong_size();
+        let client_stride = std::mem::size_of::<CK_ATTRIBUTE>();
+        let backend_stride = crate::interface_probe::backend_attribute_stride();
         let query_result: CkResult<Vec<CkAttributeQuery>> = {
             let slice = unsafe { read_input_slice(p_template, ul_count) };
-            slice.iter().map(|a| build_attribute_query(a, client_width, backend_width)).collect()
+            slice
+                .iter()
+                .map(|a| build_attribute_query(a, client_width, backend_width, backend_stride))
+                .collect()
         };
         let queries: Vec<CkAttributeQuery> = match query_result {
             Ok(queries) => queries,
@@ -113,6 +118,19 @@ pub unsafe extern "C" fn c_get_attribute_value(
                             // sub-attribute results (width-bridging each ulong
                             // sub-value and reporting a client-layout length).
                             write_nested_result_to_ffi(c_attr, result, client_width, backend_width);
+                            continue;
+                        }
+
+                        // A CKA_*_TEMPLATE pure size query (pValue = NULL, so no
+                        // nested sub-queries were built) reports the BACKEND-layout
+                        // template byte length on the wire; rescale it to the
+                        // client's CK_ATTRIBUTE stride.
+                        if query.attr_type.is_attribute_template() && result.nested.is_none() {
+                            c_attr.ulValueLen = super::width_bridge::bridge_template_output_len(
+                                result.returned_len,
+                                backend_stride,
+                                client_stride,
+                            ) as CK_ULONG;
                             continue;
                         }
 
@@ -172,6 +190,7 @@ fn build_attribute_query(
     a: &CK_ATTRIBUTE,
     client_width: usize,
     backend_width: usize,
+    backend_stride: usize,
 ) -> CkResult<CkAttributeQuery> {
     let attr_type = CkAttributeType(a.type_ as u64);
     let buffer_present = !a.pValue.is_null();
@@ -214,25 +233,38 @@ fn build_attribute_query(
             return Ok(CkAttributeQuery {
                 attr_type,
                 buffer_present,
-                buffer_len: a.ulValueLen as u64,
+                // The outer template buffer length counts CLIENT-layout
+                // CK_ATTRIBUTEs; the backend sizes its one exact call in its
+                // own layout, so rescale by stride.
+                buffer_len: super::width_bridge::bridge_template_request_len(
+                    a.ulValueLen as u64,
+                    ck_attr_size,
+                    backend_stride,
+                ),
                 nested: Some(nested),
             });
         }
     }
 
-    Ok(CkAttributeQuery {
-        attr_type,
-        buffer_present,
+    let buffer_len = if attr_type.is_attribute_template() {
+        // Template attr without parsed sub-queries (size query or empty
+        // template): the length still counts client-layout CK_ATTRIBUTEs.
+        super::width_bridge::bridge_template_request_len(
+            a.ulValueLen as u64,
+            std::mem::size_of::<CK_ATTRIBUTE>(),
+            backend_stride,
+        )
+    } else {
         // Inflate a ulong-typed buffer length to the backend width so the
         // backend's one exact FFI call allocates enough; no-op otherwise.
-        buffer_len: super::width_bridge::bridge_request_buffer_len(
+        super::width_bridge::bridge_request_buffer_len(
             attr_type,
             a.ulValueLen as u64,
             client_width,
             backend_width,
-        ),
-        nested: None,
-    })
+        )
+    };
+    Ok(CkAttributeQuery { attr_type, buffer_present, buffer_len, nested: None })
 }
 
 /// Write nested `CkAttributeQueryResult` items back into the caller's
@@ -451,7 +483,7 @@ mod tests {
             ulValueLen: buf.len() as CK_ULONG,
         };
         let w = std::mem::size_of::<CK_ULONG>();
-        let q = build_attribute_query(&attr, w, w)
+        let q = build_attribute_query(&attr, w, w, 3 * w)
             .expect("CKA_ALLOWED_MECHANISMS must not be rejected as a malformed template");
         assert!(
             q.nested.is_none(),
@@ -476,7 +508,7 @@ mod tests {
             ulValueLen: std::mem::size_of::<CK_ATTRIBUTE>() as CK_ULONG,
         };
         let w = std::mem::size_of::<CK_ULONG>();
-        let q = build_attribute_query(&attr, w, w).expect("WRAP_TEMPLATE must parse");
+        let q = build_attribute_query(&attr, w, w, 3 * w).expect("WRAP_TEMPLATE must parse");
         let nested = q.nested.expect("WRAP_TEMPLATE must build nested sub-queries");
         assert_eq!(nested.len(), 1);
     }
