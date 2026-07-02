@@ -4,7 +4,10 @@ use std::time::Duration;
 use pkcs11_proxy_ng::server::context_manager::ContextManager;
 use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
 use pkcs11_proxy_ng::server::handle_map::VirtualHandle;
-use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend, mock::MockAttributeSlot};
+use pkcs11_proxy_ng_backend::{
+    MockBackend, Pkcs11Backend,
+    mock::{MockAbi, MockAttributeSlot},
+};
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_proto::Pkcs11ProxyServer;
 use pkcs11_proxy_ng_types::{
@@ -22,32 +25,47 @@ use tonic::transport::Server;
 use super::*;
 
 static TEST_DAEMON: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_ILP32: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_LLP64: OnceLock<TestDaemon> = OnceLock::new();
 
-struct TestDaemon {
+pub(super) struct TestDaemon {
     runtime: Runtime,
-    endpoint: String,
-    backend: Arc<MockBackend>,
+    pub(super) endpoint: String,
+    pub(super) backend: Arc<MockBackend>,
     context_manager: Arc<ContextManager>,
     _shutdown: watch::Sender<bool>,
 }
 
 impl TestDaemon {
-    fn shared() -> &'static Self {
-        TEST_DAEMON.get_or_init(Self::start)
+    pub(super) fn shared() -> &'static Self {
+        TEST_DAEMON.get_or_init(|| Self::start(MockAbi::host()))
     }
 
-    fn start() -> Self {
+    /// A daemon whose MockBackend emulates the given ABI profile
+    /// (ADR-0011): one in-process singleton per profile.
+    pub(super) fn shared_with_abi(abi: MockAbi) -> &'static Self {
+        match abi {
+            MockAbi::Ilp32 => TEST_DAEMON_ILP32.get_or_init(|| Self::start(abi)),
+            MockAbi::Llp64 => TEST_DAEMON_LLP64.get_or_init(|| Self::start(abi)),
+            _ => Self::shared(),
+        }
+    }
+
+    fn start(abi: MockAbi) -> Self {
         let runtime = Runtime::new().expect("test runtime");
         let (endpoint, backend, context_manager, shutdown) = runtime.block_on(async {
-            let backend = Arc::new(MockBackend::new(
-                vec![CkSlotId(0), CkSlotId(1)],
-                vec![
-                    CkMechanismType::SHA256,
-                    CkMechanismType::RSA_PKCS,
-                    CkMechanismType::AES_ECB,
-                    CkMechanismType::AES_GCM,
-                ],
-            ));
+            let backend = Arc::new(
+                MockBackend::new(
+                    vec![CkSlotId(0), CkSlotId(1)],
+                    vec![
+                        CkMechanismType::SHA256,
+                        CkMechanismType::RSA_PKCS,
+                        CkMechanismType::AES_ECB,
+                        CkMechanismType::AES_GCM,
+                    ],
+                )
+                .with_abi(abi),
+            );
             backend.set_interface_capabilities(InterfaceCapabilities {
                 interfaces: vec![
                     InterfaceInfo { version_major: 2, version_minor: 40, null_functions: vec![] },
@@ -89,9 +107,9 @@ impl TestDaemon {
     }
 }
 
-struct ShimSession {
-    session: CK_SESSION_HANDLE,
-    slot_id: CK_SLOT_ID,
+pub(super) struct ShimSession {
+    pub(super) session: CK_SESSION_HANDLE,
+    pub(super) slot_id: CK_SLOT_ID,
 }
 
 impl ShimSession {
@@ -100,7 +118,7 @@ impl ShimSession {
         Self::with_endpoint(&daemon.endpoint)
     }
 
-    fn with_endpoint(endpoint: &str) -> Self {
+    pub(super) fn with_endpoint(endpoint: &str) -> Self {
         unsafe {
             std::env::set_var("PKCS11_PROXY_ENDPOINT", endpoint);
         }
@@ -188,7 +206,7 @@ fn expected_mock_digest(data: &[u8]) -> [u8; 4] {
     data.iter().fold(0_u32, |sum, byte| sum + u32::from(*byte)).to_be_bytes()
 }
 
-fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
+pub(super) fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
     let mut object = CK_INVALID_HANDLE;
     let rv = unsafe {
         dispatch::general::c_create_object(session, std::ptr::null_mut(), 0, &mut object)
@@ -197,7 +215,10 @@ fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
     object
 }
 
-fn backend_object_handle(daemon: &TestDaemon, object: CK_OBJECT_HANDLE) -> CkObjectHandle {
+pub(super) fn backend_object_handle(
+    daemon: &TestDaemon,
+    object: CK_OBJECT_HANDLE,
+) -> CkObjectHandle {
     daemon.block_on(async {
         let context_ids = daemon.context_manager.context_ids();
         assert_eq!(context_ids.len(), 1, "expected one active shim context");
@@ -393,7 +414,7 @@ fn shim_get_attribute_value_preserves_fatal_server_rv_when_results_are_empty() {
 #[test]
 fn raw_client_size_query_returns_length_without_bytes() {
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -452,7 +473,7 @@ fn raw_client_size_query_returns_length_without_bytes() {
 #[test]
 fn raw_client_too_small_query_preserves_backend_returned_length() {
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -505,7 +526,7 @@ fn raw_client_too_small_query_preserves_backend_returned_length() {
 #[test]
 fn raw_client_exact_fit_query_returns_backend_bytes() {
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -558,7 +579,7 @@ fn raw_client_exact_fit_query_returns_backend_bytes() {
 #[test]
 fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -647,7 +668,7 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
 #[test]
 fn legacy_client_size_query_does_not_synthesize_attribute_bytes() {
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -1988,7 +2009,7 @@ fn exact_encrypt_message_size_query_returns_length() {
     // encrypt_impl requires an active Encrypt operation, so first we call
     // encrypt_init, then verify the exact RPC returns a size-query result.
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -2062,7 +2083,7 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
     // MockBackend now implements wrap_key_authenticated_exact (delegates to wrap_key_impl).
     // Size query should return OK with the wrapped-key length.
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -2239,7 +2260,7 @@ fn exact_encapsulate_key_too_small_buffer() {
 // =========================================================================
 
 /// The raw CKA_WRAP_TEMPLATE constant (CKF_ARRAY_ATTRIBUTE | 0x211).
-const CKA_WRAP_TEMPLATE_RAW: CK_ATTRIBUTE_TYPE = 0x4000_0211;
+pub(super) const CKA_WRAP_TEMPLATE_RAW: CK_ATTRIBUTE_TYPE = 0x4000_0211;
 
 #[test]
 fn nested_template_attribute_size_query() {
@@ -2476,7 +2497,7 @@ fn nested_template_attribute_sub_buffer_too_small_preserves_partial_outputs() {
 fn raw_client_nested_template_size_query() {
     // Test the raw client path for nested template size query
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
@@ -2529,7 +2550,7 @@ fn raw_client_nested_template_size_query() {
 fn raw_client_nested_template_data_query() {
     // Test the raw client path for nested template data query with sub-buffers
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::start();
+    let daemon = TestDaemon::start(MockAbi::host());
 
     daemon.block_on(async {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");

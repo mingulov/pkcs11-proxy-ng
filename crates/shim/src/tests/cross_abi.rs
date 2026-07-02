@@ -1,0 +1,275 @@
+//! In-process cross-ABI topology suite (ADR-0011).
+//!
+//! Each test drives the full shim -> gRPC -> in-process daemon stack
+//! against a MockBackend that EMULATES a foreign backend ABI, so both
+//! width-bridge directions and the CK_ATTRIBUTE stride translation run
+//! in plain `cargo test` on any host — no i686 toolchain, SoftHSM2, or
+//! wine required. On an LP64 host the Ilp32/Llp64 daemons exercise the
+//! wide-client/narrow-backend direction; on an i686 host the same tests
+//! exercise narrow-client/narrow-backend plus the Llp64 stride delta.
+//!
+//! The live scripts (`scripts/run-cross-width-live-test.sh`,
+//! `scripts/run-*-wine-smoke.sh`) remain the real-binary proof; this
+//! module is the fast, deterministic everyday coverage.
+
+use pkcs11_proxy_ng_backend::mock::{MockAbi, MockAttributeSlot};
+use pkcs11_proxy_ng_types::{CkAttributeType, CkAttributeValue, CkObjectHandle};
+
+use super::output_semantics::{
+    CKA_WRAP_TEMPLATE_RAW, ShimSession, TestDaemon, backend_object_handle, create_object,
+};
+use super::*;
+
+/// One session against a daemon whose backend emulates `abi`.
+fn session_on(abi: MockAbi) -> (&'static TestDaemon, ShimSession) {
+    let daemon = TestDaemon::shared_with_abi(abi);
+    let session = ShimSession::with_endpoint(&daemon.endpoint);
+    (daemon, session)
+}
+
+fn foreign_profiles() -> [MockAbi; 2] {
+    [MockAbi::Ilp32, MockAbi::Llp64]
+}
+
+#[test]
+fn probe_records_each_emulated_profile() {
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (_daemon, shim) = session_on(abi);
+        assert_eq!(
+            crate::interface_probe::backend_ulong_size(),
+            abi.ulong_width(),
+            "D2 width for {abi:?}"
+        );
+        assert_eq!(
+            crate::interface_probe::backend_attribute_stride(),
+            abi.attribute_stride(),
+            "D2 stride for {abi:?}"
+        );
+        drop(shim);
+    }
+}
+
+#[test]
+fn scalar_ulong_attribute_bridges_both_directions() {
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (daemon, shim) = session_on(abi);
+        let object = create_object(shim.session);
+        let backend_object = backend_object_handle(daemon, object);
+        daemon.backend.set_attribute(
+            backend_object,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(3)),
+        );
+
+        // Size query: the CLIENT's width, whatever the backend emulates.
+        let mut attr =
+            CK_ATTRIBUTE { type_: CKA_CLASS, pValue: std::ptr::null_mut(), ulValueLen: 0 };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} size query");
+        assert_eq!(
+            attr.ulValueLen as usize,
+            std::mem::size_of::<CK_ULONG>(),
+            "{abi:?}: size query must report the client width"
+        );
+
+        // Exact-fit data query: value re-encoded to the client width.
+        let mut buf = [0u8; std::mem::size_of::<CK_ULONG>()];
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: buf.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: buf.len() as CK_ULONG,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} data query");
+        assert_eq!(CK_ULONG::from_le_bytes(buf), 3, "{abi:?}: value round-trip");
+
+        // Too-small buffer: verbatim CKR_BUFFER_TOO_SMALL and the D10
+        // sentinel arrives at the CLIENT's width.
+        let mut tiny = [0u8; 2];
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: tiny.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: tiny.len() as CK_ULONG,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "{abi:?} too-small");
+        assert_eq!(attr.ulValueLen, CK_UNAVAILABLE_INFORMATION, "{abi:?}: client-width sentinel");
+    }
+}
+
+#[test]
+fn ulong_array_attribute_bridges_element_wise() {
+    let _guard = shim_state_test_guard();
+    let mechs: [u64; 3] = [0x1081, 0x1082, 0x0209];
+    for abi in foreign_profiles() {
+        let (daemon, shim) = session_on(abi);
+        let object = create_object(shim.session);
+        let backend_object = backend_object_handle(daemon, object);
+        // The mock stores the BACKEND-native encoding of the array.
+        let backend_bytes: Vec<u8> = mechs.iter().flat_map(|m| abi.encode_ulong(*m)).collect();
+        daemon.backend.set_attribute(
+            backend_object,
+            CkAttributeType::ALLOWED_MECHANISMS,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(backend_bytes)),
+        );
+
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_ALLOWED_MECHANISMS,
+            pValue: std::ptr::null_mut(),
+            ulValueLen: 0,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} array size query");
+        assert_eq!(
+            attr.ulValueLen as usize,
+            mechs.len() * std::mem::size_of::<CK_ULONG>(),
+            "{abi:?}: array length rescaled by element count"
+        );
+
+        let mut buf = vec![0u8; mechs.len() * std::mem::size_of::<CK_ULONG>()];
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_ALLOWED_MECHANISMS,
+            pValue: buf.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: buf.len() as CK_ULONG,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} array data query");
+        for (i, expected) in mechs.iter().enumerate() {
+            let w = std::mem::size_of::<CK_ULONG>();
+            let got = CK_ULONG::from_le_bytes(buf[i * w..(i + 1) * w].try_into().expect("element"));
+            assert_eq!(got as u64, *expected, "{abi:?}: array element {i}");
+        }
+    }
+}
+
+fn set_nested_wrap_template(daemon: &TestDaemon, backend_object: CkObjectHandle) {
+    daemon.backend.set_attribute(
+        backend_object,
+        CkAttributeType::WRAP_TEMPLATE,
+        MockAttributeSlot::NestedTemplate(vec![
+            (CkAttributeType::CLASS, MockAttributeSlot::Value(CkAttributeValue::Ulong(3))),
+            (CkAttributeType::KEY_TYPE, MockAttributeSlot::Value(CkAttributeValue::Ulong(31))),
+        ]),
+    );
+}
+
+#[test]
+fn nested_template_pure_size_query_reports_client_layout() {
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (daemon, shim) = session_on(abi);
+        let object = create_object(shim.session);
+        set_nested_wrap_template(daemon, backend_object_handle(daemon, object));
+
+        // Pure size query: the wire carries the BACKEND-layout template
+        // byte length (2 x emulated stride); the caller must see the
+        // CLIENT layout (2 x local sizeof(CK_ATTRIBUTE)).
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_WRAP_TEMPLATE_RAW,
+            pValue: std::ptr::null_mut(),
+            ulValueLen: 0,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} nested size query");
+        assert_eq!(
+            attr.ulValueLen as usize,
+            2 * std::mem::size_of::<CK_ATTRIBUTE>(),
+            "{abi:?}: nested size query must be rescaled to the client stride"
+        );
+    }
+}
+
+#[test]
+fn nested_template_data_query_bridges_sub_values() {
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (daemon, shim) = session_on(abi);
+        let object = create_object(shim.session);
+        set_nested_wrap_template(daemon, backend_object_handle(daemon, object));
+
+        let w = std::mem::size_of::<CK_ULONG>();
+        let mut class_buf = vec![0u8; w];
+        let mut key_type_buf = vec![0u8; w];
+        let mut sub_attrs = [
+            CK_ATTRIBUTE {
+                type_: 0,
+                pValue: class_buf.as_mut_ptr() as CK_VOID_PTR,
+                ulValueLen: w as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: 0,
+                pValue: key_type_buf.as_mut_ptr() as CK_VOID_PTR,
+                ulValueLen: w as CK_ULONG,
+            },
+        ];
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_WRAP_TEMPLATE_RAW,
+            pValue: sub_attrs.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: (sub_attrs.len() * std::mem::size_of::<CK_ATTRIBUTE>()) as CK_ULONG,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} nested data query");
+        let class_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
+            class_buf.as_slice().try_into().expect("class width");
+        let key_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
+            key_type_buf.as_slice().try_into().expect("key width");
+        assert_eq!(CK_ULONG::from_le_bytes(class_bytes), 3, "{abi:?}: CLASS sub-value");
+        assert_eq!(CK_ULONG::from_le_bytes(key_bytes), 31, "{abi:?}: KEY_TYPE sub-value");
+        assert_eq!(sub_attrs[0].ulValueLen as usize, w, "{abi:?}: sub length at client width");
+    }
+}
+
+#[test]
+fn nested_template_sub_too_small_yields_client_width_sentinel() {
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (daemon, shim) = session_on(abi);
+        let object = create_object(shim.session);
+        set_nested_wrap_template(daemon, backend_object_handle(daemon, object));
+
+        let w = std::mem::size_of::<CK_ULONG>();
+        // First sub-buffer deliberately half a client ulong; second exact.
+        let mut small = vec![0u8; w / 2];
+        let mut ok_buf = vec![0u8; w];
+        let mut sub_attrs = [
+            CK_ATTRIBUTE {
+                type_: 0,
+                pValue: small.as_mut_ptr() as CK_VOID_PTR,
+                ulValueLen: small.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: 0,
+                pValue: ok_buf.as_mut_ptr() as CK_VOID_PTR,
+                ulValueLen: ok_buf.len() as CK_ULONG,
+            },
+        ];
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_WRAP_TEMPLATE_RAW,
+            pValue: sub_attrs.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: (sub_attrs.len() * std::mem::size_of::<CK_ATTRIBUTE>()) as CK_ULONG,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "{abi:?} sub-too-small overall rv");
+        assert_eq!(
+            sub_attrs[0].ulValueLen, CK_UNAVAILABLE_INFORMATION,
+            "{abi:?}: too-small sub gets the client-width sentinel"
+        );
+        let ok_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
+            ok_buf.as_slice().try_into().expect("width");
+        assert_eq!(
+            CK_ULONG::from_le_bytes(ok_bytes),
+            31,
+            "{abi:?}: the adequately-sized sub still round-trips"
+        );
+    }
+}
