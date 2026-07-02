@@ -639,9 +639,27 @@ assumption.
   plus test-guard hygiene; the suite now completes in well under a minute on
   x86_64 and i686 alike.
 
-**Remaining (tracked in the umbrella plan `doc/plans/` — cross-ABI closure):**
-- **D4 server-input checked narrowing** (`ffi_conversion.rs`) — the 64c/32b
-  direction; only fires with a narrow-`CK_ULONG` **backend** host (D3 track).
-- Windows **server** OS port (Bucket 3) — D3-gated (UDS/peer-cred -> mTLS-only).
-- Runtime cross-topology integration: i686 shim <-> x86_64 daemon (real
-  narrow-client/wide-backend path) and a Windows/wine LLP64 smoke.
+**Completed 2026-07-02 (cross-ABI closure, umbrella plan Phases A-E):**
+- **D4 server-input checked narrowing** (`ffi_conversion.rs`): every wire u64
+  materialized into a native `CK_ULONG` — attribute values AND the CK_ULONG
+  type-alias casts (mechanism types, attribute types, param-embedded object/
+  session handles, kdf/prf/generator/hash enums, ~150 sites) — goes through
+  `narrow_wire_ulong` (checked; `CKR_FUNCTION_FAILED` on overflow, never
+  truncation). On the 64-bit backend it is an infallible pass-through.
+  Pinned by narrow-host reject tests; the widened i686 CI gate runs them.
+- Windows **server** OS port (Bucket 3): UDS listener + `SO_PEERCRED` are
+  `#[cfg(unix)]`; `[listener.local]` is rejected on non-Unix (mTLS TCP only);
+  the daemon cross-compiles for `x86_64-pc-windows-msvc` in CI.
+- Runtime cross-topology integration, both live-verified against a real
+  daemon + SoftHSM2:
+  - `scripts/run-cross-width-live-test.sh` — i686 shim (width 4) <-> x86_64
+    daemon (width 8), plus a same-width control leg.
+  - `scripts/run-llp64-wine-smoke.sh` — Windows shim DLL + smoke .exe under
+    wine (LLP64: `CK_ULONG` 4 / pointers 8 / packed structs) <-> Linux
+    daemon, loaded through the public C ABI (`LoadLibrary` +
+    `C_GetFunctionList`), plus a native dlopen control leg.
+
+**Remaining (deployment/sign-off decisions, not code gaps):**
+- **D3**: enabling a narrow-`CK_ULONG` (32-bit) or Windows **daemon host** in
+  production is a rollout decision; the code paths exist and are tested.
+- A real-Windows (non-wine) conformance pass for final Windows sign-off.
