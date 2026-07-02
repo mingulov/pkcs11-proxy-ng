@@ -171,6 +171,18 @@ pub struct MockBackend {
     /// When set, the D2 byte-order advertisement claims big-endian so the
     /// client's D6 refusal path can be exercised.
     advertise_big_endian: bool,
+    /// Mechanism-parameter presence rules captured from a registry at
+    /// construction (`with_mechanism_registry`); `None` (plain `new`)
+    /// keeps the mock permissive for existing suites.
+    param_presence: Option<ParamPresence>,
+}
+
+/// Which mechanisms require parameters and which forbid them, snapshot
+/// from a `MechanismRegistry`. Mechanisms in neither set (vendor,
+/// unregistered) are not validated.
+struct ParamPresence {
+    parameterless: std::collections::HashSet<u64>,
+    shaped: std::collections::HashSet<u64>,
 }
 
 impl MockBackend {
@@ -217,6 +229,7 @@ impl MockBackend {
             login_gate: Mutex::new(None),
             abi: MockAbi::host(),
             advertise_big_endian: false,
+            param_presence: None,
         }
     }
 
@@ -439,6 +452,23 @@ impl MockBackend {
     ///
     /// `max_sessions`: maximum number of concurrently open sessions (0 = unlimited).
     /// `max_objects`:  maximum number of live objects (0 = unlimited).
+    /// Opt in to registry-backed mechanism-parameter presence validation:
+    /// a shaped mechanism without params — or a parameterless one WITH
+    /// params — is rejected with `CKR_MECHANISM_PARAM_INVALID`, matching
+    /// real-token behavior. Off by default: protocol-coverage suites
+    /// deliberately drive every mechanism with `params: None`.
+    pub fn with_param_presence_validation(mut self, registry: &MechanismRegistry) -> Self {
+        let parameterless = registry
+            .registered_mechanisms()
+            .into_iter()
+            .map(|x| x as u64)
+            .filter(|m| registry.is_parameterless(*m))
+            .collect();
+        let shaped = registry.param_shapes_view().keys().copied().collect();
+        self.param_presence = Some(ParamPresence { parameterless, shaped });
+        self
+    }
+
     /// Emulate a specific backend ABI (default: the host's own profile).
     pub fn with_abi(mut self, abi: MockAbi) -> Self {
         self.abi = abi;
@@ -664,6 +694,24 @@ impl MockBackend {
         }
     }
 
+    /// Registry-backed parameter-presence validation: a shaped mechanism
+    /// without params — or a parameterless one WITH params — is rejected
+    /// the way a real token rejects it. Permissive without a registry and
+    /// for mechanisms the registry does not classify (vendor).
+    fn validate_mechanism_param_presence(&self, mechanism: &CkMechanism) -> CkResult<()> {
+        let Some(presence) = &self.param_presence else {
+            return Ok(());
+        };
+        let mech = mechanism.mechanism_type.0;
+        if presence.shaped.contains(&mech) && mechanism.params.is_none() {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+        if presence.parameterless.contains(&mech) && mechanism.params.is_some() {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+        Ok(())
+    }
+
     fn require_mechanism_workflow_for_state(
         &self,
         state: &MockState,
@@ -672,6 +720,7 @@ impl MockBackend {
         required_flag: u64,
     ) -> CkResult<()> {
         self.require_supported_mechanism_for_state(state, session, mechanism)?;
+        self.validate_mechanism_param_presence(mechanism)?;
         if self.enforce_source_grounded_workflows
             && session_ops::mock_mechanism_workflow_flags(mechanism.mechanism_type) & required_flag
                 == 0

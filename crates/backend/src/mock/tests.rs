@@ -5299,3 +5299,62 @@ fn mock_advertises_its_profile_not_the_host() {
     let be = MockBackend::default_test().with_big_endian_advertisement();
     assert_eq!(be.abi_byte_order(), 2, "the D6-refusal knob claims big-endian");
 }
+
+#[test]
+fn registry_backed_mock_validates_mechanism_param_presence() {
+    let registry = MechanismRegistry::load(None).expect("embedded default registry");
+    let backend = MockBackend::with_mechanism_registry(vec![CkSlotId(0)], &registry)
+        .with_param_presence_validation(&registry);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let key = backend.create_object(session, &[]).unwrap();
+
+    // A shaped mechanism without its parameters must be rejected like a
+    // real token would reject it.
+    let gcm_no_params = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
+    assert_eq!(
+        backend.encrypt_init(session, &gcm_no_params, key).unwrap_err(),
+        CkRv::MECHANISM_PARAM_INVALID,
+        "AES-GCM without params"
+    );
+
+    // A parameterless mechanism with stray parameters is equally invalid.
+    let sha_with_params = CkMechanism {
+        mechanism_type: CkMechanismType::SHA256,
+        params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0; 16] })),
+    };
+    assert_eq!(
+        backend.digest_init(session, &sha_with_params).unwrap_err(),
+        CkRv::MECHANISM_PARAM_INVALID,
+        "SHA-256 with stray params"
+    );
+
+    // The valid pairings still initialize.
+    let sha = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
+    backend.digest_init(session, &sha).expect("parameterless SHA-256");
+    backend.digest_init_cancel(session).unwrap();
+
+    let gcm = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv: vec![0; 12],
+            iv_bits: 96,
+            iv_buffer_len: 12,
+            aad: vec![],
+            tag_bits: 128,
+        })),
+    };
+    backend.encrypt_init(session, &gcm, key).expect("GCM with params");
+}
+
+#[test]
+fn registryless_mock_stays_permissive_about_params() {
+    // MockBackend::new has no registry: presence validation must not
+    // engage (existing suites rely on plain mechanisms with params: None).
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_GCM]);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let gcm_no_params = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
+    let key = backend.create_object(session, &[]).unwrap();
+    backend.encrypt_init(session, &gcm_no_params, key).expect("no registry, no validation");
+}
