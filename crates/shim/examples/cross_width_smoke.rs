@@ -13,6 +13,10 @@
 //!
 //! Exits 0 only if every assertion holds.
 
+// CK_ULONG is u32 on the Windows target and u64 on 64-bit Unix; the
+// `as u64` casts are required on the narrow target.
+#![allow(clippy::unnecessary_cast)]
+
 use cryptoki_sys::*;
 
 fn check(cond: bool, what: &str) -> Result<(), String> {

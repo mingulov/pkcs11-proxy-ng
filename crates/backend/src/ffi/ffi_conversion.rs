@@ -93,7 +93,7 @@ impl FfiAttrs {
                 }
             };
             attrs.push(cryptoki_sys::CK_ATTRIBUTE {
-                type_: attr.attr_type.0 as cryptoki_sys::CK_ATTRIBUTE_TYPE,
+                type_: narrow_wire_ulong(attr.attr_type.0)?,
                 pValue: pvalue,
                 ulValueLen: len,
             });
@@ -135,6 +135,27 @@ mod ffi_attrs_narrowing_tests {
         let template = ulong_template(1);
         let attrs = FfiAttrs::from_slice(&template).expect("in-range value converts");
         assert_eq!(materialized_ulong(&attrs), 1);
+    }
+
+    #[test]
+    fn attribute_type_wider_than_native_is_rejected_not_truncated() {
+        // 0x1_0000_0000 | CKA_CLASS truncates to CKA_CLASS on a narrow
+        // host - the template would silently address a DIFFERENT
+        // attribute than the client named. Reject instead.
+        let template = [CkAttribute {
+            attr_type: CkAttributeType(0x1_0000_0000),
+            value: Some(CkAttributeValue::Bytes(vec![1])),
+        }];
+        match FfiAttrs::from_slice(&template) {
+            Ok(attrs) => {
+                assert_eq!(std::mem::size_of::<cryptoki_sys::CK_ULONG>(), 8);
+                assert_eq!(attrs.attrs[0].type_ as u64, 0x1_0000_0000);
+            }
+            Err(rv) => {
+                assert_eq!(std::mem::size_of::<cryptoki_sys::CK_ULONG>(), 4);
+                assert_eq!(rv, CkRv::FUNCTION_FAILED);
+            }
+        }
     }
 
     #[test]
@@ -211,7 +232,7 @@ impl FfiAttributeQueries {
                 };
 
                 attrs.push(cryptoki_sys::CK_ATTRIBUTE {
-                    type_: query.attr_type.0 as cryptoki_sys::CK_ATTRIBUTE_TYPE,
+                    type_: narrow_wire_ulong(query.attr_type.0)?,
                     pValue: pvalue,
                     ulValueLen: len,
                 });
@@ -239,7 +260,7 @@ impl FfiAttributeQueries {
             let ul_value_len = cryptoki_sys::CK_ULONG::try_from(query.buffer_len)
                 .map_err(|_| CkRv::HOST_MEMORY)?;
             attrs.push(cryptoki_sys::CK_ATTRIBUTE {
-                type_: query.attr_type.0 as cryptoki_sys::CK_ATTRIBUTE_TYPE,
+                type_: narrow_wire_ulong(query.attr_type.0)?,
                 pValue: std::ptr::null_mut(),
                 ulValueLen: ul_value_len,
             });
@@ -269,7 +290,7 @@ impl FfiAttributeQueries {
             };
 
             sub_attrs.push(cryptoki_sys::CK_ATTRIBUTE {
-                type_: sub_query.attr_type.0 as cryptoki_sys::CK_ATTRIBUTE_TYPE,
+                type_: narrow_wire_ulong(sub_query.attr_type.0)?,
                 pValue: sub_pvalue,
                 ulValueLen: sub_len,
             });
@@ -288,7 +309,7 @@ impl FfiAttributeQueries {
             as cryptoki_sys::CK_ULONG;
 
         attrs.push(cryptoki_sys::CK_ATTRIBUTE {
-            type_: query.attr_type.0 as cryptoki_sys::CK_ATTRIBUTE_TYPE,
+            type_: narrow_wire_ulong(query.attr_type.0)?,
             pValue: template_ptr,
             ulValueLen: template_byte_len,
         });
@@ -566,8 +587,10 @@ impl FfiSp800108DerivedKeys {
             .iter()
             .map(|key| FfiAttrs::from_slice(&key.template))
             .collect::<CkResult<Vec<_>>>()?;
-        let mut handles: Vec<cryptoki_sys::CK_OBJECT_HANDLE> =
-            keys.iter().map(|key| key.key_handle as cryptoki_sys::CK_OBJECT_HANDLE).collect();
+        let mut handles: Vec<cryptoki_sys::CK_OBJECT_HANDLE> = keys
+            .iter()
+            .map(|key| narrow_wire_ulong(key.key_handle))
+            .collect::<CkResult<Vec<_>>>()?;
         let handle_ptr = handles.as_mut_ptr();
         let mut derived_keys = Vec::with_capacity(keys.len());
 
@@ -868,7 +891,7 @@ struct FfiMuGenParams {
 /// fields a few microseconds earlier. Revisit only if profiling shows mechanism
 /// backing copies as a hotspot (e.g. very large-AAD AEAD workloads).
 pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism> {
-    let mech_type = mechanism.mechanism_type.0 as cryptoki_sys::CK_MECHANISM_TYPE;
+    let mech_type = narrow_wire_ulong(mechanism.mechanism_type.0)?;
 
     let params = match &mechanism.params {
         None => return Ok(FfiMechanism::no_param(mech_type)),
@@ -887,8 +910,8 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
         // -- RSA-PSS: scalar-only struct ------------------------------------
         CkMechanismParams::RsaPkcsPss(p) => {
             let pss = Box::new(cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS {
-                hashAlg: p.hash_alg.0 as cryptoki_sys::CK_MECHANISM_TYPE,
-                mgf: p.mgf as cryptoki_sys::CK_RSA_PKCS_MGF_TYPE,
+                hashAlg: narrow_wire_ulong(p.hash_alg.0)?,
+                mgf: narrow_wire_ulong(p.mgf)?,
                 sLen: narrow_wire_ulong(p.salt_len)?,
             });
             Ok(FfiMechanism::from_box(mech_type, pss, FfiParamBacking::Pss))
@@ -903,9 +926,9 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 (source_data.as_mut_ptr() as *mut std::ffi::c_void, source_data.len())
             };
             let oaep = Box::new(cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS {
-                hashAlg: p.hash_alg.0 as cryptoki_sys::CK_MECHANISM_TYPE,
-                mgf: p.mgf as cryptoki_sys::CK_RSA_PKCS_MGF_TYPE,
-                source: p.source as cryptoki_sys::CK_RSA_PKCS_OAEP_SOURCE_TYPE,
+                hashAlg: narrow_wire_ulong(p.hash_alg.0)?,
+                mgf: narrow_wire_ulong(p.mgf)?,
+                source: narrow_wire_ulong(p.source)?,
                 pSourceData: src_ptr,
                 ulSourceDataLen: src_len as cryptoki_sys::CK_ULONG,
             });
@@ -961,7 +984,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let public_ptr =
                 if public.is_empty() { std::ptr::null_mut() } else { public.as_mut_ptr() };
             let ecdh = Box::new(cryptoki_sys::CK_ECDH1_DERIVE_PARAMS {
-                kdf: p.kdf as cryptoki_sys::CK_EC_KDF_TYPE,
+                kdf: narrow_wire_ulong(p.kdf)?,
                 ulSharedDataLen: shared.len() as cryptoki_sys::CK_ULONG,
                 pSharedData: shared_ptr,
                 ulPublicDataLen: public.len() as cryptoki_sys::CK_ULONG,
@@ -1048,15 +1071,13 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
         }
 
         CkMechanismParams::Xeddsa(p) => {
-            let xed = Box::new(cryptoki_sys::CK_XEDDSA_PARAMS {
-                hash: p.hash as cryptoki_sys::CK_XEDDSA_HASH_TYPE,
-            });
+            let xed = Box::new(cryptoki_sys::CK_XEDDSA_PARAMS { hash: narrow_wire_ulong(p.hash)? });
             Ok(FfiMechanism::from_box(mech_type, xed, FfiParamBacking::Xeddsa))
         }
 
         CkMechanismParams::TlsMac(p) => {
             let tls = Box::new(cryptoki_sys::CK_TLS_MAC_PARAMS {
-                prfHashMechanism: p.prf_hash_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism)?,
                 ulMacLength: narrow_wire_ulong(p.mac_length)?,
                 ulServerOrClient: narrow_wire_ulong(p.server_or_client)?,
             });
@@ -1153,11 +1174,11 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let hkdf = Box::new(cryptoki_sys::CK_HKDF_PARAMS {
                 bExtract: if p.extract { cryptoki_sys::CK_TRUE } else { cryptoki_sys::CK_FALSE },
                 bExpand: if p.expand { cryptoki_sys::CK_TRUE } else { cryptoki_sys::CK_FALSE },
-                prfHashMechanism: p.prf_hash_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism)?,
                 ulSaltType: narrow_wire_ulong(p.salt_type)?,
                 pSalt: salt_ptr,
                 ulSaltLen: salt.len() as cryptoki_sys::CK_ULONG,
-                hSaltKey: p.salt_key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hSaltKey: narrow_wire_ulong(p.salt_key_handle)?,
                 pInfo: info_ptr,
                 ulInfoLen: info.len() as cryptoki_sys::CK_ULONG,
             });
@@ -1186,7 +1207,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 pIv: iv_ptr,
                 ulIvLen: iv.len() as cryptoki_sys::CK_ULONG,
                 ulIvFixedBits: narrow_wire_ulong(p.iv_fixed_bits)?,
-                ivGenerator: p.iv_generator as cryptoki_sys::CK_GENERATOR_FUNCTION,
+                ivGenerator: narrow_wire_ulong(p.iv_generator)?,
                 pAAD: aad_ptr,
                 ulAADLen: aad.len() as cryptoki_sys::CK_ULONG,
                 ulTagBits: narrow_wire_ulong(p.tag_bits)?,
@@ -1206,7 +1227,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 pNonce: nonce_ptr,
                 ulNonceLen: nonce.len() as cryptoki_sys::CK_ULONG,
                 ulNonceFixedBits: narrow_wire_ulong(p.nonce_fixed_bits)?,
-                nonceGenerator: p.nonce_generator as cryptoki_sys::CK_GENERATOR_FUNCTION,
+                nonceGenerator: narrow_wire_ulong(p.nonce_generator)?,
                 pAAD: aad_ptr,
                 ulAADLen: aad.len() as cryptoki_sys::CK_ULONG,
                 ulMACLen: narrow_wire_ulong(p.mac_len)?,
@@ -1265,7 +1286,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
 
         // -- MacGeneral: single CK_ULONG -----------------------------------
         CkMechanismParams::MacGeneral(p) => {
-            let val = p.mac_length as cryptoki_sys::CK_MAC_GENERAL_PARAMS;
+            let val = narrow_wire_ulong(p.mac_length)?;
             let mut buf = val.to_ne_bytes().to_vec();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
@@ -1274,7 +1295,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
 
         // -- Extract: single CK_ULONG bit position --------------------------
         CkMechanismParams::Extract(p) => {
-            let val = p.bit_position as cryptoki_sys::CK_EXTRACT_PARAMS;
+            let val = narrow_wire_ulong(p.bit_position)?;
             let mut buf = val.to_ne_bytes().to_vec();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
@@ -1304,9 +1325,9 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 (source_data.as_mut_ptr() as *mut std::ffi::c_void, source_data.len())
             };
             let mut oaep = Box::new(cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS {
-                hashAlg: p.oaep_params.hash_alg.0 as cryptoki_sys::CK_MECHANISM_TYPE,
-                mgf: p.oaep_params.mgf as cryptoki_sys::CK_RSA_PKCS_MGF_TYPE,
-                source: p.oaep_params.source as cryptoki_sys::CK_RSA_PKCS_OAEP_SOURCE_TYPE,
+                hashAlg: narrow_wire_ulong(p.oaep_params.hash_alg.0)?,
+                mgf: narrow_wire_ulong(p.oaep_params.mgf)?,
+                source: narrow_wire_ulong(p.oaep_params.source)?,
                 pSourceData: src_ptr,
                 ulSourceDataLen: src_len as cryptoki_sys::CK_ULONG,
             });
@@ -1328,7 +1349,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
 
         // -- ObjectHandle: single CK_OBJECT_HANDLE ----------------------------
         CkMechanismParams::ObjectHandle(p) => {
-            let val = p.handle as cryptoki_sys::CK_OBJECT_HANDLE;
+            let val = narrow_wire_ulong(p.handle)?;
             let mut buf = val.to_ne_bytes().to_vec();
             let ptr = buf.as_mut_ptr() as *mut std::ffi::c_void;
             let len = buf.len();
@@ -1357,7 +1378,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     hedge_variant: hedge,
                     p_context: ctx_ptr,
                     ul_context_len: ctx_len,
-                    hash: p.hash as cryptoki_sys::CK_MECHANISM_TYPE,
+                    hash: narrow_wire_ulong(p.hash)?,
                 });
                 Ok(FfiMechanism::from_box(mech_type, sac, |b| {
                     FfiParamBacking::HashSignAdditionalContext(b, ctx)
@@ -1374,7 +1395,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 customization_string.as_mut_ptr() as cryptoki_sys::CK_VOID_PTR
             };
             let kmac = Box::new(FfiKmacParams {
-                h_key: p.key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                h_key: narrow_wire_ulong(p.key_handle)?,
                 ul_mac_length: narrow_wire_ulong(p.mac_length)?,
                 p_customization_string: customization_ptr,
                 ul_customization_string_len: customization_string.len() as cryptoki_sys::CK_ULONG,
@@ -1391,7 +1412,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let tr_ptr = if tr.is_empty() { std::ptr::null_mut() } else { tr.as_mut_ptr() };
             let ctx_ptr = if ctx.is_empty() { std::ptr::null_mut() } else { ctx.as_mut_ptr() };
             let mu_gen = Box::new(FfiMuGenParams {
-                h_key: p.key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                h_key: narrow_wire_ulong(p.key_handle)?,
                 p_tr: tr_ptr,
                 ul_tr_len: tr.len() as cryptoki_sys::CK_ULONG,
                 p_ctx: ctx_ptr,
@@ -1441,7 +1462,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
                 },
                 pVersion: version_ptr,
-                prfHashMechanism: p.prf_hash_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism)?,
             });
             Ok(FfiMechanism::from_box(mech_type, tls12, |b| {
                 FfiParamBacking::Tls12MasterKeyDerive(b, client_random, server_random, version)
@@ -1526,7 +1547,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 context_data.as_mut_ptr()
             };
             let tls = Box::new(cryptoki_sys::CK_TLS_KDF_PARAMS {
-                prfMechanism: p.prf_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                prfMechanism: narrow_wire_ulong(p.prf_mechanism)?,
                 pLabel: label_ptr,
                 ulLabelLength: label.len() as cryptoki_sys::CK_ULONG,
                 RandomInfo: cryptoki_sys::CK_SSL3_RANDOM_DATA {
@@ -1596,7 +1617,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let version_ptr =
                 if version_is_null { std::ptr::null_mut() } else { &mut *version as *mut _ };
             let ext = Box::new(cryptoki_sys::CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS {
-                prfHashMechanism: p.prf_hash_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism)?,
                 pSessionHash: hash_ptr,
                 ulSessionHashLen: session_hash.len() as cryptoki_sys::CK_ULONG,
                 pVersion: version_ptr,
@@ -1640,10 +1661,10 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let iv_server_ptr =
                 if iv_server.is_empty() { std::ptr::null_mut() } else { iv_server.as_mut_ptr() };
             let mut key_mat_out = Box::new(cryptoki_sys::CK_SSL3_KEY_MAT_OUT {
-                hClientMacSecret: p.client_mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE,
-                hServerMacSecret: p.server_mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE,
-                hClientKey: p.client_key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
-                hServerKey: p.server_key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hClientMacSecret: narrow_wire_ulong(p.client_mac_secret_handle)?,
+                hServerMacSecret: narrow_wire_ulong(p.server_mac_secret_handle)?,
+                hClientKey: narrow_wire_ulong(p.client_key_handle)?,
+                hServerKey: narrow_wire_ulong(p.server_key_handle)?,
                 pIVClient: iv_client_ptr,
                 pIVServer: iv_server_ptr,
             });
@@ -1695,7 +1716,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                         ulServerRandomLen: server_random.len() as cryptoki_sys::CK_ULONG,
                     },
                     pReturnedKeyMaterial: &mut *key_mat_out as *mut _,
-                    prfHashMechanism: p.prf_hash_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                    prfHashMechanism: narrow_wire_ulong(p.prf_hash_mechanism)?,
                 });
                 Ok(FfiMechanism::from_box(mech_type, km, |b| {
                     FfiParamBacking::Tls12KeyMat(
@@ -1743,7 +1764,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 if shared.is_empty() { std::ptr::null_mut() } else { shared.as_mut_ptr() };
             let ew = Box::new(cryptoki_sys::CK_ECDH_AES_KEY_WRAP_PARAMS {
                 ulAESKeyBits: narrow_wire_ulong(p.aes_key_bits)?,
-                kdf: p.kdf as cryptoki_sys::CK_EC_KDF_TYPE,
+                kdf: narrow_wire_ulong(p.kdf)?,
                 ulSharedDataLen: shared.len() as cryptoki_sys::CK_ULONG,
                 pSharedData: shared_ptr,
             });
@@ -1764,13 +1785,13 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let public2_ptr =
                 if public2.is_empty() { std::ptr::null_mut() } else { public2.as_mut_ptr() };
             let ecdh2 = Box::new(cryptoki_sys::CK_ECDH2_DERIVE_PARAMS {
-                kdf: p.kdf as cryptoki_sys::CK_EC_KDF_TYPE,
+                kdf: narrow_wire_ulong(p.kdf)?,
                 ulSharedDataLen: shared.len() as cryptoki_sys::CK_ULONG,
                 pSharedData: shared_ptr,
                 ulPublicDataLen: public.len() as cryptoki_sys::CK_ULONG,
                 pPublicData: public_ptr,
                 ulPrivateDataLen: narrow_wire_ulong(p.private_data_len)?,
-                hPrivateData: p.private_data_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hPrivateData: narrow_wire_ulong(p.private_data_handle)?,
                 ulPublicDataLen2: public2.len() as cryptoki_sys::CK_ULONG,
                 pPublicData2: public2_ptr,
             });
@@ -1791,16 +1812,16 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let public2_ptr =
                 if public2.is_empty() { std::ptr::null_mut() } else { public2.as_mut_ptr() };
             let ecmqv = Box::new(cryptoki_sys::CK_ECMQV_DERIVE_PARAMS {
-                kdf: p.kdf as cryptoki_sys::CK_EC_KDF_TYPE,
+                kdf: narrow_wire_ulong(p.kdf)?,
                 ulSharedDataLen: shared.len() as cryptoki_sys::CK_ULONG,
                 pSharedData: shared_ptr,
                 ulPublicDataLen: public.len() as cryptoki_sys::CK_ULONG,
                 pPublicData: public_ptr,
                 ulPrivateDataLen: narrow_wire_ulong(p.private_data_len)?,
-                hPrivateData: p.private_data_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hPrivateData: narrow_wire_ulong(p.private_data_handle)?,
                 ulPublicDataLen2: public2.len() as cryptoki_sys::CK_ULONG,
                 pPublicData2: public2_ptr,
-                publicKey: p.public_key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                publicKey: narrow_wire_ulong(p.public_key_handle)?,
             });
             Ok(FfiMechanism::from_box(mech_type, ecmqv, |b| {
                 FfiParamBacking::EcmqvDerive(b, shared, public, public2)
@@ -1819,7 +1840,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 public_data.as_mut_ptr()
             };
             let x942 = Box::new(cryptoki_sys::CK_X9_42_DH1_DERIVE_PARAMS {
-                kdf: p.kdf as cryptoki_sys::CK_X9_42_DH_KDF_TYPE,
+                kdf: narrow_wire_ulong(p.kdf)?,
                 ulOtherInfoLen: other_info.len() as cryptoki_sys::CK_ULONG,
                 pOtherInfo: oi_ptr,
                 ulPublicDataLen: public_data.len() as cryptoki_sys::CK_ULONG,
@@ -1848,13 +1869,13 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 public_data2.as_mut_ptr()
             };
             let x942 = Box::new(cryptoki_sys::CK_X9_42_DH2_DERIVE_PARAMS {
-                kdf: p.kdf as cryptoki_sys::CK_X9_42_DH_KDF_TYPE,
+                kdf: narrow_wire_ulong(p.kdf)?,
                 ulOtherInfoLen: other_info.len() as cryptoki_sys::CK_ULONG,
                 pOtherInfo: oi_ptr,
                 ulPublicDataLen: public_data.len() as cryptoki_sys::CK_ULONG,
                 pPublicData: pub_ptr,
                 ulPrivateDataLen: narrow_wire_ulong(p.private_data_len)?,
-                hPrivateData: p.private_data_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hPrivateData: narrow_wire_ulong(p.private_data_handle)?,
                 ulPublicDataLen2: public_data2.len() as cryptoki_sys::CK_ULONG,
                 pPublicData2: pub2_ptr,
             });
@@ -1881,16 +1902,16 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 public_data2.as_mut_ptr()
             };
             let x942 = Box::new(cryptoki_sys::CK_X9_42_MQV_DERIVE_PARAMS {
-                kdf: p.kdf as cryptoki_sys::CK_X9_42_DH_KDF_TYPE,
+                kdf: narrow_wire_ulong(p.kdf)?,
                 ulOtherInfoLen: other_info.len() as cryptoki_sys::CK_ULONG,
                 OtherInfo: oi_ptr,
                 ulPublicDataLen: public_data.len() as cryptoki_sys::CK_ULONG,
                 PublicData: pub_ptr,
                 ulPrivateDataLen: narrow_wire_ulong(p.private_data_len)?,
-                hPrivateData: p.private_data_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hPrivateData: narrow_wire_ulong(p.private_data_handle)?,
                 ulPublicDataLen2: public_data2.len() as cryptoki_sys::CK_ULONG,
                 PublicData2: pub2_ptr,
-                publicKey: p.public_key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                publicKey: narrow_wire_ulong(p.public_key_handle)?,
             });
             Ok(FfiMechanism::from_box(mech_type, x942, |b| {
                 FfiParamBacking::X942MqvDerive(b, other_info, public_data, public_data2)
@@ -1908,7 +1929,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             };
             let ukm_ptr = if ukm.is_empty() { std::ptr::null_mut() } else { ukm.as_mut_ptr() };
             let gost = Box::new(cryptoki_sys::CK_GOSTR3410_DERIVE_PARAMS {
-                kdf: p.kdf as cryptoki_sys::CK_EC_KDF_TYPE,
+                kdf: narrow_wire_ulong(p.kdf)?,
                 pPublicData: pub_ptr,
                 ulPublicDataLen: public_data.len() as cryptoki_sys::CK_ULONG,
                 pUKM: ukm_ptr,
@@ -1931,7 +1952,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 ulWrapOIDLen: wrap_oid.len() as cryptoki_sys::CK_ULONG,
                 pUKM: ukm_ptr,
                 ulUKMLen: ukm.len() as cryptoki_sys::CK_ULONG,
-                hKey: p.key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hKey: narrow_wire_ulong(p.key_handle)?,
             });
             Ok(FfiMechanism::from_box(mech_type, gost, |b| {
                 FfiParamBacking::Gostr3410KeyWrap(b, wrap_oid, ukm)
@@ -1986,7 +2007,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let ni_ptr = if ni.is_empty() { std::ptr::null_mut() } else { ni.as_mut_ptr() };
             let nr_ptr = if nr.is_empty() { std::ptr::null_mut() } else { nr.as_mut_ptr() };
             let ike = Box::new(cryptoki_sys::CK_IKE_PRF_DERIVE_PARAMS {
-                prfMechanism: p.prf_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                prfMechanism: narrow_wire_ulong(p.prf_mechanism)?,
                 bDataAsKey: if p.data_as_key {
                     cryptoki_sys::CK_TRUE
                 } else {
@@ -1997,7 +2018,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 ulNiLen: ni.len() as cryptoki_sys::CK_ULONG,
                 pNr: nr_ptr,
                 ulNrLen: nr.len() as cryptoki_sys::CK_ULONG,
-                hNewKey: p.new_key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hNewKey: narrow_wire_ulong(p.new_key_handle)?,
             });
             Ok(FfiMechanism::from_box(mech_type, ike, |b| FfiParamBacking::IkePrfDerive(b, ni, nr)))
         }
@@ -2009,14 +2030,14 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let ckyi_ptr = if ckyi.is_empty() { std::ptr::null_mut() } else { ckyi.as_mut_ptr() };
             let ckyr_ptr = if ckyr.is_empty() { std::ptr::null_mut() } else { ckyr.as_mut_ptr() };
             let ike = Box::new(cryptoki_sys::CK_IKE1_PRF_DERIVE_PARAMS {
-                prfMechanism: p.prf_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                prfMechanism: narrow_wire_ulong(p.prf_mechanism)?,
                 bHasPrevKey: if p.has_prev_key {
                     cryptoki_sys::CK_TRUE
                 } else {
                     cryptoki_sys::CK_FALSE
                 },
-                hKeygxy: p.keygxy_handle as cryptoki_sys::CK_OBJECT_HANDLE,
-                hPrevKey: p.prev_key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hKeygxy: narrow_wire_ulong(p.keygxy_handle)?,
+                hPrevKey: narrow_wire_ulong(p.prev_key_handle)?,
                 pCKYi: ckyi_ptr,
                 ulCKYiLen: ckyi.len() as cryptoki_sys::CK_ULONG,
                 pCKYr: ckyr_ptr,
@@ -2034,13 +2055,13 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let extra_ptr =
                 if extra.is_empty() { std::ptr::null_mut() } else { extra.as_mut_ptr() };
             let ike = Box::new(cryptoki_sys::CK_IKE1_EXTENDED_DERIVE_PARAMS {
-                prfMechanism: p.prf_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                prfMechanism: narrow_wire_ulong(p.prf_mechanism)?,
                 bHasKeygxy: if p.has_keygxy {
                     cryptoki_sys::CK_TRUE
                 } else {
                     cryptoki_sys::CK_FALSE
                 },
-                hKeygxy: p.keygxy_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hKeygxy: narrow_wire_ulong(p.keygxy_handle)?,
                 pExtraData: extra_ptr,
                 ulExtraDataLen: extra.len() as cryptoki_sys::CK_ULONG,
             });
@@ -2054,13 +2075,13 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let mut seed = p.seed_data.clone();
             let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
             let ike = Box::new(cryptoki_sys::CK_IKE2_PRF_PLUS_DERIVE_PARAMS {
-                prfMechanism: p.prf_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                prfMechanism: narrow_wire_ulong(p.prf_mechanism)?,
                 bHasSeedKey: if p.has_seed_key {
                     cryptoki_sys::CK_TRUE
                 } else {
                     cryptoki_sys::CK_FALSE
                 },
-                hSeedKey: p.seed_key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hSeedKey: narrow_wire_ulong(p.seed_key_handle)?,
                 pSeedData: seed_ptr,
                 ulSeedDataLen: seed.len() as cryptoki_sys::CK_ULONG,
             });
@@ -2085,7 +2106,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 server_random.as_mut_ptr()
             };
             let wtls = Box::new(cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS {
-                DigestMechanism: p.digest_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                DigestMechanism: narrow_wire_ulong(p.digest_mechanism)?,
                 RandomInfo: cryptoki_sys::CK_WTLS_RANDOM_DATA {
                     pClientRandom: client_ptr,
                     ulClientRandomLen: client_random.len() as cryptoki_sys::CK_ULONG,
@@ -2111,7 +2132,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let output_ptr =
                 if output.is_empty() { std::ptr::null_mut() } else { output.as_mut_ptr() };
             let wtls = Box::new(cryptoki_sys::CK_WTLS_PRF_PARAMS {
-                DigestMechanism: p.digest_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                DigestMechanism: narrow_wire_ulong(p.digest_mechanism)?,
                 pSeed: seed_ptr,
                 ulSeedLen: seed.len() as cryptoki_sys::CK_ULONG,
                 pLabel: label_ptr,
@@ -2148,12 +2169,12 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             };
             let iv_ptr = if iv_buf.is_empty() { std::ptr::null_mut() } else { iv_buf.as_mut_ptr() };
             let mut kmo = Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_OUT {
-                hMacSecret: p.mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE,
-                hKey: p.key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hMacSecret: narrow_wire_ulong(p.mac_secret_handle)?,
+                hKey: narrow_wire_ulong(p.key_handle)?,
                 pIV: iv_ptr,
             });
             let wtls = Box::new(cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS {
-                DigestMechanism: p.digest_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
+                DigestMechanism: narrow_wire_ulong(p.digest_mechanism)?,
                 ulMacSizeInBits: narrow_wire_ulong(p.mac_size_bits)?,
                 ulKeySizeInBits: narrow_wire_ulong(p.key_size_bits)?,
                 ulIVSizeInBits: narrow_wire_ulong(p.iv_size_bits)?,
@@ -2186,7 +2207,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     buf.as_mut_ptr() as *mut std::ffi::c_void
                 };
                 c_params.push(cryptoki_sys::CK_PRF_DATA_PARAM {
-                    type_: dp.type_ as cryptoki_sys::CK_PRF_DATA_TYPE,
+                    type_: narrow_wire_ulong(dp.type_)?,
                     pValue: buf_ptr,
                     ulValueLen: buf.len() as cryptoki_sys::CK_ULONG,
                 });
@@ -2196,7 +2217,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                 if c_params.is_empty() { std::ptr::null_mut() } else { c_params.as_mut_ptr() };
             let mut derived_keys = FfiSp800108DerivedKeys::new(&p.additional_derived_keys)?;
             let sp = Box::new(cryptoki_sys::CK_SP800_108_KDF_PARAMS {
-                prfType: p.prf_type as cryptoki_sys::CK_SP800_108_PRF_TYPE,
+                prfType: narrow_wire_ulong(p.prf_type)?,
                 ulNumberOfDataParams: c_params.len() as cryptoki_sys::CK_ULONG,
                 pDataParams: data_ptr,
                 ulAdditionalDerivedKeys: derived_keys.len(),
@@ -2220,7 +2241,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     buf.as_mut_ptr() as *mut std::ffi::c_void
                 };
                 c_params.push(cryptoki_sys::CK_PRF_DATA_PARAM {
-                    type_: dp.type_ as cryptoki_sys::CK_PRF_DATA_TYPE,
+                    type_: narrow_wire_ulong(dp.type_)?,
                     pValue: buf_ptr,
                     ulValueLen: buf.len() as cryptoki_sys::CK_ULONG,
                 });
@@ -2232,7 +2253,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let iv_ptr = if iv.is_empty() { std::ptr::null_mut() } else { iv.as_mut_ptr() };
             let mut derived_keys = FfiSp800108DerivedKeys::new(&p.additional_derived_keys)?;
             let sp = Box::new(cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS {
-                prfType: p.prf_type as cryptoki_sys::CK_SP800_108_PRF_TYPE,
+                prfType: narrow_wire_ulong(p.prf_type)?,
                 ulNumberOfDataParams: c_params.len() as cryptoki_sys::CK_ULONG,
                 pDataParams: data_ptr,
                 ulIVLen: iv.len() as cryptoki_sys::CK_ULONG,
@@ -2253,17 +2274,16 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             // pOnetime_key is a pointer in the C struct — but it represents an
             // object handle packed as a pointer. In PKCS#11, CK_X3DH_INITIATE_PARAMS
             // has pOnetime_key as *mut CK_BYTE. We pass the handle as a pointer.
-            let mut onetime_buf =
-                (p.onetime_key_handle as cryptoki_sys::CK_OBJECT_HANDLE).to_ne_bytes().to_vec();
+            let mut onetime_buf = (narrow_wire_ulong(p.onetime_key_handle)?).to_ne_bytes().to_vec();
             let onetime_ptr = onetime_buf.as_mut_ptr();
             let x3dh = Box::new(cryptoki_sys::CK_X3DH_INITIATE_PARAMS {
-                kdf: p.kdf as cryptoki_sys::CK_X3DH_KDF_TYPE,
-                pPeer_identity: p.peer_identity_handle as cryptoki_sys::CK_OBJECT_HANDLE,
-                pPeer_prekey: p.peer_prekey_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                kdf: narrow_wire_ulong(p.kdf)?,
+                pPeer_identity: narrow_wire_ulong(p.peer_identity_handle)?,
+                pPeer_prekey: narrow_wire_ulong(p.peer_prekey_handle)?,
                 pPrekey_signature: sig_ptr,
                 pOnetime_key: onetime_ptr,
-                pOwn_identity: p.own_identity_handle as cryptoki_sys::CK_OBJECT_HANDLE,
-                pOwn_ephemeral: p.own_ephemeral_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                pOwn_identity: narrow_wire_ulong(p.own_identity_handle)?,
+                pOwn_ephemeral: narrow_wire_ulong(p.own_ephemeral_handle)?,
             });
             Ok(FfiMechanism::from_box(mech_type, x3dh, |b| {
                 FfiParamBacking::X3dhInitiate(b, prekey_sig, onetime_buf)
@@ -2272,22 +2292,18 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
 
         // -- X3DH Respond: struct with 3 pointers + 2 handles -------------------
         CkMechanismParams::X3dhRespond(p) => {
-            let mut identity_buf =
-                (p.identity_handle as cryptoki_sys::CK_OBJECT_HANDLE).to_ne_bytes().to_vec();
-            let mut prekey_buf =
-                (p.prekey_handle as cryptoki_sys::CK_OBJECT_HANDLE).to_ne_bytes().to_vec();
-            let mut onetime_buf =
-                (p.onetime_key_handle as cryptoki_sys::CK_OBJECT_HANDLE).to_ne_bytes().to_vec();
+            let mut identity_buf = (narrow_wire_ulong(p.identity_handle)?).to_ne_bytes().to_vec();
+            let mut prekey_buf = (narrow_wire_ulong(p.prekey_handle)?).to_ne_bytes().to_vec();
+            let mut onetime_buf = (narrow_wire_ulong(p.onetime_key_handle)?).to_ne_bytes().to_vec();
             // pInitiator_ephemeral is also a *mut CK_BYTE in the C struct
-            let mut ephem_buf = (p.initiator_ephemeral_handle as cryptoki_sys::CK_OBJECT_HANDLE)
-                .to_ne_bytes()
-                .to_vec();
+            let mut ephem_buf =
+                (narrow_wire_ulong(p.initiator_ephemeral_handle)?).to_ne_bytes().to_vec();
             let x3dh = Box::new(cryptoki_sys::CK_X3DH_RESPOND_PARAMS {
-                kdf: p.kdf as cryptoki_sys::CK_X3DH_KDF_TYPE,
+                kdf: narrow_wire_ulong(p.kdf)?,
                 pIdentity_id: identity_buf.as_mut_ptr(),
                 pPrekey_id: prekey_buf.as_mut_ptr(),
                 pOnetime_id: onetime_buf.as_mut_ptr(),
-                pInitiator_identity: p.initiator_identity_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                pInitiator_identity: narrow_wire_ulong(p.initiator_identity_handle)?,
                 pInitiator_ephemeral: ephem_buf.as_mut_ptr(),
             });
             // Merge identity_buf and prekey_buf and onetime_buf into fewer vecs
@@ -2305,18 +2321,17 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let sk_ptr = if sk.is_empty() { std::ptr::null_mut() } else { sk.as_mut_ptr() };
             let x2r = Box::new(cryptoki_sys::CK_X2RATCHET_INITIALIZE_PARAMS {
                 sk: sk_ptr,
-                peer_public_prekey: p.peer_public_prekey_handle as cryptoki_sys::CK_OBJECT_HANDLE,
-                peer_public_identity: p.peer_public_identity_handle
-                    as cryptoki_sys::CK_OBJECT_HANDLE,
-                own_public_identity: p.own_public_identity_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                peer_public_prekey: narrow_wire_ulong(p.peer_public_prekey_handle)?,
+                peer_public_identity: narrow_wire_ulong(p.peer_public_identity_handle)?,
+                own_public_identity: narrow_wire_ulong(p.own_public_identity_handle)?,
                 bEncryptedHeader: if p.encrypted_header {
                     cryptoki_sys::CK_TRUE
                 } else {
                     cryptoki_sys::CK_FALSE
                 },
                 eCurve: narrow_wire_ulong(p.curve)?,
-                aeadMechanism: p.aead_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
-                kdfMechanism: p.kdf_mechanism as cryptoki_sys::CK_X2RATCHET_KDF_TYPE,
+                aeadMechanism: narrow_wire_ulong(p.aead_mechanism)?,
+                kdfMechanism: narrow_wire_ulong(p.kdf_mechanism)?,
             });
             Ok(FfiMechanism::from_box(mech_type, x2r, |b| {
                 FfiParamBacking::X2RatchetInitialize(b, sk)
@@ -2329,17 +2344,17 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let sk_ptr = if sk.is_empty() { std::ptr::null_mut() } else { sk.as_mut_ptr() };
             let x2r = Box::new(cryptoki_sys::CK_X2RATCHET_RESPOND_PARAMS {
                 sk: sk_ptr,
-                own_prekey: p.own_prekey_handle as cryptoki_sys::CK_OBJECT_HANDLE,
-                initiator_identity: p.initiator_identity_handle as cryptoki_sys::CK_OBJECT_HANDLE,
-                own_public_identity: p.own_identity_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                own_prekey: narrow_wire_ulong(p.own_prekey_handle)?,
+                initiator_identity: narrow_wire_ulong(p.initiator_identity_handle)?,
+                own_public_identity: narrow_wire_ulong(p.own_identity_handle)?,
                 bEncryptedHeader: if p.encrypted_header {
                     cryptoki_sys::CK_TRUE
                 } else {
                     cryptoki_sys::CK_FALSE
                 },
                 eCurve: narrow_wire_ulong(p.curve)?,
-                aeadMechanism: p.aead_mechanism as cryptoki_sys::CK_MECHANISM_TYPE,
-                kdfMechanism: p.kdf_mechanism as cryptoki_sys::CK_X2RATCHET_KDF_TYPE,
+                aeadMechanism: narrow_wire_ulong(p.aead_mechanism)?,
+                kdfMechanism: narrow_wire_ulong(p.kdf_mechanism)?,
             });
             Ok(FfiMechanism::from_box(mech_type, x2r, |b| FfiParamBacking::X2RatchetRespond(b, sk)))
         }
@@ -2356,7 +2371,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
                     buf.as_mut_ptr() as *mut std::ffi::c_void
                 };
                 c_params.push(cryptoki_sys::CK_OTP_PARAM {
-                    type_: op.type_ as cryptoki_sys::CK_OTP_PARAM_TYPE,
+                    type_: narrow_wire_ulong(op.type_)?,
                     pValue: buf_ptr,
                     ulValueLen: buf.len() as cryptoki_sys::CK_ULONG,
                 });
@@ -2381,7 +2396,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
             let kip = Box::new(cryptoki_sys::CK_KIP_PARAMS {
                 pMechanism: &mut *inner_mech as *mut _,
-                hKey: p.key_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                hKey: narrow_wire_ulong(p.key_handle)?,
                 pSeed: seed_ptr,
                 ulSeedLen: seed.len() as cryptoki_sys::CK_ULONG,
             });
@@ -2410,7 +2425,7 @@ pub(super) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism
             let reqd_ptr =
                 if reqd_attrs.is_empty() { std::ptr::null_mut() } else { reqd_attrs.as_mut_ptr() };
             let cms = Box::new(cryptoki_sys::CK_CMS_SIG_PARAMS {
-                certificateHandle: p.certificate_handle as cryptoki_sys::CK_OBJECT_HANDLE,
+                certificateHandle: narrow_wire_ulong(p.certificate_handle)?,
                 pSigningMechanism: &mut *sign_mech as *mut _,
                 pDigestMechanism: &mut *digest_mech as *mut _,
                 pContentType: ct_ptr,
@@ -2598,6 +2613,21 @@ mod mechanism_to_ffi_tests {
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
         mechanism_to_ffi(&CkMechanism { mechanism_type, params: Some(params) })
             .expect("mechanism converts to ffi")
+    }
+
+    #[test]
+    fn mechanism_type_wider_than_native_is_rejected_not_truncated() {
+        // 0x1_0000_0000 | CKM_AES_ECB would truncate to CKM_AES_ECB on
+        // a narrow host - the backend would EXECUTE a different
+        // mechanism than the client requested. Reject instead (D4).
+        let mech =
+            CkMechanism { mechanism_type: CkMechanismType(0x1_0000_0000 + 0x1081), params: None };
+        let result = mechanism_to_ffi(&mech);
+        if std::mem::size_of::<cryptoki_sys::CK_ULONG>() == 4 {
+            assert_eq!(result.err(), Some(CkRv::FUNCTION_FAILED));
+        } else {
+            assert!(result.is_ok(), "wide host passes the value through unchanged");
+        }
     }
 
     #[test]
