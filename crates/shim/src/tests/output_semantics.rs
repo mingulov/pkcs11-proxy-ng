@@ -215,7 +215,25 @@ fn rsa_pkcs_mechanism() -> CK_MECHANISM {
 }
 
 fn expected_mock_digest(data: &[u8]) -> [u8; 4] {
-    data.iter().fold(0_u32, |sum, byte| sum + u32::from(*byte)).to_be_bytes()
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest", &[data], 4)
+        .try_into()
+        .expect("4 bytes")
+}
+
+fn expected_mock_sign(data: &[u8]) -> [u8; 2] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("sign", &[data], 2).try_into().expect("2 bytes")
+}
+
+fn expected_mock_sign_final() -> [u8; 2] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("sign-final", &[], 2)
+        .try_into()
+        .expect("2 bytes")
+}
+
+fn expected_mock_digest_final() -> [u8; 4] {
+    pkcs11_proxy_ng_backend::mock::echo::echo_bytes("digest-final", &[], 4)
+        .try_into()
+        .expect("4 bytes")
 }
 
 pub(super) fn create_object(session: CK_SESSION_HANDLE) -> CK_OBJECT_HANDLE {
@@ -1277,7 +1295,7 @@ fn exact_digest_size_query_returns_length_without_copy() {
     };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_Digest(data query)");
     assert_eq!(data_len, 4, "data query returned_len should be 4");
-    assert_eq!(out, [0, 0, 2, 20], "mock digest output should match input sum");
+    assert_eq!(out, expected_mock_digest(data), "mock digest output is the echo bytes");
 }
 
 #[test]
@@ -1322,7 +1340,7 @@ fn exact_digest_final_size_query_does_not_consume_state() {
         unsafe { dispatch::general::c_digest_final(shim.session, out.as_mut_ptr(), &mut data_len) };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_DigestFinal(data query)");
     assert_eq!(data_len, 4, "data query returned_len should be 4");
-    assert_eq!(out, [0u8; 4], "mock digest_final output should be all zeros");
+    assert_eq!(out, expected_mock_digest_final(), "mock digest_final output is the echo bytes");
 }
 
 #[test]
@@ -1348,7 +1366,7 @@ fn exact_sign_size_query_returns_length_without_copy() {
         )
     };
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_Sign(size query)");
-    // MockBackend returns MOCK_SIGN_OUTPUT = [0xDE, 0xAD] = 2 bytes
+    // MockBackend returns a 2-byte deterministic echo signature
     assert_eq!(out_len, 2, "returned_len should be 2 for mock sign output");
 
     let mut too_small = [0_u8; 1];
@@ -1378,7 +1396,7 @@ fn exact_sign_size_query_returns_length_without_copy() {
     };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_Sign(data query)");
     assert_eq!(data_len, 2, "data query returned_len should be 2");
-    assert_eq!(out, [0xDE, 0xAD], "mock sign output should be [0xDE, 0xAD]");
+    assert_eq!(out, expected_mock_sign(data), "mock sign output is the echo bytes");
 }
 
 #[test]
@@ -1398,7 +1416,7 @@ fn exact_sign_final_size_query_does_not_consume_state() {
         dispatch::general::c_sign_final(shim.session, std::ptr::null_mut(), &mut out_len)
     };
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_SignFinal(size query)");
-    // MockBackend sign_final returns MOCK_SIGN_OUTPUT = [0xDE, 0xAD] = 2 bytes
+    // MockBackend sign_final returns a 2-byte deterministic echo
     assert_eq!(out_len, 2, "size query returned_len should be 2");
 
     let mut too_small = [0_u8; 1];
@@ -1415,7 +1433,7 @@ fn exact_sign_final_size_query_does_not_consume_state() {
         unsafe { dispatch::general::c_sign_final(shim.session, out.as_mut_ptr(), &mut data_len) };
     assert_eq!(data_rv, CKR_OK as CK_RV, "C_SignFinal(data query)");
     assert_eq!(data_len, 2, "data query returned_len should be 2");
-    assert_eq!(out, [0xDE, 0xAD], "mock sign_final output should be [0xDE, 0xAD]");
+    assert_eq!(out, expected_mock_sign_final(), "mock sign_final output is the echo bytes");
 }
 
 #[test]

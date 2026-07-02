@@ -15,6 +15,7 @@ struct LoginGate {
 }
 
 mod crypto_ops;
+pub mod echo;
 mod mock_types;
 mod object_ops;
 mod session_ops;
@@ -695,8 +696,9 @@ impl MockBackend {
     }
 
     fn digest_bytes(data: &[u8]) -> Vec<u8> {
-        let sum: u32 = data.iter().map(|&byte| byte as u32).sum();
-        sum.to_be_bytes().to_vec()
+        // Deterministic, input-derived, domain-separated (see mock::echo);
+        // 4 bytes to keep two-call buffer tests simple.
+        echo::echo_bytes("digest", &[data], 4)
     }
 
     fn reverse_bytes(data: &[u8]) -> Vec<u8> {
@@ -1144,8 +1146,8 @@ impl Pkcs11Backend for MockBackend {
         self.init_cancel_impl(s, MultiPartOp::Sign)
     }
     fn sign(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
-        let _ = self.resolve_input(d)?;
-        self.sign_impl(s)
+        let data = self.resolve_input(d)?;
+        self.sign_impl(s, data)
     }
     fn sign_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
         let _ = self.resolve_input(p)?;
@@ -1167,9 +1169,9 @@ impl Pkcs11Backend for MockBackend {
         self.init_cancel_impl(s, MultiPartOp::SignRecover)
     }
     fn sign_recover(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
-        let _ = self.resolve_input(d)?;
+        let data = self.resolve_input(d)?;
         self.state.lock().unwrap().end_op(s, MultiPartOp::SignRecover)?;
-        Ok(vec![0xDE, 0xAD])
+        Ok(echo::echo_bytes("sign-recover", &[data], 2))
     }
     fn verify_recover_init(
         &self,
@@ -1457,8 +1459,7 @@ impl Pkcs11Backend for MockBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let _ = self.resolve_input(data)?;
-        self.sign_exact_impl(s, spec)
+        self.sign_exact_impl(s, self.resolve_input(data)?, spec)
     }
 
     fn sign_final_exact(
@@ -1475,8 +1476,7 @@ impl Pkcs11Backend for MockBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let _ = self.resolve_input(data)?;
-        self.sign_recover_exact_impl(s, spec)
+        self.sign_recover_exact_impl(s, self.resolve_input(data)?, spec)
     }
 
     fn verify_recover_exact(
