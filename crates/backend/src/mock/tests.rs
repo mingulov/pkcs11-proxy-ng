@@ -4144,7 +4144,10 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
             )
             .unwrap();
         assert_eq!(rv, CkRv::OK);
-        assert_eq!(data_results[0].value, Some(48_u64.to_le_bytes().to_vec()));
+        assert_eq!(
+            data_results[0].value,
+            Some((48 as cryptoki_sys::CK_ULONG).to_le_bytes().to_vec())
+        );
         assert_eq!(data_results[1].value, Some(b"sp800 extra".to_vec()));
     }
 }

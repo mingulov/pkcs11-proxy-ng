@@ -18,7 +18,12 @@ impl MockBackend {
                     vec![0]
                 }
             }
-            CkAttributeValue::Ulong(value) => value.to_le_bytes().to_vec(),
+            // Wire contract (ADR-0011): attribute value bytes carry the
+            // backend's native CK_ULONG width. The mock emulates a backend of
+            // the host's width, so encode at that width, not a fixed 8 bytes.
+            CkAttributeValue::Ulong(value) => {
+                (*value as cryptoki_sys::CK_ULONG).to_le_bytes().to_vec()
+            }
             CkAttributeValue::Bytes(bytes) => bytes.clone(),
             CkAttributeValue::String(value) => value.as_bytes().to_vec(),
         }
