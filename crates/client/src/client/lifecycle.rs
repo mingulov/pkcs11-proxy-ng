@@ -38,6 +38,8 @@ pub struct BackendProbe {
     /// Backend `CK_ULONG` byte order (1 = little, 2 = big; ADR-0011 D6).
     /// `None` against an older daemon.
     pub backend_byte_order: Option<u32>,
+    /// The backend's native sizeof(CK_ATTRIBUTE) (D2 extension), if advertised.
+    pub backend_attribute_stride: Option<u32>,
 }
 
 async fn connect_channel(
@@ -225,6 +227,7 @@ impl Pkcs11Client {
             mechanism_registry: resp.mechanism_registry,
             backend_ulong_size: resp.backend_ulong_size,
             backend_byte_order: resp.backend_byte_order,
+            backend_attribute_stride: resp.backend_attribute_stride,
         })
     }
 

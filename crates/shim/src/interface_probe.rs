@@ -52,6 +52,7 @@ static INTERFACE_STATE: RwLock<Option<&'static InterfaceState>> = RwLock::new(No
 /// `0` = not yet probed, or a daemon predating the advertisement; readers fall
 /// back to 8 bytes (D9).
 static BACKEND_ULONG_SIZE: AtomicUsize = AtomicUsize::new(0);
+static BACKEND_ATTRIBUTE_STRIDE: AtomicUsize = AtomicUsize::new(0);
 
 /// The backend's `CK_ULONG` width in bytes for the value bridge (ADR-0011).
 ///
@@ -65,6 +66,35 @@ pub fn backend_ulong_size() -> usize {
     match BACKEND_ULONG_SIZE.load(Ordering::Relaxed) {
         0 => 8,
         n => n,
+    }
+}
+
+/// The backend's native `sizeof(CK_ATTRIBUTE)` — the stride of nested
+/// `CKA_*_TEMPLATE` byte lengths on the wire (ADR-0011 D2 extension).
+///
+/// Falls back to `3 * backend_ulong_size()` (correct for LP64/ILP32 Unix
+/// layouts) when the daemon predates the advertisement; an LLP64 backend's
+/// packed stride (16) requires the advertisement.
+// Consumed by the nested-template stride bridge, wired in the next commit.
+#[allow(dead_code)]
+pub fn backend_attribute_stride() -> usize {
+    match BACKEND_ATTRIBUTE_STRIDE.load(Ordering::Relaxed) {
+        0 => 3 * backend_ulong_size(),
+        n => n,
+    }
+}
+
+/// Resolve the advertised `CK_ATTRIBUTE` stride (pure policy, unit tested).
+///
+/// Absent => `3 * width` fallback. Advertised values are sanity-bounded:
+/// a stride below 12 (the smallest real layout) or above 64 is hostile.
+fn resolve_backend_attribute_stride(stride: Option<u32>, width: usize) -> Result<usize, String> {
+    match stride {
+        None => Ok(3 * width),
+        Some(n @ 12..=64) => Ok(n as usize),
+        Some(other) => Err(format!(
+            "backend advertised an implausible CK_ATTRIBUTE stride {other} (expected 12..=64)"
+        )),
     }
 }
 
@@ -105,10 +135,17 @@ fn resolve_backend_ulong_size(
     }
 }
 
-/// Record the backend's advertised `CK_ULONG` width/byte order (ADR-0011 D2/D6).
-fn record_backend_abi(size: Option<u32>, order: Option<u32>) -> Result<(), String> {
+/// Record the backend's advertised ABI (ADR-0011 D2/D6): `CK_ULONG`
+/// width/byte order and the `CK_ATTRIBUTE` stride.
+fn record_backend_abi(
+    size: Option<u32>,
+    order: Option<u32>,
+    stride: Option<u32>,
+) -> Result<(), String> {
     let (width, fell_back) = resolve_backend_ulong_size(size, order)?;
+    let stride = resolve_backend_attribute_stride(stride, width)?;
     BACKEND_ULONG_SIZE.store(width, Ordering::Relaxed);
+    BACKEND_ATTRIBUTE_STRIDE.store(stride, Ordering::Relaxed);
     if fell_back && std::mem::size_of::<CK_ULONG>() != 8 {
         tracing::warn!(
             "daemon does not advertise its backend CK_ULONG width; assuming 8 bytes \
@@ -511,7 +548,11 @@ fn probe_backend() -> Result<InterfaceState, String> {
 
     // Record the backend CK_ULONG width/byte order for the value bridge
     // (ADR-0011 D2/D6) before anything else uses it.
-    record_backend_abi(probe.backend_ulong_size, probe.backend_byte_order)?;
+    record_backend_abi(
+        probe.backend_ulong_size,
+        probe.backend_byte_order,
+        probe.backend_attribute_stride,
+    )?;
 
     // Install the server-published registry whenever the daemon
     // includes one. Older daemons predate the field — in that case we
@@ -679,8 +720,9 @@ pub fn reprobe() {
 pub fn clear_cache() {
     let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
     *guard = None;
-    // Drop the advertised backend width so a fresh probe re-reads it (D2).
+    // Drop the advertised backend ABI so a fresh probe re-reads it (D2).
     BACKEND_ULONG_SIZE.store(0, Ordering::Relaxed);
+    BACKEND_ATTRIBUTE_STRIDE.store(0, Ordering::Relaxed);
 }
 
 /// Return a pointer to the v2.40 function list.
@@ -868,7 +910,27 @@ unsafe impl Sync for FallbackCatalog {}
 
 #[cfg(test)]
 mod backend_abi_tests {
-    use super::resolve_backend_ulong_size;
+    use super::{resolve_backend_attribute_stride, resolve_backend_ulong_size};
+
+    #[test]
+    fn stride_absent_falls_back_to_three_ulongs() {
+        assert_eq!(resolve_backend_attribute_stride(None, 8), Ok(24));
+        assert_eq!(resolve_backend_attribute_stride(None, 4), Ok(12));
+    }
+
+    #[test]
+    fn stride_advertised_value_wins() {
+        // LLP64: packed CK_ATTRIBUTE stride 16 with a 4-byte ulong.
+        assert_eq!(resolve_backend_attribute_stride(Some(16), 4), Ok(16));
+        assert_eq!(resolve_backend_attribute_stride(Some(24), 8), Ok(24));
+    }
+
+    #[test]
+    fn stride_rejects_hostile_values() {
+        assert!(resolve_backend_attribute_stride(Some(0), 8).is_err());
+        assert!(resolve_backend_attribute_stride(Some(7), 8).is_err(), "below any real layout");
+        assert!(resolve_backend_attribute_stride(Some(300), 8).is_err());
+    }
 
     #[test]
     fn valid_advertised_widths_pass_through() {

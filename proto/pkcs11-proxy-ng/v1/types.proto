@@ -1558,6 +1558,12 @@ message GetBackendInterfacesResponse {
   // byte-order mismatch rather than silently mis-decoding ulong value bytes.
   // All supported targets are little-endian; this guards a future BE backend.
   optional uint32 backend_byte_order = 4;
+
+  // The backend's native sizeof(CK_ATTRIBUTE) — the stride of nested
+  // CKA_*_TEMPLATE byte lengths on the wire (ADR-0011 D2 extension).
+  // On LLP64 backends the packed stride (16) is not derivable from the
+  // ulong width; absent => client falls back to 3 * backend_ulong_size.
+  optional uint32 backend_attribute_stride = 5;
 }
 
 // Server-driven mechanism parameter registry payload. Carries the
