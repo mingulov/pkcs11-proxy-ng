@@ -23,6 +23,28 @@ fn cross_test_enabled() -> bool {
 
 #[test]
 #[ignore = "needs a live daemon; run via scripts/run-cross-width-live-test.sh"]
+fn live_probe_records_backend_ulong_width() {
+    if !cross_test_enabled() {
+        return;
+    }
+    let _guard = shim_state_test_guard();
+    let rv = unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_Initialize against the live daemon");
+    let width = crate::interface_probe::backend_ulong_size();
+    let rv = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_Finalize");
+    let expected: usize = std::env::var("PKCS11_PROXY_CROSS_EXPECT_BACKEND_WIDTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    assert_eq!(
+        width, expected,
+        "the daemon-advertised CK_ULONG width must be recorded by C_Initialize (D2)"
+    );
+}
+
+#[test]
+#[ignore = "needs a live daemon; run via scripts/run-cross-width-live-test.sh"]
 fn live_daemon_bridges_ulong_widths_end_to_end() {
     if !cross_test_enabled() {
         return;

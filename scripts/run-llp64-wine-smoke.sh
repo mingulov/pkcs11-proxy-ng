@@ -48,9 +48,13 @@ if ! command -v cargo-xwin >/dev/null 2>&1; then
 fi
 
 # ── Build all artifacts ──────────────────────────────────────────────
-echo "--- building daemon (native), smoke client (native + Windows), shim DLL ---"
-cargo build -p pkcs11-proxy-ng >/dev/null
+echo "--- building daemon (native), smoke client (native + Windows), shim .so/DLL ---"
+# Explicit shim builds: an `--example`-only invocation does NOT refresh the
+# shim cdylib, and a stale library silently tests old code.
+cargo build -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim >/dev/null
 cargo build -p pkcs11-proxy-ng-shim --example cross_width_smoke >/dev/null
+cargo xwin build --target x86_64-pc-windows-msvc \
+    -p pkcs11-proxy-ng-shim >/dev/null
 cargo xwin build --target x86_64-pc-windows-msvc \
     -p pkcs11-proxy-ng-shim --example cross_width_smoke >/dev/null
 
