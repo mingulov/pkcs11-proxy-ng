@@ -168,12 +168,13 @@ jobs:
             -p pkcs11-proxy-ng-shim \
             -p pkcs11-proxy-ng-client
 
-  # ── Tier 0f: Windows client shim (LLP64, x86_64-pc-windows-msvc) ────────────
-  # Cross-compiles the client shim for Windows x64 via cargo-xwin (no Windows
-  # runner / no Wine needed). This is the LLP64 edge of ADR-0011: 64-bit
-  # pointers + 32-bit CK_ULONG + `#pragma pack(1)`. Catches Windows-only ABI
-  # gaps (packed-field E0793, Unix-only deps). Only the client-side crates are
-  # built; a Windows *server* is a separate, deployment-gated port (Bucket 3).
+  # ── Tier 0f: Windows build (LLP64, x86_64-pc-windows-msvc) ──────────────────
+  # Cross-compiles the client shim AND the daemon for Windows x64 via
+  # cargo-xwin (no Windows runner / no Wine needed). This is the LLP64 edge of
+  # ADR-0011: 64-bit pointers + 32-bit CK_ULONG + `#pragma pack(1)`. Catches
+  # Windows-only ABI gaps (packed-field E0793, Unix-only deps). The daemon is
+  # mTLS-TCP-only on Windows: the UDS/peer-cred transport is compiled out and
+  # config validation rejects [listener.local] there.
   windows-client-llp64:
     name: Windows client shim (LLP64, cargo-xwin)
     runs-on: ubuntu-24.04
@@ -194,8 +195,10 @@ jobs:
       - name: Install cargo-xwin
         run: cargo install cargo-xwin --locked
 
-      - name: cargo xwin build (client shim, Windows x64)
+      - name: cargo xwin build (client shim + daemon, Windows x64)
         run: |
           cargo xwin build --target x86_64-pc-windows-msvc \
             -p pkcs11-proxy-ng-shim \
-            -p pkcs11-proxy-ng-client
+            -p pkcs11-proxy-ng-client \
+            -p pkcs11-proxy-ng-backend \
+            -p pkcs11-proxy-ng
