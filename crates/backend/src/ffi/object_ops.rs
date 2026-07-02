@@ -20,7 +20,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         template: &[CkAttribute],
     ) -> CkResult<()> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         let ck_attrs = &ffi_attrs.attrs;
         Self::call_unit(unsafe { (*self.func_list).C_FindObjectsInit }, |function| unsafe {
             function(
@@ -65,7 +65,7 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: &mut [CkAttribute],
     ) -> CkResult<()> {
-        let mut ffi_attrs = FfiAttrs::from_slice(template);
+        let mut ffi_attrs = FfiAttrs::from_slice(template)?;
         let rv =
             Self::call_raw(unsafe { (*self.func_list).C_GetAttributeValue }, |function| unsafe {
                 function(
@@ -104,7 +104,7 @@ impl FfiBackend {
         session: CkSessionHandle,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_output(
             unsafe { (*self.func_list).C_CreateObject },
             |function, handle| unsafe {
@@ -124,7 +124,7 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_output(
             unsafe { (*self.func_list).C_CopyObject },
             |function, new_handle| unsafe {
@@ -168,7 +168,7 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<()> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_unit(unsafe { (*self.func_list).C_SetAttributeValue }, |function| unsafe {
             function(
                 Self::session_handle(session),

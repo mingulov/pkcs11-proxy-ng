@@ -80,7 +80,7 @@ impl FfiBackend {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_UnwrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
 
         // Save the original parameter pointer and length for read-back after the call.

@@ -24,7 +24,7 @@ impl FfiBackend {
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
 
         let mut out_len: cryptoki_sys::CK_ULONG = 0;
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
@@ -113,7 +113,7 @@ impl FfiBackend {
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
 
         // Two-call pattern: first call with pCiphertext=null to get size.
         let mut ciphertext_len: cryptoki_sys::CK_ULONG = 0;
@@ -162,7 +162,7 @@ impl FfiBackend {
     ) -> CkResult<CkObjectHandle> {
         use super::ffi_conversion::FfiAttrs;
 
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
