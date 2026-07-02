@@ -20,6 +20,7 @@ fn shim_state_test_guard() -> MutexGuard<'static, ()> {
 
 mod abi_audit;
 mod attribute_classification;
+mod cross_width_live;
 mod init_args;
 mod interface;
 mod null_pointers;
