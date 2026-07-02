@@ -127,7 +127,7 @@ jobs:
       - name: cargo build --workspace (MSRV)
         run: cargo build --workspace
 
-  # ── Tier 0e: narrow-CK_ULONG client (i686) ─────────────────────────────────
+  # ── Tier 0e: narrow-CK_ULONG targets (i686) ────────────────────────────────
   # Compiles + tests for a 32-bit-CK_ULONG target (i686-unknown-linux-gnu,
   # ILP32). This is the surfacing mechanism for the narrow-CK_ULONG width
   # bridge (ADR-0011): it catches ABI/width gaps — compile-time
@@ -136,11 +136,15 @@ jobs:
   #
   # Runs the full shim lib suite (dispatch units + the TestDaemon integration
   # modules), the backend lib suite (MockBackend emulates a narrow-native
-  # backend here), the pure width logic (types), and an ABI compile of the
-  # client crates. Real-.so backend tests skip themselves on ELF-class
+  # backend here; D4 checked-narrowing reject tests take their narrow branch),
+  # the SERVER lib suite (the 32-bit daemon host is a supported D3 target),
+  # the pure width logic (types), and an ABI compile of the client crates plus
+  # the daemon binary. Real-.so backend tests skip themselves on ELF-class
   # mismatch (64-bit provider modules cannot load into a 32-bit process).
+  # Live cross-width topologies (i686 daemon + i386 SoftHSM2) run via
+  # scripts/run-cross-width-live-test.sh outside the per-PR gate.
   narrow-client-i686:
-    name: Narrow CK_ULONG client (i686)
+    name: Narrow CK_ULONG targets (i686)
     runs-on: ubuntu-24.04
     needs: fmt
     steps:
@@ -156,17 +160,19 @@ jobs:
         with:
           targets: i686-unknown-linux-gnu
 
-      - name: cargo test types + shim + backend (i686)
+      - name: cargo test types + shim + backend + server (i686)
         run: |
           cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng-types
           cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng-shim --lib
           cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng-backend --lib
+          cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng --lib
 
-      - name: cargo build client crates (i686 ABI compile)
+      - name: cargo build client crates + daemon (i686 ABI compile)
         run: |
           cargo build --target i686-unknown-linux-gnu \
             -p pkcs11-proxy-ng-shim \
-            -p pkcs11-proxy-ng-client
+            -p pkcs11-proxy-ng-client \
+            -p pkcs11-proxy-ng
 
   # ── Tier 0f: Windows build (LLP64, x86_64-pc-windows-msvc) ──────────────────
   # Cross-compiles the client shim AND the daemon for Windows x64 via

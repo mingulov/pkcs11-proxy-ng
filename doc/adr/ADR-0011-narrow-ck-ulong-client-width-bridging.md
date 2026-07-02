@@ -19,10 +19,11 @@ Support **narrow-`CK_ULONG` clients** — clients whose native `CK_ULONG` is
 `x86_64-pc-windows-msvc`/LLP64) — talking to a 64-bit Linux server+backend, via a
 **client-side, transparent width bridge confined to the shim's C-ABI edge**.
 The design generalizes to **bidirectional** cross-width (the principle is "ABI
-width normalization at each C-ABI boundary"; see Bidirectionality), so all four
-combinations are *designed for* — but the reverse direction (`64c/32b`, needing a
-32-bit server) is **deployment-gated** and not a shipping target here; the
-shipping target is the narrow client (`32c/64b`).
+width normalization at each C-ABI boundary"; see Bidirectionality), and all four
+combinations are **supported and live-verified** (D3 amendment, 2026-07-02):
+narrow clients (`32c/64b`), the reverse direction (`64c/32b`, a
+narrow-`CK_ULONG` daemon host with D4 checked input narrowing), and both
+same-width controls. The Windows daemon host is supported as mTLS-TCP-only.
 
 - **The wire and the server do not change.** They remain `u64`-everywhere and
   width-agnostic. The client does **not** advertise its width *to* the server
@@ -527,9 +528,18 @@ assumption.
   `mechanism_registry`). The client asserts at probe; against an older daemon
   that omits them it falls back to "8 / little-endian + warning" (D9). No
   client→server width signalling.
-- **D3 — Targets: `i686-unknown-linux-gnu` + `armv7-unknown-linux-gnueabihf` +
-  `x86_64-pc-windows-msvc`.** Excluded: `pc-windows-gnu`, 32-bit Windows,
-  big-/mixed-endian, and any 32-bit backend/server track.
+- **D3 — Targets (amended 2026-07-02).** Client targets:
+  `i686-unknown-linux-gnu` + `armv7-unknown-linux-gnueabihf` +
+  `x86_64-pc-windows-msvc`. Daemon hosts: 64-bit Linux (primary),
+  **narrow-`CK_ULONG` Linux** (i686-class; D4 checked input narrowing, live
+  cross-width harness legs 3-4), and **Windows x64** (mTLS-TCP-only — the
+  UDS/peer-cred transport is Unix-only and `[listener.local]` is rejected;
+  SIGHUP registry reload unavailable, restart to apply; wine-validated at
+  runtime, a real-Windows conformance pass remains the final sign-off).
+  Original scoping (2026-06-28) had gated the non-64-bit-Linux daemon
+  tracks on deployment demand; that demand was confirmed and the tracks
+  were implemented + live-verified. Still excluded: `pc-windows-gnu`,
+  32-bit Windows, big-/mixed-endian.
 - **D4 — Overflow: checked, value-preserving narrowing.** Convert the integer
   value with a checked `CK_ULONG::try_from`; reject (`CKR_FUNCTION_FAILED`) on a
   genuine `> u32::MAX` value rather than silently truncate. Guarantees `1 → 1`
@@ -659,7 +669,19 @@ assumption.
     daemon, loaded through the public C ABI (`LoadLibrary` +
     `C_GetFunctionList`), plus a native dlopen control leg.
 
-**Remaining (deployment/sign-off decisions, not code gaps):**
-- **D3**: enabling a narrow-`CK_ULONG` (32-bit) or Windows **daemon host** in
-  production is a rollout decision; the code paths exist and are tested.
+**D3 amendment executed (2026-07-02):** narrow-`CK_ULONG` Linux daemon
+hosts and the Windows daemon host are **supported targets**, live-verified:
+- `scripts/run-cross-width-live-test.sh` now covers all four Linux width
+  topologies (32c/64b, 64/64, **64c/32b** via an i686 daemon + i386
+  SoftHSM2 — the reverse bridge and server-side D4 narrowing live — and
+  32/32), each leg also pinning the D2 width advertisement.
+- `scripts/run-windows-daemon-wine-smoke.sh` runs `pkcs11-proxy-ng.exe`
+  under wine loading the **Windows SoftHSM2 DLL** (real LLP64 backend,
+  width 4): native Linux client (8) exercises the reverse bridge + D4
+  through a genuine Windows PKCS#11 DLL, and an all-Windows LLP64
+  client/daemon pairing passes as well.
+- The per-PR i686 CI gate additionally runs the server lib suite and
+  builds the i686 daemon.
+
+**Remaining (sign-off only, not code gaps):**
 - A real-Windows (non-wine) conformance pass for final Windows sign-off.
