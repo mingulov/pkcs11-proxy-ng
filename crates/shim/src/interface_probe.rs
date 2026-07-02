@@ -107,7 +107,7 @@ fn resolve_backend_attribute_stride(stride: Option<u32>, width: usize) -> Result
 ///   and refused.
 /// - D9: an absent width falls back to 8 (LP64) — correct for every supported
 ///   x86_64 Linux daemon. `Ok(None)` signals "fell back" so the caller can warn.
-fn resolve_backend_ulong_size(
+pub(crate) fn resolve_backend_ulong_size(
     size: Option<u32>,
     order: Option<u32>,
 ) -> Result<(usize, bool), String> {

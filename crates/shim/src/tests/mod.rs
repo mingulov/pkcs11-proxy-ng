@@ -26,6 +26,7 @@ mod init_args;
 mod interface;
 mod null_pointers;
 mod output_semantics;
+mod regression;
 mod resource_limits;
 
 fn empty_interface() -> CK_INTERFACE {

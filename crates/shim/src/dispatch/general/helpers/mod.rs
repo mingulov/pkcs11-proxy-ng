@@ -59,7 +59,7 @@ pub(crate) use with_client;
 /// processes 512 MiB of data in one call).  Returning an empty slice for such
 /// values prevents undefined behavior from `from_raw_parts` and lets the
 /// backend return its own error instead of the shim crashing with SIGABRT.
-const MAX_SERIALIZABLE_BYTES: usize = 512 * 1024 * 1024;
+pub(crate) const MAX_SERIALIZABLE_BYTES: usize = 512 * 1024 * 1024;
 
 pub(crate) unsafe fn read_input_slice<'a, T>(ptr: *const T, len: CK_ULONG) -> &'a [T] {
     if ptr.is_null() || len == 0 {

@@ -12,7 +12,7 @@ mod async_ops;
 mod authenticated_wrap;
 mod combined;
 mod digest_cipher;
-mod helpers;
+pub(crate) mod helpers;
 mod init_general;
 mod kem;
 mod key_ops;
@@ -25,7 +25,7 @@ mod slot;
 mod state_ops;
 mod unsupported;
 mod verify_signature;
-mod width_bridge;
+pub(crate) mod width_bridge;
 
 // Re-export all dispatch functions so `general::c_*` continues to work.
 pub use admin::*;

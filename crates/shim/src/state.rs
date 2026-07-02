@@ -618,7 +618,7 @@ fn apply_jitter(base: Duration, jitter_pct: u32) -> Duration {
 /// must fail fast on an unreachable daemon. It cannot raise the cap:
 /// the resilience contract's bound on how long `C_Initialize` can
 /// block stays intact.
-fn connect_attempts_from_value(raw: Option<&str>) -> u32 {
+pub(crate) fn connect_attempts_from_value(raw: Option<&str>) -> u32 {
     raw.and_then(|s| s.trim().parse::<u32>().ok())
         .map(|n| n.clamp(1, MAX_ATTEMPTS))
         .unwrap_or(MAX_ATTEMPTS)
