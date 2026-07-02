@@ -5198,3 +5198,89 @@ fn decrypt_message_rejects_null_aad_with_nonzero_len() {
 }
 
 include!("tests_rest.rs");
+
+#[test]
+fn ilp32_profile_emits_4_byte_ulongs() {
+    let backend = MockBackend::default_test().with_abi(MockAbi::Ilp32);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let object = backend.create_object(session, &[]).unwrap();
+    backend.set_attribute(
+        object,
+        CkAttributeType::CLASS,
+        MockAttributeSlot::Value(CkAttributeValue::Ulong(3)),
+    );
+
+    let size_query = [CkAttributeQuery {
+        attr_type: CkAttributeType::CLASS,
+        buffer_present: false,
+        buffer_len: 0,
+        nested: None,
+    }];
+    let (rv, results) = backend.get_attribute_value_exact(session, object, &size_query).unwrap();
+    assert_eq!(rv, CkRv::OK);
+    assert_eq!(results[0].returned_len, 4, "ILP32 backend reports 4-byte ulong lengths");
+
+    let data_query = [CkAttributeQuery {
+        attr_type: CkAttributeType::CLASS,
+        buffer_present: true,
+        buffer_len: 4,
+        nested: None,
+    }];
+    let (rv, results) = backend.get_attribute_value_exact(session, object, &data_query).unwrap();
+    assert_eq!(rv, CkRv::OK);
+    assert_eq!(results[0].value, Some(vec![3, 0, 0, 0]), "value bytes at emulated width");
+}
+
+#[test]
+fn llp64_profile_reports_16_byte_attribute_stride() {
+    let backend = MockBackend::default_test().with_abi(MockAbi::Llp64);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let object = backend.create_object(session, &[]).unwrap();
+    backend.set_attribute(
+        object,
+        CkAttributeType::WRAP_TEMPLATE,
+        MockAttributeSlot::NestedTemplate(vec![
+            (CkAttributeType::CLASS, MockAttributeSlot::Value(CkAttributeValue::Ulong(3))),
+            (CkAttributeType::KEY_TYPE, MockAttributeSlot::Value(CkAttributeValue::Ulong(31))),
+        ]),
+    );
+
+    // Pure size query: the wire length is the BACKEND-layout template size.
+    let size_query = [CkAttributeQuery {
+        attr_type: CkAttributeType::WRAP_TEMPLATE,
+        buffer_present: false,
+        buffer_len: 0,
+        nested: None,
+    }];
+    let (rv, results) = backend.get_attribute_value_exact(session, object, &size_query).unwrap();
+    assert_eq!(rv, CkRv::OK);
+    assert_eq!(results[0].returned_len, 2 * 16, "LLP64 packed CK_ATTRIBUTE stride is 16");
+
+    // Data query: ulong sub-values are 4 bytes wide on this profile.
+    let data_query = [CkAttributeQuery {
+        attr_type: CkAttributeType::WRAP_TEMPLATE,
+        buffer_present: true,
+        buffer_len: 2 * 16,
+        nested: Some(vec![
+            CkAttributeQuery {
+                attr_type: CkAttributeType::CLASS,
+                buffer_present: true,
+                buffer_len: 4,
+                nested: None,
+            },
+            CkAttributeQuery {
+                attr_type: CkAttributeType::KEY_TYPE,
+                buffer_present: true,
+                buffer_len: 4,
+                nested: None,
+            },
+        ]),
+    }];
+    let (rv, results) = backend.get_attribute_value_exact(session, object, &data_query).unwrap();
+    assert_eq!(rv, CkRv::OK);
+    let nested = results[0].nested.as_ref().expect("nested results");
+    assert_eq!(nested[0].value, Some(vec![3, 0, 0, 0]));
+    assert_eq!(nested[1].value, Some(vec![31, 0, 0, 0]));
+}

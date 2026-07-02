@@ -20,7 +20,7 @@ mod object_ops;
 mod session_ops;
 mod state;
 
-pub use self::mock_types::{MockAttributeSlot, MultiPartOp};
+pub use self::mock_types::{MockAbi, MockAttributeSlot, MultiPartOp};
 use self::state::{MockState, compute_session_state};
 
 const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
@@ -164,6 +164,12 @@ pub struct MockBackend {
     /// Test-only gate (M5 harness): when `Some`, each real backend `login`
     /// signals + blocks on it. `None` (default) makes `login` a no-op gate.
     login_gate: Mutex<Option<LoginGate>>,
+    /// The backend ABI this mock emulates on the wire (ADR-0011): ulong
+    /// width for values/lengths, CK_ATTRIBUTE stride for nested templates.
+    abi: MockAbi,
+    /// When set, the D2 byte-order advertisement claims big-endian so the
+    /// client's D6 refusal path can be exercised.
+    advertise_big_endian: bool,
 }
 
 impl MockBackend {
@@ -208,6 +214,8 @@ impl MockBackend {
             token_info_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
             login_gate: Mutex::new(None),
+            abi: MockAbi::host(),
+            advertise_big_endian: false,
         }
     }
 
@@ -430,6 +438,25 @@ impl MockBackend {
     ///
     /// `max_sessions`: maximum number of concurrently open sessions (0 = unlimited).
     /// `max_objects`:  maximum number of live objects (0 = unlimited).
+    /// Emulate a specific backend ABI (default: the host's own profile).
+    pub fn with_abi(mut self, abi: MockAbi) -> Self {
+        self.abi = abi;
+        self
+    }
+
+    /// Advertise big-endian byte order (D2) so tests can pin the client's
+    /// D6 refusal path. Values are still emitted little-endian: a correct
+    /// client must refuse before ever parsing one.
+    pub fn with_big_endian_advertisement(mut self) -> Self {
+        self.advertise_big_endian = true;
+        self
+    }
+
+    /// The ABI profile this mock emulates.
+    pub fn abi(&self) -> MockAbi {
+        self.abi
+    }
+
     pub fn with_quotas(mut self, max_sessions: u64, max_objects: u64) -> Self {
         self.max_sessions = max_sessions;
         self.max_objects = max_objects;
