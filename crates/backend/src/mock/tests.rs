@@ -5284,3 +5284,18 @@ fn llp64_profile_reports_16_byte_attribute_stride() {
     assert_eq!(nested[0].value, Some(vec![3, 0, 0, 0]));
     assert_eq!(nested[1].value, Some(vec![31, 0, 0, 0]));
 }
+
+#[test]
+fn mock_advertises_its_profile_not_the_host() {
+    let narrow = MockBackend::default_test().with_abi(MockAbi::Ilp32);
+    assert_eq!(narrow.abi_ulong_size(), 4);
+    assert_eq!(narrow.abi_attribute_stride(), 12);
+    assert_eq!(narrow.abi_byte_order(), 1, "advertises little-endian by default");
+
+    let llp64 = MockBackend::default_test().with_abi(MockAbi::Llp64);
+    assert_eq!(llp64.abi_ulong_size(), 4);
+    assert_eq!(llp64.abi_attribute_stride(), 16);
+
+    let be = MockBackend::default_test().with_big_endian_advertisement();
+    assert_eq!(be.abi_byte_order(), 2, "the D6-refusal knob claims big-endian");
+}

@@ -2,7 +2,6 @@
 // intentional for cross-platform PKCS#11 portability.
 #![allow(clippy::unnecessary_cast)]
 
-
 use pkcs11_proxy_ng_types::*;
 
 use super::{MockAttributeSlot, MockBackend, MultiPartOp};

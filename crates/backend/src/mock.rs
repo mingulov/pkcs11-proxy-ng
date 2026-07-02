@@ -995,6 +995,18 @@ fn read_sp800_108_key_handle_value(value: &[u8]) -> CkResult<u64> {
 }
 
 impl Pkcs11Backend for MockBackend {
+    fn abi_ulong_size(&self) -> u32 {
+        self.abi.ulong_width() as u32
+    }
+
+    fn abi_byte_order(&self) -> u32 {
+        if self.advertise_big_endian { 2 } else { 1 }
+    }
+
+    fn abi_attribute_stride(&self) -> u32 {
+        self.abi.attribute_stride() as u32
+    }
+
     fn initialize(&self) -> CkResult<()> {
         self.initialize_backend()
     }
