@@ -292,3 +292,66 @@ fn big_endian_backend_is_refused_at_initialize() {
     }
     assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV, "a D6 byte-order mismatch must fail C_Initialize");
 }
+
+#[test]
+fn create_with_template_round_trips_across_abis() {
+    // Typed ulong template input is width-independent (D1), and vendor
+    // attributes pass through as opaque bytes (D7) at ANY width: the
+    // whole create -> store -> read-back loop must hold on foreign ABIs.
+    let _guard = shim_state_test_guard();
+    const VENDOR_ATTR: CK_ATTRIBUTE_TYPE = 0x8000_0042;
+    for abi in foreign_profiles() {
+        let (_daemon, shim) = session_on(abi);
+
+        let mut class: CK_ULONG = CKO_DATA;
+        let mut vendor_bytes = [9u8, 8, 7];
+        let mut template = [
+            CK_ATTRIBUTE {
+                type_: CKA_CLASS,
+                pValue: &mut class as *mut CK_ULONG as CK_VOID_PTR,
+                ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: VENDOR_ATTR,
+                pValue: vendor_bytes.as_mut_ptr() as CK_VOID_PTR,
+                ulValueLen: vendor_bytes.len() as CK_ULONG,
+            },
+        ];
+        let mut object = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_create_object(
+                shim.session,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut object,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} C_CreateObject with template");
+
+        // CKA_CLASS reads back at the CLIENT width regardless of the
+        // backend's storage width.
+        let mut class_buf = [0u8; std::mem::size_of::<CK_ULONG>()];
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: class_buf.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: class_buf.len() as CK_ULONG,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} CLASS read-back");
+        assert_eq!(CK_ULONG::from_le_bytes(class_buf), CKO_DATA, "{abi:?} CLASS value");
+
+        // The vendor attribute's bytes are untouched by any width bridge.
+        let mut vendor_buf = [0u8; 3];
+        let mut attr = CK_ATTRIBUTE {
+            type_: VENDOR_ATTR,
+            pValue: vendor_buf.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: vendor_buf.len() as CK_ULONG,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} vendor read-back");
+        assert_eq!(vendor_buf, [9, 8, 7], "{abi:?}: vendor bytes are opaque (D7)");
+        assert_eq!(attr.ulValueLen, 3, "{abi:?}: vendor length is byte-addressed");
+    }
+}

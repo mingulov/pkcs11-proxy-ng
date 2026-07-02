@@ -5404,3 +5404,85 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
     };
     assert_eq!(backend.encrypt_init(session, &mech_no_gen, key).unwrap(), None);
 }
+
+#[test]
+fn create_object_stores_template_attributes_for_read_back() {
+    let backend = MockBackend::default_test().with_abi(MockAbi::Ilp32);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+
+    const VENDOR_ATTR: u64 = 0x8000_0042;
+    let template = [
+        CkAttribute { attr_type: CkAttributeType::CLASS, value: Some(CkAttributeValue::Ulong(4)) },
+        CkAttribute {
+            attr_type: CkAttributeType::TOKEN,
+            value: Some(CkAttributeValue::Bool(false)),
+        },
+        CkAttribute {
+            attr_type: CkAttributeType::LABEL,
+            value: Some(CkAttributeValue::String("probe".into())),
+        },
+        // Vendor attribute: opaque bytes, D7 passthrough at ANY width.
+        CkAttribute {
+            attr_type: CkAttributeType(VENDOR_ATTR),
+            value: Some(CkAttributeValue::Bytes(vec![9, 8, 7])),
+        },
+    ];
+    let object = backend.create_object(session, &template).unwrap();
+
+    let query = |attr_type: CkAttributeType, buffer_len: u64| CkAttributeQuery {
+        attr_type,
+        buffer_present: true,
+        buffer_len,
+        nested: None,
+    };
+    let (rv, results) = backend
+        .get_attribute_value_exact(
+            session,
+            object,
+            &[
+                query(CkAttributeType::CLASS, 4),
+                query(CkAttributeType::TOKEN, 1),
+                query(CkAttributeType::LABEL, 5),
+                query(CkAttributeType(VENDOR_ATTR), 3),
+            ],
+        )
+        .unwrap();
+    assert_eq!(rv, CkRv::OK);
+    assert_eq!(results[0].value, Some(vec![4, 0, 0, 0]), "ulong at the emulated width");
+    assert_eq!(results[1].value, Some(vec![0]), "bool as one byte");
+    assert_eq!(results[2].value, Some(b"probe".to_vec()), "string bytes");
+    assert_eq!(results[3].value, Some(vec![9, 8, 7]), "vendor bytes pass through opaquely");
+}
+
+#[test]
+fn derived_object_stores_its_template_attributes() {
+    let backend = MockBackend::default_test();
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let template = [CkAttribute {
+        attr_type: CkAttributeType::VALUE_LEN,
+        value: Some(CkAttributeValue::Ulong(32)),
+    }];
+    let base_key = backend.create_object(session, &[]).unwrap();
+    let mech = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
+    let derived = backend.derive_key(session, &mech, base_key, &template).unwrap();
+    let (rv, results) = backend
+        .get_attribute_value_exact(
+            session,
+            derived,
+            &[CkAttributeQuery {
+                attr_type: CkAttributeType::VALUE_LEN,
+                buffer_present: false,
+                buffer_len: 0,
+                nested: None,
+            }],
+        )
+        .unwrap();
+    assert_eq!(rv, CkRv::OK);
+    assert_eq!(
+        results[0].returned_len as usize,
+        std::mem::size_of::<cryptoki_sys::CK_ULONG>(),
+        "derived object's template ulong is readable"
+    );
+}
