@@ -542,7 +542,20 @@ impl MockBackend {
         let attrs = template
             .iter()
             .filter_map(|attr| {
-                attr.value.clone().map(|value| (attr.attr_type.0, MockAttributeSlot::Value(value)))
+                let slot = match attr.value.clone()? {
+                    // A nested-template VALUE round-trips through the
+                    // structural nested slot so the exact output path
+                    // serves it with real two-call semantics.
+                    CkAttributeValue::NestedTemplate(subs) => MockAttributeSlot::NestedTemplate(
+                        subs.into_iter()
+                            .filter_map(|sub| {
+                                sub.value.map(|v| (sub.attr_type, MockAttributeSlot::Value(v)))
+                            })
+                            .collect(),
+                    ),
+                    value => MockAttributeSlot::Value(value),
+                };
+                Some((attr.attr_type.0, slot))
             })
             .collect::<HashMap<_, _>>();
         self.attribute_store.lock().unwrap().insert(handle.0, attrs);

@@ -355,3 +355,77 @@ fn create_with_template_round_trips_across_abis() {
         assert_eq!(attr.ulValueLen, 3, "{abi:?}: vendor length is byte-addressed");
     }
 }
+
+#[test]
+fn nested_template_input_round_trips_across_abis() {
+    // Input direction (the historically missing half): CKA_WRAP_TEMPLATE
+    // inside a C_CreateObject template crosses the wire STRUCTURALLY —
+    // never as raw client CK_ATTRIBUTE struct bytes, whose pointers would
+    // be dangling in the daemon. The backend stores it and the nested
+    // OUTPUT path serves it back at the client's own layout.
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (_daemon, shim) = session_on(abi);
+
+        let mut sub_class: CK_ULONG = 4; // CKO_SECRET_KEY
+        let mut wrap_subs = [CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: &mut sub_class as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        }];
+        let mut template = [CK_ATTRIBUTE {
+            type_: CKA_WRAP_TEMPLATE_RAW,
+            pValue: wrap_subs.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of_val(&wrap_subs) as CK_ULONG,
+        }];
+        let mut object = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_create_object(
+                shim.session,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut object,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} create with nested template input");
+
+        // Read back: pure size query first (client layout), then the data.
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_WRAP_TEMPLATE_RAW,
+            pValue: std::ptr::null_mut(),
+            ulValueLen: 0,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} nested size query");
+        assert_eq!(
+            attr.ulValueLen as usize,
+            std::mem::size_of::<CK_ATTRIBUTE>(),
+            "{abi:?}: one sub-attribute at the client stride"
+        );
+
+        let w = std::mem::size_of::<CK_ULONG>();
+        let mut class_buf = vec![0u8; w];
+        let mut out_subs = [CK_ATTRIBUTE {
+            type_: 0,
+            pValue: class_buf.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: w as CK_ULONG,
+        }];
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_WRAP_TEMPLATE_RAW,
+            pValue: out_subs.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of_val(&out_subs) as CK_ULONG,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} nested data query");
+        assert_eq!(out_subs[0].type_, CKA_CLASS, "{abi:?}: sub type");
+        let class_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
+            class_buf.as_slice().try_into().expect("width");
+        assert_eq!(
+            CK_ULONG::from_le_bytes(class_bytes),
+            4,
+            "{abi:?}: sub-value round-trips through input AND output bridging"
+        );
+    }
+}

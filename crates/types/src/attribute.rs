@@ -233,6 +233,14 @@ pub enum CkAttributeValue {
     Ulong(u64),
     Bytes(Vec<u8>),
     String(String),
+    /// A nested `CK_ATTRIBUTE[]` template value (the input direction of
+    /// CKF_ARRAY_ATTRIBUTE attributes, e.g. CKA_WRAP_TEMPLATE inside a
+    /// C_CreateObject template). Carried structurally: raw client
+    /// `CK_ATTRIBUTE` struct bytes contain client-address-space pointers
+    /// and are meaningless (and dangerous) on the backend. Depth is
+    /// bounded at one level of nesting (ADR-0011 D8): sub-attributes must
+    /// not themselves be templates.
+    NestedTemplate(Vec<CkAttribute>),
 }
 
 /// A single PKCS#11 attribute (type + optional value).

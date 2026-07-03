@@ -91,3 +91,31 @@ fn regression_mock_ulong_encoding_follows_emulated_width() {
         "the default mock profile matches the host"
     );
 }
+
+/// This series: input-direction CKA_*_TEMPLATE attributes were serialized
+/// as raw client CK_ATTRIBUTE struct bytes — client-address-space POINTERS
+/// crossed the wire and a real backend would have dereferenced them in the
+/// daemon's address space. Templates must parse structurally at the C ABI
+/// edge; the full loop is pinned in
+/// `cross_abi::nested_template_input_round_trips_across_abis`.
+#[test]
+fn regression_input_nested_template_is_structural_not_pointer_bytes() {
+    let mut sub_class: CK_ULONG = 4;
+    let mut subs = [CK_ATTRIBUTE {
+        type_: CKA_CLASS,
+        pValue: &mut sub_class as *mut CK_ULONG as CK_VOID_PTR,
+        ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+    }];
+    let outer = [CK_ATTRIBUTE {
+        type_: cryptoki_sys::CKA_WRAP_TEMPLATE,
+        pValue: subs.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: std::mem::size_of_val(&subs) as CK_ULONG,
+    }];
+    let parsed = unsafe { dispatch::general::helpers::ck_attrs_to_rust_checked(outer.as_ptr(), 1) }
+        .expect("parses");
+    assert!(
+        matches!(parsed[0].value, Some(pkcs11_proxy_ng_types::CkAttributeValue::NestedTemplate(_))),
+        "template input must never serialize as raw (pointer-carrying) bytes: {:?}",
+        parsed[0].value
+    );
+}

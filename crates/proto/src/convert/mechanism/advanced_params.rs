@@ -150,6 +150,11 @@ fn sp800_108_attribute_to_proto(attr: &CkAttribute) -> v1_proto::Sp800108Attribu
         Some(CkAttributeValue::String(value)) => {
             Some(sp800108_attribute::Value::StringValue(value.clone()))
         }
+        // A CKA_*_TEMPLATE inside an SP800-108 derived-key sub-template is
+        // not representable in Sp800108Attribute (and no real provider
+        // consumes one there); encode as value-absent rather than shipping
+        // meaningless bytes.
+        Some(CkAttributeValue::NestedTemplate(_)) => None,
     };
     v1_proto::Sp800108Attribute { attr_type: attr.attr_type.0, value }
 }

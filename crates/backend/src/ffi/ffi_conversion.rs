@@ -55,10 +55,14 @@ pub(super) fn session_state_from_ck(state: CK_STATE) -> CkSessionState {
 /// keep those bytes alive alongside the attribute array.
 pub(super) struct FfiAttrs {
     /// The ready-to-pass attribute array. Pointers inside borrow from the original
-    /// `CkAttribute` slice or from `_backing`.
+    /// `CkAttribute` slice or from `_backing`/`_nested_backing`.
     pub(super) attrs: Vec<cryptoki_sys::CK_ATTRIBUTE>,
     /// Backing byte storage for `Ulong` values whose native size differs from `u64`.
     _backing: Vec<Vec<u8>>,
+    /// Backing storage for nested `CK_ATTRIBUTE[]` template VALUES (the
+    /// input direction of CKF_ARRAY_ATTRIBUTE attributes): each entry pins
+    /// a native sub-attribute array plus its sub-value buffers.
+    _nested_backing: Vec<NestedTemplateBacking>,
 }
 
 impl FfiAttrs {
@@ -68,6 +72,7 @@ impl FfiAttrs {
     pub(super) fn from_slice(template: &[CkAttribute]) -> CkResult<Self> {
         let mut attrs = Vec::with_capacity(template.len());
         let mut backing: Vec<Vec<u8>> = Vec::new();
+        let mut nested_backing: Vec<NestedTemplateBacking> = Vec::new();
 
         for attr in template {
             let (pvalue, len): (*mut _, cryptoki_sys::CK_ULONG) = match &attr.value {
@@ -91,6 +96,20 @@ impl FfiAttrs {
                 Some(CkAttributeValue::String(s)) => {
                     (s.as_ptr() as *mut _, s.len() as cryptoki_sys::CK_ULONG)
                 }
+                Some(CkAttributeValue::NestedTemplate(subs)) => {
+                    // Rebuild a native CK_ATTRIBUTE[] the backend can walk:
+                    // the wire carries the template STRUCTURALLY (client
+                    // struct bytes never cross — their pointers are
+                    // meaningless in this address space). Sub-values follow
+                    // the same materialization rules as top-level ones
+                    // (native ulong width, checked narrowing per D4).
+                    let backing_entry = Self::materialize_nested_template(subs)?;
+                    let ptr = backing_entry.template_ptr();
+                    let byte_len = (subs.len() * std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>())
+                        as cryptoki_sys::CK_ULONG;
+                    nested_backing.push(backing_entry);
+                    (ptr as *mut _, byte_len)
+                }
             };
             attrs.push(cryptoki_sys::CK_ATTRIBUTE {
                 type_: narrow_wire_ulong(attr.attr_type.0)?,
@@ -99,7 +118,7 @@ impl FfiAttrs {
             });
         }
 
-        Ok(Self { attrs, _backing: backing })
+        Ok(Self { attrs, _backing: backing, _nested_backing: nested_backing })
     }
 }
 
@@ -135,6 +154,69 @@ mod ffi_attrs_narrowing_tests {
         let template = ulong_template(1);
         let attrs = FfiAttrs::from_slice(&template).expect("in-range value converts");
         assert_eq!(materialized_ulong(&attrs), 1);
+    }
+
+    #[test]
+    fn nested_template_value_materializes_native_ck_attribute_array() {
+        // Input direction of CKA_*_TEMPLATE: the wire carries a STRUCTURAL
+        // template (never raw client struct bytes); the FFI edge rebuilds a
+        // native CK_ATTRIBUTE[] the backend can dereference safely.
+        let template = [CkAttribute {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            value: Some(CkAttributeValue::NestedTemplate(vec![
+                CkAttribute {
+                    attr_type: CkAttributeType::CLASS,
+                    value: Some(CkAttributeValue::Ulong(4)),
+                },
+                CkAttribute {
+                    attr_type: CkAttributeType::EXTRACTABLE,
+                    value: Some(CkAttributeValue::Bool(true)),
+                },
+            ])),
+        }];
+        let attrs = FfiAttrs::from_slice(&template).expect("nested template converts");
+        let outer = &attrs.attrs[0];
+        assert_eq!(
+            outer.ulValueLen as usize,
+            2 * std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>(),
+            "outer length is the native template byte length"
+        );
+        let subs = unsafe {
+            std::slice::from_raw_parts(outer.pValue as *const cryptoki_sys::CK_ATTRIBUTE, 2)
+        };
+        assert_eq!(subs[0].type_ as u64, CkAttributeType::CLASS.0);
+        assert_eq!(subs[0].ulValueLen as usize, std::mem::size_of::<cryptoki_sys::CK_ULONG>());
+        let mut class_bytes = [0u8; std::mem::size_of::<cryptoki_sys::CK_ULONG>()];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                subs[0].pValue as *const u8,
+                class_bytes.as_mut_ptr(),
+                class_bytes.len(),
+            );
+        }
+        assert_eq!(cryptoki_sys::CK_ULONG::from_ne_bytes(class_bytes), 4);
+        assert_eq!(subs[1].type_ as u64, CkAttributeType::EXTRACTABLE.0);
+        assert_eq!(subs[1].ulValueLen, 1);
+        assert_eq!(unsafe { *(subs[1].pValue as *const u8) }, 1);
+    }
+
+    #[test]
+    fn nested_template_ulong_sub_value_wider_than_native_is_rejected() {
+        // D4 applies to nested sub-values too.
+        let template = [CkAttribute {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            value: Some(CkAttributeValue::NestedTemplate(vec![CkAttribute {
+                attr_type: CkAttributeType::CLASS,
+                value: Some(CkAttributeValue::Ulong(0x1_0000_0001)),
+            }])),
+        }];
+        match FfiAttrs::from_slice(&template) {
+            Ok(_) => assert_eq!(std::mem::size_of::<cryptoki_sys::CK_ULONG>(), 8),
+            Err(rv) => {
+                assert_eq!(std::mem::size_of::<cryptoki_sys::CK_ULONG>(), 4);
+                assert_eq!(rv, CkRv::FUNCTION_FAILED);
+            }
+        }
     }
 
     #[test]
@@ -190,6 +272,50 @@ struct NestedTemplateBacking {
     _template: std::pin::Pin<Box<[cryptoki_sys::CK_ATTRIBUTE]>>,
     /// Sub-buffers for each nested attribute's `pValue`.
     _sub_buffers: Vec<Vec<u8>>,
+}
+
+impl NestedTemplateBacking {
+    /// Stable address of the pinned native sub-attribute array.
+    fn template_ptr(&self) -> *const cryptoki_sys::CK_ATTRIBUTE {
+        self._template.as_ptr()
+    }
+}
+
+impl FfiAttrs {
+    /// Build the pinned native `CK_ATTRIBUTE[]` for a nested template VALUE.
+    fn materialize_nested_template(subs: &[CkAttribute]) -> CkResult<NestedTemplateBacking> {
+        let mut sub_buffers: Vec<Vec<u8>> = Vec::with_capacity(subs.len());
+        let mut native: Vec<cryptoki_sys::CK_ATTRIBUTE> = Vec::with_capacity(subs.len());
+        for sub in subs {
+            let bytes: Vec<u8> = match &sub.value {
+                None => Vec::new(),
+                Some(CkAttributeValue::Bool(b)) => vec![u8::from(*b)],
+                Some(CkAttributeValue::Ulong(u)) => narrow_wire_ulong(*u)?.to_ne_bytes().to_vec(),
+                Some(CkAttributeValue::Bytes(b)) => b.clone(),
+                Some(CkAttributeValue::String(s)) => s.as_bytes().to_vec(),
+                // D8: refused at the deserialization edge; defensively
+                // reject here too rather than recurse.
+                Some(CkAttributeValue::NestedTemplate(_)) => {
+                    return Err(CkRv::ATTRIBUTE_VALUE_INVALID);
+                }
+            };
+            sub_buffers.push(bytes);
+            let stored = sub_buffers.last().expect("just pushed");
+            native.push(cryptoki_sys::CK_ATTRIBUTE {
+                type_: narrow_wire_ulong(sub.attr_type.0)?,
+                pValue: if stored.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    stored.as_ptr() as *mut std::ffi::c_void
+                },
+                ulValueLen: stored.len() as cryptoki_sys::CK_ULONG,
+            });
+        }
+        Ok(NestedTemplateBacking {
+            _template: std::pin::Pin::new(native.into_boxed_slice()),
+            _sub_buffers: sub_buffers,
+        })
+    }
 }
 
 /// Owns raw `CK_ATTRIBUTE` buffers for exact `C_GetAttributeValue` semantics.

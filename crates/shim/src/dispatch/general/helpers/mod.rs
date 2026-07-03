@@ -3679,6 +3679,15 @@ unsafe fn ck_attrs_to_rust_result(
     count: CK_ULONG,
     reject_null_nonzero_count: bool,
 ) -> CkResult<Vec<CkAttribute>> {
+    unsafe { ck_attrs_to_rust_at_depth(p_template, count, reject_null_nonzero_count, 0) }
+}
+
+unsafe fn ck_attrs_to_rust_at_depth(
+    p_template: *const CK_ATTRIBUTE,
+    count: CK_ULONG,
+    reject_null_nonzero_count: bool,
+    depth: u8,
+) -> CkResult<Vec<CkAttribute>> {
     if p_template.is_null() {
         return if count == 0 || !reject_null_nonzero_count {
             Ok(Vec::new())
@@ -3707,7 +3716,33 @@ unsafe fn ck_attrs_to_rust_result(
             None
         } else {
             let len = attr.ulValueLen as usize;
-            if ck_type.is_bool() && len == std::mem::size_of::<CK_BBOOL>() {
+            if ck_type.is_attribute_template() {
+                // Input direction of CKF_ARRAY_ATTRIBUTE: pValue is a nested
+                // CK_ATTRIBUTE[] in the CLIENT's layout. Parse it structurally
+                // — serializing the raw struct bytes would ship dangling
+                // client pointers to the backend. Depth is bounded at one
+                // level (ADR-0011 D8).
+                if depth > 0 {
+                    return Err(CkRv::ATTRIBUTE_VALUE_INVALID);
+                }
+                let stride = std::mem::size_of::<CK_ATTRIBUTE>();
+                if !len.is_multiple_of(stride) {
+                    return Err(CkRv::ATTRIBUTE_VALUE_INVALID);
+                }
+                let n = len / stride;
+                if n > MAX_TEMPLATE_COUNT {
+                    return Err(CkRv::ARGUMENTS_BAD);
+                }
+                let subs = unsafe {
+                    ck_attrs_to_rust_at_depth(
+                        attr.pValue as *const CK_ATTRIBUTE,
+                        n as CK_ULONG,
+                        reject_null_nonzero_count,
+                        depth + 1,
+                    )
+                }?;
+                Some(CkAttributeValue::NestedTemplate(subs))
+            } else if ck_type.is_bool() && len == std::mem::size_of::<CK_BBOOL>() {
                 let v = unsafe { *(attr.pValue as *const CK_BBOOL) };
                 Some(CkAttributeValue::Bool(v != 0))
             } else if ck_type.is_ulong() && len == std::mem::size_of::<CK_ULONG>() {
@@ -3746,6 +3781,76 @@ unsafe fn ck_attrs_to_rust_result(
         result.push(CkAttribute { attr_type: ck_type, value });
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod nested_template_input_tests {
+    use cryptoki_sys::*;
+    use pkcs11_proxy_ng_types::{CkAttributeType, CkAttributeValue, CkRv};
+
+    use super::ck_attrs_to_rust_checked;
+
+    fn wrap_template_attr(subs: &mut [CK_ATTRIBUTE]) -> CK_ATTRIBUTE {
+        CK_ATTRIBUTE {
+            type_: cryptoki_sys::CKA_WRAP_TEMPLATE,
+            pValue: subs.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of_val(subs) as CK_ULONG,
+        }
+    }
+
+    #[test]
+    fn template_attr_parses_structurally_never_as_pointer_bytes() {
+        let mut class: CK_ULONG = 4;
+        let mut subs = [CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: &mut class as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        }];
+        let outer = [wrap_template_attr(&mut subs)];
+        let parsed = unsafe { ck_attrs_to_rust_checked(outer.as_ptr(), 1) }.expect("parses");
+        assert_eq!(parsed[0].attr_type, CkAttributeType::WRAP_TEMPLATE);
+        let Some(CkAttributeValue::NestedTemplate(nested)) = &parsed[0].value else {
+            panic!(
+                "template input must be structural (raw struct bytes would ship dangling client pointers to the backend)"
+            );
+        };
+        assert_eq!(nested.len(), 1);
+        assert_eq!(nested[0].attr_type, CkAttributeType::CLASS);
+        assert_eq!(nested[0].value, Some(CkAttributeValue::Ulong(4)));
+    }
+
+    #[test]
+    fn template_attr_with_non_stride_multiple_length_is_rejected() {
+        let mut class: CK_ULONG = 4;
+        let mut subs = [CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: &mut class as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        }];
+        let mut outer = wrap_template_attr(&mut subs);
+        outer.ulValueLen -= 1;
+        let outer = [outer];
+        assert_eq!(
+            unsafe { ck_attrs_to_rust_checked(outer.as_ptr(), 1) }.unwrap_err(),
+            CkRv::ATTRIBUTE_VALUE_INVALID
+        );
+    }
+
+    #[test]
+    fn template_inside_template_is_rejected_d8() {
+        let mut class: CK_ULONG = 4;
+        let mut inner_subs = [CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: &mut class as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        }];
+        let mut mid = [wrap_template_attr(&mut inner_subs)];
+        let outer = [wrap_template_attr(&mut mid)];
+        assert_eq!(
+            unsafe { ck_attrs_to_rust_checked(outer.as_ptr(), 1) }.unwrap_err(),
+            CkRv::ATTRIBUTE_VALUE_INVALID
+        );
+    }
 }
 
 #[cfg(test)]

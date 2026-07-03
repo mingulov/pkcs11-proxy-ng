@@ -91,6 +91,9 @@ pub(super) fn update_template_from_ffi(
             Some(CkAttributeValue::Ulong(_)) => Some(std::mem::size_of::<cryptoki_sys::CK_ULONG>()),
             Some(CkAttributeValue::Bytes(bytes)) => Some(bytes.len()),
             Some(CkAttributeValue::String(value)) => Some(value.len()),
+            // The legacy C_GetAttributeValue path does not carry nested
+            // templates (the exact path does); treat as absent.
+            Some(CkAttributeValue::NestedTemplate(_)) => None,
         };
         let returned_len = src.ulValueLen as usize;
 

@@ -22,6 +22,13 @@ impl MockBackend {
             CkAttributeValue::Ulong(value) => self.abi().encode_ulong(*value),
             CkAttributeValue::Bytes(bytes) => bytes.clone(),
             CkAttributeValue::String(value) => value.as_bytes().to_vec(),
+            // Unreachable by construction: store_object_template converts
+            // nested-template VALUES into MockAttributeSlot::NestedTemplate,
+            // which the exact path serves structurally. Serve the backend-
+            // layout byte length equivalent defensively.
+            CkAttributeValue::NestedTemplate(subs) => {
+                vec![0; subs.len() * self.abi().attribute_stride()]
+            }
         }
     }
 
