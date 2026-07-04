@@ -385,7 +385,6 @@ where
 /// or message parameter **struct** only — not embedded variable-length data
 /// fields (seeds, labels, AADs, IVs, etc.) which are data, not structs, and
 /// are bounded by `MAX_SERIALIZABLE_BYTES`.
-
 pub(crate) const MAX_MECHANISM_PARAM_STRUCT_LEN: usize = 65_536;
 
 mod mechanism_read;

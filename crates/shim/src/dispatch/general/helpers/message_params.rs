@@ -3,7 +3,6 @@
 //! back (incl. the bits-derived-length wild-read guards).
 
 use cryptoki_sys::*;
-use pkcs11_proxy_ng_types::*;
 
 use super::*;
 
