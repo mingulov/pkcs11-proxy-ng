@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/audit",
     "crates/types",
     "crates/proto",
     "crates/backend",
@@ -53,6 +54,9 @@ tonic-health = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 sha2 = "0.10"
+serde_json = "1"
+hex = "0.4"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 zeroize = { version = "1", features = ["derive"] }
 
 # Release profile tuned for size and runtime over build time. The shim
