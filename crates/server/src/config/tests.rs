@@ -739,3 +739,28 @@ fn should_exit_on_stuck_calls_policy() {
     assert!(should_exit_on_stuck_calls(4, Some(3)));
     assert!(!should_exit_on_stuck_calls(0, Some(1)));
 }
+
+#[test]
+fn resilience_absent_defaults_to_inert() {
+    let toml = "[backend]\nmodule = \"/dev/null\"\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.resilience.find_result_warn_threshold.is_none());
+    assert!(cfg.resilience.metrics_socket.is_none());
+}
+
+#[test]
+fn resilience_section_parses() {
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[resilience]
+find_result_warn_threshold = 500
+metrics_socket = \"/run/pkcs11-proxy/metrics.sock\"
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.resilience.find_result_warn_threshold, Some(500));
+    assert_eq!(
+        cfg.resilience.metrics_socket.as_deref(),
+        Some(std::path::Path::new("/run/pkcs11-proxy/metrics.sock"))
+    );
+}

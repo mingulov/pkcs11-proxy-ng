@@ -54,6 +54,8 @@ pub struct DaemonConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub mechanisms: MechanismsConfig,
+    #[serde(default)]
+    pub resilience: ResilienceConfig,
 }
 
 /// Mechanism registry source. The daemon loads the file at startup and
@@ -294,6 +296,18 @@ pub struct ListenerGroup {
     pub remote: Option<TcpListenerConfig>,
 }
 
+/// Opt-in pathological-object-population detection + local metrics endpoint.
+/// Absent section => all fields `None` => feature inert (byte-identical to today).
+#[derive(Debug, Deserialize, Default)]
+pub struct ResilienceConfig {
+    /// If set, a `C_FindObjects` result larger than this is counted as a
+    /// pathological-population event and logged. Count-only: NO extra backend calls.
+    pub find_result_warn_threshold: Option<usize>,
+    /// If set, a Unix-domain metrics endpoint (mode 0600) is bound here, serving
+    /// Prometheus text on `GET /metrics`.
+    pub metrics_socket: Option<PathBuf>,
+}
+
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum UnixAuthMode {
@@ -452,6 +466,14 @@ impl DaemonConfig {
                         allow_insecure_tcp,
                     });
                 }
+            }
+        }
+        if let Ok(v) = std::env::var("PKCS11_PROXY_RESILIENCE_METRICS_SOCKET") {
+            self.resilience.metrics_socket = Some(std::path::PathBuf::from(v));
+        }
+        if let Ok(v) = std::env::var("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD") {
+            if let Ok(n) = v.parse::<usize>() {
+                self.resilience.find_result_warn_threshold = Some(n);
             }
         }
     }
