@@ -106,17 +106,20 @@ where
 /// is cancelled by tonic's server-level timeout. Without this guard, a race
 /// between tonic's timeout and `spawn_backend`'s internal timeout can leak
 /// IN_FLIGHT counts, eventually latching the circuit breaker.
-struct InFlightGuard<'a> {
-    counter: &'a AtomicUsize,
+struct InFlightGuard {
+    counter: &'static AtomicUsize,
 }
 
-impl Drop for InFlightGuard<'_> {
+impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
-fn try_acquire_backend_call(counter: &AtomicUsize, max_calls: usize) -> Option<InFlightGuard<'_>> {
+fn try_acquire_backend_call(
+    counter: &'static AtomicUsize,
+    max_calls: usize,
+) -> Option<InFlightGuard> {
     let mut current = counter.load(Ordering::Relaxed);
 
     loop {
@@ -141,30 +144,62 @@ where
     T: Send + 'static,
     F: FnOnce() -> CkResult<T> + Send + 'static,
 {
+    spawn_backend_core(&IN_FLIGHT, backend_timeout(), max_concurrent_backend_calls(), operation)
+        .await
+}
+
+/// Timeout/breaker core of [`spawn_backend`], parameterized for tests.
+///
+/// The in-flight guard travels INTO the blocking task and drops when the
+/// FFI call actually returns — not when the caller's timeout fires. A
+/// wedged token therefore keeps its breaker slot: accumulated stuck calls
+/// trip the breaker (bounding leaked blocking threads at `max_calls`
+/// instead of the runtime's thread cap), and if the token later unsticks,
+/// the slots free and the daemon self-recovers without a restart.
+async fn spawn_backend_core<T, F>(
+    counter: &'static AtomicUsize,
+    timeout: Duration,
+    max_calls: usize,
+    operation: F,
+) -> Result<CkResult<T>, Status>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CkResult<T> + Send + 'static,
+{
     // Circuit breaker
-    let max_calls = max_concurrent_backend_calls();
-    let Some(_guard) = try_acquire_backend_call(&IN_FLIGHT, max_calls) else {
-        let current = IN_FLIGHT.load(Ordering::Relaxed);
+    let Some(guard) = try_acquire_backend_call(counter, max_calls) else {
+        let current = counter.load(Ordering::Relaxed);
         tracing::error!(
             in_flight = current,
             max = max_calls,
             "Backend circuit breaker tripped — too many in-flight calls"
         );
-        // A flood of breaker trips means the daemon is overloaded and
+        // A flood of breaker trips means the daemon is overloaded (or the
+        // backend is wedged and every slot is held by a stuck call) and
         // downstream traffic should be diverted — count as a failure
         // for the health gate.
         report_backend_outcome(false);
         return Ok(Err(CkRv::DEVICE_ERROR));
     };
 
-    let result = match tokio::time::timeout(backend_timeout(), spawn_task(operation)).await {
+    let task = spawn_task(move || {
+        // Hold the slot for the TRUE lifetime of the backend call: a
+        // blocking task always runs to completion, so the guard drops
+        // exactly when the FFI returns (even if the caller timed out or
+        // the gRPC future was cancelled long before).
+        let _guard = guard;
+        operation()
+    });
+
+    let result = match tokio::time::timeout(timeout, task).await {
         Ok(result) => result,
         Err(_elapsed) => {
             tracing::warn!(
-                timeout_secs = backend_timeout().as_secs(),
-                in_flight = IN_FLIGHT.load(Ordering::Relaxed),
-                "Backend call timed out. Consider increasing \
-                 proxy.request_timeout_secs or investigating HSM responsiveness."
+                timeout_secs = timeout.as_secs(),
+                in_flight = counter.load(Ordering::Relaxed),
+                "Backend call timed out; its breaker slot stays held until the \
+                 backend returns. Consider increasing proxy.request_timeout_secs \
+                 or investigating HSM responsiveness."
             );
             // A timeout is a transport-level failure of the daemon's own making.
             // Report it to the readiness gauge HERE, then return early, so the
@@ -181,7 +216,6 @@ where
     report_backend_outcome(healthy);
 
     result
-    // _guard drops here (or when Future is cancelled) → IN_FLIGHT decremented
 }
 
 /// Classify a `spawn_backend` result as healthy (true) or unhealthy
@@ -645,6 +679,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stuck_backend_call_holds_breaker_slot_until_completion() {
+        // A call that outlives its timeout must KEEP its in-flight slot
+        // until the FFI actually returns: the breaker has to see wedged
+        // calls (a stuck token otherwise leaks unbounded blocking threads
+        // and the daemon cannot self-recover). Dedicated counter + short
+        // timeout keep this hermetic from the global IN_FLIGHT.
+        static STUCK_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let (unstick_tx, unstick_rx) = std::sync::mpsc::channel::<()>();
+
+        let result =
+            spawn_backend_core(&STUCK_TEST_COUNTER, Duration::from_millis(50), 8, move || {
+                let _ = unstick_rx.recv();
+                Ok(0u8)
+            })
+            .await;
+        assert_eq!(
+            result.expect("no transport error").unwrap_err(),
+            CkRv::DEVICE_ERROR,
+            "caller sees the timeout as DEVICE_ERROR"
+        );
+        assert_eq!(
+            STUCK_TEST_COUNTER.load(Ordering::Relaxed),
+            1,
+            "the wedged call must still hold its breaker slot after timeout"
+        );
+
+        // The token unsticks: the slot frees WITHOUT a daemon restart.
+        unstick_tx.send(()).expect("receiver alive");
+        for _ in 0..200 {
+            if STUCK_TEST_COUNTER.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            STUCK_TEST_COUNTER.load(Ordering::Relaxed),
+            0,
+            "slot must free once the stuck call finally returns"
+        );
+    }
+
+    #[tokio::test]
     async fn spawn_backend_returns_ok_for_fast_operation() {
         let result = spawn_backend(|| Ok(42u64)).await;
         let inner = result.expect("spawn_backend should not return Status error");
@@ -660,7 +736,9 @@ mod tests {
 
     #[test]
     fn backend_call_acquire_enforces_limit_without_overshoot() {
-        let counter = std::sync::atomic::AtomicUsize::new(0);
+        // The guard is 'static so it can travel into blocking tasks.
+        static LIMIT_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let counter = &LIMIT_TEST_COUNTER;
         let max = 3;
 
         let first = try_acquire_backend_call(&counter, max).expect("first slot");
