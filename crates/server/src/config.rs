@@ -471,10 +471,10 @@ impl DaemonConfig {
         if let Ok(v) = std::env::var("PKCS11_PROXY_RESILIENCE_METRICS_SOCKET") {
             self.resilience.metrics_socket = Some(std::path::PathBuf::from(v));
         }
-        if let Ok(v) = std::env::var("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD") {
-            if let Ok(n) = v.parse::<usize>() {
-                self.resilience.find_result_warn_threshold = Some(n);
-            }
+        if let Ok(v) = std::env::var("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD")
+            && let Ok(n) = v.parse::<usize>()
+        {
+            self.resilience.find_result_warn_threshold = Some(n);
         }
     }
 
