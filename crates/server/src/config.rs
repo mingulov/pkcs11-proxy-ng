@@ -66,6 +66,8 @@ pub struct DaemonConfig {
     pub mechanisms: MechanismsConfig,
     #[serde(default)]
     pub resilience: ResilienceConfig,
+    #[serde(default)]
+    pub audit: AuditConfig,
 }
 
 /// Mechanism registry source. The daemon loads the file at startup and
@@ -316,6 +318,42 @@ pub struct ResilienceConfig {
     /// If set, a Unix-domain metrics endpoint (mode 0600) is bound here, serving
     /// Prometheus text on `GET /metrics`.
     pub metrics_socket: Option<PathBuf>,
+}
+
+/// Opt-in tamper-evident audit stream (ADR-0012, G1). Off unless `dir` is set.
+#[derive(Debug, Deserialize)]
+pub struct AuditConfig {
+    /// Directory the daemon writes rotated JSONL audit logs + the anchor into.
+    /// Absent => audit disabled (byte-identical to today).
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+    /// Ed25519 private key (raw 32-byte seed) used to sign periodic checkpoints.
+    /// Absent => hash chain only (no signed checkpoints). Loaded, never generated.
+    #[serde(default)]
+    pub signing_key: Option<PathBuf>,
+    #[serde(default = "default_audit_rotate_max_bytes")]
+    pub rotate_max_bytes: u64,
+    #[serde(default = "default_audit_rotate_keep_files")]
+    pub rotate_keep_files: u32,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            signing_key: None,
+            rotate_max_bytes: default_audit_rotate_max_bytes(),
+            rotate_keep_files: default_audit_rotate_keep_files(),
+        }
+    }
+}
+
+fn default_audit_rotate_max_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
+fn default_audit_rotate_keep_files() -> u32 {
+    10
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]

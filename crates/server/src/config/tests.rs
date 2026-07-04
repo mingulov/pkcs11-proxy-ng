@@ -781,3 +781,29 @@ metrics_socket = \"/run/pkcs11-proxy/metrics.sock\"
         Some(std::path::Path::new("/run/pkcs11-proxy/metrics.sock"))
     );
 }
+
+#[test]
+fn audit_absent_defaults_to_off() {
+    let cfg: DaemonConfig = toml::from_str("[backend]\nmodule = \"/dev/null\"\n").unwrap();
+    assert!(cfg.audit.dir.is_none());
+    assert!(cfg.audit.signing_key.is_none());
+    assert_eq!(cfg.audit.rotate_max_bytes, 64 * 1024 * 1024);
+    assert_eq!(cfg.audit.rotate_keep_files, 10);
+}
+
+#[test]
+fn audit_section_parses() {
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[audit]
+dir = \"/var/log/pkcs11-proxy/audit\"
+signing_key = \"/etc/pkcs11-proxy/audit-ed25519.key\"
+rotate_max_bytes = 1048576
+rotate_keep_files = 3
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.audit.dir.as_deref(), Some(std::path::Path::new("/var/log/pkcs11-proxy/audit")));
+    assert_eq!(cfg.audit.rotate_max_bytes, 1_048_576);
+    assert_eq!(cfg.audit.rotate_keep_files, 3);
+}
