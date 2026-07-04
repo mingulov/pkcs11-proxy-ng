@@ -685,3 +685,57 @@ module = "/dev/null"
     assert_eq!(config.proxy.http2_keepalive_interval_secs, 15);
     assert_eq!(config.proxy.http2_keepalive_timeout_secs, 5);
 }
+
+#[test]
+fn max_stuck_backend_calls_defaults_to_none() {
+    let toml = r#"
+[backend]
+module = "/dev/null"
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(config.proxy.max_stuck_backend_calls, None);
+}
+
+#[test]
+fn max_stuck_backend_calls_parses_when_set() {
+    let toml = r#"
+[backend]
+module = "/dev/null"
+
+[proxy]
+max_stuck_backend_calls = 16
+
+[listener.remote]
+bind = "127.0.0.1:7512"
+auth = "none"
+allow_insecure_tcp = true
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(config.proxy.max_stuck_backend_calls, Some(16));
+    config.validate().expect("positive limit is valid");
+}
+
+#[test]
+fn max_stuck_backend_calls_zero_is_rejected() {
+    let toml = r#"
+[backend]
+module = "/dev/null"
+
+[proxy]
+max_stuck_backend_calls = 0
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err();
+    assert!(err.contains("max_stuck_backend_calls"), "{err}");
+}
+
+#[test]
+fn should_exit_on_stuck_calls_policy() {
+    // Disabled: never exit.
+    assert!(!should_exit_on_stuck_calls(0, None));
+    assert!(!should_exit_on_stuck_calls(1_000_000, None));
+    // Enabled: exit strictly above the limit.
+    assert!(!should_exit_on_stuck_calls(3, Some(3)));
+    assert!(should_exit_on_stuck_calls(4, Some(3)));
+    assert!(!should_exit_on_stuck_calls(0, Some(1)));
+}

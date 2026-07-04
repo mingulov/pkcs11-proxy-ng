@@ -201,6 +201,22 @@ pub struct ProxyConfig {
     /// operation the way a module-returned error would (documented divergence).
     #[serde(default)]
     pub sanitize_inputs: bool,
+    /// If set, the daemon exits (nonzero) once the number of stuck backend
+    /// calls — calls that outlived `request_timeout_secs` and are still
+    /// wedged inside the token — exceeds this limit, so a supervisor
+    /// (systemd/k8s) restarts it. This is the restart-based recovery for a
+    /// PERMANENTLY wedged token (see ADR-0011 A2 alignment); opt-in only.
+    /// Unset (default) = never self-exit; the daemon keeps serving other
+    /// tokens and self-recovers if the wedged one unsticks.
+    #[serde(default)]
+    pub max_stuck_backend_calls: Option<u64>,
+}
+
+/// Whether the daemon should self-exit given the stuck-call gauge and the
+/// configured limit. Pure so the policy is unit-tested without a process
+/// exit; the single caller performs the actual exit.
+pub fn should_exit_on_stuck_calls(stuck: u64, limit: Option<u64>) -> bool {
+    matches!(limit, Some(max) if stuck > max)
 }
 
 impl Default for ProxyConfig {
@@ -222,6 +238,7 @@ impl Default for ProxyConfig {
             rate_limit_get_backend_interfaces: default_rate_limit_get_backend_interfaces(),
             rate_limit_window_secs: default_rate_limit_window_secs(),
             sanitize_inputs: false,
+            max_stuck_backend_calls: None,
         }
     }
 }
@@ -459,6 +476,14 @@ impl DaemonConfig {
         // Validate max_concurrent_backend_calls
         if self.proxy.max_concurrent_backend_calls == 0 {
             return Err("proxy.max_concurrent_backend_calls must be > 0".into());
+        }
+        // Validate max_stuck_backend_calls (opt-in; 0 would exit immediately
+        // on the first stuck call, which is never the intent — unset it to
+        // disable instead).
+        if self.proxy.max_stuck_backend_calls == Some(0) {
+            return Err(
+                "proxy.max_stuck_backend_calls must be > 0 (omit it to disable self-exit)".into()
+            );
         }
         // Validate max_blocking_threads
         if self.proxy.max_blocking_threads == 0 {

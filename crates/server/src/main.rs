@@ -345,6 +345,7 @@ fn spawn_eviction_task(
     eviction_interval_secs: u64,
     max_contexts: usize,
     max_concurrent_backend_calls: usize,
+    max_stuck_backend_calls: Option<u64>,
 ) {
     tokio::spawn(async move {
         let mut interval =
@@ -368,6 +369,23 @@ fn spawn_eviction_task(
                     max = max_concurrent_backend_calls,
                     "backend call usage above 80%"
                 );
+            }
+
+            // Opt-in fail-fast: a token wedged past the configured stuck-call
+            // limit is a permanent condition the daemon can only escape via a
+            // supervisor restart. Exit nonzero so systemd/k8s recycles us.
+            let stuck = server::grpc_service::service_utils::stuck_backend_calls();
+            if stuck > 0 {
+                tracing::warn!(stuck_calls = stuck, "backend calls wedged past their timeout");
+            }
+            if config::should_exit_on_stuck_calls(stuck as u64, max_stuck_backend_calls) {
+                tracing::error!(
+                    stuck_calls = stuck,
+                    limit = ?max_stuck_backend_calls,
+                    "stuck backend calls exceeded proxy.max_stuck_backend_calls; \
+                     exiting for supervisor restart"
+                );
+                std::process::exit(70); // EX_SOFTWARE
             }
         }
     });
@@ -532,6 +550,7 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         config.proxy.eviction_interval_secs,
         config.proxy.max_contexts,
         config.proxy.max_concurrent_backend_calls,
+        config.proxy.max_stuck_backend_calls,
     );
 
     tracing::info!(
