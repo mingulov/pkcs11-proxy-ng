@@ -2249,3 +2249,33 @@ fn decrypt_message_rejects_null_aad_with_nonzero_len() {
         CkRv::ARGUMENTS_BAD,
     );
 }
+
+#[test]
+fn mechanism_info_reports_spec_grounded_key_sizes() {
+    // AES: 16/24/32-byte keys (bytes, per the OASIS convention the mock
+    // follows for symmetric key sizes); DES3: fixed 24. Mechanisms whose
+    // spec tables define no size keep the mock's generic default.
+    let backend = MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![
+            CkMechanismType::AES_KEY_GEN,
+            CkMechanismType::DES3_KEY_GEN,
+            CkMechanismType::RSA_PKCS_KEY_PAIR_GEN,
+        ],
+    );
+    backend.initialize().unwrap();
+
+    let aes = backend.get_mechanism_info(CkSlotId(0), CkMechanismType::AES_KEY_GEN).unwrap();
+    assert_eq!(aes.min_key_size, 16);
+    assert_eq!(aes.max_key_size, 32);
+
+    let des3 = backend.get_mechanism_info(CkSlotId(0), CkMechanismType::DES3_KEY_GEN).unwrap();
+    assert_eq!(des3.min_key_size, 24);
+    assert_eq!(des3.max_key_size, 24);
+
+    // A mechanism without a spec-grounded size table keeps the generic
+    // default (asymmetric key-pair gen).
+    let rsa =
+        backend.get_mechanism_info(CkSlotId(0), CkMechanismType::RSA_PKCS_KEY_PAIR_GEN).unwrap();
+    assert_eq!((rsa.min_key_size, rsa.max_key_size), (2048, 4096));
+}

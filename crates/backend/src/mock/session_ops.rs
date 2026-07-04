@@ -125,9 +125,10 @@ impl MockBackend {
         if !self.mechanisms_for_slot(slot_id).contains(&mech) {
             return Err(CkRv::MECHANISM_INVALID);
         }
+        let (min_key_size, max_key_size) = mock_mechanism_key_sizes(mech).unwrap_or((2048, 4096));
         Ok(CkMechanismInfo {
-            min_key_size: 2048,
-            max_key_size: 4096,
+            min_key_size,
+            max_key_size,
             flags: CkMechanismFlags(mock_mechanism_workflow_flags(mech)),
         })
     }
@@ -252,6 +253,35 @@ impl MockBackend {
             queue = self.slot_event_condvar.wait(queue).unwrap();
         }
     }
+}
+
+/// Spec-grounded `(min_key_size, max_key_size)` for mechanisms whose
+/// OASIS tables define concrete sizes. Symmetric mechanisms report key
+/// sizes in BYTES (the convention SoftHSM and most providers follow);
+/// mechanisms with no defined size return `None` so `mechanism_info`
+/// keeps its generic default. Source-grounded metadata (cited by the
+/// OASIS coverage inventory) — extend only with spec-backed values.
+pub(super) fn mock_mechanism_key_sizes(mech: CkMechanismType) -> Option<(u64, u64)> {
+    use cryptoki_sys::*;
+    let v = mech.0;
+    Some(match v {
+        // AES: 128/192/256-bit keys.
+        x if x == CKM_AES_KEY_GEN as u64 => (16, 32),
+        x if x == CKM_AES_CBC as u64 => (16, 32),
+        x if x == CKM_AES_ECB as u64 => (16, 32),
+        x if x == CKM_AES_GCM as u64 => (16, 32),
+        x if x == CKM_AES_CTR as u64 => (16, 32),
+        x if x == CKM_AES_CMAC as u64 => (16, 32),
+        x if x == CKM_AES_KEY_WRAP as u64 => (16, 32),
+        // DES3: fixed triple-DES key.
+        x if x == CKM_DES3_KEY_GEN as u64 => (24, 24),
+        x if x == CKM_DES3_CBC as u64 => (24, 24),
+        x if x == CKM_DES3_ECB as u64 => (24, 24),
+        // ChaCha20 / Salsa20: fixed 256-bit.
+        x if x == CKM_CHACHA20_KEY_GEN as u64 => (32, 32),
+        x if x == CKM_SALSA20_KEY_GEN as u64 => (32, 32),
+        _ => return None,
+    })
 }
 
 pub(super) fn mock_mechanism_workflow_flags(mech: CkMechanismType) -> u64 {
