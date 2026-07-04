@@ -57,13 +57,14 @@ COPY crates/types/Cargo.toml crates/types/Cargo.toml
 COPY crates/proto/Cargo.toml crates/proto/Cargo.toml
 COPY crates/proto/build.rs crates/proto/build.rs
 COPY crates/backend/Cargo.toml crates/backend/Cargo.toml
+COPY crates/audit/Cargo.toml crates/audit/Cargo.toml
 COPY crates/server/Cargo.toml crates/server/Cargo.toml
 COPY crates/client/Cargo.toml crates/client/Cargo.toml
 COPY crates/shim/Cargo.toml crates/shim/Cargo.toml
 COPY crates/cli/Cargo.toml crates/cli/Cargo.toml
 
 # Stub source files for dependency pre-compilation
-RUN for crate in types proto backend client shim; do \
+RUN for crate in types proto backend audit client shim; do \
         mkdir -p "crates/$crate/src" && echo "" > "crates/$crate/src/lib.rs"; \
     done && \
     mkdir -p crates/server/src && echo "fn main(){}" > crates/server/src/main.rs && echo "" > crates/server/src/lib.rs && \

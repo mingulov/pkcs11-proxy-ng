@@ -365,6 +365,12 @@ fn main() -> Result<(), BoxError> {
 async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     validate_runtime_listener_support(&config)?;
 
+    // Initialise the audit sink (off by default → Ok(None); zero behaviour change
+    // when [audit] is absent or audit.dir is not set).
+    let audit_sink = server::audit::spawn_audit_sink(&config.audit)
+        .map_err(|e| format!("audit sink failed to initialise: {e}"))?;
+    // PR2: handlers will call audit_sink.emit(...) once gRPC service wiring lands.
+
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health::set_not_serving(&mut health_reporter).await;
 
@@ -538,6 +544,11 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         let _ = std::fs::remove_file(&uds_cfg.path);
     }
     serve_result?;
+
+    // Flush the audit log before finalising the backend.
+    if let Some(ref s) = audit_sink {
+        let _ = s.flush().await;
+    }
 
     backend.finalize().map_err(|rv| format!("C_Finalize failed: {rv}"))?;
     tracing::info!("Daemon stopped");

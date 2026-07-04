@@ -81,7 +81,7 @@ fn read_file(path: &Path, field: &str) -> Result<Vec<u8>, String> {
 ///
 /// World-readable is allowed (these are public material). Group-
 /// writable is allowed for kubernetes-style group-shared mounts.
-fn check_public_file_perms(path: &Path, field: &str) -> Result<(), String> {
+pub(crate) fn check_public_file_perms(path: &Path, field: &str) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
