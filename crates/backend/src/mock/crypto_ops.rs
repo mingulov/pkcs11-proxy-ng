@@ -9,7 +9,7 @@ use pkcs11_proxy_ng_types::{CkOutputBufferResult, CkParameterRoundtripResult};
 const MOCK_STATE_PREFIX: [u8; 2] = [0xC9, 0xEA];
 /// Mock signature length (a real token's length depends on the key; the
 /// mock keeps it fixed so two-call buffer tests stay simple).
-const MOCK_SIGN_LEN: usize = 2;
+pub(super) const MOCK_SIGN_LEN: usize = 2;
 pub(super) const MOCK_VERIFY_RECOVER_OUTPUT: [u8; 2] = [0xBE, 0xEF];
 pub(super) const MOCK_WRAP_OUTPUT: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
 pub(super) const MOCK_ENCAPSULATE_OUTPUT: [u8; 8] =

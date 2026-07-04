@@ -1404,15 +1404,16 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_core_workflow
 
         backend.sign_init(session, &mechanism, key).unwrap();
         backend.sign_update(session, CkInBuf::Bytes(b"part")).unwrap();
+        let multipart_signature = backend.sign_final(session).unwrap();
         assert!(
-            !backend.sign_final(session).unwrap().is_empty(),
+            !multipart_signature.is_empty(),
             "multipart sign output for 0x{:08X}",
             mechanism_type.0
         );
 
         backend.verify_init(session, &mechanism, key).unwrap();
         backend.verify_update(session, CkInBuf::Bytes(b"part")).unwrap();
-        backend.verify_final(session, CkInBuf::Bytes(&signature)).unwrap();
+        backend.verify_final(session, CkInBuf::Bytes(&multipart_signature)).unwrap();
 
         backend.digest_init(session, &mechanism).unwrap();
         let digest = backend.digest(session, CkInBuf::Bytes(b"data")).unwrap();
@@ -1590,15 +1591,20 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
         let key = backend.create_object(session, &[]).unwrap();
+        backend.sign_init(session, &mechanism, key).unwrap();
+        let signature = backend.sign(session, CkInBuf::Bytes(b"data")).unwrap();
         backend.verify_init(session, &mechanism, key).unwrap();
-        backend.verify(session, CkInBuf::Bytes(b"data"), CkInBuf::Bytes(b"signature")).unwrap();
+        backend.verify(session, CkInBuf::Bytes(b"data"), CkInBuf::Bytes(&signature)).unwrap();
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
         let key = backend.create_object(session, &[]).unwrap();
+        backend.sign_init(session, &mechanism, key).unwrap();
+        backend.sign_update(session, CkInBuf::Bytes(b"part")).unwrap();
+        let multipart_signature = backend.sign_final(session).unwrap();
         backend.verify_init(session, &mechanism, key).unwrap();
         backend.verify_update(session, CkInBuf::Bytes(b"part")).unwrap();
-        backend.verify_final(session, CkInBuf::Bytes(b"signature")).unwrap();
+        backend.verify_final(session, CkInBuf::Bytes(&multipart_signature)).unwrap();
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();

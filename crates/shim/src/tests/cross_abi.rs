@@ -551,3 +551,97 @@ fn nested_template_input_round_trips_via_every_template_call() {
         assert_wrap_template_holds_class(abi, shim.session, target, 4, "set_attribute_value");
     }
 }
+
+#[test]
+fn sign_then_verify_round_trips_through_the_proxy_cross_abi() {
+    // A2 lossless-loop: the mock now VERIFIES (signature must reproduce
+    // the sign echo of the data). A sign->verify round-trip through the
+    // full shim->gRPC->daemon stack therefore proves no byte was lost or
+    // corrupted in either direction — on foreign-ABI daemons too.
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (_daemon, shim) = session_on(abi);
+        let key = create_object(shim.session);
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_RSA_PKCS,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let data = b"cross-abi integrity";
+
+        assert_eq!(
+            unsafe { dispatch::general::c_sign_init(shim.session, &mut mechanism, key) },
+            CKR_OK as CK_RV,
+            "{abi:?} C_SignInit"
+        );
+        let mut sig_len: CK_ULONG = 0;
+        assert_eq!(
+            unsafe {
+                dispatch::general::c_sign(
+                    shim.session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    data.len() as CK_ULONG,
+                    std::ptr::null_mut(),
+                    &mut sig_len,
+                )
+            },
+            CKR_OK as CK_RV,
+            "{abi:?} C_Sign size query"
+        );
+        let mut signature = vec![0u8; sig_len as usize];
+        assert_eq!(
+            unsafe {
+                dispatch::general::c_sign(
+                    shim.session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    data.len() as CK_ULONG,
+                    signature.as_mut_ptr(),
+                    &mut sig_len,
+                )
+            },
+            CKR_OK as CK_RV,
+            "{abi:?} C_Sign"
+        );
+
+        // The genuine signature verifies.
+        assert_eq!(
+            unsafe { dispatch::general::c_verify_init(shim.session, &mut mechanism, key) },
+            CKR_OK as CK_RV,
+            "{abi:?} C_VerifyInit"
+        );
+        assert_eq!(
+            unsafe {
+                dispatch::general::c_verify(
+                    shim.session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    data.len() as CK_ULONG,
+                    signature.as_ptr() as CK_BYTE_PTR,
+                    sig_len,
+                )
+            },
+            CKR_OK as CK_RV,
+            "{abi:?} genuine signature verifies through the proxy"
+        );
+
+        // A tampered signature is rejected — the loop actually checks.
+        let mut tampered = signature.clone();
+        tampered[0] ^= 0x01;
+        assert_eq!(
+            unsafe { dispatch::general::c_verify_init(shim.session, &mut mechanism, key) },
+            CKR_OK as CK_RV,
+        );
+        assert_eq!(
+            unsafe {
+                dispatch::general::c_verify(
+                    shim.session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    data.len() as CK_ULONG,
+                    tampered.as_ptr() as CK_BYTE_PTR,
+                    sig_len,
+                )
+            },
+            CKR_SIGNATURE_INVALID as CK_RV,
+            "{abi:?} a corrupted signature is rejected"
+        );
+    }
+}

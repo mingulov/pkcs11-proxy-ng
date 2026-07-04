@@ -1298,17 +1298,37 @@ impl Pkcs11Backend for MockBackend {
         self.init_cancel_impl(s, MultiPartOp::Verify)
     }
     fn verify(&self, s: CkSessionHandle, d: CkInBuf<'_>, sig: CkInBuf<'_>) -> CkResult<()> {
-        let _ = self.resolve_input(d)?;
-        let _ = self.resolve_input(sig)?;
-        self.verify_impl(s)
+        let data = self.resolve_input(d)?;
+        let signature = self.resolve_input(sig)?;
+        // A real integrity check: the one-shot sign echo is a function of
+        // the signed data (see sign_impl), so a signature that does not
+        // reproduce echo("sign", data) means data or signature bytes were
+        // lost/corrupted between sign and verify.
+        let expected = echo::echo_bytes("sign", &[data], crypto_ops::MOCK_SIGN_LEN);
+        // Terminate the operation first (like a real token: C_Verify ends
+        // the op whether it returns OK or CKR_SIGNATURE_INVALID), then
+        // report the signature outcome.
+        self.verify_impl(s)?;
+        if signature != expected {
+            return Err(CkRv::SIGNATURE_INVALID);
+        }
+        Ok(())
     }
     fn verify_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
         let _ = self.resolve_input(p)?;
         self.verify_update_impl(s)
     }
     fn verify_final(&self, s: CkSessionHandle, sig: CkInBuf<'_>) -> CkResult<()> {
-        let _ = self.resolve_input(sig)?;
-        self.verify_final_impl(s)
+        let signature = self.resolve_input(sig)?;
+        // Multi-part verify accumulates no data (sign_final's echo is
+        // input-independent), so this stays a shape check against the
+        // sign-final echo rather than a data-integrity check.
+        let expected = echo::echo_bytes("sign-final", &[], crypto_ops::MOCK_SIGN_LEN);
+        self.verify_final_impl(s)?;
+        if signature != expected {
+            return Err(CkRv::SIGNATURE_INVALID);
+        }
+        Ok(())
     }
     fn digest_init(&self, s: CkSessionHandle, m: &CkMechanism) -> CkResult<()> {
         self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::DIGEST)?;
