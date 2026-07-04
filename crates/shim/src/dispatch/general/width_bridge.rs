@@ -226,3 +226,87 @@ mod tests {
         assert_eq!(bridge_output_value(SCALAR, Some(&backend), 8, 8, 4), Err(WidthError::Overflow));
     }
 }
+
+#[cfg(test)]
+mod law_tests {
+    //! Randomized law tests (seeded xorshift, dependency-free) for the
+    //! bridge's pure length/value functions across every width and stride
+    //! pairing — complements the pinned example matrix in `tests`.
+
+    use pkcs11_proxy_ng_types::CkAttributeType;
+
+    use super::*;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    // Miri interprets ~100x slower; a smaller sweep still exercises the
+    // laws' unsafe-free arithmetic paths there.
+    const CASES: usize = if cfg!(miri) { 48 } else { 4096 };
+    const STRIDES: [usize; 3] = [12, 16, 24];
+
+    #[test]
+    fn law_template_len_round_trips_across_all_stride_pairs() {
+        let mut rng = Rng(0x57F1_0000_0000_0001);
+        for _ in 0..CASES {
+            let entries = rng.next() % 4096;
+            for from in STRIDES {
+                for to in STRIDES {
+                    let there = bridge_template_request_len(entries * from as u64, from, to);
+                    assert_eq!(there, entries * to as u64, "{from}->{to}");
+                    let back = bridge_template_output_len(there, to, from);
+                    assert_eq!(back, entries * from as u64, "{from}->{to}->{from}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn law_ulong_output_bridge_preserves_value_and_element_count() {
+        let mut rng = Rng(0x0B1D_0000_0000_0002);
+        for _ in 0..CASES {
+            let n = 1 + (rng.next() % 4) as usize;
+            let values: Vec<u64> = (0..n).map(|_| rng.next() & 0xFFFF_FFFF).collect();
+            // Backend width 4 -> client width 8 (the widening direction).
+            let backend_bytes: Vec<u8> =
+                values.iter().flat_map(|v| (*v as u32).to_le_bytes()).collect();
+            let (out, len) = bridge_output_value(
+                CkAttributeType::ALLOWED_MECHANISMS,
+                Some(&backend_bytes),
+                backend_bytes.len() as u64,
+                4,
+                8,
+            )
+            .expect("widening never overflows");
+            assert_eq!(len, (n * 8) as u64);
+            let out = out.expect("value present");
+            for (i, v) in values.iter().enumerate() {
+                let got = u64::from_le_bytes(out[i * 8..(i + 1) * 8].try_into().expect("8"));
+                assert_eq!(got, *v, "element {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn law_opaque_attributes_are_never_rescaled() {
+        let mut rng = Rng(0x0AA0_0000_0000_0003);
+        for _ in 0..CASES {
+            let len = rng.next() % 100_000;
+            assert_eq!(
+                bridge_request_buffer_len(CkAttributeType::MODULUS, len, 8, 4),
+                len,
+                "opaque byte attributes are byte-addressed at every width"
+            );
+        }
+    }
+}

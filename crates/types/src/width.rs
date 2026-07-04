@@ -332,3 +332,117 @@ mod tests {
         assert_eq!(decanonicalize_ulong(canonicalize_ulong(7, 8), 4), Ok(7));
     }
 }
+
+#[cfg(test)]
+mod law_tests {
+    //! Randomized law tests (dependency-free): a seeded xorshift PRNG
+    //! sweeps a few thousand cases per law, complementing the pinned
+    //! example matrix above. Failures print the seed value so a case is
+    //! reproducible by pasting it into a pinned test.
+
+    use super::*;
+
+    /// Deterministic xorshift64* — good enough to sweep input space,
+    /// no dependency, identical on every arch/run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    // Miri interprets ~100x slower; a smaller sweep still exercises the
+    // laws' unsafe-free arithmetic paths there.
+    const CASES: usize = if cfg!(miri) { 48 } else { 4096 };
+
+    #[test]
+    fn law_reencode_round_trips_for_representable_values() {
+        // widen(narrow(x)) == x for narrow-representable arrays, and
+        // narrow(widen(x)) == x always — element counts preserved.
+        let mut rng = Rng(0xC0FF_EE00_0000_0001);
+        for _ in 0..CASES {
+            let n = (rng.next() % 5) as usize; // 0..=4 elements
+            let narrow_values: Vec<u64> = (0..n).map(|_| rng.next() & 0xFFFF_FFFF).collect();
+            let narrow_bytes: Vec<u8> =
+                narrow_values.iter().flat_map(|v| (*v as u32).to_le_bytes()).collect();
+
+            let widened = reencode_ulong(&narrow_bytes, 4, 8, ByteOrder::Little).expect("widen");
+            assert_eq!(widened.len(), n * 8, "element count preserved");
+            let back = reencode_ulong(&widened, 8, 4, ByteOrder::Little).expect("narrow back");
+            assert_eq!(back, narrow_bytes, "narrow∘widen == id (values {narrow_values:?})");
+        }
+    }
+
+    #[test]
+    fn law_reencode_preserves_every_element_value() {
+        let mut rng = Rng(0xDEC0_DE00_0000_0002);
+        for _ in 0..CASES {
+            let v = rng.next() & 0xFFFF_FFFF;
+            let widened =
+                reencode_ulong(&(v as u32).to_le_bytes(), 4, 8, ByteOrder::Little).expect("widen");
+            assert_eq!(u64::from_le_bytes(widened.try_into().expect("8 bytes")), v);
+        }
+    }
+
+    #[test]
+    fn law_reencode_rejects_any_unrepresentable_element() {
+        // D4: one element above the destination range poisons the array —
+        // never truncation, regardless of position.
+        let mut rng = Rng(0xBAD0_0000_0000_0003);
+        for _ in 0..CASES {
+            let n = 1 + (rng.next() % 4) as usize;
+            let poison_at = (rng.next() as usize) % n;
+            let mut bytes = Vec::new();
+            for i in 0..n {
+                let v: u64 = if i == poison_at {
+                    (rng.next() | 0x1_0000_0000).max(0x1_0000_0000)
+                } else {
+                    rng.next() & 0xFFFF_FFFF
+                };
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            assert_eq!(
+                reencode_ulong(&bytes, 8, 4, ByteOrder::Little),
+                Err(WidthError::Overflow),
+                "poison at {poison_at}/{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn law_translate_len_scales_by_element_count() {
+        let mut rng = Rng(0x1E11_0000_0000_0004);
+        for _ in 0..CASES {
+            let elements = rng.next() % 10_000;
+            for (from, to) in [(4usize, 8usize), (8, 4), (4, 4), (8, 8)] {
+                assert_eq!(
+                    translate_ulong_len(elements * from as u64, from, to),
+                    elements * to as u64
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn law_sentinel_canonicalization_round_trips() {
+        let mut rng = Rng(0x5E17_0000_0000_0005);
+        for width in [4usize, 8] {
+            // The native all-ones always maps to the canonical sentinel and back.
+            assert_eq!(canonicalize_ulong(all_ones(width), width), CANONICAL_UNAVAILABLE);
+            assert_eq!(decanonicalize_ulong(CANONICAL_UNAVAILABLE, width), Ok(all_ones(width)));
+            for _ in 0..CASES {
+                // Any non-sentinel representable value round-trips unchanged.
+                let v = rng.next() & (all_ones(width) >> 1); // below all-ones
+                let wire = canonicalize_ulong(v, width);
+                assert_eq!(wire, v, "non-sentinel values are untouched");
+                assert_eq!(decanonicalize_ulong(wire, width), Ok(v));
+            }
+        }
+    }
+}

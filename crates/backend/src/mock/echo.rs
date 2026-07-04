@@ -63,6 +63,38 @@ mod tests {
         );
     }
 
+    /// Randomized law sweep (seeded xorshift, dependency-free): arbitrary
+    /// domains/seeds stay deterministic, length-exact, and sensitive to
+    /// every seed byte.
+    #[test]
+    fn law_echo_is_stable_and_seed_sensitive_across_random_inputs() {
+        let mut state: u64 = 0xEC40_0000_0000_0001;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        let cases = if cfg!(miri) { 48 } else { 2048 };
+        for _ in 0..cases {
+            let seed: Vec<u8> = (0..(next() % 32)).map(|_| next() as u8).collect();
+            let len = (next() % 64) as usize;
+            let a = echo_bytes("law", &[&seed], len);
+            assert_eq!(a.len(), len);
+            assert_eq!(a, echo_bytes("law", &[&seed], len), "deterministic");
+            if !seed.is_empty() && len >= 8 {
+                let mut flipped = seed.clone();
+                let idx = (next() as usize) % flipped.len();
+                flipped[idx] ^= 0x01;
+                assert_ne!(
+                    a,
+                    echo_bytes("law", &[&flipped], len),
+                    "one flipped seed bit changes the output"
+                );
+            }
+        }
+    }
+
     #[test]
     fn echo_prefixes_are_consistent_across_lengths() {
         let long = echo_bytes("digest", &[b"x"], 32);
