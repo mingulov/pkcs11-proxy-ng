@@ -2,9 +2,9 @@ use super::*;
 
 #[test]
 fn over_threshold_classification() {
-    assert!(!is_over_threshold(0, None));          // detection off => never
+    assert!(!is_over_threshold(0, None)); // detection off => never
     assert!(!is_over_threshold(10_000, None));
-    assert!(!is_over_threshold(5, Some(5)));        // strictly greater
+    assert!(!is_over_threshold(5, Some(5))); // strictly greater
     assert!(is_over_threshold(6, Some(5)));
     assert!(!is_over_threshold(0, Some(0)));
     assert!(is_over_threshold(1, Some(0)));

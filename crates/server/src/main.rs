@@ -435,6 +435,13 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
 
     server::resilience::configure(config.resilience.find_result_warn_threshold);
 
+    if let Some(ref sock) = config.resilience.metrics_socket {
+        server::resilience::spawn_metrics_endpoint(sock.clone())
+            .await
+            .map_err(|e| format!("failed to bind metrics socket {}: {e}", sock.display()))?;
+        tracing::info!(path = %sock.display(), "resilience metrics endpoint bound");
+    }
+
     let (svc, context_manager, registry_source) = build_service(&config, &backend).await?;
 
     // Loud one-time warning if TCP listener is running without auth

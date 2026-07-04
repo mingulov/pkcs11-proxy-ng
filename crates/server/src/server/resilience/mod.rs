@@ -2,8 +2,8 @@
 //! snapshot for the local metrics endpoint. Pure in-process observation: never
 //! issues a backend call and never changes client-visible behaviour (design V15).
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 mod metrics_endpoint;
 pub use metrics_endpoint::spawn_metrics_endpoint;
@@ -64,7 +64,8 @@ pub struct Snapshot {
 pub fn snapshot() -> Snapshot {
     Snapshot {
         find_objects_total: FIND_OBJECTS_TOTAL.load(Ordering::Relaxed),
-        find_objects_over_threshold_total: FIND_OBJECTS_OVER_THRESHOLD_TOTAL.load(Ordering::Relaxed),
+        find_objects_over_threshold_total: FIND_OBJECTS_OVER_THRESHOLD_TOTAL
+            .load(Ordering::Relaxed),
         find_result_size_max: FIND_RESULT_SIZE_MAX.load(Ordering::Relaxed),
         get_attribute_value_total: GET_ATTRIBUTE_VALUE_TOTAL.load(Ordering::Relaxed),
     }
@@ -82,11 +83,18 @@ pub fn render_prometheus(s: &Snapshot) -> String {
         "pkcs11_proxy_find_objects_over_threshold_total {}\n",
         s.find_objects_over_threshold_total
     ));
-    o.push_str("# HELP pkcs11_proxy_find_result_size_max Largest single C_FindObjects result observed.\n");
+    o.push_str(
+        "# HELP pkcs11_proxy_find_result_size_max Largest single C_FindObjects result observed.\n",
+    );
     o.push_str("# TYPE pkcs11_proxy_find_result_size_max gauge\n");
     o.push_str(&format!("pkcs11_proxy_find_result_size_max {}\n", s.find_result_size_max));
-    o.push_str("# HELP pkcs11_proxy_get_attribute_value_total Total C_GetAttributeValue calls observed.\n");
+    o.push_str(
+        "# HELP pkcs11_proxy_get_attribute_value_total Total C_GetAttributeValue calls observed.\n",
+    );
     o.push_str("# TYPE pkcs11_proxy_get_attribute_value_total counter\n");
-    o.push_str(&format!("pkcs11_proxy_get_attribute_value_total {}\n", s.get_attribute_value_total));
+    o.push_str(&format!(
+        "pkcs11_proxy_get_attribute_value_total {}\n",
+        s.get_attribute_value_total
+    ));
     o
 }
