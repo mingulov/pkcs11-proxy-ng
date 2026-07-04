@@ -90,6 +90,17 @@ pub fn backend_in_flight() -> usize {
     IN_FLIGHT.load(Ordering::Relaxed)
 }
 
+/// Calls that outlived their timeout and have not yet returned from the
+/// backend — the "token wedged" signal, as opposed to plain overload
+/// (see `backend_in_flight`). Incremented when a call's timeout fires;
+/// decremented if/when the stuck FFI call finally returns.
+static STUCK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Current number of timed-out-but-still-running backend calls.
+pub fn stuck_backend_calls() -> usize {
+    STUCK_CALLS.load(Ordering::Relaxed)
+}
+
 pub(super) async fn spawn_task<T, F>(operation: F) -> Result<T, Status>
 where
     T: Send + 'static,
@@ -144,8 +155,14 @@ where
     T: Send + 'static,
     F: FnOnce() -> CkResult<T> + Send + 'static,
 {
-    spawn_backend_core(&IN_FLIGHT, backend_timeout(), max_concurrent_backend_calls(), operation)
-        .await
+    spawn_backend_core(
+        &IN_FLIGHT,
+        &STUCK_CALLS,
+        backend_timeout(),
+        max_concurrent_backend_calls(),
+        operation,
+    )
+    .await
 }
 
 /// Timeout/breaker core of [`spawn_backend`], parameterized for tests.
@@ -158,6 +175,7 @@ where
 /// the slots free and the daemon self-recovers without a restart.
 async fn spawn_backend_core<T, F>(
     counter: &'static AtomicUsize,
+    stuck_gauge: &'static AtomicUsize,
     timeout: Duration,
     max_calls: usize,
     operation: F,
@@ -182,21 +200,39 @@ where
         return Ok(Err(CkRv::DEVICE_ERROR));
     };
 
+    // Set when the caller's timeout fires: tells the task's completion
+    // path to decrement the stuck gauge it was counted into.
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timed_out_task = std::sync::Arc::clone(&timed_out);
     let task = spawn_task(move || {
         // Hold the slot for the TRUE lifetime of the backend call: a
         // blocking task always runs to completion, so the guard drops
         // exactly when the FFI returns (even if the caller timed out or
         // the gRPC future was cancelled long before).
         let _guard = guard;
-        operation()
+        let result = operation();
+        if timed_out_task.load(Ordering::Acquire) {
+            let remaining = stuck_gauge.fetch_sub(1, Ordering::Relaxed) - 1;
+            tracing::info!(
+                stuck_calls = remaining,
+                "a previously stuck backend call returned; slot released"
+            );
+        }
+        result
     });
 
     let result = match tokio::time::timeout(timeout, task).await {
         Ok(result) => result,
         Err(_elapsed) => {
+            // Order matters: count the call as stuck BEFORE publishing the
+            // flag its completion path reads, so the decrement can never
+            // run against a gauge that was not yet incremented.
+            let stuck = stuck_gauge.fetch_add(1, Ordering::Relaxed) + 1;
+            timed_out.store(true, Ordering::Release);
             tracing::warn!(
                 timeout_secs = timeout.as_secs(),
                 in_flight = counter.load(Ordering::Relaxed),
+                stuck_calls = stuck,
                 "Backend call timed out; its breaker slot stays held until the \
                  backend returns. Consider increasing proxy.request_timeout_secs \
                  or investigating HSM responsiveness."
@@ -686,14 +722,20 @@ mod tests {
         // and the daemon cannot self-recover). Dedicated counter + short
         // timeout keep this hermetic from the global IN_FLIGHT.
         static STUCK_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static STUCK_TEST_GAUGE: AtomicUsize = AtomicUsize::new(0);
         let (unstick_tx, unstick_rx) = std::sync::mpsc::channel::<()>();
 
-        let result =
-            spawn_backend_core(&STUCK_TEST_COUNTER, Duration::from_millis(50), 8, move || {
+        let result = spawn_backend_core(
+            &STUCK_TEST_COUNTER,
+            &STUCK_TEST_GAUGE,
+            Duration::from_millis(50),
+            8,
+            move || {
                 let _ = unstick_rx.recv();
                 Ok(0u8)
-            })
-            .await;
+            },
+        )
+        .await;
         assert_eq!(
             result.expect("no transport error").unwrap_err(),
             CkRv::DEVICE_ERROR,
@@ -718,6 +760,55 @@ mod tests {
             0,
             "slot must free once the stuck call finally returns"
         );
+    }
+
+    #[tokio::test]
+    async fn timed_out_call_is_counted_stuck_until_it_returns() {
+        // Operators must be able to distinguish "overloaded" from "token
+        // wedged": a call that outlived its timeout counts as stuck until
+        // the backend actually returns.
+        static GAUGE_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static GAUGE_TEST_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        let (unstick_tx, unstick_rx) = std::sync::mpsc::channel::<()>();
+
+        let result = spawn_backend_core(
+            &GAUGE_TEST_COUNTER,
+            &GAUGE_TEST_GAUGE,
+            Duration::from_millis(50),
+            8,
+            move || {
+                let _ = unstick_rx.recv();
+                Ok(0u8)
+            },
+        )
+        .await;
+        assert!(result.expect("no transport error").is_err());
+        assert_eq!(
+            GAUGE_TEST_GAUGE.load(Ordering::Relaxed),
+            1,
+            "a timed-out-but-running call counts as stuck"
+        );
+
+        unstick_tx.send(()).expect("receiver alive");
+        for _ in 0..200 {
+            if GAUGE_TEST_GAUGE.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            GAUGE_TEST_GAUGE.load(Ordering::Relaxed),
+            0,
+            "gauge drops when the call returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn fast_call_never_counts_as_stuck() {
+        let baseline = stuck_backend_calls();
+        let result = spawn_backend(|| Ok(7u8)).await;
+        assert_eq!(result.expect("ok").unwrap(), 7);
+        assert_eq!(stuck_backend_calls(), baseline);
     }
 
     #[tokio::test]
