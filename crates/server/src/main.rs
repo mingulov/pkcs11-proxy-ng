@@ -433,6 +433,8 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         config.proxy.rate_limit_get_backend_interfaces,
     );
 
+    server::resilience::configure(config.resilience.find_result_warn_threshold);
+
     let (svc, context_manager, registry_source) = build_service(&config, &backend).await?;
 
     // Loud one-time warning if TCP listener is running without auth

@@ -38,6 +38,7 @@ pub(super) async fn get_attribute_value(
     backend_ref: &Arc<dyn Pkcs11Backend>,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueResponse>, Status> {
+    crate::server::resilience::record_get_attribute_value();
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -82,6 +83,7 @@ pub(super) async fn get_attribute_value_exact(
     backend_ref: &Arc<dyn Pkcs11Backend>,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueExactResponse>, Status> {
+    crate::server::resilience::record_get_attribute_value();
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 

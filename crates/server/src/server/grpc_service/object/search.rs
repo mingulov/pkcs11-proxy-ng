@@ -66,18 +66,27 @@ pub(super) async fn find_objects(
     let result = spawn_backend(move || backend.find_objects(session, max_count)).await?;
 
     match result {
-        Ok(backend_objects) => match register_object_handles(ctx_mgr, &ctx_id, &backend_objects)
-            .await
-        {
-            Some(object_handles) => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
-                ck_rv: CkRv::OK.0,
-                object_handles,
-            })),
-            None => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
-                ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
-                object_handles: vec![],
-            })),
-        },
+        Ok(backend_objects) => {
+            if crate::server::resilience::observe_find_result(backend_objects.len()) {
+                // COUNT ONLY — never log the labels/IDs/values (design V15/D9 redaction).
+                tracing::warn!(
+                    object_count = backend_objects.len(),
+                    "pathological object population: C_FindObjects result exceeds resilience threshold"
+                );
+            }
+            match register_object_handles(ctx_mgr, &ctx_id, &backend_objects).await {
+                Some(object_handles) => {
+                    Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                        ck_rv: CkRv::OK.0,
+                        object_handles,
+                    }))
+                }
+                None => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                    ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+                    object_handles: vec![],
+                })),
+            }
+        }
         Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
             ck_rv: error.0,
             object_handles: vec![],
