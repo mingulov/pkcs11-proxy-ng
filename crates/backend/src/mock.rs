@@ -560,9 +560,34 @@ impl MockBackend {
         if template.is_empty() {
             return;
         }
-        let attrs =
+        let mut attrs =
             template.iter().filter_map(Self::template_entry_to_slot).collect::<HashMap<_, _>>();
+        Self::synthesize_value_from_value_len(handle, &mut attrs);
         self.attribute_store.lock().unwrap().insert(handle.0, attrs);
+    }
+
+    /// A key created with CKA_VALUE_LEN but no explicit CKA_VALUE gets a
+    /// deterministic CKA_VALUE of exactly that many bytes — matching a
+    /// real token, where generate/derive produce key material of the
+    /// requested length and it reads back at that size.
+    fn synthesize_value_from_value_len(
+        handle: CkObjectHandle,
+        attrs: &mut HashMap<u64, MockAttributeSlot>,
+    ) {
+        if attrs.contains_key(&CkAttributeType::VALUE.0) {
+            return;
+        }
+        let Some(MockAttributeSlot::Value(CkAttributeValue::Ulong(len))) =
+            attrs.get(&CkAttributeType::VALUE_LEN.0)
+        else {
+            return;
+        };
+        let len = *len as usize;
+        let value = echo::echo_bytes("key-value", &[&handle.0.to_le_bytes()], len);
+        attrs.insert(
+            CkAttributeType::VALUE.0,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(value)),
+        );
     }
 
     /// C_SetAttributeValue semantics: merge the template into the object's
