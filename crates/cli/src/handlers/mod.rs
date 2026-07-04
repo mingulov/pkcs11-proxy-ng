@@ -1,4 +1,5 @@
 mod admin;
+pub(crate) mod audit;
 mod crypto;
 mod objects;
 mod query;
@@ -32,6 +33,8 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
         Commands::ListMechanismNames => Ok(()),
         // Handled in main() before we initialize the PKCS#11 client.
         Commands::Health { .. } => Ok(()),
+        // Handled in main() before we initialize the PKCS#11 client.
+        Commands::Audit { .. } => Ok(()),
         Commands::FindObjects { slot_id, pin, label, verbose } => {
             objects::find_objects(client, slot_id, pin, label, verbose).await
         }
