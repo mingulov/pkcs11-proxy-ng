@@ -19,18 +19,13 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# shellcheck source=lib/live-harness.sh
+source "$(dirname "$0")/lib/live-harness.sh"
 
 WINE_IMAGE="${PKCS11_PROXY_WINE_IMAGE:-pkcs11check-wine}"
 
-# ── Skip-clean prerequisites ─────────────────────────────────────────
-SOFTHSM_MODULE=""
-for candidate in \
-    /usr/lib/softhsm/libsofthsm2.so \
-    /usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so \
-    /usr/lib64/pkcs11/libsofthsm2.so; do
-    [[ -f "$candidate" ]] && SOFTHSM_MODULE="$candidate" && break
-done
-if [[ -z "$SOFTHSM_MODULE" ]] || ! command -v softhsm2-util >/dev/null 2>&1; then
+harness_locate_softhsm64
+if [[ -z "$SOFTHSM_MODULE_64" ]] || ! command -v softhsm2-util >/dev/null 2>&1; then
     echo "SKIP: SoftHSM2 not installed"
     exit 0
 fi
@@ -47,7 +42,6 @@ if ! command -v cargo-xwin >/dev/null 2>&1; then
     exit 0
 fi
 
-# ── Build all artifacts ──────────────────────────────────────────────
 echo "--- building daemon (native), smoke client (native + Windows), shim .so/DLL ---"
 # Explicit shim builds: an `--example`-only invocation does NOT refresh the
 # shim cdylib, and a stale library silently tests old code.
@@ -58,56 +52,11 @@ cargo xwin build --target x86_64-pc-windows-msvc \
 cargo xwin build --target x86_64-pc-windows-msvc \
     -p pkcs11-proxy-ng-shim --example cross_width_smoke >/dev/null
 
-# ── Workspace: throwaway token + daemon on insecure localhost TCP ────
-WORK="$(mktemp -d /tmp/pkcs11-llp64-smoke.XXXXXX)"
-DAEMON_PID=""
-cleanup() {
-    if [[ -n "$DAEMON_PID" ]] && kill -0 "$DAEMON_PID" 2>/dev/null; then
-        kill "$DAEMON_PID" 2>/dev/null || true
-        wait "$DAEMON_PID" 2>/dev/null || true
-    fi
-    rm -rf "$WORK"
-}
-trap cleanup EXIT
+harness_init_workspace llp64-smoke
+mkdir -p "$WORK/stage"
 
-mkdir -p "$WORK/tokens" "$WORK/stage"
-export SOFTHSM2_CONF="$WORK/softhsm2.conf"
-cat > "$SOFTHSM2_CONF" <<EOF
-directories.tokendir = $WORK/tokens
-objectstore.backend = file
-log.level = ERROR
-EOF
-softhsm2-util --init-token --free --label llp64-smoke \
-    --so-pin 12345678 --pin 12345678 >/dev/null
-
-PORT=$(( 20000 + RANDOM % 20000 ))
-cat > "$WORK/proxy-config.toml" <<EOF
-[backend]
-module = "$SOFTHSM_MODULE"
-
-[proxy]
-mechanism_discovery = "transparent"
-
-[listener.remote]
-bind = "127.0.0.1:$PORT"
-auth = "none"
-allow_insecure_tcp = true
-EOF
-
-target/debug/pkcs11-proxy-ng "$WORK/proxy-config.toml" > "$WORK/daemon.log" 2>&1 &
-DAEMON_PID=$!
-for _ in $(seq 1 50); do
-    if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
-        exec 3>&- 3<&-
-        break
-    fi
-    if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
-        echo "FAIL: daemon exited during startup; log follows" >&2
-        cat "$WORK/daemon.log" >&2
-        exit 1
-    fi
-    sleep 0.2
-done
+PORT=$(harness_pick_port)
+harness_start_daemon target/debug/pkcs11-proxy-ng "$SOFTHSM_MODULE_64" "$PORT"
 ENDPOINT="http://127.0.0.1:$PORT"
 
 # ── Leg 1: native Linux control ──────────────────────────────────────

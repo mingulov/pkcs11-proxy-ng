@@ -18,6 +18,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# shellcheck source=lib/live-harness.sh
+source "$(dirname "$0")/lib/live-harness.sh"
 
 WINE_IMAGE="${PKCS11_PROXY_WINE_IMAGE:-pkcs11check-wine}"
 
@@ -42,16 +44,20 @@ cargo xwin build --target x86_64-pc-windows-msvc \
 cargo build -p pkcs11-proxy-ng-shim >/dev/null
 cargo build -p pkcs11-proxy-ng-shim --example cross_width_smoke >/dev/null
 
-WORK="$(mktemp -d /tmp/pkcs11-win-daemon.XXXXXX)"
 CONTAINER=""
-cleanup() {
+harness_extra_cleanup() {
     [[ -n "$CONTAINER" ]] && docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    rm -rf "$WORK"
 }
-trap cleanup EXIT
 
-PORT=$(( 20000 + RANDOM % 20000 ))
+# No local token here — the wine image bakes a provisioned SoftHSM2 token
+# (Z:\opt\softhsm2.conf; initialized at image build via the DLL's own C_*
+# exports because softhsm2-util.exe's DLL search is brittle under wine).
+# The smoke only creates session objects, so the baked token is untouched.
+WORK="$(mktemp -d /tmp/pkcs11-win-daemon.XXXXXX)"
+trap _harness_cleanup EXIT
 mkdir -p "$WORK/stage"
+
+PORT=$(harness_pick_port)
 cp target/x86_64-pc-windows-msvc/debug/pkcs11-proxy-ng.exe "$WORK/stage/"
 cp target/x86_64-pc-windows-msvc/debug/pkcs11_proxy_ng_shim.dll "$WORK/stage/"
 cp target/x86_64-pc-windows-msvc/debug/examples/cross_width_smoke.exe "$WORK/stage/"
@@ -70,12 +76,6 @@ auth = "none"
 allow_insecure_tcp = true
 EOF
 
-# One long-lived container running the daemon in the foreground. The image
-# bakes a provisioned SoftHSM2 token (Z:\opt\softhsm2.conf, initialized at
-# image build via the DLL's own C_* exports — softhsm2-util.exe's DLL
-# search is brittle under wine). SOFTHSM2_CONF is a Windows path because
-# the DLL resolves it with Win32 file APIs; the smoke only creates session
-# objects, so the baked token is not modified.
 echo "--- starting wine daemon (Windows SoftHSM2 backend) on :$PORT ---"
 CONTAINER=$(docker run -d --network host \
     -v "$WORK/stage:/stage:ro" \
