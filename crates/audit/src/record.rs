@@ -8,7 +8,7 @@ use crate::AuditError;
 ///
 /// `fail_closed` returns `true` for classes where a logging failure must
 /// abort the operation rather than silently continue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventClass {
     Auth,
