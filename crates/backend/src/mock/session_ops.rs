@@ -261,6 +261,37 @@ impl MockBackend {
 /// mechanisms with no defined size return `None` so `mechanism_info`
 /// keeps its generic default. Source-grounded metadata (cited by the
 /// OASIS coverage inventory) — extend only with spec-backed values.
+/// The CKK_* key type of the secret key produced by a symmetric
+/// `*_KEY_GEN` mechanism (from cryptoki_sys::CKK_*). `None` leaves the
+/// key type unset (mechanism has no single obvious secret key type).
+pub(super) fn mock_secret_key_type(mech: CkMechanismType) -> Option<u64> {
+    use cryptoki_sys::*;
+    let v = mech.0;
+    Some(match v {
+        x if x == CKM_AES_KEY_GEN as u64 => CKK_AES as u64,
+        x if x == CKM_DES3_KEY_GEN as u64 => CKK_DES3 as u64,
+        x if x == CKM_GENERIC_SECRET_KEY_GEN as u64 => CKK_GENERIC_SECRET as u64,
+        x if x == CKM_CHACHA20_KEY_GEN as u64 => CKK_CHACHA20 as u64,
+        _ => return None,
+    })
+}
+
+/// The CKK_* key type of the key pair produced by an asymmetric
+/// `*_KEY_PAIR_GEN` mechanism.
+pub(super) fn mock_pair_key_type(mech: CkMechanismType) -> Option<u64> {
+    use cryptoki_sys::*;
+    let v = mech.0;
+    Some(match v {
+        x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as u64 => CKK_RSA as u64,
+        x if x == CKM_EC_KEY_PAIR_GEN as u64 => CKK_EC as u64,
+        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as u64 => CKK_EC_EDWARDS as u64,
+        x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as u64 => CKK_EC_MONTGOMERY as u64,
+        x if x == CKM_DSA_KEY_PAIR_GEN as u64 => CKK_DSA as u64,
+        x if x == CKM_DH_PKCS_KEY_PAIR_GEN as u64 => CKK_DH as u64,
+        _ => return None,
+    })
+}
+
 pub(super) fn mock_mechanism_key_sizes(mech: CkMechanismType) -> Option<(u64, u64)> {
     use cryptoki_sys::*;
     let v = mech.0;

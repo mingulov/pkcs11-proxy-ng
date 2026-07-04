@@ -590,6 +590,32 @@ impl MockBackend {
         );
     }
 
+    /// Set CKA_CLASS/CKA_KEY_TYPE (+CKA_LOCAL = true) on a freshly
+    /// generated key from the mechanism, unless the template already
+    /// provided them — matching a real token, so read-after-generate
+    /// shows an authentic object. Creates the store entry if the object
+    /// was generated with an empty template.
+    fn synthesize_default_key_attributes(
+        &self,
+        handle: CkObjectHandle,
+        class: u64,
+        key_type: Option<u64>,
+    ) {
+        let mut store = self.attribute_store.lock().unwrap();
+        let attrs = store.entry(handle.0).or_default();
+        attrs
+            .entry(CkAttributeType::CLASS.0)
+            .or_insert_with(|| MockAttributeSlot::Value(CkAttributeValue::Ulong(class)));
+        if let Some(kt) = key_type {
+            attrs
+                .entry(CkAttributeType::KEY_TYPE.0)
+                .or_insert_with(|| MockAttributeSlot::Value(CkAttributeValue::Ulong(kt)));
+        }
+        attrs
+            .entry(CkAttributeType::LOCAL.0)
+            .or_insert_with(|| MockAttributeSlot::Value(CkAttributeValue::Bool(true)));
+    }
+
     /// C_SetAttributeValue semantics: merge the template into the object's
     /// existing attributes (unlike allocation, which starts fresh).
     fn merge_object_template(&self, handle: CkObjectHandle, template: &[CkAttribute]) {
@@ -1547,7 +1573,14 @@ impl Pkcs11Backend for MockBackend {
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
         self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::GENERATE)?;
-        self.generate_key_impl(session, template)
+        let handle = self.generate_key_impl(session, template)?;
+        // CKO_SECRET_KEY, with the key type derived from the mechanism.
+        self.synthesize_default_key_attributes(
+            handle,
+            0x0000_0004,
+            session_ops::mock_secret_key_type(m.mechanism_type),
+        );
+        Ok(handle)
     }
     fn create_object(
         &self,
@@ -1594,7 +1627,12 @@ impl Pkcs11Backend for MockBackend {
             m,
             CkMechanismFlags::GENERATE_KEY_PAIR,
         )?;
-        self.generate_key_pair_impl(session, public_template, private_template)
+        let (public, private) =
+            self.generate_key_pair_impl(session, public_template, private_template)?;
+        let key_type = session_ops::mock_pair_key_type(m.mechanism_type);
+        self.synthesize_default_key_attributes(public, 0x0000_0002, key_type); // CKO_PUBLIC_KEY
+        self.synthesize_default_key_attributes(private, 0x0000_0003, key_type); // CKO_PRIVATE_KEY
+        Ok((public, private))
     }
     fn wait_for_slot_event(&self, flags: u64) -> CkResult<CkSlotId> {
         self.wait_for_slot_event_impl(flags)

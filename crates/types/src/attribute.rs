@@ -28,6 +28,7 @@ impl CkAttributeType {
     pub const EC_POINT: Self = Self(0x00000181);
     pub const ID: Self = Self(0x00000102);
     pub const VALUE_LEN: Self = Self(0x00000161);
+    pub const LOCAL: Self = Self(0x00000163);
 
     /// `CKF_ARRAY_ATTRIBUTE` flag (0x40000000).
     const ARRAY_ATTRIBUTE_FLAG: u64 = 0x4000_0000;

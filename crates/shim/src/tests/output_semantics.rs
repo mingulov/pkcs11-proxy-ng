@@ -71,6 +71,7 @@ impl TestDaemon {
                     CkMechanismType::RSA_PKCS,
                     CkMechanismType::AES_ECB,
                     CkMechanismType::AES_GCM,
+                    CkMechanismType::AES_KEY_GEN,
                 ],
             )
             .with_abi(abi);
@@ -2752,9 +2753,9 @@ fn mechanism_list_count_reflects_filtered_count() {
         dispatch::general::c_get_mechanism_list(shim.slot_id, std::ptr::null_mut(), &mut count)
     };
     assert_eq!(rv, CKR_OK as CK_RV, "C_GetMechanismList(count-only)");
-    // MockBackend has 4 mechanisms: SHA256, RSA_PKCS, AES_ECB, AES_GCM.
+    // MockBackend has 5 mechanisms: SHA256, RSA_PKCS, AES_ECB, AES_GCM, AES_KEY_GEN.
     // Default registry is Transparent mode, so all 4 pass through.
-    assert_eq!(count, 4, "expected 4 mechanisms from MockBackend (transparent mode)");
+    assert_eq!(count, 5, "expected 5 mechanisms from MockBackend (transparent mode)");
 
     // Fetch into a correctly sized buffer.
     let mut mechs = vec![0 as CK_MECHANISM_TYPE; count as usize];

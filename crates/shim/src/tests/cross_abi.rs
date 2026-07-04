@@ -645,3 +645,44 @@ fn sign_then_verify_round_trips_through_the_proxy_cross_abi() {
         );
     }
 }
+
+#[test]
+fn generated_key_default_attributes_bridge_cross_abi() {
+    // Synthesized CKA_CLASS/CKA_KEY_TYPE are ulong attributes, so they
+    // must read back at the client width through the bridge on foreign
+    // ABIs — a client reading a generated key sees an authentic object.
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (_daemon, shim) = session_on(abi);
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_KEY_GEN,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut key = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_generate_key(
+                shim.session,
+                &mut mechanism,
+                std::ptr::null_mut(),
+                0,
+                &mut key,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} C_GenerateKey");
+
+        let w = std::mem::size_of::<CK_ULONG>();
+        let mut class_buf = vec![0u8; w];
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: class_buf.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: w as CK_ULONG,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, key, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} read CKA_CLASS");
+        let bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
+            class_buf.as_slice().try_into().expect("width");
+        assert_eq!(CK_ULONG::from_le_bytes(bytes), CKO_SECRET_KEY as CK_ULONG, "{abi:?} CKA_CLASS");
+    }
+}
