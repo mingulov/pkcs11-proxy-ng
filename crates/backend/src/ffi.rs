@@ -12,7 +12,7 @@ mod authenticated_wrap_ops;
 mod call_helpers;
 #[path = "ffi/crypto_ops.rs"]
 mod crypto_ops;
-#[path = "ffi/ffi_conversion.rs"]
+#[path = "ffi/ffi_conversion/mod.rs"]
 mod ffi_conversion;
 #[path = "ffi/function_field_tables.rs"]
 mod function_field_tables;
