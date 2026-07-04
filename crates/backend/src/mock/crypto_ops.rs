@@ -17,7 +17,9 @@ pub(super) const MOCK_ENCAPSULATE_OUTPUT: [u8; 8] =
 const MOCK_GCM_TAG_BYTE: u8 = 0xA5;
 const MOCK_CCM_MAC_BYTE: u8 = 0xC3;
 const MOCK_SALSA_CHACHA_TAG_BYTE: u8 = 0x5A;
-const MOCK_DIGEST_FINAL_LEN: usize = 4;
+/// Legacy compact digest length used when the active mechanism has no
+/// spec-defined output length (mock::output_lengths returns None).
+pub(super) const MOCK_DEFAULT_DIGEST_LEN: usize = 4;
 const MOCK_RANDOM_BYTE: u8 = 0x42;
 
 impl MockBackend {
@@ -153,9 +155,14 @@ impl MockBackend {
         self.state.lock().unwrap().begin_op(session, MultiPartOp::Digest)
     }
 
-    pub(super) fn digest_impl(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    pub(super) fn digest_impl(
+        &self,
+        session: CkSessionHandle,
+        data: &[u8],
+        len: usize,
+    ) -> CkResult<Vec<u8>> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Digest)?;
-        Ok(Self::digest_bytes(data))
+        Ok(super::echo::echo_bytes("digest", &[data], len))
     }
 
     pub(super) fn digest_update_impl(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -175,9 +182,13 @@ impl MockBackend {
         self.require_live_object(&state, key)
     }
 
-    pub(super) fn digest_final_impl(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub(super) fn digest_final_impl(
+        &self,
+        session: CkSessionHandle,
+        len: usize,
+    ) -> CkResult<Vec<u8>> {
         self.state.lock().unwrap().end_op(session, MultiPartOp::Digest)?;
-        Ok(vec![0; MOCK_DIGEST_FINAL_LEN])
+        Ok(super::echo::echo_bytes("digest-final", &[], len))
     }
 
     pub(super) fn encrypt_init_impl(
@@ -432,13 +443,24 @@ impl MockBackend {
         self.exact_terminal_output(session, MultiPartOp::VerifyRecover, &bytes, spec)
     }
 
+    /// Active digest output length for `session` (mechanism-defined, or
+    /// the legacy compact default). Captured at C_DigestInit.
+    pub(super) fn active_digest_len(&self, session: CkSessionHandle) -> usize {
+        self.session_digest_mechanism
+            .lock()
+            .unwrap()
+            .get(&session.0)
+            .and_then(|m| super::output_lengths::digest_len(*m))
+            .unwrap_or(MOCK_DEFAULT_DIGEST_LEN)
+    }
+
     pub(super) fn digest_exact_impl(
         &self,
         session: CkSessionHandle,
         data: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = Self::digest_bytes(data);
+        let bytes = super::echo::echo_bytes("digest", &[data], self.active_digest_len(session));
         self.exact_terminal_output(session, MultiPartOp::Digest, &bytes, spec)
     }
 
@@ -447,7 +469,7 @@ impl MockBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let bytes = super::echo::echo_bytes("digest-final", &[], MOCK_DIGEST_FINAL_LEN);
+        let bytes = super::echo::echo_bytes("digest-final", &[], self.active_digest_len(session));
         self.exact_terminal_output(session, MultiPartOp::Digest, &bytes, spec)
     }
 

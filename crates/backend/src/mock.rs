@@ -18,6 +18,7 @@ mod crypto_ops;
 pub mod echo;
 mod mock_types;
 mod object_ops;
+pub mod output_lengths;
 mod session_ops;
 mod state;
 
@@ -148,6 +149,9 @@ pub struct MockBackend {
     /// for gRPC tests that exercise the simple Encrypt/Decrypt response
     /// `mechanism_out` fields.
     session_mechanism_output: Mutex<HashMap<u64, CkMechanismParams>>,
+    /// Active digest mechanism per session, captured at C_DigestInit so
+    /// digest output length can match the mechanism (mock::output_lengths).
+    session_digest_mechanism: Mutex<HashMap<u64, CkMechanismType>>,
     /// Per-session signature captured by `C_VerifySignatureInit`.
     verify_signature_state: Mutex<HashMap<u64, Vec<u8>>>,
     /// Per-session accumulated data for `C_VerifySignatureUpdate`/`Final`.
@@ -220,6 +224,7 @@ impl MockBackend {
             wrap_key_exact_output: Mutex::new(None),
             derive_key_output: Mutex::new(None),
             session_mechanism_output: Mutex::new(HashMap::new()),
+            session_digest_mechanism: Mutex::new(HashMap::new()),
             verify_signature_state: Mutex::new(HashMap::new()),
             verify_signature_accumulator: Mutex::new(HashMap::new()),
             interface_capabilities: Mutex::new(None),
@@ -794,12 +799,6 @@ impl MockBackend {
         data.iter().map(|byte| byte ^ 0x42).collect()
     }
 
-    fn digest_bytes(data: &[u8]) -> Vec<u8> {
-        // Deterministic, input-derived, domain-separated (see mock::echo);
-        // 4 bytes to keep two-call buffer tests simple.
-        echo::echo_bytes("digest", &[data], 4)
-    }
-
     fn reverse_bytes(data: &[u8]) -> Vec<u8> {
         data.iter().rev().copied().collect()
     }
@@ -1332,13 +1331,26 @@ impl Pkcs11Backend for MockBackend {
     }
     fn digest_init(&self, s: CkSessionHandle, m: &CkMechanism) -> CkResult<()> {
         self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::DIGEST)?;
-        self.digest_init_impl(s)
+        self.digest_init_impl(s)?;
+        self.session_digest_mechanism.lock().unwrap().insert(s.0, m.mechanism_type);
+        Ok(())
     }
     fn digest_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
+        self.session_digest_mechanism.lock().unwrap().remove(&s.0);
         self.init_cancel_impl(s, MultiPartOp::Digest)
     }
     fn digest(&self, s: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
-        self.digest_impl(s, self.resolve_input(data)?)
+        let data = self.resolve_input(data)?;
+        // Length follows the active mechanism (mock::output_lengths);
+        // unknown mechanisms keep the legacy compact length.
+        let len = self
+            .session_digest_mechanism
+            .lock()
+            .unwrap()
+            .get(&s.0)
+            .and_then(|m| output_lengths::digest_len(*m))
+            .unwrap_or(crypto_ops::MOCK_DEFAULT_DIGEST_LEN);
+        self.digest_impl(s, data, len)
     }
     fn digest_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
         let _ = self.resolve_input(p)?;
@@ -1348,7 +1360,14 @@ impl Pkcs11Backend for MockBackend {
         self.digest_key_impl(s, k)
     }
     fn digest_final(&self, s: CkSessionHandle) -> CkResult<Vec<u8>> {
-        self.digest_final_impl(s)
+        let len = self
+            .session_digest_mechanism
+            .lock()
+            .unwrap()
+            .get(&s.0)
+            .and_then(|m| output_lengths::digest_len(*m))
+            .unwrap_or(crypto_ops::MOCK_DEFAULT_DIGEST_LEN);
+        self.digest_final_impl(s, len)
     }
     fn encrypt_init(
         &self,
