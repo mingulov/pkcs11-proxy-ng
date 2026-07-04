@@ -16,6 +16,7 @@ struct LoginGate {
 
 mod crypto_ops;
 pub mod echo;
+mod historical_flags;
 mod mock_types;
 mod object_ops;
 pub mod output_lengths;

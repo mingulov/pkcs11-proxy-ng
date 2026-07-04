@@ -316,6 +316,17 @@ pub(super) fn mock_mechanism_key_sizes(mech: CkMechanismType) -> Option<(u64, u6
 }
 
 pub(super) fn mock_mechanism_workflow_flags(mech: CkMechanismType) -> u64 {
+    let primary = mock_mechanism_workflow_flags_current(mech);
+    if primary != 0 {
+        return primary;
+    }
+    // Legacy mechanisms dropped from the current working spec are grounded
+    // from the historical-mechanisms spec (pkcs11-hist) instead — see
+    // super::historical_flags (generated, source-cited).
+    super::historical_flags::historical_workflow_flags(mech).unwrap_or(0)
+}
+
+fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
     let encrypt_decrypt = CkMechanismFlags::ENCRYPT | CkMechanismFlags::DECRYPT;
     let sign_verify = CkMechanismFlags::SIGN | CkMechanismFlags::VERIFY;
     let sign_recover_verify_recover =
