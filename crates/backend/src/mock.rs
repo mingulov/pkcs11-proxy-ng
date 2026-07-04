@@ -534,31 +534,41 @@ impl MockBackend {
         })
     }
 
+    /// Map one input attribute to its stored slot. A nested-template
+    /// VALUE round-trips through the structural nested slot so the exact
+    /// output path serves it with real two-call semantics.
+    fn template_entry_to_slot(attr: &CkAttribute) -> Option<(u64, MockAttributeSlot)> {
+        let slot = match attr.value.clone()? {
+            CkAttributeValue::NestedTemplate(subs) => MockAttributeSlot::NestedTemplate(
+                subs.into_iter()
+                    .filter_map(|sub| {
+                        sub.value.map(|v| (sub.attr_type, MockAttributeSlot::Value(v)))
+                    })
+                    .collect(),
+            ),
+            value => MockAttributeSlot::Value(value),
+        };
+        Some((attr.attr_type.0, slot))
+    }
+
     fn store_object_template(&self, handle: CkObjectHandle, template: &[CkAttribute]) {
         if template.is_empty() {
             return;
         }
-
-        let attrs = template
-            .iter()
-            .filter_map(|attr| {
-                let slot = match attr.value.clone()? {
-                    // A nested-template VALUE round-trips through the
-                    // structural nested slot so the exact output path
-                    // serves it with real two-call semantics.
-                    CkAttributeValue::NestedTemplate(subs) => MockAttributeSlot::NestedTemplate(
-                        subs.into_iter()
-                            .filter_map(|sub| {
-                                sub.value.map(|v| (sub.attr_type, MockAttributeSlot::Value(v)))
-                            })
-                            .collect(),
-                    ),
-                    value => MockAttributeSlot::Value(value),
-                };
-                Some((attr.attr_type.0, slot))
-            })
-            .collect::<HashMap<_, _>>();
+        let attrs =
+            template.iter().filter_map(Self::template_entry_to_slot).collect::<HashMap<_, _>>();
         self.attribute_store.lock().unwrap().insert(handle.0, attrs);
+    }
+
+    /// C_SetAttributeValue semantics: merge the template into the object's
+    /// existing attributes (unlike allocation, which starts fresh).
+    fn merge_object_template(&self, handle: CkObjectHandle, template: &[CkAttribute]) {
+        if template.is_empty() {
+            return;
+        }
+        let mut store = self.attribute_store.lock().unwrap();
+        let attrs = store.entry(handle.0).or_default();
+        attrs.extend(template.iter().filter_map(Self::template_entry_to_slot));
     }
 
     fn remove_objects(&self, state: &mut MockState, objects: &[u64]) {
@@ -1500,9 +1510,13 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        _template: &[CkAttribute],
+        template: &[CkAttribute],
     ) -> CkResult<()> {
-        self.set_attribute_value_impl(session, object)
+        self.set_attribute_value_impl(session, object)?;
+        // The template was previously discarded: C_SetAttributeValue merges
+        // into the stored attributes so set-then-read round-trips.
+        self.merge_object_template(object, template);
+        Ok(())
     }
     fn generate_key_pair(
         &self,

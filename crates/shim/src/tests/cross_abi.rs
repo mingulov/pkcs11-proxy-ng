@@ -429,3 +429,125 @@ fn nested_template_input_round_trips_across_abis() {
         );
     }
 }
+
+/// Read back CKA_WRAP_TEMPLATE from `object` and assert it holds exactly
+/// one CKA_CLASS sub-attribute with `expected_class`, at the client's
+/// own layout and width.
+fn assert_wrap_template_holds_class(
+    abi: MockAbi,
+    session: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE,
+    expected_class: CK_ULONG,
+    context: &str,
+) {
+    let w = std::mem::size_of::<CK_ULONG>();
+    let mut class_buf = vec![0u8; w];
+    let mut out_subs = [CK_ATTRIBUTE {
+        type_: 0,
+        pValue: class_buf.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: w as CK_ULONG,
+    }];
+    let mut attr = CK_ATTRIBUTE {
+        type_: CKA_WRAP_TEMPLATE_RAW,
+        pValue: out_subs.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: std::mem::size_of_val(&out_subs) as CK_ULONG,
+    };
+    let rv = unsafe { dispatch::general::c_get_attribute_value(session, object, &mut attr, 1) };
+    assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} {context}: nested read-back");
+    assert_eq!(out_subs[0].type_, CKA_CLASS, "{abi:?} {context}: sub type");
+    let bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
+        class_buf.as_slice().try_into().expect("width");
+    assert_eq!(
+        CK_ULONG::from_le_bytes(bytes),
+        expected_class,
+        "{abi:?} {context}: sub-value at client width"
+    );
+}
+
+#[test]
+fn nested_template_input_round_trips_via_every_template_call() {
+    // The four remaining template-carrying entry points: C_GenerateKey,
+    // C_UnwrapKey, C_CopyObject, and C_SetAttributeValue must all carry a
+    // nested CKA_WRAP_TEMPLATE structurally, cross-ABI, like C_CreateObject.
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (_daemon, shim) = session_on(abi);
+
+        let mut sub_class: CK_ULONG = 4;
+        let mut wrap_subs = [CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: &mut sub_class as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        }];
+        let mut template = [CK_ATTRIBUTE {
+            type_: CKA_WRAP_TEMPLATE_RAW,
+            pValue: wrap_subs.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of_val(&wrap_subs) as CK_ULONG,
+        }];
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_GCM,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+
+        // C_GenerateKey
+        let mut generated = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_generate_key(
+                shim.session,
+                &mut mechanism,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut generated,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} C_GenerateKey");
+        assert_wrap_template_holds_class(abi, shim.session, generated, 4, "generate_key");
+
+        // C_UnwrapKey
+        let mut wrapped = [0u8; 8];
+        let mut unwrapped = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_unwrap_key(
+                shim.session,
+                &mut mechanism,
+                generated,
+                wrapped.as_mut_ptr(),
+                wrapped.len() as CK_ULONG,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut unwrapped,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} C_UnwrapKey");
+        assert_wrap_template_holds_class(abi, shim.session, unwrapped, 4, "unwrap_key");
+
+        // C_CopyObject (template applies to the copy)
+        let plain = create_object(shim.session);
+        let mut copy = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_copy_object(
+                shim.session,
+                plain,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut copy,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} C_CopyObject");
+        assert_wrap_template_holds_class(abi, shim.session, copy, 4, "copy_object");
+
+        // C_SetAttributeValue (merges into an existing object)
+        let target = create_object(shim.session);
+        let rv = unsafe {
+            dispatch::general::c_set_attribute_value(
+                shim.session,
+                target,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} C_SetAttributeValue");
+        assert_wrap_template_holds_class(abi, shim.session, target, 4, "set_attribute_value");
+    }
+}
