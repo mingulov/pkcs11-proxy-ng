@@ -74,7 +74,7 @@ pub fn snapshot() -> Snapshot {
 /// Render a snapshot in Prometheus text exposition format (v0.0.4).
 pub fn render_prometheus(s: &Snapshot) -> String {
     let mut o = String::new();
-    o.push_str("# HELP pkcs11_proxy_find_objects_total Total C_FindObjects calls observed.\n");
+    o.push_str("# HELP pkcs11_proxy_find_objects_total Successful C_FindObjects calls observed.\n");
     o.push_str("# TYPE pkcs11_proxy_find_objects_total counter\n");
     o.push_str(&format!("pkcs11_proxy_find_objects_total {}\n", s.find_objects_total));
     o.push_str("# HELP pkcs11_proxy_find_objects_over_threshold_total C_FindObjects results over the configured threshold.\n");

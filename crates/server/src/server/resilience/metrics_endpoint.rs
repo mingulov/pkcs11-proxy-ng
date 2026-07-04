@@ -3,27 +3,19 @@
 //! (design V14). Read-only; exports COUNTS only (no secret material).
 
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 
 use super::{render_prometheus, snapshot};
 
 /// Bind a mode-0600 Unix metrics socket and serve on a spawned task.
-/// Returns once bound. NOTE: bind-then-chmod has a brief default-perms window;
-/// acceptable here because the payload is non-secret counters. Follow-up: mirror
-/// `bind_unix_listener`'s umask(0o177) guard (main.rs:186-223) for atomic 0600.
-pub async fn spawn_metrics_endpoint(path: PathBuf) -> io::Result<()> {
-    match std::fs::remove_file(&path) {
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    let listener = UnixListener::bind(&path)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+/// Returns once bound. Uses [`crate::server::transport::bind_unix_listener`]
+/// for atomic 0600 creation (umask guard + is_socket stale-path check).
+pub async fn spawn_metrics_endpoint(path: PathBuf) -> Result<(), String> {
+    let listener = crate::server::transport::bind_unix_listener(&path)?;
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -35,8 +27,8 @@ pub async fn spawn_metrics_endpoint(path: PathBuf) -> io::Result<()> {
                     });
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "metrics listener accept failed; stopping");
-                    break;
+                    tracing::warn!(error = %e, "metrics listener accept failed; retrying");
+                    continue;
                 }
             }
         }

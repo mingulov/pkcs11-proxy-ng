@@ -1,5 +1,22 @@
 use super::*;
 
+/// Verify that both resilience env vars introduced in the metrics-endpoint
+/// feature appear in the help table. This test enforces the "keep in sync"
+/// invariant stated at `apply_env_overrides` so that adding a new env var
+/// without updating `env_var_help()` is caught immediately.
+#[test]
+fn env_var_help_contains_resilience_vars() {
+    let help = env_var_help();
+    assert!(
+        help.contains("PKCS11_PROXY_RESILIENCE_METRICS_SOCKET"),
+        "env_var_help must list PKCS11_PROXY_RESILIENCE_METRICS_SOCKET: {help}"
+    );
+    assert!(
+        help.contains("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD"),
+        "env_var_help must list PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD: {help}"
+    );
+}
+
 #[test]
 fn parse_minimal_config() {
     let toml = r#"

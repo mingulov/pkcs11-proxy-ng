@@ -31,6 +31,16 @@ pub fn env_var_help() -> String {
             "listener.remote.allow_insecure_tcp",
             "Set to 1 to let PKCS11_PROXY_BIND create an unauthenticated TCP listener.",
         ),
+        (
+            "PKCS11_PROXY_RESILIENCE_METRICS_SOCKET",
+            "resilience.metrics_socket",
+            "Unix-domain metrics endpoint path; serves Prometheus text on GET /metrics (mode 0600).",
+        ),
+        (
+            "PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD",
+            "resilience.find_result_warn_threshold",
+            "C_FindObjects result size above which a pathological-population event is counted and logged.",
+        ),
     ];
     let var_w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
     let field_w = rows.iter().map(|r| r.1.len()).max().unwrap_or(0);
@@ -427,10 +437,12 @@ impl DaemonConfig {
     /// HSM .sos without rewriting the ConfigMap, etc.).
     ///
     /// Documented env vars:
-    /// - `PKCS11_PROXY_BIND`              → `listener.remote.bind`
-    /// - `PKCS11_PROXY_BACKEND_MODULE`    → `backend.module`
-    /// - `PKCS11_PROXY_BACKEND_ARGS`      → `backend.initialize_args`
-    /// - `PKCS11_PROXY_MECHANISMS_CONFIG` → `mechanisms.config_path`
+    /// - `PKCS11_PROXY_BIND`                          → `listener.remote.bind`
+    /// - `PKCS11_PROXY_BACKEND_MODULE`                → `backend.module`
+    /// - `PKCS11_PROXY_BACKEND_ARGS`                  → `backend.initialize_args`
+    /// - `PKCS11_PROXY_MECHANISMS_CONFIG`             → `mechanisms.config_path`
+    /// - `PKCS11_PROXY_RESILIENCE_METRICS_SOCKET`     → `resilience.metrics_socket`
+    /// - `PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD`     → `resilience.find_result_warn_threshold`
     pub fn apply_env_overrides(&mut self) {
         // Keep this list in sync with env_var_help() below — both surface the
         // same canonical env-var → TOML-field mapping.

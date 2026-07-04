@@ -173,55 +173,6 @@ async fn listener_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.changed().await;
 }
 
-/// Bind a Unix-domain-socket listener for the local transport.
-///
-/// Security (ADR-0005): a stale socket from a prior run is removed, but a path
-/// that exists and is *not* a socket is never clobbered. The socket is created
-/// `0600` (owner-only) atomically via a restrictive umask around `bind()`
-/// (D3 — no umask-default window), with an explicit `chmod` as defense in depth.
-/// This is a local-user transport (peer-cred records the connecting uid;
-/// broadening access is out of scope). The accept loop only starts later in
-/// `serve_*`, so no peer is processed before the socket exists.
-#[cfg(unix)]
-fn bind_unix_listener(path: &std::path::Path) -> Result<tokio::net::UnixListener, BoxError> {
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_socket() => {
-            std::fs::remove_file(path).map_err(|e| {
-                format!("failed to remove stale unix socket {}: {e}", path.display())
-            })?;
-        }
-        Ok(_) => {
-            return Err(format!(
-                "refusing to bind unix socket: {} exists and is not a socket",
-                path.display()
-            )
-            .into());
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(format!("cannot stat unix socket path {}: {e}", path.display()).into());
-        }
-    }
-
-    // D3: create the socket with a restrictive umask so it is 0600 from the
-    // instant of bind(), closing the brief window between bind() and the chmod
-    // below where the socket would otherwise carry umask-default (possibly
-    // group/other-accessible) permissions. Restore the prior umask immediately,
-    // even if bind() fails.
-    let prev_umask = nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o177));
-    let bind_result = tokio::net::UnixListener::bind(path);
-    nix::sys::stat::umask(prev_umask);
-    let listener =
-        bind_result.map_err(|e| format!("failed to bind unix socket {}: {e}", path.display()))?;
-    // Defense in depth: assert 0600 explicitly (a no-op given the umask above,
-    // but it guarantees the result even if the process umask is unusual).
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("failed to chmod unix socket {} to 0600: {e}", path.display()))?;
-    Ok(listener)
-}
-
 /// Early, friendly validation of runtime listener support. The Unix socket
 /// transport is now wired (peer-cred auth); this only surfaces a clear error
 /// when the configured socket's parent directory does not exist, rather than
@@ -541,7 +492,7 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // already rejected a [listener.local] config there.
     #[cfg(unix)]
     if let Some(ref uds_cfg) = config.listener.local {
-        let listener = bind_unix_listener(&uds_cfg.path)?;
+        let listener = server::transport::bind_unix_listener(&uds_cfg.path)?;
         let router = apply_http2_keepalive(Server::builder(), &config)
             .layer(server::trace_id::TraceIdLayer)
             .add_service(health_service.clone())
