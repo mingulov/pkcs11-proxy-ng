@@ -26,6 +26,7 @@ pub(crate) fn verify(dir: &Path, public_key_hex: Option<&str>) -> CliResult {
         println!("  seq range   : (empty)");
     }
     println!("  chain_ok    : {}", report.chain_ok);
+    println!("  anchor      : {}", if report.head_matches_anchor { "matches" } else { "MISMATCH" });
     println!("  gaps        : {}", report.gaps.len());
     if !report.gaps.is_empty() {
         println!("  gap seqs    : {:?}", report.gaps);
@@ -36,7 +37,7 @@ pub(crate) fn verify(dir: &Path, public_key_hex: Option<&str>) -> CliResult {
             report.checkpoints_verified, report.checkpoints_failed
         );
     } else {
-        println!("  checkpoints : (not checked — no key supplied or no sidecar)");
+        println!("  checkpoints : (signatures not checked — no key supplied or no sidecar)");
     }
 
     if !report.chain_ok {
@@ -44,7 +45,7 @@ pub(crate) fn verify(dir: &Path, public_key_hex: Option<&str>) -> CliResult {
     }
     if report.checkpoints_failed > 0 {
         return Err(format!(
-            "audit verify: {} checkpoint signature(s) failed",
+            "audit verify: {} checkpoint(s) failed (signature or content-binding)",
             report.checkpoints_failed
         )
         .into());

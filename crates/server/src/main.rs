@@ -546,8 +546,10 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     serve_result?;
 
     // Flush the audit log before finalising the backend.
-    if let Some(ref s) = audit_sink {
-        let _ = s.flush().await;
+    if let Some(ref s) = audit_sink
+        && let Err(e) = s.flush().await
+    {
+        tracing::error!(error = %e, "audit flush on shutdown failed");
     }
 
     backend.finalize().map_err(|rv| format!("C_Finalize failed: {rv}"))?;

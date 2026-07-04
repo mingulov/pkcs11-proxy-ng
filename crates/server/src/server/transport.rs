@@ -74,6 +74,35 @@ fn read_file(path: &Path, field: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("failed to read {field} '{}': {e}", path.display()))
 }
 
+/// Refuse to load a PRIVATE key file that is accessible to group or other.
+///
+/// Unlike [`check_public_file_perms`] (which permits world/group *readable*
+/// public material), private key material — such as the Ed25519 audit signing
+/// seed — must be owner-only. On unix, rejects any file whose mode has any
+/// group/other bit set (`mode & 0o077 != 0`). Non-unix platforms are a no-op
+/// since file modes don't map cleanly.
+pub(crate) fn check_private_file_perms(path: &Path, field: &str) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path)
+            .map_err(|e| format!("failed to stat {field} '{}': {e}", path.display()))?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "refuse to load private key {field} '{}': group/other-accessible \
+                 (mode {:04o}); private key material must be owner-only. \
+                 Fix with: chmod 600 {}",
+                path.display(),
+                mode,
+                path.display()
+            ));
+        }
+    }
+    let _ = (path, field);
+    Ok(())
+}
+
 /// Refuse to start when a public certificate file (CA root or server
 /// cert) is world-writable. The contents are not secret, but any
 /// process able to swap them silently changes the proxy's trust

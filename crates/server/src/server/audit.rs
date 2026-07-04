@@ -13,12 +13,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pkcs11_proxy_ng_audit::record::to_jsonl;
+use pkcs11_proxy_ng_audit::chain::record_hash;
+use pkcs11_proxy_ng_audit::record::{from_jsonl, to_jsonl};
 use pkcs11_proxy_ng_audit::sign::{Checkpoint, Signer};
 use pkcs11_proxy_ng_audit::{AuditRecord, ChainState};
 
 use crate::config::AuditConfig;
-use crate::server::transport::check_public_file_perms;
+use crate::server::transport::check_private_file_perms;
 
 /// Bounded channel capacity for the audit writer task.
 const CHANNEL_CAPACITY: usize = 1024;
@@ -61,10 +62,13 @@ impl AuditSink {
     /// - Fail-open classes (DataPlane) silently increment the dropped counter
     ///   and return `Ok(())`.
     pub fn emit(&self, rec: AuditRecord) -> Result<(), AuditDropped> {
-        match self.tx.try_send(WriterMsg::Record(rec.clone())) {
+        // `EventClass` is `Copy`; capture it so `rec` can be moved into the
+        // message without a clone.
+        let class = rec.class;
+        match self.tx.try_send(WriterMsg::Record(rec)) {
             Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                if rec.class.fail_closed() {
+                if class.fail_closed() {
                     Err(AuditDropped)
                 } else {
                     self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -112,9 +116,11 @@ enum WriterMsg {
 ///
 /// When `cfg.dir` is `Some`:
 /// 1. Creates the directory (mode 0700 on Unix) if missing.
-/// 2. Validates `cfg.signing_key` file permissions and loads the 32-byte seed.
-/// 3. Reads `audit.anchor.json` to resume the chain (or starts from genesis).
-/// 4. Spawns the background writer task and returns the sink handle.
+/// 2. Validates `cfg.signing_key` private-key file permissions and loads the
+///    32-byte seed.
+/// 3. Reconstructs the chain tip deterministically from the active log tail
+///    (falling back to the anchor, then genesis) — see [`reconstruct_chain_state`].
+/// 4. Spawns the background writer on a blocking thread and returns the handle.
 pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
     let Some(ref dir) = cfg.dir else {
         return Ok(None);
@@ -123,14 +129,16 @@ pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
     create_audit_dir(dir)?;
 
     let signer = load_signer(cfg)?;
-    let chain = load_chain_state(dir)?;
 
     let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
     let dropped = Arc::new(AtomicU64::new(0));
 
     let writer =
-        WriterState::open(dir.clone(), chain, signer, cfg.rotate_max_bytes, cfg.rotate_keep_files)?;
-    tokio::spawn(writer_task(writer, rx));
+        WriterState::open(dir.clone(), signer, cfg.rotate_max_bytes, cfg.rotate_keep_files)?;
+    // The writer does blocking `std::fs` I/O with `sync_all()`; keep it off the
+    // async worker threads by running the loop on the blocking pool and draining
+    // the tokio mpsc via `blocking_recv()`.
+    tokio::task::spawn_blocking(move || writer_task(writer, rx));
 
     Ok(Some(AuditSink { tx, dropped }))
 }
@@ -160,7 +168,7 @@ fn load_signer(cfg: &AuditConfig) -> io::Result<Option<Signer>> {
     let Some(ref key_path) = cfg.signing_key else {
         return Ok(None);
     };
-    check_public_file_perms(key_path, "audit.signing_key").map_err(io::Error::other)?;
+    check_private_file_perms(key_path, "audit.signing_key").map_err(io::Error::other)?;
     let seed = std::fs::read(key_path)?;
     if seed.len() != 32 {
         return Err(io::Error::other(format!(
@@ -173,15 +181,53 @@ fn load_signer(cfg: &AuditConfig) -> io::Result<Option<Signer>> {
 }
 
 // ---------------------------------------------------------------------------
-// Anchor file (crash-recovery chain tip)
+// Anchor file (chain tip seal + verification aid)
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct AnchorFile {
     last_hash: String,
+    /// The NEXT seq to assign (== the last written record's seq + 1), matching
+    /// [`ChainState::last_seq`].
     last_seq: u64,
 }
 
+/// Deterministically reconstruct the chain tip at startup (Critical #2).
+///
+/// The periodic anchor is written only on checkpoint/rotation/flush, so after a
+/// crash it may lag behind the records already durable in `audit.jsonl`. Trusting
+/// the anchor for the resume seq would then **re-issue** sequence numbers. Resume
+/// order:
+/// 1. If `audit.jsonl` is non-empty, take the LAST valid record `r` and resume at
+///    `last_seq = r.seq + 1`, `last_hash = record_hash(&r.prev_hash, &r)`. The
+///    active file tail is authoritative.
+/// 2. Else if `audit.anchor.json` exists, resume from it — this covers the "just
+///    rotated, new active file empty" case, where the anchor holds the last
+///    rotated file's head.
+/// 3. Else start from genesis.
+fn reconstruct_chain_state(active_path: &Path, dir: &Path) -> io::Result<ChainState> {
+    if let Ok(content) = std::fs::read_to_string(active_path) {
+        let mut last_valid: Option<AuditRecord> = None;
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            // Tolerate a torn final line from a crash: keep the last line that
+            // parses cleanly as the resume point.
+            if let Ok(rec) = from_jsonl(line) {
+                last_valid = Some(rec);
+            }
+        }
+        if let Some(r) = last_valid {
+            let last_hash = record_hash(&r.prev_hash, &r);
+            return Ok(ChainState { last_hash, last_seq: r.seq + 1 });
+        }
+    }
+    load_chain_state(dir)
+}
+
+/// Anchor fallback for the resume path (empty/absent active file): resume the
+/// chain tip from `audit.anchor.json`, or genesis if it is absent.
 fn load_chain_state(dir: &Path) -> io::Result<ChainState> {
     let anchor_path = dir.join("audit.anchor.json");
     if !anchor_path.exists() {
@@ -193,7 +239,23 @@ fn load_chain_state(dir: &Path) -> io::Result<ChainState> {
     Ok(ChainState { last_hash: anchor.last_hash, last_seq: anchor.last_seq })
 }
 
-/// Atomically update the anchor file: write to `.tmp` → fsync → rename.
+/// Fsync a directory so a preceding `rename` is durable across power loss (#5).
+///
+/// On unix, renaming a file makes the new name visible but the directory entry
+/// is not guaranteed on stable storage until the directory itself is fsynced.
+/// No-op on non-unix (opening a directory as a file is not portable).
+fn fsync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let dir_file = std::fs::File::open(dir)?;
+        dir_file.sync_all()?;
+    }
+    let _ = dir;
+    Ok(())
+}
+
+/// Atomically update the anchor file: write to `.tmp` → fsync file → rename →
+/// fsync directory (so the rename survives power loss).
 fn write_anchor(dir: &Path, chain: &ChainState) -> io::Result<()> {
     let anchor = AnchorFile { last_hash: chain.last_hash.clone(), last_seq: chain.last_seq };
     let data = serde_json::to_vec(&anchor).map_err(|e| io::Error::other(e.to_string()))?;
@@ -205,6 +267,7 @@ fn write_anchor(dir: &Path, chain: &ChainState) -> io::Result<()> {
         f.sync_all()?;
     }
     std::fs::rename(&tmp_path, dir.join("audit.anchor.json"))?;
+    fsync_dir(dir)?;
     Ok(())
 }
 
@@ -311,7 +374,9 @@ struct WriterState {
     signer: Option<Signer>,
     rotate_max_bytes: u64,
     rotate_keep_files: u32,
-    /// Total records written since the sink was started (not resumed from anchor).
+    /// Process-local count of records written since THIS sink was started. It is
+    /// reset to 0 on every restart (it is not persisted or resumed), so it is an
+    /// informational field in checkpoints, not a chain-wide total.
     record_count: u64,
     /// Records written since the last checkpoint (resets to 0 at each checkpoint).
     records_since_checkpoint: u64,
@@ -320,12 +385,14 @@ struct WriterState {
 impl WriterState {
     fn open(
         dir: PathBuf,
-        chain: ChainState,
         signer: Option<Signer>,
         rotate_max_bytes: u64,
         rotate_keep_files: u32,
     ) -> io::Result<Self> {
         let active_path = dir.join("audit.jsonl");
+        // Resume the chain tip from the active-file tail (never the periodic
+        // anchor seq) so a crash cannot re-issue sequence numbers (Critical #2).
+        let chain = reconstruct_chain_state(&active_path, &dir)?;
         let file = std::fs::OpenOptions::new().create(true).append(true).open(&active_path)?;
         let file_bytes = file.metadata()?.len();
         Ok(Self {
@@ -373,6 +440,8 @@ impl WriterState {
         // Rename while holding the fd is safe on Unix: the fd still references
         // the old inode; the new path gets a fresh inode.
         std::fs::rename(self.dir.join("audit.jsonl"), &rotated_path)?;
+        // Make the rotation rename durable before continuing (#5).
+        fsync_dir(&self.dir)?;
         self.file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -418,8 +487,12 @@ impl WriterState {
 // Background writer task
 // ---------------------------------------------------------------------------
 
-async fn writer_task(mut state: WriterState, mut rx: tokio::sync::mpsc::Receiver<WriterMsg>) {
-    while let Some(msg) = rx.recv().await {
+/// Blocking writer loop, run on the tokio blocking pool via `spawn_blocking`.
+///
+/// Uses `blocking_recv()` / `try_recv()` on the mpsc receiver so the blocking
+/// `std::fs` writes and `sync_all()` calls never run on an async worker thread.
+fn writer_task(mut state: WriterState, mut rx: tokio::sync::mpsc::Receiver<WriterMsg>) {
+    while let Some(msg) = rx.blocking_recv() {
         match msg {
             WriterMsg::Record(rec) => {
                 if let Err(e) = state.write_record(rec) {
@@ -490,7 +563,11 @@ mod tests {
         std::env::temp_dir().join(format!("audit-sink-{}-{}", std::process::id(), tag))
     }
 
-    /// Test 1: basic rotation + full chain verification via `verify_dir`.
+    /// Test 1: rotation + PRUNING + pruning-aware chain verification.
+    ///
+    /// A small `rotate_keep_files` forces old rotated files to be pruned, so the
+    /// retained chain is a suffix (`first_seq > 0`). The pruning-aware verifier
+    /// must still report `chain_ok` with no gaps in the retained range.
     #[tokio::test]
     async fn test_basic_rotation_and_verify() {
         let dir = temp_dir("basic");
@@ -500,9 +577,9 @@ mod tests {
             dir: Some(dir.clone()),
             signing_key: None,
             rotate_max_bytes: 512, // tiny limit → many rotations with ~250-byte records
-            // Use a high keep value so no old files are pruned — all 50 records
-            // must remain on disk for verify_dir to see a contiguous chain.
-            rotate_keep_files: 100,
+            // Small keep value → the oldest rotated files ARE pruned, exercising
+            // the pruning-aware verifier (a pruned prefix is not a gap).
+            rotate_keep_files: 2,
         };
 
         let sink = spawn_audit_sink(&cfg).unwrap().expect("sink should be created");
@@ -515,15 +592,21 @@ mod tests {
             EventClass::Admin,
         ];
         for i in 0..50usize {
-            sink.emit(make_record(classes[i % classes.len()].clone())).unwrap();
+            sink.emit(make_record(classes[i % classes.len()])).unwrap();
         }
         sink.flush().await.unwrap();
 
         let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
-        assert!(report.chain_ok, "chain must be valid after flush");
-        assert_eq!(report.records, 50, "all 50 records must be on disk");
-        assert!(report.gaps.is_empty(), "no seq gaps");
-        assert!(report.files >= 2, "rotation must have produced ≥2 files, got {}", report.files);
+        assert!(report.chain_ok, "pruned chain must still verify after flush: {report:?}");
+        assert!(report.gaps.is_empty(), "no seq gaps in the retained range: {:?}", report.gaps);
+        assert!(report.head_matches_anchor, "anchor must seal the retained head");
+        assert_eq!(report.last_seq, 49, "last seq is 49 (50 records emitted)");
+        assert!(
+            report.first_seq > 0,
+            "pruning must have dropped the oldest records (first_seq={})",
+            report.first_seq
+        );
+        assert!(report.records < 50, "pruning must have removed some records: {}", report.records);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -538,6 +621,12 @@ mod tests {
         let seed: [u8; 32] = [0x5Au8; 32];
         let key_path = dir.join("signing.key");
         std::fs::write(&key_path, seed).unwrap();
+        // Private key material must be owner-only, or the sink refuses to load it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
 
         let public_hex = Signer::from_seed_bytes(&seed).unwrap().public_hex();
 
@@ -604,5 +693,103 @@ mod tests {
         let cfg = AuditConfig::default();
         let result = spawn_audit_sink(&cfg).unwrap();
         assert!(result.is_none(), "audit disabled must return Ok(None)");
+    }
+
+    /// Test 5 (fix Critical #2): after a crash the writer resumes from the file
+    /// tail, NOT the (possibly stale) periodic anchor, so seqs are never
+    /// re-issued.
+    ///
+    /// We reproduce a crash deterministically: 150 records are durable in
+    /// `audit.jsonl`, but the anchor only advanced to the seq-99 checkpoint
+    /// (`last_seq = 100`). A writer that trusted the anchor for its resume seq
+    /// would re-issue seqs 100..149; a writer that resumes from the tail
+    /// continues at 150.
+    #[tokio::test]
+    async fn restart_after_crash_no_duplicate_seqs() {
+        let dir = temp_dir("crash-restart");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut lines = String::new();
+        let mut stale = AnchorFile { last_hash: String::new(), last_seq: 0 };
+        for i in 0..150u64 {
+            let mut r = make_record(EventClass::DataPlane);
+            st.append(&mut r);
+            lines.push_str(&to_jsonl(&r));
+            if i == 99 {
+                // Anchor as it would stand right after the seq-99 checkpoint.
+                stale = AnchorFile { last_hash: st.last_hash.clone(), last_seq: st.last_seq };
+            }
+        }
+        std::fs::write(dir.join("audit.jsonl"), lines).unwrap();
+        std::fs::write(dir.join("audit.anchor.json"), serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        // Restart: resume + 20 more records, then flush.
+        let cfg = AuditConfig {
+            dir: Some(dir.clone()),
+            signing_key: None,
+            rotate_max_bytes: 1 << 20, // no rotation
+            rotate_keep_files: 10,
+        };
+        let sink = spawn_audit_sink(&cfg).unwrap().expect("resumed sink");
+        for _ in 0..20 {
+            sink.emit(make_record(EventClass::DataPlane)).unwrap();
+        }
+        sink.flush().await.unwrap();
+
+        let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
+        assert!(report.chain_ok, "resumed chain must verify: {report:?}");
+        assert_eq!(report.first_seq, 0);
+        assert_eq!(
+            report.last_seq, 169,
+            "resume-from-tail must continue at seq 150 and end at 169"
+        );
+        assert!(report.gaps.is_empty(), "no gaps: {:?}", report.gaps);
+        // No duplicate seqs: exactly 170 records over the contiguous range 0..=169.
+        assert_eq!(
+            report.records,
+            report.last_seq - report.first_seq + 1,
+            "record count must equal the contiguous range (no duplicate seqs)"
+        );
+        assert_eq!(report.records, 170);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Test 6 (security HIGH): a group/other-accessible signing key is refused;
+    /// an owner-only (0600) key is accepted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn signing_key_rejected_if_group_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("keyperms");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let key_path = dir.join("signing.key");
+        std::fs::write(&key_path, [0x11u8; 32]).unwrap();
+
+        let cfg = AuditConfig {
+            dir: Some(dir.clone()),
+            signing_key: Some(key_path.clone()),
+            rotate_max_bytes: 1 << 20,
+            rotate_keep_files: 10,
+        };
+
+        // Group-readable (0640) → refused.
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            spawn_audit_sink(&cfg).is_err(),
+            "group-readable (0640) signing key must be refused"
+        );
+
+        // Owner-only (0600) → accepted.
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let ok = spawn_audit_sink(&cfg);
+        assert!(ok.is_ok(), "0600 signing key must be accepted: {:?}", ok.err());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
