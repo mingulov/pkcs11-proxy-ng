@@ -741,12 +741,12 @@ mod tests {
         let counter = &LIMIT_TEST_COUNTER;
         let max = 3;
 
-        let first = try_acquire_backend_call(&counter, max).expect("first slot");
-        let second = try_acquire_backend_call(&counter, max).expect("second slot");
-        let third = try_acquire_backend_call(&counter, max).expect("third slot");
+        let first = try_acquire_backend_call(counter, max).expect("first slot");
+        let second = try_acquire_backend_call(counter, max).expect("second slot");
+        let third = try_acquire_backend_call(counter, max).expect("third slot");
 
         assert_eq!(counter.load(Ordering::Relaxed), max);
-        assert!(try_acquire_backend_call(&counter, max).is_none());
+        assert!(try_acquire_backend_call(counter, max).is_none());
         assert_eq!(
             counter.load(Ordering::Relaxed),
             max,
@@ -757,7 +757,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), max - 1);
 
         let replacement =
-            try_acquire_backend_call(&counter, max).expect("slot released by dropped guard");
+            try_acquire_backend_call(counter, max).expect("slot released by dropped guard");
         assert_eq!(counter.load(Ordering::Relaxed), max);
 
         drop(first);
