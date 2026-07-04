@@ -158,4 +158,5 @@ pub unsafe extern "C" fn C_GetInterface(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(not(miri))] // daemon-based integration tests need real sockets
 mod tests;
