@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::{CkMechanismParams, CkObjectHandle, CkRv, Sp800108DerivedKey};
 
 use super::super::convert_template;
@@ -17,13 +16,13 @@ use crate::server::handle_map::VirtualHandle;
 
 const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
 
+use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn generate_key_pair(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyPairRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyPairResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -118,12 +117,11 @@ pub(crate) async fn generate_key_pair(
 }
 
 pub(crate) async fn generate_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -201,12 +199,11 @@ pub(crate) async fn generate_key(
 }
 
 pub(crate) async fn derive_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DeriveKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DeriveKeyResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 

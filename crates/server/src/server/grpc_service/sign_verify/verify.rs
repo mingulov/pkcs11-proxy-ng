@@ -2,22 +2,21 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
-
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend,
 };
-use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::context_manager::ClientContextId;
 
+use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn verify_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -72,12 +71,12 @@ pub(crate) async fn verify_init(
 }
 
 pub(crate) async fn verify(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -110,12 +109,12 @@ pub(crate) async fn verify(
 }
 
 pub(crate) async fn verify_update(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyUpdateResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -141,12 +140,12 @@ pub(crate) async fn verify_update(
 }
 
 pub(crate) async fn verify_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyFinalResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -172,12 +171,12 @@ pub(crate) async fn verify_final(
 }
 
 pub(crate) async fn verify_recover_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyRecoverInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyRecoverInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -237,12 +236,12 @@ pub(crate) async fn verify_recover_init(
 }
 
 pub(crate) async fn verify_recover(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyRecoverRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyRecoverResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 

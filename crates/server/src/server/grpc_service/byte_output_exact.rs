@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
@@ -8,19 +6,20 @@ use pkcs11_proxy_ng_types::{
     ByteOutputFunction, CkInBuf, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
 };
 
-use super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::context_manager::ClientContextId;
 use super::service_utils::{
     check_sanitize, input_from_wire, mechanism_output_to_proto, parse_mechanism, resolve_session,
     resolve_session_and_two_objects, spawn_backend,
 };
 
+use crate::server::grpc_service::HandlerContext;
 pub(super) async fn byte_output_exact(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::ByteOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ByteOutputExactResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -238,7 +237,7 @@ mod sanitize_inputs_tests {
     use super::super::digest_cipher::{decrypt_init, encrypt_init};
     use super::byte_output_exact;
     use crate::server::context_manager::{ClientContextId, ContextManager};
-    use crate::server::grpc_service::{Pkcs11ProxyService, session::open_session};
+    use crate::server::grpc_service::{HandlerContext, Pkcs11ProxyService, session::open_session};
 
     // -----------------------------------------------------------------------
     // Fixture helpers
@@ -279,10 +278,7 @@ mod sanitize_inputs_tests {
     ) {
         // Generate a key first so we have a valid key handle.
         let key_resp = crate::server::grpc_service::key_ops::generate_key(
-            ctx_mgr,
-            backend,
-            false,
-            &None,
+            &HandlerContext::for_test(ctx_mgr, backend),
             Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -299,10 +295,7 @@ mod sanitize_inputs_tests {
         // Ignore the RV — just init decrypt with key_handle=0 (mock ignores key validity for
         // decrypt_init) and any mechanism that the mock supports.
         let _ = decrypt_init(
-            ctx_mgr,
-            backend,
-            false,
-            &None,
+            &HandlerContext::for_test(ctx_mgr, backend),
             Request::new(pkcs11_proxy_ng_proto::DecryptInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -345,10 +338,7 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
 
         let resp = byte_output_exact(
-            &service.context_manager,
-            &service.backend,
-            service.sanitize_inputs,
-            &service.audit,
+            &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -395,10 +385,7 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_off(ctx_mgr.clone(), backend.clone());
 
         let _resp = byte_output_exact(
-            &service.context_manager,
-            &service.backend,
-            service.sanitize_inputs,
-            &service.audit,
+            &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -436,10 +423,7 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
 
         let resp = encrypt_init(
-            &service.context_manager,
-            &service.backend,
-            service.sanitize_inputs,
-            &service.audit,
+            &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::EncryptInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -473,10 +457,7 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_off(ctx_mgr.clone(), backend.clone());
 
         let resp = encrypt_init(
-            &service.context_manager,
-            &service.backend,
-            service.sanitize_inputs,
-            &service.audit,
+            &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::EncryptInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -507,10 +488,7 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
 
         let resp = super::super::sign_verify::sign(
-            &service.context_manager,
-            &service.backend,
-            service.sanitize_inputs,
-            &service.audit,
+            &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::SignRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -542,10 +520,7 @@ mod sanitize_inputs_tests {
 
         // data is valid (non-null), signature_null_len makes the second field NULL
         let resp = super::super::sign_verify::verify(
-            &service.context_manager,
-            &service.backend,
-            service.sanitize_inputs,
-            &service.audit,
+            &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::VerifyRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -578,10 +553,7 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
 
         let resp = super::super::sign_verify::sign_init(
-            &service.context_manager,
-            &service.backend,
-            service.sanitize_inputs,
-            &service.audit,
+            &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::SignInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -611,10 +583,7 @@ mod sanitize_inputs_tests {
         let service = make_service_sanitize_off(ctx_mgr.clone(), backend.clone());
 
         let resp = super::super::sign_verify::sign_init(
-            &service.context_manager,
-            &service.backend,
-            service.sanitize_inputs,
-            &service.audit,
+            &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::SignInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,

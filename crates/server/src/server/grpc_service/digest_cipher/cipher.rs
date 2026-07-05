@@ -11,15 +11,16 @@ use super::super::service_utils::{
     ck_rv_only, mechanism_output_to_proto, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend,
 };
-use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::context_manager::ClientContextId;
 
+use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn encrypt_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -93,12 +94,11 @@ pub(crate) async fn encrypt_init(
 
 // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn encrypt(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -127,12 +127,11 @@ pub(crate) async fn encrypt(
 
 // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn encrypt_update(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptUpdateResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -161,12 +160,11 @@ pub(crate) async fn encrypt_update(
 }
 
 pub(crate) async fn encrypt_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptFinalResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -193,12 +191,12 @@ pub(crate) async fn encrypt_final(
 }
 
 pub(crate) async fn decrypt_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -272,12 +270,11 @@ pub(crate) async fn decrypt_init(
 
 // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn decrypt(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -307,12 +304,11 @@ pub(crate) async fn decrypt(
 
 // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn decrypt_update(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptUpdateResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -342,12 +338,11 @@ pub(crate) async fn decrypt_update(
 }
 
 pub(crate) async fn decrypt_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptFinalResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 

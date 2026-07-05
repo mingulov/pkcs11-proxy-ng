@@ -5,25 +5,22 @@
 //! - `C_SessionCancel`
 //! - `C_GetSessionValidationFlags`
 
-use std::sync::Arc;
-
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
 
-use super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::context_manager::ClientContextId;
 use super::service_utils::{resolve_session, spawn_backend};
 
+use crate::server::grpc_service::HandlerContext;
 pub(super) async fn login_user(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::LoginUserRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::LoginUserResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -69,12 +66,11 @@ pub(super) async fn login_user(
 }
 
 pub(super) async fn session_cancel(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SessionCancelRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SessionCancelResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -106,12 +102,11 @@ pub(super) async fn session_cancel(
 }
 
 pub(super) async fn get_session_validation_flags(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetSessionValidationFlagsRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetSessionValidationFlagsResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 

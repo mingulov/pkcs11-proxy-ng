@@ -15,6 +15,7 @@ mod async_ops;
 mod authorization;
 mod byte_output_exact;
 mod combined;
+mod context;
 mod digest_cipher;
 mod general;
 mod key_ops;
@@ -29,6 +30,8 @@ mod sign_verify;
 mod slot;
 mod state_ops;
 
+pub(crate) use context::HandlerContext;
+
 /// The gRPC service implementation for all PKCS#11 proxy RPCs (ADR-0003).
 ///
 /// Every RPC returns `Ok(Response)` with `ck_rv` in the body. gRPC `Status::Ok`
@@ -37,23 +40,12 @@ mod state_ops;
 /// panic).
 #[derive(Clone)]
 pub struct Pkcs11ProxyService {
-    context_manager: Arc<ContextManager>,
-    backend: Arc<dyn Pkcs11Backend>,
-    tcp_auth_mode: TcpAuthMode,
-    unix_auth_mode: UnixAuthMode,
-    token_policy: Arc<TokenPolicy>,
-    /// Holds the current registry payload to publish over
-    /// `GetBackendInterfaces`. Wrapped in a `MechanismRegistrySource`
-    /// so SIGHUP can swap the payload while live requests are in flight.
-    mechanism_registry_source: MechanismRegistrySource,
-    /// ADR-0010 sanitize_inputs: when true, NULL data pointer with len>0
-    /// and NULL mechanisms on operation init are rejected with
-    /// CKR_ARGUMENTS_BAD before reaching the backend module. Default false
-    /// (transparent forwarding).
-    pub(super) sanitize_inputs: bool,
-    /// G1-PR2: audit sink shared across all gRPC handlers. None when audit is
-    /// not configured (zero-overhead default). Clone is cheap (Arc internally).
-    pub(super) audit: Option<AuditSink>,
+    /// All cross-cutting, request-independent handler state (context manager,
+    /// backend, token policy, mechanism registry, transport auth modes,
+    /// `sanitize_inputs`, audit sink). Aggregated so a new gateway concern is a
+    /// field on `HandlerContext`, not another positional parameter threaded
+    /// through every dispatched handler.
+    pub(super) ctx: HandlerContext,
 }
 
 impl Pkcs11ProxyService {
@@ -67,20 +59,22 @@ impl Pkcs11ProxyService {
         audit: Option<AuditSink>,
     ) -> Self {
         Self {
-            context_manager,
-            backend,
-            tcp_auth_mode,
-            unix_auth_mode,
-            token_policy,
-            mechanism_registry_source,
-            sanitize_inputs: false,
-            audit,
+            ctx: HandlerContext {
+                context_manager,
+                backend,
+                tcp_auth_mode,
+                unix_auth_mode,
+                token_policy,
+                mechanism_registry_source,
+                sanitize_inputs: false,
+                audit,
+            },
         }
     }
 
     /// Enable sanitize_inputs mode for tests that need daemon-side input rejection.
     pub fn with_sanitize_inputs(mut self) -> Self {
-        self.sanitize_inputs = true;
+        self.ctx.sanitize_inputs = true;
         self
     }
 
@@ -116,11 +110,11 @@ impl Pkcs11ProxyService {
         raw_ctx_id: &str,
     ) -> Result<(), Status> {
         authorization::enforce_context_owner(
-            &self.context_manager,
+            &self.ctx.context_manager,
             request,
             &super::context_manager::ClientContextId(raw_ctx_id.to_owned()),
-            self.tcp_auth_mode,
-            self.unix_auth_mode,
+            self.ctx.tcp_auth_mode,
+            self.ctx.unix_auth_mode,
         )
         .await
     }
@@ -168,11 +162,11 @@ macro_rules! impl_proxy_service {
                 request: Request<pkcs11_proxy_ng_proto::InitializeRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::InitializeResponse>, Status> {
                 general::initialize(
-                    &self.context_manager,
-                    &self.backend,
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
                     request,
-                    self.tcp_auth_mode,
-                    self.unix_auth_mode,
+                    self.ctx.tcp_auth_mode,
+                    self.ctx.unix_auth_mode,
                 )
                 .await
             }
@@ -184,9 +178,9 @@ macro_rules! impl_proxy_service {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
                 slot::get_slot_list_with_policy(
-                    &self.context_manager,
-                    &self.backend,
-                    self.token_policy.as_ref(),
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
+                    self.ctx.token_policy.as_ref(),
                     request,
                 )
                 .await
@@ -199,9 +193,9 @@ macro_rules! impl_proxy_service {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
                 slot::get_slot_info_with_policy(
-                    &self.context_manager,
-                    &self.backend,
-                    self.token_policy.as_ref(),
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
+                    self.ctx.token_policy.as_ref(),
                     request,
                 )
                 .await
@@ -214,9 +208,9 @@ macro_rules! impl_proxy_service {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
                 slot::get_token_info_with_policy(
-                    &self.context_manager,
-                    &self.backend,
-                    self.token_policy.as_ref(),
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
+                    self.ctx.token_policy.as_ref(),
                     request,
                 )
                 .await
@@ -229,9 +223,9 @@ macro_rules! impl_proxy_service {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
                 slot::get_mechanism_list_with_policy(
-                    &self.context_manager,
-                    &self.backend,
-                    self.token_policy.as_ref(),
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
+                    self.ctx.token_policy.as_ref(),
                     request,
                 )
                 .await
@@ -244,9 +238,9 @@ macro_rules! impl_proxy_service {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
                 slot::get_mechanism_info_with_policy(
-                    &self.context_manager,
-                    &self.backend,
-                    self.token_policy.as_ref(),
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
+                    self.ctx.token_policy.as_ref(),
                     request,
                 )
                 .await
@@ -257,9 +251,9 @@ macro_rules! impl_proxy_service {
                 request: Request<pkcs11_proxy_ng_proto::GetBackendInterfacesRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetBackendInterfacesResponse>, Status> {
                 general::get_backend_interfaces(
-                    &self.context_manager,
-                    &self.backend,
-                    &self.mechanism_registry_source,
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
+                    &self.ctx.mechanism_registry_source,
                     request,
                 )
                 .await
@@ -275,15 +269,15 @@ macro_rules! impl_proxy_service {
                     .await?;
                 // A blocking wait (CKF_DONT_BLOCK omitted) must not be reaped
                 // mid-call, exactly as the dispatch macro guards its RPCs.
-                let _op = self.context_manager.begin_operation(
+                let _op = self.ctx.context_manager.begin_operation(
                     &super::context_manager::ClientContextId(
                         request.get_ref().client_context_id.clone(),
                     ),
                 );
                 state_ops::wait_for_slot_event_with_policy(
-                    &self.context_manager,
-                    &self.backend,
-                    self.token_policy.as_ref(),
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
+                    self.ctx.token_policy.as_ref(),
                     request,
                 )
                 .await
@@ -296,9 +290,9 @@ macro_rules! impl_proxy_service {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
                 session::open_session_with_policy(
-                    &self.context_manager,
-                    &self.backend,
-                    self.token_policy.as_ref(),
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
+                    self.ctx.token_policy.as_ref(),
                     request,
                 )
                 .await
@@ -311,9 +305,9 @@ macro_rules! impl_proxy_service {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
                 session::close_all_sessions_with_policy(
-                    &self.context_manager,
-                    &self.backend,
-                    self.token_policy.as_ref(),
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
+                    self.ctx.token_policy.as_ref(),
                     request,
                 )
                 .await
@@ -326,9 +320,9 @@ macro_rules! impl_proxy_service {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
                 session::init_token_with_policy(
-                    &self.context_manager,
-                    &self.backend,
-                    self.token_policy.as_ref(),
+                    &self.ctx.context_manager,
+                    &self.ctx.backend,
+                    self.ctx.token_policy.as_ref(),
                     request,
                 )
                 .await
@@ -353,7 +347,7 @@ macro_rules! impl_proxy_service {
                     // the shared backend-call budget and DEVICE_ERROR every tenant
                     // (M2). A context that is already gone yields Ok(None) and the
                     // handler returns the right CKR.
-                    let _op = match self.context_manager.begin_operation_capped(
+                    let _op = match self.ctx.context_manager.begin_operation_capped(
                         &$crate::server::context_manager::ClientContextId(
                             request.get_ref().client_context_id.clone(),
                         ),
@@ -366,7 +360,7 @@ macro_rules! impl_proxy_service {
                             ));
                         }
                     };
-                    $module(&self.context_manager, &self.backend, self.sanitize_inputs, &self.audit, request).await
+                    $module(&self.ctx, request).await
                 }
             )+
         }

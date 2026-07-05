@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
 use super::super::ck_result_to_rv;
@@ -13,16 +12,16 @@ use super::super::service_utils::{
     resolve_session_and_object, resolve_session_and_two_objects, spawn_backend,
     template_declares_token_object,
 };
-use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::context_manager::ClientContextId;
 use crate::server::handle_map::VirtualHandle;
 
+use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn wrap_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::WrapKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -73,12 +72,12 @@ pub(crate) async fn wrap_key(
 }
 
 pub(crate) async fn unwrap_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::UnwrapKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 

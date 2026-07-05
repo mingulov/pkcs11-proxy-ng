@@ -1,114 +1,101 @@
-use std::sync::Arc;
-
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::CkAttribute;
 
-use super::super::context_manager::ContextManager;
 use super::attr_value_to_bytes;
 
 mod attributes;
 mod lifecycle;
 mod search;
 
+use crate::server::grpc_service::HandlerContext;
 pub(super) async fn find_objects_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     search::find_objects_init(ctx_mgr, backend_ref, request).await
 }
 
 pub(super) async fn find_objects(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     search::find_objects(ctx_mgr, backend_ref, request).await
 }
 
 pub(super) async fn find_objects_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsFinalResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     search::find_objects_final(ctx_mgr, backend_ref, request).await
 }
 
 pub(super) async fn get_attribute_value(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     attributes::get_attribute_value(ctx_mgr, backend_ref, request).await
 }
 
 pub(super) async fn get_attribute_value_exact(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueExactResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     attributes::get_attribute_value_exact(ctx_mgr, backend_ref, request).await
 }
 
 pub(super) async fn set_attribute_value(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SetAttributeValueRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetAttributeValueResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     attributes::set_attribute_value(ctx_mgr, backend_ref, request).await
 }
 
 pub(super) async fn get_object_size(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetObjectSizeRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetObjectSizeResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     attributes::get_object_size(ctx_mgr, backend_ref, request).await
 }
 
 pub(super) async fn create_object(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::CreateObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CreateObjectResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     lifecycle::create_object(ctx_mgr, backend_ref, request).await
 }
 
 pub(super) async fn copy_object(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::CopyObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CopyObjectResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     lifecycle::copy_object(ctx_mgr, backend_ref, request).await
 }
 
 pub(super) async fn destroy_object(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
-    _audit: &Option<crate::server::audit::AuditSink>,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DestroyObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DestroyObjectResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     lifecycle::destroy_object(ctx_mgr, backend_ref, request).await
 }
 

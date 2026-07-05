@@ -2,6 +2,7 @@ use super::{
     close_all_sessions, close_session, init_pin, init_token, login, logout, open_session, set_pin,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager, LoginState};
+use crate::server::grpc_service::HandlerContext;
 use crate::server::handle_map::VirtualHandle;
 use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
 use pkcs11_proxy_ng_types::*;
@@ -137,10 +138,7 @@ async fn login_response(
     session: u64,
 ) -> u64 {
     login(
-        ctx_mgr,
-        backend,
-        false,
-        &None,
+        &HandlerContext::for_test(ctx_mgr, backend),
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -161,10 +159,7 @@ async fn logout_response(
     session: u64,
 ) -> u64 {
     logout(
-        ctx_mgr,
-        backend,
-        false,
-        &None,
+        &HandlerContext::for_test(ctx_mgr, backend),
         Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -208,10 +203,7 @@ async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in(
     );
 
     let logout_b = logout(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
             client_context_id: ctx_b.0.clone(),
             session_handle: session_b,
@@ -274,10 +266,7 @@ async fn closing_last_session_clears_logical_login_state_for_slot() {
     assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
 
     let close_a = close_session(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
@@ -389,10 +378,7 @@ async fn context_specific_login_logout_reaches_backend_without_logical_state() {
     let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
 
     let context_login = login(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -473,10 +459,7 @@ async fn login_produces_audit_log_without_pin() {
 
     let output = capture_logs(|| async {
         let _ = login(
-            &ctx_mgr,
-            &backend,
-            false,
-            &None,
+            &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::LoginRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -530,10 +513,7 @@ async fn init_pin_produces_audit_log_without_pin() {
 
     let output = capture_logs(|| async {
         let _ = init_pin(
-            &ctx_mgr,
-            &backend,
-            false,
-            &None,
+            &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::InitPinRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -556,10 +536,7 @@ async fn set_pin_produces_audit_log_without_pins() {
 
     let output = capture_logs(|| async {
         let _ = set_pin(
-            &ctx_mgr,
-            &backend,
-            false,
-            &None,
+            &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::SetPinRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -583,10 +560,7 @@ async fn logout_produces_audit_log() {
 
     let output = capture_logs(|| async {
         let _ = login(
-            &ctx_mgr,
-            &backend,
-            false,
-            &None,
+            &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::LoginRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -596,10 +570,7 @@ async fn logout_produces_audit_log() {
         )
         .await;
         let _ = logout(
-            &ctx_mgr,
-            &backend,
-            false,
-            &None,
+            &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -721,10 +692,7 @@ async fn closing_a_session_evicts_session_objects_not_token_objects() {
         let ctx = ctx_id.0.clone();
         async move {
             create_object(
-                &ctx_mgr,
-                &backend,
-                false,
-                &None,
+                &HandlerContext::for_test(&ctx_mgr, &backend),
                 Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
                     client_context_id: ctx,
                     session_handle: session,
@@ -762,10 +730,7 @@ async fn closing_a_session_evicts_session_objects_not_token_objects() {
     assert!(resolves(token_obj).await, "setup: token object should resolve");
 
     let closed = close_session(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -794,10 +759,7 @@ async fn destroy_object_evicts_the_virtual_handle() {
 
     // Create a live backend object so destroy has something to remove.
     let created = create_object(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -818,10 +780,7 @@ async fn destroy_object_evicts_the_virtual_handle() {
     assert!(before.is_some(), "the virtual object handle should resolve before destroy");
 
     let destroyed = destroy_object(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -864,10 +823,7 @@ async fn object_handles_are_isolated_per_context() {
 
     // ctx_a creates an object; ctx_b creates none (its handle map stays empty).
     let created = create_object(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CreateObjectRequest {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
@@ -886,10 +842,7 @@ async fn object_handles_are_isolated_per_context() {
         let backend = backend.clone();
         async move {
             get_attribute_value(
-                &ctx_mgr,
-                &backend,
-                false,
-                &None,
+                &HandlerContext::for_test(&ctx_mgr, &backend),
                 Request::new(pkcs11_proxy_ng_proto::GetAttributeValueRequest {
                     client_context_id: ctx,
                     session_handle: session,
@@ -1019,10 +972,7 @@ async fn close_session_keeps_mapping_on_transient_backend_failure() {
     mock.inject_close_error(CkRv::DEVICE_ERROR);
 
     let rv = close_session(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -1050,10 +1000,7 @@ async fn close_session_drops_mapping_when_backend_reports_already_gone() {
     mock.inject_close_error(CkRv::SESSION_HANDLE_INVALID);
 
     let rv = close_session(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
@@ -1095,10 +1042,7 @@ async fn cross_client_login_with_wrong_pin_is_rejected() {
 
     // ctx_b attempts a logical login with a WRONG PIN.
     let wrong = login(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_b.0.clone(),
             session_handle: session_b,
@@ -1165,7 +1109,11 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
         let (ctx_mgr, backend, req) =
             (ctx_mgr.clone(), backend.clone(), login_req(&ctx_a, session_a));
         tokio::spawn(async move {
-            login(&ctx_mgr, &backend, false, &None, req).await.unwrap().into_inner().ck_rv
+            login(&HandlerContext::for_test(&ctx_mgr, &backend), req)
+                .await
+                .unwrap()
+                .into_inner()
+                .ck_rv
         })
     };
     // Wait (off the executor) until A is actually inside the backend login.
@@ -1176,7 +1124,11 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
         let (ctx_mgr, backend, req) =
             (ctx_mgr.clone(), backend.clone(), login_req(&ctx_b, session_b));
         tokio::spawn(async move {
-            login(&ctx_mgr, &backend, false, &None, req).await.unwrap().into_inner().ck_rv
+            login(&HandlerContext::for_test(&ctx_mgr, &backend), req)
+                .await
+                .unwrap()
+                .into_inner()
+                .ck_rv
         })
     };
 
@@ -1222,10 +1174,7 @@ async fn set_pin_refreshes_the_cross_client_login_verifier() {
     // ctx_a logs in with "1234" (verifier captured), then changes it to "5678".
     assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
     let set_rv = set_pin(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::SetPinRequest {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
@@ -1241,10 +1190,7 @@ async fn set_pin_refreshes_the_cross_client_login_verifier() {
 
     // ctx_b's logical login with the NEW PIN must now be accepted.
     let rv = login(
-        &ctx_mgr,
-        &backend,
-        false,
-        &None,
+        &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_b.0.clone(),
             session_handle: session_b,
