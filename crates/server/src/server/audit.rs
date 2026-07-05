@@ -152,8 +152,15 @@ pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
 
     // A2: spawn a time-based checkpoint task so low-volume auth-only logs get
     // sealed even if they never reach CHECKPOINT_INTERVAL (100) records.
-    // The task holds a Sender clone; it exits naturally when the channel closes
-    // (writer task exited at daemon shutdown).
+    // The task holds a Sender clone and exits when `send` fails, i.e. once the
+    // WRITER side of the channel is gone. NOTE: because this clone keeps the
+    // channel open, it does NOT unblock the writer's `blocking_recv()` on its
+    // own — today that is harmless (durability is via explicit `flush()` + the
+    // per-checkpoint anchor fsync, not a drop-based drain, and at runtime
+    // teardown the scheduler drops this task before the blocking pool is
+    // joined). If a future graceful-shutdown path drops the `AuditSink` and
+    // joins the writer, give this task an explicit cancel (shutdown Notify /
+    // select!) so it stops holding the sender independently of channel close.
     if has_signer && cfg.checkpoint_interval_secs > 0 {
         let tx_timer = tx.clone();
         let interval_secs = cfg.checkpoint_interval_secs;
