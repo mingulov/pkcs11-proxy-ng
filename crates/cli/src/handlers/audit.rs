@@ -66,6 +66,7 @@ mod tests {
 
     fn make_record(method: &str, ck_rv: u64) -> AuditRecord {
         AuditRecord {
+            schema_version: pkcs11_proxy_ng_audit::AUDIT_SCHEMA_VERSION,
             seq: 0,
             ts_unix_ms: 1_000,
             ts_monotonic_ns: 1_000,

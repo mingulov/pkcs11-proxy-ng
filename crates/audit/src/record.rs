@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::AuditError;
 
+/// Schema version used in every [`AuditRecord`].
+///
+/// `1` encodes the G1 field set.  Verifiers can detect format skew by
+/// comparing the value they read against this constant.  Bump this constant
+/// (and document the change) whenever the record shape changes.
+pub const AUDIT_SCHEMA_VERSION: u32 = 1;
+
 /// The class of PKCS#11 operation being recorded.
 ///
 /// `fail_closed` returns `true` for classes where a logging failure must
@@ -16,6 +23,11 @@ pub enum EventClass {
     Admin,
     DataPlane,
     System,
+    /// Reserved for G2 authorization-enforcement deny records.
+    ///
+    /// Not emitted until G2 lands; reserved now so that adding it later is
+    /// not a chain-format change (no schema_version bump needed for G2).
+    Deny,
 }
 
 impl EventClass {
@@ -23,6 +35,8 @@ impl EventClass {
     /// operation to be aborted (fail-closed policy).
     ///
     /// `DataPlane` is fail-open; all other classes are fail-closed.
+    /// `Deny` records are fail-closed: a denial that cannot be recorded must
+    /// not be silently ignored (reserved; not emitted until G2).
     pub fn fail_closed(self) -> bool {
         !matches!(self, EventClass::DataPlane)
     }
@@ -35,6 +49,11 @@ impl EventClass {
 /// suitable as input to the hash chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditRecord {
+    /// Audit record schema version; 1 = the G1 field set.
+    ///
+    /// Bumped when the record shape changes so verifiers can detect format
+    /// skew.  Always set to [`AUDIT_SCHEMA_VERSION`].
+    pub schema_version: u32,
     /// Monotonically increasing sequence number within the hash chain.
     pub seq: u64,
     /// Wall-clock time of the event (milliseconds since Unix epoch).
@@ -74,4 +93,76 @@ pub fn to_jsonl(rec: &AuditRecord) -> String {
 /// `AuditRecord`.
 pub fn from_jsonl(s: &str) -> Result<AuditRecord, AuditError> {
     serde_json::from_str(s.trim_end_matches('\n')).map_err(|e| AuditError::Malformed(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chain::ChainState;
+
+    fn make_record() -> AuditRecord {
+        AuditRecord {
+            schema_version: AUDIT_SCHEMA_VERSION,
+            seq: 0,
+            ts_unix_ms: 1,
+            ts_monotonic_ns: 1,
+            prev_hash: String::new(),
+            request_id: "r".into(),
+            identity: None,
+            method: "C_Login".into(),
+            class: EventClass::Auth,
+            slot: Some(0),
+            session: Some(1),
+            object_ref: None,
+            ck_rv: 0,
+            latency_us: 5,
+        }
+    }
+
+    #[test]
+    fn schema_version_constant_is_one() {
+        assert_eq!(AUDIT_SCHEMA_VERSION, 1);
+    }
+
+    #[test]
+    fn built_record_has_schema_version_one() {
+        let rec = make_record();
+        assert_eq!(rec.schema_version, 1);
+    }
+
+    #[test]
+    fn deny_variant_is_fail_closed() {
+        assert!(EventClass::Deny.fail_closed(), "Deny must be fail-closed");
+    }
+
+    #[test]
+    fn record_with_schema_version_is_chainable() {
+        let mut st = ChainState::genesis();
+        let mut r0 = make_record();
+        let mut r1 = make_record();
+        st.append(&mut r0);
+        st.append(&mut r1);
+        // Chain advances correctly.
+        assert_eq!(r0.seq, 0);
+        assert_eq!(r1.seq, 1);
+        assert_ne!(r0.prev_hash, r1.prev_hash);
+        // Both records carry schema_version = 1 after append.
+        assert_eq!(r0.schema_version, AUDIT_SCHEMA_VERSION);
+        assert_eq!(r1.schema_version, AUDIT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn record_with_schema_version_roundtrips_jsonl() {
+        let mut st = ChainState::genesis();
+        let mut rec = make_record();
+        st.append(&mut rec);
+        let line = to_jsonl(&rec);
+        let decoded = from_jsonl(&line).expect("jsonl round-trip must succeed");
+        assert_eq!(decoded, rec);
+        assert_eq!(decoded.schema_version, AUDIT_SCHEMA_VERSION);
+    }
 }

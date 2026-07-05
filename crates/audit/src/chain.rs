@@ -69,6 +69,7 @@ mod tests {
 
     fn rec(method: &str, ck_rv: u64) -> AuditRecord {
         AuditRecord {
+            schema_version: crate::record::AUDIT_SCHEMA_VERSION,
             seq: 0,
             ts_unix_ms: 1,
             ts_monotonic_ns: 1,

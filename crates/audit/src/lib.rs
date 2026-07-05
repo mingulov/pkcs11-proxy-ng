@@ -7,7 +7,7 @@ pub mod sign;
 pub mod verify;
 
 pub use chain::{ChainState, GENESIS_HASH};
-pub use record::{AuditRecord, EventClass};
+pub use record::{AUDIT_SCHEMA_VERSION, AuditRecord, EventClass};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuditError {

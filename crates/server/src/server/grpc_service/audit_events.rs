@@ -14,7 +14,7 @@
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use pkcs11_proxy_ng_audit::{AuditRecord, EventClass};
+use pkcs11_proxy_ng_audit::{AUDIT_SCHEMA_VERSION, AuditRecord, EventClass};
 
 use super::context::HandlerContext;
 use crate::server::context_manager::ClientContextId;
@@ -93,6 +93,7 @@ pub(super) fn emit_auth_event(
     // seq and prev_hash are set by the sink's ChainState in chain.append;
     // zeros are the sentinel values the sink expects from callers.
     let rec = AuditRecord {
+        schema_version: AUDIT_SCHEMA_VERSION,
         seq: 0,
         ts_unix_ms,
         ts_monotonic_ns,

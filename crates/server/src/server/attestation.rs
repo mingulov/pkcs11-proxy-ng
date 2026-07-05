@@ -32,7 +32,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use pkcs11_proxy_ng_audit::{AuditRecord, EventClass};
+use pkcs11_proxy_ng_audit::{AUDIT_SCHEMA_VERSION, AuditRecord, EventClass};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use sha2::{Digest, Sha256};
 
@@ -113,6 +113,7 @@ fn build_attestation_core(backend: &dyn Pkcs11Backend, module_path: &Path) -> Au
     // seq and prev_hash are set by the sink's ChainState in chain.append;
     // zeros / empty string are the sentinel values the sink expects from callers.
     AuditRecord {
+        schema_version: AUDIT_SCHEMA_VERSION,
         seq: 0,
         ts_unix_ms,
         ts_monotonic_ns,

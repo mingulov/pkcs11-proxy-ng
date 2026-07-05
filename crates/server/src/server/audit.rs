@@ -543,6 +543,7 @@ mod tests {
 
     fn make_record(class: EventClass) -> AuditRecord {
         AuditRecord {
+            schema_version: pkcs11_proxy_ng_audit::AUDIT_SCHEMA_VERSION,
             seq: 0,
             ts_unix_ms: 1,
             ts_monotonic_ns: 1,
