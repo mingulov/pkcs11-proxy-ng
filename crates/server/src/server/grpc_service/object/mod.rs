@@ -1,8 +1,13 @@
+use std::time::Instant;
+
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_types::CkAttribute;
+use pkcs11_proxy_ng_audit::EventClass;
+use pkcs11_proxy_ng_types::{CkAttribute, CkRv};
 
 use super::attr_value_to_bytes;
+use crate::server::context_manager::ClientContextId;
+use crate::server::grpc_service::audit_events::emit_auth_event;
 
 mod attributes;
 mod lifecycle;
@@ -72,31 +77,104 @@ pub(super) async fn get_object_size(
     attributes::get_object_size(ctx_mgr, backend_ref, request).await
 }
 
+/// Wrapper: captures timing + identity, delegates to lifecycle impl, emits a
+/// fail-closed `KeyMgmt` audit record.  `C_CreateObject` creates a key or
+/// data object — qualifies as key-management activity.
 pub(super) async fn create_object(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::CreateObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CreateObjectResponse>, Status> {
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
-    lifecycle::create_object(ctx_mgr, backend_ref, request).await
+    let response = lifecycle::create_object(ctx_mgr, backend_ref, request).await?;
+    let ck_rv = response.get_ref().ck_rv;
+    if emit_auth_event(
+        ctx,
+        &ctx_id,
+        "C_CreateObject",
+        EventClass::KeyMgmt,
+        None,
+        session_for_audit,
+        ck_rv,
+        started,
+    )
+    .is_err()
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+            object_handle: 0,
+        }));
+    }
+    Ok(response)
 }
 
+/// Wrapper: captures timing + identity, delegates to lifecycle impl, emits a
+/// fail-closed `KeyMgmt` audit record.
 pub(super) async fn copy_object(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::CopyObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CopyObjectResponse>, Status> {
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
-    lifecycle::copy_object(ctx_mgr, backend_ref, request).await
+    let response = lifecycle::copy_object(ctx_mgr, backend_ref, request).await?;
+    let ck_rv = response.get_ref().ck_rv;
+    if emit_auth_event(
+        ctx,
+        &ctx_id,
+        "C_CopyObject",
+        EventClass::KeyMgmt,
+        None,
+        session_for_audit,
+        ck_rv,
+        started,
+    )
+    .is_err()
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+            new_object_handle: 0,
+        }));
+    }
+    Ok(response)
 }
 
+/// Wrapper: captures timing + identity, delegates to lifecycle impl, emits a
+/// fail-closed `KeyMgmt` audit record.  `C_DestroyObject` is key extraction
+/// risk (permanent deletion = auditworthy).
 pub(super) async fn destroy_object(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DestroyObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DestroyObjectResponse>, Status> {
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
-    lifecycle::destroy_object(ctx_mgr, backend_ref, request).await
+    let response = lifecycle::destroy_object(ctx_mgr, backend_ref, request).await?;
+    let ck_rv = response.get_ref().ck_rv;
+    if emit_auth_event(
+        ctx,
+        &ctx_id,
+        "C_DestroyObject",
+        EventClass::KeyMgmt,
+        None,
+        session_for_audit,
+        ck_rv,
+        started,
+    )
+    .is_err()
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DestroyObjectResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+        }));
+    }
+    Ok(response)
 }
 
 /// Build the proto `AttributeResult` list from an owned template.

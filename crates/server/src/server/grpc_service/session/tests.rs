@@ -1366,3 +1366,100 @@ async fn audit_off_login_logout_byte_identical() {
     .ck_rv;
     assert_eq!(logout_rv, CkRv::OK.0, "logout must succeed with audit off");
 }
+
+// ---------------------------------------------------------------------------
+// G1-PR3: key-lifecycle audit emission tests
+// ---------------------------------------------------------------------------
+
+/// G1-PR3: `C_GenerateKey` emits a `KeyMgmt` audit record with the
+/// operation's `ck_rv` and a valid hash chain.  Uses a MockBackend configured
+/// with `AES_KEY_GEN` (not in `default_test`) so the backend call succeeds.
+#[tokio::test]
+async fn audit_generate_key_emits_key_mgmt_record() {
+    let dir = test_audit_dir("generate-key");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Build a backend that advertises AES_KEY_GEN.
+    let mock = pkcs11_proxy_ng_backend::MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![CkMechanismType::AES_KEY_GEN],
+    );
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+
+    let (ctx, sink) = make_audited_ctx(&ctx_mgr, &backend, &dir).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_handle = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    use crate::server::grpc_service::key_ops::generate_key;
+    let gen_rv = generate_key(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::AES_KEY_GEN.0,
+                params: None,
+            }),
+            template: vec![],
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(gen_rv, CkRv::OK.0, "generate_key must succeed");
+
+    sink.flush().await.unwrap();
+
+    let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
+    assert!(report.chain_ok, "audit chain must be valid after C_GenerateKey: {report:?}");
+    assert!(report.records >= 1, "must have at least one audit record, got {}", report.records);
+    assert!(report.gaps.is_empty(), "no sequence gaps: {:?}", report.gaps);
+
+    let jsonl = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+    assert!(jsonl.contains("\"C_GenerateKey\""), "C_GenerateKey must appear in audit JSONL");
+    assert!(jsonl.contains("\"ck_rv\":0"), "successful keygen must record ck_rv 0");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// G1-PR3 audit-off: when `ctx.audit` is `None`, `generate_key` behaves
+/// byte-identically to the pre-audit path (no panic, correct ck_rv).
+#[tokio::test]
+async fn audit_off_generate_key_byte_identical() {
+    let mock = pkcs11_proxy_ng_backend::MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![CkMechanismType::AES_KEY_GEN],
+    );
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+
+    // No audit sink: for_test leaves ctx.audit = None.
+    let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_handle = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    use crate::server::grpc_service::key_ops::generate_key;
+    let gen_rv = generate_key(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::AES_KEY_GEN.0,
+                params: None,
+            }),
+            template: vec![],
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(gen_rv, CkRv::OK.0, "generate_key must succeed with audit off");
+}

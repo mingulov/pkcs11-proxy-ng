@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use tonic::{Request, Response, Status};
 
+use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::{CkMechanismParams, CkObjectHandle, CkRv, Sp800108DerivedKey};
 
 use super::super::convert_template;
@@ -12,12 +14,63 @@ use super::super::service_utils::{
     template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::grpc_service::audit_events::emit_auth_event;
 use crate::server::handle_map::VirtualHandle;
 
 const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
 
 use crate::server::grpc_service::HandlerContext;
+
+/// Emit a fail-closed `KeyMgmt` audit record after the operation completes.
+/// On audit sink failure, returns `CKR_FUNCTION_FAILED` instead of the real
+/// response (ADR-0012 fail-closed contract).
+macro_rules! audit_key_mgmt {
+    ($ctx:expr, $ctx_id:expr, $method:expr, $session:expr, $response:expr, $started:expr, $fail_response:expr) => {{
+        let ck_rv = $response.get_ref().ck_rv;
+        if emit_auth_event(
+            $ctx,
+            $ctx_id,
+            $method,
+            EventClass::KeyMgmt,
+            None,
+            $session,
+            ck_rv,
+            $started,
+        )
+        .is_err()
+        {
+            return Ok(Response::new($fail_response));
+        }
+        Ok($response)
+    }};
+}
+
+/// Outer dispatcher: captures timing + identity, delegates to the impl, then
+/// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn generate_key_pair(
+    ctx: &HandlerContext,
+    request: Request<pkcs11_proxy_ng_proto::GenerateKeyPairRequest>,
+) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyPairResponse>, Status> {
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
+    let response = generate_key_pair_impl(ctx, request).await?;
+    audit_key_mgmt!(
+        ctx,
+        &ctx_id,
+        "C_GenerateKeyPair",
+        session_for_audit,
+        response,
+        started,
+        pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+            public_key_handle: 0,
+            private_key_handle: 0,
+        }
+    )
+}
+
+async fn generate_key_pair_impl(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyPairRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyPairResponse>, Status> {
@@ -116,7 +169,32 @@ pub(crate) async fn generate_key_pair(
     }
 }
 
+/// Outer dispatcher: captures timing + identity, delegates to the impl, then
+/// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn generate_key(
+    ctx: &HandlerContext,
+    request: Request<pkcs11_proxy_ng_proto::GenerateKeyRequest>,
+) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyResponse>, Status> {
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
+    let response = generate_key_impl(ctx, request).await?;
+    audit_key_mgmt!(
+        ctx,
+        &ctx_id,
+        "C_GenerateKey",
+        session_for_audit,
+        response,
+        started,
+        pkcs11_proxy_ng_proto::GenerateKeyResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }
+    )
+}
+
+async fn generate_key_impl(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyResponse>, Status> {
@@ -198,7 +276,32 @@ pub(crate) async fn generate_key(
     }
 }
 
+/// Outer dispatcher: captures timing + identity, delegates to the impl, then
+/// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn derive_key(
+    ctx: &HandlerContext,
+    request: Request<pkcs11_proxy_ng_proto::DeriveKeyRequest>,
+) -> Result<Response<pkcs11_proxy_ng_proto::DeriveKeyResponse>, Status> {
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
+    let response = derive_key_impl(ctx, request).await?;
+    audit_key_mgmt!(
+        ctx,
+        &ctx_id,
+        "C_DeriveKey",
+        session_for_audit,
+        response,
+        started,
+        pkcs11_proxy_ng_proto::DeriveKeyResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }
+    )
+}
+
+async fn derive_key_impl(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DeriveKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DeriveKeyResponse>, Status> {

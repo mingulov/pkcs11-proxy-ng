@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use tonic::{Request, Response, Status};
 
+use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
 use super::super::ck_result_to_rv;
@@ -13,10 +15,43 @@ use super::super::service_utils::{
     template_declares_token_object,
 };
 use crate::server::context_manager::ClientContextId;
+use crate::server::grpc_service::audit_events::emit_auth_event;
 use crate::server::handle_map::VirtualHandle;
 
 use crate::server::grpc_service::HandlerContext;
+
+/// Outer dispatcher: captures timing + identity, delegates to the impl, then
+/// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn wrap_key(
+    ctx: &HandlerContext,
+    request: Request<pkcs11_proxy_ng_proto::WrapKeyRequest>,
+) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyResponse>, Status> {
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
+    let response = wrap_key_impl(ctx, request).await?;
+    let ck_rv = response.get_ref().ck_rv;
+    if emit_auth_event(
+        ctx,
+        &ctx_id,
+        "C_WrapKey",
+        EventClass::KeyMgmt,
+        None,
+        session_for_audit,
+        ck_rv,
+        started,
+    )
+    .is_err()
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+            wrapped_key: Vec::new(),
+        }));
+    }
+    Ok(response)
+}
+
+async fn wrap_key_impl(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::WrapKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyResponse>, Status> {
@@ -71,7 +106,38 @@ pub(crate) async fn wrap_key(
     }))
 }
 
+/// Outer dispatcher: captures timing + identity, delegates to the impl, then
+/// emits a fail-closed `KeyMgmt` audit record.
 pub(crate) async fn unwrap_key(
+    ctx: &HandlerContext,
+    request: Request<pkcs11_proxy_ng_proto::UnwrapKeyRequest>,
+) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyResponse>, Status> {
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
+    let response = unwrap_key_impl(ctx, request).await?;
+    let ck_rv = response.get_ref().ck_rv;
+    if emit_auth_event(
+        ctx,
+        &ctx_id,
+        "C_UnwrapKey",
+        EventClass::KeyMgmt,
+        None,
+        session_for_audit,
+        ck_rv,
+        started,
+    )
+    .is_err()
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+            key_handle: 0,
+        }));
+    }
+    Ok(response)
+}
+
+async fn unwrap_key_impl(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::UnwrapKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyResponse>, Status> {
