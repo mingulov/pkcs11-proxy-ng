@@ -484,13 +484,15 @@ tokens = ["label:local-token"]
 "#;
     let config: DaemonConfig = toml::from_str(toml).unwrap();
     let err = config.validate().unwrap_err();
+    // The policy+unauthenticated check fires before validate_policy_identities,
+    // giving a dedicated startup-refusal message.
     assert!(
-        err.contains("no authenticated listeners"),
+        err.contains("[auth.policy]") || err.contains("auth.policy"),
         "error should explain policy cannot apply: {err}"
     );
     assert!(
-        err.contains("auth = 'none' bypasses auth policy"),
-        "error should mention bypass: {err}"
+        err.contains("unauthenticated") || err.to_lowercase().contains("auth = \"none\""),
+        "error should mention unauthenticated access: {err}"
     );
 }
 
@@ -806,4 +808,68 @@ rotate_keep_files = 3
     assert_eq!(cfg.audit.dir.as_deref(), Some(std::path::Path::new("/var/log/pkcs11-proxy/audit")));
     assert_eq!(cfg.audit.rotate_max_bytes, 1_048_576);
     assert_eq!(cfg.audit.rotate_keep_files, 3);
+}
+
+#[test]
+fn policy_with_unauthenticated_listener_is_rejected() {
+    // A policy entry + a local listener with auth = "none" must refuse to start:
+    // an authorization policy cannot meaningfully apply to an unauthenticated peer.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = \"all\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("auth") && err.to_lowercase().contains("policy"), "got: {err}");
+}
+
+#[test]
+fn policy_with_authenticated_listener_is_allowed() {
+    // peer_cred is an authenticated mode; uid= identities match peer_cred.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = \"all\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"peer_cred\"
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+#[cfg(unix)]
+fn check_not_group_or_world_writable_enforces_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::path::PathBuf::from(format!(
+        "/tmp/pkcs11-proxy-ng-perm-test-{}.tmp",
+        std::process::id()
+    ));
+    std::fs::write(&path, b"test").expect("write temp file");
+    // Group+world writable (mode 0662) must be rejected.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o662)).expect("chmod 0662");
+    let err = check_not_group_or_world_writable(&path, "test file").unwrap_err();
+    assert!(err.contains("group/world-writable"), "got: {err}");
+    assert!(err.contains("chmod go-w"), "got: {err}");
+    // Mode 0644 (not writable by group/world) must be accepted.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod 0644");
+    assert!(check_not_group_or_world_writable(&path, "test file").is_ok());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn login_lock_timeout_secs_defaults_to_10() {
+    let toml = "[backend]\nmodule = \"/dev/null\"\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.proxy.login_lock_timeout_secs, 10);
 }

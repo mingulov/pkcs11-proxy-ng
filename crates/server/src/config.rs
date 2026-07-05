@@ -224,6 +224,12 @@ pub struct ProxyConfig {
     /// tokens and self-recovers if the wedged one unsticks.
     #[serde(default)]
     pub max_stuck_backend_calls: Option<u64>,
+    /// How long (in seconds) to hold the per-slot login lock while a
+    /// `C_Login` or `C_Logout` is in flight. Used by the slot-login
+    /// serialization logic to prevent concurrent login/logout races on
+    /// shared slots. Default 10 seconds.
+    #[serde(default = "default_login_lock_timeout_secs")]
+    pub login_lock_timeout_secs: u64,
 }
 
 /// Whether the daemon should self-exit given the stuck-call gauge and the
@@ -253,6 +259,7 @@ impl Default for ProxyConfig {
             rate_limit_window_secs: default_rate_limit_window_secs(),
             sanitize_inputs: false,
             max_stuck_backend_calls: None,
+            login_lock_timeout_secs: default_login_lock_timeout_secs(),
         }
     }
 }
@@ -300,6 +307,9 @@ fn default_shutdown_grace_secs() -> u64 {
 }
 fn default_backend_health_consecutive_failures() -> u32 {
     3
+}
+fn default_login_lock_timeout_secs() -> u64 {
+    10
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -455,6 +465,40 @@ impl PolicyIdentitySource {
     }
 }
 
+/// Refuse to use `path` if it is group-writable or other-writable.
+///
+/// A group/world-writable config file or backend module is a code-execution
+/// surface reachable by unprivileged users — reject early so the operator
+/// sees a clear message at startup rather than a silent privilege escalation.
+///
+/// Non-Unix platforms: always succeeds (permission bits are not meaningful).
+pub(crate) fn check_not_group_or_world_writable(
+    path: &std::path::Path,
+    what: &str,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::metadata(path)
+            .map_err(|e| format!("refuse: cannot stat {what} '{}': {e}", path.display()))?;
+        let mode = meta.mode();
+        if mode & 0o022 != 0 {
+            return Err(format!(
+                "refuse: {what} '{}' is group/world-writable (mode {:04o}); \
+                 a writable code-execution surface. chmod go-w {}",
+                path.display(),
+                mode & 0o7777,
+                path.display()
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, what);
+    }
+    Ok(())
+}
+
 impl DaemonConfig {
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
@@ -462,6 +506,14 @@ impl DaemonConfig {
         let mut config: Self = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse config '{}': {e}", path.display()))?;
         config.apply_env_overrides();
+        // Security: refuse to start if config file or backend module is group/world-writable
+        // — a writable code-execution surface reachable by unprivileged users.
+        check_not_group_or_world_writable(path, "config file")?;
+        if config.backend.module.as_os_str() != BACKEND_MODULE_PLACEHOLDER
+            && config.backend.module != std::path::Path::new("/dev/null")
+        {
+            check_not_group_or_world_writable(&config.backend.module, "backend module")?;
+        }
         config.validate()?;
         Ok(config)
     }
@@ -654,6 +706,17 @@ impl DaemonConfig {
             return Err(
                 "No listeners configured. Set [listener.local] and/or [listener.remote].".into()
             );
+        }
+        // An authorization policy cannot apply to an unauthenticated peer: refuse
+        // to start if any listener uses auth = "none" while [auth.policy] is set.
+        let has_unauthenticated_listener =
+            self.listener.local.as_ref().is_some_and(|l| !l.auth.is_authenticated())
+                || self.listener.remote.as_ref().is_some_and(|r| !r.auth.is_authenticated());
+        if !self.auth.policy.is_empty() && has_unauthenticated_listener {
+            return Err("[auth.policy] is set but a listener uses auth = \"none\"; an \
+                 authorization policy cannot apply to unauthenticated peers. Use an \
+                 authenticated listener (peer_cred / mtls) or remove the policy."
+                .into());
         }
         let has_authenticated_listener =
             self.listener.local.as_ref().is_some_and(|l| l.auth.is_authenticated())
