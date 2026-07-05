@@ -1,10 +1,20 @@
 # ADR-0012: Gateway & Resilience Modes
 
 ## Status
-**Proposed (2026-07-04).** Introduced incrementally. The first increment —
-opt-in, count-only pathological-population detection (`[resilience]`) plus a
-local Unix-socket metrics endpoint — is implemented. The audit stream (this
-ADR's G1) is the next increment. Promote to **Accepted** as the phases land.
+**Proposed (2026-07-04; last revised 2026-07-06).** Introduced incrementally.
+**Landed:** (1) opt-in count-only pathological-population detection (`[resilience]`)
++ local Unix-socket metrics endpoint; (2) **G1 audit stream** — the tamper-evident
+engine (SHA-256 hash chain, Ed25519-signed checkpoints, rotating sink, anchor,
+directory `verify`), fail-closed emission for auth/session/PIN-admin and
+key-lifecycle operations, audit metrics, and a **startup** backend-attestation
+record; (3) **G2-PR1 identity/config hardening** (refuse-to-start on `policy`/
+`allow_all_authenticated`/`audit` + `auth="none"`; reject writable config/module/
+audit-dir; per-slot login-lock acquisition timeout). **Not yet landed / phased
+(see the §-notes below and the full-review gap analysis 2026-07-06):** data-plane
+(sign/encrypt) audit emission + the fail-open gap-sentinel; reconnect/hot-swap
+re-attestation; the G2 authorization *enforcement* model (principal resolution,
+deny-default flip, leaf-SPKI identity keying, class/mechanism grants, rate/quota);
+and all of G3. Promote to **Accepted** as the enforcement phases land.
 
 ## Context
 
@@ -42,25 +52,57 @@ distinguish the shim from the real module.
      mode 0600) metrics endpoint. Detection reads only values already in hand;
      it never issues an extra backend call. Follow-ups (opt-in): session-scoped
      attribute prefetch to coalesce round-trips, and duplicate-object collapse.
-   - **G1 — Audit stream:** a tamper-evident, security-relevant event log
-     (authenticated identity, method, slot/session, `CK_RV`, latency; object
-     labels/IDs are hashed or omitted by default and are not fetched from the
-     backend). Records are hash-chained (SHA-256), anchored across restart and
-     rotation, and sealed by periodic Ed25519-signed checkpoints. The daemon
-     owns rotation (rename-then-new, never copytruncate). A `verify` command
-     walks a whole log directory. Sink-failure policy is per class:
-     **fail-closed** (reject the operation) for auth / key-management / deny
-     events; **fail-open + an explicit gap sentinel + a dropped-record counter**
-     for high-volume data-plane events.
-   - **G2 — Identity hardening + coarse authorization + rate/quota:** when any
-     policy is configured, the daemon refuses to start on an unauthenticated
-     listener, and an unknown/unmatched identity is **denied by default**
-     (superseding the legacy allow-for-unauthenticated shortcut). mTLS identity
-     is keyed on the issuer's SPKI/fingerprint plus subject, not a reversible DN
-     string. Rate/quota is enforced at the dispatch seam (not a transport
-     layer), with per-principal fairness; quota rejections use spec-native RVs
-     (`CKR_SESSION_COUNT`, `CKR_DEVICE_MEMORY`) and are excluded from the
-     backend-health failure counter.
+   - **G1 — Audit stream:** a security-relevant event log (authenticated
+     identity, method, slot/session, `CK_RV`, latency; object labels/IDs are
+     hashed or omitted by default and are not fetched from the backend). Records
+     are hash-chained (SHA-256), anchored across restart and rotation, and sealed
+     by periodic Ed25519-signed checkpoints (record-count *and* time triggered).
+     The daemon owns rotation (rename-then-new, never copytruncate). A `verify`
+     command walks a whole log directory.
+     **Tamper-evidence is bounded to signed-checkpoint coverage:** with a
+     configured `signing_key`, history up to the last checkpoint is
+     cryptographically tamper-evident; the unsigned anchor gives corruption
+     detection for the post-checkpoint tail but is not proof against a writer who
+     can rewrite both the record and the anchor. **Without a `signing_key` the
+     chain is corruption-detecting only, not tamper-evident** (a directory-writer
+     can recompute the SHA-256 chain and rewrite the anchor). A front-truncation
+     below the oldest retained checkpoint is indistinguishable from legitimate
+     pruning. Sink-failure policy is per class: **fail-closed** (reject the
+     operation) for auth / key-management events. **Currently shipped emission
+     covers auth/session/PIN-admin + key-lifecycle** (generate/derive/wrap/unwrap/
+     create/destroy/copy). High-volume data-plane (`C_Sign`/`C_Encrypt`) emission
+     — with a **fail-open** path, an explicit **gap sentinel**, a surfaced
+     dropped-record counter, and a **separate channel from the fail-closed
+     classes** (so a data-plane flood cannot starve auth records) — is a planned
+     follow-up, NOT yet shipped.
+   - **G2 — Identity hardening + coarse authorization + rate/quota:**
+     *Hardening (G2-PR1, shipped):* the daemon refuses to start when a
+     policy / `allow_all_authenticated` / audit is configured alongside an
+     `auth="none"` listener, and bounds the per-slot login lock. *Authorization
+     enforcement (G2-PR2, planned):* an unknown/unmatched identity is **denied by
+     default** — which requires folding the **three** current
+     unauthenticated/`allow_all_authenticated`⇒allow paths into one deny-default
+     core (`TokenPolicy::allows` Unauthenticated + `allow_all_authenticated` +
+     `slot_is_authorized`'s enforcement short-circuit), not just one.
+     mTLS identity must key on the **leaf certificate's SPKI/fingerprint** (not
+     issuer-SPKI + a reversible subject DN string, which lets a pinned CA mint a
+     colliding-subject cert); this is a restructure of the DN-string identity key
+     and needs a policy-file migration path. An `anonymous_principal` for an
+     unauthenticated-but-audited listener is **audit-identity only** — deny-default
+     for authz, forbidden from *all* grants, and carries **no** cross-peer A2
+     ownership isolation. **Coarse (slot-level) authorization is all-or-nothing
+     per token — it grants full key USE and, for extractable keys, key
+     EXTRACTION** (via `C_WrapKey` / value-bearing `C_GetAttributeValue`);
+     per-object / per-mechanism / extract restriction is G3 (v3.0+ only), so a
+     v2.40 token gets coarse-only. An `extract-deny` coarse sub-gate on
+     `C_WrapKey` + value-bearing attribute reads is a candidate for G2 itself.
+     Rate/quota is enforced at the dispatch seam covering **both** the
+     `impl_proxy_service!` macro path and the hand-written handlers (esp.
+     `open_session`, the `CKR_SESSION_COUNT` target), with per-principal fairness;
+     quota rejections use spec-native RVs (`CKR_SESSION_COUNT`, `CKR_DEVICE_MEMORY`)
+     and are excluded from the backend-health failure counter. A per-**slot**
+     aggregate failed-login budget protects the backend's shared PIN-lockout
+     counter (the proxy is one application to the token).
    - **G3 — Fine-grained authorization:** use-time authorization on every
      handle-consuming operation and on every handle-minting operation (not
      enumeration filtering alone), including a per-**attribute** check so that
@@ -75,15 +117,21 @@ distinguish the shim from the real module.
      authorization only.
 
 3. **Backend attestation is integrity/change-detection, not proof of identity.**
-   A startup record captures the module path + content hash, the token's
-   `C_GetTokenInfo` serial/model/firmware, and the config hash, signed into the
-   audit chain; re-attestation on reconnect is mandatory and a serial mismatch
-   is a fail-closed event. This detects a swapped `.so` or token against a
-   running daemon. It is explicitly **not** a proof that the daemon fronts a
-   specific HSM against a daemon-compromise adversary (the record is self-signed
-   with an in-process key and the hash is computed by the same process). A
-   stronger property would require TPM/remote attestation and an out-of-band
-   expected hash; that is out of scope here.
+   A **startup** record (shipped) captures the module path + content hash, the
+   library `C_GetInfo`, and the token's `C_GetTokenInfo` serial/model/firmware,
+   emitted into the audit chain as a `System`-class record. It is explicitly
+   **not** proof that the daemon fronts a specific HSM against a daemon-compromise
+   adversary (the record is self-signed with an in-process key and the hash is
+   computed by the same process). A stronger property would require TPM/remote
+   attestation and an out-of-band expected hash; out of scope here.
+   **Known gaps vs the full intent (phased, not yet shipped):** the startup
+   payload does **not** yet include a config hash; and **re-attestation on
+   token hot-swap is deferred** — the daemon's backend is an in-process FFI
+   module with no reconnect hook, so a token swap that changes the serial under
+   a running daemon is currently undetected. The cheap follow-up is to re-attest
+   on the `device-removed`/`token-not-present` slot event the daemon already
+   observes (the same signal used for authorization-cache invalidation), treating
+   a serial mismatch as a fail-closed `System` event.
 
 4. **Dependency discipline.** Signed checkpoints use `ed25519-dalek` with
    `default-features = false` (no `rand_core`): the daemon **signs** with a key
