@@ -96,7 +96,13 @@ pub(super) fn emit_auth_event(
     };
 
     match sink.emit(rec) {
-        Ok(()) => Ok(()),
-        Err(_dropped) => Err(()),
+        Ok(()) => {
+            crate::server::resilience::record_audit_emitted();
+            Ok(())
+        }
+        Err(_dropped) => {
+            crate::server::resilience::record_audit_dropped();
+            Err(())
+        }
     }
 }

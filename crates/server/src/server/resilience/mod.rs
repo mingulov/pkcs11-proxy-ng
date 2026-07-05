@@ -18,6 +18,8 @@ static FIND_OBJECTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static FIND_OBJECTS_OVER_THRESHOLD_TOTAL: AtomicU64 = AtomicU64::new(0);
 static FIND_RESULT_SIZE_MAX: AtomicUsize = AtomicUsize::new(0);
 static GET_ATTRIBUTE_VALUE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static AUDIT_EMITTED: AtomicU64 = AtomicU64::new(0);
+static AUDIT_DROPPED: AtomicU64 = AtomicU64::new(0);
 
 /// Install the configured threshold once at startup. First call wins.
 pub fn configure(find_result_warn_threshold: Option<usize>) {
@@ -52,6 +54,16 @@ pub fn record_get_attribute_value() {
     GET_ATTRIBUTE_VALUE_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Record one successfully enqueued audit record.
+pub fn record_audit_emitted() {
+    AUDIT_EMITTED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record one audit record that was dropped or rejected by the fail policy.
+pub fn record_audit_dropped() {
+    AUDIT_DROPPED.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Immutable counter snapshot for the metrics endpoint.
 #[derive(Debug, Clone, Copy)]
 pub struct Snapshot {
@@ -59,6 +71,8 @@ pub struct Snapshot {
     pub find_objects_over_threshold_total: u64,
     pub find_result_size_max: usize,
     pub get_attribute_value_total: u64,
+    pub audit_emitted_total: u64,
+    pub audit_dropped_total: u64,
 }
 
 pub fn snapshot() -> Snapshot {
@@ -68,6 +82,8 @@ pub fn snapshot() -> Snapshot {
             .load(Ordering::Relaxed),
         find_result_size_max: FIND_RESULT_SIZE_MAX.load(Ordering::Relaxed),
         get_attribute_value_total: GET_ATTRIBUTE_VALUE_TOTAL.load(Ordering::Relaxed),
+        audit_emitted_total: AUDIT_EMITTED.load(Ordering::Relaxed),
+        audit_dropped_total: AUDIT_DROPPED.load(Ordering::Relaxed),
     }
 }
 
@@ -96,5 +112,13 @@ pub fn render_prometheus(s: &Snapshot) -> String {
         "pkcs11_proxy_get_attribute_value_total {}\n",
         s.get_attribute_value_total
     ));
+    o.push_str("# HELP pkcs11_proxy_audit_emitted_total Audit records successfully enqueued.\n");
+    o.push_str("# TYPE pkcs11_proxy_audit_emitted_total counter\n");
+    o.push_str(&format!("pkcs11_proxy_audit_emitted_total {}\n", s.audit_emitted_total));
+    o.push_str(
+        "# HELP pkcs11_proxy_audit_dropped_total Audit records dropped or rejected by the fail policy.\n",
+    );
+    o.push_str("# TYPE pkcs11_proxy_audit_dropped_total counter\n");
+    o.push_str(&format!("pkcs11_proxy_audit_dropped_total {}\n", s.audit_dropped_total));
     o
 }

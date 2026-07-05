@@ -17,6 +17,8 @@ fn prometheus_render_contains_all_series() {
         find_objects_over_threshold_total: 1,
         find_result_size_max: 2106,
         get_attribute_value_total: 4213,
+        audit_emitted_total: 57,
+        audit_dropped_total: 2,
     };
     let text = render_prometheus(&s);
     assert!(text.contains("pkcs11_proxy_find_objects_total 3\n"));
@@ -24,4 +26,9 @@ fn prometheus_render_contains_all_series() {
     assert!(text.contains("pkcs11_proxy_find_result_size_max 2106\n"));
     assert!(text.contains("pkcs11_proxy_get_attribute_value_total 4213\n"));
     assert!(text.contains("# TYPE pkcs11_proxy_find_objects_total counter"));
+    // Audit counters
+    assert!(text.contains("pkcs11_proxy_audit_emitted_total 57\n"));
+    assert!(text.contains("pkcs11_proxy_audit_dropped_total 2\n"));
+    assert!(text.contains("# TYPE pkcs11_proxy_audit_emitted_total counter"));
+    assert!(text.contains("# TYPE pkcs11_proxy_audit_dropped_total counter"));
 }
