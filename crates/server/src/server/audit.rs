@@ -103,6 +103,13 @@ impl AuditSink {
 enum WriterMsg {
     Record(AuditRecord),
     Flush(tokio::sync::oneshot::Sender<io::Result<()>>),
+    /// A2: time-triggered checkpoint request from the periodic timer task.
+    ///
+    /// The writer seals the current log tail with a signed checkpoint when
+    /// `records_since_checkpoint > 0` and a signer is configured, ensuring
+    /// low-volume auth-only logs get sealed even if they never reach 100
+    /// records (the count-based trigger).
+    Checkpoint,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +136,9 @@ pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
     create_audit_dir(dir)?;
 
     let signer = load_signer(cfg)?;
+    // A2: only the signer-present path needs the periodic checkpoint task;
+    // an unsigned checkpoint has no cryptographic value.
+    let has_signer = signer.is_some();
 
     let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
     let dropped = Arc::new(AtomicU64::new(0));
@@ -140,6 +150,24 @@ pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
     // the tokio mpsc via `blocking_recv()`.
     tokio::task::spawn_blocking(move || writer_task(writer, rx));
 
+    // A2: spawn a time-based checkpoint task so low-volume auth-only logs get
+    // sealed even if they never reach CHECKPOINT_INTERVAL (100) records.
+    // The task holds a Sender clone; it exits naturally when the channel closes
+    // (writer task exited at daemon shutdown).
+    if has_signer && cfg.checkpoint_interval_secs > 0 {
+        let tx_timer = tx.clone();
+        let interval_secs = cfg.checkpoint_interval_secs;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+                if tx_timer.send(WriterMsg::Checkpoint).await.is_err() {
+                    // Writer channel closed — daemon shutting down.
+                    break;
+                }
+            }
+        });
+    }
+
     Ok(Some(AuditSink { tx, dropped }))
 }
 
@@ -149,6 +177,15 @@ pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
 
 fn create_audit_dir(dir: &Path) -> io::Result<()> {
     if dir.exists() {
+        // H3: reject a pre-existing group/world-writable directory — an
+        // adversary-controllable write surface.  The signing key (0o077)
+        // and config (0o022) are already checked by their own paths; keep
+        // the audit directory to the same standard.
+        #[cfg(unix)]
+        {
+            crate::config::check_not_group_or_world_writable(dir, "audit directory")
+                .map_err(io::Error::other)?;
+        }
         return Ok(());
     }
     #[cfg(unix)]
@@ -515,11 +552,28 @@ fn writer_task(mut state: WriterState, mut rx: tokio::sync::mpsc::Receiver<Write
                             // A concurrent flush; our flush covers it.
                             let _ = inner_ack.send(Ok(()));
                         }
+                        Ok(WriterMsg::Checkpoint) => {
+                            // A time-triggered checkpoint is superseded by the
+                            // flush that follows — no-op here.
+                        }
                         Err(_) => break,
                     }
                 }
                 let result = state.flush();
                 let _ = ack.send(result);
+            }
+            WriterMsg::Checkpoint => {
+                // A2: time-triggered checkpoint. Seal the tail when there are
+                // un-checkpointed records and a signer is configured.
+                if state.records_since_checkpoint > 0
+                    && state.signer.is_some()
+                    && let Err(e) = state.do_checkpoint()
+                {
+                    tracing::error!(
+                        error = %e,
+                        "audit writer: failed time-triggered checkpoint"
+                    );
+                }
             }
         }
     }
@@ -581,6 +635,7 @@ mod tests {
             // Small keep value → the oldest rotated files ARE pruned, exercising
             // the pruning-aware verifier (a pruned prefix is not a gap).
             rotate_keep_files: 2,
+            checkpoint_interval_secs: 300,
         };
 
         let sink = spawn_audit_sink(&cfg).unwrap().expect("sink should be created");
@@ -618,6 +673,11 @@ mod tests {
         let dir = temp_dir("signed");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
 
         let seed: [u8; 32] = [0x5Au8; 32];
         let key_path = dir.join("signing.key");
@@ -636,6 +696,7 @@ mod tests {
             signing_key: Some(key_path),
             rotate_max_bytes: 64 * 1024, // large enough to avoid rotation
             rotate_keep_files: 10,
+            checkpoint_interval_secs: 300,
         };
 
         let sink = spawn_audit_sink(&cfg).unwrap().expect("signed sink should be created");
@@ -710,6 +771,11 @@ mod tests {
         let dir = temp_dir("crash-restart");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
 
         let mut st = ChainState::genesis();
         let mut lines = String::new();
@@ -732,6 +798,7 @@ mod tests {
             signing_key: None,
             rotate_max_bytes: 1 << 20, // no rotation
             rotate_keep_files: 10,
+            checkpoint_interval_secs: 300,
         };
         let sink = spawn_audit_sink(&cfg).unwrap().expect("resumed sink");
         for _ in 0..20 {
@@ -768,6 +835,8 @@ mod tests {
         let dir = temp_dir("keyperms");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // H3: audit dir must be owner-only for spawn_audit_sink to accept it.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
 
         let key_path = dir.join("signing.key");
         std::fs::write(&key_path, [0x11u8; 32]).unwrap();
@@ -777,6 +846,7 @@ mod tests {
             signing_key: Some(key_path.clone()),
             rotate_max_bytes: 1 << 20,
             rotate_keep_files: 10,
+            checkpoint_interval_secs: 300,
         };
 
         // Group-readable (0640) → refused.
@@ -790,6 +860,115 @@ mod tests {
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let ok = spawn_audit_sink(&cfg);
         assert!(ok.is_ok(), "0600 signing key must be accepted: {:?}", ok.err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Test H3: a pre-existing group/world-writable audit directory is rejected;
+    /// a 0700 directory is accepted.
+    ///
+    /// Before this fix, `create_audit_dir` returned `Ok(())` for any existing
+    /// directory, allowing an adversary to pre-plant a group-writable dir.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_audit_dir_writable_by_group_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = temp_dir("dirperms");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let cfg_for_dir = |dir: &std::path::PathBuf| AuditConfig {
+            dir: Some(dir.clone()),
+            signing_key: None,
+            rotate_max_bytes: 1 << 20,
+            rotate_keep_files: 10,
+            checkpoint_interval_secs: 300,
+        };
+
+        // 0777: group-writable + world-writable → refused.
+        let dir_777 = base.join("audit_777");
+        std::fs::create_dir_all(&dir_777).unwrap();
+        std::fs::set_permissions(&dir_777, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            spawn_audit_sink(&cfg_for_dir(&dir_777)).is_err(),
+            "0777 audit dir must be refused"
+        );
+
+        // 0772: group-writable + world-writable → refused.
+        let dir_772 = base.join("audit_772");
+        std::fs::create_dir_all(&dir_772).unwrap();
+        std::fs::set_permissions(&dir_772, std::fs::Permissions::from_mode(0o772)).unwrap();
+        assert!(
+            spawn_audit_sink(&cfg_for_dir(&dir_772)).is_err(),
+            "0772 audit dir must be refused"
+        );
+
+        // 0700: owner-only → accepted.
+        let dir_700 = base.join("audit_700");
+        std::fs::create_dir_all(&dir_700).unwrap();
+        std::fs::set_permissions(&dir_700, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = spawn_audit_sink(&cfg_for_dir(&dir_700));
+        assert!(result.is_ok(), "0700 audit dir must be accepted: {:?}", result.err());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Test A2: time-based checkpoint fires for a sub-100-record log.
+    ///
+    /// With `checkpoint_interval_secs = 1` and only 5 records emitted (well
+    /// below the 100-record count trigger), the periodic timer must fire and
+    /// produce at least one signed checkpoint before the flush.
+    #[tokio::test]
+    async fn time_triggered_checkpoint_seals_small_log() {
+        let dir = temp_dir("timed-cp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let seed: [u8; 32] = [0xBBu8; 32];
+        let key_path = dir.join("signing.key");
+        std::fs::write(&key_path, seed).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let public_hex = Signer::from_seed_bytes(&seed).unwrap().public_hex();
+
+        let cfg = AuditConfig {
+            dir: Some(dir.clone()),
+            signing_key: Some(key_path),
+            rotate_max_bytes: 64 * 1024,
+            rotate_keep_files: 10,
+            checkpoint_interval_secs: 1, // very short for test determinism
+        };
+
+        let sink = spawn_audit_sink(&cfg).unwrap().expect("timed-cp sink must be created");
+
+        // Emit only 5 records — far below the 100-record count trigger.
+        for _ in 0..5 {
+            sink.emit(make_record(pkcs11_proxy_ng_audit::EventClass::Auth)).unwrap();
+        }
+
+        // Wait generously beyond the 1-second timer so the periodic task fires.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        sink.flush().await.unwrap();
+
+        let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, Some(&public_hex)).unwrap();
+        assert!(report.chain_ok, "chain must be valid: {report:?}");
+        assert_eq!(report.records, 5);
+        assert!(
+            report.checkpoints_verified >= 1,
+            "time trigger must have produced at least one signed checkpoint; got: {report:?}"
+        );
+        assert_eq!(report.checkpoints_failed, 0, "no failed checkpoints");
 
         std::fs::remove_dir_all(&dir).ok();
     }

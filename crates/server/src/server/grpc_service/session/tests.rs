@@ -1224,6 +1224,7 @@ async fn make_audited_ctx(
         signing_key: None,
         rotate_max_bytes: 1 << 20,
         rotate_keep_files: 10,
+        checkpoint_interval_secs: 300,
     };
     let sink =
         crate::server::audit::spawn_audit_sink(&cfg).unwrap().expect("audit sink must spawn");

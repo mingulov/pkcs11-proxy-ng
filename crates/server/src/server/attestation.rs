@@ -324,6 +324,7 @@ module = "{}"
             signing_key: None,
             rotate_max_bytes: 1 << 20,
             rotate_keep_files: 10,
+            checkpoint_interval_secs: 300,
         };
         let sink = spawn_audit_sink(&cfg).unwrap();
 

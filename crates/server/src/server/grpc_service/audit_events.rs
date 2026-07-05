@@ -109,6 +109,10 @@ pub(super) fn emit_auth_event(
         latency_us,
     };
 
+    // NOTE: when data-plane fail-OPEN emission lands, a silently-dropped fail-open
+    // record returns Ok here and would be miscounted as emitted — that path must
+    // increment record_audit_dropped (or a separate counter) at the sink drop site.
+    // Tracked in the 2026-07-06 gap analysis.
     match sink.emit(rec) {
         Ok(()) => {
             crate::server::resilience::record_audit_emitted();

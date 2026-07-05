@@ -345,6 +345,12 @@ pub struct AuditConfig {
     pub rotate_max_bytes: u64,
     #[serde(default = "default_audit_rotate_keep_files")]
     pub rotate_keep_files: u32,
+    /// How often (in seconds) to write a signed checkpoint regardless of the
+    /// record-count trigger. `0` disables the time trigger. Default 300 (5 min).
+    /// Only effective when `signing_key` is set; a time-triggered checkpoint
+    /// without a signer has no value since there is nothing to sign.
+    #[serde(default = "default_audit_checkpoint_interval_secs")]
+    pub checkpoint_interval_secs: u64,
 }
 
 impl Default for AuditConfig {
@@ -354,6 +360,7 @@ impl Default for AuditConfig {
             signing_key: None,
             rotate_max_bytes: default_audit_rotate_max_bytes(),
             rotate_keep_files: default_audit_rotate_keep_files(),
+            checkpoint_interval_secs: default_audit_checkpoint_interval_secs(),
         }
     }
 }
@@ -364,6 +371,10 @@ fn default_audit_rotate_max_bytes() -> u64 {
 
 fn default_audit_rotate_keep_files() -> u32 {
     10
+}
+
+fn default_audit_checkpoint_interval_secs() -> u64 {
+    300 // 5 minutes
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]

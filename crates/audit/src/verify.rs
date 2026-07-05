@@ -632,4 +632,57 @@ mod tests {
 
         fs::remove_dir_all(&dir).ok();
     }
+
+    /// Test 7: a checkpoint signed with a DIFFERENT key (or byte-corrupted
+    /// signature) is detected as a failure when verified with the expected key.
+    ///
+    /// Sign with `SEED_A`, verify with the public key derived from `SEED_B`.
+    /// The signature will be cryptographically invalid → `checkpoints_failed > 0`
+    /// and `chain_ok == false`.
+    #[test]
+    fn wrong_key_checkpoint_fails_verification() {
+        const SEED_A: [u8; 32] = [0xAAu8; 32]; // signer seed
+        const SEED_B: [u8; 32] = [0xBBu8; 32]; // wrong verifier seed
+
+        let dir = temp_dir("wrong-key");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Build a 3-record chain.
+        let mut st = ChainState::genesis();
+        let mut recs: Vec<AuditRecord> = (0..3).map(|_| rec("C_Op", 0)).collect();
+        for r in recs.iter_mut() {
+            st.append(r);
+        }
+        let head = st.last_hash.clone();
+
+        fs::write(
+            dir.join("audit.jsonl"),
+            format!("{}{}{}", to_jsonl(&recs[0]), to_jsonl(&recs[1]), to_jsonl(&recs[2])),
+        )
+        .unwrap();
+
+        // Sign checkpoint with SEED_A.
+        let signer_a = Signer::from_seed_bytes(&SEED_A).unwrap();
+        let cp =
+            Checkpoint { seq: recs[2].seq, chain_head_hash: head, ts_unix_ms: 1, record_count: 3 };
+        write_checkpoint(&dir, &signer_a, &cp);
+
+        // Verify with public key from SEED_B — signature must be invalid.
+        let public_hex_b = Signer::from_seed_bytes(&SEED_B).unwrap().public_hex();
+        let report = verify_dir(&dir, Some(&public_hex_b)).unwrap();
+
+        assert!(
+            report.checkpoints_failed > 0,
+            "checkpoint signed by wrong key must count as failed; got: {report:?}"
+        );
+        assert_eq!(report.checkpoints_verified, 0, "no checkpoint must verify with the wrong key");
+        assert!(
+            !report.chain_ok,
+            "wrong-key checkpoint failure must set chain_ok = false; got: {report:?}"
+        );
+        assert!(report.signature_checked, "signature checking must have been attempted");
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }
