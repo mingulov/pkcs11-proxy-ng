@@ -1,3 +1,4 @@
+pub mod attestation;
 pub mod audit;
 pub mod auth;
 pub mod context_manager;

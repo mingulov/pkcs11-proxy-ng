@@ -404,6 +404,11 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     let (svc, context_manager, registry_source) =
         build_service(&config, &backend, audit_sink.clone()).await?;
 
+    // Emit startup attestation (ADR-0012 G1 §3): captures module hash,
+    // library version, and token serial/model/firmware at load time.
+    // Best-effort: a dropped record is logged but does NOT abort startup.
+    server::attestation::emit_startup_attestation(&audit_sink, &backend, &config).await;
+
     // Loud one-time warning if TCP listener is running without auth
     // (the design's default for SaaS deployments behind external
     // network protection). Stays visible in operator log scans.
