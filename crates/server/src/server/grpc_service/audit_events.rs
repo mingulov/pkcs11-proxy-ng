@@ -35,15 +35,28 @@ fn process_start() -> Instant {
 ///
 /// # Fail-closed contract
 ///
-/// Returns `Ok(())` when:
-/// - Audit is disabled (`ctx.audit` is `None`) — zero-overhead no-op that
-///   preserves byte-identical behaviour for deployments without `[audit]`.
-/// - The record was successfully queued.
+/// Returns `Ok(())` when audit is disabled (`ctx.audit` is `None`) — a
+/// zero-overhead no-op that preserves byte-identical behaviour for deployments
+/// without `[audit]` — or when the sink accepted the record.
 ///
-/// Returns `Err(())` when the event class is fail-closed (Auth, KeyMgmt,
-/// System) **and** the sink rejected the record (channel full or writer
-/// dead).  Callers MUST respond with `CKR_FUNCTION_FAILED` on `Err` — never
-/// silently return the original ck_rv for an unaudited security operation.
+/// Returns `Err(())` when the sink rejected the record. The per-class fail
+/// policy lives in `AuditSink::emit`, not here: fail-open classes (DataPlane)
+/// drop and return `Ok` under back-pressure, while fail-closed classes (Auth,
+/// KeyMgmt, System) return `Err` when the channel is full or the writer is dead.
+/// Callers MUST respond with `CKR_FUNCTION_FAILED` on `Err` — never silently
+/// return the original ck_rv for an unaudited security operation.
+///
+/// ## Fail-closed-after-side-effect (accepted divergence, ADR-0012)
+///
+/// The wired handlers perform the backend operation FIRST, then emit. If a
+/// fail-closed emit fails (sink saturated or writer dead) the handler returns
+/// `CKR_FUNCTION_FAILED` even though the operation may ALREADY have committed on
+/// the shared backend (e.g. `C_Login` logged the token in; `C_OpenSession`
+/// opened a session that is now leaked from the client's view). The
+/// client-visible failure can therefore diverge from backend state. This is a
+/// deliberate trade-off: under audit saturation we refuse to *confirm* an
+/// unaudited security action rather than report success for something we could
+/// not record. It occurs only when audit is enabled and the sink is saturated.
 ///
 /// # PIN safety
 ///

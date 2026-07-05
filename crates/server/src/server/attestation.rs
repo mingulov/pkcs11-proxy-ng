@@ -173,9 +173,11 @@ pub async fn emit_startup_attestation(
 
     match sink.emit(record) {
         Ok(()) => {
+            crate::server::resilience::record_audit_emitted();
             tracing::info!("startup attestation recorded");
         }
         Err(e) => {
+            crate::server::resilience::record_audit_dropped();
             tracing::warn!(
                 error = %e,
                 "startup attestation dropped (channel full or writer dead)"
