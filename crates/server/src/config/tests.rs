@@ -873,3 +873,64 @@ fn login_lock_timeout_secs_defaults_to_10() {
     let cfg: DaemonConfig = toml::from_str(toml).unwrap();
     assert_eq!(cfg.proxy.login_lock_timeout_secs, 10);
 }
+
+#[test]
+fn allow_all_authenticated_with_unauthenticated_listener_is_rejected() {
+    // H1: allow_all_authenticated=true + auth="none" listener must refuse to start.
+    // TokenPolicy::allows short-circuits to true for any identity including
+    // Unauthenticated, so this combo blanket-authorizes no-auth peers.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[auth]
+allow_all_authenticated = true
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("allow_all_authenticated"),
+        "error must mention allow_all_authenticated, got: {err}"
+    );
+}
+
+#[test]
+fn audit_with_unauthenticated_listener_is_rejected() {
+    // H2: [audit] dir + auth="none" listener must refuse to start.
+    // Every operation would be recorded with identity=None, giving false
+    // compliance assurance.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[audit]
+dir = \"/var/log/pkcs11-proxy/audit\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("audit"), "error must mention audit, got: {err}");
+}
+
+#[test]
+fn audit_with_authenticated_listener_is_allowed() {
+    // Positive control: [audit] + peer_cred listener is a valid config.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[audit]
+dir = \"/var/log/pkcs11-proxy/audit\"
+[auth]
+allow_all_authenticated = true
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"peer_cred\"
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.validate().is_ok());
+}

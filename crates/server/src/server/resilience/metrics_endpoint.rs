@@ -113,6 +113,8 @@ mod tests {
         assert!(resp.contains("pkcs11_proxy_find_objects_over_threshold_total"));
         assert!(resp.contains("pkcs11_proxy_find_result_size_max"));
         assert!(resp.contains("pkcs11_proxy_get_attribute_value_total"));
+        assert!(resp.contains("pkcs11_proxy_audit_emitted_total"));
+        assert!(resp.contains("pkcs11_proxy_audit_dropped_total"));
         let _ = std::fs::remove_file(&path);
     }
 

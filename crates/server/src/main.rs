@@ -371,7 +371,6 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // when [audit] is absent or audit.dir is not set).
     let audit_sink = server::audit::spawn_audit_sink(&config.audit)
         .map_err(|e| format!("audit sink failed to initialise: {e}"))?;
-    // PR2: handlers will call audit_sink.emit(...) once gRPC service wiring lands.
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health::set_not_serving(&mut health_reporter).await;

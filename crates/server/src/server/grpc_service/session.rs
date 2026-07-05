@@ -1,4 +1,3 @@
-#![allow(unused_imports)]
 use std::sync::Arc;
 use std::time::Instant;
 

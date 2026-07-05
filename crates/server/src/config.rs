@@ -718,6 +718,18 @@ impl DaemonConfig {
                  authenticated listener (peer_cred / mtls) or remove the policy."
                 .into());
         }
+        if self.auth.allow_all_authenticated && has_unauthenticated_listener {
+            return Err("allow_all_authenticated = true with an auth=\"none\" listener grants \
+                 every unauthenticated peer full token access. Use an authenticated listener \
+                 or disable allow_all_authenticated."
+                .into());
+        }
+        if self.audit.dir.is_some() && has_unauthenticated_listener {
+            return Err("[audit] is enabled with an auth=\"none\" listener; every operation \
+                 would be recorded as identity=None, giving false compliance assurance. \
+                 Use an authenticated listener."
+                .into());
+        }
         let has_authenticated_listener =
             self.listener.local.as_ref().is_some_and(|l| l.auth.is_authenticated())
                 || self.listener.remote.as_ref().is_some_and(|r| r.auth.is_authenticated());
