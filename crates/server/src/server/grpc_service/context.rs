@@ -43,12 +43,8 @@ pub(crate) struct HandlerContext {
     /// G1-PR2: audit sink shared across all gRPC handlers. `None` when audit is
     /// not configured (zero-overhead default). Clone is cheap (Arc internally).
     ///
-    /// Carried on every handler's context so emission can be wired without
-    /// touching handler signatures again. No handler consumes it yet (the
-    /// emission-attestation work is in progress on this branch), so the field is
-    /// constructed but not yet read — `allow(dead_code)` documents that
-    /// intent rather than dropping the plumbing.
-    #[allow(dead_code)]
+    /// Emission is wired in `grpc_service/audit_events.rs`; handlers call
+    /// `emit_auth_event` after each auth/key-mgmt/system operation.
     pub(crate) audit: Option<AuditSink>,
 }
 

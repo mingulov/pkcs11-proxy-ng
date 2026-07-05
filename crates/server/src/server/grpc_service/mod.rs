@@ -12,6 +12,7 @@ use super::auth::policy::TokenPolicy;
 use super::context_manager::ContextManager;
 
 mod async_ops;
+mod audit_events;
 mod authorization;
 mod byte_output_exact;
 mod combined;
@@ -289,13 +290,7 @@ macro_rules! impl_proxy_service {
             ) -> Result<Response<pkcs11_proxy_ng_proto::OpenSessionResponse>, Status> {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                session::open_session_with_policy(
-                    &self.ctx.context_manager,
-                    &self.ctx.backend,
-                    self.ctx.token_policy.as_ref(),
-                    request,
-                )
-                .await
+                session::open_session_with_policy(&self.ctx, request).await
             }
 
             async fn close_all_sessions(
@@ -319,13 +314,7 @@ macro_rules! impl_proxy_service {
             ) -> Result<Response<pkcs11_proxy_ng_proto::InitTokenResponse>, Status> {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                session::init_token_with_policy(
-                    &self.ctx.context_manager,
-                    &self.ctx.backend,
-                    self.ctx.token_policy.as_ref(),
-                    request,
-                )
-                .await
+                session::init_token_with_policy(&self.ctx, request).await
             }
 
             $(

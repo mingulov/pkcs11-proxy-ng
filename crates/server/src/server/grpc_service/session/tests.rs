@@ -1208,3 +1208,161 @@ async fn set_pin_refreshes_the_cross_client_login_verifier() {
         "a logical login with the new PIN must be accepted after SetPIN refreshes the verifier"
     );
 }
+
+// ---------------------------------------------------------------------------
+// G1-PR2: Audit emission integration tests
+// ---------------------------------------------------------------------------
+
+/// Build a `HandlerContext` with a live audit sink pointing at `dir`.
+async fn make_audited_ctx(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    dir: &std::path::Path,
+) -> (HandlerContext, crate::server::audit::AuditSink) {
+    let cfg = crate::config::AuditConfig {
+        dir: Some(dir.to_owned()),
+        signing_key: None,
+        rotate_max_bytes: 1 << 20,
+        rotate_keep_files: 10,
+    };
+    let sink =
+        crate::server::audit::spawn_audit_sink(&cfg).unwrap().expect("audit sink must spawn");
+    let mut ctx = HandlerContext::for_test(ctx_mgr, backend);
+    ctx.audit = Some(sink.clone());
+    (ctx, sink)
+}
+
+/// Returns a path inside the system temp dir that is unique per test process + tag.
+fn test_audit_dir(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("pkcs11-proxy-audit-{}-{}", std::process::id(), tag))
+}
+
+/// G1-PR2 primary: login then logout produces two audit records with the
+/// correct method names and ck_rv, the chain verifies, and the test PIN is
+/// absent from every byte of every audit file.
+#[tokio::test]
+async fn audit_login_logout_records_chain_ok_and_no_pin() {
+    let dir = test_audit_dir("login-logout");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+
+    let (ctx, sink) = make_audited_ctx(&ctx_mgr, &backend, &dir).await;
+
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_handle = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // Use a distinctive PIN string so the grep below is a strong assertion.
+    let test_pin = b"G1PR2-AuditTestPin-SENSITIVE!".to_vec();
+
+    let login_rv = login(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            user_type: CkUserType::User as u64,
+            pin: Some(test_pin.clone()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(login_rv, CkRv::OK.0, "login must succeed");
+
+    let logout_rv = logout(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(logout_rv, CkRv::OK.0, "logout must succeed");
+
+    // Flush: ensures all records are durably written before we read the files.
+    sink.flush().await.unwrap();
+
+    // Verify the hash chain.
+    let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
+    assert!(report.chain_ok, "audit chain must be valid after login+logout: {report:?}");
+    assert!(report.records >= 2, "must have at least 2 audit records, got {}", report.records);
+    assert!(report.gaps.is_empty(), "no sequence gaps: {:?}", report.gaps);
+
+    // Verify the record content (method names and ck_rv).
+    let jsonl = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+    assert!(jsonl.contains("\"C_Login\""), "C_Login method must appear in audit file");
+    assert!(jsonl.contains("\"C_Logout\""), "C_Logout method must appear in audit file");
+    // ck_rv 0 == CKR_OK
+    assert!(jsonl.contains("\"ck_rv\":0"), "successful operations must record ck_rv 0");
+
+    // PIN-safety: the raw PIN bytes must not appear anywhere in the audit files.
+    let pin_str = std::str::from_utf8(&test_pin).unwrap();
+    let all_files_content = {
+        let mut s = String::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                s.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+            }
+        }
+        s
+    };
+    assert!(
+        !all_files_content.contains(pin_str),
+        "PIN MUST NOT appear in any audit JSONL file (PIN safety violation!)"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// G1-PR2 audit-off: when `ctx.audit` is `None` (no `[audit]` config),
+/// the operation behaves byte-identically to pre-audit code.
+#[tokio::test]
+async fn audit_off_login_logout_byte_identical() {
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+
+    // No audit sink: for_test leaves ctx.audit = None.
+    let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_handle = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    let login_rv = login(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            user_type: CkUserType::User as u64,
+            pin: Some(b"1234".to_vec()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(login_rv, CkRv::OK.0, "login must succeed with audit off");
+
+    let logout_rv = logout(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(logout_rv, CkRv::OK.0, "logout must succeed with audit off");
+}

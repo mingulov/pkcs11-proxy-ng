@@ -1,0 +1,102 @@
+//! Audit emission helpers for auth/key-management operations (G1-PR2, ADR-0012).
+//!
+//! All security-sensitive PKCS#11 operations (auth, key-mgmt, system lifecycle)
+//! emit a tamper-evident audit record via the `AuditSink` held on
+//! `HandlerContext`. The sink applies per-class fail policy: Auth/KeyMgmt/System
+//! are fail-closed, so if the channel is full or the writer is dead the
+//! operation is REJECTED with `CKR_FUNCTION_FAILED` rather than silently
+//! proceeding unaudited.
+//!
+//! SECURITY: audit records MUST NOT contain PINs, keys, labels, or any other
+//! sensitive request payload — only method/identity/slot/session/ck_rv/latency.
+//! (CLAUDE.md §4.)
+
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use pkcs11_proxy_ng_audit::{AuditRecord, EventClass};
+
+use super::context::HandlerContext;
+use crate::server::context_manager::ClientContextId;
+
+/// Process-start instant for monotonic timestamps.
+///
+/// Initialised on first call; stable for the daemon lifetime. All audit
+/// records share the same baseline, so `ts_monotonic_ns` is comparable
+/// across records within a single daemon instance.
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+#[inline]
+fn process_start() -> Instant {
+    *PROCESS_START.get_or_init(Instant::now)
+}
+
+/// Emit a single audit record for an auth/key-management operation.
+///
+/// # Fail-closed contract
+///
+/// Returns `Ok(())` when:
+/// - Audit is disabled (`ctx.audit` is `None`) — zero-overhead no-op that
+///   preserves byte-identical behaviour for deployments without `[audit]`.
+/// - The record was successfully queued.
+///
+/// Returns `Err(())` when the event class is fail-closed (Auth, KeyMgmt,
+/// System) **and** the sink rejected the record (channel full or writer
+/// dead).  Callers MUST respond with `CKR_FUNCTION_FAILED` on `Err` — never
+/// silently return the original ck_rv for an unaudited security operation.
+///
+/// # PIN safety
+///
+/// This function accepts only `method`, `class`, `slot`, `session`, `ck_rv`,
+/// and timing. It MUST NOT be called with any PIN, key, label, or sensitive
+/// request payload in any parameter.
+pub(super) fn emit_auth_event(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    method: &'static str,
+    class: EventClass,
+    slot: Option<u64>,
+    session: Option<u64>,
+    ck_rv: u64,
+    started_at: Instant,
+) -> Result<(), ()> {
+    let Some(ref sink) = ctx.audit else {
+        // Audit disabled — zero-overhead no-op; behaviour is unchanged.
+        return Ok(());
+    };
+
+    let ts_unix_ms =
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+
+    // ts_monotonic_ns: nanoseconds since process start on the monotonic clock.
+    let ts_monotonic_ns = process_start().elapsed().as_nanos() as u64;
+    let latency_us = started_at.elapsed().as_micros() as u64;
+
+    // Identity: looked up from the live context map.  Absent for finalize
+    // (context already removed) or unknown ctx_id — both resolve to None,
+    // which is recorded as-is without error.
+    let identity = ctx.context_manager.context_identity(ctx_id);
+
+    // seq and prev_hash are set by the sink's ChainState in chain.append;
+    // zeros are the sentinel values the sink expects from callers.
+    let rec = AuditRecord {
+        seq: 0,
+        ts_unix_ms,
+        ts_monotonic_ns,
+        prev_hash: String::new(),
+        request_id: "-".to_string(),
+        identity,
+        method: method.to_string(),
+        class,
+        slot,
+        session,
+        object_ref: None,
+        ck_rv,
+        latency_us,
+    };
+
+    match sink.emit(rec) {
+        Ok(()) => Ok(()),
+        Err(_dropped) => Err(()),
+    }
+}
