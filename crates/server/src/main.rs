@@ -383,6 +383,9 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         config.proxy.request_timeout_secs,
         config.proxy.max_concurrent_backend_calls,
     );
+    server::grpc_service::service_utils::configure_login_lock_timeout(
+        config.proxy.login_lock_timeout_secs,
+    );
 
     // Configure per-peer rate limiter for GetBackendInterfaces.
     // Disabled by default (max_per_window=0); production deployments

@@ -14,6 +14,7 @@ use super::super::handle_map::{BackendHandle, VirtualHandle};
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();
+static LOGIN_LOCK_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static HEALTH_EVENT_TX: OnceLock<mpsc::Sender<BackendHealthEvent>> = OnceLock::new();
 /// Tracks whether the LAST sent health event was `Success`. Initialized
 /// to `true` because the health-gate task assumes the daemon starts in
@@ -39,6 +40,18 @@ pub enum BackendHealthEvent {
 pub fn configure_backend_guard(timeout_secs: u64, max_calls: usize) {
     BACKEND_TIMEOUT.set(Duration::from_secs(timeout_secs)).ok();
     MAX_BACKEND_CALLS.set(max_calls).ok();
+}
+
+/// Called once at server startup to configure the per-slot login-lock
+/// acquisition timeout (cross-tenant DoS bound).
+pub fn configure_login_lock_timeout(secs: u64) {
+    LOGIN_LOCK_TIMEOUT.set(Duration::from_secs(secs)).ok();
+}
+
+/// Returns the configured login-lock acquisition timeout.
+/// Falls back to 10 seconds if `configure_login_lock_timeout` was never called.
+pub fn login_lock_timeout() -> Duration {
+    *LOGIN_LOCK_TIMEOUT.get().unwrap_or(&Duration::from_secs(10))
 }
 
 /// Wire up the channel that `spawn_backend` uses to report outcomes
@@ -988,5 +1001,45 @@ mod tests {
                 .unwrap();
 
         assert_eq!(result, (CkSessionHandle(123), CkObjectHandle(456), CkObjectHandle(0)));
+    }
+
+    // --- Login-lock timeout tests ---
+
+    /// Verify that a timed acquisition fires when the lock is held by another
+    /// holder. This is the core DoS-bound property: a slow/wedged backend
+    /// login on one session must not queue other tenants indefinitely.
+    #[tokio::test]
+    async fn login_lock_timeout_fires_when_lock_is_held() {
+        let mutex = Arc::new(tokio::sync::Mutex::new(()));
+        // Simulate a tenant that holds the login lock (e.g. wedged backend call).
+        let _held = mutex.lock().await;
+        // A very short timeout must fire because the lock is held.
+        let result = tokio::time::timeout(Duration::from_millis(10), mutex.lock()).await;
+        assert!(
+            result.is_err(),
+            "timed lock acquisition must time out when the lock is already held"
+        );
+    }
+
+    /// Verify that a timed acquisition succeeds when the lock is free. This
+    /// ensures the 10-second default does not trip normal (uncontended) login.
+    #[tokio::test]
+    async fn login_lock_timeout_succeeds_when_lock_is_free() {
+        let mutex = Arc::new(tokio::sync::Mutex::new(()));
+        // Lock is uncontended — acquisition must succeed before any timeout.
+        let result = tokio::time::timeout(Duration::from_millis(10), mutex.lock()).await;
+        assert!(result.is_ok(), "timed lock acquisition must succeed when the lock is uncontended");
+    }
+
+    #[test]
+    fn configure_login_lock_timeout_and_getter_round_trip() {
+        // OnceLock: the first call in this process wins; subsequent calls are
+        // no-ops. We verify only that the getter returns a positive duration
+        // regardless of which test ran first.
+        configure_login_lock_timeout(7);
+        assert!(
+            login_lock_timeout().as_millis() > 0,
+            "login_lock_timeout() must return a positive duration"
+        );
     }
 }

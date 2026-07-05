@@ -9,7 +9,7 @@ use pkcs11_proxy_ng_types::*;
 
 use super::super::super::context_manager::{ClientContextId, ContextManager, LoginState};
 use super::super::super::handle_map::VirtualHandle;
-use super::super::service_utils::spawn_backend;
+use super::super::service_utils::{login_lock_timeout, spawn_backend};
 
 fn login_state_for_user_type(user_type: CkUserType) -> Option<LoginState> {
     match user_type {
@@ -87,8 +87,23 @@ pub(super) async fn login(
     // insert. Otherwise two clients racing the first login on the shared token
     // both see "no other login" and both take the real-login path, and the
     // second is answered USER_ALREADY_LOGGED_IN instead of the logical OK.
+    //
+    // Bounded acquisition (G2/V11): refuse rather than queue unboundedly when
+    // a slow/wedged backend C_Login pins the lock. CKR_DEVICE_ERROR signals a
+    // transient token-serialization failure the client can retry.
     let login_guard = ctx_mgr.slot_login_lock(slot);
-    let _login_lock = login_guard.lock().await;
+    let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
+        Ok(guard) => guard,
+        Err(_elapsed) => {
+            // Another tenant holds the per-slot login lock past the configured
+            // bound (slow/wedged backend login on the shared token). Refuse
+            // rather than queue unboundedly; CKR_DEVICE_ERROR is a transient
+            // token-serialization failure the client can retry.
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+                ck_rv: CkRv::DEVICE_ERROR.0,
+            }));
+        }
+    };
 
     // Wrap PIN bytes in `Zeroizing` so the backing buffer is overwritten when
     // dropped. Read it up-front and pre-hash it so the logical-login path can
@@ -193,8 +208,21 @@ pub(super) async fn logout(
 
     // Serialize logout against concurrent login/logout on the same slot (M5),
     // so the cross-context scan and the login_state removal stay atomic.
+    //
+    // Bounded acquisition (G2/V11): same cross-tenant DoS bound as login.
     let login_guard = ctx_mgr.slot_login_lock(slot);
-    let _login_lock = login_guard.lock().await;
+    let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
+        Ok(guard) => guard,
+        Err(_elapsed) => {
+            // Another tenant holds the per-slot login lock past the configured
+            // bound (slow/wedged backend login on the shared token). Refuse
+            // rather than queue unboundedly; CKR_DEVICE_ERROR is a transient
+            // token-serialization failure the client can retry.
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse {
+                ck_rv: CkRv::DEVICE_ERROR.0,
+            }));
+        }
+    };
 
     let other_login_state = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id);
 
