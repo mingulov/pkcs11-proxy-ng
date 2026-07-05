@@ -17,6 +17,7 @@ pub(crate) async fn encrypt_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::EncryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptInitResponse>, Status> {
     let req = request.into_inner();
@@ -95,6 +96,7 @@ pub(crate) async fn encrypt(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::EncryptRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptResponse>, Status> {
     let req = request.into_inner();
@@ -128,6 +130,7 @@ pub(crate) async fn encrypt_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::EncryptUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptUpdateResponse>, Status> {
     let req = request.into_inner();
@@ -161,6 +164,7 @@ pub(crate) async fn encrypt_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::EncryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptFinalResponse>, Status> {
     let req = request.into_inner();
@@ -192,6 +196,7 @@ pub(crate) async fn decrypt_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DecryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptInitResponse>, Status> {
     let req = request.into_inner();
@@ -270,6 +275,7 @@ pub(crate) async fn decrypt(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DecryptRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptResponse>, Status> {
     let req = request.into_inner();
@@ -304,6 +310,7 @@ pub(crate) async fn decrypt_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DecryptUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptUpdateResponse>, Status> {
     let req = request.into_inner();
@@ -338,6 +345,7 @@ pub(crate) async fn decrypt_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DecryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptFinalResponse>, Status> {
     let req = request.into_inner();

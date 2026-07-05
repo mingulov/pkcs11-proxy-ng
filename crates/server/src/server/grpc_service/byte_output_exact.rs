@@ -18,6 +18,7 @@ pub(super) async fn byte_output_exact(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::ByteOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ByteOutputExactResponse>, Status> {
     let req = request.into_inner();
@@ -281,6 +282,7 @@ mod sanitize_inputs_tests {
             ctx_mgr,
             backend,
             false,
+            &None,
             Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -300,6 +302,7 @@ mod sanitize_inputs_tests {
             ctx_mgr,
             backend,
             false,
+            &None,
             Request::new(pkcs11_proxy_ng_proto::DecryptInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -345,6 +348,7 @@ mod sanitize_inputs_tests {
             &service.context_manager,
             &service.backend,
             service.sanitize_inputs,
+            &service.audit,
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -394,6 +398,7 @@ mod sanitize_inputs_tests {
             &service.context_manager,
             &service.backend,
             service.sanitize_inputs,
+            &service.audit,
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -434,6 +439,7 @@ mod sanitize_inputs_tests {
             &service.context_manager,
             &service.backend,
             service.sanitize_inputs,
+            &service.audit,
             Request::new(pkcs11_proxy_ng_proto::EncryptInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -470,6 +476,7 @@ mod sanitize_inputs_tests {
             &service.context_manager,
             &service.backend,
             service.sanitize_inputs,
+            &service.audit,
             Request::new(pkcs11_proxy_ng_proto::EncryptInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -503,6 +510,7 @@ mod sanitize_inputs_tests {
             &service.context_manager,
             &service.backend,
             service.sanitize_inputs,
+            &service.audit,
             Request::new(pkcs11_proxy_ng_proto::SignRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -537,6 +545,7 @@ mod sanitize_inputs_tests {
             &service.context_manager,
             &service.backend,
             service.sanitize_inputs,
+            &service.audit,
             Request::new(pkcs11_proxy_ng_proto::VerifyRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -572,6 +581,7 @@ mod sanitize_inputs_tests {
             &service.context_manager,
             &service.backend,
             service.sanitize_inputs,
+            &service.audit,
             Request::new(pkcs11_proxy_ng_proto::SignInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
@@ -604,6 +614,7 @@ mod sanitize_inputs_tests {
             &service.context_manager,
             &service.backend,
             service.sanitize_inputs,
+            &service.audit,
             Request::new(pkcs11_proxy_ng_proto::SignInitRequest {
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,

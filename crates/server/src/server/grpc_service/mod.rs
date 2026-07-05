@@ -7,6 +7,7 @@ use pkcs11_proxy_ng_proto::Pkcs11Proxy;
 use pkcs11_proxy_ng_types::*;
 use tonic::{Request, Response, Status};
 
+use super::audit::AuditSink;
 use super::auth::policy::TokenPolicy;
 use super::context_manager::ContextManager;
 
@@ -50,6 +51,9 @@ pub struct Pkcs11ProxyService {
     /// CKR_ARGUMENTS_BAD before reaching the backend module. Default false
     /// (transparent forwarding).
     pub(super) sanitize_inputs: bool,
+    /// G1-PR2: audit sink shared across all gRPC handlers. None when audit is
+    /// not configured (zero-overhead default). Clone is cheap (Arc internally).
+    pub(super) audit: Option<AuditSink>,
 }
 
 impl Pkcs11ProxyService {
@@ -60,6 +64,7 @@ impl Pkcs11ProxyService {
         unix_auth_mode: UnixAuthMode,
         token_policy: Arc<TokenPolicy>,
         mechanism_registry_source: MechanismRegistrySource,
+        audit: Option<AuditSink>,
     ) -> Self {
         Self {
             context_manager,
@@ -69,6 +74,7 @@ impl Pkcs11ProxyService {
             token_policy,
             mechanism_registry_source,
             sanitize_inputs: false,
+            audit,
         }
     }
 
@@ -93,6 +99,7 @@ impl Pkcs11ProxyService {
             UnixAuthMode::None,
             token_policy,
             registry,
+            None, // audit: tests that need emission will pass a sink explicitly
         )
         // sanitize_inputs defaults to false — transparent forwarding (ADR-0010)
     }
@@ -359,7 +366,7 @@ macro_rules! impl_proxy_service {
                             ));
                         }
                     };
-                    $module(&self.context_manager, &self.backend, self.sanitize_inputs, request).await
+                    $module(&self.context_manager, &self.backend, self.sanitize_inputs, &self.audit, request).await
                 }
             )+
         }

@@ -20,6 +20,7 @@ pub(crate) async fn wrap_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::WrapKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyResponse>, Status> {
     let req = request.into_inner();
@@ -75,6 +76,7 @@ pub(crate) async fn unwrap_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::UnwrapKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyResponse>, Status> {
     let req = request.into_inner();

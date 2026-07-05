@@ -41,6 +41,7 @@ async fn spawn_uds_server(
         UnixAuthMode::PeerCred,
         Arc::new(policy),
         MechanismRegistrySource::load(None).unwrap(),
+        None, // audit: not needed for transport tests
     );
 
     let dir = tempfile::tempdir().unwrap();

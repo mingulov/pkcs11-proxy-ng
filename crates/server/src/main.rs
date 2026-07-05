@@ -60,6 +60,7 @@ fn load_backend(config: &config::DaemonConfig) -> Result<Backend, BoxError> {
 async fn build_service(
     config: &config::DaemonConfig,
     backend: &Backend,
+    audit_sink: Option<server::audit::AuditSink>,
 ) -> Result<
     (
         pkcs11_proxy_ng_proto::Pkcs11ProxyServer<server::grpc_service::Pkcs11ProxyService>,
@@ -141,6 +142,7 @@ async fn build_service(
             unix_auth_mode,
             token_policy,
             registry_source.clone(),
+            audit_sink,
         );
         if sanitize_inputs { svc.with_sanitize_inputs() } else { svc }
     };
@@ -399,7 +401,8 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         tracing::info!(path = %sock.display(), "resilience metrics endpoint bound");
     }
 
-    let (svc, context_manager, registry_source) = build_service(&config, &backend).await?;
+    let (svc, context_manager, registry_source) =
+        build_service(&config, &backend, audit_sink.clone()).await?;
 
     // Loud one-time warning if TCP listener is running without auth
     // (the design's default for SaaS deployments behind external

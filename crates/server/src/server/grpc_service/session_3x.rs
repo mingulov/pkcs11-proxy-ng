@@ -21,6 +21,7 @@ pub(super) async fn login_user(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::LoginUserRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::LoginUserResponse>, Status> {
     let req = request.into_inner();
@@ -71,6 +72,7 @@ pub(super) async fn session_cancel(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::SessionCancelRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SessionCancelResponse>, Status> {
     let req = request.into_inner();
@@ -107,6 +109,7 @@ pub(super) async fn get_session_validation_flags(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::GetSessionValidationFlagsRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetSessionValidationFlagsResponse>, Status> {
     let req = request.into_inner();

@@ -126,6 +126,7 @@ async fn start_mtls_daemon() -> MtlsFixture {
         pkcs11_proxy_ng::config::UnixAuthMode::None,
         Arc::new(token_policy),
         pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource::load(None).unwrap(),
+        None, // audit: not needed for transport tests
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

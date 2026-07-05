@@ -27,6 +27,7 @@ pub(crate) async fn verify_signature_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureInitResponse>, Status> {
     let req = request.into_inner();
@@ -131,6 +132,7 @@ pub(crate) async fn verify_signature(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureResponse>, Status> {
     let req = request.into_inner();
@@ -167,6 +169,7 @@ pub(crate) async fn verify_signature_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureUpdateResponse>, Status> {
     let req = request.into_inner();
@@ -207,6 +210,7 @@ pub(crate) async fn verify_signature_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureFinalResponse>, Status> {
     let req = request.into_inner();

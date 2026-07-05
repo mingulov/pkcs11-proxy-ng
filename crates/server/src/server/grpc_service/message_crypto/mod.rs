@@ -36,6 +36,7 @@ pub(crate) async fn message_encrypt_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::MessageEncryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageEncryptInitResponse>, Status> {
     let req = request.into_inner();
@@ -144,6 +145,7 @@ pub(crate) async fn message_encrypt_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::MessageEncryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageEncryptFinalResponse>, Status> {
     let req = request.into_inner();
@@ -173,6 +175,7 @@ pub(crate) async fn message_decrypt_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::MessageDecryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageDecryptInitResponse>, Status> {
     let req = request.into_inner();
@@ -281,6 +284,7 @@ pub(crate) async fn message_decrypt_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::MessageDecryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageDecryptFinalResponse>, Status> {
     let req = request.into_inner();
@@ -310,6 +314,7 @@ pub(crate) async fn message_sign_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::MessageSignInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageSignInitResponse>, Status> {
     let req = request.into_inner();
@@ -406,6 +411,7 @@ pub(crate) async fn message_sign_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::MessageSignFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageSignFinalResponse>, Status> {
     let req = request.into_inner();
@@ -433,6 +439,7 @@ pub(crate) async fn message_verify_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::MessageVerifyInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageVerifyInitResponse>, Status> {
     let req = request.into_inner();
@@ -529,6 +536,7 @@ pub(crate) async fn message_verify_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::MessageVerifyFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageVerifyFinalResponse>, Status> {
     let req = request.into_inner();
@@ -562,6 +570,7 @@ pub(crate) async fn encrypt_message(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageResponse>, Status> {
     let req = request.into_inner();
@@ -633,6 +642,7 @@ pub(crate) async fn encrypt_message_begin(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageBeginResponse>, Status> {
     let req = request.into_inner();
@@ -686,6 +696,7 @@ pub(crate) async fn encrypt_message_next(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageNextResponse>, Status> {
     let req = request.into_inner();
@@ -749,6 +760,7 @@ pub(crate) async fn decrypt_message(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageResponse>, Status> {
     let req = request.into_inner();
@@ -820,6 +832,7 @@ pub(crate) async fn decrypt_message_begin(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageBeginResponse>, Status> {
     let req = request.into_inner();
@@ -873,6 +886,7 @@ pub(crate) async fn decrypt_message_next(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageNextResponse>, Status> {
     let req = request.into_inner();
@@ -936,6 +950,7 @@ pub(crate) async fn sign_message(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::SignMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageResponse>, Status> {
     let req = request.into_inner();
@@ -993,6 +1008,7 @@ pub(crate) async fn sign_message_begin(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::SignMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageBeginResponse>, Status> {
     let req = request.into_inner();
@@ -1032,6 +1048,7 @@ pub(crate) async fn sign_message_next(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::SignMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageNextResponse>, Status> {
     let req = request.into_inner();
@@ -1095,6 +1112,7 @@ pub(crate) async fn verify_message(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageResponse>, Status> {
     let req = request.into_inner();
@@ -1141,6 +1159,7 @@ pub(crate) async fn verify_message_begin(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageBeginResponse>, Status> {
     let req = request.into_inner();
@@ -1174,6 +1193,7 @@ pub(crate) async fn verify_message_next(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageNextResponse>, Status> {
     let req = request.into_inner();

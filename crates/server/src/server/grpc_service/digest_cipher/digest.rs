@@ -15,6 +15,7 @@ pub(crate) async fn digest_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DigestInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestInitResponse>, Status> {
     let req = request.into_inner();
@@ -58,6 +59,7 @@ pub(crate) async fn digest(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DigestRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestResponse>, Status> {
     let req = request.into_inner();
@@ -97,6 +99,7 @@ pub(crate) async fn digest_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DigestUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestUpdateResponse>, Status> {
     let req = request.into_inner();
@@ -127,6 +130,7 @@ pub(crate) async fn digest_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DigestKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestKeyResponse>, Status> {
     let req = request.into_inner();
@@ -149,6 +153,7 @@ pub(crate) async fn digest_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DigestFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestFinalResponse>, Status> {
     let req = request.into_inner();

@@ -23,6 +23,7 @@ pub(crate) async fn encapsulate_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::EncapsulateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncapsulateKeyResponse>, Status> {
     let req = request.into_inner();
@@ -109,6 +110,7 @@ pub(crate) async fn decapsulate_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::DecapsulateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecapsulateKeyResponse>, Status> {
     let req = request.into_inner();
@@ -205,6 +207,7 @@ pub(crate) async fn encapsulate_key_exact(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::EncapsulateKeyExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse>, Status> {
     let req = request.into_inner();

@@ -22,6 +22,7 @@ pub(crate) async fn wrap_key_authenticated(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse>, Status> {
     let req = request.into_inner();
@@ -99,6 +100,7 @@ pub(crate) async fn unwrap_key_authenticated(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse>, Status> {
     let req = request.into_inner();

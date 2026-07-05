@@ -16,6 +16,7 @@ pub(crate) async fn sign_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::SignInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignInitResponse>, Status> {
     let req = request.into_inner();
@@ -71,6 +72,7 @@ pub(crate) async fn sign(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::SignRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignResponse>, Status> {
     let req = request.into_inner();
@@ -109,6 +111,7 @@ pub(crate) async fn sign_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::SignUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignUpdateResponse>, Status> {
     let req = request.into_inner();
@@ -138,6 +141,7 @@ pub(crate) async fn sign_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::SignFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignFinalResponse>, Status> {
     let req = request.into_inner();
@@ -166,6 +170,7 @@ pub(crate) async fn sign_recover_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::SignRecoverInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignRecoverInitResponse>, Status> {
     let req = request.into_inner();
@@ -227,6 +232,7 @@ pub(crate) async fn sign_recover(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::SignRecoverRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignRecoverResponse>, Status> {
     let req = request.into_inner();

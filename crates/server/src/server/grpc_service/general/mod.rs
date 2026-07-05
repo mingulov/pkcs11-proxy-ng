@@ -26,6 +26,7 @@ pub(super) async fn finalize(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::FinalizeRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FinalizeResponse>, Status> {
     lifecycle::finalize(ctx_mgr, backend_ref, request).await
@@ -35,6 +36,7 @@ pub(super) async fn get_info(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     _sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::GetInfoRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetInfoResponse>, Status> {
     info::get_info(ctx_mgr, backend_ref, request).await

@@ -15,6 +15,7 @@ pub(crate) async fn verify_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifyInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyInitResponse>, Status> {
     let req = request.into_inner();
@@ -74,6 +75,7 @@ pub(crate) async fn verify(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyResponse>, Status> {
     let req = request.into_inner();
@@ -111,6 +113,7 @@ pub(crate) async fn verify_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifyUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyUpdateResponse>, Status> {
     let req = request.into_inner();
@@ -141,6 +144,7 @@ pub(crate) async fn verify_final(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifyFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyFinalResponse>, Status> {
     let req = request.into_inner();
@@ -171,6 +175,7 @@ pub(crate) async fn verify_recover_init(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifyRecoverInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyRecoverInitResponse>, Status> {
     let req = request.into_inner();
@@ -235,6 +240,7 @@ pub(crate) async fn verify_recover(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
     sanitize_inputs: bool,
+    _audit: &Option<crate::server::audit::AuditSink>,
     request: Request<pkcs11_proxy_ng_proto::VerifyRecoverRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyRecoverResponse>, Status> {
     let req = request.into_inner();
