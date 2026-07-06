@@ -21,6 +21,7 @@ use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::context_manager::ClientContextId;
+use super::authorization::mechanism_permitted;
 use super::mechanism_handles::remap_mechanism_handles;
 use super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
@@ -78,6 +79,13 @@ pub(crate) async fn message_encrypt_init(
         {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
                 ck_rv: rv.0,
+            }));
+        }
+
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -221,6 +229,13 @@ pub(crate) async fn message_decrypt_init(
             }));
         }
 
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+            }));
+        }
+
         let init_param =
             match req.init_message_parameter.as_ref().map(MessageParameter::try_from).transpose() {
                 Ok(p) => p,
@@ -361,6 +376,13 @@ pub(crate) async fn message_sign_init(
             }));
         }
 
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+            }));
+        }
+
         let backend = Arc::clone(backend_ref);
         let result =
             spawn_backend(move || backend.message_sign_init(session, Some(&mechanism), key))
@@ -484,6 +506,13 @@ pub(crate) async fn message_verify_init(
         {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
                 ck_rv: rv.0,
+            }));
+        }
+
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 

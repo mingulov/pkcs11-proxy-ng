@@ -30,6 +30,13 @@ pub struct TokenPolicy {
     /// non-`None` `classes` list. Cached so the per-class gate check on
     /// every object-resolving RPC is a single `bool` load (M1 perf fix).
     pub(crate) per_class_active_cache: bool,
+    /// Pre-computed at `from_config`: true when at least one grant has a
+    /// non-`None` `mechanisms` list. Cached so the per-mechanism gate check
+    /// on every crypto-init RPC is a single `bool` load rather than a full
+    /// grant scan (M1 perf fix). When `false`, all mechanism checks are
+    /// entirely skipped — zero overhead for deployments with no mechanism
+    /// grants (G3 Task 3).
+    pub(crate) per_mechanism_active_cache: bool,
 }
 
 impl Default for TokenPolicy {
@@ -43,6 +50,7 @@ impl Default for TokenPolicy {
             anonymous_principal: None,
             per_object_active_cache: false,
             per_class_active_cache: false,
+            per_mechanism_active_cache: false,
         }
     }
 }
@@ -87,6 +95,13 @@ impl TokenPolicy {
                 false
             }
         });
+        let per_mechanism_active_cache = rules.values().any(|access| {
+            if let TokenAccess::Specific(grants) = access {
+                grants.iter().any(|g| g.mechanisms.is_some())
+            } else {
+                false
+            }
+        });
         Ok(Self {
             rules,
             allow_all_authenticated: auth.allow_all_authenticated,
@@ -94,6 +109,7 @@ impl TokenPolicy {
             anonymous_principal: auth.anonymous_principal.clone(),
             per_object_active_cache,
             per_class_active_cache,
+            per_mechanism_active_cache,
         })
     }
 
@@ -353,6 +369,20 @@ impl TokenPolicy {
     /// (M1) for zero-cost when no class grants are configured.
     pub fn per_class_active(&self) -> bool {
         self.per_class_active_cache
+    }
+
+    /// Whether any grant in any policy rule has a non-`None` `mechanisms` list.
+    ///
+    /// When `false`, the per-mechanism enforcement layer is entirely dormant and
+    /// `mechanism_permitted` returns `true` immediately (transparent). When
+    /// `true`, at least one grant restricts which mechanisms the identity may use,
+    /// so the enforcement path must be consulted on every crypto-init RPC.
+    ///
+    /// This is opt-in and pre-computed at `from_config` (M1): `false` for all
+    /// existing deployments until they explicitly add a `mechanisms` list to a
+    /// grant, giving zero overhead on the critical crypto-init path.
+    pub fn per_mechanism_active(&self) -> bool {
+        self.per_mechanism_active_cache
     }
 
     /// Whether the identity is allowed to use an object with the given

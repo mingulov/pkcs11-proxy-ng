@@ -152,6 +152,7 @@ mod tests {
             anonymous_principal: None,
             per_object_active_cache: false,
             per_class_active_cache: false,
+            per_mechanism_active_cache: false,
         };
 
         assert!(
@@ -215,6 +216,7 @@ mod tests {
             anonymous_principal: None,
             per_object_active_cache: false,
             per_class_active_cache: false,
+            per_mechanism_active_cache: false,
         };
 
         let user1 = AuthenticatedIdentity::PeerCred { uid: 1000 };

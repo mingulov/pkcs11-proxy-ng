@@ -13,7 +13,7 @@ use super::super::auth::request_identity::identity_from_request;
 use super::super::context_manager::{ClientContextId, ContextManager, ObjectMetadata};
 use super::super::handle_map::VirtualHandle;
 use super::HandlerContext;
-use super::service_utils::{context_exists, spawn_backend};
+use super::service_utils::{context_exists, resolve_object_authz_context, spawn_backend};
 
 pub(super) async fn context_identity(
     ctx_mgr: &Arc<ContextManager>,
@@ -135,6 +135,46 @@ pub(super) async fn extract_is_permitted(
     };
 
     Ok(ctx.token_policy.extract_allowed(&identity, &label, &serial))
+}
+
+/// Per-mechanism authorization gate (G3-PR3 Task 3, ADR-0012).
+///
+/// Called at every crypto-init RPC that BINDS a mechanism (e.g.
+/// `encrypt_init`, `sign_init`, `generate_key`, `wrap_key`, …). Returns
+/// `true` when the calling principal is allowed to use `mech` on the token
+/// that owns `virtual_session`.
+///
+/// **Transparent when off:** when no grant in any policy rule has a
+/// `mechanisms` list (`per_mechanism_active() == false`), returns `true`
+/// immediately with zero resolution work, preserving byte-identical behaviour
+/// for all existing deployments.
+///
+/// **Fail-closed:** if the identity or token info cannot be resolved (context
+/// gone, slot unknown, backend error), returns `false` — the operation is
+/// denied rather than silently permitted.
+///
+/// **Unauthenticated peers:** `allows_mechanism` short-circuits to `true` for
+/// `Unauthenticated` identities, so this function is always transparent for
+/// unauthenticated peers regardless of the configured mechanism grants.
+///
+/// On denial the caller returns `CKR_MECHANISM_INVALID` (0x70) — a
+/// spec-native rejection that is NOT an existence oracle (unlike handle-based
+/// denials which use the invisible-denial contract).
+pub(super) async fn mechanism_permitted(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    virtual_session: u64,
+    mech: CkMechanismType,
+) -> bool {
+    if !ctx.token_policy.per_mechanism_active() {
+        return true; // transparent when no mechanism grants configured
+    }
+    let Some((identity, label, serial)) =
+        resolve_object_authz_context(ctx, ctx_id, virtual_session).await
+    else {
+        return false; // fail-closed: context/slot/token unavailable
+    };
+    ctx.token_policy.allows_mechanism(&identity, &label, &serial, mech)
 }
 
 /// A2 ownership gate (pure core): decide whether a request bearing a
@@ -560,6 +600,88 @@ mod tests {
             !permitted,
             "cache miss for authenticated identity with extract=Deny must resolve from backend and deny"
         );
+    }
+
+    // --- mechanism_permitted ---
+
+    fn policy_with_mechanism_grant(identity: &str, mechanisms: Vec<String>) -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: identity.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: None,
+                    mechanisms: Some(mechanisms),
+                    extract: ExtractPolicyConfig::Allow,
+                    objects: None,
+                })]),
+            }],
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn mechanism_permitted_transparent_when_no_mechanism_grant() {
+        // A grant with mechanisms=None → per_mechanism_active is false → any
+        // mechanism is permitted (transparent, zero resolution work).
+        let policy = policy_for_identity(MTLS_IDENTITY);
+        assert!(
+            !policy.per_mechanism_active(),
+            "no mechanism list → per_mechanism_active must be false"
+        );
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        // Both allowed and "disallowed" mechanisms must pass when gate is off.
+        assert!(mechanism_permitted(&ctx, &ctx_id, session, CkMechanismType::RSA_PKCS).await);
+        assert!(mechanism_permitted(&ctx, &ctx_id, session, CkMechanismType::AES_GCM).await);
+    }
+
+    #[tokio::test]
+    async fn mechanism_permitted_allows_listed_mechanism() {
+        let policy = policy_with_mechanism_grant(MTLS_IDENTITY, vec!["CKM_RSA_PKCS".into()]);
+        assert!(
+            policy.per_mechanism_active(),
+            "mechanism list → per_mechanism_active must be true"
+        );
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            mechanism_permitted(&ctx, &ctx_id, session, CkMechanismType::RSA_PKCS).await,
+            "listed mechanism must be permitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn mechanism_permitted_denies_unlisted_mechanism() {
+        let policy = policy_with_mechanism_grant(MTLS_IDENTITY, vec!["CKM_RSA_PKCS".into()]);
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            !mechanism_permitted(&ctx, &ctx_id, session, CkMechanismType::AES_GCM).await,
+            "mechanism not in the list must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn mechanism_permitted_unauthenticated_always_true() {
+        // Unauthenticated peer: allows_mechanism returns true unconditionally,
+        // even when per_mechanism_active() is true and the mechanism list is narrow.
+        let policy = policy_with_mechanism_grant(MTLS_IDENTITY, vec!["CKM_RSA_PKCS".into()]);
+        assert!(policy.per_mechanism_active());
+        // No identity → unauthenticated
+        let (ctx, ctx_id, session) = setup_extract_test(policy, None).await;
+        assert!(
+            mechanism_permitted(&ctx, &ctx_id, session, CkMechanismType::AES_GCM).await,
+            "unauthenticated peer must always be permitted (mechanism-grant is opt-in)"
+        );
+    }
+
+    #[tokio::test]
+    async fn mechanism_permitted_no_policy_returns_true() {
+        // Empty policy (no grants): per_mechanism_active is false → transparent.
+        let policy = TokenPolicy::from_config(&AuthConfig::default()).unwrap();
+        assert!(!policy.per_mechanism_active());
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(mechanism_permitted(&ctx, &ctx_id, session, CkMechanismType::AES_GCM).await);
     }
 
     // --- fetch_object_metadata ---

@@ -5,6 +5,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::{CkInBuf, CkMechanism, CkRv};
 
+use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
@@ -83,6 +84,15 @@ pub(crate) async fn encrypt_init(
     }
 
     let mechanism_type = mechanism.mechanism_type;
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this mechanism type. Transparent (zero
+    // overhead) when per_mechanism_active() is false.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+            mechanism_out: None,
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.encrypt_init(session, &mechanism, key)).await?;
     let (ck_rv, params) = ck_result_to_rv(result);
@@ -262,6 +272,14 @@ pub(crate) async fn decrypt_init(
     }
 
     let mechanism_type = mechanism.mechanism_type;
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this mechanism type.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+            mechanism_out: None,
+        }));
+    }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.decrypt_init(session, &mechanism, key)).await?;
     let (ck_rv, params) = ck_result_to_rv(result);
@@ -387,4 +405,151 @@ fn session_mechanism_out_if_ok(
         return None;
     }
     backend.session_output_mechanism_params(session).and_then(mechanism_output_to_proto)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tonic::Request;
+
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    use pkcs11_proxy_ng_types::*;
+
+    use crate::config::{
+        AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig, TokenAccessSpec,
+    };
+    use crate::server::auth::policy::TokenPolicy;
+    use crate::server::context_manager::{ClientContextId, ContextManager};
+    use crate::server::grpc_service::HandlerContext;
+    use crate::server::handle_map::BackendHandle;
+
+    const PEER_IDENTITY: &str = "uid=1000";
+
+    fn mechanism_grant_policy(allowed_mechs: Vec<String>) -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: PEER_IDENTITY.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: None,
+                    mechanisms: Some(allowed_mechs),
+                    extract: ExtractPolicyConfig::Allow,
+                    objects: None,
+                })]),
+            }],
+        })
+        .unwrap()
+    }
+
+    fn no_mechanism_grant_policy() -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: PEER_IDENTITY.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:MockToken".into())]),
+            }],
+        })
+        .unwrap()
+    }
+
+    async fn setup(
+        policy: TokenPolicy,
+        identity: Option<String>,
+    ) -> (HandlerContext, ClientContextId, u64) {
+        let mock = Arc::new(MockBackend::new(
+            vec![CkSlotId(0)],
+            vec![CkMechanismType::AES_GCM, CkMechanismType::RSA_PKCS],
+        ));
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+            .await
+            .unwrap();
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(policy);
+        (ctx, ctx_id, session_vh.0)
+    }
+
+    fn encrypt_init_request(
+        ctx_id: &ClientContextId,
+        session_handle: u64,
+        mech_type: CkMechanismType,
+    ) -> pkcs11_proxy_ng_proto::EncryptInitRequest {
+        pkcs11_proxy_ng_proto::EncryptInitRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: mech_type.0,
+                params: None,
+            }),
+            key_handle: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn encrypt_init_allowed_mechanism_proceeds() {
+        // A principal with mechanisms=["CKM_RSA_PKCS"] may use RSA_PKCS.
+        let (ctx, ctx_id, session) =
+            setup(mechanism_grant_policy(vec!["CKM_RSA_PKCS".into()]), Some(PEER_IDENTITY.into()))
+                .await;
+        let resp = super::encrypt_init(
+            &ctx,
+            Request::new(encrypt_init_request(&ctx_id, session, CkMechanismType::RSA_PKCS)),
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            resp.into_inner().ck_rv,
+            CkRv::MECHANISM_INVALID.0,
+            "allowed mechanism must NOT return CKR_MECHANISM_INVALID"
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypt_init_unlisted_mechanism_returns_mechanism_invalid() {
+        // A principal with mechanisms=["CKM_RSA_PKCS"] must be denied for AES_GCM.
+        let (ctx, ctx_id, session) =
+            setup(mechanism_grant_policy(vec!["CKM_RSA_PKCS".into()]), Some(PEER_IDENTITY.into()))
+                .await;
+        let resp = super::encrypt_init(
+            &ctx,
+            Request::new(encrypt_init_request(&ctx_id, session, CkMechanismType::AES_GCM)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resp.into_inner().ck_rv,
+            CkRv::MECHANISM_INVALID.0,
+            "mechanism not in grant list must return CKR_MECHANISM_INVALID without a backend call"
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypt_init_no_mechanism_grant_any_mechanism_allowed() {
+        // A principal with mechanisms=None (absent) → any mechanism permitted (transparent).
+        let policy = no_mechanism_grant_policy();
+        assert!(!policy.per_mechanism_active(), "no mechanisms list → gate must be inactive");
+        let (ctx, ctx_id, session) = setup(policy, Some(PEER_IDENTITY.into())).await;
+        // AES_GCM is not in RSA_PKCS list but there is no restriction
+        let resp = super::encrypt_init(
+            &ctx,
+            Request::new(encrypt_init_request(&ctx_id, session, CkMechanismType::AES_GCM)),
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            resp.into_inner().ck_rv,
+            CkRv::MECHANISM_INVALID.0,
+            "no mechanism grant → gate must be transparent (any mechanism allowed)"
+        );
+    }
 }

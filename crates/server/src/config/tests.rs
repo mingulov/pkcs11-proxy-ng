@@ -1031,9 +1031,9 @@ tokens = [{ token = \"label:MyToken\", classes = [\"secret_key\"], extract = \"d
 }
 
 #[test]
-fn validate_rejects_grant_with_mechanisms_field() {
-    // A rich grant with `mechanisms` set implies a mechanism restriction the
-    // daemon does not enforce (G3 is not yet wired).
+fn validate_accepts_grant_with_mechanisms_field() {
+    // A rich grant with `mechanisms` set is now fully enforced at every
+    // crypto-init RPC (G3 Task 3). Validate must accept it.
     let toml = "\
 [backend]
 module = \"/dev/null\"
@@ -1047,8 +1047,10 @@ identity = \"uid=1000\"
 tokens = [{ token = \"label:MyToken\", mechanisms = [\"CKM_AES_GCM\"] }]
 ";
     let cfg: DaemonConfig = toml::from_str(toml).unwrap();
-    let err = cfg.validate().unwrap_err();
-    assert!(err.contains("mechanisms"), "error must mention 'mechanisms' restriction: {err}");
+    assert!(
+        cfg.validate().is_ok(),
+        "rich grant with mechanisms field must now validate successfully (G3 Task 3 enforcement wired)"
+    );
 }
 
 #[test]

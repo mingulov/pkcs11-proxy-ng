@@ -6,7 +6,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
-use super::super::authorization::extract_is_permitted;
+use super::super::authorization::{extract_is_permitted, mechanism_permitted};
 use super::super::ck_result_to_rv;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
@@ -95,6 +95,15 @@ async fn wrap_key_impl(
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
             ck_rv: rv.0,
+            wrapped_key: Vec::new(),
+        }));
+    }
+
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this wrapping mechanism.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
             wrapped_key: Vec::new(),
         }));
     }
@@ -195,6 +204,15 @@ async fn unwrap_key_impl(
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
             ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
+
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this unwrapping mechanism.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
             key_handle: 0,
         }));
     }

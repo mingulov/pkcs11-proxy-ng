@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
+use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
@@ -63,6 +64,13 @@ pub(crate) async fn sign_init(
         remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse { ck_rv: rv.0 }));
+    }
+
+    // Mechanism policy gate (G3-PR3 Task 3).
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+        }));
     }
 
     let backend = Arc::clone(backend_ref);
@@ -225,6 +233,13 @@ pub(crate) async fn sign_recover_init(
         remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse { ck_rv: rv.0 }));
+    }
+
+    // Mechanism policy gate (G3-PR3 Task 3).
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+        }));
     }
 
     let backend = Arc::clone(backend_ref);

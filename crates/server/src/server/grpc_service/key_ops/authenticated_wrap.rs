@@ -11,7 +11,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
-use super::super::authorization::extract_is_permitted;
+use super::super::authorization::{extract_is_permitted, mechanism_permitted};
 use super::super::convert_template;
 use super::super::service_utils::{
     check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
@@ -105,6 +105,16 @@ async fn wrap_key_authenticated_impl(
         }));
     }
 
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this wrapping mechanism.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            wrapped_key: Vec::new(),
+            mechanism_parameter_out: Vec::new(),
+        }));
+    }
+
     // Extract-deny gate (G2-PR2): wrapping a key exports its material; if the
     // principal's grant for this token has extract=Deny, reject before calling
     // the backend. The outer dispatcher emits a KeyMgmt audit record for both
@@ -184,6 +194,16 @@ pub(crate) async fn unwrap_key_authenticated(
             }));
         }
     };
+
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this unwrapping mechanism.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            key_handle: 0,
+            mechanism_parameter_out: Vec::new(),
+        }));
+    }
 
     let template = match convert_template(&req.template) {
         Ok(template) => template,

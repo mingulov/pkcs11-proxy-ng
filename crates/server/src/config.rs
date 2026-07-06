@@ -921,30 +921,11 @@ impl DaemonConfig {
                 }
             }
         }
-        // G3 guard: per-mechanism grant restrictions are parsed into the model
-        // but NOT yet enforced at runtime. Accepting a config that implies a
-        // mechanism restriction the daemon cannot enforce is dangerous:
-        // operators would believe access is restricted when it is not. Reject at
-        // startup until G3 mechanism enforcement is wired (Task 3).
-        // NOTE: per-class (`classes`) enforcement IS now wired (Task 1) and must
-        // no longer be rejected here.
-        for (index, entry) in self.auth.policy.iter().enumerate() {
-            if let TokenAccessSpec::Specific(ref grants) = entry.tokens {
-                for grant in grants {
-                    if let GrantSpec::Rich(rich) = grant
-                        && rich.mechanisms.is_some()
-                    {
-                        return Err(format!(
-                            "auth.policy[{index}]: per-mechanism grant restrictions are \
-                             parsed but NOT yet enforced (planned for G3 Task 3); \
-                             remove `mechanisms` from the [auth.policy] grant. \
-                             Accepting them would imply an authorization restriction \
-                             the daemon does not enforce."
-                        ));
-                    }
-                }
-            }
-        }
+        // NOTE: per-mechanism (`mechanisms`) enforcement is now wired (G3 Task 3)
+        // and the startup refuse-to-start guard has been removed. Mechanism grants
+        // are fully enforced at every crypto-init RPC (encrypt_init, sign_init,
+        // generate_key, wrap_key, etc.) via `mechanism_permitted` in
+        // `grpc_service/authorization.rs`.
         self.validate_policy_identities()?;
         crate::server::auth::policy::TokenPolicy::from_config(&self.auth)?;
         Ok(())

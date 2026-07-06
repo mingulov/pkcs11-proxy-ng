@@ -6,6 +6,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::{CkMechanismParams, CkObjectHandle, CkRv, Sp800108DerivedKey};
 
+use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
@@ -100,6 +101,16 @@ async fn generate_key_pair_impl(
             }));
         }
     };
+
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this key-generation mechanism.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            public_key_handle: 0,
+            private_key_handle: 0,
+        }));
+    }
 
     let public_key_template = match convert_template(&req.public_key_template) {
         Ok(template) => template,
@@ -225,6 +236,16 @@ async fn generate_key_impl(
         }
     };
 
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this key-generation mechanism.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }));
+    }
+
     let template = match convert_template(&req.template) {
         Ok(template) => template,
         Err(rv) => {
@@ -334,6 +355,16 @@ async fn derive_key_impl(
             }));
         }
     };
+
+    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
+    // principal's grant does not include this derive mechanism.
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }));
+    }
 
     // Translate every embedded object handle carried inside the mechanism
     // parameters (HKDF salt key, ECDH/MQV private-data keys, TLS key-material
