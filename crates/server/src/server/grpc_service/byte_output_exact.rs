@@ -13,12 +13,11 @@ use super::service_utils::{
 };
 
 use crate::server::grpc_service::HandlerContext;
+
 pub(super) async fn byte_output_exact(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::ByteOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ByteOutputExactResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
@@ -64,7 +63,7 @@ pub(super) async fn byte_output_exact(
             };
 
             let (session, wrapping_key, key) = match resolve_session_and_two_objects(
-                ctx_mgr,
+                &ctx.context_manager,
                 &ctx_id,
                 req.session_handle,
                 req.wrapping_key_handle,
@@ -76,7 +75,7 @@ pub(super) async fn byte_output_exact(
                 Err(error) => return Ok(Response::new(error_response(error))),
             };
 
-            let backend = backend_ref.clone();
+            let backend = ctx.backend.clone();
             let result = spawn_backend(move || {
                 backend.wrap_key_exact_with_output(session, &mechanism, wrapping_key, key, &spec)
             })
@@ -98,12 +97,13 @@ pub(super) async fn byte_output_exact(
         | ByteOutputFunction::EncryptFinal
         | ByteOutputFunction::DecryptFinal
         | ByteOutputFunction::GetOperationState => {
-            let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
-                Ok(s) => s,
-                Err(error) => return Ok(Response::new(error_response(error))),
-            };
+            let session =
+                match resolve_session(&ctx.context_manager, &ctx_id, req.session_handle).await {
+                    Ok(s) => s,
+                    Err(error) => return Ok(Response::new(error_response(error))),
+                };
 
-            let backend = backend_ref.clone();
+            let backend = ctx.backend.clone();
             let result =
                 spawn_backend(move || dispatch_session_only(function, &*backend, session, &spec))
                     .await?;
@@ -116,17 +116,18 @@ pub(super) async fn byte_output_exact(
 
         // Shape: (session, data, spec) -> all remaining functions
         _ => {
-            let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
-                Ok(s) => s,
-                Err(error) => return Ok(Response::new(error_response(error))),
-            };
+            let session =
+                match resolve_session(&ctx.context_manager, &ctx_id, req.session_handle).await {
+                    Ok(s) => s,
+                    Err(error) => return Ok(Response::new(error_response(error))),
+                };
 
             // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
             if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
                 return Ok(Response::new(error_response(rv)));
             }
 
-            let backend = backend_ref.clone();
+            let backend = ctx.backend.clone();
             let (result, mechanism_out) = if function == ByteOutputFunction::Encrypt {
                 let result = spawn_backend(move || {
                     let buf = input_from_wire(&input_data, input_data_null_len);

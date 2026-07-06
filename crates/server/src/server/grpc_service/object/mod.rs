@@ -14,31 +14,26 @@ mod lifecycle;
 mod search;
 
 use crate::server::grpc_service::HandlerContext;
+
 pub(super) async fn find_objects_init(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsInitResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
-    search::find_objects_init(ctx_mgr, backend_ref, request).await
+    search::find_objects_init(ctx, request).await
 }
 
 pub(super) async fn find_objects(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
-    search::find_objects(ctx_mgr, backend_ref, request).await
+    search::find_objects(ctx, request).await
 }
 
 pub(super) async fn find_objects_final(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsFinalResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
-    search::find_objects_final(ctx_mgr, backend_ref, request).await
+    search::find_objects_final(ctx, request).await
 }
 
 pub(super) async fn get_attribute_value(
@@ -79,9 +74,7 @@ pub(super) async fn create_object(
     let started = Instant::now();
     let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
     let session_for_audit = Some(request.get_ref().session_handle);
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
-    let response = lifecycle::create_object(ctx_mgr, backend_ref, request).await?;
+    let response = lifecycle::create_object(ctx, request).await?;
     let ck_rv = response.get_ref().ck_rv;
     if emit_auth_event(
         ctx,
@@ -112,9 +105,7 @@ pub(super) async fn copy_object(
     let started = Instant::now();
     let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
     let session_for_audit = Some(request.get_ref().session_handle);
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
-    let response = lifecycle::copy_object(ctx_mgr, backend_ref, request).await?;
+    let response = lifecycle::copy_object(ctx, request).await?;
     let ck_rv = response.get_ref().ck_rv;
     if emit_auth_event(
         ctx,
@@ -146,9 +137,7 @@ pub(super) async fn destroy_object(
     let started = Instant::now();
     let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
     let session_for_audit = Some(request.get_ref().session_handle);
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
-    let response = lifecycle::destroy_object(ctx_mgr, backend_ref, request).await?;
+    let response = lifecycle::destroy_object(ctx, request).await?;
     let ck_rv = response.get_ref().ck_rv;
     if emit_auth_event(
         ctx,
