@@ -15,12 +15,16 @@ deny-default flip + audit-only `anonymous_principal`, class/mechanism/extract
 grant model, opt-in extract-deny on `C_WrapKey`/`C_WrapKeyAuthenticated`/
 value-bearing `C_GetAttributeValue`; (5) **G2-PR3 rate/quota** — per-principal
 in-flight cap + session quota (`CKR_SESSION_COUNT`) + per-slot failed-login budget,
-opt-in via `[rate_limit]`. **Not yet landed / phased (see the §-notes below and the
-full-review gap analysis 2026-07-06):** data-plane (sign/encrypt) audit emission +
-the fail-open gap-sentinel + its separate channel; reconnect/hot-swap
-re-attestation; per-class/mechanism grant *enforcement* (config currently rejects
-those grants — G3); and all of G3 (fine-grained use-time authz). Promote to
-**Accepted** as G3 lands.
+opt-in via `[rate_limit]`; (6) **G3-PR1 per-object use-time authorization** —
+opt-in `objects` allow-list keyed on `CKA_UNIQUE_ID`, enforced at the resolution
+seam with constant-work invisible denial, v3.0+-gated (refuse-to-start on v2.40).
+**Not yet landed / phased (see the §-notes below and the full-review gap analysis
+2026-07-06):** data-plane (sign/encrypt) audit emission + the fail-open
+gap-sentinel + its separate channel; reconnect/hot-swap re-attestation;
+per-class/mechanism grant *enforcement* (config currently rejects those grants);
+`C_FindObjects` enumeration-time filtering + per-object attribute gating + minted-
+object ACL inheritance (the remaining G3 follow-ups). Promote to **Accepted** as
+the remaining G3 follow-ups land.
 
 ## Context
 
@@ -128,18 +132,32 @@ distinguish the shim from the real module.
      bound on attacker attempts. Follow-ups (not shipped): a token-bucket
      requests/sec limiter if a workload needs it, and `CKR_DEVICE_MEMORY`-based
      memory quotas.
-   - **G3 — Fine-grained authorization:** use-time authorization on every
-     handle-consuming operation and on every handle-minting operation (not
-     enumeration filtering alone), including a per-**attribute** check so that
-     reading value-bearing secret attributes is gated as extraction. Denials
-     return each function's own documented `CK_RV`, and a hidden object is
-     **indistinguishable from a nonexistent one** — same return code, same
-     latency, no backend call, no distinct audit/metric signal — to avoid an
-     existence oracle. Because a PKCS#11 object handle is reusable and is
-     reassigned on reconnect, per-object authorization keys on the immutable
-     `CKA_UNIQUE_ID` and is therefore **restricted to v3.0+ tokens** that
-     populate it; v2.40 tokens receive coarse (slot/token/class/mechanism)
-     authorization only.
+   - **G3 — Fine-grained authorization (G3-PR1 shipped: per-object use-time
+     authz):** an opt-in per-object **allow-list** — a `[auth.policy]` grant may
+     add `objects = [<CKA_UNIQUE_ID hex>,…]` to confine a principal to specific
+     objects; absent → the principal may use all objects on tokens it is coarsely
+     authorized for (byte-identical when unused). Enforced at the **object-handle
+     resolution seam** (`resolve_session_and_object`/`_two_objects`/`_key`) so it
+     covers every handle-consuming operation uniformly. A denial is
+     **constant-work invisible denial**: the resolved handle is replaced with the
+     same `CkObjectHandle(0)` sentinel the not-found path uses, so the backend
+     returns the identical `CKR_OBJECT_HANDLE_INVALID` — same RV, no distinct
+     audit/metric, no early-return, byte-for-byte indistinguishable from a
+     nonexistent object (verified by test `per_object_gate_denied_object_identical_to_nonexistent`).
+     Because a PKCS#11 object handle is reusable and reassigned on reconnect,
+     per-object authz keys on the immutable `CKA_UNIQUE_ID` (fetched once and
+     cached per virtual handle — safe because it is immutable). It is **restricted
+     to v3.0+ tokens** that populate `CKA_UNIQUE_ID`: if any `objects` grant is
+     configured against a backend reporting `< v3.0`, the daemon **refuses to
+     start**; on a v3.0 token an object with an empty/absent `CKA_UNIQUE_ID` is
+     **fail-closed** (denied). **Follow-ups (not yet shipped):** enumeration-time
+     filtering of `C_FindObjects` results (this PR gates USE-time only — a client
+     may still receive a handle it cannot use, and using it returns the
+     not-found-identical RV); per-**attribute** value-bearing gating is already
+     provided coarsely by the G2 extract-deny sub-gate, with per-object attribute
+     gating a G3 follow-up; per-class/mechanism grant enforcement (still
+     config-rejected); and ACL inheritance for handle-**minting** operations
+     (a newly generated/unwrapped object is currently usable by its creator).
 
 3. **Backend attestation is integrity/change-detection, not proof of identity.**
    A **startup** record (shipped) captures the module path + content hash, the
