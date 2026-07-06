@@ -109,11 +109,71 @@ pub struct PolicyEntry {
     pub tokens: TokenAccessSpec,
 }
 
+/// A single element in a `tokens = [...]` list.
+///
+/// Two forms are accepted:
+///
+/// **Bare string** (back-compat sugar):
+/// ```toml
+/// tokens = ["label:Prod", "serial:SN123"]
+/// ```
+///
+/// **Rich grant table** (class/mechanism/extract scoping):
+/// ```toml
+/// tokens = [
+///   { token = "label:Prod", classes = ["secret_key","private_key"],
+///     mechanisms = ["CKM_AES_GCM"], extract = "deny" }
+/// ]
+/// ```
+///
+/// The two forms can be mixed inside the same list.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum GrantSpec {
+    /// A bare token-selector string; equivalent to a rich grant with
+    /// `classes = None`, `mechanisms = None`, `extract = "allow"`.
+    Bare(String),
+    /// A full grant table with optional class/mechanism lists and an extract policy.
+    Rich(RichGrantConfig),
+}
+
+/// Rich grant table element for `tokens = [{ token = "...", ... }]`.
+#[derive(Debug, Deserialize)]
+pub struct RichGrantConfig {
+    /// Token selector string (same syntax as bare strings: `"label:X"`, `"serial:Y"`, etc.)
+    pub token: String,
+    /// Object classes this grant permits. `None` (field absent) = all classes.
+    #[serde(default)]
+    pub classes: Option<Vec<String>>,
+    /// Mechanisms this grant permits. `None` (field absent) = all mechanisms.
+    #[serde(default)]
+    pub mechanisms: Option<Vec<String>>,
+    /// Whether extraction of sensitive key material is permitted. Defaults to `"allow"`.
+    #[serde(default)]
+    pub extract: ExtractPolicyConfig,
+}
+
+/// Serde config form for extract policy (maps to `ExtractPolicy` at runtime).
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractPolicyConfig {
+    #[default]
+    Allow,
+    Deny,
+}
+
+/// Token-access specification in `[[auth.policy]]`.
+///
+/// Three valid forms:
+/// - `tokens = "all"` — blanket access to all tokens.
+/// - `tokens = ["label:X", "serial:Y"]` — list of bare selector strings.
+/// - `tokens = [{ token = "label:X", classes = [...], mechanisms = [...], extract = "deny" }]`
+///   — list of rich grant tables (may be mixed with bare strings).
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum TokenAccessSpec {
     All(String),
-    Specific(Vec<String>),
+    Specific(Vec<GrantSpec>),
 }
 
 #[derive(Deserialize)]

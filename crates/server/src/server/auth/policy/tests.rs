@@ -1,4 +1,6 @@
+use super::super::grant::{ExtractPolicy, TokenGrant, parse_class, parse_mechanism};
 use super::*;
+use pkcs11_proxy_ng_types::{CkMechanismType, CkObjectClass};
 
 /// Test-local discovery filter. The production server filters tokens per-slot
 /// via `slot_is_authorized`, so this mirrors that intent over the public
@@ -11,6 +13,11 @@ fn visible_tokens<'a>(
     tokens: &'a [(String, String)],
 ) -> Vec<&'a (String, String)> {
     tokens.iter().filter(|(label, serial)| policy.allows(identity, label, serial)).collect()
+}
+
+// Helper: make a `TokenAccess::Specific` from bare `TokenSelector`s (back-compat form).
+fn specific(selectors: Vec<TokenSelector>) -> TokenAccess {
+    TokenAccess::Specific(selectors.into_iter().map(TokenGrant::simple).collect())
 }
 
 #[test]
@@ -51,10 +58,7 @@ fn default_deny_for_unknown_identity() {
 #[test]
 fn label_selector_matches() {
     let mut rules = HashMap::new();
-    rules.insert(
-        "uid=1000".into(),
-        TokenAccess::Specific(vec![TokenSelector::Label("my-token".into())]),
-    );
+    rules.insert("uid=1000".into(), specific(vec![TokenSelector::Label("my-token".into())]));
     let policy = TokenPolicy {
         rules,
         allow_all_authenticated: false,
@@ -69,10 +73,7 @@ fn label_selector_matches() {
 #[test]
 fn serial_selector_matches() {
     let mut rules = HashMap::new();
-    rules.insert(
-        "uid=1000".into(),
-        TokenAccess::Specific(vec![TokenSelector::Serial("SN123".into())]),
-    );
+    rules.insert("uid=1000".into(), specific(vec![TokenSelector::Serial("SN123".into())]));
     let policy = TokenPolicy {
         rules,
         allow_all_authenticated: false,
@@ -122,9 +123,9 @@ fn from_config_builds_policy() {
         policy: vec![crate::config::PolicyEntry {
             identity: "uid=1000".into(),
             tokens: crate::config::TokenAccessSpec::Specific(vec![
-                "label:my-token".into(),
-                "serial:SN456".into(),
-                "bare-label".into(),
+                crate::config::GrantSpec::Bare("label:my-token".into()),
+                crate::config::GrantSpec::Bare("serial:SN456".into()),
+                crate::config::GrantSpec::Bare("bare-label".into()),
             ]),
         }],
     };
@@ -198,7 +199,7 @@ fn multiple_selectors_any_match_wins() {
     let mut rules = HashMap::new();
     rules.insert(
         "uid=1000".into(),
-        TokenAccess::Specific(vec![
+        specific(vec![
             TokenSelector::Label("token-a".into()),
             TokenSelector::Serial("SN-A".into()),
         ]),
@@ -322,7 +323,9 @@ fn from_config_rejects_empty_selector() {
         anonymous_principal: None,
         policy: vec![crate::config::PolicyEntry {
             identity: "uid=1000".into(),
-            tokens: crate::config::TokenAccessSpec::Specific(vec!["".into()]),
+            tokens: crate::config::TokenAccessSpec::Specific(vec![crate::config::GrantSpec::Bare(
+                "".into(),
+            )]),
         }],
     };
     let err = TokenPolicy::from_config(&auth).unwrap_err();
@@ -336,7 +339,9 @@ fn from_config_rejects_typo_prefix() {
         anonymous_principal: None,
         policy: vec![crate::config::PolicyEntry {
             identity: "uid=1000".into(),
-            tokens: crate::config::TokenAccessSpec::Specific(vec!["lable:foo".into()]),
+            tokens: crate::config::TokenAccessSpec::Specific(vec![crate::config::GrantSpec::Bare(
+                "lable:foo".into(),
+            )]),
         }],
     };
     let err = TokenPolicy::from_config(&auth).unwrap_err();
@@ -347,19 +352,16 @@ fn matrix_policy() -> TokenPolicy {
     let mut rules = HashMap::new();
     rules.insert(
         "uid=1000".into(),
-        TokenAccess::Specific(vec![
+        specific(vec![
             TokenSelector::Label("token-a".into()),
             TokenSelector::Serial("SN-B".into()),
         ]),
     );
-    rules.insert(
-        "uid=2000".into(),
-        TokenAccess::Specific(vec![TokenSelector::Label("token-c".into())]),
-    );
+    rules.insert("uid=2000".into(), specific(vec![TokenSelector::Label("token-c".into())]));
     rules.insert("x509:issuer=CN=Root;subject=CN=admin".into(), TokenAccess::All);
     rules.insert(
         "x509:issuer=CN=Root;subject=CN=reader".into(),
-        TokenAccess::Specific(vec![TokenSelector::Label("token-a".into())]),
+        specific(vec![TokenSelector::Label("token-a".into())]),
     );
     rules.insert("uid=9999".into(), TokenAccess::Specific(vec![]));
     TokenPolicy {
@@ -583,10 +585,7 @@ fn cross_identity_no_leakage() {
 #[test]
 fn allow_all_authenticated_overrides_restrictive_rules() {
     let mut rules = HashMap::new();
-    rules.insert(
-        "uid=1000".into(),
-        TokenAccess::Specific(vec![TokenSelector::Label("token-a".into())]),
-    );
+    rules.insert("uid=1000".into(), specific(vec![TokenSelector::Label("token-a".into())]));
     let policy = TokenPolicy {
         rules,
         allow_all_authenticated: true,
@@ -641,11 +640,15 @@ fn duplicate_identity_in_config_last_wins() {
         policy: vec![
             crate::config::PolicyEntry {
                 identity: "uid=1000".into(),
-                tokens: crate::config::TokenAccessSpec::Specific(vec!["label:token-a".into()]),
+                tokens: crate::config::TokenAccessSpec::Specific(vec![
+                    crate::config::GrantSpec::Bare("label:token-a".into()),
+                ]),
             },
             crate::config::PolicyEntry {
                 identity: "uid=1000".into(),
-                tokens: crate::config::TokenAccessSpec::Specific(vec!["label:token-b".into()]),
+                tokens: crate::config::TokenAccessSpec::Specific(vec![
+                    crate::config::GrantSpec::Bare("label:token-b".into()),
+                ]),
             },
         ],
     };
@@ -849,4 +852,352 @@ fn audit_identity_without_anon_returns_stored() {
     assert_eq!(policy.audit_identity(Some("unauthenticated")), Some("unauthenticated".into()));
     assert_eq!(policy.audit_identity(None), None);
     assert_eq!(policy.audit_identity(Some("uid=42")), Some("uid=42".into()));
+}
+
+// ============================================================================
+// Task 4 — class/mechanism/extract grant model tests
+// ============================================================================
+
+/// Build a policy that has a richer grant: access to "label:Prod" is restricted
+/// to secret_key + private_key classes, CKM_AES_GCM mechanism, with extract=Deny.
+fn rich_grant_policy() -> TokenPolicy {
+    let grant = TokenGrant {
+        selector: TokenSelector::Label("Prod".into()),
+        classes: Some(vec![CkObjectClass::SECRET_KEY, CkObjectClass::PRIVATE_KEY]),
+        mechanisms: Some(vec![CkMechanismType::AES_GCM]),
+        extract: ExtractPolicy::Deny,
+    };
+    let mut rules = HashMap::new();
+    rules.insert("uid=1000".into(), TokenAccess::Specific(vec![grant]));
+    rules.insert("uid=9000".into(), TokenAccess::All);
+    TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: true,
+        anonymous_principal: None,
+    }
+}
+
+// --- Back-compat: string forms parse to grants with extract=Allow, classes/mechs=None ---
+
+#[test]
+fn backcompat_all_access_spec_parses() {
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![crate::config::PolicyEntry {
+            identity: "uid=1".into(),
+            tokens: crate::config::TokenAccessSpec::All("all".into()),
+        }],
+    };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    let id = AuthenticatedIdentity::PeerCred { uid: 1 };
+    // All → extract allowed, any class, any mechanism
+    assert!(policy.extract_allowed(&id, "any", "any"));
+    assert!(policy.allows_class(&id, "any", "any", CkObjectClass::SECRET_KEY));
+    assert!(policy.allows_mechanism(&id, "any", "any", CkMechanismType::AES_GCM));
+}
+
+#[test]
+fn backcompat_bare_string_grants_have_no_restrictions() {
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![crate::config::PolicyEntry {
+            identity: "uid=1000".into(),
+            tokens: crate::config::TokenAccessSpec::Specific(vec![crate::config::GrantSpec::Bare(
+                "label:Prod".into(),
+            )]),
+        }],
+    };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
+    // Bare string → extract=Allow, classes=None, mechanisms=None
+    assert!(policy.allows(&id, "Prod", "any-serial"));
+    assert!(policy.extract_allowed(&id, "Prod", "any-serial"));
+    assert!(policy.allows_class(&id, "Prod", "any-serial", CkObjectClass::CERTIFICATE));
+    assert!(policy.allows_mechanism(&id, "Prod", "any-serial", CkMechanismType::RSA_PKCS));
+}
+
+// --- Richer grant form: class/mechanism/extract restrictions ---
+
+#[test]
+fn rich_grant_extract_denied_for_matched_token() {
+    let policy = rich_grant_policy();
+    let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
+    // Token-level access is granted
+    assert!(policy.allows(&id, "Prod", "any-serial"));
+    // But extract is denied by the grant
+    assert!(!policy.extract_allowed(&id, "Prod", "any-serial"));
+}
+
+#[test]
+fn rich_grant_extract_allowed_for_unmatched_token() {
+    let policy = rich_grant_policy();
+    let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
+    // Token "Dev" not in grants → extract_allowed returns true (no restriction = default allow)
+    assert!(policy.extract_allowed(&id, "Dev", "any-serial"));
+}
+
+#[test]
+fn rich_grant_extract_allowed_for_different_identity() {
+    let policy = rich_grant_policy();
+    // uid=9000 has TokenAccess::All → no extract restriction
+    let id = AuthenticatedIdentity::PeerCred { uid: 9000 };
+    assert!(policy.extract_allowed(&id, "Prod", "any-serial"));
+}
+
+#[test]
+fn rich_grant_extract_allowed_for_unauthenticated() {
+    let policy = rich_grant_policy();
+    let unauth = AuthenticatedIdentity::Unauthenticated;
+    // Unauthenticated → extract always allowed (extract-deny is authenticated-identity opt-in)
+    assert!(policy.extract_allowed(&unauth, "Prod", "any-serial"));
+}
+
+#[test]
+fn rich_grant_allows_mechanism_listed() {
+    let policy = rich_grant_policy();
+    let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
+    // AES_GCM is listed → allowed
+    assert!(policy.allows_mechanism(&id, "Prod", "any-serial", CkMechanismType::AES_GCM));
+}
+
+#[test]
+fn rich_grant_denies_mechanism_not_listed() {
+    let policy = rich_grant_policy();
+    let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
+    // RSA_PKCS is not in the list → denied
+    assert!(!policy.allows_mechanism(&id, "Prod", "any-serial", CkMechanismType::RSA_PKCS));
+}
+
+#[test]
+fn rich_grant_allows_class_listed() {
+    let policy = rich_grant_policy();
+    let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
+    assert!(policy.allows_class(&id, "Prod", "any-serial", CkObjectClass::SECRET_KEY));
+    assert!(policy.allows_class(&id, "Prod", "any-serial", CkObjectClass::PRIVATE_KEY));
+}
+
+#[test]
+fn rich_grant_denies_class_not_listed() {
+    let policy = rich_grant_policy();
+    let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
+    // CERTIFICATE not in classes list → denied
+    assert!(!policy.allows_class(&id, "Prod", "any-serial", CkObjectClass::CERTIFICATE));
+    assert!(!policy.allows_class(&id, "Prod", "any-serial", CkObjectClass::PUBLIC_KEY));
+}
+
+#[test]
+fn rich_grant_all_access_allows_any_class_and_mechanism() {
+    let policy = rich_grant_policy();
+    let id = AuthenticatedIdentity::PeerCred { uid: 9000 }; // TokenAccess::All
+    assert!(policy.allows_class(&id, "Prod", "any-serial", CkObjectClass::DATA));
+    assert!(policy.allows_mechanism(&id, "Prod", "any-serial", CkMechanismType::ECDSA));
+}
+
+#[test]
+fn rich_grant_none_classes_means_all() {
+    // A grant with classes=None allows every object class.
+    let grant = TokenGrant {
+        selector: TokenSelector::Label("MyToken".into()),
+        classes: None,
+        mechanisms: None,
+        extract: ExtractPolicy::Allow,
+    };
+    let mut rules = HashMap::new();
+    rules.insert("uid=42".into(), TokenAccess::Specific(vec![grant]));
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: true,
+        anonymous_principal: None,
+    };
+    let id = AuthenticatedIdentity::PeerCred { uid: 42 };
+    assert!(policy.allows_class(&id, "MyToken", "any", CkObjectClass::DATA));
+    assert!(policy.allows_class(&id, "MyToken", "any", CkObjectClass::CERTIFICATE));
+    assert!(policy.allows_class(&id, "MyToken", "any", CkObjectClass::SECRET_KEY));
+    assert!(policy.extract_allowed(&id, "MyToken", "any"));
+}
+
+// --- Config round-trip: richer form parses correctly ---
+
+#[test]
+fn from_config_rich_grant_parses() {
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![crate::config::PolicyEntry {
+            identity: "uid=1000".into(),
+            tokens: crate::config::TokenAccessSpec::Specific(vec![crate::config::GrantSpec::Rich(
+                crate::config::RichGrantConfig {
+                    token: "label:Prod".into(),
+                    classes: Some(vec!["secret_key".into(), "private_key".into()]),
+                    mechanisms: Some(vec!["CKM_AES_GCM".into()]),
+                    extract: crate::config::ExtractPolicyConfig::Deny,
+                },
+            )]),
+        }],
+    };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
+
+    // Token-level access
+    assert!(policy.allows(&id, "Prod", "any-serial"));
+    // Extract denied
+    assert!(!policy.extract_allowed(&id, "Prod", "any-serial"));
+    // Class restrictions
+    assert!(policy.allows_class(&id, "Prod", "any-serial", CkObjectClass::SECRET_KEY));
+    assert!(!policy.allows_class(&id, "Prod", "any-serial", CkObjectClass::CERTIFICATE));
+    // Mechanism restrictions
+    assert!(policy.allows_mechanism(&id, "Prod", "any-serial", CkMechanismType::AES_GCM));
+    assert!(!policy.allows_mechanism(&id, "Prod", "any-serial", CkMechanismType::RSA_PKCS));
+}
+
+#[test]
+fn from_config_mixed_bare_and_rich_grants() {
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![crate::config::PolicyEntry {
+            identity: "uid=1000".into(),
+            tokens: crate::config::TokenAccessSpec::Specific(vec![
+                // Bare grant: no restrictions on "Dev"
+                crate::config::GrantSpec::Bare("label:Dev".into()),
+                // Rich grant: restricted on "Prod"
+                crate::config::GrantSpec::Rich(crate::config::RichGrantConfig {
+                    token: "label:Prod".into(),
+                    classes: Some(vec!["secret_key".into()]),
+                    mechanisms: None,
+                    extract: crate::config::ExtractPolicyConfig::Deny,
+                }),
+            ]),
+        }],
+    };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
+
+    // Dev token: no restrictions
+    assert!(policy.allows(&id, "Dev", "any"));
+    assert!(policy.extract_allowed(&id, "Dev", "any"));
+    assert!(policy.allows_class(&id, "Dev", "any", CkObjectClass::CERTIFICATE));
+
+    // Prod token: class and extract restricted
+    assert!(policy.allows(&id, "Prod", "any"));
+    assert!(!policy.extract_allowed(&id, "Prod", "any"));
+    assert!(policy.allows_class(&id, "Prod", "any", CkObjectClass::SECRET_KEY));
+    assert!(!policy.allows_class(&id, "Prod", "any", CkObjectClass::CERTIFICATE));
+}
+
+// --- Name parsing ---
+
+#[test]
+fn parse_class_named_forms() {
+    assert_eq!(parse_class("data").unwrap(), CkObjectClass::DATA);
+    assert_eq!(parse_class("certificate").unwrap(), CkObjectClass::CERTIFICATE);
+    assert_eq!(parse_class("public_key").unwrap(), CkObjectClass::PUBLIC_KEY);
+    assert_eq!(parse_class("private_key").unwrap(), CkObjectClass::PRIVATE_KEY);
+    assert_eq!(parse_class("secret_key").unwrap(), CkObjectClass::SECRET_KEY);
+    assert_eq!(parse_class("CKO_DATA").unwrap(), CkObjectClass::DATA);
+    assert_eq!(parse_class("CKO_CERTIFICATE").unwrap(), CkObjectClass::CERTIFICATE);
+    assert_eq!(parse_class("CKO_PUBLIC_KEY").unwrap(), CkObjectClass::PUBLIC_KEY);
+    assert_eq!(parse_class("CKO_PRIVATE_KEY").unwrap(), CkObjectClass::PRIVATE_KEY);
+    assert_eq!(parse_class("CKO_SECRET_KEY").unwrap(), CkObjectClass::SECRET_KEY);
+}
+
+#[test]
+fn parse_class_hex_and_decimal() {
+    assert_eq!(parse_class("0x00000003").unwrap(), CkObjectClass::PRIVATE_KEY);
+    assert_eq!(parse_class("3").unwrap(), CkObjectClass::PRIVATE_KEY);
+    assert_eq!(parse_class("0x00000004").unwrap(), CkObjectClass::SECRET_KEY);
+}
+
+#[test]
+fn parse_class_unknown_name_returns_error() {
+    let err = parse_class("not_a_class").unwrap_err();
+    assert!(err.contains("unknown object class"), "error: {err}");
+    assert!(err.contains("not_a_class"), "error: {err}");
+}
+
+#[test]
+fn parse_mechanism_named_forms() {
+    assert_eq!(parse_mechanism("CKM_AES_GCM").unwrap(), CkMechanismType::AES_GCM);
+    assert_eq!(parse_mechanism("CKM_RSA_PKCS").unwrap(), CkMechanismType::RSA_PKCS);
+    assert_eq!(parse_mechanism("CKM_ECDSA_SHA256").unwrap(), CkMechanismType::ECDSA_SHA256);
+}
+
+#[test]
+fn parse_mechanism_hex_and_decimal() {
+    assert_eq!(parse_mechanism("0x00001087").unwrap(), CkMechanismType::AES_GCM);
+    assert_eq!(parse_mechanism("4231").unwrap(), CkMechanismType(4231));
+}
+
+#[test]
+fn parse_mechanism_unknown_name_returns_error() {
+    let err = parse_mechanism("CKM_TOTALLY_FAKE").unwrap_err();
+    assert!(err.contains("unknown mechanism"), "error: {err}");
+    assert!(err.contains("CKM_TOTALLY_FAKE"), "error: {err}");
+}
+
+#[test]
+fn from_config_rich_grant_unknown_class_rejected() {
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![crate::config::PolicyEntry {
+            identity: "uid=1000".into(),
+            tokens: crate::config::TokenAccessSpec::Specific(vec![crate::config::GrantSpec::Rich(
+                crate::config::RichGrantConfig {
+                    token: "label:Prod".into(),
+                    classes: Some(vec!["not_a_real_class".into()]),
+                    mechanisms: None,
+                    extract: crate::config::ExtractPolicyConfig::Allow,
+                },
+            )]),
+        }],
+    };
+    let err = TokenPolicy::from_config(&auth).unwrap_err();
+    assert!(err.contains("unknown object class"), "error: {err}");
+}
+
+#[test]
+fn from_config_rich_grant_unknown_mechanism_rejected() {
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![crate::config::PolicyEntry {
+            identity: "uid=1000".into(),
+            tokens: crate::config::TokenAccessSpec::Specific(vec![crate::config::GrantSpec::Rich(
+                crate::config::RichGrantConfig {
+                    token: "label:Prod".into(),
+                    classes: None,
+                    mechanisms: Some(vec!["CKM_DOES_NOT_EXIST".into()]),
+                    extract: crate::config::ExtractPolicyConfig::Allow,
+                },
+            )]),
+        }],
+    };
+    let err = TokenPolicy::from_config(&auth).unwrap_err();
+    assert!(err.contains("unknown mechanism"), "error: {err}");
+}
+
+#[test]
+fn extract_allowed_returns_true_when_allow_all_authenticated() {
+    // allow_all_authenticated bypasses per-grant extract restriction
+    let grant = TokenGrant {
+        selector: TokenSelector::Label("Prod".into()),
+        classes: None,
+        mechanisms: None,
+        extract: ExtractPolicy::Deny,
+    };
+    let mut rules = HashMap::new();
+    rules.insert("uid=1".into(), TokenAccess::Specific(vec![grant]));
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: true, // blanket
+        has_policy: false,
+        anonymous_principal: None,
+    };
+    let id = AuthenticatedIdentity::PeerCred { uid: 1 };
+    assert!(policy.extract_allowed(&id, "Prod", "any"));
 }

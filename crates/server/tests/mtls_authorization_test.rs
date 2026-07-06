@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pkcs11_proxy_ng::config::{
-    AuthConfig, PolicyEntry, TcpAuthMode, TcpListenerConfig, TokenAccessSpec,
+    AuthConfig, GrantSpec, PolicyEntry, TcpAuthMode, TcpListenerConfig, TokenAccessSpec,
 };
 use pkcs11_proxy_ng::server::auth::mtls;
 use pkcs11_proxy_ng::server::auth::policy::TokenPolicy;
@@ -111,7 +111,7 @@ async fn start_mtls_daemon() -> MtlsFixture {
         anonymous_principal: None,
         policy: vec![PolicyEntry {
             identity: client_a_identity,
-            tokens: TokenAccessSpec::Specific(vec!["label:MockToken".into()]),
+            tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:MockToken".into())]),
         }],
     })
     .unwrap();

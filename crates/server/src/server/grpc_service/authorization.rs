@@ -119,7 +119,7 @@ pub(super) async fn enforce_context_owner<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AuthConfig, PolicyEntry, TokenAccessSpec};
+    use crate::config::{AuthConfig, GrantSpec, PolicyEntry, TokenAccessSpec};
     use pkcs11_proxy_ng_backend::MockBackend;
 
     const MTLS_IDENTITY: &str = "x509:issuer=CN=Root CA;subject=CN=client";
@@ -134,7 +134,7 @@ mod tests {
             anonymous_principal: None,
             policy: vec![PolicyEntry {
                 identity: identity.into(),
-                tokens: TokenAccessSpec::Specific(vec!["label:MockToken".into()]),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:MockToken".into())]),
             }],
         })
         .unwrap()

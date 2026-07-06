@@ -1,5 +1,7 @@
+use super::grant::{ExtractPolicy, TokenGrant, parse_class, parse_mechanism};
 use super::identity::AuthenticatedIdentity;
 pub use super::token_selector::TokenSelector;
+use pkcs11_proxy_ng_types::{CkMechanismType, CkObjectClass};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -19,10 +21,14 @@ pub struct TokenPolicy {
     pub(crate) anonymous_principal: Option<String>,
 }
 
+/// Per-identity token-access rule.
+///
+/// `All` is a blanket grant (all tokens, all classes, all mechanisms, extract=Allow).
+/// `Specific` holds a list of `TokenGrant`s; any matching grant authorizes the token.
 #[derive(Debug)]
 pub enum TokenAccess {
     All,
-    Specific(Vec<TokenSelector>),
+    Specific(Vec<TokenGrant>),
 }
 
 /// Tracks SPKI hashes for which we've already emitted the "mTLS auth" info log.
@@ -84,6 +90,10 @@ impl TokenPolicy {
         }
     }
 
+    /// Whether the identity is authorized to access a token.
+    ///
+    /// This is the token-level gate: it does **not** enforce class, mechanism,
+    /// or extract policy — those are checked by the dedicated query methods.
     pub fn allows(
         &self,
         identity: &AuthenticatedIdentity,
@@ -150,8 +160,8 @@ impl TokenPolicy {
                 let key = identity.to_string();
                 match self.rules.get(&key) {
                     Some(TokenAccess::All) => true,
-                    Some(TokenAccess::Specific(selectors)) => {
-                        selectors.iter().any(|s| s.matches(token_label, token_serial))
+                    Some(TokenAccess::Specific(grants)) => {
+                        grants.iter().any(|g| g.matches_token(token_label, token_serial))
                     }
                     None => false,
                 }
@@ -159,11 +169,156 @@ impl TokenPolicy {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Grant-level query methods (Task 6 enforcement + G3 future use)
+    // -----------------------------------------------------------------------
+    //
+    // These methods are called AFTER `allows()` returns true (token-level
+    // gate already passed). They inspect the matching `TokenGrant`(s) for
+    // sub-token restrictions.
+    //
+    // Semantics for `Specific` grants when multiple grants match the token:
+    //   extract_allowed   — false if ANY matching grant has `extract = Deny`
+    //   allows_mechanism  — true if ANY matching grant has `mechanisms = None`
+    //                        OR contains the given mechanism
+    //   allows_class      — true if ANY matching grant has `classes = None`
+    //                        OR contains the given class
+    //
+    // For `TokenAccess::All`, unauthenticated peers, and `allow_all_authenticated`
+    // all three methods return `true` (no sub-token restrictions).
+
+    /// Whether the identity is allowed to extract sensitive key material from the
+    /// matched token.
+    ///
+    /// Returns `true` by default; `false` only when a matching grant explicitly
+    /// sets `extract = "deny"`. `TokenAccess::All` / no matching grant / unauthenticated
+    /// → always `true` (extract-deny is opt-in).
+    pub fn extract_allowed(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return true;
+        }
+        if self.allow_all_authenticated {
+            return true;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => true,
+            Some(TokenAccess::Specific(grants)) => !grants
+                .iter()
+                .filter(|g| g.matches_token(token_label, token_serial))
+                .any(|g| g.extract == ExtractPolicy::Deny),
+        }
+    }
+
+    /// Whether the identity is allowed to use the given mechanism on the matched token.
+    ///
+    /// Returns `true` when `mechanisms = None` in all matching grants (no restriction)
+    /// or at least one matching grant explicitly lists this mechanism.
+    /// `TokenAccess::All` / no matching grant → `true`.
+    pub fn allows_mechanism(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+        mech: CkMechanismType,
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return true;
+        }
+        if self.allow_all_authenticated {
+            return true;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => true,
+            Some(TokenAccess::Specific(grants)) => {
+                let matching: Vec<&TokenGrant> =
+                    grants.iter().filter(|g| g.matches_token(token_label, token_serial)).collect();
+                if matching.is_empty() {
+                    return true; // no grants matched → no restriction
+                }
+                matching.iter().any(|g| match &g.mechanisms {
+                    None => true,
+                    Some(list) => list.contains(&mech),
+                })
+            }
+        }
+    }
+
+    /// Whether the identity is allowed to access objects of the given class on the
+    /// matched token.
+    ///
+    /// Returns `true` when `classes = None` in all matching grants (no restriction)
+    /// or at least one matching grant explicitly lists this class.
+    /// `TokenAccess::All` / no matching grant → `true`.
+    pub fn allows_class(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+        class: CkObjectClass,
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return true;
+        }
+        if self.allow_all_authenticated {
+            return true;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => true,
+            Some(TokenAccess::Specific(grants)) => {
+                let matching: Vec<&TokenGrant> =
+                    grants.iter().filter(|g| g.matches_token(token_label, token_serial)).collect();
+                if matching.is_empty() {
+                    return true; // no grants matched → no restriction
+                }
+                matching.iter().any(|g| match &g.classes {
+                    None => true,
+                    Some(list) => list.contains(&class),
+                })
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    /// Resolve the `TokenAccess` for an authenticated identity without side
+    /// effects (no logging, no deprecation warnings). Used by the query methods
+    /// (`extract_allowed`, `allows_mechanism`, `allows_class`).
+    fn resolve_access(&self, identity: &AuthenticatedIdentity) -> Option<&TokenAccess> {
+        match identity {
+            AuthenticatedIdentity::Unauthenticated => None,
+            AuthenticatedIdentity::Mtls { spki_sha256, .. } => {
+                if !spki_sha256.is_empty() {
+                    let spki_key = format!("x509:spki={spki_sha256}");
+                    if let Some(access) = self.rules.get(&spki_key) {
+                        return Some(access);
+                    }
+                }
+                if let Some(legacy_key) = identity.legacy_dn_key()
+                    && let Some(access) = self.rules.get(&legacy_key)
+                {
+                    return Some(access);
+                }
+                None
+            }
+            _ => {
+                let key = identity.to_string();
+                self.rules.get(&key)
+            }
+        }
+    }
+
     fn check_access(access: &TokenAccess, token_label: &str, token_serial: &str) -> bool {
         match access {
             TokenAccess::All => true,
-            TokenAccess::Specific(selectors) => {
-                selectors.iter().any(|s| s.matches(token_label, token_serial))
+            TokenAccess::Specific(grants) => {
+                grants.iter().any(|g| g.matches_token(token_label, token_serial))
             }
         }
     }
@@ -185,19 +340,62 @@ impl TokenPolicy {
                     ))
                 }
             }
-            crate::config::TokenAccessSpec::Specific(selectors) => {
-                let parsed = selectors
+            crate::config::TokenAccessSpec::Specific(grant_specs) => {
+                let grants = grant_specs
                     .iter()
-                    .map(|selector| {
-                        TokenSelector::parse(selector).map_err(|error| {
-                            format!(
-                                "policy for '{}': invalid selector '{}': {error}",
-                                identity, selector
-                            )
-                        })
-                    })
+                    .map(|spec| Self::parse_grant(identity, spec))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(TokenAccess::Specific(parsed))
+                Ok(TokenAccess::Specific(grants))
+            }
+        }
+    }
+
+    /// Parse a single `GrantSpec` (bare string or rich table) into a `TokenGrant`.
+    fn parse_grant(identity: &str, spec: &crate::config::GrantSpec) -> Result<TokenGrant, String> {
+        match spec {
+            crate::config::GrantSpec::Bare(selector_str) => {
+                let selector = TokenSelector::parse(selector_str).map_err(|error| {
+                    format!("policy for '{identity}': invalid selector '{selector_str}': {error}")
+                })?;
+                Ok(TokenGrant::simple(selector))
+            }
+            crate::config::GrantSpec::Rich(rich) => {
+                let selector = TokenSelector::parse(&rich.token).map_err(|error| {
+                    format!(
+                        "policy for '{identity}': invalid token selector '{}': {error}",
+                        rich.token
+                    )
+                })?;
+
+                let classes = match &rich.classes {
+                    None => None,
+                    Some(strs) => Some(
+                        strs.iter()
+                            .map(|s| {
+                                parse_class(s).map_err(|e| format!("policy for '{identity}': {e}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                };
+
+                let mechanisms = match &rich.mechanisms {
+                    None => None,
+                    Some(strs) => Some(
+                        strs.iter()
+                            .map(|s| {
+                                parse_mechanism(s)
+                                    .map_err(|e| format!("policy for '{identity}': {e}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                };
+
+                let extract = match rich.extract {
+                    crate::config::ExtractPolicyConfig::Allow => ExtractPolicy::Allow,
+                    crate::config::ExtractPolicyConfig::Deny => ExtractPolicy::Deny,
+                };
+
+                Ok(TokenGrant { selector, classes, mechanisms, extract })
             }
         }
     }
