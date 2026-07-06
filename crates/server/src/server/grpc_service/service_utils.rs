@@ -590,6 +590,20 @@ pub(super) async fn gate_object_handle(
         return CkObjectHandle(0);
     }
 
+    // --- 3b. Creator bypass (G3-PR3 Task 2) ---
+    // A principal can always use an object it minted this session (generate /
+    // create / unwrap), even when its backend-assigned CKA_UNIQUE_ID is not in
+    // the pre-configured `objects` grant.  This is the minimal, correct ACL
+    // inheritance: creator-owns-what-it-mints.
+    //
+    // The check is per-context: context B's created_objects set is independent
+    // of A's, so B is still gated by its own policy for any object it did NOT
+    // mint.  A recycled virtual handle cannot inherit created-status because the
+    // removal hooks that evict object_metadata also evict created_objects.
+    if ctx.context_manager.object_was_created_here(ctx_id, virtual_object).await {
+        return backend_object;
+    }
+
     // --- 4. Policy checks ---
     // Per-object uid check (opt-in; pass-through when no objects grant configured).
     if !ctx.token_policy.allows_object_use(&identity, &label, &serial, &meta.unique_id) {
@@ -792,6 +806,12 @@ pub(super) fn template_declares_token_object(template: &[CkAttribute]) -> bool {
 /// Register a backend object handle and, when it is a session object, record it
 /// under `session` so it is evicted when that session closes (B2). Returns the
 /// virtual object handle (0 if the context is gone).
+///
+/// This is a MINTING registration (generate/create/unwrap path). The new
+/// virtual handle is inserted into `created_objects` so the per-object gate
+/// (`gate_object_handle`) allows the creating context to use this key even
+/// when its backend-assigned `CKA_UNIQUE_ID` is not in the pre-configured
+/// `objects` grant (G3-PR3 Task 2).
 pub(super) async fn register_session_object_handle(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
@@ -805,6 +825,8 @@ pub(super) async fn register_session_object_handle(
             if !is_token_object {
                 ctx.record_session_object(session, virtual_object);
             }
+            // Minting: the creating context can always use what it generated.
+            ctx.created_objects.insert(virtual_object);
             virtual_object.0
         })
         .await
@@ -813,6 +835,11 @@ pub(super) async fn register_session_object_handle(
 
 /// Register a generated key pair, recording each key as a session object under
 /// `session` unless its own template marks it a token object (B2).
+///
+/// This is a MINTING registration (C_GenerateKeyPair / C_DeriveKey path). Both
+/// virtual handles are inserted into `created_objects` so the creating context
+/// can use them immediately even when their backend-assigned `CKA_UNIQUE_ID`s
+/// are not in the pre-configured `objects` grant (G3-PR3 Task 2).
 pub(super) async fn register_session_object_pair(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
@@ -832,6 +859,9 @@ pub(super) async fn register_session_object_pair(
             if !second_is_token {
                 ctx.record_session_object(session, second);
             }
+            // Minting: the creating context can always use both generated keys.
+            ctx.created_objects.insert(first);
+            ctx.created_objects.insert(second);
             (first.0, second.0)
         })
         .await
@@ -1609,6 +1639,240 @@ mod tests {
         assert!(
             cached.is_none(),
             "token object metadata must NOT be cached in the context (I2 fix)"
+        );
+    }
+
+    // --- minted-object ACL inheritance tests (G3-PR3 Task 2) ---
+
+    /// A confined principal can use a key it just GENERATED, even when the
+    /// backend-assigned CKA_UNIQUE_ID is not in its pre-configured objects list.
+    /// This is the core usability regression described in G3-PR3 Task 2.
+    #[tokio::test]
+    async fn minted_object_usable_by_creator_despite_uid_not_in_list() {
+        use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
+        // Policy: principal may only use ALLOWED_UID objects.
+        let policy = per_object_policy(IDENTITY, "MockToken", ALLOWED_UID_HEX);
+
+        // Create a backend object whose UID is OTHER_UID (NOT in the allowed list).
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
+        );
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        // UID is NOT in the allowed list.
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+        );
+
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
+
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+            })
+            .await
+            .unwrap();
+
+        // Register via the MINTING path (register_session_object_handle), which
+        // inserts the virtual handle into created_objects.
+        let virtual_object_raw = register_session_object_handle(
+            &ctx_mgr,
+            &ctx_id,
+            virtual_session,
+            backend_object,
+            false, // session object
+        )
+        .await;
+        assert_ne!(virtual_object_raw, 0, "minting registration must return a non-zero handle");
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        // Despite uid NOT being in the allowed list, the creator must be allowed.
+        let (_, backend_obj) =
+            resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object_raw)
+                .await
+                .unwrap();
+        assert_ne!(
+            backend_obj,
+            CkObjectHandle(0),
+            "confined creator must be able to use a key it minted, even if uid ∉ allowed list"
+        );
+        assert_eq!(
+            backend_obj.0, backend_object.0,
+            "creator must receive the REAL backend handle, not a substitute"
+        );
+    }
+
+    /// A found (non-minted) object whose uid is NOT in the principal's objects
+    /// list must STILL be denied — the creator bypass does not affect find results.
+    #[tokio::test]
+    async fn found_object_not_in_list_still_denied() {
+        // Reuse the existing setup helper: it uses object_handles.insert directly
+        // (not the minting path), so the object is NOT in created_objects.
+        let policy = per_object_policy(IDENTITY, "MockToken", ALLOWED_UID_HEX);
+        let (ctx, ctx_id, vs, vo) =
+            setup_per_object_test(policy, Some(IDENTITY.into()), Some(OTHER_UID_BYTES.to_vec()))
+                .await;
+
+        let (_, backend_obj) = resolve_session_and_object(&ctx, &ctx_id, vs, vo).await.unwrap();
+        assert_eq!(
+            backend_obj,
+            CkObjectHandle(0),
+            "found object with uid ∉ allowed list must still be denied (gate unchanged for non-minted)"
+        );
+    }
+
+    /// Cross-context: context A mints an object; the same backend object
+    /// surfaced to context B (B did NOT mint it) must be gated by B's own
+    /// policy — B's created_objects set is empty for this object.
+    #[tokio::test]
+    async fn minted_object_cross_context_still_gated() {
+        use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
+        let policy_a = per_object_policy(IDENTITY, "MockToken", ALLOWED_UID_HEX);
+        let policy_b = per_object_policy("uid=9999", "MockToken", ALLOWED_UID_HEX);
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
+        );
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+        );
+
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+
+        // Context A: IDENTITY mints the object.
+        let ctx_id_a = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
+        let vs_a = ctx_mgr
+            .get_context(&ctx_id_a, |c| {
+                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+            })
+            .await
+            .unwrap();
+        let vo_a_raw =
+            register_session_object_handle(&ctx_mgr, &ctx_id_a, vs_a, backend_object, false).await;
+
+        // Context B: uid=9999 sees the SAME backend object (e.g. via an out-of-band
+        // find) but did NOT mint it — registered via direct insert, not minting.
+        let ctx_id_b = ctx_mgr.create_context(Some("uid=9999".into())).await.unwrap();
+        let vo_b_raw = ctx_mgr
+            .get_context(&ctx_id_b, |c| {
+                let vs_b = c.register_session(BackendHandle(backend_session.0), CkSlotId(0));
+                // B registers the handle as a find result (NOT via register_session_object_handle).
+                let vo_b = c.object_handles.insert(BackendHandle(backend_object.0));
+                (vs_b.0, vo_b.0)
+            })
+            .await
+            .unwrap();
+
+        // Context A's gate: creator → allow.
+        let mut ctx_a = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx_a.token_policy = policy_a;
+        let (_, result_a) =
+            resolve_session_and_object(&ctx_a, &ctx_id_a, vs_a.0, vo_a_raw).await.unwrap();
+        assert_ne!(
+            result_a,
+            CkObjectHandle(0),
+            "context A (creator) must be allowed to use the minted object"
+        );
+
+        // Context B's gate: did not mint → uid NOT in list → deny.
+        let mut ctx_b = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx_b.token_policy = policy_b;
+        let (_, result_b) =
+            resolve_session_and_object(&ctx_b, &ctx_id_b, vo_b_raw.0, vo_b_raw.1).await.unwrap();
+        assert_eq!(
+            result_b,
+            CkObjectHandle(0),
+            "context B (non-creator) must be denied for an object it did not mint"
+        );
+    }
+
+    /// After the minting session closes, the created-set entry must be gone
+    /// (no stale created-status on handle reuse).
+    #[tokio::test]
+    async fn minted_object_created_status_gone_after_session_close() {
+        use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
+        );
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)), // session object
+        );
+
+        let _backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        let vs = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+            })
+            .await
+            .unwrap();
+
+        let vo_raw =
+            register_session_object_handle(&ctx_mgr, &ctx_id, vs, backend_object, false).await;
+
+        // Verify the object is in the created set before session close.
+        let created_before = ctx_mgr.object_was_created_here(&ctx_id, vo_raw).await;
+        assert!(created_before, "object must be in created_objects immediately after minting");
+
+        // Close the session — this removes session objects and their created-set entries.
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.remove_session(vs);
+            })
+            .await;
+
+        // After session close the virtual handle and its created-status must be gone.
+        let created_after = ctx_mgr.object_was_created_here(&ctx_id, vo_raw).await;
+        assert!(
+            !created_after,
+            "created_objects entry must be evicted on session close (no stale created-status)"
         );
     }
 

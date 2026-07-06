@@ -2,7 +2,7 @@ use super::handle_map::{BackendHandle, HandleMap, VirtualHandle};
 use super::slot_map::SlotMap;
 use dashmap::DashMap;
 use pkcs11_proxy_ng_types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
@@ -67,6 +67,20 @@ pub struct LogicalClientInstance {
     pub session_objects: HashMap<VirtualHandle, Vec<VirtualHandle>>,
     pub login_state: HashMap<CkSlotId, LoginState>, // per-token login
     pub authenticated_identity: Option<String>,     // bound at creation (ADR-0005 §4)
+    /// Virtual object handles minted by this context (via generate/wrap/create,
+    /// NOT via find). Used by `gate_object_handle` to allow a principal to use
+    /// keys it generated, even when its `objects` grant does not list the new
+    /// object's `CKA_UNIQUE_ID` (which is backend-assigned and therefore
+    /// unknown at configuration time).
+    ///
+    /// Entries are evicted in the SAME removal hooks that evict `object_metadata`
+    /// (per-handle removal on session close and on `C_DestroyObject`, plus full
+    /// teardown) so a recycled virtual handle cannot inherit created-status from
+    /// a prior object.
+    ///
+    /// FIND results (`register_object_handles`) are intentionally NOT inserted
+    /// here — only minting operations insert.
+    pub created_objects: HashSet<VirtualHandle>,
     /// Count of backend operations currently in flight for this context.
     /// Eviction never reaps a context with `in_flight > 0`, so a single
     /// long backend call (DH/RSA keygen, slow-HSM op) is not evicted MID-CALL
@@ -87,6 +101,7 @@ impl LogicalClientInstance {
             object_handles: HandleMap::new(),
             object_metadata: HashMap::new(),
             session_objects: HashMap::new(),
+            created_objects: HashSet::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
             in_flight: Arc::new(AtomicI64::new(0)),
@@ -114,11 +129,13 @@ impl LogicalClientInstance {
             self.session_slots.remove(&vh);
             // Evict each closed session's session objects (B2) together with
             // their cached unique IDs so recycled virtual handles cannot return
-            // stale ids.
+            // stale ids. Also evict the created-set entries so a recycled
+            // virtual handle cannot inherit created-status.
             if let Some(objects) = self.session_objects.remove(&vh) {
                 for object in objects {
                     self.object_handles.remove(object);
                     self.object_metadata.remove(&object);
+                    self.created_objects.remove(&object);
                 }
             }
             if let Some(bh) = self.session_handles.remove(vh) {
@@ -142,12 +159,14 @@ impl LogicalClientInstance {
         let backend_handle = self.session_handles.remove(session);
         // Evict the session's session objects: the backend destroys them on
         // close, so the virtual handles must not linger and alias a recycled
-        // backend object number (B2).  Cached unique IDs are evicted alongside
-        // object handles so a recycled virtual handle cannot return a stale id.
+        // backend object number (B2).  Cached unique IDs and created-set
+        // entries are evicted alongside object handles so a recycled virtual
+        // handle cannot return stale metadata or inherit created-status.
         if let Some(objects) = self.session_objects.remove(&session) {
             for object in objects {
                 self.object_handles.remove(object);
                 self.object_metadata.remove(&object);
+                self.created_objects.remove(&object);
             }
         }
         if let Some(slot) = slot {
@@ -174,6 +193,7 @@ impl LogicalClientInstance {
         self.object_handles.clear();
         self.object_metadata.clear();
         self.session_objects.clear();
+        self.created_objects.clear();
         self.login_state.clear();
         backend_sessions
     }
@@ -328,6 +348,26 @@ impl ContextManager {
                 ctx.object_metadata.insert(VirtualHandle(virtual_object), meta);
             })
             .await;
+    }
+
+    /// Return `true` when `virtual_object` was minted (generated, created,
+    /// unwrapped) by context `ctx_id` in this session — i.e. it is present in
+    /// the context's `created_objects` set.
+    ///
+    /// Used by `gate_object_handle` to allow a confined principal to use keys
+    /// it just generated even when the backend-assigned `CKA_UNIQUE_ID` is not
+    /// in its pre-configured `objects` grant.
+    ///
+    /// Returns `false` when the context is gone (fail-safe: treat absence as
+    /// not-created so the gate does not skip its normal policy check).
+    pub async fn object_was_created_here(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_object: u64,
+    ) -> bool {
+        self.get_context(ctx_id, |ctx| ctx.created_objects.contains(&VirtualHandle(virtual_object)))
+            .await
+            .unwrap_or(false)
     }
 
     fn cached_token_info_within(

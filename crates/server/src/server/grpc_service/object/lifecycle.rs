@@ -140,9 +140,10 @@ pub(super) async fn destroy_object(
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || backend.destroy_object(session, object)).await?;
 
-    // On successful destroy, evict the virtual→backend mapping and the cached
-    // unique ID so a recycled virtual handle cannot alias or return stale data
-    // for the now-destroyed object (B2, G3).
+    // On successful destroy, evict the virtual→backend mapping, the cached
+    // unique ID, and the created-set entry so a recycled virtual handle cannot
+    // alias stale data or inherit created-status for the now-destroyed object
+    // (B2, G3, G3-PR3 Task 2).
     if result.is_ok() {
         let virtual_object = VirtualHandle(req.object_handle);
         let _ = ctx
@@ -150,6 +151,7 @@ pub(super) async fn destroy_object(
             .get_context(&ctx_id, |client_ctx| {
                 client_ctx.object_handles.remove(virtual_object);
                 client_ctx.object_metadata.remove(&virtual_object);
+                client_ctx.created_objects.remove(&virtual_object);
             })
             .await;
     }
