@@ -541,3 +541,34 @@ fn duplicate_identity_in_config_last_wins() {
     assert!(!policy.allows(&id, "token-a", "any"), "first entry should be overwritten");
     assert!(policy.allows(&id, "token-b", "any"), "last entry should apply");
 }
+
+#[test]
+fn unauthenticated_decision_routes_through_single_flip_point() {
+    // `allows()` for an Unauthenticated identity must equal `allows_unauthenticated()`
+    // (the single G2-PR2 deny-default flip-point) — not an independent inline `true`.
+    let auth = crate::config::AuthConfig { allow_all_authenticated: false, policy: vec![] };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    let unauth = AuthenticatedIdentity::Unauthenticated;
+    assert_eq!(
+        policy.allows(&unauth, "any", "any"),
+        policy.allows_unauthenticated(),
+        "the Unauthenticated case must delegate to the single flip-point"
+    );
+    // Current (pre-G2-PR2) behavior is allow; this pins the flip-point default so
+    // a future deny-default change is a deliberate single-line edit.
+    assert!(policy.allows_unauthenticated(), "no-auth mode currently allows (flip in G2-PR2)");
+}
+
+#[test]
+fn allow_all_authenticated_does_not_depend_on_unauthenticated_path() {
+    // With allow_all_authenticated=true, an AUTHENTICATED identity is allowed via
+    // the allow_all branch; the Unauthenticated branch is handled separately by the
+    // flip-point, so allow_all never independently authorizes an unauthenticated peer.
+    let auth = crate::config::AuthConfig { allow_all_authenticated: true, policy: vec![] };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    let authed = AuthenticatedIdentity::PeerCred { uid: 42 };
+    assert!(policy.allows(&authed, "any", "any"), "allow_all applies to authenticated");
+    // Unauthenticated still routes through the flip-point, independent of allow_all.
+    let unauth = AuthenticatedIdentity::Unauthenticated;
+    assert_eq!(policy.allows(&unauth, "any", "any"), policy.allows_unauthenticated());
+}

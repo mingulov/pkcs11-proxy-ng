@@ -40,8 +40,11 @@ pub(super) async fn slot_is_authorized(
         Err(error) => return Ok(Err(error)),
     };
 
+    // Unauthenticated peers route through the SAME deny-default decision as
+    // `TokenPolicy::allows` (the single G2-PR2 flip-point); short-circuit here so
+    // an identity-independent answer does not trigger a token-info fetch.
     if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
-        return Ok(Ok(true));
+        return Ok(Ok(token_policy.allows_unauthenticated()));
     }
 
     // Serve the token (label, serial) from the per-slot cache when fresh, so a

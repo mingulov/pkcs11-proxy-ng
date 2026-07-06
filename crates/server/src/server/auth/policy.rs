@@ -25,6 +25,21 @@ impl TokenPolicy {
         Ok(Self { rules, allow_all_authenticated: auth.allow_all_authenticated })
     }
 
+    /// Whether an **unauthenticated** peer is allowed (no-auth / dev mode).
+    ///
+    /// This is the SINGLE deny-default flip-point for G2-PR2 (ADR-0012): today
+    /// it returns `true` (no-auth mode bypasses policy, preserving current
+    /// behavior). When the G2-PR2 authorization-enforcement model lands, change
+    /// this to `false` and route unauthenticated peers through an explicit
+    /// `anonymous_principal` (audit-identity only). Both `allows()` and
+    /// `grpc_service::authorization::slot_is_authorized` route the
+    /// unauthenticated case through THIS method, so the flip happens in exactly
+    /// one place — never delete an inline `Unauthenticated ⇒ true` at only one
+    /// of the (previously three) sites.
+    pub fn allows_unauthenticated(&self) -> bool {
+        true
+    }
+
     pub fn allows(
         &self,
         identity: &AuthenticatedIdentity,
@@ -32,8 +47,11 @@ impl TokenPolicy {
         token_serial: &str,
     ) -> bool {
         if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
-            return true; // no-auth mode bypasses policy
+            return self.allows_unauthenticated();
         }
+        // `allow_all_authenticated` applies ONLY to genuinely-authenticated
+        // identities; the unauthenticated case is handled above via the single
+        // flip-point, so this can never blanket-authorize an unauthenticated peer.
         if self.allow_all_authenticated {
             return true;
         }
