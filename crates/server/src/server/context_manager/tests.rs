@@ -484,3 +484,74 @@ fn teardown_returns_correct_backend_session_handles() {
         "teardown must return backend session handles for caller to close"
     );
 }
+
+// --- per-object CKA_UNIQUE_ID cache (G3) ---
+
+#[tokio::test]
+async fn object_unique_id_miss_returns_none() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    assert_eq!(
+        mgr.object_unique_id(&ctx_id, 42).await,
+        None,
+        "a virtual object that was never cached must return None"
+    );
+}
+
+#[tokio::test]
+async fn object_unique_id_round_trip() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let uid = vec![0xde, 0xad, 0xbe, 0xef];
+    mgr.cache_object_unique_id(&ctx_id, 7, uid.clone()).await;
+    assert_eq!(
+        mgr.object_unique_id(&ctx_id, 7).await,
+        Some(uid),
+        "a cached unique_id must be returned by object_unique_id"
+    );
+}
+
+#[tokio::test]
+async fn object_unique_id_evicted_on_session_close() {
+    // When a virtual session closes, its session objects (and their cached
+    // unique IDs) must be evicted so a recycled virtual handle cannot return
+    // a stale unique_id (G3, B2).
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+
+    // Register a virtual session and a session object within it.
+    let (session_vh, obj_vh) = mgr
+        .get_context(&ctx_id, |ctx| {
+            let s = ctx.session_handles.insert(BackendHandle(1));
+            let o = ctx.object_handles.insert(BackendHandle(100));
+            ctx.record_session_object(s, o);
+            (s, o)
+        })
+        .await
+        .unwrap();
+
+    // Cache the unique_id for the session object.
+    mgr.cache_object_unique_id(&ctx_id, obj_vh.0, vec![1, 2, 3]).await;
+    assert!(
+        mgr.object_unique_id(&ctx_id, obj_vh.0).await.is_some(),
+        "unique_id should be cached before session close"
+    );
+
+    // Close the session — its session objects are evicted.
+    mgr.get_context(&ctx_id, |ctx| ctx.remove_session(session_vh)).await;
+
+    assert_eq!(
+        mgr.object_unique_id(&ctx_id, obj_vh.0).await,
+        None,
+        "unique_id must be evicted when the owning session closes"
+    );
+}
+
+#[tokio::test]
+async fn cache_object_unique_id_noop_for_missing_context() {
+    // Caching a unique_id for a non-existent context must not panic.
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let gone = ClientContextId("nonexistent".into());
+    mgr.cache_object_unique_id(&gone, 1, vec![0xff]).await; // must not panic
+    assert_eq!(mgr.object_unique_id(&gone, 1).await, None);
+}

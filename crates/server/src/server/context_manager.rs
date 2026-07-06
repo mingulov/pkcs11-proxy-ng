@@ -35,6 +35,15 @@ pub struct LogicalClientInstance {
     pub session_handles: HandleMap, // virtual session → backend session
     pub session_slots: HashMap<VirtualHandle, CkSlotId>, // session → slot ownership (ADR-0002 §7)
     pub object_handles: HandleMap,  // virtual object → backend object
+    /// Per-virtual-object cached `CKA_UNIQUE_ID` bytes (G3).
+    ///
+    /// `CKA_UNIQUE_ID` is immutable once set (PKCS#11 v3.0), so the cached
+    /// value is valid for the lifetime of the virtual handle.  Entries are
+    /// evicted wherever `object_handles` entries are removed — on explicit
+    /// `C_DestroyObject`, on session close (for session objects), and on
+    /// context teardown — so a recycled virtual handle can never return a
+    /// stale id.
+    pub object_unique_ids: HashMap<VirtualHandle, Vec<u8>>,
     /// Virtual object handles created as SESSION objects (CKA_TOKEN=false) in
     /// each virtual session. Evicted when that session closes so a recycled
     /// backend object number can never alias a stale handle (B2). Token objects
@@ -61,6 +70,7 @@ impl LogicalClientInstance {
             session_handles: HandleMap::new(),
             session_slots: HashMap::new(),
             object_handles: HandleMap::new(),
+            object_unique_ids: HashMap::new(),
             session_objects: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
@@ -87,10 +97,13 @@ impl LogicalClientInstance {
         let mut backend_handles = Vec::with_capacity(to_remove.len());
         for vh in to_remove {
             self.session_slots.remove(&vh);
-            // Evict each closed session's session objects (B2).
+            // Evict each closed session's session objects (B2) together with
+            // their cached unique IDs so recycled virtual handles cannot return
+            // stale ids.
             if let Some(objects) = self.session_objects.remove(&vh) {
                 for object in objects {
                     self.object_handles.remove(object);
+                    self.object_unique_ids.remove(&object);
                 }
             }
             if let Some(bh) = self.session_handles.remove(vh) {
@@ -114,10 +127,12 @@ impl LogicalClientInstance {
         let backend_handle = self.session_handles.remove(session);
         // Evict the session's session objects: the backend destroys them on
         // close, so the virtual handles must not linger and alias a recycled
-        // backend object number (B2).
+        // backend object number (B2).  Cached unique IDs are evicted alongside
+        // object handles so a recycled virtual handle cannot return a stale id.
         if let Some(objects) = self.session_objects.remove(&session) {
             for object in objects {
                 self.object_handles.remove(object);
+                self.object_unique_ids.remove(&object);
             }
         }
         if let Some(slot) = slot {
@@ -142,6 +157,7 @@ impl LogicalClientInstance {
         self.session_handles.clear();
         self.session_slots.clear();
         self.object_handles.clear();
+        self.object_unique_ids.clear();
         self.session_objects.clear();
         self.login_state.clear();
         backend_sessions
@@ -250,6 +266,41 @@ impl ContextManager {
         self.get_context(ctx_id, |ctx| ctx.session_slots.get(&virtual_session).copied())
             .await
             .flatten()
+    }
+
+    /// Return the cached `CKA_UNIQUE_ID` bytes for `virtual_object` within
+    /// context `ctx_id`, or `None` on a cache miss (the caller must then fetch
+    /// from the backend via [`fetch_object_unique_id`] and populate the cache
+    /// with [`cache_object_unique_id`]).
+    pub async fn object_unique_id(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_object: u64,
+    ) -> Option<Vec<u8>> {
+        self.get_context(ctx_id, |ctx| {
+            ctx.object_unique_ids.get(&VirtualHandle(virtual_object)).cloned()
+        })
+        .await
+        .flatten()
+    }
+
+    /// Cache the `CKA_UNIQUE_ID` bytes for `virtual_object` within context
+    /// `ctx_id`.  No-ops silently when the context no longer exists (the object
+    /// handle will not be used again).  The cached value is evicted together
+    /// with the virtual object handle (on `C_DestroyObject`, session close for
+    /// session objects, or context teardown) so a recycled handle cannot return
+    /// a stale id.
+    pub async fn cache_object_unique_id(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_object: u64,
+        unique_id: Vec<u8>,
+    ) {
+        let _ = self
+            .get_context(ctx_id, |ctx| {
+                ctx.object_unique_ids.insert(VirtualHandle(virtual_object), unique_id);
+            })
+            .await;
     }
 
     fn cached_token_info_within(

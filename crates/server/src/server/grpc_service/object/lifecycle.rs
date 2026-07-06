@@ -150,13 +150,17 @@ pub(super) async fn destroy_object(
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || backend.destroy_object(session, object)).await?;
 
-    // On successful destroy, evict the virtual->backend mapping so a recycled
-    // backend object number can never alias this now-stale handle (B2).
+    // On successful destroy, evict the virtual→backend mapping and the cached
+    // unique ID so a recycled virtual handle cannot alias or return stale data
+    // for the now-destroyed object (B2, G3).
     if result.is_ok() {
         let virtual_object = VirtualHandle(req.object_handle);
         let _ = ctx
             .context_manager
-            .get_context(&ctx_id, |client_ctx| client_ctx.object_handles.remove(virtual_object))
+            .get_context(&ctx_id, |client_ctx| {
+                client_ctx.object_handles.remove(virtual_object);
+                client_ctx.object_unique_ids.remove(&virtual_object);
+            })
             .await;
     }
 

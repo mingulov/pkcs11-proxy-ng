@@ -181,6 +181,89 @@ pub(super) async fn enforce_context_owner<T>(
     }
 }
 
+/// Fetch `CKA_UNIQUE_ID` bytes from the backend for the given backend-level
+/// object handle.
+///
+/// Implements the PKCS#11 two-call `C_GetAttributeValue` pattern using a
+/// one-element `CkAttribute` template:
+///
+/// - **Call 1** (`value = None`, i.e. `pValue = NULL` at the FFI edge):
+///   For mock-style backends that fill attribute values directly, this call
+///   already returns the bytes.  For real FFI backends the backend writes
+///   `ulValueLen` into the raw `CK_ATTRIBUTE` struct, but the Rust mapping
+///   discards it (the size has nowhere to go since `CkAttribute.value` is
+///   `Option<CkAttributeValue>` with no separate length field).
+/// - **Call 2** (pre-allocated 256-byte buffer, `value = Some(Bytes(...))`):
+///   For FFI backends that did not fill a value in call 1, this call
+///   provides a sized buffer so the backend can write actual bytes.
+///   `CKA_UNIQUE_ID` is a UUID-like byte string (16–36 bytes in practice);
+///   256 bytes is generous for any conforming provider.
+///
+/// Returns `Some(bytes)` when the attribute is present and non-empty; `None`
+/// on any error, absent attribute (`CKR_ATTRIBUTE_TYPE_INVALID`), sensitive
+/// attribute, or empty value.  The value is **not** logged.  Buggy-backend
+/// quirks (`CKR_BUFFER_TOO_SMALL`, etc.) collapse to `None`.
+///
+/// # Note
+/// Not yet called on any hot path.  Wired into the resolution-seam gate in
+/// G3-PR1 Task 3.
+#[allow(dead_code)] // wired in G3-PR1 Task 3
+pub(super) async fn fetch_object_unique_id(
+    ctx: &HandlerContext,
+    session: CkSessionHandle,
+    object: CkObjectHandle,
+) -> Option<Vec<u8>> {
+    let backend = ctx.backend.clone();
+    let result = spawn_backend(move || -> CkResult<Option<Vec<u8>>> {
+        // --- Call 1: size-query (value=None → pValue=NULL at the FFI edge) ---
+        let mut template = [CkAttribute { attr_type: CkAttributeType::UNIQUE_ID, value: None }];
+        match backend.get_attribute_value(session, object, &mut template) {
+            Ok(()) => {}
+            // Attribute absent, sensitive, or invalid handle — not available.
+            Err(
+                CkRv::ATTRIBUTE_TYPE_INVALID
+                | CkRv::ATTRIBUTE_SENSITIVE
+                | CkRv::OBJECT_HANDLE_INVALID
+                | CkRv::SESSION_HANDLE_INVALID,
+            ) => return Ok(None),
+            // Other backend errors propagate so the caller can collapse them.
+            Err(rv) => return Err(rv),
+        }
+        // Mock-style backends fill `value` directly on the size-query call.
+        // If we already have non-empty bytes, we are done.
+        if let Some(CkAttributeValue::Bytes(bytes)) = template[0].value.take()
+            && !bytes.is_empty()
+        {
+            return Ok(Some(bytes));
+        }
+        // --- Call 2: data-query with a pre-allocated buffer ---
+        // FFI backends need a sized buffer; use 256 bytes (generous for UUID strings).
+        template[0].value = Some(CkAttributeValue::Bytes(vec![0u8; 256]));
+        match backend.get_attribute_value(session, object, &mut template) {
+            Ok(()) => {}
+            Err(
+                CkRv::ATTRIBUTE_TYPE_INVALID
+                | CkRv::ATTRIBUTE_SENSITIVE
+                | CkRv::BUFFER_TOO_SMALL
+                | CkRv::OBJECT_HANDLE_INVALID
+                | CkRv::SESSION_HANDLE_INVALID,
+            ) => return Ok(None),
+            Err(rv) => return Err(rv),
+        }
+        match template[0].value.take() {
+            Some(CkAttributeValue::Bytes(bytes)) if !bytes.is_empty() => Ok(Some(bytes)),
+            _ => Ok(None),
+        }
+    })
+    .await;
+    // Collapse any transport/timeout error or backend CkRv error to None;
+    // the gate in Task 3 treats a missing unique-id as a deny decision.
+    match result {
+        Ok(Ok(opt)) => opt,
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +526,61 @@ mod tests {
             !permitted,
             "cache miss for authenticated identity with extract=Deny must resolve from backend and deny"
         );
+    }
+
+    // --- fetch_object_unique_id ---
+
+    mod fetch_unique_id {
+        use super::*;
+        use pkcs11_proxy_ng_backend::mock::MockAttributeSlot;
+
+        /// Open a real backend session and create a live object on the mock so
+        /// `get_attribute_value_impl` can validate both the session and the object.
+        fn mock_with_session_and_object() -> (Arc<MockBackend>, CkSessionHandle, CkObjectHandle) {
+            let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+            mock.initialize().unwrap();
+            let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+            let session = mock.open_session(CkSlotId(0), flags).unwrap();
+            let object = mock.create_object(session, &[]).unwrap();
+            (mock, session, object)
+        }
+
+        fn make_ctx(mock: Arc<MockBackend>) -> HandlerContext {
+            let backend: Arc<dyn Pkcs11Backend> = mock;
+            let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+            HandlerContext::for_test(&ctx_mgr, &backend)
+        }
+
+        #[tokio::test]
+        async fn returns_uid_bytes_when_backend_has_attr() {
+            let (mock, session, object) = mock_with_session_and_object();
+            let uid = b"d41d8cd9-8f00-3204-a980-0998ecf8427e".to_vec();
+            mock.set_attribute(
+                object,
+                CkAttributeType::UNIQUE_ID,
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone())),
+            );
+            let ctx = make_ctx(mock);
+            let result = fetch_object_unique_id(&ctx, session, object).await;
+            assert_eq!(result, Some(uid), "must return the uid bytes registered on the mock");
+        }
+
+        #[tokio::test]
+        async fn returns_none_when_attr_type_invalid() {
+            let (mock, session, object) = mock_with_session_and_object();
+            mock.set_attribute(object, CkAttributeType::UNIQUE_ID, MockAttributeSlot::InvalidType);
+            let ctx = make_ctx(mock);
+            let result = fetch_object_unique_id(&ctx, session, object).await;
+            assert_eq!(result, None, "CKR_ATTRIBUTE_TYPE_INVALID must map to None");
+        }
+
+        #[tokio::test]
+        async fn returns_none_when_attr_sensitive() {
+            let (mock, session, object) = mock_with_session_and_object();
+            mock.set_attribute(object, CkAttributeType::UNIQUE_ID, MockAttributeSlot::Sensitive);
+            let ctx = make_ctx(mock);
+            let result = fetch_object_unique_id(&ctx, session, object).await;
+            assert_eq!(result, None, "CKR_ATTRIBUTE_SENSITIVE must map to None");
+        }
     }
 }
