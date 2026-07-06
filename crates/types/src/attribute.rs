@@ -33,6 +33,9 @@ impl CkAttributeType {
     pub const EC_PARAMS: Self = Self(0x00000180);
     pub const EC_POINT: Self = Self(0x00000181);
     pub const ID: Self = Self(0x00000102);
+    /// `CKA_UNIQUE_ID` — PKCS#11 v3.0 mandatory, immutable byte-string
+    /// globally unique identifier for storage objects (CK_BYTE_PTR, value 0x0000_002E).
+    pub const UNIQUE_ID: Self = Self(0x0000_002E);
     pub const VALUE_LEN: Self = Self(0x00000161);
     pub const LOCAL: Self = Self(0x00000163);
 
@@ -278,6 +281,12 @@ pub struct CkAttribute {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_id_attribute_has_correct_value() {
+        // CKA_UNIQUE_ID = 0x0000_002E per PKCS#11 v3.0 spec.
+        assert_eq!(CkAttributeType::UNIQUE_ID.0, 0x0000_002E);
+    }
 
     #[test]
     fn attr_type_classification() {

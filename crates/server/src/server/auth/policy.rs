@@ -1,4 +1,6 @@
-use super::grant::{ExtractPolicy, TokenGrant, parse_class, parse_mechanism};
+use super::grant::{
+    ExtractPolicy, TokenGrant, parse_class, parse_mechanism, parse_object_unique_id,
+};
 use super::identity::AuthenticatedIdentity;
 pub use super::token_selector::TokenSelector;
 use pkcs11_proxy_ng_types::{CkMechanismType, CkObjectClass};
@@ -283,6 +285,67 @@ impl TokenPolicy {
         }
     }
 
+    /// Whether any grant in any policy rule has a non-`None` `objects` list.
+    ///
+    /// When `false`, the per-object authorization layer is entirely dormant and
+    /// the `allows_object_use` check can be skipped. When `true`, at least one
+    /// grant restricts access to specific objects by `CKA_UNIQUE_ID`, so the
+    /// enforcement path must be consulted.
+    ///
+    /// This is an opt-in feature: the value is `false` when no `objects` field
+    /// appears anywhere in the loaded config (i.e., all existing deployments
+    /// until they explicitly add an `objects` list to a grant).
+    pub fn per_object_active(&self) -> bool {
+        self.rules.values().any(|access| {
+            if let TokenAccess::Specific(grants) = access {
+                grants.iter().any(|g| g.objects.is_some())
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Whether the identity is allowed to use an object with the given
+    /// `CKA_UNIQUE_ID` value on the matched token.
+    ///
+    /// Per-object authorization is **opt-in** (an additive refinement of the
+    /// token-level grant): a grant without an `objects` list permits all objects,
+    /// preserving backward compatibility. Principals without a matching grant,
+    /// `TokenAccess::All`, `allow_all_authenticated`, and unauthenticated peers
+    /// all receive `true` — per-object is never a new denial for principals
+    /// who have no `objects` restriction configured.
+    ///
+    /// When a grant DOES have `Some(list)`, only objects whose `unique_id`
+    /// byte slice appears in `list` are permitted by that grant.
+    pub fn allows_object_use(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+        unique_id: &[u8],
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return true;
+        }
+        if self.allow_all_authenticated {
+            return true;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => true,
+            Some(TokenAccess::Specific(grants)) => {
+                let matching: Vec<&TokenGrant> =
+                    grants.iter().filter(|g| g.matches_token(token_label, token_serial)).collect();
+                if matching.is_empty() {
+                    return true; // no grants matched → no restriction
+                }
+                matching.iter().any(|g| match &g.objects {
+                    None => true, // unrestricted grant permits all objects
+                    Some(list) => list.iter().any(|u| u.as_slice() == unique_id),
+                })
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
@@ -395,7 +458,19 @@ impl TokenPolicy {
                     crate::config::ExtractPolicyConfig::Deny => ExtractPolicy::Deny,
                 };
 
-                Ok(TokenGrant { selector, classes, mechanisms, extract })
+                let objects = match &rich.objects {
+                    None => None,
+                    Some(strs) => Some(
+                        strs.iter()
+                            .map(|s| {
+                                parse_object_unique_id(s)
+                                    .map_err(|e| format!("policy for '{identity}': {e}"))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                };
+
+                Ok(TokenGrant { selector, classes, mechanisms, extract, objects })
             }
         }
     }

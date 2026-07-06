@@ -153,6 +153,12 @@ pub struct RichGrantConfig {
     /// Whether extraction of sensitive key material is permitted. Defaults to `"allow"`.
     #[serde(default)]
     pub extract: ExtractPolicyConfig,
+    /// CKA_UNIQUE_ID allow-list as hex byte strings (e.g. `["a1b2c3"]`).
+    /// `None` (field absent) = all objects permitted (back-compat default).
+    /// `Some(list)` = only objects whose CKA_UNIQUE_ID byte value matches an
+    /// entry (hex-decoded) are permitted. Requires backend PKCS#11 v3.0+.
+    #[serde(default)]
+    pub objects: Option<Vec<String>>,
 }
 
 /// Serde config form for extract policy (maps to `ExtractPolicy` at runtime).

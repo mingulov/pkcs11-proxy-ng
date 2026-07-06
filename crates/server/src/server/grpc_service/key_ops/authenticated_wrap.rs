@@ -287,6 +287,7 @@ mod tests {
                     classes: None,
                     mechanisms: None,
                     extract: ExtractPolicyConfig::Deny,
+                    objects: None,
                 })]),
             }],
         })

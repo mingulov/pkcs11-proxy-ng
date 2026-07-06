@@ -12,24 +12,36 @@ pub enum ExtractPolicy {
 }
 
 /// A token grant that pairs a token selector with optional per-class,
-/// per-mechanism restrictions and an extract policy.
+/// per-mechanism, per-object restrictions and an extract policy.
 ///
 /// `classes = None` means "all object classes allowed"; `mechanisms = None`
-/// means "all mechanisms allowed".  When `extract` is `Deny` the grant
-/// forbids extraction of sensitive key material for the matched token.
+/// means "all mechanisms allowed"; `objects = None` means "all objects allowed"
+/// (per-object restriction is an opt-in refinement, never a new default denial).
+/// When `extract` is `Deny` the grant forbids extraction of sensitive key
+/// material for the matched token.
 #[derive(Debug, Clone)]
 pub struct TokenGrant {
     pub selector: TokenSelector,
     pub classes: Option<Vec<CkObjectClass>>,
     pub mechanisms: Option<Vec<CkMechanismType>>,
     pub extract: ExtractPolicy,
+    /// CKA_UNIQUE_ID allow-list. `None` = all objects permitted (back-compat
+    /// default). `Some(list)` = only objects whose CKA_UNIQUE_ID byte value
+    /// appears in `list` are permitted by this grant.
+    pub objects: Option<Vec<Vec<u8>>>,
 }
 
 impl TokenGrant {
-    /// Convenience constructor: a grant with no class/mechanism restriction
-    /// and `extract = Allow`.  Used for back-compat string selectors.
+    /// Convenience constructor: a grant with no class/mechanism/object
+    /// restriction and `extract = Allow`. Used for back-compat string selectors.
     pub fn simple(selector: TokenSelector) -> Self {
-        Self { selector, classes: None, mechanisms: None, extract: ExtractPolicy::Allow }
+        Self {
+            selector,
+            classes: None,
+            mechanisms: None,
+            extract: ExtractPolicy::Allow,
+            objects: None,
+        }
     }
 
     /// Whether this grant matches the given token label and serial.
@@ -39,7 +51,7 @@ impl TokenGrant {
 }
 
 // ---------------------------------------------------------------------------
-// Name → type parsers
+// Name / byte parsers
 // ---------------------------------------------------------------------------
 
 /// Parse an object-class string into a `CkObjectClass`.
@@ -325,4 +337,21 @@ pub fn parse_mechanism(s: &str) -> Result<CkMechanismType, String> {
         "unknown mechanism '{t}'; expected a CKM_* name (e.g. CKM_AES_GCM), \
          a hex value (e.g. 0x00001087), or a decimal integer"
     ))
+}
+
+/// Parse a hex-encoded byte string into raw bytes for the CKA_UNIQUE_ID
+/// per-object allow-list.
+///
+/// Accepted form: a lowercase or uppercase hex string with an even number
+/// of hex digits (`"a1b2c3"` → `[0xa1, 0xb2, 0xc3]`). An empty string
+/// decodes to an empty byte vector. Odd-length or non-hex input is
+/// rejected with a clear error naming the bad value.
+pub fn parse_object_unique_id(s: &str) -> Result<Vec<u8>, String> {
+    let t = s.trim();
+    hex::decode(t).map_err(|e| {
+        format!(
+            "invalid objects entry '{t}': {e}; expected an even-length hex byte string \
+             (e.g. \"a1b2\"); got a string that is not valid hex or has an odd number of digits"
+        )
+    })
 }

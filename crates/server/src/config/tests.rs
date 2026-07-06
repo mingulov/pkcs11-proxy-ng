@@ -1074,6 +1074,48 @@ tokens = [{ token = \"label:MyToken\", extract = \"deny\" }]
 }
 
 #[test]
+fn validate_accepts_rich_grant_with_objects_field() {
+    // A rich grant with `objects` set is the G3 per-object allow-list feature.
+    // Unlike classes/mechanisms (blocked by the I2 guard until Task 3 enforcement
+    // is wired), objects has a functional allows_object_use() policy method and
+    // must NOT be rejected at validate().
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", objects = [\"a1b2\"] }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.validate().is_ok(), "rich grant with objects field must validate successfully");
+}
+
+#[test]
+fn validate_rejects_rich_grant_with_objects_bad_hex() {
+    // Malformed hex in the objects list must produce an Err at validate() time.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", objects = [\"xyz\"] }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("xyz"), "error must name the bad hex value: {err}");
+}
+
+#[test]
 fn audit_with_unauthenticated_listener_without_anonymous_principal_is_rejected() {
     // H2 guard: audit + auth=none WITHOUT anonymous_principal still refused.
     // (The existing `audit_with_unauthenticated_listener_is_rejected` test covers
