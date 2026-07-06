@@ -153,12 +153,13 @@ pub struct RichGrantConfig {
     /// Whether extraction of sensitive key material is permitted. Defaults to `"allow"`.
     #[serde(default)]
     pub extract: ExtractPolicyConfig,
-    /// CKA_UNIQUE_ID allow-list as hex byte strings (e.g. `["a1b2c3"]`).
+    /// CKA_UNIQUE_ID allow-list. Each entry is either a bare hex string
+    /// (e.g. `"a1b2c3"`) or a table `{ id = "a1b2c3", extract = "deny" }`.
     /// `None` (field absent) = all objects permitted (back-compat default).
     /// `Some(list)` = only objects whose CKA_UNIQUE_ID byte value matches an
     /// entry (hex-decoded) are permitted. Requires backend PKCS#11 v3.0+.
     #[serde(default)]
-    pub objects: Option<Vec<String>>,
+    pub objects: Option<Vec<ObjectAclSpec>>,
 }
 
 /// Serde config form for extract policy (maps to `ExtractPolicy` at runtime).
@@ -168,6 +169,31 @@ pub enum ExtractPolicyConfig {
     #[default]
     Allow,
     Deny,
+}
+
+/// A single entry in the `objects` allow-list.
+///
+/// Two forms accepted in TOML:
+/// - Bare hex string: `"a1b2c3"` — inherits grant-level extract policy.
+/// - Rich table: `{ id = "a1b2c3", extract = "deny" }` — per-object override.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ObjectAclSpec {
+    /// A bare CKA_UNIQUE_ID hex string; inherits grant-level extract policy.
+    Bare(String),
+    /// A rich table with an optional per-object extract-policy override.
+    Rich(ObjectAclRichConfig),
+}
+
+/// Rich form of an `objects` allow-list entry.
+#[derive(Debug, Deserialize)]
+pub struct ObjectAclRichConfig {
+    /// CKA_UNIQUE_ID as a hex byte string (e.g. `"a1b2c3"`).
+    pub id: String,
+    /// Per-object extract policy override. `None` (field absent) = inherit
+    /// the grant-level extract policy.
+    #[serde(default)]
+    pub extract: Option<ExtractPolicyConfig>,
 }
 
 /// Token-access specification in `[[auth.policy]]`.

@@ -11,6 +11,17 @@ pub enum ExtractPolicy {
     Deny,
 }
 
+/// Per-object extract-policy override for an entry in the `objects` allow-list.
+///
+/// `extract = None` means inherit the grant-level extract policy for this object.
+/// `extract = Some(policy)` overrides the grant-level policy for this specific
+/// object only, enabling per-object allow/deny independent of the grant default.
+#[derive(Debug, Clone)]
+pub struct ObjectAcl {
+    pub unique_id: Vec<u8>,
+    pub extract: Option<ExtractPolicy>,
+}
+
 /// A token grant that pairs a token selector with optional per-class,
 /// per-mechanism, per-object restrictions and an extract policy.
 ///
@@ -27,8 +38,10 @@ pub struct TokenGrant {
     pub extract: ExtractPolicy,
     /// CKA_UNIQUE_ID allow-list. `None` = all objects permitted (back-compat
     /// default). `Some(list)` = only objects whose CKA_UNIQUE_ID byte value
-    /// appears in `list` are permitted by this grant.
-    pub objects: Option<Vec<Vec<u8>>>,
+    /// appears in `list` are permitted by this grant. Each entry may carry an
+    /// optional per-object extract override (`ObjectAcl::extract`); `None`
+    /// inherits the grant-level `extract` policy.
+    pub objects: Option<Vec<ObjectAcl>>,
 }
 
 impl TokenGrant {

@@ -76,7 +76,9 @@ pub(super) async fn get_attribute_value(
     // I3: emit a KeyMgmt audit record for the denial so monitoring can detect
     // extraction attempts; do NOT audit the allowed path (data-plane volume).
     let has_secret_attr = template.iter().any(|attr| is_value_bearing_secret(attr.attr_type));
-    if has_secret_attr && !extract_is_permitted(ctx, &ctx_id, req.session_handle).await? {
+    if has_secret_attr
+        && !extract_is_permitted(ctx, &ctx_id, req.session_handle, req.object_handle).await?
+    {
         if emit_auth_event(
             ctx,
             &ctx_id,
@@ -144,7 +146,9 @@ pub(super) async fn get_attribute_value_exact(
     // I3: emit a KeyMgmt audit record for the denial; do NOT audit the allowed
     // path (data-plane volume). No secret/attribute values in the record.
     let has_secret_attr = query_types.iter().any(|&t| is_value_bearing_secret(t));
-    if has_secret_attr && !extract_is_permitted(ctx, &ctx_id, req.session_handle).await? {
+    if has_secret_attr
+        && !extract_is_permitted(ctx, &ctx_id, req.session_handle, req.object_handle).await?
+    {
         if emit_auth_event(
             ctx,
             &ctx_id,

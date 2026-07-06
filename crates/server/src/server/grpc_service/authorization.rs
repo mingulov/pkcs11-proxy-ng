@@ -75,22 +75,31 @@ pub(super) async fn slot_is_authorized(
 }
 
 /// Returns `true` if the calling principal may extract key material from the
-/// token that owns `virtual_session`.
+/// token that owns `virtual_session`, taking into account any per-object
+/// extract-policy override for `virtual_object`.
 ///
-/// Returns `false` when the principal has an explicit `extract = "deny"` grant
-/// for the matched token. On a cache miss for an authenticated principal the
-/// function fetches the token info from the backend and caches it, mirroring
-/// `slot_is_authorized`'s resolution strategy (M9) — a stale/expired cache
-/// must not silently disarm the extract gate. Returns `true` (permissive) on
-/// unknown context or unregistered session. Returns `false` (fail-closed) when
-/// the backend reports `TOKEN_NOT_PRESENT` or another error — consistent with
-/// `slot_is_authorized`'s "do not silently permit" contract. Unauthenticated
-/// principals always return `true` (extract-deny is opt-in for authenticated
-/// identities only).
+/// **Grant-level gate:** Returns `false` when the principal has an explicit
+/// `extract = "deny"` grant for the matched token. On a cache miss for an
+/// authenticated principal the function fetches token info from the backend
+/// and caches it, mirroring `slot_is_authorized`'s strategy (M9).
+///
+/// **Per-object gate (when `per_object_active()` is true):** If any grant in
+/// the policy has an `objects` list, the gate also checks for a per-object
+/// extract override for `virtual_object`. The object's `CKA_UNIQUE_ID` is
+/// resolved from the session-object metadata cache (`object_metadata`) when
+/// available, otherwise fetched from the backend and cached. On uid-resolution
+/// failure the gate falls back to the grant-level decision (fail-safe, not
+/// fail-closed — identical to the pre-Task-4 behaviour).
+///
+/// Returns `true` (permissive) on unknown context or unregistered session.
+/// Returns `false` (fail-closed) when the backend reports `TOKEN_NOT_PRESENT`
+/// or another error. Unauthenticated principals always return `true`
+/// (extract-deny is opt-in for authenticated identities only).
 pub(super) async fn extract_is_permitted(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,
     virtual_session: u64,
+    virtual_object: u64,
 ) -> Result<bool, Status> {
     let identity = match context_identity(&ctx.context_manager, ctx_id).await {
         Ok(identity) => identity,
@@ -134,7 +143,69 @@ pub(super) async fn extract_is_permitted(
         }
     };
 
-    Ok(ctx.token_policy.extract_allowed(&identity, &label, &serial))
+    // Fast path: when no grant has an objects list, per-object extract overrides
+    // are inactive; skip uid resolution entirely (transparent, M1).
+    if !ctx.token_policy.per_object_active() {
+        return Ok(ctx.token_policy.extract_allowed(&identity, &label, &serial));
+    }
+
+    // Per-object active: resolve the object's CKA_UNIQUE_ID so we can check
+    // for a per-object extract override. On uid-resolution failure fall back to
+    // the grant-level decision (fail-safe: identical to pre-Task-4 behaviour).
+    match resolve_uid_for_extract(ctx, ctx_id, virtual_session, virtual_object).await {
+        Some(uid) => {
+            Ok(ctx.token_policy.extract_allowed_for_object(&identity, &label, &serial, &uid))
+        }
+        None => Ok(ctx.token_policy.extract_allowed(&identity, &label, &serial)),
+    }
+}
+
+/// Resolve the `CKA_UNIQUE_ID` of `virtual_object` for the extract gate.
+///
+/// Fast path: returns the cached `ObjectMetadata::unique_id` when already
+/// present in the session-object cache (populated by `gate_object_handle`
+/// earlier in the same request). On a cache miss, resolves the backend
+/// session and object handles in one context-lock and calls
+/// `fetch_object_metadata` — the result is cached for subsequent calls.
+///
+/// Returns `None` when:
+/// - The context is gone.
+/// - Either handle (session or object) cannot be resolved.
+/// - `fetch_object_metadata` returns `None` (uid absent/sensitive/error).
+///
+/// `None` is the fail-safe fallback; callers fall back to grant-level policy.
+async fn resolve_uid_for_extract(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    virtual_session: u64,
+    virtual_object: u64,
+) -> Option<Vec<u8>> {
+    // Fast path: metadata already in cache (session objects only; token objects
+    // are never cached per the I2 invariant).
+    if let Some(cached) = ctx.context_manager.object_metadata(ctx_id, virtual_object).await {
+        return Some(cached.unique_id);
+    }
+
+    // Cache miss: resolve backend handles in one context lock.
+    let (bs_opt, bo_opt) = ctx
+        .context_manager
+        .get_context(ctx_id, |c| {
+            (
+                c.session_handles.resolve(VirtualHandle(virtual_session)),
+                c.object_handles.resolve(VirtualHandle(virtual_object)),
+            )
+        })
+        .await?;
+
+    let backend_session = CkSessionHandle(bs_opt?.0 as u64);
+    let backend_object_bh = bo_opt?;
+    let backend_object = CkObjectHandle(backend_object_bh.0 as u64);
+
+    let fetched = fetch_object_metadata(ctx, backend_session, backend_object).await;
+    if let Some(ref m) = fetched {
+        ctx.context_manager.cache_object_metadata(ctx_id, virtual_object, m.clone()).await;
+    }
+    fetched.map(|m| m.unique_id)
 }
 
 /// Per-mechanism authorization gate (G3-PR3 Task 3, ADR-0012).
@@ -542,7 +613,7 @@ mod tests {
     async fn extract_permitted_for_deny_grant_returns_false() {
         let policy = policy_with_extract_deny(MTLS_IDENTITY);
         let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
-        let permitted = extract_is_permitted(&ctx, &ctx_id, session).await.unwrap();
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session, 0).await.unwrap();
         assert!(!permitted, "extract must be denied for principal with extract=Deny grant");
     }
 
@@ -550,7 +621,7 @@ mod tests {
     async fn extract_permitted_for_allow_grant_returns_true() {
         let policy = policy_for_identity(MTLS_IDENTITY);
         let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
-        let permitted = extract_is_permitted(&ctx, &ctx_id, session).await.unwrap();
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session, 0).await.unwrap();
         assert!(permitted, "extract must be allowed for principal with default (allow) grant");
     }
 
@@ -559,7 +630,7 @@ mod tests {
         // No policy configured for unauthenticated; extract-deny is opt-in.
         let policy = policy_with_extract_deny(MTLS_IDENTITY);
         let (ctx, ctx_id, session) = setup_extract_test(policy, None).await;
-        let permitted = extract_is_permitted(&ctx, &ctx_id, session).await.unwrap();
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session, 0).await.unwrap();
         assert!(
             permitted,
             "unauthenticated peer must always be permitted (extract-deny is opt-in)"
@@ -571,7 +642,7 @@ mod tests {
         // Default (empty) policy: no grants at all → extract permitted.
         let policy = TokenPolicy::from_config(&AuthConfig::default()).unwrap();
         let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
-        let permitted = extract_is_permitted(&ctx, &ctx_id, session).await.unwrap();
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session, 0).await.unwrap();
         assert!(permitted, "principal with no matching grant must be permitted by default");
     }
 
@@ -595,7 +666,7 @@ mod tests {
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = Arc::new(policy);
 
-        let permitted = extract_is_permitted(&ctx, &ctx_id, session_vh.0).await.unwrap();
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session_vh.0, 0).await.unwrap();
         assert!(
             !permitted,
             "cache miss for authenticated identity with extract=Deny must resolve from backend and deny"

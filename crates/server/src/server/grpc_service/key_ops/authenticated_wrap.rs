@@ -120,7 +120,7 @@ async fn wrap_key_authenticated_impl(
     // the backend. The outer dispatcher emits a KeyMgmt audit record for both
     // successful authenticated-wrap and this denied attempt (ck_rv =
     // KEY_FUNCTION_NOT_PERMITTED). Mirrors the C_WrapKey gate in wrapping.rs.
-    if !extract_is_permitted(ctx, &ctx_id, req.session_handle).await? {
+    if !extract_is_permitted(ctx, &ctx_id, req.session_handle, req.key_handle).await? {
         return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
             ck_rv: CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
             wrapped_key: Vec::new(),

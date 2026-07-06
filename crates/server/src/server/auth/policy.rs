@@ -1,5 +1,5 @@
 use super::grant::{
-    ExtractPolicy, TokenGrant, parse_class, parse_mechanism, parse_object_unique_id,
+    ExtractPolicy, ObjectAcl, TokenGrant, parse_class, parse_mechanism, parse_object_unique_id,
 };
 use super::identity::AuthenticatedIdentity;
 pub use super::token_selector::TokenSelector;
@@ -272,6 +272,80 @@ impl TokenPolicy {
         }
     }
 
+    /// Whether extraction of key material is permitted for a specific object identified
+    /// by its `CKA_UNIQUE_ID` byte value.
+    ///
+    /// This is the per-object extract gate (Task 4): it refines the grant-level
+    /// `extract_allowed` decision with object-level overrides from `ObjectAcl::extract`.
+    ///
+    /// Decision order for each matching grant that has `Some(objects)` list:
+    /// 1. If the object appears with `extract = Some(Deny)` → vote deny.
+    /// 2. If the object appears with `extract = Some(Allow)` → vote allow.
+    /// 3. If the object appears with `extract = None` → inherit grant-level.
+    ///
+    /// When multiple grants conflict, deny beats allow (security-conservative).
+    /// If no grant has a per-object override, falls back to the grant-level
+    /// `extract_allowed` decision.
+    ///
+    /// **Transparent when inactive:** callers should check `per_object_active()`
+    /// first and skip this method when `false` (no objects lists in any grant).
+    ///
+    /// Returns `true` (permissive) for: unauthenticated, `allow_all_authenticated`,
+    /// `TokenAccess::All`, no matching grant, object not in any list.
+    pub fn extract_allowed_for_object(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+        unique_id: &[u8],
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return true;
+        }
+        if self.allow_all_authenticated {
+            return true;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => true,
+            Some(TokenAccess::Specific(grants)) => {
+                let matching: Vec<&TokenGrant> =
+                    grants.iter().filter(|g| g.matches_token(token_label, token_serial)).collect();
+                if matching.is_empty() {
+                    return true; // no grants matched → no restriction
+                }
+
+                // Scan for per-object overrides across all matching grants.
+                // Security-conservative: explicit deny beats explicit allow.
+                let mut has_explicit_deny = false;
+                let mut has_explicit_allow = false;
+
+                for grant in &matching {
+                    if let Some(list) = &grant.objects {
+                        for acl in list {
+                            if acl.unique_id.as_slice() == unique_id {
+                                match acl.extract {
+                                    Some(ExtractPolicy::Deny) => has_explicit_deny = true,
+                                    Some(ExtractPolicy::Allow) => has_explicit_allow = true,
+                                    None => {} // inherit grant-level; handled below
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if has_explicit_deny {
+                    return false; // deny beats allow
+                }
+                if has_explicit_allow {
+                    return true; // explicit per-object allow
+                }
+
+                // No per-object override found; fall back to grant-level extract policy.
+                !matching.iter().any(|g| g.extract == ExtractPolicy::Deny)
+            }
+        }
+    }
+
     /// Whether the identity is allowed to use the given mechanism on the matched token.
     ///
     /// Returns `true` when `mechanisms = None` in all matching grants (no restriction)
@@ -420,7 +494,7 @@ impl TokenPolicy {
                 }
                 matching.iter().any(|g| match &g.objects {
                     None => true, // unrestricted grant permits all objects
-                    Some(list) => list.iter().any(|u| u.as_slice() == unique_id),
+                    Some(list) => list.iter().any(|acl| acl.unique_id.as_slice() == unique_id),
                 })
             }
         }
@@ -540,11 +614,30 @@ impl TokenPolicy {
 
                 let objects = match &rich.objects {
                     None => None,
-                    Some(strs) => Some(
-                        strs.iter()
-                            .map(|s| {
-                                parse_object_unique_id(s)
-                                    .map_err(|e| format!("policy for '{identity}': {e}"))
+                    Some(specs) => Some(
+                        specs
+                            .iter()
+                            .map(|spec| -> Result<ObjectAcl, String> {
+                                match spec {
+                                    crate::config::ObjectAclSpec::Bare(s) => {
+                                        let uid = parse_object_unique_id(s)
+                                            .map_err(|e| format!("policy for '{identity}': {e}"))?;
+                                        Ok(ObjectAcl { unique_id: uid, extract: None })
+                                    }
+                                    crate::config::ObjectAclSpec::Rich(r) => {
+                                        let uid = parse_object_unique_id(&r.id)
+                                            .map_err(|e| format!("policy for '{identity}': {e}"))?;
+                                        let per_obj_extract = r.extract.map(|e| match e {
+                                            crate::config::ExtractPolicyConfig::Allow => {
+                                                ExtractPolicy::Allow
+                                            }
+                                            crate::config::ExtractPolicyConfig::Deny => {
+                                                ExtractPolicy::Deny
+                                            }
+                                        });
+                                        Ok(ObjectAcl { unique_id: uid, extract: per_obj_extract })
+                                    }
+                                }
                             })
                             .collect::<Result<Vec<_>, _>>()?,
                     ),

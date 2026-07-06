@@ -705,7 +705,9 @@ auth = "peer_cred"
                     classes: None,
                     mechanisms: None,
                     extract: ExtractPolicyConfig::Allow,
-                    objects: Some(vec!["aabbcc".into()]),
+                    objects: Some(vec![pkcs11_proxy_ng::config::ObjectAclSpec::Bare(
+                        "aabbcc".into(),
+                    )]),
                 })]),
             }],
         })

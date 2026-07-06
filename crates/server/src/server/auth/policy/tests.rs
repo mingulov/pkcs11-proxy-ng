@@ -1,4 +1,4 @@
-use super::super::grant::{ExtractPolicy, TokenGrant, parse_class, parse_mechanism};
+use super::super::grant::{ExtractPolicy, ObjectAcl, TokenGrant, parse_class, parse_mechanism};
 use super::*;
 use pkcs11_proxy_ng_types::{CkMechanismType, CkObjectClass};
 
@@ -663,7 +663,7 @@ fn allow_all_authenticated_does_not_affect_unauthenticated() {
             anonymous_principal: None,
             per_object_active_cache: false,
             per_class_active_cache: false,
-        per_mechanism_active_cache: false,
+            per_mechanism_active_cache: false,
         };
         assert!(policy.allows(&AuthenticatedIdentity::Unauthenticated, "any", "any"));
     }
@@ -1316,7 +1316,7 @@ fn from_config_objects_parses_hex_bytes() {
                     classes: None,
                     mechanisms: None,
                     extract: crate::config::ExtractPolicyConfig::Allow,
-                    objects: Some(vec!["a1b2".into()]),
+                    objects: Some(vec![crate::config::ObjectAclSpec::Bare("a1b2".into())]),
                 },
             )]),
         }],
@@ -1342,7 +1342,7 @@ fn from_config_objects_bad_hex_rejected() {
                     classes: None,
                     mechanisms: None,
                     extract: crate::config::ExtractPolicyConfig::Allow,
-                    objects: Some(vec!["xyz".into()]), // not valid hex
+                    objects: Some(vec![crate::config::ObjectAclSpec::Bare("xyz".into())]), // not valid hex
                 },
             )]),
         }],
@@ -1456,7 +1456,7 @@ fn per_object_active_true_when_any_grant_has_objects() {
                 classes: None,
                 mechanisms: None,
                 extract: ExtractPolicyConfig::Allow,
-                objects: Some(vec!["a1b2".into()]),
+                objects: Some(vec![crate::config::ObjectAclSpec::Bare("a1b2".into())]),
             })]),
         }],
     })
@@ -1500,7 +1500,7 @@ fn allows_object_use_some_list_allows_matching_id() {
         classes: None,
         mechanisms: None,
         extract: ExtractPolicy::Allow,
-        objects: Some(vec![bytes.clone()]),
+        objects: Some(vec![ObjectAcl { unique_id: bytes.clone(), extract: None }]),
     };
     let mut rules = HashMap::new();
     rules.insert("uid=1".into(), TokenAccess::Specific(vec![grant]));
@@ -1525,7 +1525,7 @@ fn allows_object_use_some_list_denies_non_matching_id() {
         classes: None,
         mechanisms: None,
         extract: ExtractPolicy::Allow,
-        objects: Some(vec![vec![0xa1u8, 0xb2u8]]),
+        objects: Some(vec![ObjectAcl { unique_id: vec![0xa1u8, 0xb2u8], extract: None }]),
     };
     let mut rules = HashMap::new();
     rules.insert("uid=1".into(), TokenAccess::Specific(vec![grant]));
@@ -1571,7 +1571,7 @@ fn allows_object_use_unauthenticated_always_true() {
         classes: None,
         mechanisms: None,
         extract: ExtractPolicy::Allow,
-        objects: Some(vec![vec![0xffu8]]),
+        objects: Some(vec![ObjectAcl { unique_id: vec![0xffu8], extract: None }]),
     };
     let mut rules = HashMap::new();
     rules.insert("uid=1".into(), TokenAccess::Specific(vec![grant]));
@@ -1596,7 +1596,7 @@ fn allows_object_use_allow_all_authenticated_always_true() {
         classes: None,
         mechanisms: None,
         extract: ExtractPolicy::Allow,
-        objects: Some(vec![vec![0xffu8]]),
+        objects: Some(vec![ObjectAcl { unique_id: vec![0xffu8], extract: None }]),
     };
     let mut rules = HashMap::new();
     rules.insert("uid=1".into(), TokenAccess::Specific(vec![grant]));
@@ -1621,7 +1621,7 @@ fn allows_object_use_no_matching_grant_is_permissive() {
         classes: None,
         mechanisms: None,
         extract: ExtractPolicy::Allow,
-        objects: Some(vec![vec![0xffu8]]),
+        objects: Some(vec![ObjectAcl { unique_id: vec![0xffu8], extract: None }]),
     };
     let mut rules = HashMap::new();
     rules.insert("uid=1".into(), TokenAccess::Specific(vec![grant]));
@@ -1653,4 +1653,143 @@ fn allows_object_use_no_rule_for_identity_is_permissive() {
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 42 };
     assert!(policy.allows_object_use(&id, "any", "any", &[0x00u8]));
+}
+
+// --- extract_allowed_for_object ---
+
+/// Build a TokenPolicy with one grant for uid=1 on token "Prod" that has an
+/// objects list containing `acls`. The grant-level extract policy is `grant_extract`.
+fn policy_with_object_acls(grant_extract: ExtractPolicy, acls: Vec<ObjectAcl>) -> TokenPolicy {
+    let grant = TokenGrant {
+        selector: TokenSelector::Label("Prod".into()),
+        classes: None,
+        mechanisms: None,
+        extract: grant_extract,
+        objects: Some(acls),
+    };
+    let mut rules = HashMap::new();
+    rules.insert("uid=1".into(), TokenAccess::Specific(vec![grant]));
+    TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: true,
+        anonymous_principal: None,
+        per_object_active_cache: true,
+        per_class_active_cache: false,
+        per_mechanism_active_cache: false,
+    }
+}
+
+#[test]
+fn extract_allowed_for_object_per_object_deny_overrides_grant_allow() {
+    // Grant-level extract=Allow, but this object has extract=Deny override.
+    let uid = vec![0xaau8, 0xbbu8];
+    let policy = policy_with_object_acls(
+        ExtractPolicy::Allow,
+        vec![ObjectAcl { unique_id: uid.clone(), extract: Some(ExtractPolicy::Deny) }],
+    );
+    let id = AuthenticatedIdentity::PeerCred { uid: 1 };
+    assert!(
+        !policy.extract_allowed_for_object(&id, "Prod", "any", &uid),
+        "per-object Deny must override grant-level Allow"
+    );
+}
+
+#[test]
+fn extract_allowed_for_object_per_object_allow_overrides_grant_deny() {
+    // Grant-level extract=Deny, but this object has extract=Allow override.
+    let uid = vec![0x11u8, 0x22u8];
+    let policy = policy_with_object_acls(
+        ExtractPolicy::Deny,
+        vec![ObjectAcl { unique_id: uid.clone(), extract: Some(ExtractPolicy::Allow) }],
+    );
+    let id = AuthenticatedIdentity::PeerCred { uid: 1 };
+    assert!(
+        policy.extract_allowed_for_object(&id, "Prod", "any", &uid),
+        "per-object Allow must override grant-level Deny"
+    );
+}
+
+#[test]
+fn extract_allowed_for_object_none_override_inherits_grant_level() {
+    // Object in list with extract=None → inherits grant-level policy.
+    let uid = vec![0x33u8];
+    // Grant-level Allow → should allow.
+    let policy_allow = policy_with_object_acls(
+        ExtractPolicy::Allow,
+        vec![ObjectAcl { unique_id: uid.clone(), extract: None }],
+    );
+    let id = AuthenticatedIdentity::PeerCred { uid: 1 };
+    assert!(
+        policy_allow.extract_allowed_for_object(&id, "Prod", "any", &uid),
+        "None override with grant Allow must allow"
+    );
+
+    // Grant-level Deny → should deny.
+    let policy_deny = policy_with_object_acls(
+        ExtractPolicy::Deny,
+        vec![ObjectAcl { unique_id: uid.clone(), extract: None }],
+    );
+    assert!(
+        !policy_deny.extract_allowed_for_object(&id, "Prod", "any", &uid),
+        "None override with grant Deny must deny"
+    );
+}
+
+#[test]
+fn extract_allowed_for_object_deny_beats_allow_across_grants() {
+    // Two grants for the same token: one has per-object Allow, the other has
+    // per-object Deny for the same uid. Security-conservative: deny beats allow.
+    let uid = vec![0x44u8, 0x55u8];
+    let grant_allow = TokenGrant {
+        selector: TokenSelector::Label("Prod".into()),
+        classes: None,
+        mechanisms: None,
+        extract: ExtractPolicy::Allow,
+        objects: Some(vec![ObjectAcl {
+            unique_id: uid.clone(),
+            extract: Some(ExtractPolicy::Allow),
+        }]),
+    };
+    let grant_deny = TokenGrant {
+        selector: TokenSelector::Label("Prod".into()),
+        classes: None,
+        mechanisms: None,
+        extract: ExtractPolicy::Allow,
+        objects: Some(vec![ObjectAcl {
+            unique_id: uid.clone(),
+            extract: Some(ExtractPolicy::Deny),
+        }]),
+    };
+    let mut rules = HashMap::new();
+    rules.insert("uid=1".into(), TokenAccess::Specific(vec![grant_allow, grant_deny]));
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: true,
+        anonymous_principal: None,
+        per_object_active_cache: true,
+        per_class_active_cache: false,
+        per_mechanism_active_cache: false,
+    };
+    let id = AuthenticatedIdentity::PeerCred { uid: 1 };
+    assert!(
+        !policy.extract_allowed_for_object(&id, "Prod", "any", &uid),
+        "explicit deny in any grant must beat explicit allow in another grant"
+    );
+}
+
+#[test]
+fn extract_allowed_for_object_unauthenticated_always_true() {
+    // Unauthenticated peers bypass per-object extract checks entirely.
+    let uid = vec![0xffu8];
+    let policy = policy_with_object_acls(
+        ExtractPolicy::Deny,
+        vec![ObjectAcl { unique_id: uid.clone(), extract: Some(ExtractPolicy::Deny) }],
+    );
+    let unauth = AuthenticatedIdentity::Unauthenticated;
+    assert!(
+        policy.extract_allowed_for_object(&unauth, "Prod", "any", &uid),
+        "unauthenticated peer must always be permitted (per-object extract is opt-in)"
+    );
 }

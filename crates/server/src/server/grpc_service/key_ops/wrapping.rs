@@ -112,7 +112,7 @@ async fn wrap_key_impl(
     // principal's grant for this token has extract=Deny, reject before calling
     // the backend. The outer `wrap_key` dispatcher will still emit a KeyMgmt
     // audit record for this denied attempt (ck_rv is KEY_FUNCTION_NOT_PERMITTED).
-    if !extract_is_permitted(ctx, &ctx_id, req.session_handle).await? {
+    if !extract_is_permitted(ctx, &ctx_id, req.session_handle, req.key_handle).await? {
         return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
             ck_rv: CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
             wrapped_key: Vec::new(),
@@ -284,10 +284,11 @@ mod tests {
     use pkcs11_proxy_ng_types::*;
 
     use crate::config::{
-        AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig, TokenAccessSpec,
+        AuthConfig, ExtractPolicyConfig, GrantSpec, ObjectAclRichConfig, ObjectAclSpec,
+        PolicyEntry, RichGrantConfig, TokenAccessSpec,
     };
     use crate::server::auth::policy::TokenPolicy;
-    use crate::server::context_manager::{ClientContextId, ContextManager};
+    use crate::server::context_manager::{ClientContextId, ContextManager, ObjectMetadata};
     use crate::server::grpc_service::HandlerContext;
     use crate::server::handle_map::BackendHandle;
 
@@ -405,6 +406,227 @@ mod tests {
             response.into_inner().ck_rv,
             CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
             "unauthenticated peer must not be blocked by extract-deny"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-object extract override tests (Task 4)
+    // -----------------------------------------------------------------------
+
+    /// Build a policy where the grant's extract is `grant_extract` and the
+    /// object at `object_uid_hex` has a per-object extract override of
+    /// `per_object_extract`.
+    fn per_object_policy(
+        grant_extract: ExtractPolicyConfig,
+        object_uid_hex: &str,
+        per_object_extract: Option<ExtractPolicyConfig>,
+    ) -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: MTLS_IDENTITY.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: None,
+                    mechanisms: None,
+                    extract: grant_extract,
+                    objects: Some(vec![ObjectAclSpec::Rich(ObjectAclRichConfig {
+                        id: object_uid_hex.into(),
+                        extract: per_object_extract,
+                    })]),
+                })]),
+            }],
+        })
+        .unwrap()
+    }
+
+    /// Setup helper that also registers an object handle and pre-populates the
+    /// metadata cache for it. Returns `(ctx, ctx_id, session_vh.0, object_vh.0)`.
+    async fn setup_with_object(
+        policy: TokenPolicy,
+        identity: Option<String>,
+        object_uid: Vec<u8>,
+    ) -> (HandlerContext, ClientContextId, u64, u64) {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+            .await
+            .unwrap();
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+
+        // Register a virtual object handle and cache its metadata so
+        // `resolve_uid_for_extract` can resolve it without a backend round-trip.
+        let object_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.object_handles.insert(BackendHandle(2)))
+            .await
+            .unwrap();
+        ctx_mgr
+            .cache_object_metadata(
+                &ctx_id,
+                object_vh.0,
+                ObjectMetadata {
+                    unique_id: object_uid,
+                    class: CkObjectClass::SECRET_KEY,
+                    is_token: false,
+                },
+            )
+            .await;
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(policy);
+        (ctx, ctx_id, session_vh.0, object_vh.0)
+    }
+
+    /// Build a WrapKeyRequest that targets a specific key handle.
+    fn wrap_request_with_key(
+        ctx_id: &ClientContextId,
+        session_handle: u64,
+        key_handle: u64,
+    ) -> pkcs11_proxy_ng_proto::WrapKeyRequest {
+        pkcs11_proxy_ng_proto::WrapKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::RSA_PKCS.0,
+                params: None,
+            }),
+            wrapping_key_handle: 0,
+            key_handle,
+        }
+    }
+
+    #[tokio::test]
+    async fn wrap_key_per_object_deny_blocks_when_grant_allows() {
+        // Grant-level extract=Allow, but the specific key object has a per-object
+        // Deny override → must be rejected.
+        const OBJ_UID_HEX: &str = "aabbcc";
+        let uid = hex::decode(OBJ_UID_HEX).unwrap();
+        let policy = per_object_policy(
+            ExtractPolicyConfig::Allow,
+            OBJ_UID_HEX,
+            Some(ExtractPolicyConfig::Deny),
+        );
+        let (ctx, ctx_id, session_handle, key_handle) =
+            setup_with_object(policy, Some(MTLS_IDENTITY.into()), uid).await;
+
+        let response = super::wrap_key(
+            &ctx,
+            Request::new(wrap_request_with_key(&ctx_id, session_handle, key_handle)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.into_inner().ck_rv,
+            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
+            "per-object Deny override must block wrap even when grant-level allows"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrap_key_per_object_allow_overrides_grant_deny() {
+        // Grant-level extract=Deny, but the specific key object has a per-object
+        // Allow override → must be permitted (reaches the backend).
+        const OBJ_UID_HEX: &str = "112233";
+        let uid = hex::decode(OBJ_UID_HEX).unwrap();
+        let policy = per_object_policy(
+            ExtractPolicyConfig::Deny,
+            OBJ_UID_HEX,
+            Some(ExtractPolicyConfig::Allow),
+        );
+        let (ctx, ctx_id, session_handle, key_handle) =
+            setup_with_object(policy, Some(MTLS_IDENTITY.into()), uid).await;
+
+        let response = super::wrap_key(
+            &ctx,
+            Request::new(wrap_request_with_key(&ctx_id, session_handle, key_handle)),
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(
+            response.into_inner().ck_rv,
+            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
+            "per-object Allow override must permit wrap even when grant-level denies"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrap_key_per_object_none_inherits_grant_deny() {
+        // Object in the list with extract=None → inherits grant-level Deny → blocked.
+        const OBJ_UID_HEX: &str = "deadbe";
+        let uid = hex::decode(OBJ_UID_HEX).unwrap();
+        let policy = per_object_policy(ExtractPolicyConfig::Deny, OBJ_UID_HEX, None);
+        let (ctx, ctx_id, session_handle, key_handle) =
+            setup_with_object(policy, Some(MTLS_IDENTITY.into()), uid).await;
+
+        let response = super::wrap_key(
+            &ctx,
+            Request::new(wrap_request_with_key(&ctx_id, session_handle, key_handle)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.into_inner().ck_rv,
+            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
+            "per-object None override must inherit grant-level Deny"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrap_key_per_object_none_inherits_grant_allow() {
+        // Object in the list with extract=None → inherits grant-level Allow → permitted.
+        const OBJ_UID_HEX: &str = "cafebb";
+        let uid = hex::decode(OBJ_UID_HEX).unwrap();
+        let policy = per_object_policy(ExtractPolicyConfig::Allow, OBJ_UID_HEX, None);
+        let (ctx, ctx_id, session_handle, key_handle) =
+            setup_with_object(policy, Some(MTLS_IDENTITY.into()), uid).await;
+
+        let response = super::wrap_key(
+            &ctx,
+            Request::new(wrap_request_with_key(&ctx_id, session_handle, key_handle)),
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(
+            response.into_inner().ck_rv,
+            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
+            "per-object None override must inherit grant-level Allow"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrap_key_unauthenticated_bypasses_per_object_deny() {
+        // Unauthenticated peer: per-object deny is irrelevant; must pass through.
+        const OBJ_UID_HEX: &str = "ff0011";
+        let uid = hex::decode(OBJ_UID_HEX).unwrap();
+        let policy = per_object_policy(
+            ExtractPolicyConfig::Deny,
+            OBJ_UID_HEX,
+            Some(ExtractPolicyConfig::Deny),
+        );
+        // No identity → unauthenticated; per-object extract is opt-in for
+        // authenticated identities only.
+        let (ctx, ctx_id, session_handle, key_handle) = setup_with_object(policy, None, uid).await;
+
+        let response = super::wrap_key(
+            &ctx,
+            Request::new(wrap_request_with_key(&ctx_id, session_handle, key_handle)),
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(
+            response.into_inner().ck_rv,
+            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
+            "unauthenticated peer must bypass per-object extract deny"
         );
     }
 }

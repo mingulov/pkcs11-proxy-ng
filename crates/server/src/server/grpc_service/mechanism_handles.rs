@@ -650,7 +650,9 @@ mod tests {
                         classes: None,
                         mechanisms: None,
                         extract: ExtractPolicyConfig::Allow,
-                        objects: Some(vec![ALLOWED_UID_HEX.into()]),
+                        objects: Some(vec![crate::config::ObjectAclSpec::Bare(
+                            ALLOWED_UID_HEX.into(),
+                        )]),
                     })]),
                 }],
             })
