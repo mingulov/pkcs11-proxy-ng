@@ -118,8 +118,16 @@ distinguish the shim from the real module.
      backend-health failure counter (proxy-imposed, not backend faults) and are
      inert/byte-identical when `[rate_limit]` is absent. Throttling is normal
      backpressure, **not** an unreadiness signal (no k8s-readiness change).
-     Follow-ups (not shipped): a token-bucket requests/sec limiter if a workload
-     needs it, and `CKR_DEVICE_MEMORY`-based memory quotas.
+     **Accepted limitations:** the session quota is a **soft** cap — its count is
+     read lock-free, so N concurrent `open_session` calls for one principal may
+     exceed the limit by up to N−1 (bounded by the in-flight/per-context caps); it
+     is a fairness control, not a hard guarantee. The failed-login budget **resets
+     on any successful login on the slot** — in a multi-tenant slot a legitimate
+     tenant's success zeroes the shared counter, so the budget is defense-in-depth
+     over the backend's own lockout (which likewise resets on success), not a hard
+     bound on attacker attempts. Follow-ups (not shipped): a token-bucket
+     requests/sec limiter if a workload needs it, and `CKR_DEVICE_MEMORY`-based
+     memory quotas.
    - **G3 — Fine-grained authorization:** use-time authorization on every
      handle-consuming operation and on every handle-minting operation (not
      enumeration filtering alone), including a per-**attribute** check so that
