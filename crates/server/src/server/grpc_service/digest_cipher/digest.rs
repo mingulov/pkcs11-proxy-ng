@@ -129,13 +129,12 @@ pub(crate) async fn digest_key(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestKeyResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
     let (session, key) =
-        match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle).await {
+        match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
             Ok(handles) => handles,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::DigestKeyResponse { ck_rv: rv.0 }));

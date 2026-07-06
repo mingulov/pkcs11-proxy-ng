@@ -311,7 +311,7 @@ async fn derive_key_impl(
     let ctx_id = ClientContextId(req.client_context_id);
 
     let (session, base_key) =
-        match resolve_session_and_object(ctx_mgr, &ctx_id, req.session_handle, req.base_key_handle)
+        match resolve_session_and_object(ctx, &ctx_id, req.session_handle, req.base_key_handle)
             .await
         {
             Ok(handles) => handles,

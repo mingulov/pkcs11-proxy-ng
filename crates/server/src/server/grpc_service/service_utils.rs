@@ -10,6 +10,7 @@ use pkcs11_proxy_ng_types::*;
 
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::handle_map::{BackendHandle, VirtualHandle};
+use super::HandlerContext;
 
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
@@ -457,17 +458,124 @@ pub(super) async fn resolve_session(
     Ok(CkSessionHandle(backend_session.0 as u64))
 }
 
+/// Per-object authorization gate (G3-PR1, ADR-0012).
+///
+/// Called only when `ctx.token_policy.per_object_active()` is `true` AND
+/// the object resolved to a real backend handle (non-zero).  Returns the
+/// original `backend_object` when the identity is allowed to use it;
+/// returns `CkObjectHandle(0)` (the NOT-FOUND sentinel) otherwise.
+///
+/// **Invisible-denial contract (ADR-0012 §G3):** a denied object must be
+/// byte-for-byte indistinguishable from a non-existent one.  The caller
+/// substitutes the denied handle with 0, exactly as the not-found path
+/// does.  No early return with a different RV, no audit record, no metric,
+/// no skipped/added backend call relative to the not-found path.
+///
+/// **Fail-closed semantics:**
+/// - Identity unavailable → deny (handle 0).
+/// - Session's slot unknown → deny.
+/// - Token info fetch fails → deny.
+/// - `CKA_UNIQUE_ID` absent or empty → deny.
+/// - `allows_object_use` returns false → deny.
+///
+/// NOTE: enumeration-time filtering of `find_objects` results is a
+/// separate, deferred concern; this gate covers USE-time only.  A client
+/// may still receive a handle it cannot use; using it returns the same
+/// `CKR_OBJECT_HANDLE_INVALID` as a genuinely-nonexistent handle.
+async fn gate_object_handle(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    virtual_session: u64,
+    virtual_object: u64,
+    backend_session: BackendHandle,
+    backend_object: CkObjectHandle,
+) -> CkObjectHandle {
+    let backend_session = CkSessionHandle(backend_session.0 as u64);
+    // --- 1. Resolve the caller's identity ---
+    let identity = match super::authorization::context_identity(&ctx.context_manager, ctx_id).await
+    {
+        Ok(id) => id,
+        Err(_) => return CkObjectHandle(0), // fail-closed: context gone
+    };
+
+    // --- 2. Resolve the slot that owns this session → (label, serial) ---
+    let Some(backend_slot) =
+        ctx.context_manager.slot_for_session(ctx_id, VirtualHandle(virtual_session)).await
+    else {
+        return CkObjectHandle(0); // fail-closed: session not registered
+    };
+
+    let (label, serial) = match ctx.context_manager.cached_token_info(backend_slot) {
+        Some(cached) => cached,
+        None => {
+            let backend_ref = ctx.backend.clone();
+            match spawn_backend(move || backend_ref.get_token_info(backend_slot)).await {
+                Ok(Ok(info)) => {
+                    ctx.context_manager.cache_token_info(
+                        backend_slot,
+                        info.label.clone(),
+                        info.serial_number.clone(),
+                    );
+                    (info.label, info.serial_number)
+                }
+                // TOKEN_NOT_PRESENT, backend CkRv error, or transport failure.
+                _ => return CkObjectHandle(0), // fail-closed
+            }
+        }
+    };
+
+    // --- 3. Resolve CKA_UNIQUE_ID from cache or backend ---
+    let unique_id: Option<Vec<u8>> = match ctx
+        .context_manager
+        .object_unique_id(ctx_id, virtual_object)
+        .await
+    {
+        Some(uid) => Some(uid),
+        None => {
+            // Cache miss: fetch from backend (one C_GetAttributeValue round-trip).
+            let uid =
+                super::authorization::fetch_object_unique_id(ctx, backend_session, backend_object)
+                    .await;
+            // Populate the cache when we got a result so subsequent uses of
+            // the same handle within this context skip the backend round-trip.
+            if let Some(ref id) = uid {
+                ctx.context_manager
+                    .cache_object_unique_id(ctx_id, virtual_object, id.clone())
+                    .await;
+            }
+            uid
+        }
+    };
+
+    // Fail-closed: absent or empty CKA_UNIQUE_ID on a real object → deny.
+    let uid = match unique_id {
+        Some(id) if !id.is_empty() => id,
+        _ => return CkObjectHandle(0),
+    };
+
+    // --- 4. Policy check ---
+    if !ctx.token_policy.allows_object_use(&identity, &label, &serial, &uid) {
+        // Constant-work deny: substitute the NOT-FOUND sentinel.  The handler
+        // forwards handle 0 to the backend which returns CKR_OBJECT_HANDLE_INVALID,
+        // IDENTICAL to a genuinely-nonexistent object.  No log, no audit, no metric.
+        return CkObjectHandle(0);
+    }
+
+    backend_object
+}
+
 pub(super) async fn resolve_session_and_key(
-    ctx_mgr: &Arc<ContextManager>,
+    ctx: &HandlerContext,
     ctx_id: &ClientContextId,
     session_handle: u64,
     key_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
-    let Some((session, key)) = ctx_mgr
-        .get_context(ctx_id, |ctx| {
+    let Some((session, key)) = ctx
+        .context_manager
+        .get_context(ctx_id, |c| {
             (
-                ctx.session_handles.resolve(VirtualHandle(session_handle)),
-                ctx.object_handles.resolve(VirtualHandle(key_handle)),
+                c.session_handles.resolve(VirtualHandle(session_handle)),
+                c.object_handles.resolve(VirtualHandle(key_handle)),
             )
         })
         .await
@@ -482,20 +590,31 @@ pub(super) async fn resolve_session_and_key(
     // backend decides the error priority (e.g., CKR_FUNCTION_NOT_SUPPORTED
     // vs CKR_KEY_HANDLE_INVALID).
     let backend_key = key.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    // Per-object gate: when active and the key resolved to a real handle,
+    // apply the identity/unique-id policy.  When inactive (no `objects`
+    // grant anywhere in the policy), this is a zero-overhead transparent
+    // pass-through — no allocation, no identity lookup, no backend call.
+    let backend_key = if ctx.token_policy.per_object_active() && backend_key.0 != 0 {
+        gate_object_handle(ctx, ctx_id, session_handle, key_handle, backend_session, backend_key)
+            .await
+    } else {
+        backend_key
+    };
     Ok((CkSessionHandle(backend_session.0 as u64), backend_key))
 }
 
 pub(super) async fn resolve_session_and_object(
-    ctx_mgr: &Arc<ContextManager>,
+    ctx: &HandlerContext,
     ctx_id: &ClientContextId,
     session_handle: u64,
     object_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
-    let Some((session, object)) = ctx_mgr
-        .get_context(ctx_id, |ctx| {
+    let Some((session, object)) = ctx
+        .context_manager
+        .get_context(ctx_id, |c| {
             (
-                ctx.session_handles.resolve(VirtualHandle(session_handle)),
-                ctx.object_handles.resolve(VirtualHandle(object_handle)),
+                c.session_handles.resolve(VirtualHandle(session_handle)),
+                c.object_handles.resolve(VirtualHandle(object_handle)),
             )
         })
         .await
@@ -507,22 +626,38 @@ pub(super) async fn resolve_session_and_object(
     // Forward CK_INVALID_HANDLE to backend when object is unknown — see
     // resolve_session_and_key for rationale.
     let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    // Per-object gate: see gate_object_handle for the invisible-denial contract.
+    // Zero-overhead when per_object_active()==false.
+    let backend_object = if ctx.token_policy.per_object_active() && backend_object.0 != 0 {
+        gate_object_handle(
+            ctx,
+            ctx_id,
+            session_handle,
+            object_handle,
+            backend_session,
+            backend_object,
+        )
+        .await
+    } else {
+        backend_object
+    };
     Ok((CkSessionHandle(backend_session.0 as u64), backend_object))
 }
 
 pub(super) async fn resolve_session_and_two_objects(
-    ctx_mgr: &Arc<ContextManager>,
+    ctx: &HandlerContext,
     ctx_id: &ClientContextId,
     session_handle: u64,
     first_object_handle: u64,
     second_object_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle, CkObjectHandle), CkRv> {
-    let Some((session, first_object, second_object)) = ctx_mgr
-        .get_context(ctx_id, |ctx| {
+    let Some((session, first_object, second_object)) = ctx
+        .context_manager
+        .get_context(ctx_id, |c| {
             (
-                ctx.session_handles.resolve(VirtualHandle(session_handle)),
-                ctx.object_handles.resolve(VirtualHandle(first_object_handle)),
-                ctx.object_handles.resolve(VirtualHandle(second_object_handle)),
+                c.session_handles.resolve(VirtualHandle(session_handle)),
+                c.object_handles.resolve(VirtualHandle(first_object_handle)),
+                c.object_handles.resolve(VirtualHandle(second_object_handle)),
             )
         })
         .await
@@ -538,6 +673,40 @@ pub(super) async fn resolve_session_and_two_objects(
         first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
     let second_backend_object =
         second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
+    // Per-object gate: gate each object independently (the two-object operations
+    // are wrapping/unwrapping where BOTH handles must be authorized).
+    // Zero-overhead when per_object_active()==false.
+    let (first_backend_object, second_backend_object) = if ctx.token_policy.per_object_active() {
+        let first = if first_backend_object.0 != 0 {
+            gate_object_handle(
+                ctx,
+                ctx_id,
+                session_handle,
+                first_object_handle,
+                backend_session,
+                first_backend_object,
+            )
+            .await
+        } else {
+            first_backend_object
+        };
+        let second = if second_backend_object.0 != 0 {
+            gate_object_handle(
+                ctx,
+                ctx_id,
+                session_handle,
+                second_object_handle,
+                backend_session,
+                second_backend_object,
+            )
+            .await
+        } else {
+            second_backend_object
+        };
+        (first, second)
+    } else {
+        (first_backend_object, second_backend_object)
+    };
 
     Ok((CkSessionHandle(backend_session.0 as u64), first_backend_object, second_backend_object))
 }
@@ -668,6 +837,7 @@ pub(super) fn check_sanitize(sanitize: bool, null_len: Option<u64>) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pkcs11_proxy_ng_backend::Pkcs11Backend;
     use pkcs11_proxy_ng_types::{GcmParams, SslRandomData, Tls12MasterKeyDeriveParams};
 
     #[test]
@@ -963,44 +1133,228 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_two_objects_forwards_unknown_first_object_to_backend() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> =
+            Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let (session, known_object) = ctx_mgr
-            .get_context(&ctx_id, |ctx| {
-                let session = ctx.register_session(BackendHandle(123), CkSlotId(7));
-                let object = ctx.object_handles.insert(BackendHandle(456));
+            .get_context(&ctx_id, |c| {
+                let session = c.register_session(BackendHandle(123), CkSlotId(7));
+                let object = c.object_handles.insert(BackendHandle(456));
                 (session, object)
             })
             .await
             .unwrap();
 
-        let result =
-            resolve_session_and_two_objects(&ctx_mgr, &ctx_id, session.0, 999, known_object.0)
-                .await
-                .unwrap();
+        let result = resolve_session_and_two_objects(&ctx, &ctx_id, session.0, 999, known_object.0)
+            .await
+            .unwrap();
 
         assert_eq!(result, (CkSessionHandle(123), CkObjectHandle(0), CkObjectHandle(456)));
     }
 
     #[tokio::test]
     async fn resolve_two_objects_forwards_unknown_second_object_to_backend() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> =
+            Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let (session, known_object) = ctx_mgr
-            .get_context(&ctx_id, |ctx| {
-                let session = ctx.register_session(BackendHandle(123), CkSlotId(7));
-                let object = ctx.object_handles.insert(BackendHandle(456));
+            .get_context(&ctx_id, |c| {
+                let session = c.register_session(BackendHandle(123), CkSlotId(7));
+                let object = c.object_handles.insert(BackendHandle(456));
                 (session, object)
             })
             .await
             .unwrap();
 
-        let result =
-            resolve_session_and_two_objects(&ctx_mgr, &ctx_id, session.0, known_object.0, 999)
-                .await
-                .unwrap();
+        let result = resolve_session_and_two_objects(&ctx, &ctx_id, session.0, known_object.0, 999)
+            .await
+            .unwrap();
 
         assert_eq!(result, (CkSessionHandle(123), CkObjectHandle(456), CkObjectHandle(0)));
+    }
+
+    // --- per-object gate tests (G3-PR1 Task 3) ---
+
+    /// Build a [`TokenPolicy`] with a per-object `objects` grant allowing only
+    /// the hex-encoded `allowed_uid`.
+    fn per_object_policy(
+        identity: &str,
+        token_label: &str,
+        allowed_uid_hex: &str,
+    ) -> Arc<crate::server::auth::policy::TokenPolicy> {
+        use crate::config::{
+            AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig,
+            TokenAccessSpec,
+        };
+        Arc::new(
+            crate::server::auth::policy::TokenPolicy::from_config(&AuthConfig {
+                allow_all_authenticated: false,
+                anonymous_principal: None,
+                policy: vec![PolicyEntry {
+                    identity: identity.into(),
+                    tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                        token: format!("label:{token_label}"),
+                        classes: None,
+                        mechanisms: None,
+                        extract: ExtractPolicyConfig::Allow,
+                        objects: Some(vec![allowed_uid_hex.into()]),
+                    })]),
+                }],
+            })
+            .expect("per-object policy must parse"),
+        )
+    }
+
+    /// Set up a MockBackend with an initialized session and one object on slot 0.
+    /// Returns `(ctx, ctx_id, virtual_session_handle, virtual_object_handle)`.
+    async fn setup_per_object_test(
+        policy: Arc<crate::server::auth::policy::TokenPolicy>,
+        identity: Option<String>,
+        uid_bytes: Option<Vec<u8>>,
+    ) -> (HandlerContext, crate::server::context_manager::ClientContextId, u64, u64) {
+        use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        if let Some(uid) = uid_bytes {
+            mock.set_attribute(
+                backend_object,
+                CkAttributeType::UNIQUE_ID,
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid)),
+            );
+        }
+
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
+
+        let (virtual_session, virtual_object) = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                let vs = c.register_session(BackendHandle(backend_session.0), CkSlotId(0));
+                let vo = c.object_handles.insert(BackendHandle(backend_object.0));
+                (vs, vo)
+            })
+            .await
+            .unwrap();
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+        (ctx, ctx_id, virtual_session.0, virtual_object.0)
+    }
+
+    /// The uid "aabbcc" → hex-encoded bytes [0xaa, 0xbb, 0xcc].
+    const ALLOWED_UID_HEX: &str = "aabbcc";
+    const ALLOWED_UID_BYTES: [u8; 3] = [0xaa, 0xbb, 0xcc];
+    const OTHER_UID_BYTES: [u8; 3] = [0x11, 0x22, 0x33];
+    const IDENTITY: &str = "uid=1000";
+
+    #[tokio::test]
+    async fn per_object_gate_inactive_is_transparent() {
+        // When no grant has `objects`, per_object_active()==false and the gate
+        // must be a zero-overhead pass-through for all objects.
+        use pkcs11_proxy_ng_backend::MockBackend;
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> =
+            Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend); // default policy: no objects
+        assert!(
+            !ctx.token_policy.per_object_active(),
+            "default policy must have per_object_active()==false"
+        );
+
+        let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
+        let (vs, vo) = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                let vs = c.register_session(BackendHandle(77), CkSlotId(0));
+                let vo = c.object_handles.insert(BackendHandle(42));
+                (vs, vo)
+            })
+            .await
+            .unwrap();
+
+        let (_, backend_obj) = resolve_session_and_object(&ctx, &ctx_id, vs.0, vo.0).await.unwrap();
+        // Gate is inactive → real backend handle returned unchanged.
+        assert_eq!(backend_obj, CkObjectHandle(42), "inactive gate must return real handle");
+    }
+
+    #[tokio::test]
+    async fn per_object_gate_allows_permitted_object() {
+        // Principal P is allowed only objects with unique_id ALLOWED_UID.
+        // Using an object with that uid must return the real backend handle.
+        let policy = per_object_policy(IDENTITY, "MockToken", ALLOWED_UID_HEX);
+        let (ctx, ctx_id, vs, vo) =
+            setup_per_object_test(policy, Some(IDENTITY.into()), Some(ALLOWED_UID_BYTES.to_vec()))
+                .await;
+
+        let (_, backend_obj) = resolve_session_and_object(&ctx, &ctx_id, vs, vo).await.unwrap();
+        assert_ne!(
+            backend_obj,
+            CkObjectHandle(0),
+            "permitted object must return the real backend handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_object_gate_denied_object_identical_to_nonexistent() {
+        // The invisible-denial contract (ADR-0012 §G3): using an object whose
+        // unique_id is NOT in the allowed list must produce CkObjectHandle(0),
+        // byte-for-byte identical to what a genuinely-nonexistent handle produces.
+        // The test also verifies that no audit sink fires (ctx.audit is None).
+        let policy = per_object_policy(IDENTITY, "MockToken", ALLOWED_UID_HEX);
+        // Object exists in the backend but has a DIFFERENT unique_id.
+        let (ctx, ctx_id, vs, vo) =
+            setup_per_object_test(policy, Some(IDENTITY.into()), Some(OTHER_UID_BYTES.to_vec()))
+                .await;
+
+        // Denied object: unique_id ∉ allowed list → CkObjectHandle(0).
+        let (_, denied_backend_obj) =
+            resolve_session_and_object(&ctx, &ctx_id, vs, vo).await.unwrap();
+
+        // Nonexistent-handle path: resolve a virtual handle that is not in the map.
+        let (_, nonexistent_backend_obj) =
+            resolve_session_and_object(&ctx, &ctx_id, vs, 9_999_999).await.unwrap();
+
+        assert_eq!(
+            denied_backend_obj, nonexistent_backend_obj,
+            "denied object and nonexistent object must produce the SAME backend handle (invisible denial)"
+        );
+        assert_eq!(
+            denied_backend_obj,
+            CkObjectHandle(0),
+            "both paths must produce the not-found sentinel CkObjectHandle(0)"
+        );
+        // No audit sink is wired in for_test, guaranteeing no distinct audit record.
+        assert!(
+            ctx.audit.is_none(),
+            "test context must have no audit sink (invisible-denial: no audit on deny)"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_object_gate_fail_closed_on_empty_unique_id() {
+        // Fail-closed: a real object with an absent/empty CKA_UNIQUE_ID must be
+        // denied (handle 0), even though the backend handle is non-zero.
+        let policy = per_object_policy(IDENTITY, "MockToken", ALLOWED_UID_HEX);
+        // uid_bytes=None → no CKA_UNIQUE_ID set on the object.
+        let (ctx, ctx_id, vs, vo) =
+            setup_per_object_test(policy, Some(IDENTITY.into()), None).await;
+
+        let (_, backend_obj) = resolve_session_and_object(&ctx, &ctx_id, vs, vo).await.unwrap();
+        assert_eq!(
+            backend_obj,
+            CkObjectHandle(0),
+            "object with no CKA_UNIQUE_ID must be denied (handle 0)"
+        );
     }
 
     // --- Login-lock timeout tests ---

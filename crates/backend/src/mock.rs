@@ -185,6 +185,9 @@ pub struct MockBackend {
     /// construction (`with_mechanism_registry`); `None` (plain `new`)
     /// keeps the mock permissive for existing suites.
     param_presence: Option<ParamPresence>,
+    /// PKCS#11 version reported by `get_info`. Default `(3, 0)`.
+    /// Set via `with_cryptoki_version` to test the v3.0+ startup guard.
+    cryptoki_version: (u8, u8),
 }
 
 /// Which mechanisms require parameters and which forbid them, snapshot
@@ -242,6 +245,7 @@ impl MockBackend {
             abi: MockAbi::host(),
             advertise_big_endian: false,
             param_presence: None,
+            cryptoki_version: (3, 0),
         }
     }
 
@@ -505,6 +509,13 @@ impl MockBackend {
     /// client must refuse before ever parsing one.
     pub fn with_big_endian_advertisement(mut self) -> Self {
         self.advertise_big_endian = true;
+        self
+    }
+
+    /// Override the PKCS#11 cryptoki version reported by `get_info`.
+    /// Used by startup-guard tests to simulate a pre-3.0 backend.
+    pub fn with_cryptoki_version(mut self, major: u8, minor: u8) -> Self {
+        self.cryptoki_version = (major, minor);
         self
     }
 

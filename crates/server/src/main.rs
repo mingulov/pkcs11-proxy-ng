@@ -129,6 +129,10 @@ async fn build_service(
         server::auth::policy::TokenPolicy::from_config(&config.auth)
             .map_err(std::io::Error::other)?,
     );
+    // G3-PR1: refuse to start when per-object authz is configured against a
+    // pre-3.0 backend that does not populate CKA_UNIQUE_ID (the gate would
+    // fail-closed for every object, silently breaking all operations).
+    check_per_object_version_requirement(&token_policy, backend.as_ref())?;
     let tcp_auth_mode =
         config.listener.remote.as_ref().map_or(config::TcpAuthMode::None, |tcp| tcp.auth);
     let unix_auth_mode =
@@ -173,6 +177,37 @@ fn apply_http2_keepalive(builder: Server, config: &config::DaemonConfig) -> Serv
 /// Resolves when the OS-signal task flips the watch value (or drops the sender).
 async fn listener_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.changed().await;
+}
+
+/// G3-PR1: refuse to start when per-object authorization is configured but the
+/// backend does not support PKCS#11 v3.0+.
+///
+/// Per-object authorization relies on `CKA_UNIQUE_ID`, which was introduced in
+/// PKCS#11 v3.0.  A pre-3.0 backend will never populate the attribute, so the
+/// gate would fail-closed for every object — silently breaking all operations.
+/// Refusing to start gives operators an immediate, actionable error instead of
+/// a silent runtime outage.
+///
+/// Extracted as a pure function so it can be unit-tested without loading a real
+/// PKCS#11 module.
+fn check_per_object_version_requirement(
+    token_policy: &server::auth::policy::TokenPolicy,
+    backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend,
+) -> Result<(), BoxError> {
+    if !token_policy.per_object_active() {
+        return Ok(());
+    }
+    let info = backend.get_info().map_err(|rv| format!("C_GetInfo failed: {rv}"))?;
+    let (maj, min) = info.cryptoki_version;
+    if (maj, min) < (3, 0) {
+        return Err(format!(
+            "per-object authorization ([auth.policy] grants with `objects`) requires a \
+             PKCS#11 v3.0+ token that populates CKA_UNIQUE_ID; this backend reports \
+             v{maj}.{min}. Remove the `objects` grants or use a v3.0+ token."
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Early, friendly validation of runtime listener support. The Unix socket
@@ -651,5 +686,82 @@ auth = "peer_cred"
 
         let err = validate_runtime_listener_support(&cfg).unwrap_err().to_string();
         assert!(err.contains("unix socket directory does not exist"), "clear dir error: {err}");
+    }
+
+    // --- per-object version guard tests ---
+
+    fn per_object_policy() -> server::auth::policy::TokenPolicy {
+        use pkcs11_proxy_ng::config::{
+            AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig,
+            TokenAccessSpec,
+        };
+        server::auth::policy::TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: "uid=1000".into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:TestToken".into(),
+                    classes: None,
+                    mechanisms: None,
+                    extract: ExtractPolicyConfig::Allow,
+                    objects: Some(vec!["aabbcc".into()]),
+                })]),
+            }],
+        })
+        .expect("policy parses")
+    }
+
+    fn no_objects_policy() -> server::auth::policy::TokenPolicy {
+        server::auth::policy::TokenPolicy::from_config(
+            &pkcs11_proxy_ng::config::AuthConfig::default(),
+        )
+        .expect("default policy parses")
+    }
+
+    #[test]
+    fn startup_refuses_v240_backend_when_per_object_policy_configured() {
+        // G3-PR1: a v2.40 backend does not populate CKA_UNIQUE_ID; the daemon
+        // must refuse to start rather than silently fail-closing every object.
+        let mock = pkcs11_proxy_ng_backend::MockBackend::new(
+            vec![pkcs11_proxy_ng_types::CkSlotId(0)],
+            vec![],
+        )
+        .with_cryptoki_version(2, 40);
+        let policy = per_object_policy();
+        let err = check_per_object_version_requirement(&policy, &mock).unwrap_err().to_string();
+        assert!(err.contains("v2.40"), "error message must mention the backend version: {err}");
+        assert!(
+            err.contains("CKA_UNIQUE_ID") || err.contains("v3.0"),
+            "error message must reference v3.0+ requirement: {err}"
+        );
+    }
+
+    #[test]
+    fn startup_allows_v30_backend_with_per_object_policy() {
+        // A v3.0 backend can populate CKA_UNIQUE_ID — the check must pass.
+        let mock = pkcs11_proxy_ng_backend::MockBackend::new(
+            vec![pkcs11_proxy_ng_types::CkSlotId(0)],
+            vec![],
+        );
+        // MockBackend default is (3,0).
+        let policy = per_object_policy();
+        check_per_object_version_requirement(&policy, &mock)
+            .expect("v3.0 backend with per-object policy must start");
+    }
+
+    #[test]
+    fn startup_allows_v240_backend_without_per_object_policy() {
+        // When no `objects` grants are configured, the version check is skipped
+        // entirely — existing deployments without per-object policy must not be
+        // broken.
+        let mock = pkcs11_proxy_ng_backend::MockBackend::new(
+            vec![pkcs11_proxy_ng_types::CkSlotId(0)],
+            vec![],
+        )
+        .with_cryptoki_version(2, 40);
+        let policy = no_objects_policy();
+        check_per_object_version_requirement(&policy, &mock)
+            .expect("v2.40 backend without per-object policy must start");
     }
 }

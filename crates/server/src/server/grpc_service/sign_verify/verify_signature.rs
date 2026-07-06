@@ -43,9 +43,7 @@ pub(crate) async fn verify_signature_init(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureInitResponse {

@@ -28,19 +28,23 @@ pub(crate) async fn encapsulate_key(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, public_key) =
-        match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.public_key_handle)
-            .await
-        {
-            Ok(handles) => handles,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
-                    ck_rv: rv.0,
-                    ciphertext: Vec::new(),
-                    key_handle: 0,
-                }));
-            }
-        };
+    let (session, public_key) = match resolve_session_and_key(
+        ctx,
+        &ctx_id,
+        req.session_handle,
+        req.public_key_handle,
+    )
+    .await
+    {
+        Ok(handles) => handles,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+                ck_rv: rv.0,
+                ciphertext: Vec::new(),
+                key_handle: 0,
+            }));
+        }
+    };
 
     let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
@@ -116,7 +120,7 @@ pub(crate) async fn decapsulate_key(
     let ctx_id = ClientContextId(req.client_context_id);
 
     let (session, private_key) =
-        match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.private_key_handle)
+        match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.private_key_handle)
             .await
         {
             Ok(handles) => handles,
@@ -211,22 +215,26 @@ pub(crate) async fn encapsulate_key_exact(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, public_key) =
-        match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.public_key_handle)
-            .await
-        {
-            Ok(handles) => handles,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
-                    result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
-                        ck_rv: rv.0,
-                        returned_len: 0,
-                        value: None,
-                        object_handle: 0,
-                    }),
-                }));
-            }
-        };
+    let (session, public_key) = match resolve_session_and_key(
+        ctx,
+        &ctx_id,
+        req.session_handle,
+        req.public_key_handle,
+    )
+    .await
+    {
+        Ok(handles) => handles,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+                result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    ck_rv: rv.0,
+                    returned_len: 0,
+                    value: None,
+                    object_handle: 0,
+                }),
+            }));
+        }
+    };
 
     let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,

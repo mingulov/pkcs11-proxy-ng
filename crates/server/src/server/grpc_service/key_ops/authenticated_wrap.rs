@@ -59,14 +59,13 @@ async fn wrap_key_authenticated_impl(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
     let (session, wrapping_key, key) = match resolve_session_and_two_objects(
-        ctx_mgr,
+        ctx,
         &ctx_id,
         req.session_handle,
         req.wrapping_key_handle,
@@ -158,7 +157,7 @@ pub(crate) async fn unwrap_key_authenticated(
     let ctx_id = ClientContextId(req.client_context_id);
 
     let (session, unwrapping_key) = match super::super::service_utils::resolve_session_and_object(
-        ctx_mgr,
+        ctx,
         &ctx_id,
         req.session_handle,
         req.unwrapping_key_handle,

@@ -70,7 +70,7 @@ pub(super) async fn parameter_output_exact(
             };
 
             let (session, wrapping_key, key) = match resolve_session_and_two_objects(
-                ctx_mgr,
+                ctx,
                 &ctx_id,
                 req.session_handle,
                 req.wrapping_key_handle,

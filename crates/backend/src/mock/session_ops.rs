@@ -40,7 +40,7 @@ impl MockBackend {
 
     pub(super) fn backend_info(&self) -> CkResult<CkInfo> {
         Ok(CkInfo {
-            cryptoki_version: (3, 0),
+            cryptoki_version: self.cryptoki_version,
             manufacturer_id: "MockBackend".into(),
             flags: 0,
             library_description: "Mock PKCS#11 for testing".into(),

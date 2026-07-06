@@ -62,7 +62,7 @@ async fn wrap_key_impl(
     let ctx_id = ClientContextId(req.client_context_id);
 
     let (session, wrapping_key, key) = match resolve_session_and_two_objects(
-        ctx_mgr,
+        ctx,
         &ctx_id,
         req.session_handle,
         req.wrapping_key_handle,
@@ -160,7 +160,7 @@ async fn unwrap_key_impl(
     let ctx_id = ClientContextId(req.client_context_id);
 
     let (session, unwrapping_key) = match resolve_session_and_object(
-        ctx_mgr,
+        ctx,
         &ctx_id,
         req.session_handle,
         req.unwrapping_key_handle,

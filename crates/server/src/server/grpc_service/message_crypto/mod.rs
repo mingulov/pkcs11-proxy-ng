@@ -52,9 +52,7 @@ pub(crate) async fn message_encrypt_init(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
@@ -190,9 +188,7 @@ pub(crate) async fn message_decrypt_init(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
@@ -328,9 +324,7 @@ pub(crate) async fn message_sign_init(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
@@ -452,9 +446,7 @@ pub(crate) async fn message_verify_init(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {

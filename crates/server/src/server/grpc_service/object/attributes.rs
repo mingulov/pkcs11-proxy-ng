@@ -46,22 +46,17 @@ pub(super) async fn get_attribute_value(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, object) = match resolve_session_and_object(
-        &ctx.context_manager,
-        &ctx_id,
-        req.session_handle,
-        req.object_handle,
-    )
-    .await
-    {
-        Ok(handles) => handles,
-        Err(error) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueResponse {
-                ck_rv: error.0,
-                results: vec![],
-            }));
-        }
-    };
+    let (session, object) =
+        match resolve_session_and_object(ctx, &ctx_id, req.session_handle, req.object_handle).await
+        {
+            Ok(handles) => handles,
+            Err(error) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueResponse {
+                    ck_rv: error.0,
+                    results: vec![],
+                }));
+            }
+        };
 
     let mut template = match convert_template(&req.template) {
         Ok(template) => template,
@@ -127,22 +122,17 @@ pub(super) async fn get_attribute_value_exact(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, object) = match resolve_session_and_object(
-        &ctx.context_manager,
-        &ctx_id,
-        req.session_handle,
-        req.object_handle,
-    )
-    .await
-    {
-        Ok(handles) => handles,
-        Err(error) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
-                ck_rv: error.0,
-                results: vec![],
-            }));
-        }
-    };
+    let (session, object) =
+        match resolve_session_and_object(ctx, &ctx_id, req.session_handle, req.object_handle).await
+        {
+            Ok(handles) => handles,
+            Err(error) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+                    ck_rv: error.0,
+                    results: vec![],
+                }));
+            }
+        };
 
     let queries = req.queries.iter().map(CkAttributeQuery::from).collect::<Vec<_>>();
     // Keep only the (Copy) attribute types for post-call alignment validation,
@@ -211,21 +201,16 @@ pub(super) async fn set_attribute_value(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, object) = match resolve_session_and_object(
-        &ctx.context_manager,
-        &ctx_id,
-        req.session_handle,
-        req.object_handle,
-    )
-    .await
-    {
-        Ok(handles) => handles,
-        Err(error) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::SetAttributeValueResponse {
-                ck_rv: error.0,
-            }));
-        }
-    };
+    let (session, object) =
+        match resolve_session_and_object(ctx, &ctx_id, req.session_handle, req.object_handle).await
+        {
+            Ok(handles) => handles,
+            Err(error) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::SetAttributeValueResponse {
+                    ck_rv: error.0,
+                }));
+            }
+        };
 
     let template = match convert_template(&req.template) {
         Ok(template) => template,
@@ -252,22 +237,17 @@ pub(super) async fn get_object_size(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, object) = match resolve_session_and_object(
-        &ctx.context_manager,
-        &ctx_id,
-        req.session_handle,
-        req.object_handle,
-    )
-    .await
-    {
-        Ok(handles) => handles,
-        Err(error) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::GetObjectSizeResponse {
-                ck_rv: error.0,
-                size: 0,
-            }));
-        }
-    };
+    let (session, object) =
+        match resolve_session_and_object(ctx, &ctx_id, req.session_handle, req.object_handle).await
+        {
+            Ok(handles) => handles,
+            Err(error) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::GetObjectSizeResponse {
+                    ck_rv: error.0,
+                    size: 0,
+                }));
+            }
+        };
 
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || backend.get_object_size(session, object)).await?;

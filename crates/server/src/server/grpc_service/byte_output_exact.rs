@@ -63,7 +63,7 @@ pub(super) async fn byte_output_exact(
             };
 
             let (session, wrapping_key, key) = match resolve_session_and_two_objects(
-                &ctx.context_manager,
+                ctx,
                 &ctx_id,
                 req.session_handle,
                 req.wrapping_key_handle,

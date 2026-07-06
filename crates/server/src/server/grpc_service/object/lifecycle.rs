@@ -72,22 +72,17 @@ pub(super) async fn copy_object(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, object) = match resolve_session_and_object(
-        &ctx.context_manager,
-        &ctx_id,
-        req.session_handle,
-        req.object_handle,
-    )
-    .await
-    {
-        Ok(handles) => handles,
-        Err(error) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
-                ck_rv: error.0,
-                new_object_handle: 0,
-            }));
-        }
-    };
+    let (session, object) =
+        match resolve_session_and_object(ctx, &ctx_id, req.session_handle, req.object_handle).await
+        {
+            Ok(handles) => handles,
+            Err(error) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
+                    ck_rv: error.0,
+                    new_object_handle: 0,
+                }));
+            }
+        };
 
     let template = match convert_template(&req.template) {
         Ok(template) => template,
@@ -131,21 +126,16 @@ pub(super) async fn destroy_object(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, object) = match resolve_session_and_object(
-        &ctx.context_manager,
-        &ctx_id,
-        req.session_handle,
-        req.object_handle,
-    )
-    .await
-    {
-        Ok(handles) => handles,
-        Err(error) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::DestroyObjectResponse {
-                ck_rv: error.0,
-            }));
-        }
-    };
+    let (session, object) =
+        match resolve_session_and_object(ctx, &ctx_id, req.session_handle, req.object_handle).await
+        {
+            Ok(handles) => handles,
+            Err(error) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::DestroyObjectResponse {
+                    ck_rv: error.0,
+                }));
+            }
+        };
 
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || backend.destroy_object(session, object)).await?;

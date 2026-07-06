@@ -205,9 +205,7 @@ pub(super) async fn enforce_context_owner<T>(
 /// quirks (`CKR_BUFFER_TOO_SMALL`, etc.) collapse to `None`.
 ///
 /// # Note
-/// Not yet called on any hot path.  Wired into the resolution-seam gate in
-/// G3-PR1 Task 3.
-#[allow(dead_code)] // wired in G3-PR1 Task 3
+/// Called by the per-object gate in `service_utils::gate_object_handle`.
 pub(super) async fn fetch_object_unique_id(
     ctx: &HandlerContext,
     session: CkSessionHandle,
