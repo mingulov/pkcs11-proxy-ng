@@ -239,6 +239,19 @@ impl ContextManager {
         self.cached_token_info_within(backend_slot, TOKEN_INFO_CACHE_TTL)
     }
 
+    /// Look up the backend slot that owns `virtual_session` within context
+    /// `ctx_id`. Returns `None` when the context does not exist or the session
+    /// is not registered in `session_slots`.
+    pub async fn slot_for_session(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_session: VirtualHandle,
+    ) -> Option<CkSlotId> {
+        self.get_context(ctx_id, |ctx| ctx.session_slots.get(&virtual_session).copied())
+            .await
+            .flatten()
+    }
+
     fn cached_token_info_within(
         &self,
         backend_slot: CkSlotId,

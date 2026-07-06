@@ -45,36 +45,28 @@ pub(super) async fn get_attribute_value(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
-    attributes::get_attribute_value(ctx_mgr, backend_ref, request).await
+    attributes::get_attribute_value(ctx, request).await
 }
 
 pub(super) async fn get_attribute_value_exact(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueExactResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
-    attributes::get_attribute_value_exact(ctx_mgr, backend_ref, request).await
+    attributes::get_attribute_value_exact(ctx, request).await
 }
 
 pub(super) async fn set_attribute_value(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SetAttributeValueRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetAttributeValueResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
-    attributes::set_attribute_value(ctx_mgr, backend_ref, request).await
+    attributes::set_attribute_value(ctx, request).await
 }
 
 pub(super) async fn get_object_size(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetObjectSizeRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetObjectSizeResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
-    attributes::get_object_size(ctx_mgr, backend_ref, request).await
+    attributes::get_object_size(ctx, request).await
 }
 
 /// Wrapper: captures timing + identity, delegates to lifecycle impl, emits a

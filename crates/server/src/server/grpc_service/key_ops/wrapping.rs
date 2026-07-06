@@ -6,6 +6,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
+use super::super::authorization::extract_is_permitted;
 use super::super::ck_result_to_rv;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
@@ -92,6 +93,17 @@ async fn wrap_key_impl(
     if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
             ck_rv: rv.0,
+            wrapped_key: Vec::new(),
+        }));
+    }
+
+    // Extract-deny gate (G2-PR2): wrapping a key exports its material; if the
+    // principal's grant for this token has extract=Deny, reject before calling
+    // the backend. The outer `wrap_key` dispatcher will still emit a KeyMgmt
+    // audit record for this denied attempt (ck_rv is KEY_FUNCTION_NOT_PERMITTED).
+    if !extract_is_permitted(ctx, &ctx_id, req.session_handle).await? {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
+            ck_rv: CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
             wrapped_key: Vec::new(),
         }));
     }
@@ -235,5 +247,140 @@ async fn unwrap_key_impl(
             ck_rv: error.0,
             key_handle: 0,
         })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tonic::Request;
+
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    use pkcs11_proxy_ng_types::*;
+
+    use crate::config::{
+        AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig, TokenAccessSpec,
+    };
+    use crate::server::auth::policy::TokenPolicy;
+    use crate::server::context_manager::{ClientContextId, ContextManager};
+    use crate::server::grpc_service::HandlerContext;
+    use crate::server::handle_map::BackendHandle;
+
+    const MTLS_IDENTITY: &str = "x509:issuer=CN=Root CA;subject=CN=client";
+
+    fn deny_policy() -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: MTLS_IDENTITY.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: None,
+                    mechanisms: None,
+                    extract: ExtractPolicyConfig::Deny,
+                })]),
+            }],
+        })
+        .unwrap()
+    }
+
+    fn allow_policy() -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: MTLS_IDENTITY.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:MockToken".into())]),
+            }],
+        })
+        .unwrap()
+    }
+
+    async fn setup(
+        policy: TokenPolicy,
+        identity: Option<String>,
+    ) -> (HandlerContext, ClientContextId, u64) {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+            .await
+            .unwrap();
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(policy);
+        (ctx, ctx_id, session_vh.0)
+    }
+
+    fn wrap_request(
+        ctx_id: &ClientContextId,
+        session_handle: u64,
+    ) -> pkcs11_proxy_ng_proto::WrapKeyRequest {
+        pkcs11_proxy_ng_proto::WrapKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::RSA_PKCS.0,
+                params: None,
+            }),
+            wrapping_key_handle: 0,
+            key_handle: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn wrap_key_denied_with_extract_deny_grant() {
+        let (ctx, ctx_id, session_handle) = setup(deny_policy(), Some(MTLS_IDENTITY.into())).await;
+
+        let response = super::wrap_key(&ctx, Request::new(wrap_request(&ctx_id, session_handle)))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.into_inner().ck_rv,
+            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
+            "C_WrapKey with extract=Deny must return KEY_FUNCTION_NOT_PERMITTED"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrap_key_proceeds_with_extract_allow_grant() {
+        let (ctx, ctx_id, session_handle) = setup(allow_policy(), Some(MTLS_IDENTITY.into())).await;
+
+        let response = super::wrap_key(&ctx, Request::new(wrap_request(&ctx_id, session_handle)))
+            .await
+            .unwrap();
+
+        // The MockBackend will fail (no real objects), but it must NOT be
+        // KEY_FUNCTION_NOT_PERMITTED — the gate must not block an allowed principal.
+        assert_ne!(
+            response.into_inner().ck_rv,
+            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
+            "C_WrapKey with extract=Allow must reach the backend"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrap_key_unauthenticated_proceeds() {
+        // No identity → unauthenticated; extract-deny is opt-in so must pass through.
+        let policy = deny_policy();
+        let (ctx, ctx_id, session_handle) = setup(policy, None).await;
+
+        let response = super::wrap_key(&ctx, Request::new(wrap_request(&ctx_id, session_handle)))
+            .await
+            .unwrap();
+
+        assert_ne!(
+            response.into_inner().ck_rv,
+            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
+            "unauthenticated peer must not be blocked by extract-deny"
+        );
     }
 }

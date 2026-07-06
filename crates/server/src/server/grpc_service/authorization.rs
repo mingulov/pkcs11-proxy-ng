@@ -11,6 +11,8 @@ use super::super::auth::identity::AuthenticatedIdentity;
 use super::super::auth::policy::TokenPolicy;
 use super::super::auth::request_identity::identity_from_request;
 use super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::handle_map::VirtualHandle;
+use super::HandlerContext;
 use super::service_utils::{context_exists, spawn_backend};
 
 pub(super) async fn context_identity(
@@ -72,6 +74,46 @@ pub(super) async fn slot_is_authorized(
     Ok(Ok(token_policy.allows(&identity, &label, &serial)))
 }
 
+/// Returns `true` if the calling principal may extract key material from the
+/// token that owns `virtual_session`.
+///
+/// `false` only when the principal has an explicit `extract = "deny"` grant for
+/// the matched token AND the token info is already in the cache. On any
+/// resolution failure (unknown context, session not in `session_slots`, cache
+/// miss) the function returns `true` so that the opt-in extract-deny gate
+/// never denies due to incomplete state.
+pub(super) async fn extract_is_permitted(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    virtual_session: u64,
+) -> Result<bool, Status> {
+    let identity = match context_identity(&ctx.context_manager, ctx_id).await {
+        Ok(identity) => identity,
+        Err(_) => return Ok(true), // context gone → permissive
+    };
+
+    // Unauthenticated peers: extract_allowed always returns true; skip
+    // session/slot lookup.
+    if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+        return Ok(true);
+    }
+
+    let Some(backend_slot) =
+        ctx.context_manager.slot_for_session(ctx_id, VirtualHandle(virtual_session)).await
+    else {
+        return Ok(true); // session not registered → permissive
+    };
+
+    let (label, serial) = match ctx.context_manager.cached_token_info(backend_slot) {
+        Some(info) => info,
+        // Cache miss: rather than blocking on a backend call just for the
+        // extract gate, be permissive — extract-deny is opt-in.
+        None => return Ok(true),
+    };
+
+    Ok(ctx.token_policy.extract_allowed(&identity, &label, &serial))
+}
+
 /// A2 ownership gate (pure core): decide whether a request bearing a
 /// `client_context_id` may proceed, given the identity captured for that
 /// context at C_Initialize (`stored`; `None` when no such context is recorded)
@@ -119,7 +161,11 @@ pub(super) async fn enforce_context_owner<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AuthConfig, GrantSpec, PolicyEntry, TokenAccessSpec};
+    use crate::config::{
+        AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig, TokenAccessSpec,
+    };
+    use crate::server::grpc_service::HandlerContext;
+    use crate::server::handle_map::BackendHandle;
     use pkcs11_proxy_ng_backend::MockBackend;
 
     const MTLS_IDENTITY: &str = "x509:issuer=CN=Root CA;subject=CN=client";
@@ -265,5 +311,107 @@ mod tests {
             spki_sha256: "".into(),
         };
         assert!(!context_owner_allowed(Some(MTLS_IDENTITY), &impostor));
+    }
+
+    // --- extract_is_permitted ---
+
+    fn policy_with_extract_deny(identity: &str) -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: identity.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: None,
+                    mechanisms: None,
+                    extract: ExtractPolicyConfig::Deny,
+                })]),
+            }],
+        })
+        .unwrap()
+    }
+
+    /// Helper: build a HandlerContext with a given policy, register a session on
+    /// slot 0 in the context, and pre-populate the token-info cache so
+    /// `extract_is_permitted` can see the token without a backend round-trip.
+    /// Returns `(ctx, ctx_id, session_handle)`.
+    async fn setup_extract_test(
+        policy: TokenPolicy,
+        identity: Option<String>,
+    ) -> (HandlerContext, ClientContextId, u64) {
+        let backend = backend();
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+            .await
+            .unwrap();
+        // Prime the token-info cache so extract_is_permitted can resolve without
+        // a backend call.
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(policy);
+        (ctx, ctx_id, session_vh.0)
+    }
+
+    #[tokio::test]
+    async fn extract_permitted_for_deny_grant_returns_false() {
+        let policy = policy_with_extract_deny(MTLS_IDENTITY);
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session).await.unwrap();
+        assert!(!permitted, "extract must be denied for principal with extract=Deny grant");
+    }
+
+    #[tokio::test]
+    async fn extract_permitted_for_allow_grant_returns_true() {
+        let policy = policy_for_identity(MTLS_IDENTITY);
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session).await.unwrap();
+        assert!(permitted, "extract must be allowed for principal with default (allow) grant");
+    }
+
+    #[tokio::test]
+    async fn extract_permitted_for_unauthenticated_returns_true() {
+        // No policy configured for unauthenticated; extract-deny is opt-in.
+        let policy = policy_with_extract_deny(MTLS_IDENTITY);
+        let (ctx, ctx_id, session) = setup_extract_test(policy, None).await;
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session).await.unwrap();
+        assert!(
+            permitted,
+            "unauthenticated peer must always be permitted (extract-deny is opt-in)"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_permitted_for_no_policy_returns_true() {
+        // Default (empty) policy: no grants at all → extract permitted.
+        let policy = TokenPolicy::from_config(&AuthConfig::default()).unwrap();
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session).await.unwrap();
+        assert!(permitted, "principal with no matching grant must be permitted by default");
+    }
+
+    #[tokio::test]
+    async fn extract_permitted_on_cache_miss_returns_true() {
+        // When the token-info cache is empty (no prime step), the function
+        // returns true (permissive on cache miss — extract-deny is opt-in).
+        let policy = policy_with_extract_deny(MTLS_IDENTITY);
+        let backend = backend();
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+            .await
+            .unwrap();
+        // No cache_token_info call — intentional cache miss.
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(policy);
+
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session_vh.0).await.unwrap();
+        assert!(permitted, "cache miss must be permissive");
     }
 }
