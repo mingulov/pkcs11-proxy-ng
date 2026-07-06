@@ -18,14 +18,17 @@ in-flight cap + session quota (`CKR_SESSION_COUNT`) + per-slot failed-login budg
 opt-in via `[rate_limit]`; (6) **G3-PR1 per-object use-time authorization** —
 opt-in `objects` allow-list keyed on `CKA_UNIQUE_ID`, enforced at the resolution
 seam with constant-work-on-RV/audit/metric invisible denial (I1: NOT constant-latency
-— first-access incurs backend UID fetch), v3.0+-gated (refuse-to-start on v2.40).
-**Not yet landed / phased (see the §-notes below and the full-review gap analysis
-2026-07-06):** data-plane (sign/encrypt) audit emission + the fail-open
-gap-sentinel + its separate channel; reconnect/hot-swap re-attestation;
-per-class/mechanism grant *enforcement* (config currently rejects those grants);
-`C_FindObjects` enumeration-time filtering + per-object attribute gating + minted-
-object ACL inheritance (the remaining G3 follow-ups). Promote to **Accepted** as
-the remaining G3 follow-ups land.
+— first-access incurs backend UID fetch), v3.0+-gated (refuse-to-start on v2.40);
+(7) **G3-PR2 `C_FindObjects` enumeration filtering** (confined principals never
+receive handles for objects they cannot use); (8) **G3-PR3 authz completion** —
+per-class + per-mechanism enforcement (config un-rejected), per-object extract
+override, minted-object ACL inheritance, and the I2 session-only-metadata-cache
+hardening. **Not yet landed / phased (see the §-notes below and the full-review gap
+analysis 2026-07-06):** data-plane (sign/encrypt) audit emission + the fail-open
+gap-sentinel + its separate channel; reconnect/hot-swap re-attestation; R2
+attribute-coalesce (perf); constant-latency denial (documented I1 limit). The G3
+authorization model is substantially complete — promote to **Accepted** after a
+transparency-matrix validation pass.
 
 ## Context
 
@@ -159,14 +162,26 @@ distinguish the shim from the real module.
      to v3.0+ tokens** that populate `CKA_UNIQUE_ID`: if any `objects` grant is
      configured against a backend reporting `< v3.0`, the daemon **refuses to
      start**; on a v3.0 token an object with an empty/absent `CKA_UNIQUE_ID` is
-     **fail-closed** (denied). **Follow-ups (not yet shipped):** enumeration-time
-     filtering of `C_FindObjects` results (this PR gates USE-time only — a client
-     may still receive a handle it cannot use, and using it returns the
-     not-found-identical RV); per-**attribute** value-bearing gating is already
-     provided coarsely by the G2 extract-deny sub-gate, with per-object attribute
-     gating a G3 follow-up; per-class/mechanism grant enforcement (still
-     config-rejected); and ACL inheritance for handle-**minting** operations
-     (a newly generated/unwrapped object is currently usable by its creator).
+     **fail-closed** (denied). **Now also shipped (G3-PR2/PR3):**
+     `C_FindObjects` **enumeration-time filtering** (a confined principal's find
+     results exclude objects it cannot use — the handle is never received; a
+     server-side inner loop pulls past fully-filtered batches so `find` returns 0
+     only on genuine exhaustion); **per-class and per-mechanism enforcement**
+     (`classes`/`mechanisms` grants are enforced at the resolution seam / crypto
+     `*Init` respectively — a class-mismatch is a constant-work handle-invalid
+     denial, a mechanism-mismatch is `CKR_MECHANISM_INVALID`; the config
+     refuse-to-start guard for these grants is removed); **per-object extract
+     override** (an `objects` entry may be `{ id, extract }` so a principal can
+     use-but-not-extract a specific object, deny-beats-allow); **minted-object ACL
+     inheritance** (an object a principal generates/unwraps/creates this session is
+     usable by its creating context regardless of the configured allow-list,
+     per-context, evicted on handle removal); and the **I2 hardening** (object
+     metadata — uid+class — is fetched in one round-trip and cached only for
+     **session** objects; **token** objects are re-fetched every gate call, immune
+     to cross-client backend handle recycling). **Remaining (non-G3):** data-plane
+     (sign/encrypt) audit emission + its separate fail-open channel; R2
+     attribute-coalesce (perf); constant-**latency** denial (the deny path's
+     metadata fetch is a first-access timing difference — documented I1 limit).
 
 3. **Backend attestation is integrity/change-detection, not proof of identity.**
    A **startup** record (shipped) captures the module path + content hash, the
