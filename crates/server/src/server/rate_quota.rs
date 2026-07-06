@@ -34,7 +34,6 @@ struct RateQuota {
     login_cooldown: Duration,
     /// Arc so `PrincipalOpGuard` can hold a reference without a lifetime.
     in_flight: Arc<DashMap<String, AtomicI64>>,
-    sessions: DashMap<String, AtomicI64>,
     login_state: DashMap<CkSlotId, FailedLoginState>,
 }
 
@@ -99,37 +98,6 @@ fn begin_op_on(
     }))
 }
 
-/// Reserve one session slot for `principal` against the given sessions map.
-fn reserve_session_on(
-    max_sessions: Option<usize>,
-    sessions: &DashMap<String, AtomicI64>,
-    principal: &str,
-) -> bool {
-    let max = match max_sessions {
-        None => return true,
-        Some(m) => m,
-    };
-    let cell = sessions.entry(principal.to_owned()).or_insert_with(|| AtomicI64::new(0));
-    let prev = cell.fetch_add(1, Ordering::Relaxed);
-    if prev >= max as i64 {
-        cell.fetch_sub(1, Ordering::Relaxed);
-        crate::server::resilience::record_session_quota_rejected();
-        false
-    } else {
-        true
-    }
-}
-
-/// Release one session slot for `principal`. Saturating-decrements; never below 0.
-fn release_session_on(sessions: &DashMap<String, AtomicI64>, principal: &str) {
-    if let Some(cell) = sessions.get(principal) {
-        let prev = cell.fetch_sub(1, Ordering::Relaxed);
-        if prev <= 0 {
-            cell.store(0, Ordering::Relaxed);
-        }
-    }
-}
-
 /// Record a failed login for `slot` against the given state. Returns `true` when
 /// the budget is reached (slot enters cooldown). Records the metric once on the
 /// first trip; subsequent calls while in cooldown return `true` without re-recording.
@@ -188,7 +156,6 @@ pub fn configure(cfg: &crate::config::RateLimitConfig) {
         login_budget: cfg.per_slot_failed_login_budget,
         login_cooldown: Duration::from_secs(cooldown_secs),
         in_flight: Arc::new(DashMap::new()),
-        sessions: DashMap::new(),
         login_state: DashMap::new(),
     });
 }
@@ -208,24 +175,12 @@ pub fn try_begin_principal_op(principal: &str) -> Option<PrincipalOpGuard> {
     begin_op_on(state.max_in_flight, &state.in_flight, principal)
 }
 
-/// Attempt to reserve a session slot for `principal`.
-///
-/// Returns `true` on success (caller must call [`release_session`] when the
-/// session closes). Returns `false` when `per_principal_max_sessions` is reached.
-/// When the limit is unset always returns `true`.
-pub fn try_reserve_session(principal: &str) -> bool {
-    let Some(state) = STATE.get() else { return true };
-    reserve_session_on(state.max_sessions, &state.sessions, principal)
-}
-
-/// Release a previously reserved session slot. Saturating-decrements; never
-/// goes below zero. No-op when the limit is unset or state is unconfigured.
-pub fn release_session(principal: &str) {
-    let Some(state) = STATE.get() else { return };
-    if state.max_sessions.is_none() {
-        return;
-    }
-    release_session_on(&state.sessions, principal);
+/// Returns the configured per-principal session limit, or `None` when
+/// `per_principal_max_sessions` is unset or the rate-quota state has not been
+/// configured yet. Used by `open_session` to check the derived session count
+/// against the live bookkeeping (leak-proof — no reserve/release needed).
+pub fn per_principal_max_sessions() -> Option<usize> {
+    STATE.get()?.max_sessions
 }
 
 /// Record a failed login attempt for `slot`.
@@ -277,7 +232,6 @@ mod tests {
             login_budget,
             login_cooldown: Duration::from_secs(cooldown_secs),
             in_flight: Arc::new(DashMap::new()),
-            sessions: DashMap::new(),
             login_state: DashMap::new(),
         }
     }
@@ -315,28 +269,6 @@ mod tests {
             .map(|_| begin_op_on(q.max_in_flight, &q.in_flight, "carol").expect("all admitted"))
             .collect();
         drop(guards);
-    }
-
-    // ── Session quota ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn session_reserve_then_release() {
-        let q = make_quota(None, Some(1), None, 60);
-        assert!(reserve_session_on(q.max_sessions, &q.sessions, "dave"), "first reserve");
-        assert!(
-            !reserve_session_on(q.max_sessions, &q.sessions, "dave"),
-            "second must be rejected"
-        );
-        release_session_on(&q.sessions, "dave");
-        assert!(reserve_session_on(q.max_sessions, &q.sessions, "dave"), "admitted after release");
-    }
-
-    #[test]
-    fn session_none_limit_always_admits() {
-        let q = make_quota(None, None, None, 60);
-        for _ in 0..1000 {
-            assert!(reserve_session_on(q.max_sessions, &q.sessions, "eve"), "unlimited sessions");
-        }
     }
 
     // ── Login budget ──────────────────────────────────────────────────────────

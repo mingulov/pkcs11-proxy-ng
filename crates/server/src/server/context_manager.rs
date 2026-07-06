@@ -502,6 +502,28 @@ impl ContextManager {
         self.contexts.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
     }
 
+    /// Sum of open sessions across ALL contexts whose principal key equals
+    /// `principal_key`. A context's principal key is its `authenticated_identity`
+    /// when set; otherwise the context-id string itself (mirrors the derivation
+    /// used at the dispatch seam so authenticated principals aggregate across
+    /// their contexts and unauthenticated contexts are counted individually).
+    ///
+    /// Not `async`: iterates the DashMap with shared shard guards, no await
+    /// needed (L5). Called from `open_session` BEFORE opening the backend
+    /// session — leak-proof because it reads live bookkeeping rather than
+    /// maintaining a separate reserve/release counter.
+    pub fn session_count_for_principal(&self, principal_key: &str) -> usize {
+        self.contexts
+            .iter()
+            .map(|entry| {
+                let ctx = entry.value();
+                let key =
+                    ctx.authenticated_identity.as_deref().unwrap_or_else(|| entry.key().0.as_str());
+                if key == principal_key { ctx.session_slots.len() } else { 0 }
+            })
+            .sum()
+    }
+
     // Not `async`: a DashMap remove needs no `.await` (L5).
     pub fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
         self.contexts.remove(id).map(|(_k, v)| v)

@@ -65,6 +65,22 @@ pub(super) async fn open_session(
         }
     }
 
+    // G2-PR3: per-principal session quota (opt-in; no-op when unset).
+    // Derive the principal key exactly as the dispatch seam does:
+    // authenticated_identity when bound, ctx_id string otherwise.
+    // The derived count is leak-proof — it reads live session_slots bookkeeping
+    // rather than a separate reserve/release counter.
+    let principal_key = ctx_mgr.context_identity(&ctx_id).unwrap_or_else(|| ctx_id.0.clone());
+    if let Some(max) = crate::server::rate_quota::per_principal_max_sessions()
+        && ctx_mgr.session_count_for_principal(&principal_key) >= max
+    {
+        crate::server::resilience::record_session_quota_rejected();
+        return Ok(Response::new(pkcs11_proxy_ng_proto::OpenSessionResponse {
+            ck_rv: CkRv::SESSION_COUNT.0,
+            session_handle: 0,
+        }));
+    }
+
     let flags = CkSessionFlags(req.flags as u64);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.open_session(backend_slot, flags)).await?;
