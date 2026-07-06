@@ -57,8 +57,11 @@ pub(crate) async fn encapsulate_key(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
             ck_rv: rv.0,
             ciphertext: Vec::new(),
@@ -142,8 +145,11 @@ pub(crate) async fn decapsulate_key(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
             ck_rv: rv.0,
             key_handle: 0,
@@ -250,8 +256,11 @@ pub(crate) async fn encapsulate_key_exact(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
                 ck_rv: rv.0,

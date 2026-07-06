@@ -9,13 +9,13 @@ use pkcs11_proxy_ng_types::{CkMechanismParams, CkObjectHandle, CkRv, Sp800108Der
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    parse_mechanism, register_object_handle, register_session_object_handle,
+    gate_object_handle, parse_mechanism, register_object_handle, register_session_object_handle,
     register_session_object_pair, resolve_session, resolve_session_and_object, spawn_backend,
     template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
 use crate::server::grpc_service::audit_events::emit_auth_event;
-use crate::server::handle_map::VirtualHandle;
+use crate::server::handle_map::{BackendHandle, VirtualHandle};
 
 const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
 
@@ -338,9 +338,12 @@ async fn derive_key_impl(
     // Translate every embedded object handle carried inside the mechanism
     // parameters (HKDF salt key, ECDH/MQV private-data keys, TLS key-material
     // secrets, CKM_CONCATENATE_BASE_AND_KEY handle, …) from the caller's
-    // virtual handle space to the backend's (B1). SP800-108's byte-encoded
-    // input key handles are handled separately just below.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // virtual handle space to the backend's, gating through per-object authz
+    // when active (B1 + C1). SP800-108's byte-encoded input key handles are
+    // handled separately just below.
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
             ck_rv: rv.0,
             key_handle: 0,
@@ -349,7 +352,8 @@ async fn derive_key_impl(
     }
 
     if let Some(ref mut params) = mechanism.params
-        && let Err(rv) = resolve_sp800_108_key_handle_data_params(ctx_mgr, &ctx_id, params).await
+        && let Err(rv) =
+            resolve_sp800_108_key_handle_data_params(ctx, &ctx_id, req.session_handle, params).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
             ck_rv: rv.0,
@@ -423,27 +427,41 @@ async fn derive_key_impl(
     }
 }
 
+/// Resolve SP800-108 byte-encoded key handles in KDF params, gating each
+/// through per-object authz when active (C1).
 async fn resolve_sp800_108_key_handle_data_params(
-    ctx_mgr: &Arc<ContextManager>,
+    ctx: &HandlerContext,
     ctx_id: &ClientContextId,
+    virtual_session_handle: u64,
     params: &mut CkMechanismParams,
 ) -> Result<(), CkRv> {
     match params {
         CkMechanismParams::Sp800108Kdf(params) => {
-            resolve_sp800_108_key_handle_data_param_list(ctx_mgr, ctx_id, &mut params.data_params)
-                .await
+            resolve_sp800_108_key_handle_data_param_list(
+                ctx,
+                ctx_id,
+                virtual_session_handle,
+                &mut params.data_params,
+            )
+            .await
         }
         CkMechanismParams::Sp800108FeedbackKdf(params) => {
-            resolve_sp800_108_key_handle_data_param_list(ctx_mgr, ctx_id, &mut params.data_params)
-                .await
+            resolve_sp800_108_key_handle_data_param_list(
+                ctx,
+                ctx_id,
+                virtual_session_handle,
+                &mut params.data_params,
+            )
+            .await
         }
         _ => Ok(()),
     }
 }
 
 async fn resolve_sp800_108_key_handle_data_param_list(
-    ctx_mgr: &Arc<ContextManager>,
+    ctx: &HandlerContext,
     ctx_id: &ClientContextId,
+    virtual_session_handle: u64,
     data_params: &mut [pkcs11_proxy_ng_types::PrfDataParam],
 ) -> Result<(), CkRv> {
     for data_param in data_params {
@@ -452,12 +470,29 @@ async fn resolve_sp800_108_key_handle_data_param_list(
         }
 
         let (virtual_handle, width) = read_sp800_108_key_handle_value(&data_param.value)?;
-        let backend_handle = ctx_mgr
-            .get_context(ctx_id, |ctx| ctx.object_handles.resolve(VirtualHandle(virtual_handle)))
+        let backend_handle = ctx
+            .context_manager
+            .get_context(ctx_id, |lci| lci.object_handles.resolve(VirtualHandle(virtual_handle)))
             .await
             .and_then(|resolved| resolved)
             .ok_or(CkRv::OBJECT_HANDLE_INVALID)?;
-        data_param.value = write_sp800_108_key_handle_value(backend_handle.0, width)?;
+
+        // Gate the resolved handle through per-object authz if active (C1).
+        let final_handle = if ctx.token_policy.per_object_active() && backend_handle.0 != 0 {
+            gate_object_handle(
+                ctx,
+                ctx_id,
+                virtual_session_handle,
+                virtual_handle,
+                BackendHandle(backend_handle.0),
+                CkObjectHandle(backend_handle.0),
+            )
+            .await
+        } else {
+            CkObjectHandle(backend_handle.0)
+        };
+
+        data_param.value = write_sp800_108_key_handle_value(final_handle.0, width)?;
     }
     Ok(())
 }
@@ -529,20 +564,29 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::server::grpc_service::HandlerContext;
     use crate::server::handle_map::BackendHandle;
+    use pkcs11_proxy_ng_backend::MockBackend;
     use pkcs11_proxy_ng_types::{
-        CkMechanismType, PrfDataParam, Sp800108FeedbackKdfParams, Sp800108KdfParams,
+        CkMechanismType, CkSlotId, PrfDataParam, Sp800108FeedbackKdfParams, Sp800108KdfParams,
     };
+
+    /// Build a minimal `HandlerContext` with no per-object policy (fast path for
+    /// SP800-108 unit tests that only care about handle resolution, not gating).
+    fn make_ctx(ctx_mgr: &Arc<ContextManager>) -> HandlerContext {
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> =
+            Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        HandlerContext::for_test(ctx_mgr, &backend)
+    }
 
     #[tokio::test]
     async fn resolves_sp800_108_key_handle_data_param_to_backend_handle_bytes() {
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 16));
+        let ctx = make_ctx(&ctx_mgr);
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let backend_key = BackendHandle(0xABCD_0102);
-        let virtual_key = ctx_mgr
-            .get_context(&ctx_id, |ctx| ctx.object_handles.insert(backend_key))
-            .await
-            .unwrap();
+        let virtual_key =
+            ctx_mgr.get_context(&ctx_id, |c| c.object_handles.insert(backend_key)).await.unwrap();
         let mut params = CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
             prf_type: CkMechanismType::SHA256.0,
             data_params: vec![PrfDataParam {
@@ -553,7 +597,9 @@ mod tests {
             additional_derived_keys: Vec::new(),
         });
 
-        resolve_sp800_108_key_handle_data_params(&ctx_mgr, &ctx_id, &mut params).await.unwrap();
+        // Virtual session handle = 0 is fine; per_object_active() is false so it
+        // is not used for gate lookup.
+        resolve_sp800_108_key_handle_data_params(&ctx, &ctx_id, 0, &mut params).await.unwrap();
 
         let CkMechanismParams::Sp800108FeedbackKdf(params) = params else {
             panic!("expected SP800-108 feedback KDF params");
@@ -564,6 +610,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_malformed_sp800_108_key_handle_data_param_width() {
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 16));
+        let ctx = make_ctx(&ctx_mgr);
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let mut params = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
             prf_type: CkMechanismType::SHA256.0,
@@ -574,7 +621,7 @@ mod tests {
             additional_derived_keys: Vec::new(),
         });
 
-        let err = resolve_sp800_108_key_handle_data_params(&ctx_mgr, &ctx_id, &mut params)
+        let err = resolve_sp800_108_key_handle_data_params(&ctx, &ctx_id, 0, &mut params)
             .await
             .unwrap_err();
 

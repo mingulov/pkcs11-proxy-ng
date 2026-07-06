@@ -150,6 +150,7 @@ mod tests {
             allow_all_authenticated: false,
             has_policy: false,
             anonymous_principal: None,
+            per_object_active_cache: false,
         };
 
         assert!(
@@ -211,6 +212,7 @@ mod tests {
             allow_all_authenticated: false,
             has_policy: false,
             anonymous_principal: None,
+            per_object_active_cache: false,
         };
 
         let user1 = AuthenticatedIdentity::PeerCred { uid: 1000 };

@@ -70,8 +70,12 @@ pub(crate) async fn message_encrypt_init(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
                 ck_rv: rv.0,
             }));
@@ -206,8 +210,12 @@ pub(crate) async fn message_decrypt_init(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
                 ck_rv: rv.0,
             }));
@@ -342,8 +350,12 @@ pub(crate) async fn message_sign_init(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
                 ck_rv: rv.0,
             }));
@@ -464,8 +476,12 @@ pub(crate) async fn message_verify_init(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
                 ck_rv: rv.0,
             }));

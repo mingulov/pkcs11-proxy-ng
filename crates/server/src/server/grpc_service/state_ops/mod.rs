@@ -43,10 +43,8 @@ pub(super) async fn set_operation_state(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SetOperationStateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetOperationStateResponse>, Status> {
-    let ctx_mgr = &ctx.context_manager;
-    let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    operation_state::set_operation_state(ctx_mgr, backend_ref, sanitize_inputs, request).await
+    operation_state::set_operation_state(ctx, sanitize_inputs, request).await
 }
 
 pub(super) async fn seed_random(

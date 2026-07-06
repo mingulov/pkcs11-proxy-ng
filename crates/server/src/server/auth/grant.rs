@@ -343,15 +343,68 @@ pub fn parse_mechanism(s: &str) -> Result<CkMechanismType, String> {
 /// per-object allow-list.
 ///
 /// Accepted form: a lowercase or uppercase hex string with an even number
-/// of hex digits (`"a1b2c3"` → `[0xa1, 0xb2, 0xc3]`). An empty string
-/// decodes to an empty byte vector. Odd-length or non-hex input is
-/// rejected with a clear error naming the bad value.
+/// of hex digits (`"a1b2c3"` → `[0xa1, 0xb2, 0xc3]`). An empty or
+/// whitespace-only string is rejected: it would match nothing (no
+/// `CKA_UNIQUE_ID` is ever the empty byte sequence) while still flipping
+/// `per_object_active()` to `true`, silently denying every object. Odd-length
+/// or non-hex input is also rejected with a clear error.
 pub fn parse_object_unique_id(s: &str) -> Result<Vec<u8>, String> {
     let t = s.trim();
+    if t.is_empty() {
+        return Err(
+            "invalid objects entry: empty or whitespace string is not a valid CKA_UNIQUE_ID \
+             hex value. An empty entry matches nothing yet activates per-object authz, silently \
+             denying all objects — refuse-to-start instead. Use a non-empty even-length hex \
+             byte string (e.g. \"a1b2c3\")."
+                .into(),
+        );
+    }
     hex::decode(t).map_err(|e| {
         format!(
             "invalid objects entry '{t}': {e}; expected an even-length hex byte string \
              (e.g. \"a1b2\"); got a string that is not valid hex or has an odd number of digits"
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_object_unique_id;
+
+    // M2: empty / whitespace `objects` entries must be rejected.
+
+    #[test]
+    fn parse_uid_empty_string_rejected() {
+        // M2: empty string matches nothing but would activate per-object authz,
+        // silently denying all objects.
+        assert!(parse_object_unique_id("").is_err(), "empty objects entry must be rejected");
+    }
+
+    #[test]
+    fn parse_uid_whitespace_only_rejected() {
+        // M2: whitespace-only is equivalent to empty after trim.
+        assert!(
+            parse_object_unique_id("   ").is_err(),
+            "whitespace-only objects entry must be rejected"
+        );
+    }
+
+    #[test]
+    fn parse_uid_valid_hex_accepted() {
+        // Sanity: a valid even-length hex string produces the decoded bytes.
+        let result = parse_object_unique_id("aabbcc").unwrap();
+        assert_eq!(result, &[0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn parse_uid_odd_length_hex_rejected() {
+        // Odd-length hex string is not valid.
+        assert!(parse_object_unique_id("abc").is_err(), "odd-length hex must be rejected");
+    }
+
+    #[test]
+    fn parse_uid_non_hex_rejected() {
+        // Non-hex characters are rejected.
+        assert!(parse_object_unique_id("xyz").is_err(), "non-hex input must be rejected");
+    }
 }

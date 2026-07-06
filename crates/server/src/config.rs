@@ -898,6 +898,29 @@ impl DaemonConfig {
                  entries or set auth.allow_all_authenticated = true."
                 .into());
         }
+        // M3: a per-object `objects` grant on an auth="none" listener is silently
+        // inert — `allows_object_use` returns true for Unauthenticated, so the
+        // per-object restriction is bypassed entirely. Refuse to start to prevent
+        // false security (mirror of the existing policy+auth=none guard above).
+        if has_unauthenticated_listener {
+            for (index, entry) in self.auth.policy.iter().enumerate() {
+                if let TokenAccessSpec::Specific(ref grants) = entry.tokens {
+                    for grant in grants {
+                        if let GrantSpec::Rich(rich) = grant
+                            && rich.objects.is_some()
+                        {
+                            return Err(format!(
+                                "auth.policy[{index}]: per-object `objects` grant with an \
+                                 auth=\"none\" listener is silently inert — unauthenticated \
+                                 peers bypass per-object authz (allows_object_use returns \
+                                 true for Unauthenticated). Use an authenticated listener \
+                                 (peer_cred / mtls) or remove the `objects` restriction."
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         // I2 guard (G2-PR2): per-class and per-mechanism grant restrictions are
         // parsed into the model (for G3) but NOT yet enforced at runtime — only
         // `extract` is enforced today. Accepting a config that implies a

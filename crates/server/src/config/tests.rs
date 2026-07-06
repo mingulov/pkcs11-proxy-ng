@@ -1202,3 +1202,52 @@ fn rate_limit_some_nonzero_fields_validate_ok() {
     assert_eq!(cfg.rate_limit.per_principal_max_sessions, Some(5));
     assert_eq!(cfg.rate_limit.per_slot_failed_login_budget, Some(5));
 }
+
+// ---------------------------------------------------------------------------
+// M3: `objects` grant + auth="none" listener must be rejected at startup
+// ---------------------------------------------------------------------------
+
+#[test]
+fn objects_grant_with_unauthenticated_listener_is_rejected() {
+    // M3: allows_object_use() returns true for Unauthenticated, so an `objects`
+    // grant combined with auth="none" is silently inert (false security).
+    // The daemon must refuse to start.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", objects = [\"aabbcc\"] }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("objects") || err.contains("auth"),
+        "error must mention 'objects' or 'auth', got: {err}"
+    );
+}
+
+#[test]
+fn objects_grant_with_authenticated_listener_accepted() {
+    // M3 positive case: per-object grant + peer_cred auth must be accepted.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", objects = [\"aabbcc\"] }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.validate().is_ok(), "objects grant + peer_cred must be accepted");
+}

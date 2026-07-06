@@ -460,16 +460,28 @@ pub(super) async fn resolve_session(
 
 /// Per-object authorization gate (G3-PR1, ADR-0012).
 ///
-/// Called only when `ctx.token_policy.per_object_active()` is `true` AND
+/// Called when `ctx.token_policy.per_object_active()` is `true` AND
 /// the object resolved to a real backend handle (non-zero).  Returns the
 /// original `backend_object` when the identity is allowed to use it;
 /// returns `CkObjectHandle(0)` (the NOT-FOUND sentinel) otherwise.
 ///
-/// **Invisible-denial contract (ADR-0012 §G3):** a denied object must be
-/// byte-for-byte indistinguishable from a non-existent one.  The caller
-/// substitutes the denied handle with 0, exactly as the not-found path
-/// does.  No early return with a different RV, no audit record, no metric,
-/// no skipped/added backend call relative to the not-found path.
+/// **Invisible-denial contract (ADR-0012 §G3):** a denied object must
+/// appear byte-for-byte identical to a non-existent one on the **RV**,
+/// **audit**, and **metric** axes.  The caller substitutes the denied handle
+/// with 0, exactly as the not-found path does.  No early return with a
+/// different RV; no distinct audit record; no metric.  The backend returns
+/// the operation's own handle-invalid code (`CKR_OBJECT_HANDLE_INVALID` for
+/// object ops, `CKR_KEY_HANDLE_INVALID` for key ops); since both paths use
+/// handle 0, the deny and not-found codes converge automatically.
+///
+/// **Timing note (I1):** the denial is NOT constant-latency.  A not-found
+/// virtual handle (never registered) skips the backend entirely; a denied
+/// handle (registered but policy-blocked) incurs a `get_token_info` +
+/// `C_GetAttributeValue` (`CKA_UNIQUE_ID`) round-trip on first use (the
+/// cache eliminates these on subsequent uses of the same handle).  This
+/// first-use timing side-channel is accepted; a constant-latency denial
+/// path (padding the not-found path with phantom backend calls) is tracked
+/// as a follow-up together with `C_FindObjects` enumeration filtering.
 ///
 /// **Fail-closed semantics:**
 /// - Identity unavailable → deny (handle 0).
@@ -481,8 +493,8 @@ pub(super) async fn resolve_session(
 /// NOTE: enumeration-time filtering of `find_objects` results is a
 /// separate, deferred concern; this gate covers USE-time only.  A client
 /// may still receive a handle it cannot use; using it returns the same
-/// `CKR_OBJECT_HANDLE_INVALID` as a genuinely-nonexistent handle.
-async fn gate_object_handle(
+/// handle-invalid RV as a genuinely-nonexistent handle.
+pub(super) async fn gate_object_handle(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,
     virtual_session: u64,

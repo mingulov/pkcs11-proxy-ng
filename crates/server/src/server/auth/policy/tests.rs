@@ -27,6 +27,7 @@ fn unauthenticated_always_allowed() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     assert!(policy.allows(&AuthenticatedIdentity::Unauthenticated, "any", "any"));
 }
@@ -38,6 +39,7 @@ fn allow_all_authenticated_bypasses_rules() {
         allow_all_authenticated: true,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(policy.allows(&id, "token1", "serial1"));
@@ -50,6 +52,7 @@ fn default_deny_for_unknown_identity() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(!policy.allows(&id, "token1", "serial1"));
@@ -64,6 +67,7 @@ fn label_selector_matches() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(policy.allows(&id, "my-token", "any-serial"));
@@ -79,6 +83,7 @@ fn serial_selector_matches() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(policy.allows(&id, "any-label", "SN123"));
@@ -94,6 +99,7 @@ fn all_access_matches_everything() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 0 };
     assert!(policy.allows(&id, "any", "any"));
@@ -147,6 +153,7 @@ fn mtls_identity_matches_policy_by_display_key() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
 
     let allowed = AuthenticatedIdentity::Mtls {
@@ -172,6 +179,7 @@ fn multiple_identities_independent_access() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
 
     let allowed = AuthenticatedIdentity::PeerCred { uid: 1000 };
@@ -189,6 +197,7 @@ fn specific_access_empty_selectors_denies_everything() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(!policy.allows(&id, "any-label", "any-serial"));
@@ -209,6 +218,7 @@ fn multiple_selectors_any_match_wins() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
 
@@ -254,6 +264,7 @@ fn root_uid_denied_when_not_in_policy() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let root = AuthenticatedIdentity::PeerCred { uid: 0 };
     assert!(!policy.allows(&root, "any", "any"));
@@ -369,6 +380,7 @@ fn matrix_policy() -> TokenPolicy {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     }
 }
 
@@ -591,6 +603,7 @@ fn allow_all_authenticated_overrides_restrictive_rules() {
         allow_all_authenticated: true,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(policy.allows(&id, "token-b", "SN-B"));
@@ -603,6 +616,7 @@ fn allow_all_authenticated_allows_unknown_identity() {
         allow_all_authenticated: true,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 99999 };
     assert!(
@@ -619,6 +633,7 @@ fn allow_all_authenticated_does_not_affect_unauthenticated() {
             allow_all_authenticated: flag,
             has_policy: false,
             anonymous_principal: None,
+            per_object_active_cache: false,
         };
         assert!(policy.allows(&AuthenticatedIdentity::Unauthenticated, "any", "any"));
     }
@@ -711,6 +726,7 @@ fn dual_accept_emits_deprecation_warning_for_legacy_dn_key() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
 
     // Identity with both SPKI and DN — the SPKI key won't be in rules, but the DN key will.
@@ -848,6 +864,7 @@ fn audit_identity_without_anon_returns_stored() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     assert_eq!(policy.audit_identity(Some("unauthenticated")), Some("unauthenticated".into()));
     assert_eq!(policy.audit_identity(None), None);
@@ -876,6 +893,7 @@ fn rich_grant_policy() -> TokenPolicy {
         allow_all_authenticated: false,
         has_policy: true,
         anonymous_principal: None,
+        per_object_active_cache: false,
     }
 }
 
@@ -1014,6 +1032,7 @@ fn rich_grant_none_classes_means_all() {
         allow_all_authenticated: false,
         has_policy: true,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 42 };
     assert!(policy.allows_class(&id, "MyToken", "any", CkObjectClass::DATA));
@@ -1204,6 +1223,7 @@ fn extract_allowed_returns_true_when_allow_all_authenticated() {
         allow_all_authenticated: true, // blanket
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1 };
     assert!(policy.extract_allowed(&id, "Prod", "any"));
@@ -1220,9 +1240,10 @@ fn parse_object_unique_id_valid_hex() {
     use super::super::grant::parse_object_unique_id;
     assert_eq!(parse_object_unique_id("a1b2").unwrap(), vec![0xa1u8, 0xb2u8]);
     assert_eq!(parse_object_unique_id("00ff").unwrap(), vec![0x00u8, 0xffu8]);
-    assert_eq!(parse_object_unique_id("").unwrap(), vec![] as Vec<u8>);
-    // Trimming whitespace
+    // Trimming whitespace around valid hex
     assert_eq!(parse_object_unique_id("  a1b2  ").unwrap(), vec![0xa1u8, 0xb2u8]);
+    // Empty string is rejected (M2): matches nothing but activates per-object authz.
+    assert!(parse_object_unique_id("").is_err(), "empty string must be rejected (M2)");
 }
 
 #[test]
@@ -1354,6 +1375,7 @@ fn per_object_active_false_when_no_objects_field() {
         allow_all_authenticated: false,
         has_policy: true,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     assert!(!policy.per_object_active());
 }
@@ -1368,28 +1390,33 @@ fn per_object_active_false_for_all_access_variant() {
         allow_all_authenticated: false,
         has_policy: true,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     assert!(!policy.per_object_active());
 }
 
 #[test]
 fn per_object_active_true_when_any_grant_has_objects() {
-    // Even one grant with objects=Some(…) makes per_object_active() true.
-    let grant = TokenGrant {
-        selector: TokenSelector::Label("Prod".into()),
-        classes: None,
-        mechanisms: None,
-        extract: ExtractPolicy::Allow,
-        objects: Some(vec![vec![0xa1u8, 0xb2u8]]),
+    // Even one grant with objects=Some(…) makes per_object_active() true (M1).
+    // Use from_config so the cache is correctly populated.
+    use crate::config::{
+        AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig, TokenAccessSpec,
     };
-    let mut rules = HashMap::new();
-    rules.insert("uid=1".into(), TokenAccess::Specific(vec![grant]));
-    let policy = TokenPolicy {
-        rules,
+    let policy = TokenPolicy::from_config(&AuthConfig {
         allow_all_authenticated: false,
-        has_policy: true,
         anonymous_principal: None,
-    };
+        policy: vec![PolicyEntry {
+            identity: "uid=1".into(),
+            tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                token: "label:Prod".into(),
+                classes: None,
+                mechanisms: None,
+                extract: ExtractPolicyConfig::Allow,
+                objects: Some(vec!["a1b2".into()]),
+            })]),
+        }],
+    })
+    .expect("policy parses");
     assert!(policy.per_object_active());
 }
 
@@ -1412,6 +1439,7 @@ fn allows_object_use_none_objects_allows_any_id() {
         allow_all_authenticated: false,
         has_policy: true,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1 };
     assert!(policy.allows_object_use(&id, "Prod", "any", &[0x00u8]));
@@ -1435,6 +1463,7 @@ fn allows_object_use_some_list_allows_matching_id() {
         allow_all_authenticated: false,
         has_policy: true,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1 };
     // Exact match → allowed
@@ -1457,6 +1486,7 @@ fn allows_object_use_some_list_denies_non_matching_id() {
         allow_all_authenticated: false,
         has_policy: true,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1 };
     // Different unique_id → denied
@@ -1475,6 +1505,7 @@ fn allows_object_use_token_access_all_always_true() {
         allow_all_authenticated: false,
         has_policy: true,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 0 };
     assert!(policy.allows_object_use(&id, "any", "any", &[0x00u8]));
@@ -1497,6 +1528,7 @@ fn allows_object_use_unauthenticated_always_true() {
         allow_all_authenticated: false,
         has_policy: false, // transport mode
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let unauth = AuthenticatedIdentity::Unauthenticated;
     assert!(policy.allows_object_use(&unauth, "Prod", "any", &[0x00u8]));
@@ -1519,6 +1551,7 @@ fn allows_object_use_allow_all_authenticated_always_true() {
         allow_all_authenticated: true,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 99 };
     assert!(policy.allows_object_use(&id, "Prod", "any", &[0x00u8]));
@@ -1541,6 +1574,7 @@ fn allows_object_use_no_matching_grant_is_permissive() {
         allow_all_authenticated: false,
         has_policy: true,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 1 };
     // Token "DifferentToken" doesn't match "OtherToken" selector → no restriction → true
@@ -1555,6 +1589,7 @@ fn allows_object_use_no_rule_for_identity_is_permissive() {
         allow_all_authenticated: false,
         has_policy: true,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
     let id = AuthenticatedIdentity::PeerCred { uid: 42 };
     assert!(policy.allows_object_use(&id, "any", "any", &[0x00u8]));

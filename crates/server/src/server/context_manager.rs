@@ -42,7 +42,19 @@ pub struct LogicalClientInstance {
     /// evicted wherever `object_handles` entries are removed — on explicit
     /// `C_DestroyObject`, on session close (for session objects), and on
     /// context teardown — so a recycled virtual handle can never return a
-    /// stale id.
+    /// stale id within one context.
+    ///
+    /// **Cache-staleness dependency (I2 / ADR-0012 §G3):** this cache assumes
+    /// the B2 no-alias guarantee — that a virtual→backend→object binding is
+    /// stable for the lifetime of the virtual handle.  For **token objects**
+    /// (CKA_TOKEN=true) under a cross-client backend object-number recycling
+    /// scenario (e.g. another client destroys object N and a new object is
+    /// assigned the same backend number N), a stale cache entry could
+    /// authorize a `gate_object_handle` check against the wrong identity.
+    /// Tracking token-object cache invalidation / re-fetch on backend slot
+    /// events (e.g. `CKN_TOKEN_PRESENT` / `CKN_CARD_INSERTED`) is a deferred
+    /// follow-up; the risk is bounded by the existing B2 eviction-on-close
+    /// contract for session objects.
     pub object_unique_ids: HashMap<VirtualHandle, Vec<u8>>,
     /// Virtual object handles created as SESSION objects (CKA_TOKEN=false) in
     /// each virtual session. Evicted when that session closes so a recycled

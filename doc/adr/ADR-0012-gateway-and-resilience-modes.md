@@ -17,7 +17,8 @@ value-bearing `C_GetAttributeValue`; (5) **G2-PR3 rate/quota** — per-principal
 in-flight cap + session quota (`CKR_SESSION_COUNT`) + per-slot failed-login budget,
 opt-in via `[rate_limit]`; (6) **G3-PR1 per-object use-time authorization** —
 opt-in `objects` allow-list keyed on `CKA_UNIQUE_ID`, enforced at the resolution
-seam with constant-work invisible denial, v3.0+-gated (refuse-to-start on v2.40).
+seam with constant-work-on-RV/audit/metric invisible denial (I1: NOT constant-latency
+— first-access incurs backend UID fetch), v3.0+-gated (refuse-to-start on v2.40).
 **Not yet landed / phased (see the §-notes below and the full-review gap analysis
 2026-07-06):** data-plane (sign/encrypt) audit emission + the fail-open
 gap-sentinel + its separate channel; reconnect/hot-swap re-attestation;
@@ -139,14 +140,22 @@ distinguish the shim from the real module.
      authorized for (byte-identical when unused). Enforced at the **object-handle
      resolution seam** (`resolve_session_and_object`/`_two_objects`/`_key`) so it
      covers every handle-consuming operation uniformly. A denial is
-     **constant-work invisible denial**: the resolved handle is replaced with the
-     same `CkObjectHandle(0)` sentinel the not-found path uses, so the backend
-     returns the identical `CKR_OBJECT_HANDLE_INVALID` — same RV, no distinct
-     audit/metric, no early-return, byte-for-byte indistinguishable from a
-     nonexistent object (verified by test `per_object_gate_denied_object_identical_to_nonexistent`).
+     **constant-work denial on the RV/audit/metric axes** (I1): the resolved
+     handle is replaced with the same `CkObjectHandle(0)` sentinel the not-found
+     path uses, so the backend returns the identical `CKR_OBJECT_HANDLE_INVALID` —
+     same RV, no distinct audit/metric, no early-return, byte-for-byte
+     indistinguishable from a nonexistent object (verified by test
+     `per_object_gate_denied_object_identical_to_nonexistent`). The denial is NOT
+     constant-latency: on the first access the gate fetches `CKA_UNIQUE_ID` from
+     the backend (`C_GetAttributeValue`) and resolves the session's slot
+     (`get_token_info`), after which the UID is cached per virtual handle.
      Because a PKCS#11 object handle is reusable and reassigned on reconnect,
      per-object authz keys on the immutable `CKA_UNIQUE_ID` (fetched once and
-     cached per virtual handle — safe because it is immutable). It is **restricted
+     cached per virtual handle — safe because it is immutable once set; I2 caveat:
+     for token objects under cross-client backend object-number recycling, cache
+     staleness could authorize against the wrong identity — tracking token-object
+     cache invalidation is a deferred follow-up; session objects are safe via B2
+     eviction-on-close). It is **restricted
      to v3.0+ tokens** that populate `CKA_UNIQUE_ID`: if any `objects` grant is
      configured against a backend reporting `< v3.0`, the daemon **refuses to
      start**; on a v3.0 token an object with an empty/absent `CKA_UNIQUE_ID` is

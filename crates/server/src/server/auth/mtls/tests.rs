@@ -318,6 +318,7 @@ fn policy_lookup_with_real_cert() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
 
     assert!(
@@ -400,6 +401,7 @@ fn dual_accept_spki_policy_authorizes() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
 
     assert!(policy.allows(&identity, "any", "any"), "SPKI-keyed policy must authorize");
@@ -431,6 +433,7 @@ fn dual_accept_legacy_dn_policy_authorizes_with_deprecation_warning() {
         allow_all_authenticated: false,
         has_policy: false,
         anonymous_principal: None,
+        per_object_active_cache: false,
     };
 
     // The deprecated DN path is accepted (with a one-time tracing::warn! emitted)

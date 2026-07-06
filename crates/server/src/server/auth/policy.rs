@@ -21,6 +21,25 @@ pub struct TokenPolicy {
     /// instead of the raw `"unauthenticated"` marker. This is NEVER a
     /// grant: authz still routes through `allows_unauthenticated()`.
     pub(crate) anonymous_principal: Option<String>,
+    /// Pre-computed at `from_config`: true when at least one grant has a
+    /// non-`None` `objects` list. Cached so the per-object gate check on
+    /// every object-resolving RPC is a single `bool` load rather than a
+    /// full scan of all grants (M1 perf fix).
+    pub(crate) per_object_active_cache: bool,
+}
+
+impl Default for TokenPolicy {
+    /// Returns a zero-access policy: no rules, no allow-all, no anonymous principal.
+    /// Intended for test construction via struct update syntax (`..Default::default()`).
+    fn default() -> Self {
+        Self {
+            rules: HashMap::new(),
+            allow_all_authenticated: false,
+            has_policy: false,
+            anonymous_principal: None,
+            per_object_active_cache: false,
+        }
+    }
 }
 
 /// Per-identity token-access rule.
@@ -49,11 +68,19 @@ impl TokenPolicy {
             rules.insert(entry.identity.clone(), access);
         }
         let has_policy = !rules.is_empty();
+        let per_object_active_cache = rules.values().any(|access| {
+            if let TokenAccess::Specific(grants) = access {
+                grants.iter().any(|g| g.objects.is_some())
+            } else {
+                false
+            }
+        });
         Ok(Self {
             rules,
             allow_all_authenticated: auth.allow_all_authenticated,
             has_policy,
             anonymous_principal: auth.anonymous_principal.clone(),
+            per_object_active_cache,
         })
     }
 
@@ -295,14 +322,11 @@ impl TokenPolicy {
     /// This is an opt-in feature: the value is `false` when no `objects` field
     /// appears anywhere in the loaded config (i.e., all existing deployments
     /// until they explicitly add an `objects` list to a grant).
+    ///
+    /// The result is pre-computed at `from_config` (M1) so that per-object gate
+    /// callers pay only a single `bool` load per RPC, not a full grant scan.
     pub fn per_object_active(&self) -> bool {
-        self.rules.values().any(|access| {
-            if let TokenAccess::Specific(grants) = access {
-                grants.iter().any(|g| g.objects.is_some())
-            } else {
-                false
-            }
-        })
+        self.per_object_active_cache
     }
 
     /// Whether the identity is allowed to use an object with the given
