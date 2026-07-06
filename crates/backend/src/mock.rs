@@ -115,6 +115,11 @@ pub struct MockBackend {
     /// paths are exercised through this separate hook. Set via
     /// `inject_close_error()`.
     injected_close_error: Mutex<Option<CkRv>>,
+    /// Error that `login` specifically returns (before `login_impl`). Used to
+    /// simulate PIN failures (e.g. CKR_PIN_INCORRECT) so tests can exercise
+    /// the per-slot failed-login budget without a real PKCS#11 module.
+    /// `login_calls` is still incremented so the caller can assert backend reach.
+    injected_login_rv: Mutex<Option<CkRv>>,
     /// Optional mechanism parameters to return from `C_EncryptInit`.
     ///
     /// Real providers may mutate selected init parameters, for example by
@@ -219,6 +224,7 @@ impl MockBackend {
             attribute_store: Mutex::new(HashMap::new()),
             injected_error: Mutex::new(None),
             injected_close_error: Mutex::new(None),
+            injected_login_rv: Mutex::new(None),
             encrypt_init_output: Mutex::new(None),
             encrypt_operation_output: Mutex::new(None),
             encrypt_exact_output: Mutex::new(None),
@@ -389,6 +395,19 @@ impl MockBackend {
     /// Clear a previously injected `close_session` error.
     pub fn clear_close_error(&self) {
         *self.injected_close_error.lock().unwrap() = None;
+    }
+
+    /// Make subsequent `login` calls return `rv` instead of the normal
+    /// login logic. `login_calls` is still incremented so tests can assert
+    /// whether the backend was reached. Use to simulate PIN failures without
+    /// a real PKCS#11 module (e.g. `CKR_PIN_INCORRECT`).
+    pub fn inject_login_rv(&self, rv: CkRv) {
+        *self.injected_login_rv.lock().unwrap() = Some(rv);
+    }
+
+    /// Clear a previously injected login error, restoring normal login behavior.
+    pub fn clear_login_rv(&self) {
+        *self.injected_login_rv.lock().unwrap() = None;
     }
 
     /// Configure optional mechanism parameters returned by `encrypt_init`.
@@ -1256,6 +1275,11 @@ impl Pkcs11Backend for MockBackend {
             while !*released {
                 released = cv.wait(released).unwrap();
             }
+        }
+        // G2-PR3: injected login error for PIN-failure tests. Checked after the
+        // gate and counter so tests can assert backend reach via login_call_count.
+        if let Some(rv) = *self.injected_login_rv.lock().unwrap() {
+            return Err(rv);
         }
         self.login_impl(session, user_type)
     }

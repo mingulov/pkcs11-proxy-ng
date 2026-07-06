@@ -105,6 +105,19 @@ pub(super) async fn login(
         }
     };
 
+    // G2-PR3: per-slot aggregate failed-login budget. Fast-reject during the
+    // cooldown window without touching the backend — the proxy stops feeding
+    // the backend's shared PIN-lockout counter. Inert (always false) when
+    // `per_slot_failed_login_budget` is unset → byte-identical to today.
+    // Indistinguishable from the lock-timeout DEVICE_ERROR above; the app
+    // already handles transient DEVICE_ERROR as a retriable failure.
+    if crate::server::rate_quota::login_slot_in_cooldown(slot) {
+        crate::server::resilience::record_login_budget_tripped();
+        return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+            ck_rv: CkRv::DEVICE_ERROR.0,
+        }));
+    }
+
     // Wrap PIN bytes in `Zeroizing` so the backing buffer is overwritten when
     // dropped. Read it up-front and pre-hash it so the logical-login path can
     // validate the PIN and the verifier can be stored after the PIN is moved
@@ -168,6 +181,9 @@ pub(super) async fn login(
 
     let ck_rv = match &result {
         Ok(()) => {
+            // G2-PR3: backend accepted the PIN → reset the slot's failure counter
+            // so the budget window starts fresh on the next wrong-PIN attempt.
+            crate::server::rate_quota::record_login_success(slot);
             if let Some(login_state) = requested_login_state {
                 // Capture the verifier so co-located logical clients can be
                 // PIN-validated (A1) without a second backend login.
@@ -183,6 +199,17 @@ pub(super) async fn login(
         }
         Err(error) => {
             warn!(context_id = %ctx_id.0, user_type = user_type_raw, rv = error.0, "Login failed");
+            // G2-PR3: count PIN-wrong RVs toward the per-slot aggregate budget.
+            // PIN_LOCKED is the backend's own lockout — counting it would be
+            // redundant. PIN_EXPIRED is not a wrong-PIN attempt. Other RVs
+            // (SESSION_HANDLE_INVALID, DEVICE_ERROR, …) are not PIN failures.
+            if (*error == CkRv::PIN_INCORRECT
+                || *error == CkRv::PIN_INVALID
+                || *error == CkRv::PIN_LEN_RANGE)
+                && crate::server::rate_quota::record_login_failure(slot)
+            {
+                crate::server::resilience::record_login_budget_tripped();
+            }
             error.0
         }
     };

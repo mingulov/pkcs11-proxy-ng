@@ -1719,3 +1719,72 @@ async fn open_session_quota_enforced_end_to_end() {
     let ro3 = open(ctx_other.0.clone()).await;
     assert_eq!(ro3.ck_rv, CkRv::SESSION_COUNT.0, "other context hits own quota independently");
 }
+
+// ---------------------------------------------------------------------------
+// G2-PR3: per-slot aggregate failed-login budget
+// ---------------------------------------------------------------------------
+
+/// G2-PR3: when `per_slot_failed_login_budget` is unset (or configured to
+/// `None`), all failed-login attempts reach the backend transparently — no
+/// fast-reject, no DEVICE_ERROR substitution.
+///
+/// This test is safe to run alongside `open_session_quota_enforced_end_to_end`
+/// which configures the global rate-quota state with `budget = None`. In both
+/// the "state not yet configured" and the "state configured with budget = None"
+/// cases, `login_slot_in_cooldown` always returns false and
+/// `record_login_failure` is always a no-op, so the login path is unchanged.
+#[tokio::test]
+async fn failed_login_budget_unset_all_reach_backend_transparently() {
+    // Use quota_mutex so this test serializes against the quota configure test;
+    // if that test has already set the budget to None, we're fine. If another
+    // test (e.g. in an integration binary) has configured a non-None budget, we
+    // detect it here and skip rather than assert incorrectly.
+    let _guard = quota_mutex().lock().await;
+
+    // If the global state is already configured with a non-None budget, skip
+    // gracefully. Within this test binary, only the existing configure call
+    // (budget = None) ever runs, so this path should not be taken.
+    if crate::server::rate_quota::configured_login_budget().is_some() {
+        // A different invocation set a non-None budget; unset semantics cannot
+        // be verified in this process. Skip.
+        return;
+    }
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    // Inject PIN_INCORRECT so every backend login fails with a PIN error.
+    mock.inject_login_rv(CkRv::PIN_INCORRECT);
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // 5 failed attempts must ALL reach the backend (no fast-reject).
+    for i in 1_usize..=5 {
+        let rv = login(
+            &HandlerContext::for_test(&ctx_mgr, &backend),
+            Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                user_type: CkUserType::User as u64,
+                pin: Some(b"wrong".to_vec()),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+        assert_eq!(
+            rv,
+            CkRv::PIN_INCORRECT.0,
+            "attempt {i}: must return transparent CKR_PIN_INCORRECT (no fast-reject)"
+        );
+        assert_eq!(
+            mock.login_call_count(),
+            i,
+            "attempt {i}: backend must be called — no fast-reject when budget is unset"
+        );
+    }
+}

@@ -213,6 +213,13 @@ pub fn login_slot_in_cooldown(slot: CkSlotId) -> bool {
     in_cooldown_on(&state.login_state, slot)
 }
 
+/// Returns the configured per-slot failed-login budget, or `None` when
+/// `per_slot_failed_login_budget` is unset or the state has not been
+/// configured. Used by tests to detect which OnceLock branch is active.
+pub fn configured_login_budget() -> Option<u32> {
+    STATE.get()?.login_budget
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
