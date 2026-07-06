@@ -112,7 +112,6 @@ pub(super) async fn login(
     // Indistinguishable from the lock-timeout DEVICE_ERROR above; the app
     // already handles transient DEVICE_ERROR as a retriable failure.
     if crate::server::rate_quota::login_slot_in_cooldown(slot) {
-        crate::server::resilience::record_login_budget_tripped();
         return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
             ck_rv: CkRv::DEVICE_ERROR.0,
         }));
@@ -203,12 +202,13 @@ pub(super) async fn login(
             // PIN_LOCKED is the backend's own lockout — counting it would be
             // redundant. PIN_EXPIRED is not a wrong-PIN attempt. Other RVs
             // (SESSION_HANDLE_INVALID, DEVICE_ERROR, …) are not PIN failures.
-            if (*error == CkRv::PIN_INCORRECT
+            // The trip metric (login_budget_tripped_total) is recorded exactly
+            // once per trip inside record_login_failure → record_failure_on.
+            if *error == CkRv::PIN_INCORRECT
                 || *error == CkRv::PIN_INVALID
-                || *error == CkRv::PIN_LEN_RANGE)
-                && crate::server::rate_quota::record_login_failure(slot)
+                || *error == CkRv::PIN_LEN_RANGE
             {
-                crate::server::resilience::record_login_budget_tripped();
+                crate::server::rate_quota::record_login_failure(slot);
             }
             error.0
         }

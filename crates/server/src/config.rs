@@ -725,6 +725,24 @@ impl DaemonConfig {
         if self.proxy.max_blocking_threads == 0 {
             return Err("proxy.max_blocking_threads must be > 0".into());
         }
+        // Validate rate_limit fields: Some(0) would silently block every request
+        // because the cap is set but set to zero. The correct way to disable a limit
+        // is to omit the field (None). Reject Some(0) loudly at startup.
+        if self.rate_limit.per_principal_max_in_flight == Some(0) {
+            return Err("rate_limit.per_principal_max_in_flight must be > 0; \
+                 omit the field to disable the limit (0 would block all requests)"
+                .into());
+        }
+        if self.rate_limit.per_principal_max_sessions == Some(0) {
+            return Err("rate_limit.per_principal_max_sessions must be > 0; \
+                 omit the field to disable the limit (0 would block all requests)"
+                .into());
+        }
+        if self.rate_limit.per_slot_failed_login_budget == Some(0) {
+            return Err("rate_limit.per_slot_failed_login_budget must be > 0; \
+                 omit the field to disable the limit (0 would block all requests)"
+                .into());
+        }
         if self.proxy.max_concurrent_backend_calls > self.proxy.max_blocking_threads {
             return Err(format!(
                 "proxy.max_concurrent_backend_calls ({}) must be <= proxy.max_blocking_threads ({}). \

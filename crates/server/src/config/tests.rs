@@ -1092,3 +1092,71 @@ allow_insecure_unix = true
     let err = cfg.validate().unwrap_err();
     assert!(err.contains("audit"), "error must mention audit, got: {err}");
 }
+
+// --- G2-PR3: rate_limit Some(0) footgun tests ---
+
+/// Helper that builds a minimal valid config string with an optional `[rate_limit]` block
+/// and an insecure unix listener (so everything except the tested field validates).
+fn rate_limit_toml(rate_limit_block: &str) -> String {
+    format!(
+        "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+{rate_limit_block}"
+    )
+}
+
+#[test]
+fn rate_limit_per_principal_max_in_flight_zero_is_rejected() {
+    let toml = rate_limit_toml("[rate_limit]\nper_principal_max_in_flight = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("per_principal_max_in_flight"), "error must name the field, got: {err}");
+    assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
+}
+
+#[test]
+fn rate_limit_per_principal_max_sessions_zero_is_rejected() {
+    let toml = rate_limit_toml("[rate_limit]\nper_principal_max_sessions = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("per_principal_max_sessions"), "error must name the field, got: {err}");
+    assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
+}
+
+#[test]
+fn rate_limit_per_slot_failed_login_budget_zero_is_rejected() {
+    let toml = rate_limit_toml("[rate_limit]\nper_slot_failed_login_budget = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("per_slot_failed_login_budget"), "error must name the field, got: {err}");
+    assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
+}
+
+#[test]
+fn rate_limit_absent_fields_validate_ok() {
+    // All rate_limit fields absent (None) is the opt-out default; must be valid.
+    let toml = rate_limit_toml("");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    assert!(cfg.validate().is_ok(), "absent rate_limit fields must validate OK");
+    assert!(cfg.rate_limit.per_principal_max_in_flight.is_none());
+    assert!(cfg.rate_limit.per_principal_max_sessions.is_none());
+    assert!(cfg.rate_limit.per_slot_failed_login_budget.is_none());
+}
+
+#[test]
+fn rate_limit_some_nonzero_fields_validate_ok() {
+    // Some(5) for each field is a valid positive limit.
+    let toml = rate_limit_toml(
+        "[rate_limit]\nper_principal_max_in_flight = 5\nper_principal_max_sessions = 5\nper_slot_failed_login_budget = 5\n",
+    );
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    assert!(cfg.validate().is_ok(), "positive rate_limit fields must validate OK");
+    assert_eq!(cfg.rate_limit.per_principal_max_in_flight, Some(5));
+    assert_eq!(cfg.rate_limit.per_principal_max_sessions, Some(5));
+    assert_eq!(cfg.rate_limit.per_slot_failed_login_budget, Some(5));
+}

@@ -8,10 +8,33 @@
 //! Mirrors the `OnceLock<State>` + `DashMap` pattern of [`super::rate_limit`].
 //! Uses `Arc<DashMap>` for `in_flight` so `PrincipalOpGuard` can hold the map
 //! reference without lifetime parameters (enabling test isolation via local state).
+//!
+//! ## Concurrency safety for in-flight GC
+//!
+//! The guard holds the principal `String` key and **re-looks-up** the DashMap entry
+//! on drop (`map.get(key)`).  `DashMap::get()` holds a shard **read-lock** for the
+//! lifetime of the returned `Ref`, and `DashMap::retain()` acquires a shard
+//! **write-lock** — the two are mutually exclusive at the shard level.  Therefore:
+//!
+//! - A GC pass (`retain`) cannot remove an entry while its guard is being dropped
+//!   (the drop holds the shard read-lock via the `Ref`, blocking GC's write-lock).
+//! - The admit path (`entry().or_insert_with()` + `fetch_add`) holds a shard
+//!   write-lock for the entire insert+increment sequence, preventing GC from
+//!   removing a newly-inserted zero-count entry before the increment completes.
+//! - GC only drops entries whose count is `<= 0`; a just-admitted entry has count
+//!   `>= 1` when the shard lock is released, so it is never a GC target.
+//!
+//! The alternative (guard holds `Arc<AtomicI64>` so the decrement hits the same
+//! counter even after map removal) was not chosen because the re-lookup design is
+//! already correct under DashMap shard-locking and requires no extra allocation.
 
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Minimum interval between opportunistic GC sweeps of the in-flight map.
+/// There is no per-op window here (unlike `rate_limit.rs`), so a fixed constant is used.
+const INFLIGHT_GC_INTERVAL: Duration = Duration::from_secs(60);
 
 use dashmap::DashMap;
 use pkcs11_proxy_ng_types::CkSlotId;
@@ -34,6 +57,10 @@ struct RateQuota {
     login_cooldown: Duration,
     /// Arc so `PrincipalOpGuard` can hold a reference without a lifetime.
     in_flight: Arc<DashMap<String, AtomicI64>>,
+    /// Timestamp of the last opportunistic GC sweep of `in_flight`.
+    /// `try_lock` is used; a missed sweep is not a correctness issue, only
+    /// a bounded delay in reclaiming idle entries.
+    last_inflight_gc: Mutex<Instant>,
     login_state: DashMap<CkSlotId, FailedLoginState>,
 }
 
@@ -143,6 +170,46 @@ fn in_cooldown_on(login_state: &DashMap<CkSlotId, FailedLoginState>, slot: CkSlo
     login_state.get(&slot).is_some_and(|e| e.cooldown_until.is_some_and(|t| t > Instant::now()))
 }
 
+/// Opportunistically reclaim idle (count == 0) entries from the in-flight map.
+///
+/// Gated by two conditions (matching the sibling `rate_limit.rs` GC pattern):
+/// - map size > 1 024 (avoids a full scan when the map is small — the common case).
+/// - `INFLIGHT_GC_INTERVAL` has elapsed since the last sweep (rate-limits scan cost).
+///
+/// `try_lock` is used so a contended GC lock is skipped silently; the next
+/// successful admit on any principal will retry.
+///
+/// # Safety
+///
+/// See the module-level concurrency note.  Entries with `count <= 0` are safe to
+/// remove because the guard's `Drop` impl holds a DashMap shard **read-lock** for
+/// the entire decrement (via `map.get()`), which is mutually exclusive with
+/// `retain`'s shard **write-lock**.  A dropped guard therefore cannot observe a
+/// missing entry mid-decrement, and a just-admitted entry (count >= 1) is never
+/// a GC target.
+fn maybe_gc_inflight(
+    in_flight: &Arc<DashMap<String, AtomicI64>>,
+    last_gc: &Mutex<Instant>,
+    now: Instant,
+) {
+    if in_flight.len() > 1024
+        && let Ok(mut last) = last_gc.try_lock()
+        && now.duration_since(*last) >= INFLIGHT_GC_INTERVAL
+    {
+        in_flight.retain(|_, c| c.load(Ordering::Relaxed) > 0);
+        *last = now;
+    }
+}
+
+/// Force a GC pass unconditionally, bypassing the size and interval gates.
+///
+/// Available only in tests so each test can control when GC runs without
+/// waiting for the 1 024-entry trigger or the 60-second interval.
+#[cfg(test)]
+fn force_gc_on(in_flight: &Arc<DashMap<String, AtomicI64>>) {
+    in_flight.retain(|_, c| c.load(Ordering::Relaxed) > 0);
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Install the rate-quota configuration. Called once at daemon startup.
@@ -156,6 +223,7 @@ pub fn configure(cfg: &crate::config::RateLimitConfig) {
         login_budget: cfg.per_slot_failed_login_budget,
         login_cooldown: Duration::from_secs(cooldown_secs),
         in_flight: Arc::new(DashMap::new()),
+        last_inflight_gc: Mutex::new(Instant::now()),
         login_state: DashMap::new(),
     });
 }
@@ -172,7 +240,13 @@ pub fn try_begin_principal_op(principal: &str) -> Option<PrincipalOpGuard> {
     let Some(state) = STATE.get() else {
         return Some(PrincipalOpGuard(GuardKind::NoOp));
     };
-    begin_op_on(state.max_in_flight, &state.in_flight, principal)
+    let guard = begin_op_on(state.max_in_flight, &state.in_flight, principal)?;
+    // Opportunistic GC: reclaim idle (count == 0) principal entries from the
+    // in_flight map.  Only runs when the map is large AND the interval has
+    // elapsed; otherwise it is a single atomic size-load + a failed try_lock.
+    // Runs only on successful admission so GC never delays a rejected caller.
+    maybe_gc_inflight(&state.in_flight, &state.last_inflight_gc, Instant::now());
+    Some(guard)
 }
 
 /// Returns the configured per-principal session limit, or `None` when
@@ -239,6 +313,7 @@ mod tests {
             login_budget,
             login_cooldown: Duration::from_secs(cooldown_secs),
             in_flight: Arc::new(DashMap::new()),
+            last_inflight_gc: Mutex::new(Instant::now()),
             login_state: DashMap::new(),
         }
     }
@@ -341,5 +416,53 @@ mod tests {
             );
             assert!(!in_cooldown_on(&q.login_state, slot), "None budget: never in cooldown");
         }
+    }
+
+    // ── In-flight GC ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn gc_reclaims_idle_entries() {
+        // After all guards are dropped (count → 0), force_gc_on must remove them.
+        let q = make_quota(Some(10), None, None, 60);
+        let g1 = begin_op_on(q.max_in_flight, &q.in_flight, "alice").expect("g1");
+        let g2 = begin_op_on(q.max_in_flight, &q.in_flight, "bob").expect("g2");
+        assert_eq!(q.in_flight.len(), 2, "two principals registered before drop");
+        drop(g1);
+        drop(g2);
+        // Both counts are now 0; GC must remove them.
+        force_gc_on(&q.in_flight);
+        assert_eq!(q.in_flight.len(), 0, "GC reclaimed both idle entries");
+    }
+
+    #[test]
+    fn gc_retains_entries_with_live_guards() {
+        // A principal whose guard is still live (count > 0) must NOT be GC'd.
+        let q = make_quota(Some(10), None, None, 60);
+        let _ga = begin_op_on(q.max_in_flight, &q.in_flight, "alice").expect("g_alice");
+        let gb = begin_op_on(q.max_in_flight, &q.in_flight, "bob").expect("g_bob");
+        drop(gb); // bob's guard dropped; count → 0
+
+        force_gc_on(&q.in_flight);
+
+        assert!(q.in_flight.contains_key("alice"), "alice must be retained (live guard)");
+        assert!(!q.in_flight.contains_key("bob"), "bob must be reclaimed (idle)");
+        let alice_count = q.in_flight.get("alice").map(|c| c.load(Ordering::Relaxed)).unwrap_or(-1);
+        assert_eq!(alice_count, 1, "alice's in-flight count stays 1 after GC");
+    }
+
+    #[test]
+    fn gc_then_readmit_accounting_correct() {
+        // Admit, drop, GC removes entry, admit again: new entry has correct count.
+        let q = make_quota(Some(5), None, None, 60);
+        let g1 = begin_op_on(q.max_in_flight, &q.in_flight, "carol").expect("first admit");
+        drop(g1); // count → 0
+        force_gc_on(&q.in_flight); // entry removed
+        assert!(!q.in_flight.contains_key("carol"), "entry was reclaimed by GC");
+
+        // Fresh admit must create a new entry with count == 1.
+        let g2 = begin_op_on(q.max_in_flight, &q.in_flight, "carol").expect("re-admit");
+        let count = q.in_flight.get("carol").map(|c| c.load(Ordering::Relaxed)).unwrap_or(-1);
+        assert_eq!(count, 1, "fresh entry starts at 1 after re-admit");
+        drop(g2);
     }
 }
