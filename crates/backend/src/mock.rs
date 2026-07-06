@@ -188,11 +188,17 @@ pub struct MockBackend {
     /// PKCS#11 version reported by `get_info`. Default `(3, 0)`.
     /// Set via `with_cryptoki_version` to test the v3.0+ startup guard.
     cryptoki_version: (u8, u8),
-    /// When `Some`, `find_objects` returns this list (truncated to `max_count`)
-    /// instead of the default empty result. Used by G3-PR2 tests that need the
-    /// mock to serve specific objects from a search. Default `None` preserves
-    /// the historical "always empty" find behavior.
+    /// When `Some`, `find_objects` returns successive slices of this list,
+    /// advancing the cursor on each call. After all objects have been returned,
+    /// subsequent calls return an empty vec — simulating genuine backend exhaustion.
+    /// `find_objects_init` resets the cursor to 0. Default `None` preserves the
+    /// historical "always empty" find behavior for tests that do not need search.
     find_objects_override: Mutex<Option<Vec<CkObjectHandle>>>,
+    /// Cursor into `find_objects_override`: the index of the next object to return.
+    /// Each `find_objects` call advances it by the number of objects returned.
+    /// `find_objects_init` resets it to 0. Enables multi-batch test scenarios where
+    /// successive calls return successive slices (batch1 → batch2 → [] exhausted).
+    find_objects_cursor: Mutex<usize>,
 }
 
 /// Which mechanisms require parameters and which forbid them, snapshot
@@ -252,6 +258,7 @@ impl MockBackend {
             param_presence: None,
             cryptoki_version: (3, 0),
             find_objects_override: Mutex::new(None),
+            find_objects_cursor: Mutex::new(0),
         }
     }
 
@@ -328,11 +335,15 @@ impl MockBackend {
         store.entry(object.0).or_default().insert(attr_type.0, slot);
     }
 
-    /// Configure the objects returned by the next `find_objects` call(s).
+    /// Configure the objects to be served by successive `find_objects` calls.
     ///
-    /// When set, `find_objects` returns these handles (truncated to `max_count`)
-    /// instead of the default empty vec. Used by G3-PR2 per-object filter tests
-    /// that need the mock to serve a specific search result.
+    /// `find_objects` returns a cursor-based slice of up to `max_count` handles on each
+    /// call, advancing the cursor. Once all handles have been returned, subsequent calls
+    /// yield an empty vec — simulating genuine backend exhaustion. `find_objects_init`
+    /// resets the cursor to 0, so a new search starts from the beginning.
+    ///
+    /// This enables multi-batch test scenarios (e.g. batch1=[denied], batch2=[allowed])
+    /// by configuring a list larger than `max_count` and using a small `max_object_count`.
     pub fn set_find_objects_result(&self, objects: Vec<CkObjectHandle>) {
         *self.find_objects_override.lock().unwrap() = Some(objects);
     }

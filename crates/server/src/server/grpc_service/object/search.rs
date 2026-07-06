@@ -62,33 +62,24 @@ pub(super) async fn find_objects(
     };
 
     let max_count = req.max_object_count;
-    let backend = ctx.backend.clone();
-    // CkSessionHandle is Copy; the move closure copies it so `session` remains
-    // available for the per-object filter below.
-    let result = spawn_backend(move || backend.find_objects(session, max_count)).await?;
 
-    match result {
-        Ok(backend_objects) => {
-            // COUNT ONLY — never log the labels/IDs/values (design V15/D9 redaction).
-            // observe_find_result sees the FULL backend count (resilience monitors
-            // the backend population size, independent of what the filter keeps).
-            if crate::server::resilience::observe_find_result(backend_objects.len()) {
-                tracing::warn!(
-                    object_count = backend_objects.len(),
-                    "pathological object population: C_FindObjects result exceeds resilience threshold"
-                );
-            }
-
-            // Transparency path: per_object_active()==false means no grant anywhere
-            // in the loaded config has an `objects` restriction, so every principal
-            // is unrestricted. Skip all authz work — byte-identical to pre-filter.
-            if !ctx.token_policy.per_object_active() {
-                return match register_object_handles(
-                    &ctx.context_manager,
-                    &ctx_id,
-                    &backend_objects,
-                )
-                .await
+    // Transparency path: per_object_active()==false means no grant anywhere
+    // in the loaded config has an `objects` restriction, so every principal
+    // is unrestricted. Single backend call, no filter — byte-identical to pre-filter.
+    if !ctx.token_policy.per_object_active() {
+        let backend = ctx.backend.clone();
+        // CkSessionHandle is Copy; the move closure copies it.
+        let result = spawn_backend(move || backend.find_objects(session, max_count)).await?;
+        return match result {
+            Ok(backend_objects) => {
+                // COUNT ONLY — never log the labels/IDs/values (design V15/D9 redaction).
+                if crate::server::resilience::observe_find_result(backend_objects.len()) {
+                    tracing::warn!(
+                        object_count = backend_objects.len(),
+                        "pathological object population: C_FindObjects result exceeds resilience threshold"
+                    );
+                }
+                match register_object_handles(&ctx.context_manager, &ctx_id, &backend_objects).await
                 {
                     Some(object_handles) => {
                         Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
@@ -100,70 +91,109 @@ pub(super) async fn find_objects(
                         ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
                         object_handles: vec![],
                     })),
-                };
+                }
             }
+            Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                ck_rv: error.0,
+                object_handles: vec![],
+            })),
+        };
+    }
 
-            // Per-object enumeration filter (G3-PR2, ADR-0012).
-            // Resolve identity + (label, serial) once for all objects in this batch.
-            // Fail-closed: if the authz context cannot be resolved, return an empty
-            // result with CKR_OK — indistinguishable from "template matched nothing".
-            let Some((identity, label, serial)) =
-                resolve_object_authz_context(ctx, &ctx_id, virtual_session).await
-            else {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
-                    ck_rv: CkRv::OK.0,
-                    object_handles: vec![],
-                }));
+    // Per-object enumeration filter (G3-PR2, ADR-0012).
+    // Resolve identity + (label, serial) ONCE before the inner loop.
+    // Fail-closed: if the authz context cannot be resolved, return an empty
+    // result with CKR_OK — indistinguishable from "template matched nothing".
+    let Some((identity, label, serial)) =
+        resolve_object_authz_context(ctx, &ctx_id, virtual_session).await
+    else {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+            ck_rv: CkRv::OK.0,
+            object_handles: vec![],
+        }));
+    };
+
+    // Inner loop: pull successive backend batches, filtering each.
+    // Returns accumulated kept objects as soon as ≥1 is found (a non-empty result
+    // may be fewer than max_count — that is legal C_FindObjects behaviour; the
+    // client continues looping). Returns empty ONLY when the backend itself returns
+    // an empty batch (genuine exhaustion), which is the correct loop-terminator a
+    // client can rely on. This prevents a fully-denied batch from being returned as
+    // 0 to the client, which would be indistinguishable from end-of-search and would
+    // silently hide authorized objects appearing later in the backend's enumeration.
+    let mut kept_backends = Vec::new();
+    let mut kept_uids: Vec<Vec<u8>> = Vec::new();
+    loop {
+        let batch_backend = ctx.backend.clone();
+        // CkSessionHandle and u32 are Copy; the move closure copies them.
+        let batch =
+            match spawn_backend(move || batch_backend.find_objects(session, max_count)).await? {
+                Ok(objects) => objects,
+                Err(ck_error) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                        ck_rv: ck_error.0,
+                        object_handles: vec![],
+                    }));
+                }
             };
 
-            // For each backend object: fetch its CKA_UNIQUE_ID and apply the policy.
-            // Fail-closed: absent/empty uid or a deny → silently drop the object.
-            // The spec allows find_objects to return fewer than max_object_count
-            // when some matches are filtered; callers loop until they get 0 (C4).
-            let mut kept_backends = Vec::new();
-            let mut kept_uids: Vec<Vec<u8>> = Vec::new();
-            for &backend_object in &backend_objects {
-                let uid = super::super::authorization::fetch_object_unique_id(
-                    ctx,
-                    session,
-                    backend_object,
-                )
-                .await;
-                match uid {
-                    Some(uid)
-                        if !uid.is_empty()
-                            && ctx
-                                .token_policy
-                                .allows_object_use(&identity, &label, &serial, &uid) =>
-                    {
-                        kept_backends.push(backend_object);
-                        kept_uids.push(uid);
-                    }
-                    // Fail-closed: empty/absent uid, or deny — drop.
-                    _ => {}
-                }
-            }
+        // COUNT ONLY — never log the labels/IDs/values (design V15/D9 redaction).
+        // observe_find_result sees each backend batch independently so resilience
+        // monitors the backend population size regardless of what the filter keeps.
+        if crate::server::resilience::observe_find_result(batch.len()) {
+            tracing::warn!(
+                object_count = batch.len(),
+                "pathological object population: C_FindObjects result exceeds resilience threshold"
+            );
+        }
 
-            match register_object_handles(&ctx.context_manager, &ctx_id, &kept_backends).await {
-                Some(virtual_handles) => {
-                    // Cache each kept object's uid under its new virtual handle so
-                    // use-time gates (gate_object_handle) skip the re-fetch.
-                    for (&virtual_id, uid) in virtual_handles.iter().zip(kept_uids) {
-                        ctx.context_manager.cache_object_unique_id(&ctx_id, virtual_id, uid).await;
-                    }
-                    Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
-                        ck_rv: CkRv::OK.0,
-                        object_handles: virtual_handles,
-                    }))
+        if batch.is_empty() {
+            // Backend is genuinely exhausted — return whatever was accumulated.
+            // An empty kept set here means the search is truly over (correct 0).
+            break;
+        }
+
+        for &backend_object in &batch {
+            let uid =
+                super::super::authorization::fetch_object_unique_id(ctx, session, backend_object)
+                    .await;
+            match uid {
+                Some(uid)
+                    if !uid.is_empty()
+                        && ctx.token_policy.allows_object_use(&identity, &label, &serial, &uid) =>
+                {
+                    kept_backends.push(backend_object);
+                    kept_uids.push(uid);
                 }
-                None => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
-                    ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
-                    object_handles: vec![],
-                })),
+                // Fail-closed: empty/absent uid, or deny — drop silently.
+                _ => {}
             }
         }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
-            ck_rv: error.0,
+
+        if !kept_backends.is_empty() {
+            // At least one authorized object found — return now. Returning fewer
+            // than max_count is legal; the client loops until it receives an empty
+            // response (which this server now only sends on genuine exhaustion).
+            break;
+        }
+        // The entire batch was denied — pull the next backend batch rather than
+        // returning 0, which the client would mistake for end-of-search.
+    }
+
+    match register_object_handles(&ctx.context_manager, &ctx_id, &kept_backends).await {
+        Some(virtual_handles) => {
+            // Cache each kept object's uid under its new virtual handle so
+            // use-time gates (gate_object_handle) skip the re-fetch.
+            for (&virtual_id, uid) in virtual_handles.iter().zip(kept_uids) {
+                ctx.context_manager.cache_object_unique_id(&ctx_id, virtual_id, uid).await;
+            }
+            Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                ck_rv: CkRv::OK.0,
+                object_handles: virtual_handles,
+            }))
+        }
+        None => Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+            ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
             object_handles: vec![],
         })),
     }
@@ -458,6 +488,152 @@ mod tests {
             cached,
             Some(UID_A_BYTES.to_vec()),
             "kept object's uid must be pre-cached under its virtual handle"
+        );
+    }
+
+    // ── Test 6: inner loop pulls past a fully-denied batch ────────────────────
+
+    #[tokio::test]
+    async fn find_objects_inner_loop_pulls_past_fully_denied_batch() {
+        // Regression test for the premature-0 bug: when the first backend batch
+        // contains only denied objects, the server must pull the next batch rather
+        // than returning 0 (which a client reads as end-of-search).
+        //
+        // Setup: 3 objects in the mock — obj_d1 and obj_d2 have uid_B (denied),
+        // obj_a has uid_A (allowed). With max_object_count=2, the mock cursor
+        // returns batch1=[obj_d1, obj_d2] then batch2=[obj_a] then [].
+        // The inner loop must see batch1 entirely denied, pull batch2, find obj_a
+        // allowed, and return its virtual handle — NOT 0 (premature end-of-search).
+        let policy = confined_policy(CONFINED_IDENTITY, "MockToken", UID_A_HEX);
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+
+        // Two denied objects with uid_B, then the allowed object with uid_A.
+        let obj_d1 = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_d1,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+        );
+        let obj_d2 = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_d2,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+        );
+        let obj_a = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_a,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec())),
+        );
+
+        // Prime the multi-part op and configure the cursor-based result list.
+        // With max_object_count=2: batch1=[obj_d1,obj_d2], batch2=[obj_a], then [].
+        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.set_find_objects_result(vec![obj_d1, obj_d2, obj_a]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(CONFINED_IDENTITY.into())).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+            })
+            .await
+            .unwrap();
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        let resp = super::find_objects(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::FindObjectsRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session.0,
+                // Small batch size to force multi-batch: 2 < 3 total objects.
+                max_object_count: 2,
+            }),
+        )
+        .await
+        .expect("find_objects must not return a transport error")
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "must return CKR_OK");
+        assert_eq!(
+            resp.object_handles.len(),
+            1,
+            "inner loop must pull past the all-denied batch1 and return obj_a from batch2"
+        );
+
+        // The returned virtual handle must resolve to obj_a (uid_A in allowed list).
+        let virtual_handle = resp.object_handles[0];
+        let resolved = ctx
+            .context_manager
+            .get_context(&ctx_id, |c| {
+                c.object_handles.resolve(crate::server::handle_map::VirtualHandle(virtual_handle))
+            })
+            .await
+            .flatten();
+        assert_eq!(
+            resolved.map(|h| h.0),
+            Some(obj_a.0),
+            "the returned handle must map to obj_a (uid_A), not the denied obj_d1/obj_d2"
+        );
+    }
+
+    // ── Test 7: genuine backend exhaustion returns 0 handles ──────────────────
+
+    #[tokio::test]
+    async fn find_objects_genuine_exhaustion_returns_zero_handles() {
+        // When the backend is immediately exhausted (returns [] on first call),
+        // the inner loop must terminate correctly and return 0 handles with CKR_OK.
+        // This distinguishes the "real end-of-search" 0 from the "premature-0" bug.
+        let policy = confined_policy(CONFINED_IDENTITY, "MockToken", UID_A_HEX);
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+
+        // No set_find_objects_result → mock default returns [] immediately (exhausted).
+        mock.find_objects_init(backend_session, &[]).unwrap();
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(CONFINED_IDENTITY.into())).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+            })
+            .await
+            .unwrap();
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        let resp = super::find_objects(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::FindObjectsRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session.0,
+                max_object_count: 32,
+            }),
+        )
+        .await
+        .expect("find_objects must not return a transport error")
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "genuine exhaustion must return CKR_OK");
+        assert_eq!(
+            resp.object_handles.len(),
+            0,
+            "genuine backend exhaustion must return 0 handles — the correct loop-terminator"
         );
     }
 }

@@ -37,7 +37,11 @@ impl MockBackend {
         if !state.has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
-        state.begin_op(session, MultiPartOp::FindObjects)
+        state.begin_op(session, MultiPartOp::FindObjects)?;
+        // Reset the cursor so the next search starts from the beginning of the
+        // configured override list.
+        *self.find_objects_cursor.lock().unwrap() = 0;
+        Ok(())
     }
 
     pub(super) fn find_objects_impl(
@@ -50,13 +54,24 @@ impl MockBackend {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
         state.require_op(session, MultiPartOp::FindObjects)?;
-        // When a test has configured a result override, return it truncated to
-        // `max_count`. The override is retained so repeated find_objects calls
-        // (as a client would issue when looping) continue to work.
-        let override_guard = self.find_objects_override.lock().unwrap();
-        if let Some(objects) = override_guard.as_ref() {
-            let take = (max_count as usize).min(objects.len());
-            return Ok(objects[..take].to_vec());
+        drop(state);
+
+        // Return a cursor-based slice of the override list so each call advances
+        // through the configured objects. Once all objects have been served, returns
+        // an empty vec — the same signal a real backend sends at end-of-search.
+        // `find_objects_init` resets the cursor to 0.
+        //
+        // Tests that configure a small `max_count` relative to the override list
+        // length can observe multi-batch behaviour: batch1 → batch2 → [] exhausted.
+        let overridden = self.find_objects_override.lock().unwrap().clone();
+        if let Some(objects) = overridden {
+            let mut cursor = self.find_objects_cursor.lock().unwrap();
+            let start = *cursor;
+            let remaining = objects.len().saturating_sub(start);
+            let take = (max_count as usize).min(remaining);
+            let batch = objects[start..start + take].to_vec();
+            *cursor = start + take;
+            return Ok(batch);
         }
         Ok(vec![])
     }
