@@ -34,10 +34,16 @@ use super::super::handle_map::{BackendHandle, VirtualHandle};
 /// 1. Collect all non-zero embedded virtual handles (read-only scan).
 /// 2. Resolve each virtual→backend inside the context lock.
 /// 3. Gate each resolved handle through `gate_object_handle` (async, one call
-///    per embedded handle).  A denied handle is substituted with
-///    `CkObjectHandle(0)` (the not-found sentinel), making the denial
-///    byte-identical to a nonexistent handle at the backend.
-/// 4. Re-walk params writing the gated backend handles (resolve-by-map).
+///    per embedded handle).  A denied handle gates to `CkObjectHandle(0)`.
+/// 4. Re-walk params writing the gated backend handles. A gated-to-0 (denied /
+///    fail-closed) embedded handle is NOT forwarded to the backend as 0 —
+///    for an embedded handle a backend value of 0 means "no key / not
+///    applicable" (a different, potentially insecure operation), so Phase 4
+///    instead rejects the whole operation with `CKR_OBJECT_HANDLE_INVALID`
+///    BEFORE the backend call. This yields the SAME RV a genuinely nonexistent
+///    embedded handle produces (Phase 3 `None`), preserving the
+///    denied==nonexistent invisible-denial property at the RV/audit/metric axes
+///    (the first-access UID-fetch timing difference is the documented I1 limit).
 ///
 /// This structure ensures every handle-bearing mechanism variant — including
 /// nested CmsSig sub-mechanisms and SP800-108 byte-encoded key handles (the
