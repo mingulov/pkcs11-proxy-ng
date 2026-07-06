@@ -9,12 +9,18 @@ directory `verify`), fail-closed emission for auth/session/PIN-admin and
 key-lifecycle operations, audit metrics, and a **startup** backend-attestation
 record; (3) **G2-PR1 identity/config hardening** (refuse-to-start on `policy`/
 `allow_all_authenticated`/`audit` + `auth="none"`; reject writable config/module/
-audit-dir; per-slot login-lock acquisition timeout). **Not yet landed / phased
-(see the §-notes below and the full-review gap analysis 2026-07-06):** data-plane
-(sign/encrypt) audit emission + the fail-open gap-sentinel; reconnect/hot-swap
-re-attestation; the G2 authorization *enforcement* model (principal resolution,
-deny-default flip, leaf-SPKI identity keying, class/mechanism grants, rate/quota);
-and all of G3. Promote to **Accepted** as the enforcement phases land.
+audit-dir; per-slot login-lock acquisition timeout); (4) **G2-PR2 authorization
+enforcement** — mTLS leaf-SPKI identity keying (dual-accept DN transition),
+deny-default flip + audit-only `anonymous_principal`, class/mechanism/extract
+grant model, opt-in extract-deny on `C_WrapKey`/`C_WrapKeyAuthenticated`/
+value-bearing `C_GetAttributeValue`; (5) **G2-PR3 rate/quota** — per-principal
+in-flight cap + session quota (`CKR_SESSION_COUNT`) + per-slot failed-login budget,
+opt-in via `[rate_limit]`. **Not yet landed / phased (see the §-notes below and the
+full-review gap analysis 2026-07-06):** data-plane (sign/encrypt) audit emission +
+the fail-open gap-sentinel + its separate channel; reconnect/hot-swap
+re-attestation; per-class/mechanism grant *enforcement* (config currently rejects
+those grants — G3); and all of G3 (fine-grained use-time authz). Promote to
+**Accepted** as G3 lands.
 
 ## Context
 
@@ -96,13 +102,24 @@ distinguish the shim from the real module.
      per-object / per-mechanism / extract restriction is G3 (v3.0+ only), so a
      v2.40 token gets coarse-only. An `extract-deny` coarse sub-gate on
      `C_WrapKey` + value-bearing attribute reads is a candidate for G2 itself.
-     Rate/quota is enforced at the dispatch seam covering **both** the
-     `impl_proxy_service!` macro path and the hand-written handlers (esp.
-     `open_session`, the `CKR_SESSION_COUNT` target), with per-principal fairness;
-     quota rejections use spec-native RVs (`CKR_SESSION_COUNT`, `CKR_DEVICE_MEMORY`)
-     and are excluded from the backend-health failure counter. A per-**slot**
-     aggregate failed-login budget protects the backend's shared PIN-lockout
-     counter (the proxy is one application to the token).
+     *Rate/quota (G2-PR3, shipped, opt-in via `[rate_limit]`):* enforced at the
+     dispatch seam covering **both** the `impl_proxy_service!` macro path and the
+     hand-written handlers, with per-principal fairness. The reject codes are
+     **reconciled by kind** (2026-07-06 review): a transient per-principal
+     **in-flight** cap returns gRPC `resource_exhausted` (retryable, same as the
+     existing per-context cap); a per-principal **session** quota returns the
+     spec-native **`CKR_SESSION_COUNT`** as a CK_RV (derived leak-proof count, so
+     a client disconnect can never leak a reservation); a per-**slot** aggregate
+     **failed-login** budget fast-rejects with `CKR_DEVICE_ERROR` after K PIN
+     failures (indistinguishable from the existing login-lock timeout) to stop
+     feeding the backend token's **shared PIN-lockout** counter (the proxy is one
+     application to the token — the budget is per-slot AGGREGATE, not
+     per-principal, by design). All three rejections are EXCLUDED from the
+     backend-health failure counter (proxy-imposed, not backend faults) and are
+     inert/byte-identical when `[rate_limit]` is absent. Throttling is normal
+     backpressure, **not** an unreadiness signal (no k8s-readiness change).
+     Follow-ups (not shipped): a token-bucket requests/sec limiter if a workload
+     needs it, and `CKR_DEVICE_MEMORY`-based memory quotas.
    - **G3 — Fine-grained authorization:** use-time authorization on every
      handle-consuming operation and on every handle-minting operation (not
      enumeration filtering alone), including a per-**attribute** check so that
