@@ -1328,6 +1328,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hdrhistogram",
+ "hex",
  "http",
  "libc",
  "libloading",

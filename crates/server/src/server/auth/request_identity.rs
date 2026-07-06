@@ -61,10 +61,11 @@ fn identity_from_tcp<T>(
             let cert = certs.first().ok_or_else(|| {
                 Status::unauthenticated("mTLS listener request has empty peer certificate chain")
             })?;
-            let (issuer, subject) = super::mtls::extract_identity(cert.as_ref()).map_err(|e| {
-                Status::unauthenticated(format!("invalid mTLS peer certificate: {e}"))
-            })?;
-            Ok(AuthenticatedIdentity::Mtls { issuer, subject })
+            let (issuer, subject, spki_sha256) = super::mtls::extract_identity(cert.as_ref())
+                .map_err(|e| {
+                    Status::unauthenticated(format!("invalid mTLS peer certificate: {e}"))
+                })?;
+            Ok(AuthenticatedIdentity::Mtls { issuer, subject, spki_sha256 })
         }
     }
 }

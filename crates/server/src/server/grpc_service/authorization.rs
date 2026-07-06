@@ -254,12 +254,14 @@ mod tests {
         let owner = AuthenticatedIdentity::Mtls {
             issuer: "CN=Root CA".into(),
             subject: "CN=client".into(),
+            spki_sha256: "".into(),
         };
         assert!(context_owner_allowed(Some(MTLS_IDENTITY), &owner));
 
         let impostor = AuthenticatedIdentity::Mtls {
             issuer: "CN=Root CA".into(),
             subject: "CN=attacker".into(),
+            spki_sha256: "".into(),
         };
         assert!(!context_owner_allowed(Some(MTLS_IDENTITY), &impostor));
     }

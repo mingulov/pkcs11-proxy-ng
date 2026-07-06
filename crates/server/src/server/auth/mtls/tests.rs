@@ -80,7 +80,7 @@ fn self_signed_cn_only() {
     dn.push(DnType::CommonName, "TestCA");
     let der = gen_self_signed(&dn);
 
-    let (issuer, subject) = extract_identity(&der).unwrap();
+    let (issuer, subject, _) = extract_identity(&der).unwrap();
     assert_eq!(issuer, subject);
     assert!(subject.contains("CN=TestCA"), "subject: {subject}");
 }
@@ -95,7 +95,7 @@ fn ca_signed_distinct_issuer_and_subject() {
     client_dn.push(DnType::CommonName, "client1");
 
     let der = gen_ca_signed(&ca_dn, &client_dn);
-    let (issuer, subject) = extract_identity(&der).unwrap();
+    let (issuer, subject, _) = extract_identity(&der).unwrap();
 
     assert!(issuer.contains("CN=Root CA"), "issuer: {issuer}");
     assert!(issuer.contains("O=Test Org"), "issuer: {issuer}");
@@ -112,7 +112,7 @@ fn multi_attribute_dn_ordering() {
     dn.push(DnType::CommonName, "service-a");
 
     let der = gen_self_signed(&dn);
-    let (_, subject) = extract_identity(&der).unwrap();
+    let (_, subject, _) = extract_identity(&der).unwrap();
 
     assert!(subject.contains("C=US"), "subject: {subject}");
     assert!(subject.contains("O=ACME Corp"), "subject: {subject}");
@@ -129,16 +129,19 @@ fn policy_key_roundtrip() {
     client_dn.push(DnType::CommonName, "client1");
 
     let der = gen_ca_signed(&ca_dn, &client_dn);
-    let (issuer, subject) = extract_identity(&der).unwrap();
+    let (issuer, subject, spki_sha256) = extract_identity(&der).unwrap();
 
     let identity = super::super::identity::AuthenticatedIdentity::Mtls {
         issuer: issuer.clone(),
         subject: subject.clone(),
+        spki_sha256: spki_sha256.clone(),
     };
     let display = identity.to_string();
 
-    assert!(display.contains(&issuer), "display '{display}' must contain issuer '{issuer}'");
-    assert!(display.contains(&subject), "display '{display}' must contain subject '{subject}'");
+    // With SPKI present and DN present, display is enriched form starting with "x509:spki="
+    assert!(display.starts_with("x509:spki="), "display starts with spki prefix: {display}");
+    // The SPKI hash should be in the display
+    assert!(display.contains(&spki_sha256), "display contains spki_sha256");
 }
 
 #[test]
@@ -146,7 +149,7 @@ fn special_characters_in_cn() {
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "test+service");
     let der = gen_self_signed(&dn);
-    let (_, subject) = extract_identity(&der).unwrap();
+    let (_, subject, _) = extract_identity(&der).unwrap();
     assert!(
         subject.contains("test") && subject.contains("service"),
         "subject should contain the CN value: {subject}"
@@ -159,8 +162,8 @@ fn identity_deterministic_across_calls() {
     dn.push(DnType::CommonName, "stable-identity");
     let der = gen_self_signed(&dn);
 
-    let (issuer1, subject1) = extract_identity(&der).unwrap();
-    let (issuer2, subject2) = extract_identity(&der).unwrap();
+    let (issuer1, subject1, _) = extract_identity(&der).unwrap();
+    let (issuer2, subject2, _) = extract_identity(&der).unwrap();
     assert_eq!(issuer1, issuer2, "identity extraction must be deterministic");
     assert_eq!(subject1, subject2, "identity extraction must be deterministic");
 }
@@ -179,7 +182,7 @@ fn unicode_cn_handled() {
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "München-Server-ä");
     let der = gen_self_signed(&dn);
-    let (_, subject) = extract_identity(&der).unwrap();
+    let (_, subject, _) = extract_identity(&der).unwrap();
     assert!(
         subject.contains("München") || subject.contains("M"),
         "unicode should be preserved or safely encoded: {subject}"
@@ -299,13 +302,17 @@ fn policy_lookup_with_real_cert() {
     client_dn.push(DnType::CommonName, "authorized-client");
 
     let der = gen_ca_signed(&ca_dn, &client_dn);
-    let (issuer, subject) = extract_identity(&der).unwrap();
+    let (issuer, subject, spki_sha256) = extract_identity(&der).unwrap();
 
-    let identity = AuthenticatedIdentity::Mtls { issuer: issuer.clone(), subject: subject.clone() };
-
-    let policy_key = identity.to_string();
+    let identity = AuthenticatedIdentity::Mtls {
+        issuer: issuer.clone(),
+        subject: subject.clone(),
+        spki_sha256: spki_sha256.clone(),
+    };
+    // Policy key is the SPKI form (short)
+    let spki_policy_key = format!("x509:spki={spki_sha256}");
     let mut rules = HashMap::new();
-    rules.insert(policy_key, TokenAccess::All);
+    rules.insert(spki_policy_key, TokenAccess::All);
     let policy = TokenPolicy { rules, allow_all_authenticated: false };
 
     assert!(
@@ -316,9 +323,104 @@ fn policy_lookup_with_real_cert() {
     let other = AuthenticatedIdentity::Mtls {
         issuer: issuer.clone(),
         subject: "CN=unauthorized-client".into(),
+        spki_sha256: "different_spki_hash_000000000000000000000000000000000000000000000000".into(),
     };
     assert!(
         !policy.allows(&other, "any-token", "any-serial"),
-        "different subject should be denied"
+        "different SPKI hash should be denied"
+    );
+}
+
+#[test]
+fn extract_identity_provides_spki_sha256() {
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "test-cert");
+    let der = gen_self_signed(&dn);
+
+    let (_, _, spki_sha256) = extract_identity(&der).unwrap();
+    assert!(!spki_sha256.is_empty(), "SPKI hash must be non-empty");
+    assert_eq!(spki_sha256.len(), 64, "SHA-256 hex is 64 chars");
+    assert!(
+        spki_sha256.chars().all(|c| c.is_ascii_hexdigit()),
+        "SPKI hash must be hex: {spki_sha256}"
+    );
+
+    // Identity to_string() starts with x509:spki=
+    let identity = super::super::identity::AuthenticatedIdentity::Mtls {
+        issuer: "CN=test-cert".into(),
+        subject: "CN=test-cert".into(),
+        spki_sha256: spki_sha256.clone(),
+    };
+    assert!(identity.to_string().starts_with("x509:spki="), "primary key: {identity}");
+}
+
+#[test]
+fn spki_hash_differs_for_different_keypairs_same_dn() {
+    // Two certs with identical subject DN but different keypairs produce different SPKI hashes.
+    // This is the spoof that DN-keyed identity allowed: a CA minting a second cert with the
+    // victim's subject inherits the victim's grants. SPKI-keyed identity closes this.
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "shared-dn");
+    let der_a = gen_self_signed(&dn);
+    let der_b = gen_self_signed(&dn); // different key pair, same DN
+
+    let (_, subject_a, spki_a) = extract_identity(&der_a).unwrap();
+    let (_, subject_b, spki_b) = extract_identity(&der_b).unwrap();
+
+    // Same subject DN (the attacker can clone it)
+    assert_eq!(subject_a, subject_b, "subject DNs must be identical");
+    // But DIFFERENT SPKI (bound to the keypair — cannot be cloned)
+    assert_ne!(spki_a, spki_b, "SPKI hashes must differ for different keypairs");
+}
+
+#[test]
+fn dual_accept_spki_policy_authorizes() {
+    use super::super::identity::AuthenticatedIdentity;
+    use super::super::policy::{TokenAccess, TokenPolicy};
+    use std::collections::HashMap;
+
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "dual-accept-client");
+    let der = gen_self_signed(&dn);
+
+    let (issuer, subject, spki_sha256) = extract_identity(&der).unwrap();
+    let identity =
+        AuthenticatedIdentity::Mtls { issuer, subject, spki_sha256: spki_sha256.clone() };
+
+    // Policy keyed by SPKI (new form)
+    let mut rules = HashMap::new();
+    rules.insert(format!("x509:spki={spki_sha256}"), TokenAccess::All);
+    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+
+    assert!(policy.allows(&identity, "any", "any"), "SPKI-keyed policy must authorize");
+}
+
+#[test]
+fn dual_accept_legacy_dn_policy_authorizes_with_deprecation_warning() {
+    use super::super::identity::AuthenticatedIdentity;
+    use super::super::policy::{TokenAccess, TokenPolicy};
+    use std::collections::HashMap;
+
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "legacy-dn-client-unique-test");
+    let der = gen_self_signed(&dn);
+
+    let (issuer, subject, spki_sha256) = extract_identity(&der).unwrap();
+    let identity = AuthenticatedIdentity::Mtls {
+        issuer: issuer.clone(),
+        subject: subject.clone(),
+        spki_sha256,
+    };
+
+    // Policy keyed by legacy DN (old form) — dual-accept must still authorize
+    let legacy_key = format!("x509:issuer={};subject={}", issuer, subject);
+    let mut rules = HashMap::new();
+    rules.insert(legacy_key, TokenAccess::All);
+    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+
+    // The deprecated DN path is accepted (with a one-time tracing::warn! emitted)
+    assert!(
+        policy.allows(&identity, "any", "any"),
+        "legacy DN-keyed policy must still authorize during transition"
     );
 }

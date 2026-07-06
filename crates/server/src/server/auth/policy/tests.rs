@@ -70,8 +70,11 @@ fn all_access_matches_everything() {
 
 #[test]
 fn mtls_identity_display_format() {
-    let id =
-        AuthenticatedIdentity::Mtls { issuer: "CN=TestCA".into(), subject: "CN=client1".into() };
+    let id = AuthenticatedIdentity::Mtls {
+        issuer: "CN=TestCA".into(),
+        subject: "CN=client1".into(),
+        spki_sha256: "".into(),
+    };
     assert_eq!(id.to_string(), "x509:issuer=CN=TestCA;subject=CN=client1");
 }
 
@@ -109,10 +112,16 @@ fn mtls_identity_matches_policy_by_display_key() {
     rules.insert(mtls_key.to_string(), TokenAccess::All);
     let policy = TokenPolicy { rules, allow_all_authenticated: false };
 
-    let allowed =
-        AuthenticatedIdentity::Mtls { issuer: "CN=Root CA".into(), subject: "CN=client1".into() };
-    let wrong_subject =
-        AuthenticatedIdentity::Mtls { issuer: "CN=Root CA".into(), subject: "CN=other".into() };
+    let allowed = AuthenticatedIdentity::Mtls {
+        issuer: "CN=Root CA".into(),
+        subject: "CN=client1".into(),
+        spki_sha256: "".into(),
+    };
+    let wrong_subject = AuthenticatedIdentity::Mtls {
+        issuer: "CN=Root CA".into(),
+        subject: "CN=other".into(),
+        spki_sha256: "".into(),
+    };
     assert!(policy.allows(&allowed, "any", "any"));
     assert!(!policy.allows(&wrong_subject, "any", "any"));
 }
@@ -329,7 +338,11 @@ fn discovery_uid2000_sees_only_token_c() {
 #[test]
 fn discovery_admin_mtls_sees_all() {
     let policy = matrix_policy();
-    let id = AuthenticatedIdentity::Mtls { issuer: "CN=Root".into(), subject: "CN=admin".into() };
+    let id = AuthenticatedIdentity::Mtls {
+        issuer: "CN=Root".into(),
+        subject: "CN=admin".into(),
+        spki_sha256: "".into(),
+    };
     let tokens = token_list();
     let visible = visible_tokens(&policy, &id, &tokens);
     assert_eq!(visible.len(), 4, "admin should see all 4 tokens");
@@ -338,7 +351,11 @@ fn discovery_admin_mtls_sees_all() {
 #[test]
 fn discovery_reader_mtls_sees_one() {
     let policy = matrix_policy();
-    let id = AuthenticatedIdentity::Mtls { issuer: "CN=Root".into(), subject: "CN=reader".into() };
+    let id = AuthenticatedIdentity::Mtls {
+        issuer: "CN=Root".into(),
+        subject: "CN=reader".into(),
+        spki_sha256: "".into(),
+    };
     let tokens = token_list();
     let visible = visible_tokens(&policy, &id, &tokens);
     let labels: Vec<&str> = visible.iter().map(|(l, _)| l.as_str()).collect();
@@ -404,30 +421,44 @@ fn denial_uid2000_denied_token_a() {
 #[test]
 fn denial_reader_denied_token_b() {
     let policy = matrix_policy();
-    let id = AuthenticatedIdentity::Mtls { issuer: "CN=Root".into(), subject: "CN=reader".into() };
+    let id = AuthenticatedIdentity::Mtls {
+        issuer: "CN=Root".into(),
+        subject: "CN=reader".into(),
+        spki_sha256: "".into(),
+    };
     assert!(!policy.allows(&id, "token-b", "SN-B"), "reader should not access token-b");
 }
 
 #[test]
 fn mtls_issuer_mismatch_denied() {
     let policy = matrix_policy();
-    let id =
-        AuthenticatedIdentity::Mtls { issuer: "CN=Other CA".into(), subject: "CN=admin".into() };
+    let id = AuthenticatedIdentity::Mtls {
+        issuer: "CN=Other CA".into(),
+        subject: "CN=admin".into(),
+        spki_sha256: "".into(),
+    };
     assert!(!policy.allows(&id, "token-a", "SN-A"), "wrong issuer must be denied");
 }
 
 #[test]
 fn mtls_subject_mismatch_denied() {
     let policy = matrix_policy();
-    let id =
-        AuthenticatedIdentity::Mtls { issuer: "CN=Root".into(), subject: "CN=attacker".into() };
+    let id = AuthenticatedIdentity::Mtls {
+        issuer: "CN=Root".into(),
+        subject: "CN=attacker".into(),
+        spki_sha256: "".into(),
+    };
     assert!(!policy.allows(&id, "token-a", "SN-A"), "wrong subject must be denied");
 }
 
 #[test]
 fn peer_cred_vs_mtls_identity_collision_impossible() {
     let peer = AuthenticatedIdentity::PeerCred { uid: 1000 };
-    let mtls = AuthenticatedIdentity::Mtls { issuer: "uid=1000".into(), subject: "".into() };
+    let mtls = AuthenticatedIdentity::Mtls {
+        issuer: "uid=1000".into(),
+        subject: "".into(),
+        spki_sha256: "".into(),
+    };
     assert_ne!(
         peer.to_string(),
         mtls.to_string(),
@@ -458,6 +489,7 @@ fn cross_identity_no_leakage() {
             id: AuthenticatedIdentity::Mtls {
                 issuer: "CN=Root".into(),
                 subject: "CN=admin".into(),
+                spki_sha256: "".into(),
             },
             expected_labels: vec!["token-a", "token-b", "token-c", "token-d"],
         },
@@ -465,6 +497,7 @@ fn cross_identity_no_leakage() {
             id: AuthenticatedIdentity::Mtls {
                 issuer: "CN=Root".into(),
                 subject: "CN=reader".into(),
+                spki_sha256: "".into(),
             },
             expected_labels: vec!["token-a"],
         },
@@ -571,4 +604,36 @@ fn allow_all_authenticated_does_not_depend_on_unauthenticated_path() {
     // Unauthenticated still routes through the flip-point, independent of allow_all.
     let unauth = AuthenticatedIdentity::Unauthenticated;
     assert_eq!(policy.allows(&unauth, "any", "any"), policy.allows_unauthenticated());
+}
+
+#[test]
+fn dual_accept_emits_deprecation_warning_for_legacy_dn_key() {
+    // A policy with a legacy x509:issuer=...;subject=... key authorizes via the
+    // dual-accept fallback. The primary SPKI lookup misses; the legacy DN lookup hits.
+    let legacy_key = "x509:issuer=CN=DualAccept CA;subject=CN=transition-client";
+    let mut rules = HashMap::new();
+    rules.insert(legacy_key.to_string(), TokenAccess::All);
+    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+
+    // Identity with both SPKI and DN — the SPKI key won't be in rules, but the DN key will.
+    let id = AuthenticatedIdentity::Mtls {
+        issuer: "CN=DualAccept CA".into(),
+        subject: "CN=transition-client".into(),
+        spki_sha256: "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666000077778888aaaa".into(),
+    };
+    // Dual-accept: legacy key hit even though SPKI key is absent
+    assert!(policy.allows(&id, "any", "any"), "dual-accept must authorize via legacy DN key");
+
+    // A DIFFERENT cert with the SAME DN but different SPKI would also get authorized via
+    // the legacy DN lookup — this is the documented transition risk (operators should migrate
+    // to x509:spki= to close the spoof window).
+    let id_spoof = AuthenticatedIdentity::Mtls {
+        issuer: "CN=DualAccept CA".into(),
+        subject: "CN=transition-client".into(),
+        spki_sha256: "bbbb2222cccc3333dddd4444eeee5555ffff6666000077778888aaaa9999bbbb".into(),
+    };
+    assert!(
+        policy.allows(&id_spoof, "any", "any"),
+        "legacy DN policy matches ANY cert with that DN (documented transition risk; use SPKI to close)"
+    );
 }

@@ -104,8 +104,8 @@ async fn start_mtls_daemon() -> MtlsFixture {
     let client_b_cert = write_file(&temp, "client-b.pem", &client_b.cert_pem);
     let client_b_key = write_file(&temp, "client-b-key.pem", &client_b.key_pem);
 
-    let (issuer, subject) = mtls::extract_identity(&client_a.der).unwrap();
-    let client_a_identity = format!("x509:issuer={issuer};subject={subject}");
+    let (_, _, spki_sha256) = mtls::extract_identity(&client_a.der).unwrap();
+    let client_a_identity = format!("x509:spki={spki_sha256}");
     let token_policy = TokenPolicy::from_config(&AuthConfig {
         allow_all_authenticated: false,
         policy: vec![PolicyEntry {

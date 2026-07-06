@@ -1,6 +1,8 @@
 use super::identity::AuthenticatedIdentity;
 pub use super::token_selector::TokenSelector;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug)]
 pub struct TokenPolicy {
@@ -13,6 +15,13 @@ pub enum TokenAccess {
     All,
     Specific(Vec<TokenSelector>),
 }
+
+/// Tracks SPKI hashes for which we've already emitted the "mTLS auth" info log.
+/// Prevents flooding the log when the same certificate connects repeatedly.
+static LOGGED_SPKI: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Tracks legacy DN keys for which we've already emitted the deprecation warning.
+static WARNED_LEGACY: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 impl TokenPolicy {
     /// Build from parsed config, validating all selectors.
@@ -49,19 +58,78 @@ impl TokenPolicy {
         if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
             return self.allows_unauthenticated();
         }
-        // `allow_all_authenticated` applies ONLY to genuinely-authenticated
-        // identities; the unauthenticated case is handled above via the single
-        // flip-point, so this can never blanket-authorize an unauthenticated peer.
         if self.allow_all_authenticated {
             return true;
         }
-        let key = identity.to_string();
-        match self.rules.get(&key) {
-            Some(TokenAccess::All) => true,
-            Some(TokenAccess::Specific(selectors)) => {
+
+        match identity {
+            AuthenticatedIdentity::Mtls { spki_sha256, .. } => {
+                // Primary lookup: by SPKI fingerprint (the cryptographic identity).
+                if !spki_sha256.is_empty() {
+                    let spki_key = format!("x509:spki={spki_sha256}");
+                    // Log once per unique SPKI so operators can populate SPKI-form policy entries.
+                    let logged = LOGGED_SPKI.get_or_init(|| Mutex::new(HashSet::new()));
+                    if let Ok(mut set) = logged.lock()
+                        && set.insert(spki_sha256.clone())
+                    {
+                        tracing::info!(
+                            spki_key = %spki_key,
+                            "mTLS peer identified; use this key in [auth.policy] to migrate to SPKI-pinned identity (x509:spki=<fingerprint>)"
+                        );
+                    }
+                    if let Some(access) = self.rules.get(&spki_key) {
+                        return Self::check_access(access, token_label, token_serial);
+                    }
+                }
+                // Dual-accept fallback: legacy DN-keyed policy entry.
+                // Only triggered when the identity carries the DN (i.e., freshly constructed
+                // from a cert or parsed from an enriched stored-context string). When
+                // legacy_dn_key() returns None (empty DN), skip silently.
+                if let Some(legacy_key) = identity.legacy_dn_key()
+                    && let Some(access) = self.rules.get(&legacy_key)
+                {
+                    // Warn once per legacy key so operators know to migrate.
+                    let warned = WARNED_LEGACY.get_or_init(|| Mutex::new(HashSet::new()));
+                    if let Ok(mut set) = warned.lock()
+                        && set.insert(legacy_key.clone())
+                    {
+                        let spki_display = if !spki_sha256.is_empty() {
+                            format!("x509:spki={spki_sha256}")
+                        } else {
+                            "(SPKI unavailable — identity parsed from legacy stored string)"
+                                .to_string()
+                        };
+                        tracing::warn!(
+                            legacy_key = %legacy_key,
+                            spki_key = %spki_display,
+                            "deprecated DN-based mTLS policy identity '{}'; migrate the [auth.policy] entry to '{}' (see the daemon logs for the peer's SPKI hash)",
+                            legacy_key, spki_display
+                        );
+                    }
+                    return Self::check_access(access, token_label, token_serial);
+                }
+                false // default deny
+            }
+            _ => {
+                // PeerCred (and Unauthenticated already handled above)
+                let key = identity.to_string();
+                match self.rules.get(&key) {
+                    Some(TokenAccess::All) => true,
+                    Some(TokenAccess::Specific(selectors)) => {
+                        selectors.iter().any(|s| s.matches(token_label, token_serial))
+                    }
+                    None => false,
+                }
+            }
+        }
+    }
+
+    fn check_access(access: &TokenAccess, token_label: &str, token_serial: &str) -> bool {
+        match access {
+            TokenAccess::All => true,
+            TokenAccess::Specific(selectors) => {
                 selectors.iter().any(|s| s.matches(token_label, token_serial))
             }
-            None => false, // default deny
         }
     }
 

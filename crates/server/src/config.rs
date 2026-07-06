@@ -460,7 +460,9 @@ impl PolicyIdentitySource {
     const fn expected_format(self) -> &'static str {
         match self {
             Self::PeerCred => "uid=<numeric-uid>",
-            Self::Mtls => "x509:issuer=<issuer-dn>;subject=<subject-dn>",
+            Self::Mtls => {
+                "x509:spki=<hex-fingerprint> (new) or x509:issuer=<issuer-dn>;subject=<subject-dn> (legacy)"
+            }
         }
     }
 
@@ -470,7 +472,15 @@ impl PolicyIdentitySource {
                 identity.strip_prefix("uid=").is_some_and(|uid| uid.parse::<u32>().is_ok())
             }
             Self::Mtls => {
-                identity.strip_prefix("x509:issuer=").is_some_and(|rest| rest.contains(";subject="))
+                // New SPKI-keyed form: x509:spki=<hash> (short) or x509:spki=<hash>;issuer=...;subject=... (enriched)
+                let is_spki_form = identity
+                    .strip_prefix("x509:spki=")
+                    .is_some_and(|rest| !rest.split(';').next().unwrap_or("").is_empty());
+                // Legacy DN form: x509:issuer=<esc_issuer>;subject=<esc_subject>
+                let is_dn_form = identity
+                    .strip_prefix("x509:issuer=")
+                    .is_some_and(|rest| rest.contains(";subject="));
+                is_spki_form || is_dn_form
             }
         }
     }
@@ -791,8 +801,8 @@ impl DaemonConfig {
             };
             let expected = if sources.is_empty() {
                 "enable listener.local.auth = 'peer_cred' for uid=<numeric-uid> identities or \
-                 listener.remote.auth = 'mtls' for x509:issuer=<issuer-dn>;subject=<subject-dn> \
-                 identities"
+                 listener.remote.auth = 'mtls' for x509:spki=<fingerprint> or \
+                 x509:issuer=<issuer-dn>;subject=<subject-dn> identities"
                     .to_string()
             } else {
                 sources
