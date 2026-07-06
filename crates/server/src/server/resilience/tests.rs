@@ -19,6 +19,9 @@ fn prometheus_render_contains_all_series() {
         get_attribute_value_total: 4213,
         audit_emitted_total: 57,
         audit_dropped_total: 2,
+        rate_limit_rejected_total: 11,
+        session_quota_rejected_total: 5,
+        login_budget_tripped_total: 3,
     };
     let text = render_prometheus(&s);
     assert!(text.contains("pkcs11_proxy_find_objects_total 3\n"));
@@ -31,4 +34,11 @@ fn prometheus_render_contains_all_series() {
     assert!(text.contains("pkcs11_proxy_audit_dropped_total 2\n"));
     assert!(text.contains("# TYPE pkcs11_proxy_audit_emitted_total counter"));
     assert!(text.contains("# TYPE pkcs11_proxy_audit_dropped_total counter"));
+    // Rate-quota counters
+    assert!(text.contains("pkcs11_proxy_rate_limit_rejected_total 11\n"));
+    assert!(text.contains("pkcs11_proxy_session_quota_rejected_total 5\n"));
+    assert!(text.contains("pkcs11_proxy_login_budget_tripped_total 3\n"));
+    assert!(text.contains("# TYPE pkcs11_proxy_rate_limit_rejected_total counter"));
+    assert!(text.contains("# TYPE pkcs11_proxy_session_quota_rejected_total counter"));
+    assert!(text.contains("# TYPE pkcs11_proxy_login_budget_tripped_total counter"));
 }

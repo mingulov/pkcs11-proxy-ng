@@ -20,6 +20,9 @@ static FIND_RESULT_SIZE_MAX: AtomicUsize = AtomicUsize::new(0);
 static GET_ATTRIBUTE_VALUE_TOTAL: AtomicU64 = AtomicU64::new(0);
 static AUDIT_EMITTED: AtomicU64 = AtomicU64::new(0);
 static AUDIT_DROPPED: AtomicU64 = AtomicU64::new(0);
+static RATE_LIMIT_REJECTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static SESSION_QUOTA_REJECTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LOGIN_BUDGET_TRIPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Install the configured threshold once at startup. First call wins.
 pub fn configure(find_result_warn_threshold: Option<usize>) {
@@ -64,6 +67,21 @@ pub fn record_audit_dropped() {
     AUDIT_DROPPED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Record one operation rejected by the per-principal in-flight cap.
+pub fn record_rate_limit_rejected() {
+    RATE_LIMIT_REJECTED_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record one session-open rejected by the per-principal session quota.
+pub fn record_session_quota_rejected() {
+    SESSION_QUOTA_REJECTED_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record one per-slot failed-login budget that tripped into cooldown.
+pub fn record_login_budget_tripped() {
+    LOGIN_BUDGET_TRIPPED_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Immutable counter snapshot for the metrics endpoint.
 #[derive(Debug, Clone, Copy)]
 pub struct Snapshot {
@@ -73,6 +91,9 @@ pub struct Snapshot {
     pub get_attribute_value_total: u64,
     pub audit_emitted_total: u64,
     pub audit_dropped_total: u64,
+    pub rate_limit_rejected_total: u64,
+    pub session_quota_rejected_total: u64,
+    pub login_budget_tripped_total: u64,
 }
 
 pub fn snapshot() -> Snapshot {
@@ -84,6 +105,9 @@ pub fn snapshot() -> Snapshot {
         get_attribute_value_total: GET_ATTRIBUTE_VALUE_TOTAL.load(Ordering::Relaxed),
         audit_emitted_total: AUDIT_EMITTED.load(Ordering::Relaxed),
         audit_dropped_total: AUDIT_DROPPED.load(Ordering::Relaxed),
+        rate_limit_rejected_total: RATE_LIMIT_REJECTED_TOTAL.load(Ordering::Relaxed),
+        session_quota_rejected_total: SESSION_QUOTA_REJECTED_TOTAL.load(Ordering::Relaxed),
+        login_budget_tripped_total: LOGIN_BUDGET_TRIPPED_TOTAL.load(Ordering::Relaxed),
     }
 }
 
@@ -120,5 +144,23 @@ pub fn render_prometheus(s: &Snapshot) -> String {
     );
     o.push_str("# TYPE pkcs11_proxy_audit_dropped_total counter\n");
     o.push_str(&format!("pkcs11_proxy_audit_dropped_total {}\n", s.audit_dropped_total));
+    o.push_str("# HELP pkcs11_proxy_rate_limit_rejected_total Operations rejected by the per-principal in-flight cap.\n");
+    o.push_str("# TYPE pkcs11_proxy_rate_limit_rejected_total counter\n");
+    o.push_str(&format!(
+        "pkcs11_proxy_rate_limit_rejected_total {}\n",
+        s.rate_limit_rejected_total
+    ));
+    o.push_str("# HELP pkcs11_proxy_session_quota_rejected_total Session opens rejected by the per-principal session quota.\n");
+    o.push_str("# TYPE pkcs11_proxy_session_quota_rejected_total counter\n");
+    o.push_str(&format!(
+        "pkcs11_proxy_session_quota_rejected_total {}\n",
+        s.session_quota_rejected_total
+    ));
+    o.push_str("# HELP pkcs11_proxy_login_budget_tripped_total Per-slot failed-login budgets that have entered cooldown.\n");
+    o.push_str("# TYPE pkcs11_proxy_login_budget_tripped_total counter\n");
+    o.push_str(&format!(
+        "pkcs11_proxy_login_budget_tripped_total {}\n",
+        s.login_budget_tripped_total
+    ));
     o
 }

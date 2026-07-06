@@ -6,6 +6,7 @@ pub mod grpc_service;
 pub mod handle_map;
 pub mod health;
 pub mod rate_limit;
+pub mod rate_quota;
 pub mod resilience;
 mod slot_map;
 pub mod trace_id;

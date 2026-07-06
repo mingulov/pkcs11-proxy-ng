@@ -68,6 +68,8 @@ pub struct DaemonConfig {
     pub resilience: ResilienceConfig,
     #[serde(default)]
     pub audit: AuditConfig,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
 }
 
 /// Mechanism registry source. The daemon loads the file at startup and
@@ -398,6 +400,25 @@ pub struct ResilienceConfig {
     /// If set, a Unix-domain metrics endpoint (mode 0600) is bound here, serving
     /// Prometheus text on `GET /metrics`.
     pub metrics_socket: Option<PathBuf>,
+}
+
+/// Opt-in per-principal in-flight / session-quota limiter and per-slot
+/// failed-login budget (G2-PR3). All fields are `None` by default: an absent
+/// `[rate_limit]` section is byte-identical to having no rate limiting at all.
+#[derive(Debug, Deserialize, Default)]
+pub struct RateLimitConfig {
+    /// Maximum concurrent in-flight operations per principal (identified by
+    /// mTLS SPKI or Unix peer-cred). `None` (default) → no cap.
+    pub per_principal_max_in_flight: Option<usize>,
+    /// Maximum concurrent open sessions per principal. `None` (default) → no cap.
+    pub per_principal_max_sessions: Option<usize>,
+    /// Number of consecutive failed `C_Login` attempts per slot before the slot
+    /// enters a failed-login cooldown. `None` (default) → no budget enforced.
+    pub per_slot_failed_login_budget: Option<u32>,
+    /// Cooldown duration (seconds) after `per_slot_failed_login_budget` is
+    /// exhausted. Defaults to 60 s when a budget is set; has no effect when
+    /// `per_slot_failed_login_budget` is `None`.
+    pub per_slot_failed_login_cooldown_secs: Option<u64>,
 }
 
 /// Opt-in tamper-evident audit stream (ADR-0012, G1). Off unless `dir` is set.

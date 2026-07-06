@@ -115,6 +115,9 @@ mod tests {
         assert!(resp.contains("pkcs11_proxy_get_attribute_value_total"));
         assert!(resp.contains("pkcs11_proxy_audit_emitted_total"));
         assert!(resp.contains("pkcs11_proxy_audit_dropped_total"));
+        assert!(resp.contains("pkcs11_proxy_rate_limit_rejected_total"));
+        assert!(resp.contains("pkcs11_proxy_session_quota_rejected_total"));
+        assert!(resp.contains("pkcs11_proxy_login_budget_tripped_total"));
         let _ = std::fs::remove_file(&path);
     }
 

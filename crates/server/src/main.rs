@@ -395,6 +395,7 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     );
 
     server::resilience::configure(config.resilience.find_result_warn_threshold);
+    server::rate_quota::configure(&config.rate_limit);
 
     if let Some(ref sock) = config.resilience.metrics_socket {
         server::resilience::spawn_metrics_endpoint(sock.clone())
