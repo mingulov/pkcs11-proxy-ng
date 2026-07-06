@@ -471,7 +471,7 @@ mod tests {
                 object_vh.0,
                 ObjectMetadata {
                     unique_id: object_uid,
-                    class: CkObjectClass::SECRET_KEY,
+                    class: Some(CkObjectClass::SECRET_KEY),
                     is_token: false,
                 },
             )

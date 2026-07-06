@@ -490,7 +490,7 @@ fn teardown_returns_correct_backend_session_handles() {
 fn make_session_meta(uid: Vec<u8>) -> super::ObjectMetadata {
     super::ObjectMetadata {
         unique_id: uid,
-        class: pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY,
+        class: Some(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY),
         is_token: false,
     }
 }
@@ -498,7 +498,7 @@ fn make_session_meta(uid: Vec<u8>) -> super::ObjectMetadata {
 fn make_token_meta(uid: Vec<u8>) -> super::ObjectMetadata {
     super::ObjectMetadata {
         unique_id: uid,
-        class: pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY,
+        class: Some(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY),
         is_token: true,
     }
 }

@@ -459,6 +459,43 @@ impl TokenPolicy {
         self.per_mechanism_active_cache
     }
 
+    /// Whether the principal's matching grant has any `ObjectAcl` entry with an
+    /// explicit per-object extract override (`extract.is_some()`).
+    ///
+    /// Used by `extract_is_permitted` to decide what to do when the uid cannot
+    /// be resolved (transient fetch failure or `ATTRIBUTE_SENSITIVE`):
+    /// - `true` → at least one per-object extract override exists for this token;
+    ///   the uid is needed to evaluate it, so fail-closed (DENY) to prevent
+    ///   exporting a key that may be covered by a per-object extract=Deny.
+    /// - `false` → no per-object overrides exist; fall through to the grant-level
+    ///   `extract_allowed` decision (do NOT over-deny on transient fetch failure).
+    ///
+    /// Returns `false` for unauthenticated, `allow_all_authenticated`, and
+    /// `TokenAccess::All` (those paths have no per-object ACL lists).
+    pub fn has_object_extract_override(
+        &self,
+        identity: &AuthenticatedIdentity,
+        token_label: &str,
+        token_serial: &str,
+    ) -> bool {
+        if matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+            return false;
+        }
+        if self.allow_all_authenticated {
+            return false;
+        }
+        match self.resolve_access(identity) {
+            None | Some(TokenAccess::All) => false,
+            Some(TokenAccess::Specific(grants)) => {
+                grants.iter().filter(|g| g.matches_token(token_label, token_serial)).any(|g| {
+                    g.objects
+                        .as_ref()
+                        .is_some_and(|list| list.iter().any(|acl| acl.extract.is_some()))
+                })
+            }
+        }
+    }
+
     /// Whether the identity is allowed to use an object with the given
     /// `CKA_UNIQUE_ID` value on the matched token.
     ///

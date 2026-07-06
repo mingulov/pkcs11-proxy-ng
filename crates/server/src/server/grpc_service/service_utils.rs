@@ -561,7 +561,46 @@ pub(super) async fn gate_object_handle(
         return CkObjectHandle(0); // fail-closed
     };
 
-    // --- 3. Resolve ObjectMetadata from cache or backend ---
+    // --- 2. Early creator bypass (I3/M1 fix) ---
+    // A principal can always use an object it minted this session (generate /
+    // create / unwrap), even when its backend-assigned CKA_UNIQUE_ID is not in
+    // the pre-configured `objects` grant. This is the minimal, correct ACL
+    // inheritance: creator-owns-what-it-mints.
+    //
+    // The check is EARLY (before the metadata fetch) so that uid-only deployments
+    // avoid the entire C_GetAttributeValue round-trip for created objects (M1).
+    //
+    // The check is per-context: context B's created_objects set is independent
+    // of A's, so B is still gated by its own policy for any object it did NOT
+    // mint. A recycled virtual handle cannot inherit created-status because the
+    // removal hooks that evict object_metadata also evict created_objects.
+    if ctx.context_manager.object_was_created_here(ctx_id, virtual_object).await {
+        if !ctx.token_policy.per_class_active() {
+            // No class gate: creator bypass is unconditional. No metadata fetch
+            // needed for uid-only deployments (M1 — no overhead for creators).
+            return backend_object;
+        }
+        // Class gate is active (I3 fix): fetch metadata for the class check only;
+        // the uid check is still skipped (creator-owns-what-it-mints for uid).
+        let fetched =
+            super::authorization::fetch_object_metadata(ctx, backend_session, backend_object).await;
+        if let Some(ref m) = fetched {
+            ctx.context_manager.cache_object_metadata(ctx_id, virtual_object, m.clone()).await;
+        }
+        return match fetched {
+            Some(meta)
+                if meta.class.is_some_and(|c| {
+                    ctx.token_policy.allows_class(&identity, &label, &serial, c)
+                }) =>
+            {
+                backend_object
+            }
+            // fail-closed: class denied, class unknown (None), or metadata fetch failed
+            _ => CkObjectHandle(0),
+        };
+    }
+
+    // --- 3. Resolve ObjectMetadata from cache or backend (non-created objects) ---
     // Token objects (is_token=true) are never cached (I2 fix: cross-client backend
     // handle recycling immunity). Session objects are cached for the lifetime of
     // the virtual handle.
@@ -590,20 +629,6 @@ pub(super) async fn gate_object_handle(
         return CkObjectHandle(0);
     }
 
-    // --- 3b. Creator bypass (G3-PR3 Task 2) ---
-    // A principal can always use an object it minted this session (generate /
-    // create / unwrap), even when its backend-assigned CKA_UNIQUE_ID is not in
-    // the pre-configured `objects` grant.  This is the minimal, correct ACL
-    // inheritance: creator-owns-what-it-mints.
-    //
-    // The check is per-context: context B's created_objects set is independent
-    // of A's, so B is still gated by its own policy for any object it did NOT
-    // mint.  A recycled virtual handle cannot inherit created-status because the
-    // removal hooks that evict object_metadata also evict created_objects.
-    if ctx.context_manager.object_was_created_here(ctx_id, virtual_object).await {
-        return backend_object;
-    }
-
     // --- 4. Policy checks ---
     // Per-object uid check (opt-in; pass-through when no objects grant configured).
     if !ctx.token_policy.allows_object_use(&identity, &label, &serial, &meta.unique_id) {
@@ -613,8 +638,9 @@ pub(super) async fn gate_object_handle(
         return CkObjectHandle(0);
     }
     // Per-class check (opt-in; skipped when no classes grant is configured).
+    // M2: class is Option — None is fail-closed when per_class_active() (deny).
     if ctx.token_policy.per_class_active()
-        && !ctx.token_policy.allows_class(&identity, &label, &serial, meta.class)
+        && !meta.class.is_some_and(|c| ctx.token_policy.allows_class(&identity, &label, &serial, c))
     {
         return CkObjectHandle(0);
     }
@@ -1875,6 +1901,200 @@ mod tests {
         assert!(
             !created_after,
             "created_objects entry must be evicted on session close (no stale created-status)"
+        );
+    }
+
+    // --- I3/M1: created-object class-gate + no-metadata-fetch for uid-only ---
+
+    /// I3 fix: a principal confined to SECRET_KEY objects cannot use a
+    /// PRIVATE_KEY it just minted — the class gate still applies for created objects
+    /// when `per_class_active()` is true.
+    #[tokio::test]
+    async fn i3_minted_private_key_denied_when_class_confined_to_secret_key() {
+        use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
+        let policy = per_class_policy(IDENTITY, "MockToken", vec!["secret_key"]);
+        assert!(policy.per_class_active(), "per_class_active must be true");
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        // PRIVATE_KEY — denied class.
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::PRIVATE_KEY.0)),
+        );
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+        );
+
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
+
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+            })
+            .await
+            .unwrap();
+
+        // Register via the MINTING path so object is in created_objects.
+        let vo_raw = register_session_object_handle(
+            &ctx_mgr,
+            &ctx_id,
+            virtual_session,
+            backend_object,
+            false,
+        )
+        .await;
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        let (_, backend_obj) =
+            resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, vo_raw).await.unwrap();
+        assert_eq!(
+            backend_obj,
+            CkObjectHandle(0),
+            "I3: creator of a PRIVATE_KEY must be denied by class gate (confined to secret_key)"
+        );
+    }
+
+    /// I3 fix: a principal confined to SECRET_KEY CAN use a SECRET_KEY it minted.
+    #[tokio::test]
+    async fn i3_minted_secret_key_allowed_when_class_confined_to_secret_key() {
+        use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
+        let policy = per_class_policy(IDENTITY, "MockToken", vec!["secret_key"]);
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        // SECRET_KEY — allowed class.
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
+        );
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+        );
+
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
+
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+            })
+            .await
+            .unwrap();
+
+        let vo_raw = register_session_object_handle(
+            &ctx_mgr,
+            &ctx_id,
+            virtual_session,
+            backend_object,
+            false,
+        )
+        .await;
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        let (_, backend_obj) =
+            resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, vo_raw).await.unwrap();
+        assert_ne!(
+            backend_obj,
+            CkObjectHandle(0),
+            "I3: creator of a SECRET_KEY must be allowed by class gate (confined to secret_key)"
+        );
+        assert_eq!(backend_obj.0, backend_object.0, "I3: must receive the real backend handle");
+    }
+
+    /// M1 fix: a uid-only-confined principal (no class grant) that mints an object
+    /// must be allowed WITHOUT a metadata fetch. We prove this by creating an object
+    /// with NO attributes registered (CLASS/TOKEN/UNIQUE_ID all absent). If the gate
+    /// were to fetch metadata, it would get ATTRIBUTE_TYPE_INVALID for all three
+    /// attributes → fetch_object_metadata returns None → gate returns CkObjectHandle(0)
+    /// (fail-closed). If M1 works correctly: no fetch, real handle returned.
+    #[tokio::test]
+    async fn m1_uid_only_creator_bypass_requires_no_metadata_fetch() {
+        use pkcs11_proxy_ng_backend::MockBackend;
+        // uid-only policy: objects restricted, no classes list → per_class_active==false.
+        let policy = per_object_policy(IDENTITY, "MockToken", ALLOWED_UID_HEX);
+        assert!(!policy.per_class_active(), "uid-only policy must have per_class_active==false");
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        // Intentionally NO attributes (CLASS, TOKEN, UNIQUE_ID). If the gate fetches
+        // metadata, the MockBackend returns ATTRIBUTE_TYPE_INVALID for all three →
+        // fetch_object_metadata returns None → gate returns 0 (fail-closed).
+        // If M1 works, no fetch occurs and the real handle passes through.
+
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
+
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+            })
+            .await
+            .unwrap();
+
+        // Register via MINTING path (created_objects entry).
+        let vo_raw = register_session_object_handle(
+            &ctx_mgr,
+            &ctx_id,
+            virtual_session,
+            backend_object,
+            false,
+        )
+        .await;
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        let (_, backend_obj) =
+            resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, vo_raw).await.unwrap();
+        assert_ne!(
+            backend_obj,
+            CkObjectHandle(0),
+            "M1: uid-only creator must be allowed without metadata fetch \
+             (if fetch occurred the attribute-less object would be fail-closed)"
+        );
+        assert_eq!(
+            backend_obj.0, backend_object.0,
+            "M1: must receive the real backend handle, not a substitute"
         );
     }
 

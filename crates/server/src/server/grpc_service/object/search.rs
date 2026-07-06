@@ -64,10 +64,10 @@ pub(super) async fn find_objects(
 
     let max_count = req.max_object_count;
 
-    // Transparency path: per_object_active()==false means no grant anywhere
-    // in the loaded config has an `objects` restriction, so every principal
-    // is unrestricted. Single backend call, no filter — byte-identical to pre-filter.
-    if !ctx.token_policy.per_object_active() {
+    // Transparency path: neither per_object_active() nor per_class_active() →
+    // no grant anywhere restricts by uid or class; every principal is unrestricted.
+    // Single backend call, no filter — byte-identical to pre-filter.
+    if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() {
         let backend = ctx.backend.clone();
         // CkSessionHandle is Copy; the move closure copies it.
         let result = spawn_backend(move || backend.find_objects(session, max_count)).await?;
@@ -101,7 +101,7 @@ pub(super) async fn find_objects(
         };
     }
 
-    // Per-object enumeration filter (G3-PR2, ADR-0012).
+    // Per-object / per-class enumeration filter (G3-PR2/G3-PR3, ADR-0012).
     // Resolve identity + (label, serial) ONCE before the inner loop.
     // Fail-closed: if the authz context cannot be resolved, return an empty
     // result with CKR_OK — indistinguishable from "template matched nothing".
@@ -158,6 +158,8 @@ pub(super) async fn find_objects(
             let meta =
                 super::super::authorization::fetch_object_metadata(ctx, session, backend_object)
                     .await;
+            // I2 fix: keep the object only when uid check AND class check both pass.
+            // M2: meta.class is Option — None is fail-closed when per_class_active().
             match meta {
                 Some(meta)
                     if !meta.unique_id.is_empty()
@@ -166,12 +168,16 @@ pub(super) async fn find_objects(
                             &label,
                             &serial,
                             &meta.unique_id,
-                        ) =>
+                        )
+                        && (!ctx.token_policy.per_class_active()
+                            || meta.class.is_some_and(|c| {
+                                ctx.token_policy.allows_class(&identity, &label, &serial, c)
+                            })) =>
                 {
                     kept_backends.push(backend_object);
                     kept_metas.push(meta);
                 }
-                // Fail-closed: empty/absent uid, fetch failure, or deny — drop silently.
+                // Fail-closed: empty/absent uid, fetch failure, denied uid, denied/absent class.
                 _ => {}
             }
         }
@@ -718,6 +724,164 @@ mod tests {
             resp.object_handles.len(),
             0,
             "genuine backend exhaustion must return 0 handles — the correct loop-terminator"
+        );
+    }
+
+    // ── Test 8: I2 — class-confined principal cannot enumerate denied-class objects ─
+
+    /// Build a class-only policy (no uid restriction) for the given identity.
+    fn class_confined_policy(
+        identity: &str,
+        token_label: &str,
+        allowed_class: &str,
+    ) -> Arc<TokenPolicy> {
+        Arc::new(
+            TokenPolicy::from_config(&AuthConfig {
+                allow_all_authenticated: false,
+                anonymous_principal: None,
+                policy: vec![PolicyEntry {
+                    identity: identity.into(),
+                    tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                        token: format!("label:{token_label}"),
+                        classes: Some(vec![allowed_class.into()]),
+                        mechanisms: None,
+                        extract: ExtractPolicyConfig::Allow,
+                        objects: None, // no uid restriction — pure class gate
+                    })]),
+                }],
+            })
+            .expect("class-confined policy must parse"),
+        )
+    }
+
+    #[tokio::test]
+    async fn i2_class_confined_find_returns_only_allowed_class_objects() {
+        // I2 fix: a class-confined principal (classes=["secret_key"], objects:None)
+        // must see only SECRET_KEY objects from find_objects. The PUBLIC_KEY object
+        // must be invisible (silently dropped). per_object_active()==false but
+        // per_class_active()==true → the filter must still run (I2 fix).
+        let policy = class_confined_policy(CONFINED_IDENTITY, "MockToken", "secret_key");
+        assert!(
+            policy.per_class_active(),
+            "class-confined policy must have per_class_active==true"
+        );
+        assert!(
+            !policy.per_object_active(),
+            "class-only policy must have per_object_active==false"
+        );
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+
+        // obj_sk: SECRET_KEY — allowed class.
+        let obj_sk = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_sk,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
+        );
+        mock.set_attribute(
+            obj_sk,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            obj_sk,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec())),
+        );
+
+        // obj_pk: PUBLIC_KEY — denied class; must be invisible.
+        let obj_pk = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_pk,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(CkObjectClass::PUBLIC_KEY.0)),
+        );
+        mock.set_attribute(
+            obj_pk,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            obj_pk,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+        );
+
+        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.set_find_objects_result(vec![obj_sk, obj_pk]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(CONFINED_IDENTITY.into())).await.unwrap();
+
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+            })
+            .await
+            .unwrap();
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        let resp = super::find_objects(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::FindObjectsRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session.0,
+                max_object_count: 32,
+            }),
+        )
+        .await
+        .expect("find_objects must not return a transport error")
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "must return CKR_OK");
+        assert_eq!(
+            resp.object_handles.len(),
+            1,
+            "I2: class-confined principal must see only secret_key objects (public_key absent)"
+        );
+
+        // The returned handle must resolve to obj_sk (SECRET_KEY), not obj_pk.
+        let virtual_handle = resp.object_handles[0];
+        let resolved = ctx
+            .context_manager
+            .get_context(&ctx_id, |c| {
+                c.object_handles.resolve(crate::server::handle_map::VirtualHandle(virtual_handle))
+            })
+            .await
+            .flatten();
+        assert_eq!(
+            resolved.map(|h| h.0),
+            Some(obj_sk.0),
+            "I2: the returned handle must map to obj_sk (SECRET_KEY), not obj_pk (PUBLIC_KEY)"
+        );
+    }
+
+    #[tokio::test]
+    async fn i2_transparent_when_neither_per_object_nor_per_class_active() {
+        // Regression guard: when neither per_object_active() nor per_class_active(),
+        // the transparency path must still return all objects unchanged (no filter).
+        let policy = Arc::new(TokenPolicy::from_config(&AuthConfig::default()).unwrap());
+        assert!(!policy.per_object_active());
+        assert!(!policy.per_class_active());
+        let (ctx, ctx_id, vs, _obj_a, _obj_b) =
+            setup_two_object_find(policy, Some(CONFINED_IDENTITY.into())).await;
+
+        let resp = run_find_objects(&ctx, &ctx_id, vs).await;
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(
+            resp.object_handles.len(),
+            2,
+            "transparency path: neither gate active → all objects pass through"
         );
     }
 }

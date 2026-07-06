@@ -37,7 +37,10 @@ pub enum LoginState {
 #[derive(Debug, Clone)]
 pub struct ObjectMetadata {
     pub unique_id: Vec<u8>,
-    pub class: CkObjectClass,
+    /// `None` when `CKA_CLASS` is absent or unparseable (M2: uid-only deployments must not
+    /// fail on a missing class attribute). Class-confined gates treat `None` as fail-closed
+    /// (deny); uid-only deployments ignore this field entirely.
+    pub class: Option<CkObjectClass>,
     pub is_token: bool,
 }
 

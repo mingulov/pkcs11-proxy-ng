@@ -87,9 +87,15 @@ pub(super) async fn slot_is_authorized(
 /// the policy has an `objects` list, the gate also checks for a per-object
 /// extract override for `virtual_object`. The object's `CKA_UNIQUE_ID` is
 /// resolved from the session-object metadata cache (`object_metadata`) when
-/// available, otherwise fetched from the backend and cached. On uid-resolution
-/// failure the gate falls back to the grant-level decision (fail-safe, not
-/// fail-closed — identical to the pre-Task-4 behaviour).
+/// available, otherwise fetched from the backend and cached.
+///
+/// On uid-resolution failure (I1 fix — fail-closed when overrides exist):
+/// - If the principal has ANY per-object extract override (`extract.is_some()`)
+///   on the matched token → DENY (fail-closed: we cannot rule out this object
+///   being covered by a per-object extract=Deny).
+/// - If the principal has NO per-object extract overrides → fall through to the
+///   grant-level `extract_allowed` decision (an unconfined principal must NOT
+///   be over-denied on a transient uid-fetch failure).
 ///
 /// Returns `true` (permissive) on unknown context or unregistered session.
 /// Returns `false` (fail-closed) when the backend reports `TOKEN_NOT_PRESENT`
@@ -150,13 +156,25 @@ pub(super) async fn extract_is_permitted(
     }
 
     // Per-object active: resolve the object's CKA_UNIQUE_ID so we can check
-    // for a per-object extract override. On uid-resolution failure fall back to
-    // the grant-level decision (fail-safe: identical to pre-Task-4 behaviour).
+    // for a per-object extract override.
+    //
+    // On uid-resolution failure (I1 fix):
+    // - If the principal has ANY per-object extract override on this token: DENY
+    //   (fail-closed — we can't rule out this object being covered by extract=Deny).
+    // - If the principal has NO per-object extract overrides: fall through to the
+    //   grant-level decision (an unconfined principal must NOT be over-denied on a
+    //   transient uid-fetch failure).
     match resolve_uid_for_extract(ctx, ctx_id, virtual_session, virtual_object).await {
         Some(uid) => {
             Ok(ctx.token_policy.extract_allowed_for_object(&identity, &label, &serial, &uid))
         }
-        None => Ok(ctx.token_policy.extract_allowed(&identity, &label, &serial)),
+        None => {
+            if ctx.token_policy.has_object_extract_override(&identity, &label, &serial) {
+                Ok(false) // I1 fix: fail-closed when per-object extract overrides exist
+            } else {
+                Ok(ctx.token_policy.extract_allowed(&identity, &label, &serial))
+            }
+        }
     }
 }
 
@@ -305,8 +323,11 @@ pub(super) async fn enforce_context_owner<T>(
 /// Returns `None` (fail-closed) when:
 /// - The backend call fails with a non-transient error.
 /// - `CKA_UNIQUE_ID` is absent, sensitive, or empty.
-/// - `CKA_CLASS` is absent or cannot be parsed.
 /// - Transport or timeout error.
+///
+/// `CKA_CLASS` absence or parse failure does NOT cause `None` (M2): the returned
+/// `ObjectMetadata.class` is `None` in that case. Class-confined gates treat
+/// a `None` class as fail-closed (deny); uid-only deployments are unaffected.
 ///
 /// The unique-id bytes are **not** logged.
 ///
@@ -347,18 +368,19 @@ pub(super) async fn fetch_object_metadata(
             Err(rv) => return Err(rv),
         }
 
-        // Parse CLASS (fail-closed: absent or unknown encoding → deny).
-        let class = match template[1].value.take() {
-            Some(CkAttributeValue::Ulong(u)) => CkObjectClass(u),
+        // Parse CLASS — tolerate absent/unparseable (M2): uid-only deployments must not
+        // fail on a missing class attribute. Class-confined gates treat None as fail-closed.
+        let class: Option<CkObjectClass> = match template[1].value.take() {
+            Some(CkAttributeValue::Ulong(u)) => Some(CkObjectClass(u)),
             Some(CkAttributeValue::Bytes(ref bytes)) if bytes.len() == 8 => {
                 let arr: [u8; 8] = bytes[..8].try_into().unwrap();
-                CkObjectClass(u64::from_ne_bytes(arr))
+                Some(CkObjectClass(u64::from_ne_bytes(arr)))
             }
             Some(CkAttributeValue::Bytes(ref bytes)) if bytes.len() == 4 => {
                 let arr: [u8; 4] = bytes[..4].try_into().unwrap();
-                CkObjectClass(u32::from_ne_bytes(arr) as u64)
+                Some(CkObjectClass(u32::from_ne_bytes(arr) as u64))
             }
-            _ => return Ok(None), // fail-closed: CLASS absent or unrecognised
+            _ => None, // M2: CLASS absent or unrecognised → None, not fail-closed here
         };
 
         // Parse TOKEN (absent → session object; any non-zero byte → token object).
@@ -673,6 +695,134 @@ mod tests {
         );
     }
 
+    // --- I1: fail-closed extract override on uid-fetch failure ---
+
+    /// Build a policy where `identity` has `extract=Allow` at grant level
+    /// PLUS a per-object `extract=Deny` for object id "a1".
+    fn policy_with_per_object_extract_deny(identity: &str) -> TokenPolicy {
+        use crate::config::{ObjectAclRichConfig, ObjectAclSpec};
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: identity.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: None,
+                    mechanisms: None,
+                    extract: ExtractPolicyConfig::Allow, // grant-level: allow
+                    objects: Some(vec![ObjectAclSpec::Rich(ObjectAclRichConfig {
+                        id: "a1".into(), // per-object deny
+                        extract: Some(ExtractPolicyConfig::Deny),
+                    })]),
+                })]),
+            }],
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn i1_extract_denied_when_override_exists_and_uid_fetch_fails() {
+        // I1 fix: grant extract=Allow + objects=[{id="a1",extract="deny"}].
+        // When the uid fetch fails (MockBackend returns ATTRIBUTE_SENSITIVE for
+        // CKA_UNIQUE_ID), the gate must DENY (fail-closed — cannot rule out this
+        // object being the per-object-deny entry "a1").
+        use pkcs11_proxy_ng_backend::mock::MockAttributeSlot;
+        let policy = policy_with_per_object_extract_deny(MTLS_IDENTITY);
+        assert!(
+            policy.per_object_active(),
+            "policy with objects list must have per_object_active==true"
+        );
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        // Make UNIQUE_ID ATTRIBUTE_SENSITIVE so uid resolution returns None.
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::UNIQUE_ID,
+            MockAttributeSlot::Sensitive,
+        );
+
+        let backend: Arc<dyn Pkcs11Backend> = mock;
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(BackendHandle(backend_session.0), CkSlotId(0))
+            })
+            .await
+            .unwrap();
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+
+        // Register the object virtual handle.
+        let object_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.object_handles.insert(BackendHandle(backend_object.0)))
+            .await
+            .unwrap();
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(policy);
+
+        let permitted =
+            extract_is_permitted(&ctx, &ctx_id, session_vh.0, object_vh.0).await.unwrap();
+        assert!(
+            !permitted,
+            "I1: uid-fetch failure with per-object override must be DENIED (fail-closed)"
+        );
+    }
+
+    #[tokio::test]
+    async fn i1_extract_allowed_unconfined_principal_on_uid_fetch_failure() {
+        // I1 fix: an unconfined principal (objects:None, grant extract=Allow) must
+        // still be ALLOWED when uid fetch fails — no per-object overrides exist, so
+        // the grant-level allow should not be over-denied on a transient failure.
+        let policy = policy_for_identity(MTLS_IDENTITY); // bare grant, no objects list
+        assert!(
+            !policy.per_object_active(),
+            "bare grant (no objects list) must have per_object_active==false"
+        );
+        // With per_object_active==false the fast path is taken (no uid resolution),
+        // so this test confirms grant-level allow is returned without uid fetch.
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session, 0).await.unwrap();
+        assert!(
+            permitted,
+            "I1: unconfined principal (no per-object overrides) must remain ALLOWED on uid-fetch failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn i1_extract_denied_per_object_override_present_no_uid_resolution() {
+        // I1 fix (second coverage): has_object_extract_override returns true even
+        // when the uid cache is empty (no object virtual handle registered), so
+        // per-object-override detection is independent of uid resolution.
+        let policy = policy_with_per_object_extract_deny(MTLS_IDENTITY);
+        let backend = backend();
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+            .await
+            .unwrap();
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(policy);
+
+        // virtual_object=999 is not registered → uid resolution returns None via
+        // cache miss AND handle-resolve-miss. The gate must still DENY because
+        // has_object_extract_override is true for this principal on MockToken.
+        let permitted = extract_is_permitted(&ctx, &ctx_id, session_vh.0, 999).await.unwrap();
+        assert!(
+            !permitted,
+            "I1: unresolvable object handle with per-object extract override must be DENIED"
+        );
+    }
+
     // --- mechanism_permitted ---
 
     fn policy_with_mechanism_grant(identity: &str, mechanisms: Vec<String>) -> TokenPolicy {
@@ -804,7 +954,7 @@ mod tests {
             let result = fetch_object_metadata(&ctx, session, object).await;
             let meta = result.expect("must return metadata when all attrs present");
             assert_eq!(meta.unique_id, uid, "uid must match the registered value");
-            assert_eq!(meta.class, CkObjectClass::SECRET_KEY, "class must be SECRET_KEY");
+            assert_eq!(meta.class, Some(CkObjectClass::SECRET_KEY), "class must be SECRET_KEY");
             assert!(!meta.is_token, "is_token must be false for a session object");
         }
 
@@ -859,7 +1009,7 @@ mod tests {
 
             let session_meta = ObjectMetadata {
                 unique_id: b"ses-uid".to_vec(),
-                class: CkObjectClass::SECRET_KEY,
+                class: Some(CkObjectClass::SECRET_KEY),
                 is_token: false,
             };
             ctx_mgr.cache_object_metadata(&ctx_id, 1, session_meta.clone()).await;
@@ -868,7 +1018,7 @@ mod tests {
 
             let token_meta = ObjectMetadata {
                 unique_id: b"tok-uid".to_vec(),
-                class: CkObjectClass::SECRET_KEY,
+                class: Some(CkObjectClass::SECRET_KEY),
                 is_token: true,
             };
             ctx_mgr.cache_object_metadata(&ctx_id, 2, token_meta).await;
@@ -884,6 +1034,63 @@ mod tests {
             // against the mock backend for two consecutive gate checks.
             // (Uses gate_object_handle indirectly via setup_per_object_test.)
             // This is tested in service_utils::tests as per_object_gate_token_object_not_cached.
+        }
+
+        // --- M2: unrecognised CLASS format yields class=None, not fail-closed ---
+
+        #[tokio::test]
+        async fn m2_unrecognised_class_format_returns_metadata_with_none_class() {
+            // M2: a CLASS value that is present but in an unrecognised byte-width
+            // (not 4 or 8 bytes) must NOT cause fetch_object_metadata to return None.
+            // Previously the `_ => return Ok(None)` branch was fail-closed for ALL
+            // unrecognised CLASS encodings, breaking uid-only deployments when
+            // backends emit unusual class widths.
+            //
+            // After M2: class parsing failure → class=None in ObjectMetadata.
+            // The call still returns Some — uid-only deployments remain functional.
+            let (mock, session, object) = mock_with_session_and_object();
+            // Override CLASS with a 3-byte value: present but unrecognisable size
+            // (valid sizes are 4 and 8 bytes). The backend call succeeds (no error
+            // code from mock) so parsing is reached.
+            mock.set_attribute(
+                object,
+                CkAttributeType::CLASS,
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(vec![0x00, 0x00, 0x03])),
+            );
+            let uid = b"uid-odd-class".to_vec();
+            mock.set_attribute(
+                object,
+                CkAttributeType::UNIQUE_ID,
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone())),
+            );
+            let ctx = make_ctx(mock);
+            let result = fetch_object_metadata(&ctx, session, object).await;
+            // M2: must return Some (not None) even though CLASS cannot be parsed.
+            let meta = result.expect("M2: unrecognised CLASS format must NOT fail the fetch");
+            assert_eq!(meta.unique_id, uid, "uid must still be populated when CLASS unrecognised");
+            assert!(
+                meta.class.is_none(),
+                "M2: unrecognised CLASS encoding must map to class=None in metadata"
+            );
+        }
+
+        #[tokio::test]
+        async fn m2_present_class_returns_metadata_with_some_class() {
+            // Regression guard: a normally-present CLASS is still parsed into Some(class).
+            let (mock, session, object) = mock_with_session_and_object();
+            let uid = b"uid-with-class".to_vec();
+            mock.set_attribute(
+                object,
+                CkAttributeType::UNIQUE_ID,
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone())),
+            );
+            let ctx = make_ctx(mock);
+            let meta = fetch_object_metadata(&ctx, session, object).await.unwrap();
+            assert_eq!(
+                meta.class,
+                Some(CkObjectClass::SECRET_KEY),
+                "M2: normally-present CLASS must parse into Some(class)"
+            );
         }
     }
 }
