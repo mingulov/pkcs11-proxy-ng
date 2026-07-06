@@ -43,12 +43,21 @@ impl MockBackend {
     pub(super) fn find_objects_impl(
         &self,
         session: CkSessionHandle,
+        max_count: u32,
     ) -> CkResult<Vec<CkObjectHandle>> {
         let state = self.state.lock().unwrap();
         if !state.has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
         state.require_op(session, MultiPartOp::FindObjects)?;
+        // When a test has configured a result override, return it truncated to
+        // `max_count`. The override is retained so repeated find_objects calls
+        // (as a client would issue when looping) continue to work.
+        let override_guard = self.find_objects_override.lock().unwrap();
+        if let Some(objects) = override_guard.as_ref() {
+            let take = (max_count as usize).min(objects.len());
+            return Ok(objects[..take].to_vec());
+        }
         Ok(vec![])
     }
 

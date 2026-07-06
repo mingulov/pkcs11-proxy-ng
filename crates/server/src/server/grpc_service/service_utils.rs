@@ -8,6 +8,7 @@ use tonic::Status;
 
 use pkcs11_proxy_ng_types::*;
 
+use super::super::auth::identity::AuthenticatedIdentity;
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::HandlerContext;
@@ -458,6 +459,55 @@ pub(super) async fn resolve_session(
     Ok(CkSessionHandle(backend_session.0 as u64))
 }
 
+/// Resolve the caller's identity and the token `(label, serial)` for the
+/// session that owns `virtual_session`.
+///
+/// This is the shared identity + slot-info prologue for the per-object
+/// authorization gate (`gate_object_handle`, USE-time) and the
+/// `find_objects` enumeration filter (G3-PR2). Extracting it here keeps
+/// the two call sites DRY — neither duplicates the identity lookup, slot
+/// lookup, or token-info cache logic.
+///
+/// Returns `None` (fail-closed) when:
+/// - the context is gone,
+/// - the session is not registered in `session_slots`,
+/// - the slot's token info is unavailable (`TOKEN_NOT_PRESENT`, backend
+///   error, or transport failure).
+pub(super) async fn resolve_object_authz_context(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    virtual_session: u64,
+) -> Option<(AuthenticatedIdentity, String, String)> {
+    // Step 1: Resolve the caller's identity from the context.
+    let identity =
+        super::authorization::context_identity(&ctx.context_manager, ctx_id).await.ok()?;
+
+    // Step 2: Resolve the slot that owns this session → (label, serial).
+    let backend_slot =
+        ctx.context_manager.slot_for_session(ctx_id, VirtualHandle(virtual_session)).await?;
+
+    let (label, serial) = match ctx.context_manager.cached_token_info(backend_slot) {
+        Some(cached) => cached,
+        None => {
+            let backend_ref = ctx.backend.clone();
+            match spawn_backend(move || backend_ref.get_token_info(backend_slot)).await {
+                Ok(Ok(info)) => {
+                    ctx.context_manager.cache_token_info(
+                        backend_slot,
+                        info.label.clone(),
+                        info.serial_number.clone(),
+                    );
+                    (info.label, info.serial_number)
+                }
+                // TOKEN_NOT_PRESENT, backend CkRv error, or transport failure.
+                _ => return None, // fail-closed
+            }
+        }
+    };
+
+    Some((identity, label, serial))
+}
+
 /// Per-object authorization gate (G3-PR1, ADR-0012).
 ///
 /// Called when `ctx.token_policy.per_object_active()` is `true` AND
@@ -481,7 +531,7 @@ pub(super) async fn resolve_session(
 /// cache eliminates these on subsequent uses of the same handle).  This
 /// first-use timing side-channel is accepted; a constant-latency denial
 /// path (padding the not-found path with phantom backend calls) is tracked
-/// as a follow-up together with `C_FindObjects` enumeration filtering.
+/// as a future refinement.
 ///
 /// **Fail-closed semantics:**
 /// - Identity unavailable → deny (handle 0).
@@ -490,10 +540,10 @@ pub(super) async fn resolve_session(
 /// - `CKA_UNIQUE_ID` absent or empty → deny.
 /// - `allows_object_use` returns false → deny.
 ///
-/// NOTE: enumeration-time filtering of `find_objects` results is a
-/// separate, deferred concern; this gate covers USE-time only.  A client
-/// may still receive a handle it cannot use; using it returns the same
-/// handle-invalid RV as a genuinely-nonexistent handle.
+/// NOTE: enumeration-time filtering of `find_objects` results is implemented
+/// by G3-PR2 (`find_objects` in `object/search.rs`).  This gate covers
+/// USE-time only; objects that pass the enumeration filter have their
+/// `CKA_UNIQUE_ID` pre-cached so this gate avoids a re-fetch.
 pub(super) async fn gate_object_handle(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,
@@ -503,37 +553,12 @@ pub(super) async fn gate_object_handle(
     backend_object: CkObjectHandle,
 ) -> CkObjectHandle {
     let backend_session = CkSessionHandle(backend_session.0 as u64);
-    // --- 1. Resolve the caller's identity ---
-    let identity = match super::authorization::context_identity(&ctx.context_manager, ctx_id).await
-    {
-        Ok(id) => id,
-        Err(_) => return CkObjectHandle(0), // fail-closed: context gone
-    };
 
-    // --- 2. Resolve the slot that owns this session → (label, serial) ---
-    let Some(backend_slot) =
-        ctx.context_manager.slot_for_session(ctx_id, VirtualHandle(virtual_session)).await
+    // --- 1+2: Resolve identity and (label, serial) via shared helper ---
+    let Some((identity, label, serial)) =
+        resolve_object_authz_context(ctx, ctx_id, virtual_session).await
     else {
-        return CkObjectHandle(0); // fail-closed: session not registered
-    };
-
-    let (label, serial) = match ctx.context_manager.cached_token_info(backend_slot) {
-        Some(cached) => cached,
-        None => {
-            let backend_ref = ctx.backend.clone();
-            match spawn_backend(move || backend_ref.get_token_info(backend_slot)).await {
-                Ok(Ok(info)) => {
-                    ctx.context_manager.cache_token_info(
-                        backend_slot,
-                        info.label.clone(),
-                        info.serial_number.clone(),
-                    );
-                    (info.label, info.serial_number)
-                }
-                // TOKEN_NOT_PRESENT, backend CkRv error, or transport failure.
-                _ => return CkObjectHandle(0), // fail-closed
-            }
-        }
+        return CkObjectHandle(0); // fail-closed
     };
 
     // --- 3. Resolve CKA_UNIQUE_ID from cache or backend ---

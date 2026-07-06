@@ -188,6 +188,11 @@ pub struct MockBackend {
     /// PKCS#11 version reported by `get_info`. Default `(3, 0)`.
     /// Set via `with_cryptoki_version` to test the v3.0+ startup guard.
     cryptoki_version: (u8, u8),
+    /// When `Some`, `find_objects` returns this list (truncated to `max_count`)
+    /// instead of the default empty result. Used by G3-PR2 tests that need the
+    /// mock to serve specific objects from a search. Default `None` preserves
+    /// the historical "always empty" find behavior.
+    find_objects_override: Mutex<Option<Vec<CkObjectHandle>>>,
 }
 
 /// Which mechanisms require parameters and which forbid them, snapshot
@@ -246,6 +251,7 @@ impl MockBackend {
             advertise_big_endian: false,
             param_presence: None,
             cryptoki_version: (3, 0),
+            find_objects_override: Mutex::new(None),
         }
     }
 
@@ -320,6 +326,15 @@ impl MockBackend {
     ) {
         let mut store = self.attribute_store.lock().unwrap();
         store.entry(object.0).or_default().insert(attr_type.0, slot);
+    }
+
+    /// Configure the objects returned by the next `find_objects` call(s).
+    ///
+    /// When set, `find_objects` returns these handles (truncated to `max_count`)
+    /// instead of the default empty vec. Used by G3-PR2 per-object filter tests
+    /// that need the mock to serve a specific search result.
+    pub fn set_find_objects_result(&self, objects: Vec<CkObjectHandle>) {
+        *self.find_objects_override.lock().unwrap() = Some(objects);
     }
 
     /// Enqueue a slot event to be returned by the next `wait_for_slot_event` call.
@@ -1301,8 +1316,12 @@ impl Pkcs11Backend for MockBackend {
     fn find_objects_init(&self, session: CkSessionHandle, _t: &[CkAttribute]) -> CkResult<()> {
         self.find_objects_init_impl(session)
     }
-    fn find_objects(&self, session: CkSessionHandle, _m: u32) -> CkResult<Vec<CkObjectHandle>> {
-        self.find_objects_impl(session)
+    fn find_objects(
+        &self,
+        session: CkSessionHandle,
+        max_count: u32,
+    ) -> CkResult<Vec<CkObjectHandle>> {
+        self.find_objects_impl(session, max_count)
     }
     fn find_objects_final(&self, session: CkSessionHandle) -> CkResult<()> {
         self.find_objects_final_impl(session)
