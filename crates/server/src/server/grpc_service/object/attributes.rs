@@ -1,10 +1,14 @@
+use std::time::Instant;
+
 use tonic::{Request, Response, Status};
 
+use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::attribute::is_value_bearing_secret;
 use pkcs11_proxy_ng_types::{CkAttributeQuery, CkAttributeType, CkRv};
 
 use super::super::super::context_manager::ClientContextId;
 use super::super::HandlerContext;
+use super::super::audit_events::emit_auth_event;
 use super::super::authorization::extract_is_permitted;
 use super::super::service_utils::{
     ck_rv_only, resolve_session_and_object, spawn_backend, spawn_task,
@@ -37,6 +41,7 @@ pub(super) async fn get_attribute_value(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueResponse>, Status> {
+    let started = Instant::now();
     crate::server::resilience::record_get_attribute_value();
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
@@ -73,8 +78,27 @@ pub(super) async fn get_attribute_value(
     // KEY_FUNCTION_NOT_PERMITTED without calling the backend. Public attributes
     // such as CKA_MODULUS are unaffected (is_value_bearing_secret returns false
     // for them). Unauthenticated / no-policy / no-extract-deny → passes through.
+    // I3: emit a KeyMgmt audit record for the denial so monitoring can detect
+    // extraction attempts; do NOT audit the allowed path (data-plane volume).
     let has_secret_attr = template.iter().any(|attr| is_value_bearing_secret(attr.attr_type));
     if has_secret_attr && !extract_is_permitted(ctx, &ctx_id, req.session_handle).await? {
+        if emit_auth_event(
+            ctx,
+            &ctx_id,
+            "C_GetAttributeValue",
+            EventClass::KeyMgmt,
+            None,
+            Some(req.session_handle),
+            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
+            started,
+        )
+        .is_err()
+        {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueResponse {
+                ck_rv: CkRv::FUNCTION_FAILED.0,
+                results: vec![],
+            }));
+        }
         return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueResponse {
             ck_rv: CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
             results: vec![],
@@ -98,6 +122,7 @@ pub(super) async fn get_attribute_value_exact(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueExactResponse>, Status> {
+    let started = Instant::now();
     crate::server::resilience::record_get_attribute_value();
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
@@ -126,8 +151,27 @@ pub(super) async fn get_attribute_value_exact(
     let query_types: Vec<CkAttributeType> = queries.iter().map(|q| q.attr_type).collect();
 
     // Extract-deny gate (G2-PR2): same semantics as get_attribute_value above.
+    // I3: emit a KeyMgmt audit record for the denial; do NOT audit the allowed
+    // path (data-plane volume). No secret/attribute values in the record.
     let has_secret_attr = query_types.iter().any(|&t| is_value_bearing_secret(t));
     if has_secret_attr && !extract_is_permitted(ctx, &ctx_id, req.session_handle).await? {
+        if emit_auth_event(
+            ctx,
+            &ctx_id,
+            "C_GetAttributeValueExact",
+            EventClass::KeyMgmt,
+            None,
+            Some(req.session_handle),
+            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
+            started,
+        )
+        .is_err()
+        {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+                ck_rv: CkRv::FUNCTION_FAILED.0,
+                results: vec![],
+            }));
+        }
         return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
             ck_rv: CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
             results: vec![],

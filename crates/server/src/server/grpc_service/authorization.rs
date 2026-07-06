@@ -77,11 +77,16 @@ pub(super) async fn slot_is_authorized(
 /// Returns `true` if the calling principal may extract key material from the
 /// token that owns `virtual_session`.
 ///
-/// `false` only when the principal has an explicit `extract = "deny"` grant for
-/// the matched token AND the token info is already in the cache. On any
-/// resolution failure (unknown context, session not in `session_slots`, cache
-/// miss) the function returns `true` so that the opt-in extract-deny gate
-/// never denies due to incomplete state.
+/// Returns `false` when the principal has an explicit `extract = "deny"` grant
+/// for the matched token. On a cache miss for an authenticated principal the
+/// function fetches the token info from the backend and caches it, mirroring
+/// `slot_is_authorized`'s resolution strategy (M9) — a stale/expired cache
+/// must not silently disarm the extract gate. Returns `true` (permissive) on
+/// unknown context or unregistered session. Returns `false` (fail-closed) when
+/// the backend reports `TOKEN_NOT_PRESENT` or another error — consistent with
+/// `slot_is_authorized`'s "do not silently permit" contract. Unauthenticated
+/// principals always return `true` (extract-deny is opt-in for authenticated
+/// identities only).
 pub(super) async fn extract_is_permitted(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,
@@ -104,11 +109,29 @@ pub(super) async fn extract_is_permitted(
         return Ok(true); // session not registered → permissive
     };
 
+    // Resolve the token (label, serial) from cache when available. On a miss,
+    // fetch from the backend and cache the result so a TTL-expired cache cannot
+    // silently disarm the extract gate. Mirrors slot_is_authorized (M9).
     let (label, serial) = match ctx.context_manager.cached_token_info(backend_slot) {
         Some(info) => info,
-        // Cache miss: rather than blocking on a backend call just for the
-        // extract gate, be permissive — extract-deny is opt-in.
-        None => return Ok(true),
+        None => {
+            let backend = ctx.backend.clone();
+            match spawn_backend(move || backend.get_token_info(backend_slot)).await? {
+                Ok(info) => {
+                    ctx.context_manager.cache_token_info(
+                        backend_slot,
+                        info.label.clone(),
+                        info.serial_number.clone(),
+                    );
+                    (info.label, info.serial_number)
+                }
+                // No token at this slot → fail closed (consistent with
+                // slot_is_authorized returning false for TOKEN_NOT_PRESENT).
+                Err(CkRv::TOKEN_NOT_PRESENT) => return Ok(false),
+                // Backend error → fail closed; do not silently permit.
+                Err(_) => return Ok(false),
+            }
+        }
     };
 
     Ok(ctx.token_policy.extract_allowed(&identity, &label, &serial))
@@ -395,9 +418,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extract_permitted_on_cache_miss_returns_true() {
-        // When the token-info cache is empty (no prime step), the function
-        // returns true (permissive on cache miss — extract-deny is opt-in).
+    async fn extract_denied_on_cache_miss_for_authenticated_identity() {
+        // I1 fix: for an authenticated identity with extract=Deny, a cache miss
+        // must NOT silently permit. The function fetches token info from the
+        // backend, caches it, and then evaluates the grant — yielding a denial
+        // when the policy says extract=Deny.
         let policy = policy_with_extract_deny(MTLS_IDENTITY);
         let backend = backend();
         let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
@@ -407,11 +432,15 @@ mod tests {
             .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
             .await
             .unwrap();
-        // No cache_token_info call — intentional cache miss.
+        // No cache_token_info call — intentional cache miss; backend fetch is
+        // expected (MockBackend returns label "MockToken" which matches the policy).
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = Arc::new(policy);
 
         let permitted = extract_is_permitted(&ctx, &ctx_id, session_vh.0).await.unwrap();
-        assert!(permitted, "cache miss must be permissive");
+        assert!(
+            !permitted,
+            "cache miss for authenticated identity with extract=Deny must resolve from backend and deny"
+        );
     }
 }

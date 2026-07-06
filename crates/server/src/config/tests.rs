@@ -1005,6 +1005,74 @@ allow_insecure_unix = true
     );
 }
 
+// --- I2 (G2-PR2): per-class/mechanism grants rejected by validate() ---
+
+#[test]
+fn validate_rejects_grant_with_classes_field() {
+    // A rich grant with `classes` set implies a class restriction the daemon
+    // does not enforce (G3 is not yet wired). validate() must refuse to start.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", classes = [\"secret_key\"], extract = \"deny\" }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("classes"), "error must mention 'classes' restriction: {err}");
+    assert!(
+        err.contains("not yet enforced") || err.contains("does not enforce"),
+        "error must explain why it is rejected: {err}"
+    );
+}
+
+#[test]
+fn validate_rejects_grant_with_mechanisms_field() {
+    // A rich grant with `mechanisms` set implies a mechanism restriction the
+    // daemon does not enforce (G3 is not yet wired).
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", mechanisms = [\"CKM_AES_GCM\"] }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("mechanisms"), "error must mention 'mechanisms' restriction: {err}");
+}
+
+#[test]
+fn validate_accepts_rich_grant_with_extract_deny_only() {
+    // A rich grant that uses only `extract = "deny"` (no classes/mechanisms)
+    // is fully enforced today and must pass validate().
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"peer_cred\"
+[auth]
+allow_all_authenticated = false
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = [{ token = \"label:MyToken\", extract = \"deny\" }]
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(cfg.validate().is_ok(), "rich grant with extract=deny only must validate successfully");
+}
+
 #[test]
 fn audit_with_unauthenticated_listener_without_anonymous_principal_is_rejected() {
     // H2 guard: audit + auth=none WITHOUT anonymous_principal still refused.
