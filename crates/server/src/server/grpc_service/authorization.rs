@@ -131,6 +131,7 @@ mod tests {
     fn policy_for_identity(identity: &str) -> TokenPolicy {
         TokenPolicy::from_config(&AuthConfig {
             allow_all_authenticated: false,
+            anonymous_principal: None,
             policy: vec![PolicyEntry {
                 identity: identity.into(),
                 tokens: TokenAccessSpec::Specific(vec!["label:MockToken".into()]),

@@ -108,6 +108,7 @@ async fn start_mtls_daemon() -> MtlsFixture {
     let client_a_identity = format!("x509:spki={spki_sha256}");
     let token_policy = TokenPolicy::from_config(&AuthConfig {
         allow_all_authenticated: false,
+        anonymous_principal: None,
         policy: vec![PolicyEntry {
             identity: client_a_identity,
             tokens: TokenAccessSpec::Specific(vec!["label:MockToken".into()]),

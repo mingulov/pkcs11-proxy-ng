@@ -15,20 +15,35 @@ fn visible_tokens<'a>(
 
 #[test]
 fn unauthenticated_always_allowed() {
-    let policy = TokenPolicy { rules: HashMap::new(), allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules: HashMap::new(),
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     assert!(policy.allows(&AuthenticatedIdentity::Unauthenticated, "any", "any"));
 }
 
 #[test]
 fn allow_all_authenticated_bypasses_rules() {
-    let policy = TokenPolicy { rules: HashMap::new(), allow_all_authenticated: true };
+    let policy = TokenPolicy {
+        rules: HashMap::new(),
+        allow_all_authenticated: true,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(policy.allows(&id, "token1", "serial1"));
 }
 
 #[test]
 fn default_deny_for_unknown_identity() {
-    let policy = TokenPolicy { rules: HashMap::new(), allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules: HashMap::new(),
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(!policy.allows(&id, "token1", "serial1"));
 }
@@ -40,7 +55,12 @@ fn label_selector_matches() {
         "uid=1000".into(),
         TokenAccess::Specific(vec![TokenSelector::Label("my-token".into())]),
     );
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(policy.allows(&id, "my-token", "any-serial"));
     assert!(!policy.allows(&id, "other-token", "any-serial"));
@@ -53,7 +73,12 @@ fn serial_selector_matches() {
         "uid=1000".into(),
         TokenAccess::Specific(vec![TokenSelector::Serial("SN123".into())]),
     );
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(policy.allows(&id, "any-label", "SN123"));
     assert!(!policy.allows(&id, "any-label", "SN999"));
@@ -63,7 +88,12 @@ fn serial_selector_matches() {
 fn all_access_matches_everything() {
     let mut rules = HashMap::new();
     rules.insert("uid=0".into(), TokenAccess::All);
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     let id = AuthenticatedIdentity::PeerCred { uid: 0 };
     assert!(policy.allows(&id, "any", "any"));
 }
@@ -88,6 +118,7 @@ fn uri_selector_deferred() {
 fn from_config_builds_policy() {
     let auth = crate::config::AuthConfig {
         allow_all_authenticated: false,
+        anonymous_principal: None,
         policy: vec![crate::config::PolicyEntry {
             identity: "uid=1000".into(),
             tokens: crate::config::TokenAccessSpec::Specific(vec![
@@ -110,7 +141,12 @@ fn mtls_identity_matches_policy_by_display_key() {
     let mtls_key = "x509:issuer=CN=Root CA;subject=CN=client1";
     let mut rules = HashMap::new();
     rules.insert(mtls_key.to_string(), TokenAccess::All);
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
 
     let allowed = AuthenticatedIdentity::Mtls {
         issuer: "CN=Root CA".into(),
@@ -130,7 +166,12 @@ fn mtls_identity_matches_policy_by_display_key() {
 fn multiple_identities_independent_access() {
     let mut rules = HashMap::new();
     rules.insert("uid=1000".into(), TokenAccess::All);
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
 
     let allowed = AuthenticatedIdentity::PeerCred { uid: 1000 };
     let denied = AuthenticatedIdentity::PeerCred { uid: 2000 };
@@ -142,7 +183,12 @@ fn multiple_identities_independent_access() {
 fn specific_access_empty_selectors_denies_everything() {
     let mut rules = HashMap::new();
     rules.insert("uid=1000".into(), TokenAccess::Specific(vec![]));
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(!policy.allows(&id, "any-label", "any-serial"));
 }
@@ -157,7 +203,12 @@ fn multiple_selectors_any_match_wins() {
             TokenSelector::Serial("SN-A".into()),
         ]),
     );
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
 
     assert!(policy.allows(&id, "token-a", "unrelated-serial"));
@@ -169,6 +220,7 @@ fn multiple_selectors_any_match_wins() {
 fn from_config_with_all_access() {
     let auth = crate::config::AuthConfig {
         allow_all_authenticated: false,
+        anonymous_principal: None,
         policy: vec![crate::config::PolicyEntry {
             identity: "uid=0".into(),
             tokens: crate::config::TokenAccessSpec::All("*".into()),
@@ -196,7 +248,12 @@ fn token_selector_serial_case_sensitive() {
 
 #[test]
 fn root_uid_denied_when_not_in_policy() {
-    let policy = TokenPolicy { rules: HashMap::new(), allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules: HashMap::new(),
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     let root = AuthenticatedIdentity::PeerCred { uid: 0 };
     assert!(!policy.allows(&root, "any", "any"));
 }
@@ -262,6 +319,7 @@ fn parse_trims_whitespace() {
 fn from_config_rejects_empty_selector() {
     let auth = crate::config::AuthConfig {
         allow_all_authenticated: false,
+        anonymous_principal: None,
         policy: vec![crate::config::PolicyEntry {
             identity: "uid=1000".into(),
             tokens: crate::config::TokenAccessSpec::Specific(vec!["".into()]),
@@ -275,6 +333,7 @@ fn from_config_rejects_empty_selector() {
 fn from_config_rejects_typo_prefix() {
     let auth = crate::config::AuthConfig {
         allow_all_authenticated: false,
+        anonymous_principal: None,
         policy: vec![crate::config::PolicyEntry {
             identity: "uid=1000".into(),
             tokens: crate::config::TokenAccessSpec::Specific(vec!["lable:foo".into()]),
@@ -303,7 +362,12 @@ fn matrix_policy() -> TokenPolicy {
         TokenAccess::Specific(vec![TokenSelector::Label("token-a".into())]),
     );
     rules.insert("uid=9999".into(), TokenAccess::Specific(vec![]));
-    TokenPolicy { rules, allow_all_authenticated: false }
+    TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    }
 }
 
 fn token_list() -> Vec<(String, String)> {
@@ -523,14 +587,24 @@ fn allow_all_authenticated_overrides_restrictive_rules() {
         "uid=1000".into(),
         TokenAccess::Specific(vec![TokenSelector::Label("token-a".into())]),
     );
-    let policy = TokenPolicy { rules, allow_all_authenticated: true };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: true,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     assert!(policy.allows(&id, "token-b", "SN-B"));
 }
 
 #[test]
 fn allow_all_authenticated_allows_unknown_identity() {
-    let policy = TokenPolicy { rules: HashMap::new(), allow_all_authenticated: true };
+    let policy = TokenPolicy {
+        rules: HashMap::new(),
+        allow_all_authenticated: true,
+        has_policy: false,
+        anonymous_principal: None,
+    };
     let id = AuthenticatedIdentity::PeerCred { uid: 99999 };
     assert!(
         policy.allows(&id, "any", "any"),
@@ -541,7 +615,12 @@ fn allow_all_authenticated_allows_unknown_identity() {
 #[test]
 fn allow_all_authenticated_does_not_affect_unauthenticated() {
     for flag in [true, false] {
-        let policy = TokenPolicy { rules: HashMap::new(), allow_all_authenticated: flag };
+        let policy = TokenPolicy {
+            rules: HashMap::new(),
+            allow_all_authenticated: flag,
+            has_policy: false,
+            anonymous_principal: None,
+        };
         assert!(policy.allows(&AuthenticatedIdentity::Unauthenticated, "any", "any"));
     }
 }
@@ -558,6 +637,7 @@ fn serial_selector_grants_regardless_of_label() {
 fn duplicate_identity_in_config_last_wins() {
     let auth = crate::config::AuthConfig {
         allow_all_authenticated: false,
+        anonymous_principal: None,
         policy: vec![
             crate::config::PolicyEntry {
                 identity: "uid=1000".into(),
@@ -579,7 +659,11 @@ fn duplicate_identity_in_config_last_wins() {
 fn unauthenticated_decision_routes_through_single_flip_point() {
     // `allows()` for an Unauthenticated identity must equal `allows_unauthenticated()`
     // (the single G2-PR2 deny-default flip-point) — not an independent inline `true`.
-    let auth = crate::config::AuthConfig { allow_all_authenticated: false, policy: vec![] };
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        policy: vec![],
+        anonymous_principal: None,
+    };
     let policy = TokenPolicy::from_config(&auth).unwrap();
     let unauth = AuthenticatedIdentity::Unauthenticated;
     assert_eq!(
@@ -587,9 +671,11 @@ fn unauthenticated_decision_routes_through_single_flip_point() {
         policy.allows_unauthenticated(),
         "the Unauthenticated case must delegate to the single flip-point"
     );
-    // Current (pre-G2-PR2) behavior is allow; this pins the flip-point default so
-    // a future deny-default change is a deliberate single-line edit.
-    assert!(policy.allows_unauthenticated(), "no-auth mode currently allows (flip in G2-PR2)");
+    // G2-PR2 is now deployed: no-policy (transport) mode still allows (has_policy=false).
+    assert!(
+        policy.allows_unauthenticated(),
+        "no-policy transport mode must allow unauthenticated peers"
+    );
 }
 
 #[test]
@@ -597,7 +683,11 @@ fn allow_all_authenticated_does_not_depend_on_unauthenticated_path() {
     // With allow_all_authenticated=true, an AUTHENTICATED identity is allowed via
     // the allow_all branch; the Unauthenticated branch is handled separately by the
     // flip-point, so allow_all never independently authorizes an unauthenticated peer.
-    let auth = crate::config::AuthConfig { allow_all_authenticated: true, policy: vec![] };
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: true,
+        policy: vec![],
+        anonymous_principal: None,
+    };
     let policy = TokenPolicy::from_config(&auth).unwrap();
     let authed = AuthenticatedIdentity::PeerCred { uid: 42 };
     assert!(policy.allows(&authed, "any", "any"), "allow_all applies to authenticated");
@@ -613,7 +703,12 @@ fn dual_accept_emits_deprecation_warning_for_legacy_dn_key() {
     let legacy_key = "x509:issuer=CN=DualAccept CA;subject=CN=transition-client";
     let mut rules = HashMap::new();
     rules.insert(legacy_key.to_string(), TokenAccess::All);
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
 
     // Identity with both SPKI and DN — the SPKI key won't be in rules, but the DN key will.
     let id = AuthenticatedIdentity::Mtls {
@@ -636,4 +731,122 @@ fn dual_accept_emits_deprecation_warning_for_legacy_dn_key() {
         policy.allows(&id_spoof, "any", "any"),
         "legacy DN policy matches ANY cert with that DN (documented transition risk; use SPKI to close)"
     );
+}
+
+// --- G2-PR2: deny-default flip-point tests ---
+
+#[test]
+fn allows_unauthenticated_no_policy_no_anon_is_true() {
+    // Transport mode: no policy → unauthenticated allowed (legacy behaviour preserved).
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        policy: vec![],
+        anonymous_principal: None,
+    };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    assert!(
+        policy.allows_unauthenticated(),
+        "no-policy transport mode must allow unauthenticated peers"
+    );
+}
+
+#[test]
+fn allows_unauthenticated_policy_set_no_anon_is_false() {
+    // Policy configured, no anonymous_principal → deny-default for unauthenticated peers.
+    // (Validation normally prevents this combo with an auth=none listener, but the
+    // flip-point must work correctly at the pure policy level regardless.)
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![crate::config::PolicyEntry {
+            identity: "uid=1000".into(),
+            tokens: crate::config::TokenAccessSpec::All("all".into()),
+        }],
+    };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    assert!(
+        !policy.allows_unauthenticated(),
+        "policy-configured mode without anonymous_principal must deny unauthenticated peers"
+    );
+    // And allows() routes through the flip-point, so unauthenticated is denied there too.
+    assert!(
+        !policy.allows(&AuthenticatedIdentity::Unauthenticated, "any", "any"),
+        "allows() for Unauthenticated must honour the deny-default flip"
+    );
+}
+
+#[test]
+fn allows_unauthenticated_policy_set_with_anon_is_true() {
+    // Policy + anonymous_principal: operator has named the audit identity; allow.
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: Some("anon-client".into()),
+        policy: vec![crate::config::PolicyEntry {
+            identity: "uid=1000".into(),
+            tokens: crate::config::TokenAccessSpec::All("all".into()),
+        }],
+    };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    assert!(
+        policy.allows_unauthenticated(),
+        "policy + anonymous_principal must allow unauthenticated peers"
+    );
+}
+
+#[test]
+fn allows_unauthenticated_no_policy_with_anon_is_true() {
+    // No policy, but anonymous_principal set: allowed (no-policy is already allow;
+    // anon name is carried for audit labelling).
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: Some("anon-client".into()),
+        policy: vec![],
+    };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    assert!(
+        policy.allows_unauthenticated(),
+        "no-policy + anonymous_principal must allow unauthenticated peers"
+    );
+}
+
+#[test]
+fn audit_identity_substitutes_anon_name_for_unauthenticated() {
+    // When anonymous_principal is set, audit_identity() substitutes the configured
+    // name for "unauthenticated" and None (audit-identity only path).
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: Some("anon-label".into()),
+        policy: vec![],
+    };
+    let policy = TokenPolicy::from_config(&auth).unwrap();
+    assert_eq!(
+        policy.audit_identity(Some("unauthenticated")),
+        Some("anon-label".into()),
+        "audit_identity should substitute anon name for 'unauthenticated'"
+    );
+    assert_eq!(
+        policy.audit_identity(None),
+        Some("anon-label".into()),
+        "audit_identity should substitute anon name for None context"
+    );
+    // Authenticated identities are passed through unchanged.
+    assert_eq!(
+        policy.audit_identity(Some("uid=1000")),
+        Some("uid=1000".into()),
+        "audit_identity must not alter authenticated identities"
+    );
+}
+
+#[test]
+fn audit_identity_without_anon_returns_stored() {
+    // No anonymous_principal: audit_identity() returns the stored value verbatim.
+    let policy = TokenPolicy {
+        rules: HashMap::new(),
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
+    assert_eq!(policy.audit_identity(Some("unauthenticated")), Some("unauthenticated".into()));
+    assert_eq!(policy.audit_identity(None), None);
+    assert_eq!(policy.audit_identity(Some("uid=42")), Some("uid=42".into()));
 }

@@ -91,6 +91,16 @@ pub struct AuthConfig {
     pub allow_all_authenticated: bool,
     #[serde(default)]
     pub policy: Vec<PolicyEntry>,
+    /// Audit-identity label used for unauthenticated peers when `[audit]` is
+    /// enabled and at least one unauthenticated listener is present. Setting
+    /// this name relaxes the H2 guard (audit+auth=none → refuse to start)
+    /// because the operator has explicitly named how unauthenticated peers
+    /// will appear in audit records, avoiding the "identity=None" compliance
+    /// gap that guard protects against. **Audit-identity only** — this is
+    /// never an authz grant. Authz for unauthenticated peers is still
+    /// controlled by `allows_unauthenticated()` in `TokenPolicy`.
+    #[serde(default)]
+    pub anonymous_principal: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -745,11 +755,31 @@ impl DaemonConfig {
                  or disable allow_all_authenticated."
                 .into());
         }
-        if self.audit.dir.is_some() && has_unauthenticated_listener {
+        // H2 guard: audit + unauthenticated listener is normally refused because
+        // every operation would be recorded as identity=None (false compliance).
+        // EXCEPTION: when anonymous_principal is set the operator has explicitly
+        // named the audit identity for unauthenticated peers, so the concern is
+        // addressed and we allow the combination.
+        if self.audit.dir.is_some()
+            && has_unauthenticated_listener
+            && self.auth.anonymous_principal.is_none()
+        {
             return Err("[audit] is enabled with an auth=\"none\" listener; every operation \
                  would be recorded as identity=None, giving false compliance assurance. \
-                 Use an authenticated listener."
+                 Use an authenticated listener, or set auth.anonymous_principal to name \
+                 the audit identity for unauthenticated peers."
                 .into());
+        }
+        // anonymous_principal must not also appear as a policy grant key — it is
+        // audit-identity only, never an authz grant.
+        if let Some(ref anon) = self.auth.anonymous_principal
+            && self.auth.policy.iter().any(|e| &e.identity == anon)
+        {
+            return Err(format!(
+                "auth.anonymous_principal '{anon}' also appears as an [auth.policy] \
+                 entry identity; anonymous_principal is audit-only and must not be \
+                 used as a policy grant key"
+            ));
         }
         let has_authenticated_listener =
             self.listener.local.as_ref().is_some_and(|l| l.auth.is_authenticated())

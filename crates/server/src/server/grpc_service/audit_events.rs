@@ -86,9 +86,12 @@ pub(super) fn emit_auth_event(
     let latency_us = started_at.elapsed().as_micros() as u64;
 
     // Identity: looked up from the live context map.  Absent for finalize
-    // (context already removed) or unknown ctx_id — both resolve to None,
-    // which is recorded as-is without error.
-    let identity = ctx.context_manager.context_identity(ctx_id);
+    // (context already removed) or unknown ctx_id — both resolve to None.
+    // When an anonymous_principal is configured, audit_identity() substitutes
+    // its name for unauthenticated peers ("unauthenticated" / None) so audit
+    // records carry a meaningful label instead of the raw marker.
+    let identity =
+        ctx.token_policy.audit_identity(ctx.context_manager.context_identity(ctx_id).as_deref());
 
     // seq and prev_hash are set by the sink's ChainState in chain.append;
     // zeros are the sentinel values the sink expects from callers.

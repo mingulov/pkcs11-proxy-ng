@@ -925,6 +925,7 @@ async fn wait_for_slot_event_suppresses_events_for_unauthorized_slots() {
     let policy =
         crate::server::auth::policy::TokenPolicy::from_config(&crate::config::AuthConfig {
             allow_all_authenticated: false,
+            anonymous_principal: None,
             policy: vec![],
         })
         .unwrap();

@@ -142,7 +142,12 @@ mod tests {
         let mut rules = HashMap::new();
         rules
             .insert(policy_key, TokenAccess::Specific(vec![TokenSelector::Label("my-hsm".into())]));
-        let policy = TokenPolicy { rules, allow_all_authenticated: false };
+        let policy = TokenPolicy {
+            rules,
+            allow_all_authenticated: false,
+            has_policy: false,
+            anonymous_principal: None,
+        };
 
         assert!(
             policy.allows(&id, "my-hsm", "any-serial"),
@@ -193,7 +198,12 @@ mod tests {
             "uid=2000".into(),
             TokenAccess::Specific(vec![TokenSelector::Label("user2-token".into())]),
         );
-        let policy = TokenPolicy { rules, allow_all_authenticated: false };
+        let policy = TokenPolicy {
+            rules,
+            allow_all_authenticated: false,
+            has_policy: false,
+            anonymous_principal: None,
+        };
 
         let user1 = AuthenticatedIdentity::PeerCred { uid: 1000 };
         let user2 = AuthenticatedIdentity::PeerCred { uid: 2000 };

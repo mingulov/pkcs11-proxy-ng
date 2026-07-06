@@ -8,6 +8,15 @@ use std::sync::{Mutex, OnceLock};
 pub struct TokenPolicy {
     pub(crate) rules: HashMap<String, TokenAccess>,
     pub(crate) allow_all_authenticated: bool,
+    /// True when at least one `[[auth.policy]]` entry is configured.
+    /// Drives the deny-default flip: when a policy is present and no
+    /// `anonymous_principal` is named, unauthenticated peers are denied.
+    pub(crate) has_policy: bool,
+    /// Audit-identity label for unauthenticated peers. When set,
+    /// `audit_identity()` substitutes this string in the audit record
+    /// instead of the raw `"unauthenticated"` marker. This is NEVER a
+    /// grant: authz still routes through `allows_unauthenticated()`.
+    pub(crate) anonymous_principal: Option<String>,
 }
 
 #[derive(Debug)]
@@ -31,22 +40,48 @@ impl TokenPolicy {
             let access = Self::parse_access(&entry.identity, &entry.tokens)?;
             rules.insert(entry.identity.clone(), access);
         }
-        Ok(Self { rules, allow_all_authenticated: auth.allow_all_authenticated })
+        let has_policy = !rules.is_empty();
+        Ok(Self {
+            rules,
+            allow_all_authenticated: auth.allow_all_authenticated,
+            has_policy,
+            anonymous_principal: auth.anonymous_principal.clone(),
+        })
     }
 
-    /// Whether an **unauthenticated** peer is allowed (no-auth / dev mode).
+    /// Whether an **unauthenticated** peer is allowed.
     ///
-    /// This is the SINGLE deny-default flip-point for G2-PR2 (ADR-0012): today
-    /// it returns `true` (no-auth mode bypasses policy, preserving current
-    /// behavior). When the G2-PR2 authorization-enforcement model lands, change
-    /// this to `false` and route unauthenticated peers through an explicit
-    /// `anonymous_principal` (audit-identity only). Both `allows()` and
-    /// `grpc_service::authorization::slot_is_authorized` route the
-    /// unauthenticated case through THIS method, so the flip happens in exactly
-    /// one place — never delete an inline `Unauthenticated ⇒ true` at only one
-    /// of the (previously three) sites.
+    /// This is the SINGLE deny-default flip-point (G2-PR2, ADR-0012). Both
+    /// `allows()` and `grpc_service::authorization::slot_is_authorized` route
+    /// the unauthenticated case through THIS method — never add an independent
+    /// inline `Unauthenticated ⇒ true` elsewhere.
+    ///
+    /// Decision table:
+    ///  - No policy (`has_policy = false`): transport/dev mode — allow (legacy behaviour).
+    ///  - Policy set, no `anonymous_principal`: deny-default (G2-PR2 enforcement).
+    ///  - Policy set + `anonymous_principal` named: allow (operator has explicitly
+    ///    identified unauthenticated peers for audit; the anon name is audit-only,
+    ///    never a grant).
+    ///  - No policy + `anonymous_principal`: allow (meaningless but not an error;
+    ///    the anon name is still used for audit labelling).
     pub fn allows_unauthenticated(&self) -> bool {
-        true
+        !self.has_policy || self.anonymous_principal.is_some()
+    }
+
+    /// Returns the audit-identity string for a context.
+    ///
+    /// When the stored identity is `None` (no identity recorded) or
+    /// `"unauthenticated"`, and an `anonymous_principal` is configured, this
+    /// substitutes the anonymous name in the audit record instead of the raw
+    /// `"unauthenticated"` marker. This is **audit-identity only** — the authz
+    /// path always calls `allows_unauthenticated()` and never calls this method.
+    pub fn audit_identity(&self, stored: Option<&str>) -> Option<String> {
+        match stored {
+            Some("unauthenticated") | None => {
+                self.anonymous_principal.clone().or_else(|| stored.map(|s| s.to_string()))
+            }
+            _ => stored.map(|s| s.to_string()),
+        }
     }
 
     pub fn allows(

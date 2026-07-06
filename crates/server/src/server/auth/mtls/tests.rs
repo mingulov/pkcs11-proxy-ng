@@ -313,7 +313,12 @@ fn policy_lookup_with_real_cert() {
     let spki_policy_key = format!("x509:spki={spki_sha256}");
     let mut rules = HashMap::new();
     rules.insert(spki_policy_key, TokenAccess::All);
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
 
     assert!(
         policy.allows(&identity, "any-token", "any-serial"),
@@ -390,7 +395,12 @@ fn dual_accept_spki_policy_authorizes() {
     // Policy keyed by SPKI (new form)
     let mut rules = HashMap::new();
     rules.insert(format!("x509:spki={spki_sha256}"), TokenAccess::All);
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
 
     assert!(policy.allows(&identity, "any", "any"), "SPKI-keyed policy must authorize");
 }
@@ -416,7 +426,12 @@ fn dual_accept_legacy_dn_policy_authorizes_with_deprecation_warning() {
     let legacy_key = format!("x509:issuer={};subject={}", issuer, subject);
     let mut rules = HashMap::new();
     rules.insert(legacy_key, TokenAccess::All);
-    let policy = TokenPolicy { rules, allow_all_authenticated: false };
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: false,
+        anonymous_principal: None,
+    };
 
     // The deprecated DN path is accepted (with a one-time tracing::warn! emitted)
     assert!(

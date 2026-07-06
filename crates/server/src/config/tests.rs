@@ -934,3 +934,93 @@ auth = \"peer_cred\"
     let cfg: DaemonConfig = toml::from_str(toml).unwrap();
     assert!(cfg.validate().is_ok());
 }
+
+// --- G2-PR2: anonymous_principal config tests ---
+
+#[test]
+fn anonymous_principal_parses() {
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[auth]
+anonymous_principal = \"anon-client\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.auth.anonymous_principal.as_deref(), Some("anon-client"));
+}
+
+#[test]
+fn anonymous_principal_absent_defaults_to_none() {
+    let cfg: DaemonConfig = toml::from_str("[backend]\nmodule = \"/dev/null\"\n").unwrap();
+    assert!(cfg.auth.anonymous_principal.is_none());
+}
+
+#[test]
+fn anonymous_principal_also_in_policy_is_rejected() {
+    // anonymous_principal is audit-only; it must not also appear as a grant key.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[auth]
+anonymous_principal = \"uid=1000\"
+[[auth.policy]]
+identity = \"uid=1000\"
+tokens = \"all\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"peer_cred\"
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("anonymous_principal") && err.contains("uid=1000"),
+        "error must mention anonymous_principal and the conflicting identity, got: {err}"
+    );
+}
+
+#[test]
+fn audit_with_unauthenticated_listener_and_anonymous_principal_is_allowed() {
+    // H2 guard is RELAXED when anonymous_principal is set: the operator has named
+    // the audit identity for unauthenticated peers, so the compliance gap is addressed.
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[audit]
+dir = \"/var/log/pkcs11-proxy/audit\"
+[auth]
+anonymous_principal = \"anon-client\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    assert!(
+        cfg.validate().is_ok(),
+        "audit + auth=none + anonymous_principal must be allowed (H2 guard relaxed)"
+    );
+}
+
+#[test]
+fn audit_with_unauthenticated_listener_without_anonymous_principal_is_rejected() {
+    // H2 guard: audit + auth=none WITHOUT anonymous_principal still refused.
+    // (The existing `audit_with_unauthenticated_listener_is_rejected` test covers
+    // the same code path; this test names the negative case explicitly for clarity.)
+    let toml = "\
+[backend]
+module = \"/dev/null\"
+[audit]
+dir = \"/var/log/pkcs11-proxy/audit\"
+[listener.local]
+path = \"/run/p.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("audit"), "error must mention audit, got: {err}");
+}
