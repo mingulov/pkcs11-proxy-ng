@@ -26,6 +26,10 @@ pub struct TokenPolicy {
     /// every object-resolving RPC is a single `bool` load rather than a
     /// full scan of all grants (M1 perf fix).
     pub(crate) per_object_active_cache: bool,
+    /// Pre-computed at `from_config`: true when at least one grant has a
+    /// non-`None` `classes` list. Cached so the per-class gate check on
+    /// every object-resolving RPC is a single `bool` load (M1 perf fix).
+    pub(crate) per_class_active_cache: bool,
 }
 
 impl Default for TokenPolicy {
@@ -38,6 +42,7 @@ impl Default for TokenPolicy {
             has_policy: false,
             anonymous_principal: None,
             per_object_active_cache: false,
+            per_class_active_cache: false,
         }
     }
 }
@@ -75,12 +80,20 @@ impl TokenPolicy {
                 false
             }
         });
+        let per_class_active_cache = rules.values().any(|access| {
+            if let TokenAccess::Specific(grants) = access {
+                grants.iter().any(|g| g.classes.is_some())
+            } else {
+                false
+            }
+        });
         Ok(Self {
             rules,
             allow_all_authenticated: auth.allow_all_authenticated,
             has_policy,
             anonymous_principal: auth.anonymous_principal.clone(),
             per_object_active_cache,
+            per_class_active_cache,
         })
     }
 
@@ -327,6 +340,19 @@ impl TokenPolicy {
     /// callers pay only a single `bool` load per RPC, not a full grant scan.
     pub fn per_object_active(&self) -> bool {
         self.per_object_active_cache
+    }
+
+    /// Whether any grant in any policy rule has a non-`None` `classes` list.
+    ///
+    /// When `false`, the per-class authorization check inside the object gate
+    /// is skipped entirely (transparent). When `true`, at least one grant
+    /// restricts access by `CKA_CLASS`, so the `allows_class` check is enforced
+    /// after the unique-id check passes.
+    ///
+    /// Like `per_object_active`, this is opt-in and pre-computed at `from_config`
+    /// (M1) for zero-cost when no class grants are configured.
+    pub fn per_class_active(&self) -> bool {
+        self.per_class_active_cache
     }
 
     /// Whether the identity is allowed to use an object with the given

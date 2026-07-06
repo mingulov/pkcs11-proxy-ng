@@ -921,24 +921,25 @@ impl DaemonConfig {
                 }
             }
         }
-        // I2 guard (G2-PR2): per-class and per-mechanism grant restrictions are
-        // parsed into the model (for G3) but NOT yet enforced at runtime — only
-        // `extract` is enforced today. Accepting a config that implies a
-        // class/mechanism restriction the daemon cannot enforce is dangerous:
+        // G3 guard: per-mechanism grant restrictions are parsed into the model
+        // but NOT yet enforced at runtime. Accepting a config that implies a
+        // mechanism restriction the daemon cannot enforce is dangerous:
         // operators would believe access is restricted when it is not. Reject at
-        // startup until G3 enforcement is wired.
+        // startup until G3 mechanism enforcement is wired (Task 3).
+        // NOTE: per-class (`classes`) enforcement IS now wired (Task 1) and must
+        // no longer be rejected here.
         for (index, entry) in self.auth.policy.iter().enumerate() {
             if let TokenAccessSpec::Specific(ref grants) = entry.tokens {
                 for grant in grants {
                     if let GrantSpec::Rich(rich) = grant
-                        && (rich.classes.is_some() || rich.mechanisms.is_some())
+                        && rich.mechanisms.is_some()
                     {
                         return Err(format!(
-                            "auth.policy[{index}]: per-class / per-mechanism grant \
-                             restrictions are parsed but NOT yet enforced (planned for G3); \
-                             remove `classes` / `mechanisms` from the [auth.policy] grant or \
-                             use `extract = \"deny\"`. Accepting them would imply an \
-                             authorization restriction the daemon does not enforce."
+                            "auth.policy[{index}]: per-mechanism grant restrictions are \
+                             parsed but NOT yet enforced (planned for G3 Task 3); \
+                             remove `mechanisms` from the [auth.policy] grant. \
+                             Accepting them would imply an authorization restriction \
+                             the daemon does not enforce."
                         ));
                     }
                 }

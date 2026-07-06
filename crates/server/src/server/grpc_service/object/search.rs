@@ -3,6 +3,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_types::CkRv;
 
 use super::super::super::context_manager::ClientContextId;
+use super::super::super::context_manager::ObjectMetadata;
 use super::super::HandlerContext;
 use super::super::convert_template;
 use super::super::service_utils::{
@@ -122,7 +123,7 @@ pub(super) async fn find_objects(
     // 0 to the client, which would be indistinguishable from end-of-search and would
     // silently hide authorized objects appearing later in the backend's enumeration.
     let mut kept_backends = Vec::new();
-    let mut kept_uids: Vec<Vec<u8>> = Vec::new();
+    let mut kept_metas: Vec<ObjectMetadata> = Vec::new();
     loop {
         let batch_backend = ctx.backend.clone();
         // CkSessionHandle and u32 are Copy; the move closure copies them.
@@ -154,18 +155,23 @@ pub(super) async fn find_objects(
         }
 
         for &backend_object in &batch {
-            let uid =
-                super::super::authorization::fetch_object_unique_id(ctx, session, backend_object)
+            let meta =
+                super::super::authorization::fetch_object_metadata(ctx, session, backend_object)
                     .await;
-            match uid {
-                Some(uid)
-                    if !uid.is_empty()
-                        && ctx.token_policy.allows_object_use(&identity, &label, &serial, &uid) =>
+            match meta {
+                Some(meta)
+                    if !meta.unique_id.is_empty()
+                        && ctx.token_policy.allows_object_use(
+                            &identity,
+                            &label,
+                            &serial,
+                            &meta.unique_id,
+                        ) =>
                 {
                     kept_backends.push(backend_object);
-                    kept_uids.push(uid);
+                    kept_metas.push(meta);
                 }
-                // Fail-closed: empty/absent uid, or deny — drop silently.
+                // Fail-closed: empty/absent uid, fetch failure, or deny — drop silently.
                 _ => {}
             }
         }
@@ -182,10 +188,11 @@ pub(super) async fn find_objects(
 
     match register_object_handles(&ctx.context_manager, &ctx_id, &kept_backends).await {
         Some(virtual_handles) => {
-            // Cache each kept object's uid under its new virtual handle so
+            // Cache each kept object's metadata under its new virtual handle so
             // use-time gates (gate_object_handle) skip the re-fetch.
-            for (&virtual_id, uid) in virtual_handles.iter().zip(kept_uids) {
-                ctx.context_manager.cache_object_unique_id(&ctx_id, virtual_id, uid).await;
+            // cache_object_metadata internally skips token objects (I2 fix).
+            for (&virtual_id, meta) in virtual_handles.iter().zip(kept_metas) {
+                ctx.context_manager.cache_object_metadata(&ctx_id, virtual_id, meta).await;
             }
             Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
                 ck_rv: CkRv::OK.0,
@@ -292,14 +299,39 @@ mod tests {
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
-        // Create two objects and attach their UIDs.
+        // Create two objects and attach their UIDs. Also set CLASS and TOKEN so
+        // fetch_object_metadata's 3-element template succeeds (conformant backend).
         let obj_a = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_a,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY.0,
+            )),
+        );
+        mock.set_attribute(
+            obj_a,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
         mock.set_attribute(
             obj_a,
             CkAttributeType::UNIQUE_ID,
             MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec())),
         );
         let obj_b = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_b,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY.0,
+            )),
+        );
+        mock.set_attribute(
+            obj_b,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
         mock.set_attribute(
             obj_b,
             CkAttributeType::UNIQUE_ID,
@@ -428,8 +460,20 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        // Object created with NO CKA_UNIQUE_ID.
+        // Object created with CLASS and TOKEN but NO CKA_UNIQUE_ID.
         let obj_no_uid = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_no_uid,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY.0,
+            )),
+        );
+        mock.set_attribute(
+            obj_no_uid,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
 
         mock.find_objects_init(backend_session, &[]).unwrap();
         mock.set_find_objects_result(vec![obj_no_uid]);
@@ -468,12 +512,13 @@ mod tests {
         );
     }
 
-    // ── Test 5: uid cached on kept handle after find ──────────────────────────
+    // ── Test 5: metadata cached on kept handle after find ────────────────────
 
     #[tokio::test]
-    async fn find_objects_caches_uid_for_kept_object() {
-        // After find_objects, the kept object's CKA_UNIQUE_ID must be pre-cached
-        // under its new virtual handle so use-time gate_object_handle skips re-fetch.
+    async fn find_objects_caches_metadata_for_kept_object() {
+        // After find_objects, the kept object's metadata (uid, class, is_token)
+        // must be pre-cached under its new virtual handle so use-time
+        // gate_object_handle skips the re-fetch.
         let policy = confined_policy(CONFINED_IDENTITY, "MockToken", UID_A_HEX);
         let (ctx, ctx_id, vs, _obj_a, _obj_b) =
             setup_two_object_find(policy, Some(CONFINED_IDENTITY.into())).await;
@@ -483,9 +528,9 @@ mod tests {
         assert_eq!(resp.object_handles.len(), 1);
 
         let virtual_id = resp.object_handles[0];
-        let cached = ctx.context_manager.object_unique_id(&ctx_id, virtual_id).await;
+        let cached = ctx.context_manager.object_metadata(&ctx_id, virtual_id).await;
         assert_eq!(
-            cached,
+            cached.map(|m| m.unique_id),
             Some(UID_A_BYTES.to_vec()),
             "kept object's uid must be pre-cached under its virtual handle"
         );
@@ -512,7 +557,20 @@ mod tests {
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         // Two denied objects with uid_B, then the allowed object with uid_A.
+        // Set CLASS and TOKEN on each (required by fetch_object_metadata).
         let obj_d1 = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_d1,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY.0,
+            )),
+        );
+        mock.set_attribute(
+            obj_d1,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
         mock.set_attribute(
             obj_d1,
             CkAttributeType::UNIQUE_ID,
@@ -521,10 +579,34 @@ mod tests {
         let obj_d2 = mock.create_object(backend_session, &[]).unwrap();
         mock.set_attribute(
             obj_d2,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY.0,
+            )),
+        );
+        mock.set_attribute(
+            obj_d2,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
+        mock.set_attribute(
+            obj_d2,
             CkAttributeType::UNIQUE_ID,
             MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
         );
         let obj_a = mock.create_object(backend_session, &[]).unwrap();
+        mock.set_attribute(
+            obj_a,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY.0,
+            )),
+        );
+        mock.set_attribute(
+            obj_a,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
         mock.set_attribute(
             obj_a,
             CkAttributeType::UNIQUE_ID,

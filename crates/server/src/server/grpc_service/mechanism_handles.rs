@@ -603,6 +603,19 @@ mod tests {
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        // Always set CLASS and TOKEN so fetch_object_metadata's 3-element template works.
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::CLASS,
+            MockAttributeSlot::Value(CkAttributeValue::Ulong(
+                pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY.0,
+            )),
+        );
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::TOKEN,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
         if let Some(uid) = uid_bytes {
             mock.set_attribute(
                 backend_object,

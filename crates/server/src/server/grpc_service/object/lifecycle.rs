@@ -149,7 +149,7 @@ pub(super) async fn destroy_object(
             .context_manager
             .get_context(&ctx_id, |client_ctx| {
                 client_ctx.object_handles.remove(virtual_object);
-                client_ctx.object_unique_ids.remove(&virtual_object);
+                client_ctx.object_metadata.remove(&virtual_object);
             })
             .await;
     }

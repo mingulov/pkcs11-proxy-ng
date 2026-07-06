@@ -485,37 +485,67 @@ fn teardown_returns_correct_backend_session_handles() {
     );
 }
 
-// --- per-object CKA_UNIQUE_ID cache (G3) ---
+// --- per-object ObjectMetadata cache (G3, I2) ---
+
+fn make_session_meta(uid: Vec<u8>) -> super::ObjectMetadata {
+    super::ObjectMetadata {
+        unique_id: uid,
+        class: pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY,
+        is_token: false,
+    }
+}
+
+fn make_token_meta(uid: Vec<u8>) -> super::ObjectMetadata {
+    super::ObjectMetadata {
+        unique_id: uid,
+        class: pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY,
+        is_token: true,
+    }
+}
 
 #[tokio::test]
-async fn object_unique_id_miss_returns_none() {
+async fn object_metadata_miss_returns_none() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let ctx_id = mgr.create_context(None).await.unwrap();
     assert_eq!(
-        mgr.object_unique_id(&ctx_id, 42).await,
+        mgr.object_metadata(&ctx_id, 42).await.map(|m| m.unique_id),
         None,
         "a virtual object that was never cached must return None"
     );
 }
 
 #[tokio::test]
-async fn object_unique_id_round_trip() {
+async fn object_metadata_session_object_round_trip() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let ctx_id = mgr.create_context(None).await.unwrap();
     let uid = vec![0xde, 0xad, 0xbe, 0xef];
-    mgr.cache_object_unique_id(&ctx_id, 7, uid.clone()).await;
+    mgr.cache_object_metadata(&ctx_id, 7, make_session_meta(uid.clone())).await;
     assert_eq!(
-        mgr.object_unique_id(&ctx_id, 7).await,
+        mgr.object_metadata(&ctx_id, 7).await.map(|m| m.unique_id),
         Some(uid),
-        "a cached unique_id must be returned by object_unique_id"
+        "a cached session-object metadata must be returned by object_metadata"
     );
 }
 
 #[tokio::test]
-async fn object_unique_id_evicted_on_session_close() {
+async fn object_metadata_token_object_not_cached() {
+    // I2 fix: token objects (is_token=true) must never be stored in the cache.
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let uid = vec![0xde, 0xad, 0xbe, 0xef];
+    mgr.cache_object_metadata(&ctx_id, 9, make_token_meta(uid)).await;
+    assert_eq!(
+        mgr.object_metadata(&ctx_id, 9).await.map(|m| m.unique_id),
+        None,
+        "token object metadata must not be cached (I2 fix: re-fetched every gate call)"
+    );
+}
+
+#[tokio::test]
+async fn object_metadata_evicted_on_session_close() {
     // When a virtual session closes, its session objects (and their cached
-    // unique IDs) must be evicted so a recycled virtual handle cannot return
-    // a stale unique_id (G3, B2).
+    // metadata) must be evicted so a recycled virtual handle cannot return
+    // stale metadata (G3, B2).
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let ctx_id = mgr.create_context(None).await.unwrap();
 
@@ -530,28 +560,28 @@ async fn object_unique_id_evicted_on_session_close() {
         .await
         .unwrap();
 
-    // Cache the unique_id for the session object.
-    mgr.cache_object_unique_id(&ctx_id, obj_vh.0, vec![1, 2, 3]).await;
+    // Cache the metadata for the session object.
+    mgr.cache_object_metadata(&ctx_id, obj_vh.0, make_session_meta(vec![1, 2, 3])).await;
     assert!(
-        mgr.object_unique_id(&ctx_id, obj_vh.0).await.is_some(),
-        "unique_id should be cached before session close"
+        mgr.object_metadata(&ctx_id, obj_vh.0).await.is_some(),
+        "metadata should be cached before session close"
     );
 
     // Close the session — its session objects are evicted.
     mgr.get_context(&ctx_id, |ctx| ctx.remove_session(session_vh)).await;
 
     assert_eq!(
-        mgr.object_unique_id(&ctx_id, obj_vh.0).await,
+        mgr.object_metadata(&ctx_id, obj_vh.0).await.map(|m| m.unique_id),
         None,
-        "unique_id must be evicted when the owning session closes"
+        "metadata must be evicted when the owning session closes"
     );
 }
 
 #[tokio::test]
-async fn cache_object_unique_id_noop_for_missing_context() {
-    // Caching a unique_id for a non-existent context must not panic.
+async fn cache_object_metadata_noop_for_missing_context() {
+    // Caching metadata for a non-existent context must not panic.
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let gone = ClientContextId("nonexistent".into());
-    mgr.cache_object_unique_id(&gone, 1, vec![0xff]).await; // must not panic
-    assert_eq!(mgr.object_unique_id(&gone, 1).await, None);
+    mgr.cache_object_metadata(&gone, 1, make_session_meta(vec![0xff])).await; // must not panic
+    assert_eq!(mgr.object_metadata(&gone, 1).await.map(|m| m.unique_id), None);
 }

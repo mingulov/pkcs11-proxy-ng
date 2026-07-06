@@ -1005,12 +1005,12 @@ allow_insecure_unix = true
     );
 }
 
-// --- I2 (G2-PR2): per-class/mechanism grants rejected by validate() ---
+// --- G3 Task 1: per-class grants now accepted; per-mechanism still rejected ---
 
 #[test]
-fn validate_rejects_grant_with_classes_field() {
-    // A rich grant with `classes` set implies a class restriction the daemon
-    // does not enforce (G3 is not yet wired). validate() must refuse to start.
+fn validate_accepts_grant_with_classes_field() {
+    // Classes enforcement is now wired (G3 Task 1). A rich grant with `classes`
+    // must be accepted by validate() — operators can now safely restrict by class.
     let toml = "\
 [backend]
 module = \"/dev/null\"
@@ -1024,11 +1024,9 @@ identity = \"uid=1000\"
 tokens = [{ token = \"label:MyToken\", classes = [\"secret_key\"], extract = \"deny\" }]
 ";
     let cfg: DaemonConfig = toml::from_str(toml).unwrap();
-    let err = cfg.validate().unwrap_err();
-    assert!(err.contains("classes"), "error must mention 'classes' restriction: {err}");
     assert!(
-        err.contains("not yet enforced") || err.contains("does not enforce"),
-        "error must explain why it is rejected: {err}"
+        cfg.validate().is_ok(),
+        "grant with classes field must be accepted now that per-class enforcement is wired"
     );
 }
 

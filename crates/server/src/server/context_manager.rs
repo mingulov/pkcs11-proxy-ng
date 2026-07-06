@@ -27,6 +27,20 @@ pub enum LoginState {
     So,
 }
 
+/// Cached object metadata for the per-object / per-class authorization gate (G3).
+///
+/// Fetched in a single `C_GetAttributeValue` round-trip covering
+/// `CKA_UNIQUE_ID`, `CKA_CLASS`, and `CKA_TOKEN`. Only session objects
+/// (`is_token = false`) are stored in the cache; token objects are always
+/// re-fetched to prevent stale authorization against recycled backend handles
+/// (I2 fix, ADR-0012 §G3).
+#[derive(Debug, Clone)]
+pub struct ObjectMetadata {
+    pub unique_id: Vec<u8>,
+    pub class: CkObjectClass,
+    pub is_token: bool,
+}
+
 /// A logical client instance — the server-side PKCS#11 "application" (ADR-0002).
 pub struct LogicalClientInstance {
     pub id: ClientContextId,
@@ -35,27 +49,16 @@ pub struct LogicalClientInstance {
     pub session_handles: HandleMap, // virtual session → backend session
     pub session_slots: HashMap<VirtualHandle, CkSlotId>, // session → slot ownership (ADR-0002 §7)
     pub object_handles: HandleMap,  // virtual object → backend object
-    /// Per-virtual-object cached `CKA_UNIQUE_ID` bytes (G3).
+    /// Per-virtual-object cached `ObjectMetadata` (G3). **Only session objects
+    /// (`CKA_TOKEN=false`) are cached.** Token objects are never stored here —
+    /// they are re-fetched on every gate call so a cross-client backend handle
+    /// recycling event cannot cause a stale authorization decision (I2 fix).
     ///
-    /// `CKA_UNIQUE_ID` is immutable once set (PKCS#11 v3.0), so the cached
-    /// value is valid for the lifetime of the virtual handle.  Entries are
-    /// evicted wherever `object_handles` entries are removed — on explicit
-    /// `C_DestroyObject`, on session close (for session objects), and on
-    /// context teardown — so a recycled virtual handle can never return a
-    /// stale id within one context.
-    ///
-    /// **Cache-staleness dependency (I2 / ADR-0012 §G3):** this cache assumes
-    /// the B2 no-alias guarantee — that a virtual→backend→object binding is
-    /// stable for the lifetime of the virtual handle.  For **token objects**
-    /// (CKA_TOKEN=true) under a cross-client backend object-number recycling
-    /// scenario (e.g. another client destroys object N and a new object is
-    /// assigned the same backend number N), a stale cache entry could
-    /// authorize a `gate_object_handle` check against the wrong identity.
-    /// Tracking token-object cache invalidation / re-fetch on backend slot
-    /// events (e.g. `CKN_TOKEN_PRESENT` / `CKN_CARD_INSERTED`) is a deferred
-    /// follow-up; the risk is bounded by the existing B2 eviction-on-close
-    /// contract for session objects.
-    pub object_unique_ids: HashMap<VirtualHandle, Vec<u8>>,
+    /// Entries are evicted wherever `object_handles` entries are removed —
+    /// on explicit `C_DestroyObject`, on session close (for session objects),
+    /// and on context teardown — so a recycled virtual handle can never return
+    /// stale metadata within one context.
+    pub object_metadata: HashMap<VirtualHandle, ObjectMetadata>,
     /// Virtual object handles created as SESSION objects (CKA_TOKEN=false) in
     /// each virtual session. Evicted when that session closes so a recycled
     /// backend object number can never alias a stale handle (B2). Token objects
@@ -82,7 +85,7 @@ impl LogicalClientInstance {
             session_handles: HandleMap::new(),
             session_slots: HashMap::new(),
             object_handles: HandleMap::new(),
-            object_unique_ids: HashMap::new(),
+            object_metadata: HashMap::new(),
             session_objects: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
@@ -115,7 +118,7 @@ impl LogicalClientInstance {
             if let Some(objects) = self.session_objects.remove(&vh) {
                 for object in objects {
                     self.object_handles.remove(object);
-                    self.object_unique_ids.remove(&object);
+                    self.object_metadata.remove(&object);
                 }
             }
             if let Some(bh) = self.session_handles.remove(vh) {
@@ -144,7 +147,7 @@ impl LogicalClientInstance {
         if let Some(objects) = self.session_objects.remove(&session) {
             for object in objects {
                 self.object_handles.remove(object);
-                self.object_unique_ids.remove(&object);
+                self.object_metadata.remove(&object);
             }
         }
         if let Some(slot) = slot {
@@ -169,7 +172,7 @@ impl LogicalClientInstance {
         self.session_handles.clear();
         self.session_slots.clear();
         self.object_handles.clear();
-        self.object_unique_ids.clear();
+        self.object_metadata.clear();
         self.session_objects.clear();
         self.login_state.clear();
         backend_sessions
@@ -280,37 +283,49 @@ impl ContextManager {
             .flatten()
     }
 
-    /// Return the cached `CKA_UNIQUE_ID` bytes for `virtual_object` within
-    /// context `ctx_id`, or `None` on a cache miss (the caller must then fetch
-    /// from the backend via [`fetch_object_unique_id`] and populate the cache
-    /// with [`cache_object_unique_id`]).
-    pub async fn object_unique_id(
+    /// Return the cached [`ObjectMetadata`] for `virtual_object` within context
+    /// `ctx_id`, or `None` on a cache miss.
+    ///
+    /// A `None` result means either the object has never been fetched, OR it is
+    /// a token object (token objects are never cached — see `cache_object_metadata`).
+    /// The caller must fetch from the backend via `fetch_object_metadata` when
+    /// this returns `None`.
+    pub async fn object_metadata(
         &self,
         ctx_id: &ClientContextId,
         virtual_object: u64,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<ObjectMetadata> {
         self.get_context(ctx_id, |ctx| {
-            ctx.object_unique_ids.get(&VirtualHandle(virtual_object)).cloned()
+            ctx.object_metadata.get(&VirtualHandle(virtual_object)).cloned()
         })
         .await
         .flatten()
     }
 
-    /// Cache the `CKA_UNIQUE_ID` bytes for `virtual_object` within context
-    /// `ctx_id`.  No-ops silently when the context no longer exists (the object
-    /// handle will not be used again).  The cached value is evicted together
-    /// with the virtual object handle (on `C_DestroyObject`, session close for
-    /// session objects, or context teardown) so a recycled handle cannot return
-    /// a stale id.
-    pub async fn cache_object_unique_id(
+    /// Cache [`ObjectMetadata`] for `virtual_object` within context `ctx_id`.
+    ///
+    /// **I2 fix:** token objects (`meta.is_token == true`) are NEVER cached.
+    /// They are re-fetched on every gate call so a cross-client backend handle
+    /// recycling event cannot cause a stale authorization decision.
+    ///
+    /// Session objects (`!meta.is_token`) are cached and evicted together with
+    /// the virtual object handle (on `C_DestroyObject`, session close, or
+    /// context teardown) so a recycled virtual handle can never return stale
+    /// metadata within one context.
+    ///
+    /// No-ops silently when the context no longer exists.
+    pub async fn cache_object_metadata(
         &self,
         ctx_id: &ClientContextId,
         virtual_object: u64,
-        unique_id: Vec<u8>,
+        meta: ObjectMetadata,
     ) {
+        if meta.is_token {
+            return; // Never cache token objects (I2 fix).
+        }
         let _ = self
             .get_context(ctx_id, |ctx| {
-                ctx.object_unique_ids.insert(VirtualHandle(virtual_object), unique_id);
+                ctx.object_metadata.insert(VirtualHandle(virtual_object), meta);
             })
             .await;
     }
