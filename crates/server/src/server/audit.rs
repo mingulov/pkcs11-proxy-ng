@@ -57,9 +57,52 @@ pub struct AuditSink {
     /// When `tx.capacity() <= fail_closed_reserve`, DataPlane records are
     /// rejected fail-open WITHOUT occupying a slot (C1 invariant).
     fail_closed_reserve: usize,
+    /// Mirror of `AuditConfig::data_plane`. When `false`, handlers skip
+    /// DataPlane emission entirely — zero overhead beyond a single bool check.
+    data_plane: bool,
 }
 
 impl AuditSink {
+    /// Returns `true` when DataPlane-class emission is enabled for this sink.
+    ///
+    /// Handlers gate their DataPlane `emit_auth_event` calls on this check so
+    /// that, when data-plane audit is off (the default), there is zero overhead
+    /// beyond a single bool read — no record is constructed, no channel send is
+    /// attempted.
+    pub fn data_plane_enabled(&self) -> bool {
+        self.data_plane
+    }
+
+    /// Build a sink backed by a saturated channel (capacity 1, already full,
+    /// no reader) with `data_plane = true`. Every `emit` call for a DataPlane
+    /// record returns `DroppedFailOpen` immediately. Used in handler unit tests
+    /// that verify the fail-open contract without requiring direct access to the
+    /// private `WriterMsg` type.
+    #[cfg(test)]
+    pub(crate) fn new_saturated_for_test() -> Self {
+        use pkcs11_proxy_ng_audit::EventClass;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<WriterMsg>(1);
+        // Fill the one slot so every subsequent send fails with Full.
+        let _ = tx.try_send(WriterMsg::Record(Box::new(AuditRecord {
+            schema_version: pkcs11_proxy_ng_audit::AUDIT_SCHEMA_VERSION,
+            seq: 0,
+            ts_unix_ms: 0,
+            ts_monotonic_ns: 0,
+            prev_hash: String::new(),
+            request_id: String::new(),
+            identity: None,
+            method: "__TEST_SATURATE__".into(),
+            class: EventClass::System,
+            slot: None,
+            session: None,
+            object_ref: None,
+            ck_rv: 0,
+            latency_us: 0,
+            dropped_count: None,
+        })));
+        Self { tx, dropped: Arc::new(AtomicU64::new(0)), fail_closed_reserve: 0, data_plane: true }
+    }
+
     /// Emit one audit record to the writer task.
     ///
     /// Returns an [`EmitOutcome`] describing what happened:
@@ -202,7 +245,12 @@ pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
         });
     }
 
-    Ok(Some(AuditSink { tx, dropped, fail_closed_reserve: cfg.fail_closed_reserve }))
+    Ok(Some(AuditSink {
+        tx,
+        dropped,
+        fail_closed_reserve: cfg.fail_closed_reserve,
+        data_plane: cfg.data_plane,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -821,7 +869,8 @@ mod tests {
 
         // fail_closed_reserve = 0 so we test the try_send-full path rather than
         // the reserve-guard path for DataPlane.
-        let sink = AuditSink { tx, dropped: dropped.clone(), fail_closed_reserve: 0 };
+        let sink =
+            AuditSink { tx, dropped: dropped.clone(), fail_closed_reserve: 0, data_plane: true };
 
         // Auth is fail-closed → RejectedFailClosed when channel is full.
         assert_eq!(
@@ -1100,7 +1149,12 @@ mod tests {
         }
         assert_eq!(tx.capacity(), RESERVE, "capacity must equal the reserve after filling");
 
-        let sink = AuditSink { tx, dropped: dropped.clone(), fail_closed_reserve: RESERVE };
+        let sink = AuditSink {
+            tx,
+            dropped: dropped.clone(),
+            fail_closed_reserve: RESERVE,
+            data_plane: true,
+        };
 
         // DataPlane is blocked by the reserve — must NOT occupy a slot.
         assert_eq!(

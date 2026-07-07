@@ -1,5 +1,7 @@
 use std::sync::Arc;
+use std::time::Instant;
 
+use pkcs11_proxy_ng_audit::EventClass;
 use tonic::{Request, Response, Status};
 
 use super::super::ck_result_to_rv;
@@ -8,6 +10,7 @@ use super::super::service_utils::{
     resolve_session_and_key, spawn_backend,
 };
 use crate::server::context_manager::ClientContextId;
+use crate::server::grpc_service::audit_events::emit_auth_event;
 
 use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn digest_init(
@@ -58,6 +61,7 @@ pub(crate) async fn digest(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestResponse>, Status> {
+    let started = Instant::now();
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
@@ -88,6 +92,19 @@ pub(crate) async fn digest(
         spawn_backend(move || backend.digest(session, input_from_wire(&data, data_null_len)))
             .await?;
     let (ck_rv, digest) = ck_result_to_rv(result);
+    // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
+    if ctx.audit.as_ref().is_some_and(|a| a.data_plane_enabled()) {
+        let _ = emit_auth_event(
+            ctx,
+            &ctx_id,
+            "C_Digest",
+            EventClass::DataPlane,
+            None,
+            Some(req.session_handle),
+            ck_rv,
+            started,
+        );
+    }
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestResponse {
         ck_rv,
         digest: digest.unwrap_or_default(),
@@ -150,6 +167,7 @@ pub(crate) async fn digest_final(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestFinalResponse>, Status> {
+    let started = Instant::now();
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
@@ -168,6 +186,19 @@ pub(crate) async fn digest_final(
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.digest_final(session)).await?;
     let (ck_rv, digest) = ck_result_to_rv(result);
+    // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
+    if ctx.audit.as_ref().is_some_and(|a| a.data_plane_enabled()) {
+        let _ = emit_auth_event(
+            ctx,
+            &ctx_id,
+            "C_Digest",
+            EventClass::DataPlane,
+            None,
+            Some(req.session_handle),
+            ck_rv,
+            started,
+        );
+    }
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestFinalResponse {
         ck_rv,
         digest: digest.unwrap_or_default(),

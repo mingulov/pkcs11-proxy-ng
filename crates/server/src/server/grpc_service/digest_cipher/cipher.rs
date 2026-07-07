@@ -1,9 +1,10 @@
 use std::sync::Arc;
+use std::time::Instant;
 
-use tonic::{Request, Response, Status};
-
+use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::{CkInBuf, CkMechanism, CkRv};
+use tonic::{Request, Response, Status};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
@@ -13,6 +14,7 @@ use super::super::service_utils::{
     resolve_session_and_key, spawn_backend,
 };
 use crate::server::context_manager::ClientContextId;
+use crate::server::grpc_service::audit_events::emit_auth_event;
 
 use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn encrypt_init(
@@ -110,6 +112,7 @@ pub(crate) async fn encrypt(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptResponse>, Status> {
+    let started = Instant::now();
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
@@ -131,6 +134,19 @@ pub(crate) async fn encrypt(
     let result = spawn_backend(move || backend.encrypt(session, CkInBuf::Bytes(&data))).await?;
     let (ck_rv, encrypted_data) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
+    // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
+    if ctx.audit.as_ref().is_some_and(|a| a.data_plane_enabled()) {
+        let _ = emit_auth_event(
+            ctx,
+            &ctx_id,
+            "C_Encrypt",
+            EventClass::DataPlane,
+            None,
+            Some(req.session_handle),
+            ck_rv,
+            started,
+        );
+    }
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptResponse {
         ck_rv,
         encrypted_data: encrypted_data.unwrap_or_default(),
@@ -176,6 +192,7 @@ pub(crate) async fn encrypt_final(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptFinalResponse>, Status> {
+    let started = Instant::now();
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
@@ -196,6 +213,19 @@ pub(crate) async fn encrypt_final(
     let result = spawn_backend(move || backend.encrypt_final(session)).await?;
     let (ck_rv, last_encrypted_part) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
+    // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
+    if ctx.audit.as_ref().is_some_and(|a| a.data_plane_enabled()) {
+        let _ = emit_auth_event(
+            ctx,
+            &ctx_id,
+            "C_Encrypt",
+            EventClass::DataPlane,
+            None,
+            Some(req.session_handle),
+            ck_rv,
+            started,
+        );
+    }
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptFinalResponse {
         ck_rv,
         last_encrypted_part: last_encrypted_part.unwrap_or_default(),
@@ -297,6 +327,7 @@ pub(crate) async fn decrypt(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptResponse>, Status> {
+    let started = Instant::now();
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
@@ -319,6 +350,19 @@ pub(crate) async fn decrypt(
         spawn_backend(move || backend.decrypt(session, CkInBuf::Bytes(&encrypted_data))).await?;
     let (ck_rv, data) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
+    // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
+    if ctx.audit.as_ref().is_some_and(|a| a.data_plane_enabled()) {
+        let _ = emit_auth_event(
+            ctx,
+            &ctx_id,
+            "C_Decrypt",
+            EventClass::DataPlane,
+            None,
+            Some(req.session_handle),
+            ck_rv,
+            started,
+        );
+    }
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptResponse {
         ck_rv,
         data: data.unwrap_or_default(),
@@ -365,6 +409,7 @@ pub(crate) async fn decrypt_final(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptFinalResponse>, Status> {
+    let started = Instant::now();
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
@@ -385,6 +430,19 @@ pub(crate) async fn decrypt_final(
     let result = spawn_backend(move || backend.decrypt_final(session)).await?;
     let (ck_rv, last_part) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
+    // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
+    if ctx.audit.as_ref().is_some_and(|a| a.data_plane_enabled()) {
+        let _ = emit_auth_event(
+            ctx,
+            &ctx_id,
+            "C_Decrypt",
+            EventClass::DataPlane,
+            None,
+            Some(req.session_handle),
+            ck_rv,
+            started,
+        );
+    }
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptFinalResponse {
         ck_rv,
         last_part: last_part.unwrap_or_default(),
@@ -551,5 +609,106 @@ mod tests {
             CkRv::MECHANISM_INVALID.0,
             "no mechanism grant → gate must be transparent (any mechanism allowed)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Data-plane audit tests (Task 2)
+    // -----------------------------------------------------------------------
+
+    use std::path::PathBuf;
+
+    use crate::config::AuditConfig;
+    use crate::server::audit::{AuditSink, spawn_audit_sink};
+
+    fn dp_temp_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("cipher-dp-{}-{}", std::process::id(), tag))
+    }
+
+    fn dp_make_audit_dir(dir: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    fn dp_make_sink(dir: &std::path::Path, data_plane: bool) -> AuditSink {
+        let cfg = AuditConfig { dir: Some(dir.to_path_buf()), data_plane, ..Default::default() };
+        spawn_audit_sink(&cfg).unwrap().expect("sink")
+    }
+
+    fn dp_parse_records(dir: &std::path::Path) -> Vec<pkcs11_proxy_ng_audit::AuditRecord> {
+        let content = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap_or_default();
+        content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| pkcs11_proxy_ng_audit::record::from_jsonl(l).expect("parse"))
+            .collect()
+    }
+
+    /// With `data_plane=true`, a C_Encrypt completion writes a DataPlane record
+    /// with method="C_Encrypt" and the op's real ck_rv.
+    #[tokio::test]
+    async fn encrypt_data_plane_true_produces_record() {
+        let dir = dp_temp_dir("enc-on");
+        dp_make_audit_dir(&dir);
+        let sink = dp_make_sink(&dir, true);
+
+        let (mut ctx, ctx_id, session) =
+            setup(no_mechanism_grant_policy(), Some(PEER_IDENTITY.into())).await;
+        ctx.audit = Some(sink.clone());
+
+        let req = pkcs11_proxy_ng_proto::EncryptRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            data: vec![0u8; 4],
+            data_null_len: None,
+        };
+        let resp = super::encrypt(&ctx, Request::new(req)).await.unwrap();
+        let ck_rv = resp.into_inner().ck_rv;
+
+        sink.flush().await.unwrap();
+
+        let records = dp_parse_records(&dir);
+        let dp = records.iter().find(|r| r.class == pkcs11_proxy_ng_audit::EventClass::DataPlane);
+        assert!(dp.is_some(), "DataPlane record must be written when data_plane=true");
+        let dp = dp.unwrap();
+        assert_eq!(dp.method, "C_Encrypt");
+        assert_eq!(dp.ck_rv, ck_rv, "record must carry the real ck_rv");
+
+        let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
+        assert!(report.chain_ok, "chain must verify: {report:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With `data_plane=false`, C_Encrypt must NOT write any DataPlane records.
+    #[tokio::test]
+    async fn encrypt_data_plane_false_no_record() {
+        let dir = dp_temp_dir("enc-off");
+        dp_make_audit_dir(&dir);
+        let sink = dp_make_sink(&dir, false);
+
+        let (mut ctx, ctx_id, session) =
+            setup(no_mechanism_grant_policy(), Some(PEER_IDENTITY.into())).await;
+        ctx.audit = Some(sink.clone());
+
+        let req = pkcs11_proxy_ng_proto::EncryptRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            data: vec![0u8; 4],
+            data_null_len: None,
+        };
+        let _ = super::encrypt(&ctx, Request::new(req)).await.unwrap();
+        sink.flush().await.unwrap();
+
+        let records = dp_parse_records(&dir);
+        let has_dp =
+            records.iter().any(|r| r.class == pkcs11_proxy_ng_audit::EventClass::DataPlane);
+        assert!(!has_dp, "no DataPlane records must appear when data_plane=false");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
