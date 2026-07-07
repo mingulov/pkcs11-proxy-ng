@@ -647,6 +647,11 @@ impl WriterState {
     /// Fsync the active file, write a final checkpoint if there are uncheck-
     /// pointed records, and update the anchor.
     fn flush(&mut self) -> io::Result<()> {
+        // Seal any trailing fail-open drop run into the chain BEFORE the fsync
+        // so the sentinel is durable in the log (not left pending until the
+        // next real record arrives).  This ensures verify_dir sees the correct
+        // dropped_count even when no subsequent record follows the drop run.
+        self.maybe_write_gap_sentinel()?;
         self.file.sync_all()?;
         if self.records_since_checkpoint > 0 {
             self.do_checkpoint()?; // do_checkpoint writes the anchor
@@ -1254,6 +1259,71 @@ mod tests {
         // Chain must still verify end-to-end.
         let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
         assert!(report.chain_ok, "chain must verify after gap sentinel: {report:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// FIX #4: trailing fail-open drops with NO subsequent record must be sealed
+    /// by a gap sentinel when `flush()` is called — not left pending until the
+    /// next real record arrives.
+    ///
+    /// Scenario:
+    ///   1. Emit one real record so the writer starts.
+    ///   2. Artificially increment the drop counter (simulates fail-open DataPlane
+    ///      drops that never get a following record).
+    ///   3. Call `flush()` without emitting any further real record.
+    ///   4. `verify_dir` must report the sentinel's `dropped_count` in the log.
+    #[tokio::test]
+    async fn flush_seals_trailing_fail_open_drops_as_sentinel() {
+        let dir = temp_dir("flush-sentinel");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let cfg = AuditConfig {
+            dir: Some(dir.clone()),
+            channel_capacity: 8,
+            fail_closed_reserve: 2,
+            ..Default::default()
+        };
+        let sink = spawn_audit_sink(&cfg).unwrap().expect("flush-sentinel sink");
+
+        // One real Auth record to establish the chain.
+        assert_eq!(sink.emit(make_record(EventClass::Auth)), EmitOutcome::Queued);
+        sink.flush().await.unwrap();
+
+        // Simulate 5 trailing fail-open drops with no subsequent real record.
+        sink.dropped.fetch_add(5, Ordering::Relaxed);
+
+        // flush() must seal the drops as a gap sentinel — no real record follows.
+        sink.flush().await.unwrap();
+
+        // Verify the log: the sentinel must be present in the file.
+        let content = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        let records: Vec<pkcs11_proxy_ng_audit::AuditRecord> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| pkcs11_proxy_ng_audit::record::from_jsonl(l).expect("parseable record"))
+            .collect();
+
+        let sentinel = records
+            .iter()
+            .find(|r| r.method == "__AUDIT_GAP__")
+            .expect("flush() must have written a gap sentinel for trailing drops");
+        assert_eq!(
+            sentinel.dropped_count,
+            Some(5),
+            "sentinel must carry dropped_count = 5, got {:?}",
+            sentinel.dropped_count
+        );
+
+        // Chain must still verify.
+        let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
+        assert!(report.chain_ok, "chain must verify after flush-sealed sentinel: {report:?}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

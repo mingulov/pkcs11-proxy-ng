@@ -496,6 +496,11 @@ impl AuditConfig {
     /// Validate derived invariants.  Returns `Err` if the configuration is
     /// self-inconsistent; the message is human-readable for operator display.
     pub fn validate(&self) -> Result<(), String> {
+        if self.channel_capacity == 0 {
+            return Err("audit.channel_capacity must be > 0 \
+                 (tokio::sync::mpsc::channel(0) panics at startup)"
+                .into());
+        }
         if self.fail_closed_reserve >= self.channel_capacity {
             return Err(format!(
                 "audit.fail_closed_reserve ({}) must be strictly less than \
@@ -996,6 +1001,7 @@ impl DaemonConfig {
         // `grpc_service/authorization.rs`.
         self.validate_policy_identities()?;
         crate::server::auth::policy::TokenPolicy::from_config(&self.auth)?;
+        self.audit.validate()?;
         Ok(())
     }
 

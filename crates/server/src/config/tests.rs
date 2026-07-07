@@ -1251,3 +1251,65 @@ tokens = [{ token = \"label:MyToken\", objects = [\"aabbcc\"] }]
     let cfg: DaemonConfig = toml::from_str(toml).unwrap();
     assert!(cfg.validate().is_ok(), "objects grant + peer_cred must be accepted");
 }
+
+// ---------------------------------------------------------------------------
+// FIX #1: AuditConfig::validate() wired into DaemonConfig::validate()
+// ---------------------------------------------------------------------------
+
+/// Helper: minimal valid DaemonConfig string with an insecure unix listener so
+/// all other fields pass — only the [audit] block is varied by the caller.
+fn audit_validate_toml(audit_block: &str) -> String {
+    format!(
+        "\
+[backend]
+module = \"/dev/null\"
+[listener.local]
+path = \"/tmp/test.sock\"
+auth = \"none\"
+allow_insecure_unix = true
+{audit_block}"
+    )
+}
+
+#[test]
+fn daemon_validate_rejects_audit_channel_capacity_zero() {
+    // channel_capacity = 0 panics at runtime (tokio channel(0) panics);
+    // DaemonConfig::validate() must catch it before startup.
+    // No `dir` here: audit.validate() runs unconditionally regardless of dir;
+    // omitting dir avoids the H2 guard (audit+auth=none without anonymous_principal)
+    // which would fire first and mask the channel_capacity error.
+    let toml = audit_validate_toml("[audit]\nchannel_capacity = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("channel_capacity"), "error must mention channel_capacity, got: {err}");
+    assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
+}
+
+#[test]
+fn daemon_validate_rejects_fail_closed_reserve_ge_channel_capacity() {
+    // fail_closed_reserve >= channel_capacity means 100% of data-plane records
+    // would be silently dropped; DaemonConfig::validate() must refuse to start.
+    // No `dir`: avoids H2 guard masking the error (see above).
+    let toml =
+        audit_validate_toml("[audit]\nchannel_capacity = 10\nfail_closed_reserve = 10\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("fail_closed_reserve"),
+        "error must mention fail_closed_reserve, got: {err}"
+    );
+    assert!(err.contains("channel_capacity"), "error must mention channel_capacity, got: {err}");
+}
+
+#[test]
+fn daemon_validate_accepts_audit_defaults() {
+    // The shipped defaults (channel_capacity=4096, fail_closed_reserve=256)
+    // must pass DaemonConfig::validate() without error.
+    // No `dir`: avoids H2 guard (see above); the invariant checks are on the
+    // capacity/reserve fields which are validated regardless of whether dir is set.
+    let toml = audit_validate_toml("[audit]\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    assert_eq!(cfg.audit.channel_capacity, 4096);
+    assert_eq!(cfg.audit.fail_closed_reserve, 256);
+    assert!(cfg.validate().is_ok(), "audit defaults must validate OK");
+}
