@@ -29,10 +29,10 @@ admission (`channel_capacity`/`fail_closed_reserve`) so a data-plane flood canno
 starve fail-closed classes (C1 isolation), gap sentinel (`__AUDIT_GAP__`, chained +
 tamper-evident) records dropped runs, and `verify` surfaces the dropped count.
 **Not yet landed / phased (see the §-notes below and the full-review gap
-analysis 2026-07-06):** reconnect/hot-swap re-attestation; R2
-attribute-coalesce (perf); constant-latency denial (documented I1 limit). The G3
-authorization model is substantially complete — promote to **Accepted** after a
-transparency-matrix validation pass.
+analysis 2026-07-06):** reconnect/hot-swap re-attestation; constant-latency
+denial (documented I1 limit). **R2 attribute-coalesce is now SHIPPED** (see
+Resilience § below). The G3 authorization model is substantially complete —
+promote to **Accepted** after a transparency-matrix validation pass.
 
 ## Context
 
@@ -68,8 +68,30 @@ distinguish the shim from the real module.
    - **Resilience (shipped, first increment):** count-only detection of
      pathological object populations + a local, authenticated (Unix socket,
      mode 0600) metrics endpoint. Detection reads only values already in hand;
-     it never issues an extra backend call. Follow-ups (opt-in): session-scoped
-     attribute prefetch to coalesce round-trips, and duplicate-object collapse.
+     it never issues an extra backend call.
+     **R2 — session-scoped attribute coalescer (SHIPPED, opt-in):** enabled by
+     `[resilience] coalesce_attributes = true` (default off). Caches per-`(session,
+     object, attribute)` backend results and serves repeated `C_GetAttributeValue`
+     calls for the same triple from memory, eliminating backend round-trips for
+     repeated reads. Properties: (a) **byte-identical on a hit** — the raw
+     per-attribute byte sequence returned by the backend is stored verbatim and
+     reconstructed identically; (b) **non-security attributes only** — V5
+     value-bearing-secret attributes (`CKA_VALUE`, `CKA_PRIVATE_EXPONENT`, etc.)
+     and `CKR_ATTRIBUTE_SENSITIVE` results are never cached; (c) **invalidated**
+     on `C_SetAttributeValue`, `C_DestroyObject`, and session close; (d) **multi-client
+     staleness limitation** — the cache is per-session; a mutation to a shared token
+     object by a **different client session** is not observed, so the local cache
+     serves stale data until session close. This is the opt-in rationale: suitable
+     for read-heavy, single-writer workloads (e.g. immutable certificate metadata);
+     **not suitable** for multi-writer shared-token scenarios. This addresses
+     **REPEATED-read amplification** (same attribute, same object, same session);
+     the N-distinct-object cert-storm collapse is R3 (dedup), still a follow-up.
+     Observable via `pkcs11_proxy_attr_coalesce_hits_total` /
+     `pkcs11_proxy_attr_coalesce_misses_total` at the metrics endpoint.
+     Follow-up (not shipped): attribute prefetch (fetch a set of common attributes
+     on first read to collapse one-at-a-time multi-attr reads into one round-trip;
+     needs exact-output-prefetch design). R3 (not shipped): duplicate-object
+     collapse (N-distinct-cert-storm mitigation).
    - **G1 — Audit stream:** a security-relevant event log (authenticated
      identity, method, slot/session, `CK_RV`, latency; object labels/IDs are
      hashed or omitted by default and are not fetched from the backend). Records
@@ -194,9 +216,10 @@ distinguish the shim from the real module.
      per-context, evicted on handle removal); and the **I2 hardening** (object
      metadata — uid+class — is fetched in one round-trip and cached only for
      **session** objects; **token** objects are re-fetched every gate call, immune
-     to cross-client backend handle recycling). **Remaining (non-G3):** R2
-     attribute-coalesce (perf); constant-**latency** denial (the deny path's
-     metadata fetch is a first-access timing difference — documented I1 limit).
+     to cross-client backend handle recycling). **Remaining (non-G3):**
+     constant-**latency** denial (the deny path's metadata fetch is a first-access
+     timing difference — documented I1 limit); R2 attribute-coalesce is now
+     SHIPPED (see Resilience § above).
      Data-plane audit emission and its fail-open channel are shipped (see G1
      above).
 

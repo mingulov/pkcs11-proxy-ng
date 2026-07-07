@@ -36,6 +36,8 @@ fn prometheus_render_contains_all_series() {
         rate_limit_rejected_total: 11,
         session_quota_rejected_total: 5,
         login_budget_tripped_total: 3,
+        attr_coalesce_hits_total: 42,
+        attr_coalesce_misses_total: 7,
     };
     let text = render_prometheus(&s);
     assert!(text.contains("pkcs11_proxy_find_objects_total 3\n"));
@@ -55,4 +57,9 @@ fn prometheus_render_contains_all_series() {
     assert!(text.contains("# TYPE pkcs11_proxy_rate_limit_rejected_total counter"));
     assert!(text.contains("# TYPE pkcs11_proxy_session_quota_rejected_total counter"));
     assert!(text.contains("# TYPE pkcs11_proxy_login_budget_tripped_total counter"));
+    // R2 attribute coalescer counters
+    assert!(text.contains("pkcs11_proxy_attr_coalesce_hits_total 42\n"));
+    assert!(text.contains("pkcs11_proxy_attr_coalesce_misses_total 7\n"));
+    assert!(text.contains("# TYPE pkcs11_proxy_attr_coalesce_hits_total counter"));
+    assert!(text.contains("# TYPE pkcs11_proxy_attr_coalesce_misses_total counter"));
 }

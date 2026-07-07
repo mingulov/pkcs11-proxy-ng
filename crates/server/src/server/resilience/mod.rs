@@ -28,11 +28,9 @@ static RATE_LIMIT_REJECTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static SESSION_QUOTA_REJECTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static LOGIN_BUDGET_TRIPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-/// Attribute coalescer cache hits (R2). Incremented by the serving path (Task 2).
-#[allow(dead_code)] // wired in R2 Task 2/3
+/// Attribute coalescer cache hits (R2). Incremented by the serving path.
 static ATTR_COALESCE_HITS: AtomicU64 = AtomicU64::new(0);
-/// Attribute coalescer cache misses (R2). Incremented by the serving path (Task 2).
-#[allow(dead_code)] // wired in R2 Task 2/3
+/// Attribute coalescer cache misses (R2). Incremented by the serving path.
 static ATTR_COALESCE_MISSES: AtomicU64 = AtomicU64::new(0);
 
 /// Install the configured thresholds and feature flags once at startup. First call wins.
@@ -47,14 +45,12 @@ pub fn coalesce_enabled() -> bool {
     COALESCE_ENABLED.get().copied().unwrap_or(false)
 }
 
-/// Record one attribute coalescer cache hit (R2). Called by the serving path (Task 2).
-#[allow(dead_code)] // wired in R2 Task 2/3
+/// Record one attribute coalescer cache hit (R2). Called by the serving path.
 pub fn record_attr_coalesce_hit() {
     ATTR_COALESCE_HITS.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Record one attribute coalescer cache miss (R2). Called by the serving path (Task 2).
-#[allow(dead_code)] // wired in R2 Task 2/3
+/// Record one attribute coalescer cache miss (R2). Called by the serving path.
 pub fn record_attr_coalesce_miss() {
     ATTR_COALESCE_MISSES.fetch_add(1, Ordering::Relaxed);
 }
@@ -124,6 +120,10 @@ pub struct Snapshot {
     pub rate_limit_rejected_total: u64,
     pub session_quota_rejected_total: u64,
     pub login_budget_tripped_total: u64,
+    /// R2 attribute coalescer: reads served from the session cache.
+    pub attr_coalesce_hits_total: u64,
+    /// R2 attribute coalescer: cacheable reads that missed and hit the backend.
+    pub attr_coalesce_misses_total: u64,
 }
 
 pub fn snapshot() -> Snapshot {
@@ -138,6 +138,8 @@ pub fn snapshot() -> Snapshot {
         rate_limit_rejected_total: RATE_LIMIT_REJECTED_TOTAL.load(Ordering::Relaxed),
         session_quota_rejected_total: SESSION_QUOTA_REJECTED_TOTAL.load(Ordering::Relaxed),
         login_budget_tripped_total: LOGIN_BUDGET_TRIPPED_TOTAL.load(Ordering::Relaxed),
+        attr_coalesce_hits_total: ATTR_COALESCE_HITS.load(Ordering::Relaxed),
+        attr_coalesce_misses_total: ATTR_COALESCE_MISSES.load(Ordering::Relaxed),
     }
 }
 
@@ -193,6 +195,15 @@ pub fn render_prometheus(s: &Snapshot) -> String {
     o.push_str(&format!(
         "pkcs11_proxy_login_budget_tripped_total {}\n",
         s.login_budget_tripped_total
+    ));
+    o.push_str("# HELP pkcs11_proxy_attr_coalesce_hits_total Attribute reads served from the session cache.\n");
+    o.push_str("# TYPE pkcs11_proxy_attr_coalesce_hits_total counter\n");
+    o.push_str(&format!("pkcs11_proxy_attr_coalesce_hits_total {}\n", s.attr_coalesce_hits_total));
+    o.push_str("# HELP pkcs11_proxy_attr_coalesce_misses_total Cacheable attribute reads that missed the cache and hit the backend.\n");
+    o.push_str("# TYPE pkcs11_proxy_attr_coalesce_misses_total counter\n");
+    o.push_str(&format!(
+        "pkcs11_proxy_attr_coalesce_misses_total {}\n",
+        s.attr_coalesce_misses_total
     ));
     o
 }

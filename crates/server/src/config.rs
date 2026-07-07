@@ -432,12 +432,38 @@ pub struct ResilienceConfig {
     /// If set, a Unix-domain metrics endpoint (mode 0600) is bound here, serving
     /// Prometheus text on `GET /metrics`.
     pub metrics_socket: Option<PathBuf>,
-    /// Opt-in session-scoped attribute result coalescer (R2). When `true`, the
-    /// daemon caches per-`(session, object, attribute)` results and serves
-    /// repeated `C_GetAttributeValue` queries from the in-memory cache rather
-    /// than forwarding them to the backend. Inert when absent/`false`; the
-    /// per-context cache map is always allocated but stays empty until Task 2
-    /// wires the serving path.
+    /// Opt-in session-scoped attribute result coalescer (R2). Default `false`
+    /// (off). When `true`, the daemon caches per-`(session, object, attribute)`
+    /// backend results and serves repeated `C_GetAttributeValue` calls for the
+    /// **same** `(session, object, attribute)` triple from the in-memory cache
+    /// rather than forwarding them to the backend, eliminating round-trips for
+    /// repeated reads of the same attribute.
+    ///
+    /// **Non-security attributes only.** Value-bearing-secret attributes (V5:
+    /// `CKA_VALUE`, `CKA_PRIVATE_EXPONENT`, etc.) and `CKR_ATTRIBUTE_SENSITIVE`
+    /// results are never cached. Only non-sensitive, non-extractable-secret
+    /// attribute results enter the cache.
+    ///
+    /// **Cache hits are byte-identical to the backend response.** The raw
+    /// per-attribute byte sequence returned by the backend is stored verbatim
+    /// and reconstructed identically on a hit — the client cannot distinguish
+    /// a cached response from a live one.
+    ///
+    /// **Invalidation:** the cache is cleared on `C_SetAttributeValue`,
+    /// `C_DestroyObject`, and session close. It is NOT invalidated when another
+    /// client mutates a shared token object; see the multi-client caveat below.
+    ///
+    /// **Multi-client staleness caveat (opt-in rationale).** The cache is
+    /// per-session. If a different client session modifies a token object,
+    /// this session's cache entry for that object is NOT invalidated — it
+    /// will serve stale data until session close. For this reason the feature
+    /// is **opt-in** and should only be enabled in **read-heavy, single-writer**
+    /// workloads (e.g. read-only access to immutable certificate metadata).
+    /// It is **not suitable** for multi-writer shared-token scenarios.
+    ///
+    /// This counter is observable at the metrics endpoint as
+    /// `pkcs11_proxy_attr_coalesce_hits_total` and
+    /// `pkcs11_proxy_attr_coalesce_misses_total`.
     #[serde(default)]
     pub coalesce_attributes: bool,
 }
