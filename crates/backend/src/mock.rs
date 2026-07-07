@@ -172,6 +172,13 @@ pub struct MockBackend {
     /// every migrated data op that calls it contributes. Used by
     /// sanitize_inputs tests to confirm whether the backend was reached.
     data_op_calls: AtomicUsize,
+    /// Count of `C_GetAttributeValue` calls reaching the backend (regular path).
+    /// Used by R2 coalescer tests to assert whether the backend was bypassed on
+    /// a cache hit.
+    attr_get_calls: AtomicUsize,
+    /// Count of `C_GetAttributeValue` calls reaching the backend (exact path).
+    /// Parallels `attr_get_calls` for the exact-output RPC path.
+    attr_get_exact_calls: AtomicUsize,
     /// Test-only gate (M5 harness): when `Some`, each real backend `login`
     /// signals + blocks on it. `None` (default) makes `login` a no-op gate.
     login_gate: Mutex<Option<LoginGate>>,
@@ -252,6 +259,8 @@ impl MockBackend {
             login_calls: AtomicUsize::new(0),
             token_info_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
+            attr_get_calls: AtomicUsize::new(0),
+            attr_get_exact_calls: AtomicUsize::new(0),
             login_gate: Mutex::new(None),
             abi: MockAbi::host(),
             advertise_big_endian: false,
@@ -380,6 +389,19 @@ impl MockBackend {
     /// (M9) deduplicates repeated authorization checks.
     pub fn token_info_call_count(&self) -> usize {
         self.token_info_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of `C_GetAttributeValue` calls reaching the backend (regular path).
+    ///
+    /// Used by R2 coalescer tests to assert that a cache hit does NOT increment
+    /// the backend call count, confirming the backend was bypassed.
+    pub fn attr_get_call_count(&self) -> usize {
+        self.attr_get_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of `C_GetAttributeValue` calls reaching the backend (exact path).
+    pub fn attr_get_exact_call_count(&self) -> usize {
+        self.attr_get_exact_calls.load(Ordering::SeqCst)
     }
 
     /// Configure a slot-specific mechanism list.

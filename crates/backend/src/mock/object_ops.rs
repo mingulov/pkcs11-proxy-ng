@@ -90,6 +90,8 @@ impl MockBackend {
         object: CkObjectHandle,
         template: &mut [CkAttribute],
     ) -> CkResult<()> {
+        use std::sync::atomic::Ordering;
+        self.attr_get_calls.fetch_add(1, Ordering::SeqCst);
         let state = self.state.lock().unwrap();
         if !state.has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
@@ -136,6 +138,8 @@ impl MockBackend {
         object: CkObjectHandle,
         queries: &[CkAttributeQuery],
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
+        use std::sync::atomic::Ordering;
+        self.attr_get_exact_calls.fetch_add(1, Ordering::SeqCst);
         if !self.state.lock().unwrap().has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
