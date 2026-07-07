@@ -707,3 +707,45 @@ async fn attr_cache_put_noop_for_missing_context() {
     mgr.attr_cache_put(&gone, 1, CkAttributeType::CLASS, make_cached_attr(vec![0xff], 0)).await; // must not panic
     assert!(mgr.attr_cache_get(&gone, 1, CkAttributeType::CLASS).await.is_none());
 }
+
+#[tokio::test]
+async fn attr_cache_clear_empties_all_entries_for_context() {
+    // C1: attr_cache_clear must drop ALL entries for the target context, leaving
+    // other contexts' entries untouched (used by the C_Logout handler).
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_a = mgr.create_context(None).await.unwrap();
+    let ctx_b = mgr.create_context(None).await.unwrap();
+
+    // Populate ctx_a with two attrs across two different objects.
+    mgr.attr_cache_put(&ctx_a, 10, CkAttributeType::CLASS, make_cached_attr(vec![1], 0)).await;
+    mgr.attr_cache_put(&ctx_a, 20, CkAttributeType::TOKEN, make_cached_attr(vec![1], 0)).await;
+    // Populate ctx_b with one attr (must survive ctx_a's clear).
+    mgr.attr_cache_put(&ctx_b, 10, CkAttributeType::CLASS, make_cached_attr(vec![2], 0)).await;
+
+    // Clear ctx_a's entire cache.
+    mgr.attr_cache_clear(&ctx_a).await;
+
+    // ctx_a's entries must be gone.
+    assert!(
+        mgr.attr_cache_get(&ctx_a, 10, CkAttributeType::CLASS).await.is_none(),
+        "attr_cache_clear must remove all entries for ctx_a (object 10)"
+    );
+    assert!(
+        mgr.attr_cache_get(&ctx_a, 20, CkAttributeType::TOKEN).await.is_none(),
+        "attr_cache_clear must remove all entries for ctx_a (object 20)"
+    );
+
+    // ctx_b's entry must be untouched.
+    assert!(
+        mgr.attr_cache_get(&ctx_b, 10, CkAttributeType::CLASS).await.is_some(),
+        "attr_cache_clear for ctx_a must not affect ctx_b's entries"
+    );
+}
+
+#[tokio::test]
+async fn attr_cache_clear_noop_for_missing_context() {
+    // attr_cache_clear on a non-existent context must not panic (no-op).
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let gone = ClientContextId("nonexistent".into());
+    mgr.attr_cache_clear(&gone).await; // must not panic
+}

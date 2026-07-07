@@ -254,6 +254,17 @@ pub(super) async fn get_attribute_value(
             // (per-attr rv = OK, implied by value_bytes = Some).
             // NEVER cache: (a) value-bearing-secret attrs, (b) attrs with no value
             //              (sensitive-denial or invalid-type — we can't tell which, so skip).
+            //
+            // M1 encoding note: this non-exact path encodes values via
+            // `attr_value_to_bytes` (e.g. CK_ULONG → 8-byte LE on LP64), while the
+            // exact path (get_attribute_value_exact) stores raw backend bytes (4-byte
+            // on an ILP32 backend). Both use the SAME attr_cache key space.  The two
+            // encodings are identical on LP64 (native platform) and diverge only on a
+            // cross-ABI ILP32 backend — which the shim does not use (the shim reaches
+            // the exact RPC exclusively).  This is therefore safe today and on all
+            // planned platforms.  If a non-LP64 backend is ever added, the non-exact
+            // path must be excluded from cache reads/writes to avoid serving an
+            // LP64-encoded value in response to an exact (raw-byte) query.
             if !is_value_bearing_secret(fetched_attr.attr_type)
                 && let Some(bytes) = &value_bytes
             {
@@ -422,6 +433,13 @@ pub(super) async fn get_attribute_value_exact(
                     // (ck_rv = None AND value = Some means the backend returned bytes).
                     // Do NOT cache: size-only results (value = None with ck_rv = None),
                     // sensitive, invalid-type, or buffer-too-small results.
+                    //
+                    // M1 encoding note: this exact path stores raw backend bytes (e.g.
+                    // CK_ULONG → 4-byte on ILP32). The non-exact path (get_attribute_value)
+                    // uses `attr_value_to_bytes` (8-byte LE on LP64). The two encodings
+                    // are identical on LP64 (current and planned platform) and share
+                    // the same attr_cache key space — safe today (see full note at the
+                    // non-exact put site above).
                     if !is_value_bearing_secret(fetched_result.attr_type)
                         && fetched_result.ck_rv.is_none()
                         && let Some(bytes) = &fetched_result.value
@@ -1128,6 +1146,173 @@ mod tests {
         assert_eq!(
             fresh.results, cached_resp.results,
             "exact: per-attr results must be byte-identical to fresh fetch"
+        );
+    }
+
+    /// M3(a): exact-path SIZE-QUERY hit — when the cache holds a data result,
+    /// a subsequent size query (buffer_present=false) must be served from cache
+    /// and its returned_len must equal a fresh size query's returned_len.
+    #[tokio::test]
+    async fn exact_path_size_query_cache_hit_is_byte_identical_to_fresh() {
+        enable_coalesce();
+        let mock = mock_with_attrs();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(1), CkSlotId(0));
+                c.object_handles.insert(BackendHandle(1));
+            })
+            .await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(allow_policy());
+
+        let session_handle = ctx_mgr
+            .get_context(&ctx_id, |c| c.session_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap();
+        let object_handle = ctx_mgr
+            .get_context(&ctx_id, |c| c.object_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap();
+
+        // Step 1: warm the cache with an adequate-buffer data query.
+        let data_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            object_handle,
+            queries: vec![pkcs11_proxy_ng_proto::AttributeQuery {
+                attr_type: CkAttributeType::ID.0,
+                buffer_present: true,
+                buffer_len: 64,
+                nested: None,
+            }],
+        };
+        let fresh_data = super::get_attribute_value_exact(&ctx, Request::new(data_req))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(fresh_data.ck_rv, CkRv::OK.0, "data query must succeed");
+        let expected_len = fresh_data.results[0].returned_len;
+        let after_warm = mock.attr_get_exact_call_count();
+
+        // Step 2: size query (buffer_present=false) — must be served from cache.
+        let size_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            object_handle,
+            queries: vec![pkcs11_proxy_ng_proto::AttributeQuery {
+                attr_type: CkAttributeType::ID.0,
+                buffer_present: false,
+                buffer_len: 0,
+                nested: None,
+            }],
+        };
+        let cached_size = super::get_attribute_value_exact(&ctx, Request::new(size_req))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            mock.attr_get_exact_call_count(),
+            after_warm,
+            "M3(a): size query must be served from cache (backend must not be called)"
+        );
+        assert_eq!(cached_size.ck_rv, CkRv::OK.0, "M3(a): size-query cache hit must return OK");
+        assert_eq!(
+            cached_size.results[0].returned_len, expected_len,
+            "M3(a): size-query cache hit returned_len must match the data query's returned_len"
+        );
+        // Size query has no value bytes (None in proto).
+        assert!(
+            cached_size.results[0].value.is_none(),
+            "M3(a): size-query cache hit must have no value bytes (size-only result)"
+        );
+    }
+
+    /// M3(b): exact-path BUFFER_TOO_SMALL cache hit — when the cache holds a data
+    /// result, a subsequent query with an under-sized buffer must be served from
+    /// cache with CKR_BUFFER_TOO_SMALL (byte-identical to a fresh backend response).
+    #[tokio::test]
+    async fn exact_path_buffer_too_small_cache_hit_returns_buffer_too_small() {
+        enable_coalesce();
+        let mock = mock_with_attrs();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(1), CkSlotId(0));
+                c.object_handles.insert(BackendHandle(1));
+            })
+            .await;
+        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = Arc::new(allow_policy());
+
+        let session_handle = ctx_mgr
+            .get_context(&ctx_id, |c| c.session_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap();
+        let object_handle = ctx_mgr
+            .get_context(&ctx_id, |c| c.object_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap();
+
+        // Step 1: warm the cache with an adequate-buffer data query.
+        let data_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            object_handle,
+            queries: vec![pkcs11_proxy_ng_proto::AttributeQuery {
+                attr_type: CkAttributeType::ID.0,
+                buffer_present: true,
+                buffer_len: 64,
+                nested: None,
+            }],
+        };
+        super::get_attribute_value_exact(&ctx, Request::new(data_req)).await.unwrap();
+        let after_warm = mock.attr_get_exact_call_count();
+
+        // Step 2: buffer-too-small query (buffer_len = 1) — must be served from cache.
+        let small_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            object_handle,
+            queries: vec![pkcs11_proxy_ng_proto::AttributeQuery {
+                attr_type: CkAttributeType::ID.0,
+                buffer_present: true,
+                buffer_len: 1,
+                nested: None,
+            }],
+        };
+        let cached_small = super::get_attribute_value_exact(&ctx, Request::new(small_req))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            mock.attr_get_exact_call_count(),
+            after_warm,
+            "M3(b): buffer-too-small query must be served from cache (backend must not be called)"
+        );
+        // Overall RV must be BUFFER_TOO_SMALL (dominant RV for small-buffer hits).
+        assert_eq!(
+            cached_small.ck_rv,
+            CkRv::BUFFER_TOO_SMALL.0,
+            "M3(b): buffer-too-small cache hit must return BUFFER_TOO_SMALL"
+        );
+        // Per-attr returned_len must be CK_UNAVAILABLE_INFORMATION (u64::MAX) per PKCS#11.
+        assert_eq!(
+            cached_small.results[0].returned_len,
+            u64::MAX,
+            "M3(b): buffer-too-small cache hit must set returned_len to CK_UNAVAILABLE_INFORMATION"
         );
     }
 }

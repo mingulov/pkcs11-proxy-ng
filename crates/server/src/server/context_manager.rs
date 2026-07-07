@@ -437,6 +437,23 @@ impl ContextManager {
             .await;
     }
 
+    /// Clear ALL cached attribute entries for context `ctx_id` (e.g. after `C_Logout`).
+    ///
+    /// Per PKCS#11, `C_Logout` invalidates an application's handles to private objects
+    /// on the token; the coalescer must not serve cached attributes of those handles
+    /// after logout. Evicting the entire cache is conservative and correct: it also
+    /// clears public-object entries, which is only a performance miss, not a correctness
+    /// issue. Distinguishing private vs. public would require `CKA_PRIVATE` to be
+    /// tracked per handle — which the cache does not do. No-ops silently when the
+    /// context is gone.
+    pub async fn attr_cache_clear(&self, ctx_id: &ClientContextId) {
+        let _ = self
+            .get_context(ctx_id, |ctx| {
+                ctx.attr_cache.clear();
+            })
+            .await;
+    }
+
     /// Return `true` when `virtual_object` was minted (generated, created,
     /// unwrapped) by context `ctx_id` in this session — i.e. it is present in
     /// the context's `created_objects` set.

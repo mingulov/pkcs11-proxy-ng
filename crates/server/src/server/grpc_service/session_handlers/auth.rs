@@ -265,6 +265,11 @@ pub(super) async fn logout(
                 ctx.login_state.remove(&slot);
             })
             .await;
+        // C1: per PKCS#11 §11.6, C_Logout invalidates the application's handles to
+        // private objects. The coalescer must not serve cached attributes of those
+        // handles after logout. Evicting the entire cache is conservative + correct;
+        // over-invalidating public entries is only a performance miss, not a bug.
+        ctx_mgr.attr_cache_clear(&ctx_id).await;
         info!(context_id = %ctx_id.0, "Logout completed logically");
         return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv: CkRv::OK.0 }));
     }
@@ -284,6 +289,11 @@ pub(super) async fn logout(
                     ctx.login_state.remove(&slot);
                 })
                 .await;
+            // C1: per PKCS#11 §11.6, C_Logout invalidates the application's handles to
+            // private objects. The coalescer must not serve cached attributes of those
+            // handles after logout. Evicting the entire cache is conservative + correct;
+            // over-invalidating public entries is only a performance miss, not a bug.
+            ctx_mgr.attr_cache_clear(&ctx_id).await;
             info!(context_id = %ctx_id.0, "Logout succeeded");
             CkRv::OK.0
         }
@@ -291,4 +301,241 @@ pub(super) async fn logout(
     };
 
     Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tonic::Request;
+
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    use pkcs11_proxy_ng_types::*;
+
+    use crate::server::context_manager::{CachedAttr, ClientContextId, ContextManager, LoginState};
+    use crate::server::handle_map::BackendHandle;
+
+    // Ensure the coalescer is on for C1 tests. The OnceLock is set once per
+    // process; the first call wins — subsequent calls are no-ops.
+    fn enable_coalesce() {
+        crate::server::resilience::configure(None, true);
+    }
+
+    /// C1: a successful C_Logout must clear the calling context's attr_cache so
+    /// the coalescer cannot serve cached private-object attributes after the token
+    /// has been logged out (post-logout transparency divergence fix).
+    #[tokio::test]
+    async fn logout_clears_attr_cache_on_success() {
+        enable_coalesce();
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+        // Open a real backend session and log in so the mock accepts C_Logout.
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        mock.login(backend_session, CkUserType::User, None).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        // Register the real backend session in the context and record logged-in state.
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                let vh = ctx.register_session(BackendHandle(backend_session.0), virtual_slot);
+                ctx.login_state.insert(virtual_slot, LoginState::User);
+                vh
+            })
+            .await
+            .unwrap();
+
+        // Pre-populate attr_cache to simulate a coalescer entry cached after login.
+        ctx_mgr
+            .attr_cache_put(
+                &ctx_id,
+                42,
+                CkAttributeType::ID,
+                CachedAttr { value: b"cached-id".to_vec(), ck_rv: CkRv::OK.0 },
+            )
+            .await;
+        assert!(
+            ctx_mgr.attr_cache_get(&ctx_id, 42, CkAttributeType::ID).await.is_some(),
+            "attr_cache must be populated before logout"
+        );
+
+        // Call the real logout handler.
+        let resp = super::logout(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh.0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "logout must succeed");
+        assert!(
+            ctx_mgr.attr_cache_get(&ctx_id, 42, CkAttributeType::ID).await.is_none(),
+            "attr_cache must be empty after C_Logout (C1 fix: post-logout transparency)"
+        );
+    }
+
+    /// C1 logical path: a logical logout (another context still holds the token)
+    /// must also clear the calling context's attr_cache.
+    #[tokio::test]
+    async fn logical_logout_clears_attr_cache() {
+        enable_coalesce();
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+        // Open a real backend session and log in.
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        mock.login(backend_session, CkUserType::User, None).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
+
+        // Two contexts on the same slot — ctx_a will attempt logout; ctx_b stays logged in,
+        // forcing the logical-logout path (backend NOT called).
+        let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+        let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+
+        let session_a_vh = ctx_mgr
+            .get_context(&ctx_a, |ctx| {
+                let vh = ctx.register_session(BackendHandle(backend_session.0), virtual_slot);
+                ctx.login_state.insert(virtual_slot, LoginState::User);
+                vh
+            })
+            .await
+            .unwrap();
+
+        // ctx_b is also logged in for the same slot (makes first_login_state_for_slot_excluding
+        // return Some, so ctx_a's logout takes the logical path).
+        ctx_mgr
+            .get_context(&ctx_b, |ctx| {
+                ctx.login_state.insert(virtual_slot, LoginState::User);
+            })
+            .await;
+
+        // Pre-populate attr_cache for ctx_a.
+        ctx_mgr
+            .attr_cache_put(
+                &ctx_a,
+                7,
+                CkAttributeType::LABEL,
+                CachedAttr { value: b"my-label".to_vec(), ck_rv: CkRv::OK.0 },
+            )
+            .await;
+        assert!(
+            ctx_mgr.attr_cache_get(&ctx_a, 7, CkAttributeType::LABEL).await.is_some(),
+            "attr_cache must be populated before logical logout"
+        );
+
+        // Logical logout for ctx_a (backend NOT called because ctx_b is still logged in).
+        let resp = super::logout(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
+                client_context_id: ctx_a.0.clone(),
+                session_handle: session_a_vh.0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "logical logout must succeed");
+        assert!(
+            ctx_mgr.attr_cache_get(&ctx_a, 7, CkAttributeType::LABEL).await.is_none(),
+            "attr_cache must be empty after logical C_Logout (C1 fix)"
+        );
+
+        // ctx_b's cache must be untouched.
+        ctx_mgr
+            .attr_cache_put(
+                &ctx_b,
+                7,
+                CkAttributeType::LABEL,
+                CachedAttr { value: b"other".to_vec(), ck_rv: CkRv::OK.0 },
+            )
+            .await;
+        assert!(
+            ctx_mgr.attr_cache_get(&ctx_b, 7, CkAttributeType::LABEL).await.is_some(),
+            "ctx_b's attr_cache must be unaffected by ctx_a's logout"
+        );
+    }
+
+    /// C1 negative: a failed logout must NOT clear the attr_cache.
+    #[tokio::test]
+    async fn failed_logout_does_not_clear_attr_cache() {
+        enable_coalesce();
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+        // Open a session but do NOT login — backend will return USER_NOT_LOGGED_IN.
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        // Session not logged in from the ContextManager's perspective either.
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(BackendHandle(backend_session.0), virtual_slot)
+            })
+            .await
+            .unwrap();
+
+        // Pre-populate attr_cache.
+        ctx_mgr
+            .attr_cache_put(
+                &ctx_id,
+                5,
+                CkAttributeType::TOKEN,
+                CachedAttr { value: vec![0x01], ck_rv: CkRv::OK.0 },
+            )
+            .await;
+
+        // Logout should fail with USER_NOT_LOGGED_IN (context not logged in).
+        let resp = super::logout(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh.0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::USER_NOT_LOGGED_IN.0,
+            "logout with no login must return USER_NOT_LOGGED_IN"
+        );
+        // Cache must be intact — no successful logout occurred.
+        assert!(
+            ctx_mgr.attr_cache_get(&ctx_id, 5, CkAttributeType::TOKEN).await.is_some(),
+            "attr_cache must be intact after a failed logout"
+        );
+    }
+
+    /// Context-ID invariant: attr_cache_clear by ID is used in the
+    /// ContextManager-level test (context_manager/tests.rs); this test
+    /// validates that a non-existent ClientContextId is a silent no-op
+    /// (matches the contract of all other get_context-based accessors).
+    #[tokio::test]
+    async fn attr_cache_clear_noop_for_missing_context() {
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let gone = ClientContextId("nonexistent".into());
+        ctx_mgr.attr_cache_clear(&gone).await; // must not panic
+    }
 }

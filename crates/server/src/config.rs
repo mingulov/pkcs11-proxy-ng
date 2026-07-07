@@ -454,12 +454,14 @@ pub struct ResilienceConfig {
     /// client mutates a shared token object; see the multi-client caveat below.
     ///
     /// **Multi-client staleness caveat (opt-in rationale).** The cache is
-    /// per-session. If a different client session modifies a token object,
-    /// this session's cache entry for that object is NOT invalidated — it
-    /// will serve stale data until session close. For this reason the feature
-    /// is **opt-in** and should only be enabled in **read-heavy, single-writer**
-    /// workloads (e.g. read-only access to immutable certificate metadata).
-    /// It is **not suitable** for multi-writer shared-token scenarios.
+    /// per logical client context. If a different client context modifies a
+    /// token object, this context's cache entry for that object is NOT
+    /// invalidated — it will serve stale data until session close or logout.
+    /// For this reason the feature is **opt-in** and should only be enabled in
+    /// **read-heavy, single-writer** workloads (e.g. read-only access to
+    /// immutable certificate metadata). It is **not suitable** for multi-writer
+    /// shared-token scenarios. Cross-context isolation (different identities
+    /// having separate contexts) is enforced regardless of this setting.
     ///
     /// This counter is observable at the metrics endpoint as
     /// `pkcs11_proxy_attr_coalesce_hits_total` and

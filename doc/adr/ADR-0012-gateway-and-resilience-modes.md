@@ -69,8 +69,8 @@ distinguish the shim from the real module.
      pathological object populations + a local, authenticated (Unix socket,
      mode 0600) metrics endpoint. Detection reads only values already in hand;
      it never issues an extra backend call.
-     **R2 — session-scoped attribute coalescer (SHIPPED, opt-in):** enabled by
-     `[resilience] coalesce_attributes = true` (default off). Caches per-`(session,
+     **R2 — context-scoped attribute coalescer (SHIPPED, opt-in):** enabled by
+     `[resilience] coalesce_attributes = true` (default off). Caches per-`(context,
      object, attribute)` backend results and serves repeated `C_GetAttributeValue`
      calls for the same triple from memory, eliminating backend round-trips for
      repeated reads. Properties: (a) **byte-identical on a hit** — the raw
@@ -78,14 +78,17 @@ distinguish the shim from the real module.
      reconstructed identically; (b) **non-security attributes only** — V5
      value-bearing-secret attributes (`CKA_VALUE`, `CKA_PRIVATE_EXPONENT`, etc.)
      and `CKR_ATTRIBUTE_SENSITIVE` results are never cached; (c) **invalidated**
-     on `C_SetAttributeValue`, `C_DestroyObject`, and session close; (d) **multi-client
-     staleness limitation** — the cache is per-session; a mutation to a shared token
-     object by a **different client session** is not observed, so the local cache
-     serves stale data until session close. This is the opt-in rationale: suitable
-     for read-heavy, single-writer workloads (e.g. immutable certificate metadata);
-     **not suitable** for multi-writer shared-token scenarios. This addresses
-     **REPEATED-read amplification** (same attribute, same object, same session);
-     the N-distinct-object cert-storm collapse is R3 (dedup), still a follow-up.
+     on `C_SetAttributeValue`, `C_DestroyObject`, `C_Logout`, and session close;
+     (d) **multi-client staleness limitation** — the cache is per logical client
+     context; a mutation to a shared token object by a **different client context**
+     is not observed, so the local cache serves stale data until session close or
+     logout. This is the opt-in rationale: suitable for read-heavy, single-writer
+     workloads (e.g. immutable certificate metadata); **not suitable** for
+     multi-writer shared-token scenarios. Cross-context isolation (different
+     identities having separate contexts) is enforced regardless of this setting.
+     This addresses **REPEATED-read amplification** (same attribute, same object,
+     same context); the N-distinct-object cert-storm collapse is R3 (dedup),
+     still a follow-up.
      Observable via `pkcs11_proxy_attr_coalesce_hits_total` /
      `pkcs11_proxy_attr_coalesce_misses_total` at the metrics endpoint.
      Follow-up (not shipped): attribute prefetch (fetch a set of common attributes
