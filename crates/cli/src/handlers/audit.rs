@@ -39,6 +39,14 @@ pub(crate) fn verify(dir: &Path, public_key_hex: Option<&str>) -> CliResult {
     } else {
         println!("  checkpoints : (signatures not checked — no key supplied or no sidecar)");
     }
+    if report.dropped_records > 0 {
+        println!(
+            "  dropped     : {} data-plane record(s) dropped (fail-open; gap sentinels visible in chain)",
+            report.dropped_records
+        );
+    } else {
+        println!("  dropped     : 0");
+    }
 
     if !report.chain_ok {
         return Err("audit verify: hash chain is broken".into());

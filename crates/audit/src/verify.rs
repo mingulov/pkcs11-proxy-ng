@@ -60,6 +60,15 @@ pub struct VerifyReport {
     /// `true` if there is no anchor, or the anchor matches the replayed head
     /// and last seq. `false` is a tamper signal (e.g. the tail was altered).
     pub head_matches_anchor: bool,
+    /// Total data-plane records dropped (fail-open) as reported by all
+    /// `__AUDIT_GAP__` sentinel records in the log.
+    ///
+    /// Each sentinel is a normal chain link whose `dropped_count` field carries
+    /// the number of data-plane records that could not be enqueued since the
+    /// previous write. A non-zero value is informational — drops are expected
+    /// under sustained data-plane load (fail-open design); the sentinel itself
+    /// is tamper-evident because it is chained like any other record.
+    pub dropped_records: u64,
 }
 
 /// A single line in `audit.checkpoints.jsonl`.
@@ -142,6 +151,15 @@ pub fn verify_dir(dir: &Path, public_key_hex: Option<&str>) -> Result<VerifyRepo
 
     let replay = replay_chain(&all_records, first_seq, last_seq);
 
+    // Tally dropped data-plane records from gap-sentinel entries.
+    // A sentinel is any record whose `dropped_count` is `Some(n)`.
+    // Using `dropped_count.is_some()` is more robust than matching the
+    // `method` string: a sentinel is valid in the chain regardless.
+    let dropped_records: u64 = all_records
+        .iter()
+        .filter_map(|r| r.dropped_count)
+        .fold(0u64, |acc, n| acc.saturating_add(n));
+
     let (checkpoints_verified, checkpoints_failed, signature_checked) = check_checkpoints(
         dir,
         public_key_hex,
@@ -169,6 +187,7 @@ pub fn verify_dir(dir: &Path, public_key_hex: Option<&str>) -> Result<VerifyRepo
         checkpoints_failed,
         signature_checked,
         head_matches_anchor,
+        dropped_records,
     })
 }
 
@@ -630,6 +649,127 @@ mod tests {
         let report = verify_dir(&dir, Some(&signer.public_hex())).unwrap();
         assert!(report.checkpoints_failed > 0, "covered tamper must fail checkpoint binding");
         assert!(!report.chain_ok, "covered tamper must fail chain_ok");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests 8–10: gap-sentinel awareness
+    // -----------------------------------------------------------------------
+
+    /// Returns a gap-sentinel record: `method = "__AUDIT_GAP__"`,
+    /// `class = System`, `dropped_count = Some(n)`.
+    fn sentinel(dropped: u64) -> AuditRecord {
+        AuditRecord {
+            schema_version: crate::record::AUDIT_SCHEMA_VERSION,
+            seq: 0,
+            ts_unix_ms: 1,
+            ts_monotonic_ns: 1,
+            prev_hash: String::new(),
+            request_id: "gap".into(),
+            identity: None,
+            method: "__AUDIT_GAP__".into(),
+            class: crate::record::EventClass::System,
+            slot: None,
+            session: None,
+            object_ref: None,
+            ck_rv: 0,
+            latency_us: 0,
+            dropped_count: Some(dropped),
+        }
+    }
+
+    /// Test 8: sentinels are valid chain links; `dropped_records` is the sum
+    /// of all sentinel `dropped_count` values; `chain_ok` remains `true`.
+    #[test]
+    fn gap_sentinels_tally_dropped_records() {
+        let dir = temp_dir("sentinel-tally");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut r0 = rec("C_Login", 0);
+        let mut s1 = sentinel(7);
+        let mut r2 = rec("C_Logout", 0);
+        let mut s3 = sentinel(3);
+        let mut r4 = rec("C_Sign", 0);
+        st.append(&mut r0);
+        st.append(&mut s1);
+        st.append(&mut r2);
+        st.append(&mut s3);
+        st.append(&mut r4);
+
+        fs::write(
+            dir.join("audit.jsonl"),
+            format!(
+                "{}{}{}{}{}",
+                to_jsonl(&r0),
+                to_jsonl(&s1),
+                to_jsonl(&r2),
+                to_jsonl(&s3),
+                to_jsonl(&r4)
+            ),
+        )
+        .unwrap();
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert!(report.chain_ok, "chain with sentinels must be chain_ok: {report:?}");
+        assert_eq!(report.dropped_records, 10, "7 + 3 = 10 dropped records");
+        assert_eq!(report.records, 5, "5 records total (including 2 sentinels)");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Test 9: tampering a sentinel (altering its `dropped_count`) breaks the
+    /// chain — the sentinel is tamper-evident because it is chained normally.
+    #[test]
+    fn tampered_sentinel_breaks_chain() {
+        let dir = temp_dir("sentinel-tamper");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut r0 = rec("C_Login", 0);
+        let mut s1 = sentinel(5);
+        let mut r2 = rec("C_Logout", 0);
+        st.append(&mut r0);
+        st.append(&mut s1);
+        st.append(&mut r2);
+
+        // Tamper the sentinel's dropped_count AFTER the chain was built.
+        let mut tampered_sentinel = s1.clone();
+        tampered_sentinel.dropped_count = Some(999);
+
+        fs::write(
+            dir.join("audit.jsonl"),
+            format!("{}{}{}", to_jsonl(&r0), to_jsonl(&tampered_sentinel), to_jsonl(&r2)),
+        )
+        .unwrap();
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert!(!report.chain_ok, "tampered sentinel must break chain_ok: {report:?}");
+    }
+
+    /// Test 10: a log with no sentinels reports `dropped_records == 0` and
+    /// `chain_ok == true` (back-compat: existing logs with no sentinels are
+    /// unaffected).
+    #[test]
+    fn no_sentinels_dropped_records_is_zero() {
+        let dir = temp_dir("no-sentinel");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut r0 = rec("C_Login", 0);
+        let mut r1 = rec("C_FindObjects", 0);
+        st.append(&mut r0);
+        st.append(&mut r1);
+
+        fs::write(dir.join("audit.jsonl"), format!("{}{}", to_jsonl(&r0), to_jsonl(&r1))).unwrap();
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert!(report.chain_ok, "chain without sentinels must be chain_ok");
+        assert_eq!(report.dropped_records, 0, "no sentinels → dropped_records == 0");
 
         fs::remove_dir_all(&dir).ok();
     }

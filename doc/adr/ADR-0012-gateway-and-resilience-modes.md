@@ -1,7 +1,7 @@
 # ADR-0012: Gateway & Resilience Modes
 
 ## Status
-**Proposed (2026-07-04; last revised 2026-07-06).** Introduced incrementally.
+**Proposed (2026-07-04; last revised 2026-07-07).** Introduced incrementally.
 **Landed:** (1) opt-in count-only pathological-population detection (`[resilience]`)
 + local Unix-socket metrics endpoint; (2) **G1 audit stream** — the tamper-evident
 engine (SHA-256 hash chain, Ed25519-signed checkpoints, rotating sink, anchor,
@@ -23,9 +23,13 @@ seam with constant-work-on-RV/audit/metric invisible denial (I1: NOT constant-la
 receive handles for objects they cannot use); (8) **G3-PR3 authz completion** —
 per-class + per-mechanism enforcement (config un-rejected), per-object extract
 override, minted-object ACL inheritance, and the I2 session-only-metadata-cache
-hardening. **Not yet landed / phased (see the §-notes below and the full-review gap
-analysis 2026-07-06):** data-plane (sign/encrypt) audit emission + the fail-open
-gap-sentinel + its separate channel; reconnect/hot-swap re-attestation; R2
+hardening; (9) **G1 data-plane audit** — opt-in (`[audit] data_plane = true`)
+emission for sign/encrypt/decrypt/verify/digest, fail-open with reserved-capacity
+admission (`channel_capacity`/`fail_closed_reserve`) so a data-plane flood cannot
+starve fail-closed classes (C1 isolation), gap sentinel (`__AUDIT_GAP__`, chained +
+tamper-evident) records dropped runs, and `verify` surfaces the dropped count.
+**Not yet landed / phased (see the §-notes below and the full-review gap
+analysis 2026-07-06):** reconnect/hot-swap re-attestation; R2
 attribute-coalesce (perf); constant-latency denial (documented I1 limit). The G3
 authorization model is substantially complete — promote to **Accepted** after a
 transparency-matrix validation pass.
@@ -82,13 +86,21 @@ distinguish the shim from the real module.
      can recompute the SHA-256 chain and rewrite the anchor). A front-truncation
      below the oldest retained checkpoint is indistinguishable from legitimate
      pruning. Sink-failure policy is per class: **fail-closed** (reject the
-     operation) for auth / key-management events. **Currently shipped emission
-     covers auth/session/PIN-admin + key-lifecycle** (generate/derive/wrap/unwrap/
-     create/destroy/copy). High-volume data-plane (`C_Sign`/`C_Encrypt`) emission
-     — with a **fail-open** path, an explicit **gap sentinel**, a surfaced
-     dropped-record counter, and a **separate channel from the fail-closed
-     classes** (so a data-plane flood cannot starve auth records) — is a planned
-     follow-up, NOT yet shipped.
+     operation) for auth / key-management events. **Shipped emission covers
+     auth/session/PIN-admin + key-lifecycle** (generate/derive/wrap/unwrap/
+     create/destroy/copy) **and data-plane** (`C_Sign`/`C_Encrypt`/`C_Decrypt`/
+     `C_Verify`/`C_Digest` and their multi-part `*Update`/`*Final` variants).
+     Data-plane emission is **opt-in** via `[audit] data_plane = true` (default
+     off). It uses a **separate channel** from the fail-closed classes — capacity
+     tunable via `channel_capacity`/`fail_closed_reserve` — so a data-plane
+     flood cannot starve auth records (C1 isolation). When the data-plane
+     channel is full the record is **dropped (fail-open)** and a **gap sentinel**
+     (`method = "__AUDIT_GAP__"`, `class = system`, `dropped_count = N`) is
+     chained as the next record, making the drop **tamper-evident** (removing
+     or altering the sentinel breaks the hash chain). The `verify` command
+     surfaces the total dropped count (`dropped_records` in `VerifyReport`;
+     printed as the `dropped` line in CLI output). Drops are possible under
+     sustained overload — that is the fail-open design.
    - **G2 — Identity hardening + coarse authorization + rate/quota:**
      *Hardening (G2-PR1, shipped):* the daemon refuses to start when a
      policy / `allow_all_authenticated` / audit is configured alongside an
@@ -178,10 +190,11 @@ distinguish the shim from the real module.
      per-context, evicted on handle removal); and the **I2 hardening** (object
      metadata — uid+class — is fetched in one round-trip and cached only for
      **session** objects; **token** objects are re-fetched every gate call, immune
-     to cross-client backend handle recycling). **Remaining (non-G3):** data-plane
-     (sign/encrypt) audit emission + its separate fail-open channel; R2
+     to cross-client backend handle recycling). **Remaining (non-G3):** R2
      attribute-coalesce (perf); constant-**latency** denial (the deny path's
      metadata fetch is a first-access timing difference — documented I1 limit).
+     Data-plane audit emission and its fail-open channel are shipped (see G1
+     above).
 
 3. **Backend attestation is integrity/change-detection, not proof of identity.**
    A **startup** record (shipped) captures the module path + content hash, the
