@@ -89,12 +89,16 @@ distinguish the shim from the real module.
      operation) for auth / key-management events. **Shipped emission covers
      auth/session/PIN-admin + key-lifecycle** (generate/derive/wrap/unwrap/
      create/destroy/copy) **and data-plane** (`C_Sign`/`C_Encrypt`/`C_Decrypt`/
-     `C_Verify`/`C_Digest` and their multi-part `*Update`/`*Final` variants).
-     Data-plane emission is **opt-in** via `[audit] data_plane = true` (default
-     off). It uses a **separate channel** from the fail-closed classes — capacity
-     tunable via `channel_capacity`/`fail_closed_reserve` — so a data-plane
-     flood cannot starve auth records (C1 isolation). When the data-plane
-     channel is full the record is **dropped (fail-open)** and a **gap sentinel**
+     `C_Verify`/`C_Digest` — one record per completed operation, i.e. the
+     single-shot ops and the multi-part `*Final` completions; the high-volume
+     `*Update` steps are intentionally NOT emitted). Data-plane emission is
+     **opt-in** via `[audit] data_plane = true` (default off). It uses a
+     **reserved-capacity partition of the shared channel** — a DataPlane record is
+     admitted only while the channel retains more than `fail_closed_reserve` free
+     slots (of `channel_capacity`), so the fail-closed classes always have room: a
+     data-plane flood cannot starve auth records (C1 isolation). When the reserve
+     is reached or the channel is full the record is **dropped (fail-open)** and a
+     **gap sentinel**
      (`method = "__AUDIT_GAP__"`, `class = system`, `dropped_count = N`) is
      chained as the next record, making the drop **tamper-evident** (removing
      or altering the sentinel breaks the hash chain). The `verify` command
