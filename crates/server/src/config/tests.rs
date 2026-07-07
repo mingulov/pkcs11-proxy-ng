@@ -1290,8 +1290,7 @@ fn daemon_validate_rejects_fail_closed_reserve_ge_channel_capacity() {
     // fail_closed_reserve >= channel_capacity means 100% of data-plane records
     // would be silently dropped; DaemonConfig::validate() must refuse to start.
     // No `dir`: avoids H2 guard masking the error (see above).
-    let toml =
-        audit_validate_toml("[audit]\nchannel_capacity = 10\nfail_closed_reserve = 10\n");
+    let toml = audit_validate_toml("[audit]\nchannel_capacity = 10\nfail_closed_reserve = 10\n");
     let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
     let err = cfg.validate().unwrap_err();
     assert!(

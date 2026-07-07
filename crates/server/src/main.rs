@@ -429,7 +429,10 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         config.proxy.rate_limit_get_backend_interfaces,
     );
 
-    server::resilience::configure(config.resilience.find_result_warn_threshold);
+    server::resilience::configure(
+        config.resilience.find_result_warn_threshold,
+        config.resilience.coalesce_attributes,
+    );
     server::rate_quota::configure(&config.rate_limit);
 
     if let Some(ref sock) = config.resilience.metrics_socket {

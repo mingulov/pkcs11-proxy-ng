@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn coalesce_enabled_reflects_configure() {
+    // configure() sets the OnceLock; first call wins for the process lifetime.
+    // We call configure(true) here; since no other test in this binary calls
+    // configure(), this is the first call and coalesce_enabled() must be true.
+    // The record_attr_coalesce_{hit,miss} functions must also be callable
+    // without panicking (they are reserved for Task 2/3).
+    configure(None, true);
+    assert!(coalesce_enabled(), "coalesce_enabled must be true after configure(…, true)");
+    // Smoke-test the reserved record fns (no assertion — they just must not panic).
+    record_attr_coalesce_hit();
+    record_attr_coalesce_miss();
+}
+
+#[test]
 fn over_threshold_classification() {
     assert!(!is_over_threshold(0, None)); // detection off => never
     assert!(!is_over_threshold(10_000, None));

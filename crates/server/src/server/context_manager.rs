@@ -44,6 +44,19 @@ pub struct ObjectMetadata {
     pub is_token: bool,
 }
 
+/// Raw per-attribute backend result stored by the session-scoped coalescer (R2).
+///
+/// Captures both the value bytes and the `CK_RV` so the coalescer can faithfully
+/// replay the exact backend response — including attribute-level errors — without
+/// a second backend round-trip.
+#[derive(Debug, Clone)]
+pub struct CachedAttr {
+    /// Raw attribute value bytes as returned by the backend (may be empty on error).
+    pub value: Vec<u8>,
+    /// The raw `CK_RV` returned by the backend for this attribute.
+    pub ck_rv: u64,
+}
+
 /// A logical client instance — the server-side PKCS#11 "application" (ADR-0002).
 pub struct LogicalClientInstance {
     pub id: ClientContextId,
@@ -84,6 +97,16 @@ pub struct LogicalClientInstance {
     /// FIND results (`register_object_handles`) are intentionally NOT inserted
     /// here — only minting operations insert.
     pub created_objects: HashSet<VirtualHandle>,
+    /// Session-scoped attribute result cache (R2 coalescer).
+    ///
+    /// Keys are `(virtual object handle, attribute type)`. Entries are evicted
+    /// in the SAME hooks that evict `object_metadata` and `created_objects`
+    /// (per-handle removal on session close and `C_DestroyObject`, plus full
+    /// teardown) so a recycled virtual handle can never return stale cached
+    /// attributes within one context. The map is always allocated; it is only
+    /// populated when `resilience::coalesce_enabled()` is `true` (Task 2 wires
+    /// the serving path).
+    pub attr_cache: HashMap<(VirtualHandle, CkAttributeType), CachedAttr>,
     /// Count of backend operations currently in flight for this context.
     /// Eviction never reaps a context with `in_flight > 0`, so a single
     /// long backend call (DH/RSA keygen, slow-HSM op) is not evicted MID-CALL
@@ -105,6 +128,7 @@ impl LogicalClientInstance {
             object_metadata: HashMap::new(),
             session_objects: HashMap::new(),
             created_objects: HashSet::new(),
+            attr_cache: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
             in_flight: Arc::new(AtomicI64::new(0)),
@@ -139,6 +163,10 @@ impl LogicalClientInstance {
                     self.object_handles.remove(object);
                     self.object_metadata.remove(&object);
                     self.created_objects.remove(&object);
+                    // Evict all cached attribute entries for this object (R2). Mirrors
+                    // the object_metadata + created_objects eviction so a recycled
+                    // virtual handle cannot return stale cached attributes.
+                    self.attr_cache.retain(|(attr_vh, _), _| *attr_vh != object);
                 }
             }
             if let Some(bh) = self.session_handles.remove(vh) {
@@ -170,6 +198,10 @@ impl LogicalClientInstance {
                 self.object_handles.remove(object);
                 self.object_metadata.remove(&object);
                 self.created_objects.remove(&object);
+                // Evict all cached attribute entries for this object (R2). Mirrors
+                // the object_metadata + created_objects eviction so a recycled
+                // virtual handle cannot return stale cached attributes.
+                self.attr_cache.retain(|(attr_vh, _), _| *attr_vh != object);
             }
         }
         if let Some(slot) = slot {
@@ -197,6 +229,7 @@ impl LogicalClientInstance {
         self.object_metadata.clear();
         self.session_objects.clear();
         self.created_objects.clear();
+        self.attr_cache.clear();
         self.login_state.clear();
         backend_sessions
     }
@@ -349,6 +382,57 @@ impl ContextManager {
         let _ = self
             .get_context(ctx_id, |ctx| {
                 ctx.object_metadata.insert(VirtualHandle(virtual_object), meta);
+            })
+            .await;
+    }
+
+    // --- R2 attribute coalescer accessors ---
+
+    /// Return the cached [`CachedAttr`] for `(object, attr)` within context `ctx_id`,
+    /// or `None` on a cache miss.
+    ///
+    /// A `None` result means either the attribute has never been cached for this object,
+    /// or the object's cache entries were evicted (session close / context teardown).
+    /// The caller should forward the request to the backend and then call
+    /// [`attr_cache_put`](Self::attr_cache_put) when the coalescer is enabled.
+    pub async fn attr_cache_get(
+        &self,
+        ctx_id: &ClientContextId,
+        object: u64,
+        attr: CkAttributeType,
+    ) -> Option<CachedAttr> {
+        self.get_context(ctx_id, |ctx| ctx.attr_cache.get(&(VirtualHandle(object), attr)).cloned())
+            .await
+            .flatten()
+    }
+
+    /// Store a [`CachedAttr`] for `(object, attr)` within context `ctx_id`.
+    ///
+    /// No-ops silently when the context no longer exists (the backend result is
+    /// still forwarded to the caller; only the caching step is skipped).
+    pub async fn attr_cache_put(
+        &self,
+        ctx_id: &ClientContextId,
+        object: u64,
+        attr: CkAttributeType,
+        entry: CachedAttr,
+    ) {
+        let _ = self
+            .get_context(ctx_id, |ctx| {
+                ctx.attr_cache.insert((VirtualHandle(object), attr), entry);
+            })
+            .await;
+    }
+
+    /// Drop ALL cached attribute entries for `object` within context `ctx_id`.
+    ///
+    /// Called when a virtual object handle is invalidated (e.g. `C_DestroyObject`)
+    /// so a reused virtual handle cannot serve stale cached attributes from a prior
+    /// object. No-ops silently when the context is gone.
+    pub async fn attr_cache_invalidate_object(&self, ctx_id: &ClientContextId, object: u64) {
+        let _ = self
+            .get_context(ctx_id, |ctx| {
+                ctx.attr_cache.retain(|(vh, _), _| *vh != VirtualHandle(object));
             })
             .await;
     }

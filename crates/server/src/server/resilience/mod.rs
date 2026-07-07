@@ -14,6 +14,10 @@ mod tests;
 /// Configured find-result threshold. `None` => detection off. Set once at startup.
 static FIND_WARN_THRESHOLD: OnceLock<Option<usize>> = OnceLock::new();
 
+/// Whether the session-scoped attribute coalescer is enabled (R2). Set once at startup.
+/// Defaults to `false` when not configured — the coalescer is opt-in.
+static COALESCE_ENABLED: OnceLock<bool> = OnceLock::new();
+
 static FIND_OBJECTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static FIND_OBJECTS_OVER_THRESHOLD_TOTAL: AtomicU64 = AtomicU64::new(0);
 static FIND_RESULT_SIZE_MAX: AtomicUsize = AtomicUsize::new(0);
@@ -24,9 +28,35 @@ static RATE_LIMIT_REJECTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static SESSION_QUOTA_REJECTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 static LOGIN_BUDGET_TRIPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-/// Install the configured threshold once at startup. First call wins.
-pub fn configure(find_result_warn_threshold: Option<usize>) {
+/// Attribute coalescer cache hits (R2). Incremented by the serving path (Task 2).
+#[allow(dead_code)] // wired in R2 Task 2/3
+static ATTR_COALESCE_HITS: AtomicU64 = AtomicU64::new(0);
+/// Attribute coalescer cache misses (R2). Incremented by the serving path (Task 2).
+#[allow(dead_code)] // wired in R2 Task 2/3
+static ATTR_COALESCE_MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// Install the configured thresholds and feature flags once at startup. First call wins.
+pub fn configure(find_result_warn_threshold: Option<usize>, coalesce_attributes: bool) {
     let _ = FIND_WARN_THRESHOLD.set(find_result_warn_threshold);
+    let _ = COALESCE_ENABLED.set(coalesce_attributes);
+}
+
+/// Whether the session-scoped attribute coalescer is active (R2).
+/// Returns `false` when [`configure`] has not been called (safe default: no caching).
+pub fn coalesce_enabled() -> bool {
+    COALESCE_ENABLED.get().copied().unwrap_or(false)
+}
+
+/// Record one attribute coalescer cache hit (R2). Called by the serving path (Task 2).
+#[allow(dead_code)] // wired in R2 Task 2/3
+pub fn record_attr_coalesce_hit() {
+    ATTR_COALESCE_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record one attribute coalescer cache miss (R2). Called by the serving path (Task 2).
+#[allow(dead_code)] // wired in R2 Task 2/3
+pub fn record_attr_coalesce_miss() {
+    ATTR_COALESCE_MISSES.fetch_add(1, Ordering::Relaxed);
 }
 
 fn threshold() -> Option<usize> {

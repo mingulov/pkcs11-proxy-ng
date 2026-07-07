@@ -432,6 +432,14 @@ pub struct ResilienceConfig {
     /// If set, a Unix-domain metrics endpoint (mode 0600) is bound here, serving
     /// Prometheus text on `GET /metrics`.
     pub metrics_socket: Option<PathBuf>,
+    /// Opt-in session-scoped attribute result coalescer (R2). When `true`, the
+    /// daemon caches per-`(session, object, attribute)` results and serves
+    /// repeated `C_GetAttributeValue` queries from the in-memory cache rather
+    /// than forwarding them to the backend. Inert when absent/`false`; the
+    /// per-context cache map is always allocated but stays empty until Task 2
+    /// wires the serving path.
+    #[serde(default)]
+    pub coalesce_attributes: bool,
 }
 
 /// Opt-in per-principal in-flight / session-quota limiter and per-slot

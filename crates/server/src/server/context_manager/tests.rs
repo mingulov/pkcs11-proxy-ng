@@ -585,3 +585,125 @@ async fn cache_object_metadata_noop_for_missing_context() {
     mgr.cache_object_metadata(&gone, 1, make_session_meta(vec![0xff])).await; // must not panic
     assert_eq!(mgr.object_metadata(&gone, 1).await.map(|m| m.unique_id), None);
 }
+
+// --- per-object attribute cache (R2 coalescer, Task 1) ---
+
+fn make_cached_attr(value: Vec<u8>, rv: u64) -> super::CachedAttr {
+    super::CachedAttr { value, ck_rv: rv }
+}
+
+#[tokio::test]
+async fn attr_cache_put_then_get_round_trips() {
+    // attr_cache_put followed by attr_cache_get must return an entry with the
+    // exact same value bytes and ck_rv (R2, Task 1).
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let object: u64 = 42;
+    let attr = CkAttributeType::CLASS;
+    let entry = make_cached_attr(vec![0x03, 0x00, 0x00, 0x00], 0);
+
+    mgr.attr_cache_put(&ctx_id, object, attr, entry.clone()).await;
+    let result = mgr.attr_cache_get(&ctx_id, object, attr).await;
+
+    let result = result.expect("a cached entry must be returned on a hit");
+    assert_eq!(result.value, entry.value, "round-tripped value bytes must match");
+    assert_eq!(result.ck_rv, entry.ck_rv, "round-tripped ck_rv must match");
+}
+
+#[tokio::test]
+async fn attr_cache_miss_returns_none() {
+    // A get for an object/attr pair that was never put must return None.
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let result = mgr.attr_cache_get(&ctx_id, 99, CkAttributeType::TOKEN).await;
+    assert!(result.is_none(), "a cache miss must return None");
+}
+
+#[tokio::test]
+async fn attr_cache_invalidate_object_drops_only_that_object() {
+    // attr_cache_invalidate_object(O) must drop only entries whose key is O;
+    // a different object's entries must remain (R2, Task 1).
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(None).await.unwrap();
+
+    let obj_a: u64 = 10;
+    let obj_b: u64 = 20;
+    let attr = CkAttributeType::CLASS;
+
+    mgr.attr_cache_put(&ctx_id, obj_a, attr, make_cached_attr(vec![1], 0)).await;
+    mgr.attr_cache_put(&ctx_id, obj_b, attr, make_cached_attr(vec![2], 0)).await;
+
+    mgr.attr_cache_invalidate_object(&ctx_id, obj_a).await;
+
+    assert!(
+        mgr.attr_cache_get(&ctx_id, obj_a, attr).await.is_none(),
+        "invalidated object's entries must be gone"
+    );
+    assert!(
+        mgr.attr_cache_get(&ctx_id, obj_b, attr).await.is_some(),
+        "other object's entries must survive invalidate_object"
+    );
+}
+
+#[test]
+fn attr_cache_cleared_on_teardown() {
+    // teardown() must clear attr_cache so no stale entries survive context
+    // destruction (R2, Task 1).
+    let mut ctx = LogicalClientInstance::new(None);
+    let obj = VirtualHandle(55);
+    let attr = CkAttributeType::CLASS;
+    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0xff], ck_rv: 0 });
+    let _ = ctx.teardown();
+    assert!(ctx.attr_cache.is_empty(), "teardown must clear the attribute cache");
+}
+
+#[test]
+fn attr_cache_evicted_on_session_close_via_remove_session() {
+    // When remove_session() evicts a session object, that object's attr_cache
+    // entries must also be evicted so a recycled virtual handle cannot serve
+    // stale cached attributes (R2, Task 1, mirrors object_metadata eviction).
+    let mut ctx = LogicalClientInstance::new(None);
+    let session = ctx.session_handles.insert(BackendHandle(10));
+    let obj = ctx.object_handles.insert(BackendHandle(100));
+    ctx.record_session_object(session, obj);
+
+    let attr = CkAttributeType::CLASS;
+    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![1, 2, 3], ck_rv: 0 });
+
+    ctx.remove_session(session);
+
+    assert!(
+        !ctx.attr_cache.contains_key(&(obj, attr)),
+        "attr_cache entries for a closed session's objects must be evicted"
+    );
+}
+
+#[test]
+fn attr_cache_evicted_on_session_close_via_remove_sessions_for_slot() {
+    // When remove_sessions_for_slot() evicts session objects, their attr_cache
+    // entries must also be evicted (R2, Task 1).
+    let mut ctx = LogicalClientInstance::new(None);
+    let session = ctx.session_handles.insert(BackendHandle(11));
+    ctx.session_slots.insert(session, CkSlotId(7));
+    let obj = ctx.object_handles.insert(BackendHandle(111));
+    ctx.record_session_object(session, obj);
+
+    let attr = CkAttributeType::TOKEN;
+    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0x01], ck_rv: 0 });
+
+    ctx.remove_sessions_for_slot(CkSlotId(7));
+
+    assert!(
+        !ctx.attr_cache.contains_key(&(obj, attr)),
+        "attr_cache entries evicted by remove_sessions_for_slot"
+    );
+}
+
+#[tokio::test]
+async fn attr_cache_put_noop_for_missing_context() {
+    // attr_cache_put on a gone context must not panic.
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let gone = ClientContextId("nonexistent".into());
+    mgr.attr_cache_put(&gone, 1, CkAttributeType::CLASS, make_cached_attr(vec![0xff], 0)).await; // must not panic
+    assert!(mgr.attr_cache_get(&gone, 1, CkAttributeType::CLASS).await.is_none());
+}
