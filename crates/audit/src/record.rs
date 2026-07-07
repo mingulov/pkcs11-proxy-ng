@@ -6,10 +6,11 @@ use crate::AuditError;
 
 /// Schema version used in every [`AuditRecord`].
 ///
-/// `1` encodes the G1 field set.  Verifiers can detect format skew by
-/// comparing the value they read against this constant.  Bump this constant
-/// (and document the change) whenever the record shape changes.
-pub const AUDIT_SCHEMA_VERSION: u32 = 1;
+/// `2` adds `dropped_count` (gap-sentinel field, `None` for normal records).
+/// Verifiers can detect format skew by comparing the value they read against
+/// this constant.  Bump this constant (and document the change) whenever the
+/// record shape changes.
+pub const AUDIT_SCHEMA_VERSION: u32 = 2;
 
 /// The class of PKCS#11 operation being recorded.
 ///
@@ -80,6 +81,12 @@ pub struct AuditRecord {
     pub ck_rv: u64,
     /// Operation latency in microseconds.
     pub latency_us: u64,
+    /// Number of fail-open records dropped since the previous written record.
+    ///
+    /// Set to `Some(n)` only on gap-sentinel records (`method = "__AUDIT_GAP__"`);
+    /// `None` for all normal records.  Added in schema version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_count: Option<u64>,
 }
 
 /// Serializes `rec` as a single JSON line terminated by `\n`.
@@ -120,18 +127,19 @@ mod tests {
             object_ref: None,
             ck_rv: 0,
             latency_us: 5,
+            dropped_count: None,
         }
     }
 
     #[test]
-    fn schema_version_constant_is_one() {
-        assert_eq!(AUDIT_SCHEMA_VERSION, 1);
+    fn schema_version_constant_is_two() {
+        assert_eq!(AUDIT_SCHEMA_VERSION, 2);
     }
 
     #[test]
-    fn built_record_has_schema_version_one() {
+    fn built_record_has_schema_version_two() {
         let rec = make_record();
-        assert_eq!(rec.schema_version, 1);
+        assert_eq!(rec.schema_version, 2);
     }
 
     #[test]
@@ -150,7 +158,7 @@ mod tests {
         assert_eq!(r0.seq, 0);
         assert_eq!(r1.seq, 1);
         assert_ne!(r0.prev_hash, r1.prev_hash);
-        // Both records carry schema_version = 1 after append.
+        // Both records carry schema_version = 2 after append.
         assert_eq!(r0.schema_version, AUDIT_SCHEMA_VERSION);
         assert_eq!(r1.schema_version, AUDIT_SCHEMA_VERSION);
     }
@@ -163,6 +171,6 @@ mod tests {
         let line = to_jsonl(&rec);
         let decoded = from_jsonl(&line).expect("jsonl round-trip must succeed");
         assert_eq!(decoded, rec);
-        assert_eq!(decoded.schema_version, AUDIT_SCHEMA_VERSION);
+        assert_eq!(decoded.schema_version, AUDIT_SCHEMA_VERSION); // version 2
     }
 }

@@ -140,7 +140,9 @@ pub fn render_prometheus(s: &Snapshot) -> String {
     o.push_str("# TYPE pkcs11_proxy_audit_emitted_total counter\n");
     o.push_str(&format!("pkcs11_proxy_audit_emitted_total {}\n", s.audit_emitted_total));
     o.push_str(
-        "# HELP pkcs11_proxy_audit_dropped_total Audit records dropped or rejected by the fail policy.\n",
+        "# HELP pkcs11_proxy_audit_dropped_total Fail-open DataPlane records dropped \
+         (channel near capacity) OR fail-closed Auth/KeyMgmt/System/Deny records rejected \
+         (channel full or writer dead).\n",
     );
     o.push_str("# TYPE pkcs11_proxy_audit_dropped_total counter\n");
     o.push_str(&format!("pkcs11_proxy_audit_dropped_total {}\n", s.audit_dropped_total));

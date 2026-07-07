@@ -17,6 +17,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use pkcs11_proxy_ng_audit::{AUDIT_SCHEMA_VERSION, AuditRecord, EventClass};
 
 use super::context::HandlerContext;
+use crate::server::audit::EmitOutcome;
 use crate::server::context_manager::ClientContextId;
 
 /// Process-start instant for monotonic timestamps.
@@ -110,18 +111,22 @@ pub(super) fn emit_auth_event(
         object_ref: None,
         ck_rv,
         latency_us,
+        dropped_count: None,
     };
 
-    // NOTE: when data-plane fail-OPEN emission lands, a silently-dropped fail-open
-    // record returns Ok here and would be miscounted as emitted — that path must
-    // increment record_audit_dropped (or a separate counter) at the sink drop site.
-    // Tracked in the 2026-07-06 gap analysis.
     match sink.emit(rec) {
-        Ok(()) => {
+        EmitOutcome::Queued => {
             crate::server::resilience::record_audit_emitted();
             Ok(())
         }
-        Err(_dropped) => {
+        EmitOutcome::DroppedFailOpen => {
+            // Fail-open: count as dropped so metrics are accurate, but the
+            // calling operation proceeds normally (not an error for the client).
+            crate::server::resilience::record_audit_dropped();
+            Ok(())
+        }
+        EmitOutcome::RejectedFailClosed => {
+            // Fail-closed: count as dropped and abort the operation.
             crate::server::resilience::record_audit_dropped();
             Err(())
         }

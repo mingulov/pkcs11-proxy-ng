@@ -474,6 +474,37 @@ pub struct AuditConfig {
     /// without a signer has no value since there is nothing to sign.
     #[serde(default = "default_audit_checkpoint_interval_secs")]
     pub checkpoint_interval_secs: u64,
+    /// Opt-in data-plane audit emission. When `false` (default) DataPlane-class
+    /// records are not emitted; when `true` they are subject to fail-open
+    /// admission (dropped if channel is near capacity rather than blocking).
+    #[serde(default)]
+    pub data_plane: bool,
+    /// Capacity of the bounded MPSC channel between emitters and the writer task.
+    /// Default 4096; raise for high-volume deployments with data-plane audit on.
+    #[serde(default = "default_audit_channel_capacity")]
+    pub channel_capacity: usize,
+    /// Number of channel slots reserved exclusively for fail-closed record classes
+    /// (Auth, KeyMgmt, System, Deny).  When available capacity drops to or below
+    /// this reserve, DataPlane `emit` is rejected fail-open WITHOUT occupying a
+    /// slot, guaranteeing room for security-critical records even under a
+    /// data-plane flood (C1 finding).  Must be strictly less than `channel_capacity`.
+    #[serde(default = "default_audit_fail_closed_reserve")]
+    pub fail_closed_reserve: usize,
+}
+
+impl AuditConfig {
+    /// Validate derived invariants.  Returns `Err` if the configuration is
+    /// self-inconsistent; the message is human-readable for operator display.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.fail_closed_reserve >= self.channel_capacity {
+            return Err(format!(
+                "audit.fail_closed_reserve ({}) must be strictly less than \
+                 audit.channel_capacity ({})",
+                self.fail_closed_reserve, self.channel_capacity
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for AuditConfig {
@@ -484,6 +515,9 @@ impl Default for AuditConfig {
             rotate_max_bytes: default_audit_rotate_max_bytes(),
             rotate_keep_files: default_audit_rotate_keep_files(),
             checkpoint_interval_secs: default_audit_checkpoint_interval_secs(),
+            data_plane: false,
+            channel_capacity: default_audit_channel_capacity(),
+            fail_closed_reserve: default_audit_fail_closed_reserve(),
         }
     }
 }
@@ -498,6 +532,14 @@ fn default_audit_rotate_keep_files() -> u32 {
 
 fn default_audit_checkpoint_interval_secs() -> u64 {
     300 // 5 minutes
+}
+
+fn default_audit_channel_capacity() -> usize {
+    4096
+}
+
+fn default_audit_fail_closed_reserve() -> usize {
+    256
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]

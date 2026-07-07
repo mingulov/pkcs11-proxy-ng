@@ -21,9 +21,6 @@ use pkcs11_proxy_ng_audit::{AuditRecord, ChainState};
 use crate::config::AuditConfig;
 use crate::server::transport::check_private_file_perms;
 
-/// Bounded channel capacity for the audit writer task.
-const CHANNEL_CAPACITY: usize = 1024;
-
 /// Write a signed checkpoint every N records.
 const CHECKPOINT_INTERVAL: u64 = 100;
 
@@ -31,18 +28,22 @@ const CHECKPOINT_INTERVAL: u64 = 100;
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Error returned by [`AuditSink::emit`] when a record cannot be queued and
-/// the event class is fail-closed.
-#[derive(Debug)]
-pub struct AuditDropped;
-
-impl std::fmt::Display for AuditDropped {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "audit record dropped: channel full, fail-closed event class")
-    }
+/// Outcome of a single [`AuditSink::emit`] call.
+///
+/// Replaces the old `Result<(), AuditDropped>` so that fail-open drops are
+/// distinguishable from fail-closed rejections at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitOutcome {
+    /// Record was accepted and queued for writing.
+    Queued,
+    /// Record was silently dropped (fail-open class; channel at or below
+    /// `fail_closed_reserve`, or channel was full).  The drop counter was
+    /// incremented.  The calling operation SHOULD proceed normally.
+    DroppedFailOpen,
+    /// Record was rejected because the channel is full or the writer has exited
+    /// (fail-closed class).  The calling operation MUST be aborted.
+    RejectedFailClosed,
 }
-
-impl std::error::Error for AuditDropped {}
 
 /// Clonable handle to the background audit writer task.
 ///
@@ -52,31 +53,52 @@ impl std::error::Error for AuditDropped {}
 pub struct AuditSink {
     tx: tokio::sync::mpsc::Sender<WriterMsg>,
     dropped: Arc<AtomicU64>,
+    /// Slots reserved exclusively for fail-closed record classes.
+    /// When `tx.capacity() <= fail_closed_reserve`, DataPlane records are
+    /// rejected fail-open WITHOUT occupying a slot (C1 invariant).
+    fail_closed_reserve: usize,
 }
 
 impl AuditSink {
     /// Emit one audit record to the writer task.
     ///
-    /// Uses non-blocking `try_send`. On a full channel:
-    /// - Fail-closed classes (Auth, KeyMgmt, Admin, System) return `Err(AuditDropped)`.
-    /// - Fail-open classes (DataPlane) silently increment the dropped counter
-    ///   and return `Ok(())`.
-    pub fn emit(&self, rec: AuditRecord) -> Result<(), AuditDropped> {
-        // `EventClass` is `Copy`; capture it so `rec` can be moved into the
-        // message without a clone.
+    /// Returns an [`EmitOutcome`] describing what happened:
+    ///
+    /// - **DataPlane** (fail-open): if available capacity is at or below the
+    ///   configured `fail_closed_reserve`, the record is dropped immediately
+    ///   without touching the channel (`DroppedFailOpen`); the drop counter is
+    ///   incremented.  This reserves those slots for fail-closed classes even
+    ///   under a data-plane flood (C1).  If capacity is above the reserve,
+    ///   `try_send` is attempted; Full or Closed → `DroppedFailOpen`.
+    ///
+    /// - **Fail-closed** (Auth, KeyMgmt, Admin, System, Deny): `try_send` is
+    ///   attempted directly.  Full or Closed → `RejectedFailClosed`; the
+    ///   caller MUST abort the operation.  The `dropped` counter is NOT
+    ///   incremented here — callers map `RejectedFailClosed` to
+    ///   `record_audit_dropped()` themselves so that the resilience metric
+    ///   remains accurate regardless of call site.
+    pub fn emit(&self, rec: AuditRecord) -> EmitOutcome {
         let class = rec.class;
-        match self.tx.try_send(WriterMsg::Record(rec)) {
-            Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                if class.fail_closed() {
-                    Err(AuditDropped)
-                } else {
-                    self.dropped.fetch_add(1, Ordering::Relaxed);
-                    Ok(())
-                }
+
+        if !class.fail_closed() {
+            // DataPlane: enforce the fail-closed capacity reserve first.
+            if self.tx.capacity() <= self.fail_closed_reserve {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return EmitOutcome::DroppedFailOpen;
             }
-            // Writer task exited; treat as fail-closed to surface the problem.
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(AuditDropped),
+            return match self.tx.try_send(WriterMsg::Record(Box::new(rec))) {
+                Ok(()) => EmitOutcome::Queued,
+                Err(_) => {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    EmitOutcome::DroppedFailOpen
+                }
+            };
+        }
+
+        // Fail-closed path: try to send; do not increment `dropped` here.
+        match self.tx.try_send(WriterMsg::Record(Box::new(rec))) {
+            Ok(()) => EmitOutcome::Queued,
+            Err(_) => EmitOutcome::RejectedFailClosed,
         }
     }
 
@@ -101,7 +123,7 @@ impl AuditSink {
 // ---------------------------------------------------------------------------
 
 enum WriterMsg {
-    Record(AuditRecord),
+    Record(Box<AuditRecord>),
     Flush(tokio::sync::oneshot::Sender<io::Result<()>>),
     /// A2: time-triggered checkpoint request from the periodic timer task.
     ///
@@ -140,11 +162,16 @@ pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
     // an unsigned checkpoint has no cryptographic value.
     let has_signer = signer.is_some();
 
-    let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+    let (tx, rx) = tokio::sync::mpsc::channel(cfg.channel_capacity);
     let dropped = Arc::new(AtomicU64::new(0));
 
-    let writer =
-        WriterState::open(dir.clone(), signer, cfg.rotate_max_bytes, cfg.rotate_keep_files)?;
+    let writer = WriterState::open(
+        dir.clone(),
+        signer,
+        cfg.rotate_max_bytes,
+        cfg.rotate_keep_files,
+        Arc::clone(&dropped),
+    )?;
     // The writer does blocking `std::fs` I/O with `sync_all()`; keep it off the
     // async worker threads by running the loop on the blocking pool and draining
     // the tokio mpsc via `blocking_recv()`.
@@ -175,7 +202,7 @@ pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
         });
     }
 
-    Ok(Some(AuditSink { tx, dropped }))
+    Ok(Some(AuditSink { tx, dropped, fail_closed_reserve: cfg.fail_closed_reserve }))
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +451,12 @@ struct WriterState {
     record_count: u64,
     /// Records written since the last checkpoint (resets to 0 at each checkpoint).
     records_since_checkpoint: u64,
+    /// Shared fail-open drop counter (same Arc as `AuditSink::dropped`).
+    /// Read by the writer to detect gaps and emit gap-sentinel records.
+    dropped: Arc<AtomicU64>,
+    /// The value of `dropped` as of the last gap-sentinel (or zero at start).
+    /// Used to compute the delta for each new sentinel.
+    last_seen_dropped: u64,
 }
 
 impl WriterState {
@@ -432,6 +465,7 @@ impl WriterState {
         signer: Option<Signer>,
         rotate_max_bytes: u64,
         rotate_keep_files: u32,
+        dropped: Arc<AtomicU64>,
     ) -> io::Result<Self> {
         let active_path = dir.join("audit.jsonl");
         // Resume the chain tip from the active-file tail (never the periodic
@@ -449,12 +483,55 @@ impl WriterState {
             rotate_keep_files,
             record_count: 0,
             records_since_checkpoint: 0,
+            dropped,
+            last_seen_dropped: 0,
         })
     }
 
-    fn write_record(&mut self, mut rec: AuditRecord) -> io::Result<()> {
-        self.chain.append(&mut rec);
-        let line = to_jsonl(&rec);
+    /// If any fail-open drops have accumulated since the last sentinel, write a
+    /// gap-sentinel record into the chain before the real record.
+    ///
+    /// The sentinel is a normal `AuditRecord` with `method = "__AUDIT_GAP__"`,
+    /// `class = System`, and `dropped_count = Some(delta)`.  It is chained
+    /// normally, making the drop run visible and tamper-evident.
+    fn maybe_write_gap_sentinel(&mut self) -> io::Result<()> {
+        let current = self.dropped.load(Ordering::Relaxed);
+        if current <= self.last_seen_dropped {
+            return Ok(());
+        }
+        let delta = current - self.last_seen_dropped;
+        self.last_seen_dropped = current;
+
+        let ts_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let mut sentinel = AuditRecord {
+            schema_version: pkcs11_proxy_ng_audit::AUDIT_SCHEMA_VERSION,
+            seq: 0,
+            ts_unix_ms,
+            ts_monotonic_ns: 0,
+            prev_hash: String::new(),
+            request_id: String::new(),
+            identity: None,
+            method: "__AUDIT_GAP__".to_string(),
+            class: pkcs11_proxy_ng_audit::EventClass::System,
+            slot: None,
+            session: None,
+            object_ref: None,
+            ck_rv: 0,
+            latency_us: 0,
+            dropped_count: Some(delta),
+        };
+        self.write_record_raw(&mut sentinel)
+    }
+
+    /// Write a single `AuditRecord` into the chain without emitting a gap sentinel
+    /// first.  Used internally by both `write_record` and `maybe_write_gap_sentinel`.
+    fn write_record_raw(&mut self, rec: &mut AuditRecord) -> io::Result<()> {
+        self.chain.append(rec);
+        let line = to_jsonl(rec);
         let line_bytes = line.len() as u64;
 
         // Rotate before writing if the new line would push the active file over the limit.
@@ -473,6 +550,11 @@ impl WriterState {
         }
 
         Ok(())
+    }
+
+    fn write_record(&mut self, mut rec: AuditRecord) -> io::Result<()> {
+        self.maybe_write_gap_sentinel()?;
+        self.write_record_raw(&mut rec)
     }
 
     /// Rotate the active log: fsync + rename audit.jsonl → audit.<N>.jsonl,
@@ -539,7 +621,7 @@ fn writer_task(mut state: WriterState, mut rx: tokio::sync::mpsc::Receiver<Write
     while let Some(msg) = rx.blocking_recv() {
         match msg {
             WriterMsg::Record(rec) => {
-                if let Err(e) = state.write_record(rec) {
+                if let Err(e) = state.write_record(*rec) {
                     tracing::error!(error = %e, "audit writer: failed to write record");
                 }
             }
@@ -548,7 +630,7 @@ fn writer_task(mut state: WriterState, mut rx: tokio::sync::mpsc::Receiver<Write
                 loop {
                     match rx.try_recv() {
                         Ok(WriterMsg::Record(rec)) => {
-                            if let Err(e) = state.write_record(rec) {
+                            if let Err(e) = state.write_record(*rec) {
                                 tracing::error!(
                                     error = %e,
                                     "audit writer: failed to write record during flush drain"
@@ -618,6 +700,7 @@ mod tests {
             object_ref: None,
             ck_rv: 0,
             latency_us: 1,
+            dropped_count: None,
         }
     }
 
@@ -637,12 +720,11 @@ mod tests {
 
         let cfg = AuditConfig {
             dir: Some(dir.clone()),
-            signing_key: None,
             rotate_max_bytes: 512, // tiny limit → many rotations with ~250-byte records
             // Small keep value → the oldest rotated files ARE pruned, exercising
             // the pruning-aware verifier (a pruned prefix is not a gap).
             rotate_keep_files: 2,
-            checkpoint_interval_secs: 300,
+            ..Default::default()
         };
 
         let sink = spawn_audit_sink(&cfg).unwrap().expect("sink should be created");
@@ -655,7 +737,8 @@ mod tests {
             EventClass::Admin,
         ];
         for i in 0..50usize {
-            sink.emit(make_record(classes[i % classes.len()])).unwrap();
+            // emit() returns EmitOutcome; any outcome is fine for this rotation test.
+            let _ = sink.emit(make_record(classes[i % classes.len()]));
         }
         sink.flush().await.unwrap();
 
@@ -703,14 +786,14 @@ mod tests {
             signing_key: Some(key_path),
             rotate_max_bytes: 64 * 1024, // large enough to avoid rotation
             rotate_keep_files: 10,
-            checkpoint_interval_secs: 300,
+            ..Default::default()
         };
 
         let sink = spawn_audit_sink(&cfg).unwrap().expect("signed sink should be created");
 
         // Emit > CHECKPOINT_INTERVAL records to trigger at least one periodic checkpoint.
         for _ in 0..110 {
-            sink.emit(make_record(EventClass::DataPlane)).unwrap();
+            assert_eq!(sink.emit(make_record(EventClass::DataPlane)), EmitOutcome::Queued);
         }
         sink.flush().await.unwrap();
 
@@ -734,26 +817,34 @@ mod tests {
         let dropped = Arc::new(AtomicU64::new(0));
 
         // Fill the channel to capacity.
-        tx.try_send(WriterMsg::Record(make_record(EventClass::System))).unwrap();
+        tx.try_send(WriterMsg::Record(Box::new(make_record(EventClass::System)))).unwrap();
 
-        let sink = AuditSink { tx, dropped: dropped.clone() };
+        // fail_closed_reserve = 0 so we test the try_send-full path rather than
+        // the reserve-guard path for DataPlane.
+        let sink = AuditSink { tx, dropped: dropped.clone(), fail_closed_reserve: 0 };
 
-        // Auth is fail-closed → Err(AuditDropped) when channel is full.
-        assert!(
-            sink.emit(make_record(EventClass::Auth)).is_err(),
-            "fail-closed Auth must return Err on full channel"
+        // Auth is fail-closed → RejectedFailClosed when channel is full.
+        assert_eq!(
+            sink.emit(make_record(EventClass::Auth)),
+            EmitOutcome::RejectedFailClosed,
+            "fail-closed Auth must return RejectedFailClosed on full channel"
         );
 
-        // DataPlane is fail-open → Ok + dropped counter increments.
-        assert!(
-            sink.emit(make_record(EventClass::DataPlane)).is_ok(),
-            "fail-open DataPlane must return Ok on full channel"
+        // DataPlane is fail-open → DroppedFailOpen + dropped counter increments.
+        assert_eq!(
+            sink.emit(make_record(EventClass::DataPlane)),
+            EmitOutcome::DroppedFailOpen,
+            "fail-open DataPlane must return DroppedFailOpen on full channel"
         );
         assert_eq!(sink.dropped_count(), 1, "dropped counter must reflect the DataPlane drop");
 
-        // A second fail-closed class also errors without changing the counter.
-        assert!(sink.emit(make_record(EventClass::KeyMgmt)).is_err());
-        assert_eq!(sink.dropped_count(), 1, "counter must not increment for fail-closed drops");
+        // A second fail-closed class also rejects without changing the dropped counter.
+        assert_eq!(sink.emit(make_record(EventClass::KeyMgmt)), EmitOutcome::RejectedFailClosed);
+        assert_eq!(
+            sink.dropped_count(),
+            1,
+            "dropped counter must not increment for fail-closed rejects"
+        );
     }
 
     /// Test 4: audit disabled (dir = None) → Ok(None), no side effects.
@@ -802,14 +893,13 @@ mod tests {
         // Restart: resume + 20 more records, then flush.
         let cfg = AuditConfig {
             dir: Some(dir.clone()),
-            signing_key: None,
             rotate_max_bytes: 1 << 20, // no rotation
             rotate_keep_files: 10,
-            checkpoint_interval_secs: 300,
+            ..Default::default()
         };
         let sink = spawn_audit_sink(&cfg).unwrap().expect("resumed sink");
         for _ in 0..20 {
-            sink.emit(make_record(EventClass::DataPlane)).unwrap();
+            assert_eq!(sink.emit(make_record(EventClass::DataPlane)), EmitOutcome::Queued);
         }
         sink.flush().await.unwrap();
 
@@ -853,7 +943,7 @@ mod tests {
             signing_key: Some(key_path.clone()),
             rotate_max_bytes: 1 << 20,
             rotate_keep_files: 10,
-            checkpoint_interval_secs: 300,
+            ..Default::default()
         };
 
         // Group-readable (0640) → refused.
@@ -887,10 +977,9 @@ mod tests {
 
         let cfg_for_dir = |dir: &std::path::PathBuf| AuditConfig {
             dir: Some(dir.clone()),
-            signing_key: None,
             rotate_max_bytes: 1 << 20,
             rotate_keep_files: 10,
-            checkpoint_interval_secs: 300,
+            ..Default::default()
         };
 
         // 0777: group-writable + world-writable → refused.
@@ -954,13 +1043,17 @@ mod tests {
             rotate_max_bytes: 64 * 1024,
             rotate_keep_files: 10,
             checkpoint_interval_secs: 1, // very short for test determinism
+            ..Default::default()
         };
 
         let sink = spawn_audit_sink(&cfg).unwrap().expect("timed-cp sink must be created");
 
         // Emit only 5 records — far below the 100-record count trigger.
         for _ in 0..5 {
-            sink.emit(make_record(pkcs11_proxy_ng_audit::EventClass::Auth)).unwrap();
+            assert_eq!(
+                sink.emit(make_record(pkcs11_proxy_ng_audit::EventClass::Auth)),
+                EmitOutcome::Queued
+            );
         }
 
         // Wait generously beyond the 1-second timer so the periodic task fires.
@@ -976,6 +1069,137 @@ mod tests {
             "time trigger must have produced at least one signed checkpoint; got: {report:?}"
         );
         assert_eq!(report.checkpoints_failed, 0, "no failed checkpoints");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // C1 + outcome tests (Task 1: reserved-capacity + gap sentinel)
+    // -----------------------------------------------------------------------
+
+    /// C1 reserve: DataPlane is blocked by the reserve while fail-closed can
+    /// still enqueue.
+    ///
+    /// Build a sink with channel_capacity = 8, fail_closed_reserve = 4.
+    /// Fill the channel until available capacity <= reserve (4 slots left).
+    /// Then:
+    ///   - further DataPlane `emit` must return `DroppedFailOpen` WITHOUT
+    ///     sending (the reserve slots are untouched).
+    ///   - a fail-closed emit must return `Queued` (reserve is available).
+    #[tokio::test]
+    async fn c1_reserve_blocks_data_plane_but_not_fail_closed() {
+        const CAP: usize = 8;
+        const RESERVE: usize = 4;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<WriterMsg>(CAP);
+        let dropped = Arc::new(AtomicU64::new(0));
+
+        // Fill until available capacity == RESERVE (send CAP - RESERVE messages).
+        for _ in 0..(CAP - RESERVE) {
+            tx.try_send(WriterMsg::Record(Box::new(make_record(EventClass::System)))).unwrap();
+        }
+        assert_eq!(tx.capacity(), RESERVE, "capacity must equal the reserve after filling");
+
+        let sink = AuditSink { tx, dropped: dropped.clone(), fail_closed_reserve: RESERVE };
+
+        // DataPlane is blocked by the reserve — must NOT occupy a slot.
+        assert_eq!(
+            sink.emit(make_record(EventClass::DataPlane)),
+            EmitOutcome::DroppedFailOpen,
+            "DataPlane must be blocked when capacity == reserve"
+        );
+        assert_eq!(dropped.load(Ordering::Relaxed), 1, "drop counter must increment");
+        // Channel capacity unchanged — the slot was NOT consumed.
+        assert_eq!(sink.tx.capacity(), RESERVE, "reserve slots must remain untouched");
+
+        // Fail-closed Auth can still enqueue (reserve is available).
+        assert_eq!(
+            sink.emit(make_record(EventClass::Auth)),
+            EmitOutcome::Queued,
+            "Auth must still queue from the reserved slots"
+        );
+    }
+
+    /// Config validation: fail_closed_reserve >= channel_capacity must be rejected.
+    #[test]
+    fn config_validate_reserve_must_be_less_than_capacity() {
+        let bad = AuditConfig {
+            channel_capacity: 10,
+            fail_closed_reserve: 10, // equal → error
+            ..Default::default()
+        };
+        assert!(bad.validate().is_err(), "reserve == capacity must fail validate()");
+
+        let also_bad = AuditConfig {
+            channel_capacity: 10,
+            fail_closed_reserve: 11, // greater → error
+            ..Default::default()
+        };
+        assert!(also_bad.validate().is_err(), "reserve > capacity must fail validate()");
+
+        let good = AuditConfig {
+            channel_capacity: 10,
+            fail_closed_reserve: 9, // strictly less → OK
+            ..Default::default()
+        };
+        assert!(good.validate().is_ok(), "reserve < capacity must pass validate()");
+    }
+
+    /// Gap sentinel: after fail-open drops, the next flushed record is preceded
+    /// by a `__AUDIT_GAP__` System record with `dropped_count = Some(n)`.
+    /// The overall chain must still verify.
+    #[tokio::test]
+    async fn gap_sentinel_written_after_fail_open_drops() {
+        let dir = temp_dir("gap-sentinel");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        // Small channel (capacity 4) with reserve 2 so drops happen quickly.
+        let cfg = AuditConfig {
+            dir: Some(dir.clone()),
+            channel_capacity: 4,
+            fail_closed_reserve: 2,
+            ..Default::default()
+        };
+        let sink = spawn_audit_sink(&cfg).unwrap().expect("gap-sentinel sink");
+
+        // Emit one normal Auth record so the writer starts.
+        assert_eq!(sink.emit(make_record(EventClass::Auth)), EmitOutcome::Queued);
+        sink.flush().await.unwrap();
+
+        // Artificially increment the drop counter to simulate fail-open drops.
+        // (In production this is done by DataPlane emit; here we drive it directly
+        // to avoid race conditions with the writer task.)
+        sink.dropped.fetch_add(3, Ordering::Relaxed);
+
+        // Emit another Auth record — the writer must prepend a gap sentinel.
+        assert_eq!(sink.emit(make_record(EventClass::Auth)), EmitOutcome::Queued);
+        sink.flush().await.unwrap();
+
+        // Read back the log and verify: there must be a sentinel and chain_ok.
+        let content = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        let records: Vec<pkcs11_proxy_ng_audit::AuditRecord> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| pkcs11_proxy_ng_audit::record::from_jsonl(l).expect("parseable record"))
+            .collect();
+
+        // Find the gap sentinel.
+        let sentinel = records
+            .iter()
+            .find(|r| r.method == "__AUDIT_GAP__")
+            .expect("gap sentinel must be present in the log");
+        assert_eq!(sentinel.class, pkcs11_proxy_ng_audit::EventClass::System);
+        assert_eq!(sentinel.dropped_count, Some(3), "sentinel must carry dropped_count = 3");
+
+        // Chain must still verify end-to-end.
+        let report = pkcs11_proxy_ng_audit::verify::verify_dir(&dir, None).unwrap();
+        assert!(report.chain_ok, "chain must verify after gap sentinel: {report:?}");
 
         std::fs::remove_dir_all(&dir).ok();
     }

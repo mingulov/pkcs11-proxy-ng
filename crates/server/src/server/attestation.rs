@@ -37,7 +37,7 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use sha2::{Digest, Sha256};
 
 use crate::config::DaemonConfig;
-use crate::server::audit::AuditSink;
+use crate::server::audit::{AuditSink, EmitOutcome};
 
 /// Process-start instant for monotonic timestamps.
 ///
@@ -127,6 +127,7 @@ fn build_attestation_core(backend: &dyn Pkcs11Backend, module_path: &Path) -> Au
         object_ref: Some(payload.to_string()),
         ck_rv: 0,
         latency_us: 0,
+        dropped_count: None,
     }
 }
 
@@ -173,16 +174,13 @@ pub async fn emit_startup_attestation(
     };
 
     match sink.emit(record) {
-        Ok(()) => {
+        EmitOutcome::Queued => {
             crate::server::resilience::record_audit_emitted();
             tracing::info!("startup attestation recorded");
         }
-        Err(e) => {
+        EmitOutcome::DroppedFailOpen | EmitOutcome::RejectedFailClosed => {
             crate::server::resilience::record_audit_dropped();
-            tracing::warn!(
-                error = %e,
-                "startup attestation dropped (channel full or writer dead)"
-            );
+            tracing::warn!("startup attestation dropped (channel full or writer dead)");
         }
     }
 }
@@ -321,10 +319,9 @@ module = "{}"
 
         let cfg = AuditConfig {
             dir: Some(audit_dir.clone()),
-            signing_key: None,
             rotate_max_bytes: 1 << 20,
             rotate_keep_files: 10,
-            checkpoint_interval_secs: 300,
+            ..Default::default()
         };
         let sink = spawn_audit_sink(&cfg).unwrap();
 

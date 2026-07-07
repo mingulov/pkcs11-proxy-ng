@@ -80,6 +80,7 @@ mod tests {
             object_ref: None,
             ck_rv,
             latency_us: 10,
+            dropped_count: None,
         }
     }
 
