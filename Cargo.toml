@@ -12,6 +12,7 @@ members = [
 ]
 
 [workspace.package]
+version = "0.2.0"
 edition = "2024"
 # MSRV raised from 1.85 to 1.88 so the workspace can use let-chains
 # (`if cond && let X = e { ... }`), stabilised in Rust 1.88. The pre-

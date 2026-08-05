@@ -77,6 +77,29 @@ require_executable() {
 cd "$ROOT_DIR"
 
 require_cmd cargo
+release_version="$(cargo pkgid -p pkcs11-proxy-ng | sed -E 's/.*@//')"
+test "$release_version" = "0.2.0"
+
+for manifest in crates/*/Cargo.toml; do
+    for key in version edition rust-version license; do
+        grep -qx "${key}.workspace = true" "$manifest" || {
+            echo "$manifest must inherit $key from workspace.package" >&2
+            exit 1
+        }
+    done
+done
+
+for package in \
+    pkcs11-proxy-ng-audit pkcs11-proxy-ng-types pkcs11-proxy-ng-proto \
+    pkcs11-proxy-ng-backend pkcs11-proxy-ng pkcs11-proxy-ng-client \
+    pkcs11-proxy-ng-cli pkcs11-proxy-ng-shim; do
+    test "$(cargo pkgid -p "$package" | sed -E 's/.*@//')" = "$release_version"
+done
+
+grep -qx '  APP_VERSION: "0.2.0"' .gitlab-ci.yml
+grep -qx 'pkgver=0.2.0' packaging/alpine/APKBUILD
+grep -qx 'Version:        0.2.0' packaging/amazon/pkcs11-proxy-ng.spec
+grep -q 'pkcs11-proxy-ng-0.2.0' packaging/amazon/Dockerfile.amazon
 require_cmd install
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
@@ -98,8 +121,8 @@ install -m 0755 "$DAEMON_BIN" "$PREFIX/bin/pkcs11-proxy-ng"
 install -m 0755 "$CLI_BIN" "$PREFIX/bin/pkcs11-proxy-ng-cli"
 install -m 0755 "$SHIM_LIB" "$PREFIX/lib/pkcs11/libpkcs11_proxy_ng_shim.so"
 
-"$PREFIX/bin/pkcs11-proxy-ng" --version >/dev/null
-"$PREFIX/bin/pkcs11-proxy-ng-cli" --version >/dev/null
+[[ "$("$PREFIX/bin/pkcs11-proxy-ng" --version)" == *" $release_version" ]]
+[[ "$("$PREFIX/bin/pkcs11-proxy-ng-cli" --version)" == *" $release_version" ]]
 test -s "$PREFIX/lib/pkcs11/libpkcs11_proxy_ng_shim.so"
 
 cat <<EOF
