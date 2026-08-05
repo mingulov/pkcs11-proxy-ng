@@ -78,7 +78,6 @@ cd "$ROOT_DIR"
 
 require_cmd cargo
 release_version="$(cargo pkgid -p pkcs11-proxy-ng | sed -E 's/.*@//')"
-test "$release_version" = "0.2.0"
 
 for manifest in crates/*/Cargo.toml; do
     for key in version edition rust-version license; do
@@ -89,17 +88,39 @@ for manifest in crates/*/Cargo.toml; do
     done
 done
 
-for package in \
+packages=(
     pkcs11-proxy-ng-audit pkcs11-proxy-ng-types pkcs11-proxy-ng-proto \
     pkcs11-proxy-ng-backend pkcs11-proxy-ng pkcs11-proxy-ng-client \
-    pkcs11-proxy-ng-cli pkcs11-proxy-ng-shim; do
+    pkcs11-proxy-ng-cli pkcs11-proxy-ng-shim
+)
+expected_packages="$(printf '%s\n' "${packages[@]}" | sort)"
+actual_packages="$(cargo tree --workspace --depth 0 --prefix none | sed -E '/^$/d; s/ .*$//' | sort)"
+[[ "$actual_packages" == "$expected_packages" ]] || {
+    echo "Workspace package set does not match the release package set" >&2
+    exit 1
+}
+
+for package in "${packages[@]}"; do
     test "$(cargo pkgid -p "$package" | sed -E 's/.*@//')" = "$release_version"
 done
 
-grep -qx '  APP_VERSION: "0.2.0"' .gitlab-ci.yml
-grep -qx 'pkgver=0.2.0' packaging/alpine/APKBUILD
-grep -qx 'Version:        0.2.0' packaging/amazon/pkcs11-proxy-ng.spec
-grep -q 'pkcs11-proxy-ng-0.2.0' packaging/amazon/Dockerfile.amazon
+for mirror in \
+    ".gitlab-ci.yml:$(sed -nE 's/^  APP_VERSION: \"([^\"]+)\"$/\1/p' .gitlab-ci.yml)" \
+    "packaging/alpine/APKBUILD:$(sed -nE 's/^pkgver=([^[:space:]]+)$/\1/p' packaging/alpine/APKBUILD)" \
+    "packaging/amazon/pkcs11-proxy-ng.spec:$(sed -nE 's/^Version:[[:space:]]+([^[:space:]]+)[[:space:]]*$/\1/p' packaging/amazon/pkcs11-proxy-ng.spec)" \
+    "packaging/amazon/Dockerfile.amazon:$(sed -nE 's/^ARG APP_VERSION=([^[:space:]]+)$/\1/p' packaging/amazon/Dockerfile.amazon)"; do
+    mirror_path="${mirror%%:*}"
+    mirror_version="${mirror#*:}"
+    [[ "$mirror_version" == "$release_version" ]] || {
+        echo "$mirror_path version $mirror_version does not match Cargo $release_version" >&2
+        exit 1
+    }
+done
+
+if grep -Eq 'pkcs11-proxy-ng-[0-9]+\.[0-9]+\.[0-9]+' packaging/amazon/Dockerfile.amazon; then
+    echo "Amazon Dockerfile versioned paths must derive from APP_VERSION" >&2
+    exit 1
+fi
 require_cmd install
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then

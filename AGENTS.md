@@ -69,15 +69,15 @@ AI agents, automation, and human contributors.
   of 1.85 was aspirational — let-chains stabilised in Rust 1.88
   (May 2025), so 1.85 was inconsistent with actual usage. Distribution
   matrix:
-  * **Alpine 3.23** — stock `rustc` ≥ 1.91; build with stock toolchain.
-  * **Alpine 3.22** — stock `rustc` 1.87; **NOT supported** (below
-    MSRV). Use Alpine 3.23 instead.
+  * **Alpine 3.23** — stock `rustc` ≥ 1.91; supported. CI uses a
+    `rustup`-managed stable toolchain uniformly across the Alpine matrix.
+  * **Alpine 3.22** — stock `rustc` 1.87; supported via the
+    `rustup`-managed toolchain because stock Rust is below MSRV.
   * **Amazon Linux 2023** — stock `rustc` ~1.86; **install Rust via
     `rustup`** rather than relying on the system package.
-  If a build target's stock Rust is older than 1.88, expect callers to
-  install a `rustup`-managed toolchain rather than expanding the distro
-  matrix. New code may not use language or library features stabilised
-  after Rust 1.88.
+  If a supported build target's stock Rust is older than 1.88, install a
+  `rustup`-managed toolchain. New code may not use language or library
+  features stabilised after Rust 1.88.
 
 ## 6. Refactor Rules
 

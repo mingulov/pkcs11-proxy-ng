@@ -20,13 +20,14 @@ edition = "2024"
 # old MSRV; this version reflects reality.
 #
 # Distribution matrix (see AGENTS.md §5):
-#   * Alpine 3.23  — stock rustc ≥ 1.91. Supported by stock toolchain.
-#   * Alpine 3.22  — stock rustc 1.87. NOT supported (below MSRV).
-#                    Drop in favour of Alpine 3.23.
+#   * Alpine 3.23  — stock rustc ≥ 1.91. Supported; CI uses rustup-managed
+#                    stable uniformly across the Alpine matrix.
+#   * Alpine 3.22  — stock rustc 1.87. Supported via the rustup-managed
+#                    toolchain because stock Rust is below MSRV.
 #   * Amazon Linux 2023 — stock rustc ~1.86. Below MSRV; users must
 #                    install Rust via rustup or vendor toolchain.
-# If a build target's stock Rust is older than 1.88, expect rustup-
-# installed toolchain rather than expanding the distro matrix.
+# If a supported build target's stock Rust is older than 1.88, use a
+# rustup-installed toolchain.
 rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 
