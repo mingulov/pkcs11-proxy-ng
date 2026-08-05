@@ -426,22 +426,14 @@ fn public_docs_present() {
 }
 
 #[test]
-fn adr_files_exist() {
-    let adr_dir = repo_root().join("doc/adr");
-    let expected = [
-        "ADR-0001-function-mechanism-coverage-policy.md",
-        "ADR-0002-handle-session-identity-model.md",
-        "ADR-0003-error-model.md",
-        "ADR-0004-backend-integration-model.md",
-        "ADR-0005-phase-1-authorization-model.md",
-        "ADR-0006-32-64-bit-cross-platform-compatibility.md",
-        "ADR-0007-backend-process-isolation.md",
-        "ADR-0008-cross-client-login-pin-verifier.md",
-        "ADR-0009-per-request-context-ownership.md",
-    ];
-    for name in &expected {
-        let path = adr_dir.join(name);
-        assert!(path.exists(), "ADR file missing: {} (expected at {})", name, path.display());
+fn adr_index_covers_every_numbered_adr() {
+    let root = repo_root();
+    let index = std::fs::read_to_string(root.join("doc/adr/README.md")).unwrap();
+    for entry in std::fs::read_dir(root.join("doc/adr")).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        if name.starts_with("ADR-") && name.ends_with(".md") {
+            assert!(index.contains(&format!("]({name})")), "ADR index does not link {name}");
+        }
     }
 }
 

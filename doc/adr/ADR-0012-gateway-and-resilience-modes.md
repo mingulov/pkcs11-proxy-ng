@@ -1,8 +1,10 @@
 # ADR-0012: Gateway & Resilience Modes
 
 ## Status
-**Proposed (2026-07-04; last revised 2026-07-07).** Introduced incrementally.
-**Landed:** (1) opt-in count-only pathological-population detection (`[resilience]`)
+**Proposed (2026-07-04; last revised 2026-08-05).**
+Implemented locally, partially covered, and unreleased. Acceptance and public-release language require a
+provenance-complete transparency matrix and public release evidence.
+**Implemented locally:** (1) opt-in count-only pathological-population detection (`[resilience]`)
 + local Unix-socket metrics endpoint; (2) **G1 audit stream** — the tamper-evident
 engine (SHA-256 hash chain, Ed25519-signed checkpoints, rotating sink, anchor,
 directory `verify`), fail-closed emission for auth/session/PIN-admin and
@@ -28,9 +30,9 @@ emission for sign/encrypt/decrypt/verify/digest, fail-open with reserved-capacit
 admission (`channel_capacity`/`fail_closed_reserve`) so a data-plane flood cannot
 starve fail-closed classes (C1 isolation), gap sentinel (`__AUDIT_GAP__`, chained +
 tamper-evident) records dropped runs, and `verify` surfaces the dropped count.
-**Not yet landed / phased (see the §-notes below and the full-review gap
+**Not yet implemented / phased (see the §-notes below and the full-review gap
 analysis 2026-07-06):** reconnect/hot-swap re-attestation; constant-latency
-denial (documented I1 limit). **R2 attribute-coalesce is now SHIPPED** (see
+denial (documented I1 limit). **R2 attribute-coalesce is implemented locally** (see
 Resilience § below). The G3 authorization model is substantially complete —
 promote to **Accepted** after a transparency-matrix validation pass.
 
@@ -58,18 +60,19 @@ distinguish the shim from the real module.
    With no `[audit]`, `[policy]`, or `[resilience]` configuration present, the
    daemon is byte-identical to today — same client-visible behavior, same
    `CK_RV`s, same backend call sequence. This is the same contract as
-   `sanitize_inputs` (ADR-0010 §4) and is enforced by a policy-OFF shard of the
-   transparency matrix asserting byte-identical output. Pure in-process
+   `sanitize_inputs` (ADR-0010 §4) and is covered by local feature-off tests
+   asserting byte-identical output; those tests are not a transparency matrix.
+   Pure in-process
    observation (counters) that changes neither client-visible behavior nor the
    backend call sequence is permitted on the default path; anything that issues
    an extra backend call or alters a response stays behind its config gate.
 
-2. **The capabilities ship as phases, each independently useful:**
-   - **Resilience (shipped, first increment):** count-only detection of
+2. **The capabilities are implemented locally in phases, each independently useful:**
+   - **Resilience (implemented locally, first increment):** count-only detection of
      pathological object populations + a local, authenticated (Unix socket,
      mode 0600) metrics endpoint. Detection reads only values already in hand;
      it never issues an extra backend call.
-     **R2 — context-scoped attribute coalescer (SHIPPED, opt-in):** enabled by
+     **R2 — context-scoped attribute coalescer (implemented locally, opt-in):** enabled by
      `[resilience] coalesce_attributes = true` (default off). Caches per-`(context,
      object, attribute)` backend results and serves repeated `C_GetAttributeValue`
      calls for the same triple from memory, eliminating backend round-trips for
@@ -91,9 +94,9 @@ distinguish the shim from the real module.
      still a follow-up.
      Observable via `pkcs11_proxy_attr_coalesce_hits_total` /
      `pkcs11_proxy_attr_coalesce_misses_total` at the metrics endpoint.
-     Follow-up (not shipped): attribute prefetch (fetch a set of common attributes
+     Follow-up (not implemented): attribute prefetch (fetch a set of common attributes
      on first read to collapse one-at-a-time multi-attr reads into one round-trip;
-     needs exact-output-prefetch design). R3 (not shipped): duplicate-object
+     needs exact-output-prefetch design). R3 (not implemented): duplicate-object
      collapse (N-distinct-cert-storm mitigation).
    - **G1 — Audit stream:** a security-relevant event log (authenticated
      identity, method, slot/session, `CK_RV`, latency; object labels/IDs are
@@ -111,7 +114,7 @@ distinguish the shim from the real module.
      can recompute the SHA-256 chain and rewrite the anchor). A front-truncation
      below the oldest retained checkpoint is indistinguishable from legitimate
      pruning. Sink-failure policy is per class: **fail-closed** (reject the
-     operation) for auth / key-management events. **Shipped emission covers
+     operation) for auth / key-management events. **Emission implemented locally covers
      auth/session/PIN-admin + key-lifecycle** (generate/derive/wrap/unwrap/
      create/destroy/copy) **and data-plane** (`C_Sign`/`C_Encrypt`/`C_Decrypt`/
      `C_Verify`/`C_Digest` — one record per completed operation, i.e. the
@@ -129,29 +132,31 @@ distinguish the shim from the real module.
      or altering the sentinel breaks the hash chain). The `verify` command
      surfaces the total dropped count (`dropped_records` in `VerifyReport`;
      printed as the `dropped` line in CLI output). Drops are possible under
-     sustained overload — that is the fail-open design.
+     sustained overload — that is the fail-open design. Audit records contain
+     operational metadata only, never PINs, key material, or raw request
+     payloads. Because fail-closed records are emitted after the backend result
+     is known, an audit failure can reject the proxy operation after a backend
+     side effect. `EventClass::Deny` remains reserved rather than emitted.
    - **G2 — Identity hardening + coarse authorization + rate/quota:**
-     *Hardening (G2-PR1, shipped):* the daemon refuses to start when a
+     *Hardening (G2-PR1, implemented locally):* the daemon refuses to start when a
      policy / `allow_all_authenticated` / audit is configured alongside an
      `auth="none"` listener, and bounds the per-slot login lock. *Authorization
-     enforcement (G2-PR2, planned):* an unknown/unmatched identity is **denied by
-     default** — which requires folding the **three** current
-     unauthenticated/`allow_all_authenticated`⇒allow paths into one deny-default
-     core (`TokenPolicy::allows` Unauthenticated + `allow_all_authenticated` +
-     `slot_is_authorized`'s enforcement short-circuit), not just one.
-     mTLS identity must key on the **leaf certificate's SPKI/fingerprint** (not
-     issuer-SPKI + a reversible subject DN string, which lets a pinned CA mint a
-     colliding-subject cert); this is a restructure of the DN-string identity key
-     and needs a policy-file migration path. An `anonymous_principal` for an
+     enforcement (G2-PR2, implemented locally):* an unknown/unmatched identity
+     is **denied by default** across the unauthenticated,
+     `allow_all_authenticated`, and `slot_is_authorized` paths.
+     mTLS identity uses the **leaf certificate's SPKI/fingerprint** as its primary
+     key (not issuer-SPKI + a reversible subject DN string, which lets a pinned
+     CA mint a colliding-subject cert), while dual-accepting legacy DN-keyed
+     policy entries and logging the operator migration path. An `anonymous_principal` for an
      unauthenticated-but-audited listener is **audit-identity only** — deny-default
      for authz, forbidden from *all* grants, and carries **no** cross-peer A2
      ownership isolation. **Coarse (slot-level) authorization is all-or-nothing
      per token — it grants full key USE and, for extractable keys, key
      EXTRACTION** (via `C_WrapKey` / value-bearing `C_GetAttributeValue`);
      per-object / per-mechanism / extract restriction is G3 (v3.0+ only), so a
-     v2.40 token gets coarse-only. An `extract-deny` coarse sub-gate on
-     `C_WrapKey` + value-bearing attribute reads is a candidate for G2 itself.
-     *Rate/quota (G2-PR3, shipped, opt-in via `[rate_limit]`):* enforced at the
+     v2.40 token gets coarse-only. The implemented-local `extract-deny` coarse
+     sub-gate covers `C_WrapKey` + value-bearing attribute reads.
+     *Rate/quota (G2-PR3, implemented locally, opt-in via `[rate_limit]`):* enforced at the
      dispatch seam covering **both** the `impl_proxy_service!` macro path and the
      hand-written handlers, with per-principal fairness. The reject codes are
      **reconciled by kind** (2026-07-06 review): a transient per-principal
@@ -174,10 +179,10 @@ distinguish the shim from the real module.
      on any successful login on the slot** — in a multi-tenant slot a legitimate
      tenant's success zeroes the shared counter, so the budget is defense-in-depth
      over the backend's own lockout (which likewise resets on success), not a hard
-     bound on attacker attempts. Follow-ups (not shipped): a token-bucket
+     bound on attacker attempts. Follow-ups (not implemented): a token-bucket
      requests/sec limiter if a workload needs it, and `CKR_DEVICE_MEMORY`-based
      memory quotas.
-   - **G3 — Fine-grained authorization (G3-PR1 shipped: per-object use-time
+   - **G3 — Fine-grained authorization (G3-PR1 implemented locally: per-object use-time
      authz):** an opt-in per-object **allow-list** — a `[auth.policy]` grant may
      add `objects = [<CKA_UNIQUE_ID hex>,…]` to confine a principal to specific
      objects; absent → the principal may use all objects on tokens it is coarsely
@@ -203,7 +208,7 @@ distinguish the shim from the real module.
      to v3.0+ tokens** that populate `CKA_UNIQUE_ID`: if any `objects` grant is
      configured against a backend reporting `< v3.0`, the daemon **refuses to
      start**; on a v3.0 token an object with an empty/absent `CKA_UNIQUE_ID` is
-     **fail-closed** (denied). **Now also shipped (G3-PR2/PR3):**
+     **fail-closed** (denied). **Also implemented locally (G3-PR2/PR3):**
      `C_FindObjects` **enumeration-time filtering** (a confined principal's find
      results exclude objects it cannot use — the handle is never received; a
      server-side inner loop pulls past fully-filtered batches so `find` returns 0
@@ -221,20 +226,20 @@ distinguish the shim from the real module.
      **session** objects; **token** objects are re-fetched every gate call, immune
      to cross-client backend handle recycling). **Remaining (non-G3):**
      constant-**latency** denial (the deny path's metadata fetch is a first-access
-     timing difference — documented I1 limit); R2 attribute-coalesce is now
-     SHIPPED (see Resilience § above).
-     Data-plane audit emission and its fail-open channel are shipped (see G1
+     timing difference — documented I1 limit); R2 attribute-coalesce is
+     implemented locally (see Resilience § above).
+     Data-plane audit emission and its fail-open channel are implemented locally (see G1
      above).
 
 3. **Backend attestation is integrity/change-detection, not proof of identity.**
-   A **startup** record (shipped) captures the module path + content hash, the
+   A **startup record implemented locally** captures the module path + content hash, the
    library `C_GetInfo`, and the token's `C_GetTokenInfo` serial/model/firmware,
    emitted into the audit chain as a `System`-class record. It is explicitly
    **not** proof that the daemon fronts a specific HSM against a daemon-compromise
    adversary (the record is self-signed with an in-process key and the hash is
    computed by the same process). A stronger property would require TPM/remote
    attestation and an out-of-band expected hash; out of scope here.
-   **Known gaps vs the full intent (phased, not yet shipped):** the startup
+   **Known gaps vs the full intent (phased, not yet implemented):** the startup
    payload does **not** yet include a config hash; and **re-attestation on
    token hot-swap is deferred** — the daemon's backend is an in-process FFI
    module with no reconnect hook, so a token swap that changes the serial under

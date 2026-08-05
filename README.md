@@ -11,10 +11,13 @@ backend module directly, apart from network latency.
 app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkcs11-proxy-ng (daemon) ──FFI──▶ backend .so (HSM/token)
 ```
 
-> **Status: `0.x` public beta.** Validated on Linux `x86_64` against SoftHSM2,
-> NSS softokn, and Kryoptic using direct-vs-proxied parity checking. This is a
-> bounded beta claim, **not** a general production-readiness or broad
-> vendor-compatibility claim. See [Beta scope](#beta-scope).
+> **Public latest: `v0.1.0`.**
+>
+> The local target is `v0.2.0`; its gateway, authorization, resilience, and audit
+> work is implemented locally, partially covered, and unreleased. Local unit and
+> integration coverage is not a
+> provenance-complete transparency matrix, so there is no public `v0.2.0` parity
+> or support claim. See [Beta scope](#beta-scope).
 
 ## Quick start (local dev, no Kubernetes)
 
@@ -49,14 +52,14 @@ hand-rolling a config.
 
 ## Beta scope
 
-**Supported and validated**
+**Public `v0.1.0` support**
 
 - Linux `x86_64`
 - Remote daemon over **TCP + mTLS** (baseline public transport), and
   **Unix-domain socket + peer-credential auth** for same-host deployments
 - Backends validated with direct-vs-proxied parity: **SoftHSM2**, **NSS
   softokn**, **Kryoptic**
-- The current daemon, client, CLI, and shim architecture and TOML config model
+- The released daemon, client, CLI, and shim architecture and TOML config model
 
 **Explicitly not claimed for this beta**
 
@@ -66,11 +69,15 @@ hand-rolling a config.
 - Plain TCP **without** mTLS as a public-supported mode (undecided)
 - Backends beyond the validated matrix (others may work but are unvalidated)
 
-The core beta claim — "the proxy does not materially change observed PKCS#11
+The public `v0.1.0` beta claim — "the proxy does not materially change observed PKCS#11
 behavior for the validated providers" — is backed by repeatable direct-vs-proxied
 checking, not by assertion. See the full
 [beta support matrix](./doc/release/beta-support-matrix.md) and the
 [parity methodology](./doc/release/parity-validation.md).
+
+The local `v0.2.0` target adds opt-in gateway, authorization, resilience, and
+audit increments. They remain unreleased until the release blockers in the
+candidate [release notes](./doc/release/v0.2.0-release-notes.md) are satisfied.
 
 ## Documentation
 

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Local-only, unreleased opt-in gateway authorization: leaf-SPKI identity
+  policies, deny-default unknown identities, audit-only anonymous principals,
+  coarse and fine object/class/mechanism/extract grants, and per-principal
+  rate/session quotas with a per-slot failed-login budget.
+- Local-only, unreleased resilience: pathological-object-population detection,
+  authenticated local metrics, and opt-in context-scoped attribute coalescing.
+- Local-only, unreleased tamper-evident audit: hash chain, signed checkpoints,
+  operational metadata only (never PINs, key material, or raw request payloads),
+  opt-in data-plane records with fail-open gap reporting, and fail-closed
+  security classes that can reject after a backend side effect. `EventClass::Deny`
+  remains reserved rather than emitted.
+- Local-only, unreleased startup backend attestation: module hash plus library
+  and token identity fields. It has no config hash or reconnect/hot-swap
+  re-attestation.
 - `sanitize_inputs` daemon config option (default `false`). When enabled, the
   daemon rejects NULL data pointers with non-zero length and NULL mechanism
   pointers on init with `CKR_ARGUMENTS_BAD` before they reach the backend
@@ -52,10 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Workspace MSRV lowered from `1.94` to `1.85` so the project builds with
-  the stock Rust toolchain shipped by Alpine 3.22 (1.87), Alpine 3.23
-  (>=1.91), and Amazon Linux 2023 (~1.86). Edition `2024` is preserved.
-  See `AGENTS.md` rule 5 for the rationale.
+- Workspace MSRV is `1.88`; Alpine 3.22 and Amazon Linux 2023 use a
+  rustup-managed toolchain because their stock Rust is older. Edition `2024` is
+  preserved. See `AGENTS.md` rule 5 for the rationale.
 - `[profile.release]` now sets `lto = "thin"`, `strip = "symbols"`, and
   `codegen-units = 1`. The shim cdylib and daemon binary shrink ~25-30%
   at the cost of ~30s additional CI build time.
@@ -119,10 +132,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The OASIS coverage inventory script, the source-scan quality gates,
   and ADR-0006 were updated for the `helpers.rs` → `helpers/` module
   split, which had left them pointing at the removed file.
-- The CI MSRV job now installs Rust 1.88 to match the declared
-  `rust-version` (it previously built with 1.94, leaving the declared
-  MSRV unverified). The declared MSRV itself moved 1.85 → 1.88 for
-  let-chains; see `AGENTS.md` rule 5.
+- The CI MSRV job now matches the declared `rust-version` (it previously built
+  with 1.94, leaving the declared MSRV unverified). The declared MSRV was
+  corrected for let-chains; see `AGENTS.md` rule 5.
 
 ### Security
 
