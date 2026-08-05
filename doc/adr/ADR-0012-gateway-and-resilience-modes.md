@@ -9,12 +9,14 @@ provenance-complete transparency matrix and public release evidence.
 engine (SHA-256 hash chain, Ed25519-signed checkpoints, rotating sink, anchor,
 directory `verify`), fail-closed emission for auth/session/PIN-admin and
 key-lifecycle operations, audit metrics, and a **startup** backend-attestation
-record; (3) **G2-PR1 identity/config hardening** (refuse-to-start on `policy`/
-`allow_all_authenticated`/`audit` + `auth="none"`; reject writable config/module/
-audit-dir; per-slot login-lock acquisition timeout); (4) **G2-PR2 authorization
-enforcement** — mTLS leaf-SPKI identity keying (dual-accept DN transition),
-deny-default flip + audit-only `anonymous_principal`, class/mechanism/extract
-grant model, opt-in extract-deny on `C_WrapKey`/`C_WrapKeyAuthenticated`/
+record; (3) **G2-PR1 identity/config hardening** (refuse-to-start on `policy` or
+`allow_all_authenticated` + `auth="none"`; require `anonymous_principal` for
+unauthenticated audit; reject writable config/module/audit-dir; per-slot
+login-lock acquisition timeout); (4) **G2-PR2 authorization enforcement** —
+mTLS leaf-SPKI identity keying (dual-accept DN transition), deny-default
+authenticated policy with explicit allow-all override, audit-label-only
+`anonymous_principal`, class/mechanism/extract grant model, opt-in extract-deny
+on `C_WrapKey`/`C_WrapKeyAuthenticated`/
 value-bearing `C_GetAttributeValue`; (5) **G2-PR3 rate/quota** — per-principal
 in-flight cap + session quota (`CKR_SESSION_COUNT`) + per-slot failed-login budget,
 opt-in via `[rate_limit]`; (6) **G3-PR1 per-object use-time authorization** —
@@ -139,23 +141,29 @@ distinguish the shim from the real module.
      side effect. `EventClass::Deny` remains reserved rather than emitted.
    - **G2 — Identity hardening + coarse authorization + rate/quota:**
      *Hardening (G2-PR1, implemented locally):* the daemon refuses to start when a
-     policy / `allow_all_authenticated` / audit is configured alongside an
-     `auth="none"` listener, and bounds the per-slot login lock. *Authorization
-     enforcement (G2-PR2, implemented locally):* an unknown/unmatched identity
-     is **denied by default** across the unauthenticated,
-     `allow_all_authenticated`, and `slot_is_authorized` paths.
+     policy or `allow_all_authenticated = true` is configured alongside an
+     `auth="none"` listener; unauthenticated audit requires an
+     `anonymous_principal`. It also bounds the per-slot login lock. With no policy,
+     unauthenticated transport/dev mode remains allowed subject to listener
+     safety configuration. `anonymous_principal` changes only its audit label,
+     is never a policy grant, and does not relax those config guards.
+     *Authorization enforcement (G2-PR2, implemented locally):* with an
+     authenticated policy, an unknown/unmatched identity is **denied by
+     default**; `allow_all_authenticated = true` is an explicit operator
+     override for authenticated identities.
      mTLS identity uses the **leaf certificate's SPKI/fingerprint** as its primary
      key (not issuer-SPKI + a reversible subject DN string, which lets a pinned
      CA mint a colliding-subject cert), while dual-accepting legacy DN-keyed
-     policy entries and logging the operator migration path. An `anonymous_principal` for an
-     unauthenticated-but-audited listener is **audit-identity only** — deny-default
-     for authz, forbidden from *all* grants, and carries **no** cross-peer A2
-     ownership isolation. **Coarse (slot-level) authorization is all-or-nothing
+     policy entries and logging the operator migration path. An unauthenticated
+     peer carries **no** cross-peer A2 ownership isolation. **Coarse (slot-level)
+     authorization is all-or-nothing
      per token — it grants full key USE and, for extractable keys, key
      EXTRACTION** (via `C_WrapKey` / value-bearing `C_GetAttributeValue`);
-     per-object / per-mechanism / extract restriction is G3 (v3.0+ only), so a
-     v2.40 token gets coarse-only. The implemented-local `extract-deny` coarse
-     sub-gate covers `C_WrapKey` + value-bearing attribute reads.
+     class/mechanism and grant-level extract restrictions are implemented
+     separately. Grant-level `extract = "deny"` covers `C_WrapKey` and
+     value-bearing attribute reads without relying on PKCS#11 v3.0. Per-object
+     allow-lists and per-object extract overrides require v3.0+
+     `CKA_UNIQUE_ID`; a v2.40 token has no per-object controls.
      *Rate/quota (G2-PR3, implemented locally, opt-in via `[rate_limit]`):* enforced at the
      dispatch seam covering **both** the `impl_proxy_service!` macro path and the
      hand-written handlers, with per-principal fairness. The reject codes are

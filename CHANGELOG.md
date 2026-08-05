@@ -10,9 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Local-only, unreleased opt-in gateway authorization: leaf-SPKI identity
-  policies, deny-default unknown identities, audit-only anonymous principals,
-  coarse and fine object/class/mechanism/extract grants, and per-principal
-  rate/session quotas with a per-slot failed-login budget.
+  policies with legacy dual-accept; deny-default unmatched identities when an
+  authenticated policy is present; explicit `allow_all_authenticated` override
+  for authenticated identities; and an audit-label-only `anonymous_principal`
+  that is never a grant. No-policy unauthenticated dev transport remains allowed
+  subject to listener safety config, while config rejects policy or allow-all on
+  unauthenticated listeners. Coarse and fine object/class/mechanism/extract
+  grants and per-principal rate/session quotas with a per-slot failed-login
+  budget are implemented locally.
 - Local-only, unreleased resilience: pathological-object-population detection,
   authenticated local metrics, and opt-in context-scoped attribute coalescing.
 - Local-only, unreleased tamper-evident audit: hash chain, signed checkpoints,
