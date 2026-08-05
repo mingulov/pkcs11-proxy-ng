@@ -20,7 +20,7 @@ ARG READY_IMAGE=scratch
 ARG BUILD_DATE=unknown
 ARG GIT_COMMIT=unknown
 
-# ─── Stage 1: build APKs using stock Alpine toolchain ──────────────────────
+# ─── Stage 1: build APKs using rustup-managed Rust toolchain ──────────────────
 
 FROM ${ALPINE_BUILD_IMAGE} AS buildapk
 

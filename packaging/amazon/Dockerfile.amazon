@@ -17,7 +17,7 @@ ARG APP_VERSION=0.2.0
 ARG BUILD_DATE=unknown
 ARG GIT_COMMIT=unknown
 
-# ─── Stage 1: build RPMs using stock AL2023 toolchain ──────────────────────
+# ─── Stage 1: build RPMs using rustup-managed Rust toolchain ──────────────────
 
 FROM ${AMAZON_BUILD_IMAGE} AS buildrpm
 
