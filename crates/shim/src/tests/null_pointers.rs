@@ -343,6 +343,34 @@ fn c_generate_random_null_returns_bad_args() {
 }
 
 #[test]
+fn c_generate_random_null_precedes_unrepresentable_length() {
+    if CK_ULONG::BITS <= u32::BITS {
+        return;
+    }
+
+    let too_large = (u32::MAX as u64 + 1) as CK_ULONG;
+    let rv = unsafe { dispatch::general::c_generate_random(0, std::ptr::null_mut(), too_large) };
+
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_generate_random_rejects_length_above_wire_width_before_client_use() {
+    if CK_ULONG::BITS <= u32::BITS {
+        return;
+    }
+
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let output = std::ptr::dangling_mut::<CK_BYTE>();
+    let too_large = (u32::MAX as u64 + 1) as CK_ULONG;
+
+    let rv = unsafe { dispatch::general::c_generate_random(0, output, too_large) };
+
+    assert_eq!(rv, CKR_DATA_LEN_RANGE as CK_RV);
+}
+
+#[test]
 fn c_wrap_key_null_pul_len_returns_bad_args() {
     let rv = unsafe {
         dispatch::general::c_wrap_key(

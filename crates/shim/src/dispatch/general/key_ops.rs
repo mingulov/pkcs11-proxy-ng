@@ -278,10 +278,14 @@ pub unsafe extern "C" fn c_generate_random(
         if p_random_data.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), ul_random_len as u32))
+        let random_len = match u32::try_from(ul_random_len) {
+            Ok(len) => len,
+            Err(_) => return rv_err(CkRv::DATA_LEN_RANGE),
+        };
+        match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), random_len))
         {
             Ok(data) => {
-                if data.len() != ul_random_len as usize {
+                if data.len() != random_len as usize {
                     return rv_err(CkRv::DEVICE_ERROR);
                 }
                 unsafe {

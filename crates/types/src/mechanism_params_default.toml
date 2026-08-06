@@ -87,7 +87,6 @@ parameterless = [
 
     # RC2 (historical)
     0x0100,  # CKM_RC2_KEY_GEN
-    0x0101,  # CKM_RC2_ECB
 
     # RC4 (historical)
     0x0110,  # CKM_RC4_KEY_GEN
@@ -466,8 +465,8 @@ mechanisms = [
     0x02B7,  # CKM_SHA3_224_HMAC_GENERAL
     0x02C2,  # CKM_SHA3_384_HMAC_GENERAL
     0x02D2,  # CKM_SHA3_512_HMAC_GENERAL
+    0x0101,  # CKM_RC2_ECB (CK_RC2_PARAMS = single CK_ULONG)
     0x0103,  # CKM_RC2_MAC (CK_RC2_PARAMS = single CK_ULONG)
-    0x0104,  # CKM_RC2_MAC_GENERAL
     0x0124,  # CKM_DES_MAC_GENERAL
     0x0135,  # CKM_DES3_MAC_GENERAL
     0x0144,  # CKM_CDMF_MAC_GENERAL
@@ -540,6 +539,13 @@ shape = "rc2_cbc"
 mechanisms = [
     0x0102,  # CKM_RC2_CBC
     0x0105,  # CKM_RC2_CBC_PAD
+]
+
+# RC2 MAC general: CK_RC2_MAC_GENERAL_PARAMS (effective_bits, mac_length)
+[[params]]
+shape = "rc2_mac_general"
+mechanisms = [
+    0x0104,  # CKM_RC2_MAC_GENERAL
 ]
 
 # Camellia CTR: CK_CAMELLIA_CTR_PARAMS (counter_bits, cb[16])
