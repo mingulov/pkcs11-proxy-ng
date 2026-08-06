@@ -787,22 +787,22 @@ FUNCTION_SEMANTIC_LOCAL_TESTS = {
     "C_SignMessage": ["message_sign_verify_round_trip"],
     "C_SignMessageBegin": [
         "message_sign_verify_begin_next_round_trip",
-        "loaded_shim_message_begin_next_round_trips_c_stack_params",
+        "loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_per_call",
     ],
     "C_SignMessageNext": [
         "message_sign_verify_begin_next_round_trip",
-        "loaded_shim_message_begin_next_round_trips_c_stack_params",
+        "loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_per_call",
     ],
     "C_MessageSignFinal": ["message_sign_verify_round_trip"],
     "C_MessageVerifyInit": ["message_sign_verify_round_trip"],
     "C_VerifyMessage": ["message_sign_verify_round_trip"],
     "C_VerifyMessageBegin": [
         "message_sign_verify_begin_next_round_trip",
-        "loaded_shim_message_begin_next_round_trips_c_stack_params",
+        "loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_per_call",
     ],
     "C_VerifyMessageNext": [
         "message_sign_verify_begin_next_round_trip",
-        "loaded_shim_message_begin_next_round_trips_c_stack_params",
+        "loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_per_call",
     ],
     "C_MessageVerifyFinal": ["message_sign_verify_round_trip"],
     "C_Finalize": ["finalize_p_reserved_nonnull_returns_bad_args"],
@@ -1360,11 +1360,17 @@ MESSAGE_PARAMETER_SHAPE_LOCAL_TESTS = {
 }
 
 MESSAGE_PARAMETER_READ_WRITE_HELPERS = {
-    "CcmMessage": ("read_ccm_message_params", "write_ccm_message_params_back"),
-    "GcmMessage": ("read_gcm_message_params", "write_gcm_message_params_back"),
+    "CcmMessage": (
+        "read_message_parameter_call_for_shape_with_memory",
+        "write_exact_message_output",
+    ),
+    "GcmMessage": (
+        "read_message_parameter_call_for_shape_with_memory",
+        "write_exact_message_output",
+    ),
     "SalaChacha": (
-        "read_salsa_chacha_message_params",
-        "write_salsa_chacha_message_params_back",
+        "read_message_parameter_call_for_shape_with_memory",
+        "write_exact_message_output",
     ),
 }
 

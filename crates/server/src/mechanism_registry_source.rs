@@ -17,17 +17,22 @@ use sha2::{Digest, Sha256};
 /// was loaded from (so a SIGHUP reload knows where to re-read).
 #[derive(Clone)]
 pub struct MechanismRegistrySource {
-    payload: Arc<RwLock<Arc<MechanismRegistryPayload>>>,
+    snapshot: Arc<RwLock<Arc<RegistrySnapshot>>>,
     config_path: Option<PathBuf>,
+}
+
+struct RegistrySnapshot {
+    registry: Arc<MechanismRegistry>,
+    payload: Arc<MechanismRegistryPayload>,
 }
 
 impl MechanismRegistrySource {
     /// Load the registry from the configured file path (or the embedded
     /// default if `config_path` is `None`).
     pub fn load(config_path: Option<&Path>) -> Result<Self, String> {
-        let payload = load_payload(config_path)?;
+        let snapshot = load_snapshot(config_path)?;
         Ok(Self {
-            payload: Arc::new(RwLock::new(Arc::new(payload))),
+            snapshot: Arc::new(RwLock::new(Arc::new(snapshot))),
             config_path: config_path.map(Path::to_path_buf),
         })
     }
@@ -35,7 +40,12 @@ impl MechanismRegistrySource {
     /// Return a cheap clone of the current payload — suitable for
     /// returning in a gRPC response.
     pub fn current(&self) -> Arc<MechanismRegistryPayload> {
-        self.payload.read().expect("MechanismRegistrySource RwLock poisoned").clone()
+        self.snapshot.read().expect("MechanismRegistrySource RwLock poisoned").payload.clone()
+    }
+
+    /// Return the parsed registry from the same atomic snapshot as `current`.
+    pub fn current_registry(&self) -> Arc<MechanismRegistry> {
+        self.snapshot.read().expect("MechanismRegistrySource RwLock poisoned").registry.clone()
     }
 
     /// Reload the registry from disk. Used by the daemon's SIGHUP
@@ -43,10 +53,10 @@ impl MechanismRegistrySource {
     /// error is returned for logging — the daemon must not crash if
     /// the operator ships a malformed registry.
     pub fn reload(&self) -> Result<Arc<MechanismRegistryPayload>, String> {
-        let payload = load_payload(self.config_path.as_deref())?;
-        let new = Arc::new(payload);
-        *self.payload.write().expect("poisoned") = new.clone();
-        Ok(new)
+        let snapshot = Arc::new(load_snapshot(self.config_path.as_deref())?);
+        let payload = snapshot.payload.clone();
+        *self.snapshot.write().expect("poisoned") = snapshot;
+        Ok(payload)
     }
 
     /// The file path the daemon will re-read on SIGHUP, or `None` if
@@ -56,23 +66,25 @@ impl MechanismRegistrySource {
     }
 }
 
-fn load_payload(config_path: Option<&Path>) -> Result<MechanismRegistryPayload, String> {
-    match config_path {
+fn load_snapshot(config_path: Option<&Path>) -> Result<RegistrySnapshot, String> {
+    let registry = match config_path {
         Some(path) => {
             let content = std::fs::read_to_string(path).map_err(|e| {
                 format!("failed to read mechanism registry {}: {e}", path.display())
             })?;
             let mut registry = MechanismRegistry::load(Some(path))?;
             registry.set_revision(compute_revision(&content));
-            Ok((&registry).into())
+            registry
         }
         None => {
             // Embedded default; revision is set automatically by load().
             let registry = MechanismRegistry::load(None)?;
             debug_assert_eq!(registry.revision(), EMBEDDED_DEFAULT_REVISION);
-            Ok((&registry).into())
+            registry
         }
-    }
+    };
+    let payload = Arc::new((&registry).into());
+    Ok(RegistrySnapshot { registry: Arc::new(registry), payload })
 }
 
 fn compute_revision(content: &str) -> String {

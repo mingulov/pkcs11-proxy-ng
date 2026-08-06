@@ -2,90 +2,225 @@ use super::*;
 
 #[test]
 fn typed_message_exact_paths_return_structured_mock_outputs() {
-    let backend = MockBackend::default_test();
+    let backend = MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![
+            CkMechanismType::AES_GCM,
+            CkMechanismType::AES_CCM,
+            CkMechanismType::CHACHA20_POLY1305,
+        ],
+    );
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let key = live_key(&backend, session);
     let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 64 };
 
     let gcm = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x10; 12],
+        iv_null_len: None,
         iv_fixed_bits: 32,
         iv_generator: 1,
-        tag: Vec::new(),
+        tag: vec![0; 16],
+        tag_null_len: None,
         tag_bits: 128,
     });
-    let (encrypted, gcm_out) = backend
-        .encrypt_message_exact_msg(
-            session,
-            &gcm,
-            CkInBuf::Bytes(b"aad"),
-            CkInBuf::Bytes(b"hello"),
-            &output_spec,
-        )
-        .unwrap();
-    assert_eq!(encrypted.ck_rv, CkRv::OK);
-    assert_eq!(encrypted.value, Some(b"hello".iter().map(|byte| byte ^ 0x42).collect()));
-    match gcm_out {
-        MessageParameter::GcmMessage(params) => {
-            assert_eq!(params.iv, vec![0x10; 12]);
-            assert_eq!(params.tag, vec![0xA5; 16]);
-            assert_eq!(params.tag_bits, 128);
-        }
-        other => panic!("unexpected GCM message params: {other:?}"),
-    }
-
+    let gcm_spec = CkParameterRoundtripSpec {
+        buffer_present: true,
+        buffer_len: std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>() as u64,
+        value: None,
+    };
     let ccm = MessageParameter::CcmMessage(CcmMessageParams {
         data_len: 5,
         nonce: vec![0x20; 13],
+        nonce_null_len: None,
         nonce_fixed_bits: 16,
         nonce_generator: 2,
-        mac: Vec::new(),
+        mac: vec![0; 12],
+        mac_null_len: None,
         mac_len: 12,
     });
-    let (decrypted, ccm_out) = backend
-        .decrypt_message_next_exact_msg(
-            session,
-            &ccm,
-            CkInBuf::Bytes(b"cipher"),
-            CkFlags(0),
-            &output_spec,
-        )
-        .unwrap();
-    assert_eq!(decrypted.ck_rv, CkRv::OK);
-    match ccm_out {
-        MessageParameter::CcmMessage(params) => {
-            assert_eq!(params.nonce, vec![0x20; 13]);
-            assert_eq!(params.mac, vec![0xC3; 12]);
-            assert_eq!(params.mac_len, 12);
-        }
-        other => panic!("unexpected CCM message params: {other:?}"),
-    }
-
+    let ccm_spec = CkParameterRoundtripSpec {
+        buffer_present: true,
+        buffer_len: std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>() as u64,
+        value: None,
+    };
     let chacha = MessageParameter::SalaChacha(Salsa20ChaCha20Poly1305MessageParams {
         nonce: vec![0x30; 12],
-        tag: Vec::new(),
+        nonce_bits: 96,
+        nonce_null_len: None,
+        tag: vec![0; 16],
+        tag_null_len: None,
     });
-    let (signature, chacha_out) = backend
-        .sign_message_next_exact_msg(session, &chacha, CkInBuf::Bytes(b"payload"), &output_spec)
-        .unwrap();
-    assert_eq!(signature.ck_rv, CkRv::OK);
-    assert_eq!(signature.value, Some(b"payload".iter().rev().copied().collect()));
-    match chacha_out {
-        MessageParameter::SalaChacha(params) => {
-            assert_eq!(params.nonce, vec![0x30; 12]);
-            assert_eq!(params.tag, vec![0x5A; 16]);
+    let chacha_spec = CkParameterRoundtripSpec {
+        buffer_present: true,
+        buffer_len: std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>()
+            as u64,
+        value: None,
+    };
+    let cases = [
+        ("GCM", CkMechanismType::AES_GCM, &gcm, &gcm_spec),
+        ("CCM", CkMechanismType::AES_CCM, &ccm, &ccm_spec),
+        ("Salsa/ChaCha", CkMechanismType::CHACHA20_POLY1305, &chacha, &chacha_spec),
+    ];
+    let mut exercised_cells = 0;
+    for (shape, mechanism_type, parameter, provider_spec) in cases {
+        let mechanism = CkMechanism { mechanism_type, params: None };
+        for encrypt in [true, false] {
+            let direction = if encrypt { "Encrypt" } else { "Decrypt" };
+
+            let init_ack = if encrypt {
+                backend.message_encrypt_init_contract(
+                    session,
+                    &mechanism,
+                    Some(parameter),
+                    key,
+                    provider_spec,
+                )
+            } else {
+                backend.message_decrypt_init_contract(
+                    session,
+                    &mechanism,
+                    Some(parameter),
+                    key,
+                    provider_spec,
+                )
+            }
+            .unwrap_or_else(|rv| panic!("{shape} {direction} Init failed: {rv:?}"));
+            assert_eq!(init_ack.ck_rv, CkRv::OK, "{shape} {direction} Init rv");
+            assert_eq!(
+                init_ack.returned_len, provider_spec.buffer_len,
+                "{shape} {direction} Init native length",
+            );
+            assert_eq!(init_ack.value, Some(Vec::new()), "{shape} {direction} Init presence");
+            assert_eq!(
+                backend.last_message_init_contract(),
+                Some((parameter.clone(), provider_spec.clone())),
+                "{shape} {direction} Init reaches the structured backend contract",
+            );
+            exercised_cells += 1;
+
+            let before = backend.message_parameter_call_count();
+            let (one_shot, one_shot_ack, one_shot_parameter) = if encrypt {
+                backend.encrypt_message_exact_msg(
+                    session,
+                    parameter,
+                    CkInBuf::Bytes(b"aad"),
+                    CkInBuf::Bytes(b"input"),
+                    &output_spec,
+                    provider_spec,
+                )
+            } else {
+                backend.decrypt_message_exact_msg(
+                    session,
+                    parameter,
+                    CkInBuf::Bytes(b"aad"),
+                    CkInBuf::Bytes(b"input"),
+                    &output_spec,
+                    provider_spec,
+                )
+            }
+            .unwrap_or_else(|rv| panic!("{shape} {direction} one-shot failed: {rv:?}"));
+            assert_eq!(
+                backend.message_parameter_call_count(),
+                before + 1,
+                "{shape} {direction} one-shot trait call",
+            );
+            assert_eq!(one_shot.ck_rv, CkRv::OK, "{shape} {direction} one-shot rv");
+            assert_eq!(one_shot.returned_len, 5, "{shape} {direction} one-shot length");
+            assert!(one_shot.value.is_some(), "{shape} {direction} one-shot output");
+            assert_eq!(
+                one_shot_ack.returned_len, provider_spec.buffer_len,
+                "{shape} {direction} one-shot native length",
+            );
+            assert!(
+                parameter.same_layout_and_scalars(&one_shot_parameter),
+                "{shape} {direction} one-shot layout/scalars",
+            );
+            exercised_cells += 1;
+
+            let before = backend.message_begin_call_count();
+            let (begin_ack, begin_parameter) = if encrypt {
+                backend.encrypt_message_begin_msg(
+                    session,
+                    parameter,
+                    CkInBuf::Bytes(b"aad"),
+                    provider_spec,
+                )
+            } else {
+                backend.decrypt_message_begin_msg(
+                    session,
+                    parameter,
+                    CkInBuf::Bytes(b"aad"),
+                    provider_spec,
+                )
+            }
+            .unwrap_or_else(|rv| panic!("{shape} {direction} Begin failed: {rv:?}"));
+            assert_eq!(
+                backend.message_begin_call_count(),
+                before + 1,
+                "{shape} {direction} Begin trait call",
+            );
+            assert_eq!(
+                begin_ack.returned_len, provider_spec.buffer_len,
+                "{shape} {direction} Begin native length",
+            );
+            assert!(
+                parameter.same_layout_and_scalars(&begin_parameter),
+                "{shape} {direction} Begin layout/scalars",
+            );
+            exercised_cells += 1;
+
+            let before = backend.message_parameter_call_count();
+            let (next, next_ack, next_parameter) = if encrypt {
+                backend.encrypt_message_next_exact_msg(
+                    session,
+                    parameter,
+                    CkInBuf::Bytes(b"input"),
+                    CkFlags(0),
+                    &output_spec,
+                    provider_spec,
+                )
+            } else {
+                backend.decrypt_message_next_exact_msg(
+                    session,
+                    parameter,
+                    CkInBuf::Bytes(b"input"),
+                    CkFlags(0),
+                    &output_spec,
+                    provider_spec,
+                )
+            }
+            .unwrap_or_else(|rv| panic!("{shape} {direction} Next failed: {rv:?}"));
+            assert_eq!(
+                backend.message_parameter_call_count(),
+                before + 1,
+                "{shape} {direction} Next trait call",
+            );
+            assert_eq!(next.ck_rv, CkRv::OK, "{shape} {direction} Next rv");
+            assert_eq!(next.returned_len, 5, "{shape} {direction} Next length");
+            assert!(next.value.is_some(), "{shape} {direction} Next output");
+            assert_eq!(
+                next_ack.returned_len, provider_spec.buffer_len,
+                "{shape} {direction} Next native length",
+            );
+            assert!(
+                parameter.same_layout_and_scalars(&next_parameter),
+                "{shape} {direction} Next layout/scalars",
+            );
+            exercised_cells += 1;
         }
-        other => panic!("unexpected Salsa/ChaCha message params: {other:?}"),
     }
+    assert_eq!(exercised_cells, 24, "three shapes x two directions x Init/one-shot/Begin/Next",);
 
     let too_small = CkOutputBufferSpec { buffer_present: true, buffer_len: 1 };
-    let (small, _) = backend
+    let (small, _, _) = backend
         .encrypt_message_exact_msg(
             session,
             &gcm,
             CkInBuf::Bytes(b"aad"),
             CkInBuf::Bytes(b"hello"),
             &too_small,
+            &gcm_spec,
         )
         .unwrap();
     assert_eq!(small.ck_rv, CkRv::BUFFER_TOO_SMALL);
@@ -99,7 +234,8 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
                 &gcm,
                 CkInBuf::Bytes(b"aad"),
                 CkInBuf::Bytes(b"hello"),
-                &output_spec
+                &output_spec,
+                &gcm_spec,
             )
             .unwrap_err(),
         CkRv::SESSION_HANDLE_INVALID

@@ -1,67 +1,1053 @@
-use super::{message_parameter_roundtrip_spec, try_read_message_parameter};
+use super::{
+    MessageCallMemory, MessageParameterCall, MessageParameterDirection, MessageParameterStage,
+    empty_message_parameter_roundtrip_spec, message_parameter_roundtrip_spec,
+    read_message_parameter_call_for_shape_with_memory, write_exact_message_output,
+};
 use cryptoki_sys::*;
-use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
-use pkcs11_proxy_ng_types::CkRv;
+use pkcs11_proxy_ng_proto::convert::message_params::{MessageParameter, MessageParameterShape};
+use pkcs11_proxy_ng_types::{CkResult, CkRv};
 
-#[test]
-fn null_zero_len_message_parameter_is_absent() {
-    let param =
-        unsafe { try_read_message_parameter(std::ptr::null(), 0) }.expect("valid null/zero");
-
-    assert!(param.is_none());
-}
-
-#[test]
-fn null_nonzero_len_message_parameter_is_rejected() {
-    let err = unsafe { try_read_message_parameter(std::ptr::null(), 1) }.unwrap_err();
-
-    assert_eq!(err, CkRv::ARGUMENTS_BAD);
-}
-
-#[test]
-fn oversized_message_parameter_is_rejected_before_reading() {
-    let mut byte = 0u8;
-    let err = unsafe {
-        try_read_message_parameter(
-            &mut byte as *mut _ as *const _,
-            (super::MAX_MECHANISM_PARAM_STRUCT_LEN + 1) as CK_ULONG,
+unsafe fn read_message_parameter_call_for_shape(
+    p_parameter: *const std::ffi::c_void,
+    ul_parameter_len: CK_ULONG,
+    shape: MessageParameterShape,
+    direction: MessageParameterDirection,
+    stage: MessageParameterStage,
+) -> CkResult<MessageParameterCall> {
+    unsafe {
+        read_message_parameter_call_for_shape_with_memory(
+            p_parameter,
+            ul_parameter_len,
+            shape,
+            direction,
+            stage,
+            MessageCallMemory::none(),
         )
     }
-    .unwrap_err();
+}
 
-    assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
+unsafe fn read_message_parameter_for_shape(
+    p_parameter: *const std::ffi::c_void,
+    ul_parameter_len: CK_ULONG,
+    shape: MessageParameterShape,
+    direction: MessageParameterDirection,
+    stage: MessageParameterStage,
+) -> CkResult<Option<MessageParameter>> {
+    Ok(unsafe {
+        read_message_parameter_call_for_shape(
+            p_parameter,
+            ul_parameter_len,
+            shape,
+            direction,
+            stage,
+        )
+    }?
+    .into_parameter())
 }
 
 #[test]
-fn raw_message_parameter_preserves_small_unknown_shape() {
-    let bytes = [0xA5, 0x5A, 0x01];
-    let param =
-        unsafe { try_read_message_parameter(bytes.as_ptr() as *const _, bytes.len() as CK_ULONG) }
-            .expect("small raw parameter")
-            .expect("message parameter should be present");
+fn empty_sign_verify_parameter_classes_are_preserved_and_positive_is_rejected_without_read() {
+    let null_zero =
+        unsafe { empty_message_parameter_roundtrip_spec(std::ptr::null_mut(), 0) }.unwrap();
+    assert!(!null_zero.buffer_present);
+    assert_eq!(null_zero.buffer_len, 0);
 
-    assert_eq!(param, MessageParameter::Raw(bytes.to_vec()));
-}
-
-#[test]
-fn message_roundtrip_spec_rejects_null_nonzero_len() {
-    let err = unsafe { message_parameter_roundtrip_spec(std::ptr::null_mut(), 1) }.unwrap_err();
-
-    assert_eq!(err, CkRv::ARGUMENTS_BAD);
-}
-
-#[test]
-fn message_roundtrip_spec_rejects_oversized_len_before_reading() {
-    let mut byte = 0u8;
-    let err = unsafe {
-        message_parameter_roundtrip_spec(
-            &mut byte as *mut _ as *mut _,
-            (super::MAX_MECHANISM_PARAM_STRUCT_LEN + 1) as CK_ULONG,
+    let nonnull_zero = unsafe {
+        empty_message_parameter_roundtrip_spec(
+            std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
+            0,
         )
     }
-    .unwrap_err();
+    .unwrap();
+    assert!(nonnull_zero.buffer_present);
+    assert_eq!(nonnull_zero.buffer_len, 0);
 
-    assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
+    let poison = std::ptr::without_provenance_mut::<std::ffi::c_void>(1);
+    assert_eq!(
+        unsafe { empty_message_parameter_roundtrip_spec(poison, 1) },
+        Err(CkRv::MECHANISM_PARAM_INVALID),
+    );
+}
+
+#[test]
+fn transactional_message_output_keeps_all_memory_unchanged_on_malformed_ack() {
+    let mut iv = [0x11u8; 12];
+    let mut tag = [0x22u8; 16];
+    let mut outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let call = unsafe {
+        read_message_parameter_call_for_shape(
+            (&mut outer as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    }
+    .unwrap();
+    let request = call.parameter().unwrap().clone();
+    let mut response = request.clone();
+    let MessageParameter::GcmMessage(response_gcm) = &mut response else { unreachable!() };
+    response_gcm.iv.fill(0x33);
+    response_gcm.tag.fill(0x44);
+
+    let output_spec =
+        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: true, buffer_len: 4 };
+    let parameter_spec = pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
+        buffer_present: true,
+        buffer_len: std::mem::size_of_val(&outer) as u64,
+        value: None,
+    };
+    let output_result = pkcs11_proxy_ng_types::CkOutputBufferResult {
+        ck_rv: CkRv::OK,
+        returned_len: 4,
+        value: Some(vec![1, 2, 3, 4]),
+    };
+    let malformed_parameter_result = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
+        ck_rv: CkRv::OK,
+        returned_len: parameter_spec.buffer_len + 1,
+        value: Some(Vec::new()),
+    };
+    let mut output = [0xAAu8; 4];
+    let mut output_len = output.len() as CK_ULONG;
+
+    let rv = unsafe {
+        write_exact_message_output(
+            &output_spec,
+            &parameter_spec,
+            &call,
+            &output_result,
+            &malformed_parameter_result,
+            Some(&response),
+            output.as_mut_ptr(),
+            &mut output_len,
+        )
+    };
+
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(output, [0xAA; 4]);
+    assert_eq!(output_len, 4);
+    assert_eq!(iv, [0x11; 12]);
+    assert_eq!(tag, [0x22; 16]);
+}
+
+#[test]
+fn transactional_message_output_rejects_malformed_main_value_before_any_write() {
+    let mut iv = [0x11u8; 12];
+    let mut tag = [0x22u8; 16];
+    let mut outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let outer_snapshot = (
+        outer.pIv,
+        outer.ulIvLen,
+        outer.ulIvFixedBits,
+        outer.ivGenerator,
+        outer.pTag,
+        outer.ulTagBits,
+    );
+    let call = unsafe {
+        read_message_parameter_call_for_shape(
+            (&mut outer as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    }
+    .unwrap();
+    let mut response = call.parameter().unwrap().clone();
+    let MessageParameter::GcmMessage(response_gcm) = &mut response else { unreachable!() };
+    response_gcm.iv.fill(0x33);
+    response_gcm.tag.fill(0x44);
+
+    let output_spec =
+        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: true, buffer_len: 4 };
+    let parameter_spec = pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
+        buffer_present: true,
+        buffer_len: std::mem::size_of_val(&outer) as u64,
+        value: None,
+    };
+    let malformed_output = pkcs11_proxy_ng_types::CkOutputBufferResult {
+        ck_rv: CkRv::OK,
+        returned_len: 4,
+        value: Some(vec![1, 2, 3]),
+    };
+    let parameter_result = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
+        ck_rv: CkRv::OK,
+        returned_len: parameter_spec.buffer_len,
+        value: Some(Vec::new()),
+    };
+    let mut output = [0xAAu8; 4];
+    let mut output_len = output.len() as CK_ULONG;
+
+    let rv = unsafe {
+        write_exact_message_output(
+            &output_spec,
+            &parameter_spec,
+            &call,
+            &malformed_output,
+            &parameter_result,
+            Some(&response),
+            output.as_mut_ptr(),
+            &mut output_len,
+        )
+    };
+
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(output, [0xAA; 4]);
+    assert_eq!(output_len, 4);
+    assert_eq!(iv, [0x11; 12]);
+    assert_eq!(tag, [0x22; 16]);
+    assert_eq!(
+        (
+            outer.pIv,
+            outer.ulIvLen,
+            outer.ulIvFixedBits,
+            outer.ivGenerator,
+            outer.pTag,
+            outer.ulTagBits,
+        ),
+        outer_snapshot,
+        "validation must not modify the outer parameter snapshot",
+    );
+}
+
+#[test]
+fn transactional_message_size_query_keeps_memory_unchanged_on_bad_pointer_class_ack() {
+    let mut iv = [0x11u8; 12];
+    let mut tag = [0x22u8; 16];
+    let mut outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let call = unsafe {
+        read_message_parameter_call_for_shape(
+            (&mut outer as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    }
+    .unwrap();
+    let mut response = call.parameter().unwrap().clone();
+    let MessageParameter::GcmMessage(response_gcm) = &mut response else { unreachable!() };
+    response_gcm.iv.fill(0x33);
+    response_gcm.tag.fill(0x44);
+
+    let output_spec =
+        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+    let parameter_spec = pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
+        buffer_present: true,
+        buffer_len: std::mem::size_of_val(&outer) as u64,
+        value: None,
+    };
+    let output_result = pkcs11_proxy_ng_types::CkOutputBufferResult {
+        ck_rv: CkRv::OK,
+        returned_len: 4,
+        value: None,
+    };
+    let bad_ack = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
+        ck_rv: CkRv::OK,
+        returned_len: parameter_spec.buffer_len,
+        value: None,
+    };
+    let mut output_len = 0x55 as CK_ULONG;
+
+    let rv = unsafe {
+        write_exact_message_output(
+            &output_spec,
+            &parameter_spec,
+            &call,
+            &output_result,
+            &bad_ack,
+            Some(&response),
+            std::ptr::null_mut(),
+            &mut output_len,
+        )
+    };
+
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(output_len, 0x55);
+    assert_eq!(iv, [0x11; 12]);
+    assert_eq!(tag, [0x22; 16]);
+}
+
+#[test]
+fn transactional_message_b2s_keeps_all_memory_unchanged_on_bad_ack() {
+    let mut iv = [0x11u8; 12];
+    let mut tag = [0x22u8; 16];
+    let mut outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let call = unsafe {
+        read_message_parameter_call_for_shape(
+            (&mut outer as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    }
+    .unwrap();
+    let mut response = call.parameter().unwrap().clone();
+    let MessageParameter::GcmMessage(response_gcm) = &mut response else { unreachable!() };
+    response_gcm.iv.fill(0x33);
+    response_gcm.tag.fill(0x44);
+
+    let output_spec =
+        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: true, buffer_len: 2 };
+    let parameter_spec = pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
+        buffer_present: true,
+        buffer_len: std::mem::size_of_val(&outer) as u64,
+        value: None,
+    };
+    let output_result = pkcs11_proxy_ng_types::CkOutputBufferResult {
+        ck_rv: CkRv::BUFFER_TOO_SMALL,
+        returned_len: 4,
+        value: None,
+    };
+    let bad_ack = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
+        ck_rv: CkRv::OK,
+        returned_len: parameter_spec.buffer_len,
+        value: Some(Vec::new()),
+    };
+    let mut output = [0xAAu8; 2];
+    let mut output_len = output.len() as CK_ULONG;
+
+    let rv = unsafe {
+        write_exact_message_output(
+            &output_spec,
+            &parameter_spec,
+            &call,
+            &output_result,
+            &bad_ack,
+            Some(&response),
+            output.as_mut_ptr(),
+            &mut output_len,
+        )
+    };
+
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(output, [0xAA; 2]);
+    assert_eq!(output_len, 2);
+    assert_eq!(iv, [0x11; 12]);
+    assert_eq!(tag, [0x22; 16]);
+}
+
+#[test]
+fn message_roundtrip_spec_preserves_null_nonzero_without_reading() {
+    let spec = unsafe { message_parameter_roundtrip_spec(std::ptr::null_mut(), 7) }.unwrap();
+
+    assert!(!spec.buffer_present);
+    assert_eq!(spec.buffer_len, 7);
+    assert_eq!(spec.value, None);
+}
+
+#[test]
+fn message_roundtrip_spec_preserves_nonnull_zero_without_reading() {
+    let spec = unsafe { message_parameter_roundtrip_spec(std::ptr::dangling_mut(), 0) }.unwrap();
+
+    assert!(spec.buffer_present);
+    assert_eq!(spec.buffer_len, 0);
+    assert_eq!(spec.value, None);
+}
+
+#[test]
+fn message_roundtrip_spec_never_copies_materialized_outer_struct() {
+    let spec = unsafe { message_parameter_roundtrip_spec(std::ptr::dangling_mut(), CK_ULONG::MAX) }
+        .unwrap();
+
+    assert!(spec.buffer_present);
+    assert_eq!(spec.buffer_len, CK_ULONG::MAX as u64);
+    assert_eq!(spec.value, None);
+}
+
+#[test]
+fn shape_bound_reader_rejects_unmodelled_materialized_parameter_without_reading() {
+    let result = unsafe {
+        read_message_parameter_for_shape(
+            std::ptr::dangling(),
+            1,
+            MessageParameterShape::Unmodeled,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    };
+
+    assert_eq!(result.unwrap_err(), CkRv::MECHANISM_PARAM_INVALID);
+}
+
+#[test]
+fn shape_bound_reader_accepts_unaligned_gcm_outer_and_zeroes_encrypt_tag() {
+    let mut iv = [0x11u8; 12];
+    let mut tag = [0xA5u8; 16];
+    let outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let mut storage = vec![0u8; std::mem::size_of_val(&outer) + 1];
+    let unaligned = unsafe { storage.as_mut_ptr().add(1).cast::<CK_GCM_MESSAGE_PARAMS>() };
+    unsafe { std::ptr::write_unaligned(unaligned, outer) };
+
+    let parameter = unsafe {
+        read_message_parameter_for_shape(
+            unaligned.cast(),
+            std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>() as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    }
+    .unwrap()
+    .unwrap();
+
+    let MessageParameter::GcmMessage(parameter) = parameter else { panic!("expected GCM") };
+    assert_eq!(parameter.iv, iv);
+    assert_eq!(parameter.tag, vec![0; 16], "encrypt output storage must not be read");
+}
+
+fn commit_stage_response(
+    call: &MessageParameterCall,
+    outer_len: usize,
+    response: &MessageParameter,
+) -> CK_RV {
+    let output_spec =
+        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+    let parameter_spec = pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
+        buffer_present: true,
+        buffer_len: outer_len as u64,
+        value: None,
+    };
+    let output_result = pkcs11_proxy_ng_types::CkOutputBufferResult {
+        ck_rv: CkRv::OK,
+        returned_len: 0,
+        value: None,
+    };
+    let parameter_result = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
+        ck_rv: CkRv::OK,
+        returned_len: outer_len as u64,
+        value: Some(Vec::new()),
+    };
+    let mut output_len = 0;
+    unsafe {
+        write_exact_message_output(
+            &output_spec,
+            &parameter_spec,
+            call,
+            &output_result,
+            &parameter_result,
+            Some(response),
+            std::ptr::null_mut(),
+            &mut output_len,
+        )
+    }
+}
+
+#[test]
+fn shape_bound_reader_covers_all_shapes_directions_and_stages() {
+    let stages = [
+        ("Init", MessageParameterStage::Init),
+        ("one-shot", MessageParameterStage::OneShot),
+        ("Begin", MessageParameterStage::Begin),
+        ("Next(non-final)", MessageParameterStage::Next { final_part: false }),
+        ("Next(final)", MessageParameterStage::Next { final_part: true }),
+    ];
+    let mut exercised_cells = 0;
+
+    for direction in [MessageParameterDirection::Encrypt, MessageParameterDirection::Decrypt] {
+        for (stage_name, stage) in stages {
+            let direction_name = match direction {
+                MessageParameterDirection::Encrypt => "Encrypt",
+                MessageParameterDirection::Decrypt => "Decrypt",
+            };
+            let reads_auth = direction == MessageParameterDirection::Decrypt
+                && matches!(
+                    stage,
+                    MessageParameterStage::OneShot
+                        | MessageParameterStage::Next { final_part: true }
+                );
+            let reads_full_generated = direction == MessageParameterDirection::Decrypt
+                || matches!(stage, MessageParameterStage::Next { .. });
+            let writes_generated = direction == MessageParameterDirection::Encrypt
+                && matches!(stage, MessageParameterStage::OneShot | MessageParameterStage::Begin);
+            let writes_auth = direction == MessageParameterDirection::Encrypt
+                && matches!(
+                    stage,
+                    MessageParameterStage::OneShot
+                        | MessageParameterStage::Next { final_part: true }
+                );
+
+            let mut iv = [0x31_u8; 12];
+            iv[0] = 0xAB;
+            iv[1] = 0xCD;
+            let original_iv = iv;
+            let mut tag = [0x44_u8; 16];
+            let original_tag = tag;
+            let outer = CK_GCM_MESSAGE_PARAMS {
+                pIv: iv.as_mut_ptr(),
+                ulIvLen: iv.len() as CK_ULONG,
+                ulIvFixedBits: 12,
+                ivGenerator: CKG_GENERATE,
+                pTag: tag.as_mut_ptr(),
+                ulTagBits: 128,
+            };
+            let call = unsafe {
+                read_message_parameter_call_for_shape(
+                    (&outer as *const CK_GCM_MESSAGE_PARAMS).cast(),
+                    std::mem::size_of_val(&outer) as CK_ULONG,
+                    MessageParameterShape::Gcm,
+                    direction,
+                    stage,
+                )
+            }
+            .unwrap_or_else(|rv| panic!("GCM {direction_name} {stage_name} read: {rv:?}"));
+            let request = call.parameter().unwrap().clone();
+            let MessageParameter::GcmMessage(request_gcm) = &request else {
+                panic!("GCM {direction_name} {stage_name} variant")
+            };
+            let expected_iv = if reads_full_generated {
+                original_iv.to_vec()
+            } else {
+                let mut prefix = vec![0; original_iv.len()];
+                prefix[0] = 0xAB;
+                prefix[1] = 0xC0;
+                prefix
+            };
+            assert_eq!(request_gcm.iv, expected_iv, "GCM {direction_name} {stage_name} IV read");
+            assert_eq!(
+                request_gcm.tag,
+                if reads_auth { original_tag.to_vec() } else { vec![0; original_tag.len()] },
+                "GCM {direction_name} {stage_name} tag read",
+            );
+            let mut response = request.clone();
+            if direction == MessageParameterDirection::Encrypt {
+                let MessageParameter::GcmMessage(response) = &mut response else { unreachable!() };
+                response.iv.fill(0x71);
+                response.tag.fill(0x72);
+            }
+            assert_eq!(
+                commit_stage_response(&call, std::mem::size_of_val(&outer), &response),
+                CKR_OK as CK_RV,
+                "GCM {direction_name} {stage_name} writeback",
+            );
+            assert_eq!(
+                iv,
+                if writes_generated { [0x71; 12] } else { original_iv },
+                "GCM {direction_name} {stage_name} IV write timing",
+            );
+            assert_eq!(
+                tag,
+                if writes_auth { [0x72; 16] } else { original_tag },
+                "GCM {direction_name} {stage_name} tag write timing",
+            );
+            exercised_cells += 1;
+
+            let mut nonce = [0x32_u8; 13];
+            nonce[0] = 0xBC;
+            nonce[1] = 0xDE;
+            let original_nonce = nonce;
+            let mut mac = [0x55_u8; 12];
+            let original_mac = mac;
+            let outer = CK_CCM_MESSAGE_PARAMS {
+                ulDataLen: 5,
+                pNonce: nonce.as_mut_ptr(),
+                ulNonceLen: nonce.len() as CK_ULONG,
+                ulNonceFixedBits: 12,
+                nonceGenerator: CKG_GENERATE,
+                pMAC: mac.as_mut_ptr(),
+                ulMACLen: mac.len() as CK_ULONG,
+            };
+            let call = unsafe {
+                read_message_parameter_call_for_shape(
+                    (&outer as *const CK_CCM_MESSAGE_PARAMS).cast(),
+                    std::mem::size_of_val(&outer) as CK_ULONG,
+                    MessageParameterShape::Ccm,
+                    direction,
+                    stage,
+                )
+            }
+            .unwrap_or_else(|rv| panic!("CCM {direction_name} {stage_name} read: {rv:?}"));
+            let request = call.parameter().unwrap().clone();
+            let MessageParameter::CcmMessage(request_ccm) = &request else {
+                panic!("CCM {direction_name} {stage_name} variant")
+            };
+            let expected_nonce = if reads_full_generated {
+                original_nonce.to_vec()
+            } else {
+                let mut prefix = vec![0; original_nonce.len()];
+                prefix[0] = 0xBC;
+                prefix[1] = 0xD0;
+                prefix
+            };
+            assert_eq!(
+                request_ccm.nonce, expected_nonce,
+                "CCM {direction_name} {stage_name} nonce read",
+            );
+            assert_eq!(
+                request_ccm.mac,
+                if reads_auth { original_mac.to_vec() } else { vec![0; original_mac.len()] },
+                "CCM {direction_name} {stage_name} MAC read",
+            );
+            let mut response = request.clone();
+            if direction == MessageParameterDirection::Encrypt {
+                let MessageParameter::CcmMessage(response) = &mut response else { unreachable!() };
+                response.nonce.fill(0x73);
+                response.mac.fill(0x74);
+            }
+            assert_eq!(
+                commit_stage_response(&call, std::mem::size_of_val(&outer), &response),
+                CKR_OK as CK_RV,
+                "CCM {direction_name} {stage_name} writeback",
+            );
+            assert_eq!(
+                nonce,
+                if writes_generated { [0x73; 13] } else { original_nonce },
+                "CCM {direction_name} {stage_name} nonce write timing",
+            );
+            assert_eq!(
+                mac,
+                if writes_auth { [0x74; 12] } else { original_mac },
+                "CCM {direction_name} {stage_name} MAC write timing",
+            );
+            exercised_cells += 1;
+
+            let mut salsa_nonce = [0x66_u8; 12];
+            let original_salsa_nonce = salsa_nonce;
+            let mut salsa_tag = [0x77_u8; 16];
+            let original_salsa_tag = salsa_tag;
+            let outer = CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS {
+                pNonce: salsa_nonce.as_mut_ptr(),
+                ulNonceLen: 96,
+                pTag: salsa_tag.as_mut_ptr(),
+            };
+            let call = unsafe {
+                read_message_parameter_call_for_shape(
+                    (&outer as *const CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS).cast(),
+                    std::mem::size_of_val(&outer) as CK_ULONG,
+                    MessageParameterShape::SalsaChacha,
+                    direction,
+                    stage,
+                )
+            }
+            .unwrap_or_else(|rv| panic!("Salsa/ChaCha {direction_name} {stage_name} read: {rv:?}"));
+            let request = call.parameter().unwrap().clone();
+            let MessageParameter::SalaChacha(request_salsa) = &request else {
+                panic!("Salsa/ChaCha {direction_name} {stage_name} variant")
+            };
+            assert_eq!(
+                request_salsa.nonce, original_salsa_nonce,
+                "Salsa/ChaCha {direction_name} {stage_name} nonce read",
+            );
+            assert_eq!(
+                request_salsa.tag,
+                if reads_auth {
+                    original_salsa_tag.to_vec()
+                } else {
+                    vec![0; original_salsa_tag.len()]
+                },
+                "Salsa/ChaCha {direction_name} {stage_name} tag read",
+            );
+            let mut response = request.clone();
+            if direction == MessageParameterDirection::Encrypt {
+                let MessageParameter::SalaChacha(response) = &mut response else { unreachable!() };
+                response.nonce.fill(0x75);
+                response.tag.fill(0x76);
+            }
+            assert_eq!(
+                commit_stage_response(&call, std::mem::size_of_val(&outer), &response),
+                CKR_OK as CK_RV,
+                "Salsa/ChaCha {direction_name} {stage_name} writeback",
+            );
+            assert_eq!(
+                salsa_nonce, original_salsa_nonce,
+                "Salsa/ChaCha {direction_name} {stage_name} nonce is input-only",
+            );
+            assert_eq!(
+                salsa_tag,
+                if writes_auth { [0x76; 16] } else { original_salsa_tag },
+                "Salsa/ChaCha {direction_name} {stage_name} tag write timing",
+            );
+            exercised_cells += 1;
+        }
+    }
+
+    assert_eq!(
+        exercised_cells, 30,
+        "three shapes x two directions x Init/one-shot/Begin/non-final Next/final Next",
+    );
+}
+
+#[test]
+fn shape_bound_reader_rejects_overlapping_embedded_buffers() {
+    let mut shared = [0x5Au8; 16];
+    let outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: shared.as_mut_ptr(),
+        ulIvLen: shared.len() as CK_ULONG,
+        ulIvFixedBits: 128,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: shared.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+
+    let result = unsafe {
+        read_message_parameter_for_shape(
+            (&outer as *const CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Decrypt,
+            MessageParameterStage::OneShot,
+        )
+    };
+
+    assert_eq!(result.unwrap_err(), CkRv::MECHANISM_PARAM_INVALID);
+}
+
+#[test]
+fn shape_bound_reader_rejects_embedded_range_end_overflow_before_reading() {
+    let mut tag = [0x5Au8; 16];
+    let outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: (usize::MAX - 1) as *mut CK_BYTE,
+        ulIvLen: 4,
+        ulIvFixedBits: 0,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+
+    let result = unsafe {
+        read_message_parameter_for_shape(
+            (&outer as *const CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    };
+
+    assert_eq!(result.unwrap_err(), CkRv::MECHANISM_PARAM_INVALID);
+}
+
+#[test]
+fn shape_bound_reader_rejects_outer_and_embedded_overlap() {
+    let mut tag = [0x5Au8; 16];
+    let mut outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: std::ptr::null_mut(),
+        ulIvLen: 12,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    outer.pIv = (&mut outer as *mut CK_GCM_MESSAGE_PARAMS).cast();
+
+    let result = unsafe {
+        read_message_parameter_for_shape(
+            (&outer as *const CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    };
+
+    assert_eq!(result.unwrap_err(), CkRv::MECHANISM_PARAM_INVALID);
+}
+
+#[test]
+fn message_call_ranges_reject_output_length_alias_with_embedded_storage() {
+    let mut iv = [0x11u8; 12];
+    let mut output_len = 8 as CK_ULONG;
+    let outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: (&mut output_len as CK_ULONG_PTR).cast(),
+        ulTagBits: (std::mem::size_of::<CK_ULONG>() * 8) as CK_ULONG,
+    };
+    let input = [0x22u8; 1];
+    let mut output = [0u8; 1];
+
+    let result = unsafe {
+        read_message_parameter_call_for_shape_with_memory(
+            (&outer as *const CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+            MessageCallMemory::output(
+                std::ptr::null(),
+                0,
+                input.as_ptr(),
+                input.len() as CK_ULONG,
+                output.as_mut_ptr(),
+                output.len() as u64,
+                &mut output_len,
+            ),
+        )
+    };
+
+    assert_eq!(result.unwrap_err(), CkRv::MECHANISM_PARAM_INVALID);
+}
+
+#[test]
+fn message_call_ranges_reject_partial_main_buffer_overlap() {
+    let mut shared = [0u8; 16];
+    let mut output_len = 8 as CK_ULONG;
+
+    let result = unsafe {
+        read_message_parameter_call_for_shape_with_memory(
+            std::ptr::null(),
+            0,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+            MessageCallMemory::output(
+                std::ptr::null(),
+                0,
+                shared.as_ptr(),
+                8,
+                shared.as_mut_ptr().add(1),
+                8,
+                &mut output_len,
+            ),
+        )
+    };
+
+    assert_eq!(result.unwrap_err(), CkRv::MECHANISM_PARAM_INVALID);
+}
+
+#[test]
+fn message_call_ranges_allow_exact_same_base_main_in_place() {
+    let mut shared = [0u8; 16];
+    let mut output_len = shared.len() as CK_ULONG;
+
+    let call = unsafe {
+        read_message_parameter_call_for_shape_with_memory(
+            std::ptr::null(),
+            0,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+            MessageCallMemory::output(
+                std::ptr::null(),
+                0,
+                shared.as_ptr(),
+                8,
+                shared.as_mut_ptr(),
+                shared.len() as u64,
+                &mut output_len,
+            ),
+        )
+    }
+    .expect("same-base plaintext/ciphertext is the one permitted alias");
+
+    assert!(call.parameter().is_none());
+}
+
+#[test]
+fn invalid_structured_scalars_reject_poison_pointers_before_reading() {
+    let poison = std::ptr::without_provenance_mut::<CK_BYTE>(1);
+    let mut iv = [0x11u8; 12];
+    let gcm = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: poison,
+        ulTagBits: 129,
+    };
+    assert_eq!(
+        unsafe {
+            read_message_parameter_for_shape(
+                (&gcm as *const CK_GCM_MESSAGE_PARAMS).cast(),
+                std::mem::size_of_val(&gcm) as CK_ULONG,
+                MessageParameterShape::Gcm,
+                MessageParameterDirection::Decrypt,
+                MessageParameterStage::OneShot,
+            )
+        }
+        .unwrap_err(),
+        CkRv::MECHANISM_PARAM_INVALID,
+    );
+
+    let mut mac = [0x22u8; 16];
+    for nonce_len in [6, 14] {
+        let ccm = CK_CCM_MESSAGE_PARAMS {
+            ulDataLen: 0,
+            pNonce: poison,
+            ulNonceLen: nonce_len,
+            ulNonceFixedBits: 0,
+            nonceGenerator: CKG_NO_GENERATE,
+            pMAC: mac.as_mut_ptr(),
+            ulMACLen: mac.len() as CK_ULONG,
+        };
+        assert_eq!(
+            unsafe {
+                read_message_parameter_for_shape(
+                    (&ccm as *const CK_CCM_MESSAGE_PARAMS).cast(),
+                    std::mem::size_of_val(&ccm) as CK_ULONG,
+                    MessageParameterShape::Ccm,
+                    MessageParameterDirection::Decrypt,
+                    MessageParameterStage::OneShot,
+                )
+            }
+            .unwrap_err(),
+            CkRv::MECHANISM_PARAM_INVALID,
+        );
+    }
+
+    let mut nonce = [0x33u8; 12];
+    let ccm = CK_CCM_MESSAGE_PARAMS {
+        ulDataLen: 0,
+        pNonce: nonce.as_mut_ptr(),
+        ulNonceLen: nonce.len() as CK_ULONG,
+        ulNonceFixedBits: 0,
+        nonceGenerator: CKG_NO_GENERATE,
+        pMAC: poison,
+        ulMACLen: 5,
+    };
+    assert_eq!(
+        unsafe {
+            read_message_parameter_for_shape(
+                (&ccm as *const CK_CCM_MESSAGE_PARAMS).cast(),
+                std::mem::size_of_val(&ccm) as CK_ULONG,
+                MessageParameterShape::Ccm,
+                MessageParameterDirection::Decrypt,
+                MessageParameterStage::OneShot,
+            )
+        }
+        .unwrap_err(),
+        CkRv::MECHANISM_PARAM_INVALID,
+    );
+
+    let salsa =
+        CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS { pNonce: poison, ulNonceLen: 128, pTag: poison };
+    assert_eq!(
+        unsafe {
+            read_message_parameter_for_shape(
+                (&salsa as *const CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS).cast(),
+                std::mem::size_of_val(&salsa) as CK_ULONG,
+                MessageParameterShape::SalsaChacha,
+                MessageParameterDirection::Decrypt,
+                MessageParameterStage::OneShot,
+            )
+        }
+        .unwrap_err(),
+        CkRv::MECHANISM_PARAM_INVALID,
+    );
+}
+
+#[test]
+fn null_gcm_extent_avoids_bit_length_overflow_without_allocating() {
+    let gcm = CK_GCM_MESSAGE_PARAMS {
+        pIv: std::ptr::null_mut(),
+        ulIvLen: CK_ULONG::MAX,
+        ulIvFixedBits: CK_ULONG::MAX,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: std::ptr::null_mut(),
+        ulTagBits: 128,
+    };
+
+    let parameter = unsafe {
+        read_message_parameter_for_shape(
+            (&gcm as *const CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&gcm) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::Init,
+        )
+    }
+    .expect("NULL extents allocate no backing buffers")
+    .expect("GCM shape should produce a structured parameter");
+
+    let MessageParameter::GcmMessage(parameter) = parameter else {
+        panic!("expected GCM message parameter")
+    };
+    assert_eq!(parameter.iv_null_len, Some(CK_ULONG::MAX as u64));
+    assert_eq!(parameter.iv_fixed_bits, CK_ULONG::MAX as u64);
+    assert_eq!(parameter.tag_null_len, Some(16));
+}
+
+#[test]
+fn materialized_embedded_extent_over_transport_ceiling_rejects_poison_before_reading() {
+    let poison = std::ptr::without_provenance_mut::<CK_BYTE>(1);
+    let mut tag = [0u8; 16];
+    let gcm = CK_GCM_MESSAGE_PARAMS {
+        pIv: poison,
+        ulIvLen: (super::MAX_SERIALIZABLE_BYTES as CK_ULONG) + 1,
+        ulIvFixedBits: 0,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+
+    assert_eq!(
+        unsafe {
+            read_message_parameter_for_shape(
+                (&gcm as *const CK_GCM_MESSAGE_PARAMS).cast(),
+                std::mem::size_of_val(&gcm) as CK_ULONG,
+                MessageParameterShape::Gcm,
+                MessageParameterDirection::Encrypt,
+                MessageParameterStage::OneShot,
+            )
+        }
+        .unwrap_err(),
+        CkRv::MECHANISM_PARAM_INVALID,
+    );
+}
+
+#[test]
+fn salsa_reader_treats_nonce_length_as_bits() {
+    let mut nonce = [0x33u8; 12];
+    let mut tag = [0x44u8; 16];
+    let params = CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS {
+        pNonce: nonce.as_mut_ptr(),
+        ulNonceLen: 96,
+        pTag: tag.as_mut_ptr(),
+    };
+
+    let parameter = unsafe {
+        read_message_parameter_for_shape(
+            (&params as *const CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS).cast(),
+            std::mem::size_of_val(&params) as CK_ULONG,
+            MessageParameterShape::SalsaChacha,
+            MessageParameterDirection::Decrypt,
+            MessageParameterStage::OneShot,
+        )
+    }
+    .unwrap()
+    .unwrap();
+
+    let MessageParameter::SalaChacha(parameter) = parameter else { panic!("expected Salsa") };
+    assert_eq!(parameter.nonce_bits, 96);
+    assert_eq!(parameter.nonce, nonce);
 }
 
 #[test]
@@ -440,100 +1426,4 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
     assert_eq!(key_mat_out.hServerKey, 202);
     assert_eq!(client_iv, [0xA1, 0xA2, 0xA3, 0xA4]);
     assert_eq!(server_iv, [0xB1, 0xB2, 0xB3, 0xB4]);
-}
-
-/// ADR-0010 Scope 2: a GCM message parameter with ulIvLen = CK_ULONG::MAX must
-/// not cause a wild read.  The reader clamps to an empty IV (same behavior as
-/// a null pIv) rather than constructing a slice of size usize::MAX.
-///
-/// Empty-Vec outcome is the deliberate class-5 status quo: embedded-pointer
-/// handling in message params is deferred to its own follow-up plan; mechanism
-/// arms use the Raw fallback instead.  See ADR-0010 Scope 2 input classes.
-#[test]
-fn gcm_message_params_unmaterializable_iv_len_yields_empty_not_crash() {
-    let tag = [0xAAu8; 16];
-    let params = CK_GCM_MESSAGE_PARAMS {
-        pIv: std::ptr::dangling_mut::<u8>(),
-        ulIvLen: CK_ULONG::MAX,
-        ulIvFixedBits: 0,
-        ivGenerator: 0,
-        pTag: tag.as_ptr() as *mut u8,
-        ulTagBits: 128,
-    };
-    let result =
-        unsafe { super::read_gcm_message_params(&params as *const _ as *const std::ffi::c_void) };
-    assert!(result.iv.is_empty(), "unmaterializable ulIvLen must yield empty IV, not a wild read");
-    // pTag with sane tag_bytes (128/8=16 <= MAX_SERIALIZABLE_BYTES) must still be read.
-    assert_eq!(result.tag, vec![0xAAu8; 16]);
-}
-
-/// ADR-0010 Scope 2: a GCM message parameter with ulTagBits = CK_ULONG::MAX
-/// produces a tag_bytes of ~2^61, which exceeds MAX_SERIALIZABLE_BYTES.  The
-/// reader must return an empty tag rather than calling `slice::from_raw_parts`
-/// with an absurd length.
-///
-/// Empty-Vec outcome is the deliberate class-5 status quo: embedded-pointer
-/// handling in message params is deferred to its own follow-up plan; mechanism
-/// arms use the Raw fallback instead.  See ADR-0010 Scope 2 input classes.
-#[test]
-fn gcm_message_params_absurd_tag_bits_yields_empty_not_crash() {
-    let params = CK_GCM_MESSAGE_PARAMS {
-        pIv: std::ptr::null_mut(),
-        ulIvLen: 0,
-        ulIvFixedBits: 0,
-        ivGenerator: 0,
-        pTag: std::ptr::dangling_mut::<u8>(),
-        ulTagBits: CK_ULONG::MAX,
-    };
-    let result =
-        unsafe { super::read_gcm_message_params(&params as *const _ as *const std::ffi::c_void) };
-    assert!(result.tag.is_empty(), "absurd ulTagBits must yield empty tag, not a wild read");
-}
-
-/// ADR-0010 Scope 2: CCM message reader — unmaterializable `ulNonceLen` must
-/// yield an empty nonce, and unmaterializable `ulMACLen` must yield an empty
-/// mac.  Neither should cause a wild read.
-#[test]
-fn ccm_message_params_unmaterializable_lens_yield_empty_not_crash() {
-    // ulNonceLen = CK_ULONG::MAX: dangling pNonce must not be dereferenced.
-    let params = CK_CCM_MESSAGE_PARAMS {
-        ulDataLen: 16,
-        pNonce: std::ptr::dangling_mut::<u8>(),
-        ulNonceLen: CK_ULONG::MAX,
-        ulNonceFixedBits: 0,
-        nonceGenerator: 0,
-        pMAC: std::ptr::dangling_mut::<u8>(),
-        ulMACLen: CK_ULONG::MAX,
-    };
-    let result =
-        unsafe { super::read_ccm_message_params(&params as *const _ as *const std::ffi::c_void) };
-    assert!(
-        result.nonce.is_empty(),
-        "unmaterializable ulNonceLen must yield empty nonce, not a wild read"
-    );
-    assert!(
-        result.mac.is_empty(),
-        "unmaterializable ulMACLen must yield empty mac, not a wild read"
-    );
-}
-
-/// ADR-0010 Scope 2: Salsa/ChaCha message reader — unmaterializable `ulNonceLen`
-/// must yield an empty nonce.  The dangling pNonce must not be dereferenced.
-#[test]
-fn salsa_chacha_message_params_unmaterializable_nonce_len_yields_empty_not_crash() {
-    let tag = [0xBBu8; 16];
-    let params = CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS {
-        pNonce: std::ptr::dangling_mut::<u8>(),
-        ulNonceLen: CK_ULONG::MAX,
-        pTag: tag.as_ptr() as *mut u8,
-    };
-    let result = unsafe {
-        super::read_salsa_chacha_message_params(&params as *const _ as *const std::ffi::c_void)
-    };
-    assert!(
-        result.nonce.is_empty(),
-        "unmaterializable ulNonceLen must yield empty nonce, not a wild read"
-    );
-    // pTag with fixed 16-byte length must still be read correctly.
-    assert_eq!(result.tag, vec![0xBBu8; 16]);
 }

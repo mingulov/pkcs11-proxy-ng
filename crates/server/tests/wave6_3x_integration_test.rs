@@ -10,6 +10,9 @@ use std::sync::Arc;
 
 use pkcs11_proxy_ng_backend::{MockBackend, TestBackend3x};
 use pkcs11_proxy_ng_client::Pkcs11Client;
+use pkcs11_proxy_ng_proto::convert::message_params::{
+    GcmMessageParams, MessageParameter, MessageParameterShape,
+};
 use pkcs11_proxy_ng_types::*;
 
 mod common_3x;
@@ -19,6 +22,50 @@ const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION
 
 fn test_mechanism() -> CkMechanism {
     CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None }
+}
+
+#[tokio::test]
+async fn structured_init_translates_32_byte_caller_envelope_to_48_byte_native_provider_spec() {
+    assert_eq!(
+        std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>(),
+        48,
+        "this proof runs on the native LP64 Linux daemon side",
+    );
+    let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![mechanism.mechanism_type]));
+    let (endpoint, _shutdown) = mock_daemon(backend.clone()).await;
+    let mut client = init_client(&endpoint).await;
+    let (session, key) = setup_session_with_key(&mut client).await;
+    let parameter = MessageParameter::GcmMessage(GcmMessageParams {
+        iv: vec![0x11; 12],
+        iv_null_len: None,
+        iv_fixed_bits: 96,
+        iv_generator: 0,
+        tag: vec![0; 16],
+        tag_null_len: None,
+        tag_bits: 128,
+    });
+    let caller_envelope =
+        CkParameterRoundtripSpec { buffer_present: true, buffer_len: 32, value: None };
+
+    client
+        .message_encrypt_init_contract(
+            session,
+            &mechanism,
+            Some(&parameter),
+            key,
+            &caller_envelope,
+            MessageParameterShape::Gcm,
+        )
+        .await
+        .expect("32-byte LLP64 caller envelope is semantic, not provider-native bytes");
+
+    let (observed_parameter, provider_spec) =
+        backend.last_message_init_contract().expect("MockBackend should observe structured Init");
+    assert_eq!(observed_parameter, parameter);
+    assert!(provider_spec.buffer_present);
+    assert_eq!(provider_spec.buffer_len, 48);
+    assert_eq!(provider_spec.value, None);
 }
 
 /// Open a session and create an object to get a valid key handle.
@@ -144,7 +191,7 @@ async fn message_encrypt_decrypt_round_trip() {
 
     let (session, key) = setup_session_with_key(&mut client).await;
     let plaintext = b"hello world 3x";
-    let parameter = b"nonce123";
+    let parameter = b"";
 
     // Init encrypt
     client.message_encrypt_init(session, Some(&test_mechanism()), None, key).await.unwrap();
@@ -154,6 +201,7 @@ async fn message_encrypt_decrypt_round_trip() {
         .encrypt_message(session, parameter, CkInBuf::Bytes(&[]), CkInBuf::Bytes(plaintext))
         .await
         .unwrap();
+    assert!(param_out.is_empty());
     assert_ne!(ciphertext, plaintext.to_vec(), "ciphertext should differ from plaintext");
 
     // Finalize encrypt
@@ -182,14 +230,14 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
 
     let (session, key) = setup_session_with_key(&mut client).await;
     let aad = b"begin-next-aad";
-    let parameter = b"begin-next-param";
+    let parameter = b"";
     let part1 = b"hello ";
     let part2 = b"message begin-next";
 
     client.message_encrypt_init(session, Some(&mechanism), None, key).await.unwrap();
     let encrypt_parameter =
         client.encrypt_message_begin(session, parameter, CkInBuf::Bytes(aad)).await.unwrap();
-    assert_eq!(encrypt_parameter, parameter);
+    assert!(encrypt_parameter.is_empty());
 
     let (encrypt_parameter, ciphertext1) = client
         .encrypt_message_next(session, &encrypt_parameter, CkInBuf::Bytes(part1), CkFlags(0))
@@ -199,7 +247,7 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
         .encrypt_message_next(session, &encrypt_parameter, CkInBuf::Bytes(part2), CkFlags(0))
         .await
         .unwrap();
-    assert_eq!(encrypt_parameter, parameter);
+    assert!(encrypt_parameter.is_empty());
     assert_ne!(ciphertext1, part1);
     assert_ne!(ciphertext2, part2);
     client.message_encrypt_final(session).await.unwrap();
@@ -209,7 +257,7 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
         .decrypt_message_begin(session, &encrypt_parameter, CkInBuf::Bytes(aad))
         .await
         .unwrap();
-    assert_eq!(decrypt_parameter, parameter);
+    assert!(decrypt_parameter.is_empty());
 
     let (decrypt_parameter, recovered1) = client
         .decrypt_message_next(session, &decrypt_parameter, CkInBuf::Bytes(&ciphertext1), CkFlags(0))
@@ -219,7 +267,7 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
         .decrypt_message_next(session, &decrypt_parameter, CkInBuf::Bytes(&ciphertext2), CkFlags(0))
         .await
         .unwrap();
-    assert_eq!(decrypt_parameter, parameter);
+    assert!(decrypt_parameter.is_empty());
     assert_eq!(recovered1, part1);
     assert_eq!(recovered2, part2);
     client.message_decrypt_final(session).await.unwrap();
@@ -593,7 +641,7 @@ async fn message_sign_verify_round_trip() {
 
     let (session, key) = setup_session_with_key(&mut client).await;
     let data = b"sign this data";
-    let parameter = b"param01";
+    let parameter = b"";
 
     // Init sign
     client.message_sign_init(session, Some(&test_mechanism()), key).await.unwrap();
@@ -601,6 +649,7 @@ async fn message_sign_verify_round_trip() {
     // Sign message
     let (param_out, signature) =
         client.sign_message(session, parameter, CkInBuf::Bytes(data)).await.unwrap();
+    assert!(param_out.is_empty());
     assert!(!signature.is_empty(), "signature should not be empty");
 
     // Finalize sign
@@ -627,19 +676,19 @@ async fn message_sign_verify_begin_next_round_trip() {
     let mut client = init_client(&endpoint).await;
 
     let (session, key) = setup_session_with_key(&mut client).await;
-    let parameter = b"sign-begin-next-param";
+    let parameter = b"";
     let nonfinal_data = b"nonfinal";
     let final_data = b"final payload";
 
     client.message_sign_init(session, Some(&mechanism), key).await.unwrap();
     let sign_parameter = client.sign_message_begin(session, parameter).await.unwrap();
-    assert_eq!(sign_parameter, parameter);
+    assert!(sign_parameter.is_empty());
 
     let (sign_parameter, nonfinal_signature) = client
         .sign_message_next(session, &sign_parameter, CkInBuf::Bytes(nonfinal_data), false)
         .await
         .unwrap();
-    assert_eq!(sign_parameter, parameter);
+    assert!(sign_parameter.is_empty());
     assert!(nonfinal_signature.is_empty());
 
     let (sign_parameter, signature) = client
@@ -647,7 +696,7 @@ async fn message_sign_verify_begin_next_round_trip() {
         .await
         .unwrap();
     let expected_signature: Vec<u8> = final_data.iter().rev().copied().collect();
-    assert_eq!(sign_parameter, parameter);
+    assert!(sign_parameter.is_empty());
     assert_eq!(signature, expected_signature);
     client.message_sign_final(session).await.unwrap();
 
@@ -674,6 +723,36 @@ async fn message_sign_verify_begin_next_round_trip() {
         .await
         .unwrap();
     client.message_verify_final(session).await.unwrap();
+}
+
+#[tokio::test]
+async fn sign_begin_empty_contract_rejects_positive_before_backend_and_acks_pointer_class() {
+    let mechanism = test_mechanism();
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![mechanism.mechanism_type]));
+    let (endpoint, _shutdown) = mock_daemon(backend.clone()).await;
+    let mut client = init_client(&endpoint).await;
+    let (session, key) = setup_session_with_key(&mut client).await;
+
+    client.message_sign_init(session, Some(&mechanism), key).await.unwrap();
+    assert_eq!(backend.message_parameter_call_count(), 0);
+
+    let positive = CkParameterRoundtripSpec { buffer_present: false, buffer_len: 1, value: None };
+    let error = client.sign_message_begin_contract(session, &positive).await.unwrap_err();
+    assert_eq!(error.origin, pkcs11_proxy_ng_client::MessageCallErrorOrigin::Backend);
+    assert_eq!(error.ck_rv, CkRv::MECHANISM_PARAM_INVALID);
+    assert_eq!(
+        backend.message_parameter_call_count(),
+        0,
+        "positive parameter length must be rejected before backend invocation"
+    );
+
+    for buffer_present in [false, true] {
+        let empty = CkParameterRoundtripSpec { buffer_present, buffer_len: 0, value: None };
+        let acknowledgement = client.sign_message_begin_contract(session, &empty).await.unwrap();
+        assert_eq!(acknowledgement.returned_len, 0);
+        assert_eq!(acknowledgement.value, buffer_present.then(Vec::new));
+    }
+    assert_eq!(backend.message_parameter_call_count(), 2);
 }
 
 // ────────────────────────────────────────────────────────────────────

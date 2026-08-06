@@ -306,6 +306,19 @@ fn backend_methods_have_proto_rpcs() {
         "encrypt_message_next_exact_msg",
         "decrypt_message_next_exact_msg",
         "sign_message_next_exact_msg",
+        // Structured/transactional helpers carried by the named message RPCs,
+        // not additional wire methods.
+        "message_encrypt_init_contract",
+        "message_decrypt_init_contract",
+        "encrypt_message_begin_exact",
+        "decrypt_message_begin_exact",
+        "encrypt_message_begin_msg",
+        "decrypt_message_begin_msg",
+        "sign_message_begin_exact",
+        "sign_message_next_feed_exact",
+        "verify_message_exact",
+        "verify_message_begin_exact",
+        "verify_message_next_exact",
     ];
 
     let mut missing = Vec::new();

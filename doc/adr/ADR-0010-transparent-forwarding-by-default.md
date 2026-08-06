@@ -54,12 +54,14 @@ other clients' sessions.
    per-call smartness.
 4. **Input sanitization is a separate, daemon-side, default-off option**
    (`sanitize_inputs`, planned with Scope 2). When enabled by the operator, the
-   daemon rejects spec-invalid inputs (NULL mechanism on init, NULL data
-   pointer with non-zero length, lengths beyond the `isize` boundary) with
-   `CKR_ARGUMENTS_BAD` before they reach the module. Daemon-side because that
-   is the trust boundary the operator controls; a shim-side option would not
-   protect the daemon from non-cooperating clients. Enabling it deliberately
-   trades transparency for availability.
+   daemon rejects spec-invalid inputs (including NULL mechanisms on classic
+   init calls, NULL data pointers with non-zero length, and lengths beyond the
+   `isize` boundary) with `CKR_ARGUMENTS_BAD` before they reach the module.
+   NULL `C_MessageEncryptInit`/`C_MessageDecryptInit` remains the PKCS-defined
+   message-operation cancel form and is valid in both modes. Daemon-side
+   because that is the trust boundary the operator controls; a shim-side
+   option would not protect the daemon from non-cooperating clients. Enabling
+   it deliberately trades transparency for availability.
 
 ## Limits — transport-impossible inputs
 
@@ -80,9 +82,19 @@ exception that licenses other synthesis:
   rejects Raw with `CKR_MECHANISM_PARAM_INVALID` at the FFI reconstruction
   boundary (not shim-synthesized). This is the same chain as the pre-existing
   NULL-embedded-pointer treatment.
-- **(c) Message-API parameter embedded fields (class 5):** oversized lengths
-  are flattened to empty (pre-existing behavior, unchanged). Deferred to the
-  class-5 follow-up plan.
+- **(c) Message-API parameter embedded fields (class 5):** the registry-selected
+  GCM, CCM, and Salsa/ChaCha shapes are transported structurally for
+  MessageEncrypt/MessageDecrypt Init, one-shot, Begin, and Next. The shim binds
+  each call to its active shape and exact client-native outer struct, and the
+  daemon reconstructs a provider-native struct; raw outer bytes never cross
+  the ABI boundary. Encrypt parameters support validated provider writeback,
+  while Decrypt parameters are input-only. Sign/Verify parameters remain
+  empty-only. A materialized unmodelled parameter, a present buffer or embedded
+  extent beyond `MAX_SERIALIZABLE_BYTES`, or a writable parameter buffer that
+  aliases another call buffer fails closed with `CKR_MECHANISM_PARAM_INVALID`.
+  Unmodelled class-5 layouts, over-ceiling buffers, and writable-buffer aliasing
+  therefore remain acknowledged transport limits rather than faithful raw
+  forwarding paths.
 - The constant `MAX_MECHANISM_PARAM_STRUCT_LEN` (64 KiB, renamed from
   `MAX_MECHANISM_PARAM_LEN`) bounds only parameter-STRUCT lengths; embedded
   data fields are bounded by `MAX_SERIALIZABLE_BYTES` (512 MiB). Legitimate
@@ -117,16 +129,19 @@ correctness claims.
   (if any) reach the client unchanged. This covers class-1 byte-data inputs
   (encrypt/decrypt/sign/verify/digest, combined ops, wrap/unwrap, KEM,
   set-operation-state, message-API data). PIN inputs (class 2), attribute
-  templates (class 3), and embedded mechanism/message-param pointers (classes
-  4–5) are deferred to follow-up plans; their current behavior is unchanged.
+  templates (class 3), and embedded mechanism-parameter pointers (class 4)
+  remain deferred. For class 5, the modelled GCM, CCM, and Salsa/ChaCha message
+  shapes follow the bounded structural contract above; only unmodelled layouts
+  remain deferred.
 - `sanitize_inputs` (Scope 2, daemon config, default OFF): rejects NULL
-  data pointers with `len > 0` and NULL mechanism on init with
-  `CKR_ARGUMENTS_BAD` before the module is called. Known divergence: a
-  sanitize-mode reject does NOT terminate the active backend operation the
-  way a module-returned error would; applications relying on operation
-  termination from a rejected call must not depend on `sanitize_inputs` for
-  that behavior. This is an accepted trade-off (availability over full
-  fidelity) documented here rather than silently fixed.
+  data pointers with `len > 0` and NULL mechanisms on classic init calls with
+  `CKR_ARGUMENTS_BAD` before the module is called. MessageEncrypt/MessageDecrypt
+  NULL Init cancellation is accepted with sanitization both disabled and
+  enabled. Known divergence: a sanitize-mode reject does NOT terminate the
+  active backend operation the way a module-returned error would; applications
+  relying on operation termination from a rejected call must not depend on
+  `sanitize_inputs` for that behavior. This is an accepted trade-off
+  (availability over full fidelity) documented here rather than silently fixed.
 - Known bypass: the LEGACY `Encrypt`/`EncryptUpdate`/`Decrypt`/`DecryptUpdate`
   single-op handlers (`cipher.rs`) hardcode `CkInBuf::Bytes`, ignoring
   `*_null_len` and skipping `check_sanitize`, as do the 4 combined-update
@@ -142,3 +157,21 @@ correctness claims.
 - Future "compatibility" fixes that would synthesize or translate a `CK_RV` on
   the default path are rejected by policy; they belong behind `sanitize_inputs`
   or in the backend module itself.
+
+## Rolling upgrade contract for pointer-safe message parameters
+
+- Upgrade daemons before shims/clients. A new daemon accepts an old client's
+  omitted shape only for the genuinely legacy-safe case: no outer envelope, no
+  structured message parameter, and a type-only mechanism with empty
+  `mechanism.params`. Old-client raw, structured, dual, or otherwise
+  materialized parameter requests fail before provider invocation.
+- A new shim/client treats an absent
+  `pointer_safe_message_parameters` capability as false and returns
+  `CKR_FUNCTION_NOT_SUPPORTED` before parsing caller parameters or issuing a
+  stateful message RPC. Thus a new client does not probe an old daemon by
+  mutating provider state.
+- Response shape, envelope, and structured-variant acknowledgements are
+  integrity checks for a responder that advertised the capability. They are
+  not feature detection and do not replace the pre-call capability gate. Once
+  both edges advertise and use the capability, the full shape, envelope, and
+  acknowledgement contract above applies to every safe message path.

@@ -643,20 +643,31 @@ impl FfiBackend {
             &mut cryptoki_sys::CK_ULONG,
         ) -> cryptoki_sys::CK_RV,
     {
-        // Prepare the parameter buffer for dual input/output use.
+        // Prepare the parameter buffer for dual input/output use.  The
+        // roundtrip envelope, not the serialized input bytes, is authoritative
+        // for both pointer class and length.
         let param_buf_len = if param_out_spec.buffer_present {
-            param_out_spec.buffer_len as usize
+            usize::try_from(param_out_spec.buffer_len).map_err(|_| CkRv::ARGUMENTS_BAD)?
         } else {
-            parameter_input.len()
+            0
         };
+        if param_buf_len as u64 > MAX_OUTPUT_BUFFER_BYTES {
+            return Err(CkRv::ARGUMENTS_BAD);
+        }
         let mut param_buf = vec![0u8; param_buf_len];
         let copy_len = parameter_input.len().min(param_buf_len);
         if copy_len > 0 {
             param_buf[..copy_len].copy_from_slice(&parameter_input[..copy_len]);
         }
-        let param_ptr =
-            if param_buf_len > 0 { param_buf.as_mut_ptr() } else { std::ptr::null_mut() };
-        let param_ck_len = param_buf_len as cryptoki_sys::CK_ULONG;
+        let param_ptr = if !param_out_spec.buffer_present {
+            std::ptr::null_mut()
+        } else if param_buf_len == 0 {
+            std::ptr::NonNull::<u8>::dangling().as_ptr()
+        } else {
+            param_buf.as_mut_ptr()
+        };
+        let param_ck_len = cryptoki_sys::CK_ULONG::try_from(param_out_spec.buffer_len)
+            .map_err(|_| CkRv::ARGUMENTS_BAD)?;
 
         // Prepare the main output buffer.
         let mut out_len: cryptoki_sys::CK_ULONG = 0;
@@ -672,7 +683,7 @@ impl FfiBackend {
                 };
                 let param_result = CkParameterRoundtripResult {
                     ck_rv: CkRv::OK,
-                    returned_len: param_buf_len as u64,
+                    returned_len: param_out_spec.buffer_len,
                     value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
                 };
                 Ok((output_result, param_result))
@@ -695,7 +706,7 @@ impl FfiBackend {
                 };
                 let param_result = CkParameterRoundtripResult {
                     ck_rv: CkRv::OK,
-                    returned_len: param_buf_len as u64,
+                    returned_len: param_out_spec.buffer_len,
                     value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
                 };
                 Ok((output_result, param_result))
@@ -707,8 +718,8 @@ impl FfiBackend {
                 };
                 let param_result = CkParameterRoundtripResult {
                     ck_rv: CkRv::BUFFER_TOO_SMALL,
-                    returned_len: param_buf_len as u64,
-                    value: None,
+                    returned_len: param_out_spec.buffer_len,
+                    value: if param_out_spec.buffer_present { Some(param_buf) } else { None },
                 };
                 Ok((output_result, param_result))
             } else {
@@ -741,7 +752,8 @@ impl FfiBackend {
 
 #[cfg(test)]
 mod output_cap_tests {
-    use super::{MAX_OUTPUT_BUFFER_BYTES, capped_output_len};
+    use super::{FfiBackend, MAX_OUTPUT_BUFFER_BYTES, capped_output_len};
+    use pkcs11_proxy_ng_types::{CkOutputBufferSpec, CkParameterRoundtripSpec, CkRv};
 
     #[test]
     fn caps_absurd_buffer_len() {
@@ -753,5 +765,85 @@ mod output_cap_tests {
     fn passes_through_reasonable_buffer_len() {
         assert_eq!(capped_output_len(1024), 1024);
         assert_eq!(capped_output_len(0), 0);
+    }
+
+    #[test]
+    fn parameter_exact_preserves_null_positive_envelope() {
+        let output_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 7, value: None };
+        let mut calls = 0;
+
+        let (_, result) = FfiBackend::single_call_parameter_output_exact(
+            &output_spec,
+            &[],
+            &parameter_spec,
+            |parameter, parameter_len, output, output_len| {
+                calls += 1;
+                assert!(parameter.is_null());
+                assert_eq!(parameter_len, 7);
+                assert!(output.is_null());
+                *output_len = 0;
+                CkRv::OK.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("provider call");
+
+        assert_eq!(calls, 1);
+        assert_eq!(result.ck_rv, CkRv::OK);
+        assert_eq!(result.returned_len, 7);
+        assert_eq!(result.value, None);
+    }
+
+    #[test]
+    fn parameter_exact_preserves_null_zero_envelope() {
+        let output_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
+        let mut calls = 0;
+
+        let (_, result) = FfiBackend::single_call_parameter_output_exact(
+            &output_spec,
+            &[],
+            &parameter_spec,
+            |parameter, parameter_len, _, output_len| {
+                calls += 1;
+                assert!(parameter.is_null());
+                assert_eq!(parameter_len, 0);
+                *output_len = 0;
+                CkRv::OK.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("provider call");
+
+        assert_eq!(calls, 1);
+        assert_eq!(result.returned_len, 0);
+        assert_eq!(result.value, None);
+    }
+
+    #[test]
+    fn parameter_exact_preserves_nonnull_zero_envelope() {
+        let output_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 0, value: None };
+        let mut calls = 0;
+
+        let (_, result) = FfiBackend::single_call_parameter_output_exact(
+            &output_spec,
+            &[],
+            &parameter_spec,
+            |parameter, parameter_len, _, output_len| {
+                calls += 1;
+                assert!(!parameter.is_null());
+                assert_eq!(parameter_len, 0);
+                *output_len = 0;
+                CkRv::OK.0 as cryptoki_sys::CK_RV
+            },
+        )
+        .expect("provider call");
+
+        assert_eq!(calls, 1);
+        assert_eq!(result.returned_len, 0);
+        assert_eq!(result.value, Some(Vec::new()));
     }
 }
