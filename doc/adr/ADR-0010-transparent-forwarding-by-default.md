@@ -100,18 +100,24 @@ exception that licenses other synthesis:
   data fields are bounded by `MAX_SERIALIZABLE_BYTES` (512 MiB). Legitimate
   AAD/seed/label/IV values larger than 64 KiB no longer hit the struct cap.
 
-## Limits — NULL output-length pointer (out of scope, follow-up needed)
+## NULL output-length pointers
 
-Calls where the *output-length* pointer (`pulLen`) is NULL (e.g.
-`C_Encrypt(out=NULL, pulLen=NULL)`) are explicitly out of scope for Scope 2.
-These already have defined spec semantics via the exact-output RPCs
-(`ByteOutputExact`, etc.) and are handled separately from data-input pointers.
-The `-length` variant test family (`test_null_argument_rejection_terminates_*`
-with NULL `pulLen`) reveals a known divergence: the shim synthesizes
-`CKR_ARGUMENTS_BAD` locally before the backend op is attempted, while direct
-modules reject AND terminate the active operation. This is tracked as a
-follow-up (output-spec NULL fidelity) and does not affect the Scope 2
-correctness claims.
+Output-bearing calls preserve all three native caller shapes through the
+existing exact-output RPCs: a missing output-length pointer, an ordinary size
+query, and a caller-provided output buffer. The additive
+`OutputBufferSpec.length_pointer_null` field defaults to false for older wire
+payloads. The shim captures both pointer classes without dereferencing a NULL
+length pointer; the daemon reconstructs the actual NULL pointer only at the
+provider FFI boundary and calls the provider once. The response preserves the
+provider's exact `CK_RV`; its main-output envelope is canonically empty
+(`returned_len = 0`, no value), is not written to caller memory, and does not
+hide genuine mechanism, message-parameter, or KEM handle output produced by a
+successful provider call.
+
+`C_SignMessageNext` is the deliberate exception. Its NULL signature-length
+form is the PKCS#11 feed/control call, represented by `request_signature =
+false`; it remains on that feed path and is not reclassified as a missing-length
+exact-output request.
 
 ## Consequences
 

@@ -508,7 +508,8 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
     client.encrypt_init(session, &mechanism, key).await.unwrap();
 
     let plaintext = b"exact-output mechanism_out";
-    let size_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+    let size_spec =
+        CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
     let (size_result, size_mechanism_out) = client
         .byte_output_exact_with_mechanism_out(
             session,
@@ -526,7 +527,11 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
     assert!(size_result.value.is_none(), "size query must not return ciphertext bytes");
     assert!(size_mechanism_out.is_none(), "size query must not surface delayed mechanism_out");
 
-    let data_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: plaintext.len() as u64 };
+    let data_spec = CkOutputBufferSpec {
+        buffer_present: true,
+        buffer_len: plaintext.len() as u64,
+        length_pointer_null: false,
+    };
     let (data_result, data_mechanism_out) = client
         .byte_output_exact_with_mechanism_out(
             session,
@@ -582,7 +587,8 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
         })),
     };
 
-    let size_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+    let size_spec =
+        CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
     let (size_result, size_mechanism_out) = client
         .byte_output_exact_with_mechanism_out(
             session,
@@ -600,7 +606,8 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
     assert!(size_result.value.is_none(), "size query must not return wrapped bytes");
     assert!(size_mechanism_out.is_none(), "size query must not surface delayed mechanism_out");
 
-    let data_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 4 };
+    let data_spec =
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false };
     let (wrap_result, mechanism_out) = client
         .byte_output_exact_with_mechanism_out(
             session,

@@ -149,19 +149,21 @@ pub(crate) unsafe fn write_output_slice<'a, T>(ptr: *mut T, len: usize) -> &'a m
 ///
 /// # Safety
 ///
-/// `pul_output_len` must be non-null and point to a valid `CK_ULONG`.
-/// The caller must have already validated `pul_output_len` before calling this.
+/// A non-null `pul_output_len` must point to a valid `CK_ULONG`.
 pub(crate) unsafe fn output_buffer_spec(
     p_output: CK_BYTE_PTR,
     pul_output_len: CK_ULONG_PTR,
 ) -> pkcs11_proxy_ng_types::CkOutputBufferSpec {
-    if p_output.is_null() {
-        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: false, buffer_len: 0 }
-    } else {
-        pkcs11_proxy_ng_types::CkOutputBufferSpec {
-            buffer_present: true,
-            buffer_len: unsafe { *pul_output_len } as u64,
-        }
+    let length_pointer_null = pul_output_len.is_null();
+    let buffer_present = !p_output.is_null();
+    pkcs11_proxy_ng_types::CkOutputBufferSpec {
+        buffer_present,
+        buffer_len: if length_pointer_null || !buffer_present {
+            0
+        } else {
+            (unsafe { *pul_output_len }) as u64
+        },
+        length_pointer_null,
     }
 }
 
@@ -175,13 +177,26 @@ pub(crate) unsafe fn output_buffer_spec(
 ///
 /// # Safety
 ///
-/// `pul_output_len` must be non-null. If the result contains data and `p_output` is non-null,
-/// `p_output` must point to a writable buffer of at least `returned_len` bytes.
+/// When the captured spec says the length pointer was present, `pul_output_len` must still be
+/// non-null. If the result contains data and `p_output` is non-null, `p_output` must point to a
+/// writable buffer of at least `returned_len` bytes. A captured missing-length call never
+/// dereferences or writes either output pointer.
 pub(crate) unsafe fn write_exact_output(
+    spec: &pkcs11_proxy_ng_types::CkOutputBufferSpec,
     result: &pkcs11_proxy_ng_types::CkOutputBufferResult,
     p_output: CK_BYTE_PTR,
     pul_output_len: CK_ULONG_PTR,
 ) -> CK_RV {
+    if spec.length_pointer_null {
+        if !pul_output_len.is_null()
+            || p_output.is_null() == spec.buffer_present
+            || result.returned_len != 0
+            || result.value.is_some()
+        {
+            return rv_err(CkRv::GENERAL_ERROR);
+        }
+        return rv_err(result.ck_rv);
+    }
     if pul_output_len.is_null() {
         return rv_err(CkRv::ARGUMENTS_BAD);
     }
@@ -338,6 +353,7 @@ pub(crate) unsafe fn empty_message_parameter_roundtrip_spec(
 /// Same safety requirements as `write_exact_output` plus `p_parameter` must be
 /// writable for `ul_parameter_len` bytes if non-null.
 pub(crate) unsafe fn write_exact_parameter_output(
+    output_spec: &pkcs11_proxy_ng_types::CkOutputBufferSpec,
     output_result: &pkcs11_proxy_ng_types::CkOutputBufferResult,
     param_result: &pkcs11_proxy_ng_types::CkParameterRoundtripResult,
     p_output: CK_BYTE_PTR,
@@ -346,7 +362,7 @@ pub(crate) unsafe fn write_exact_parameter_output(
     ul_parameter_len: CK_ULONG,
 ) -> CK_RV {
     // Write the main output first
-    let rv = unsafe { write_exact_output(output_result, p_output, pul_output_len) };
+    let rv = unsafe { write_exact_output(output_spec, output_result, p_output, pul_output_len) };
 
     // Write back the parameter if present and the main result was OK or
     // BUFFER_TOO_SMALL (parameter write-back happens regardless for size queries)

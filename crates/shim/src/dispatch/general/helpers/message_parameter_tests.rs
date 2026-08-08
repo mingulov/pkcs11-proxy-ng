@@ -97,8 +97,11 @@ fn transactional_message_output_keeps_all_memory_unchanged_on_malformed_ack() {
     response_gcm.iv.fill(0x33);
     response_gcm.tag.fill(0x44);
 
-    let output_spec =
-        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: true, buffer_len: 4 };
+    let output_spec = pkcs11_proxy_ng_types::CkOutputBufferSpec {
+        buffer_present: true,
+        buffer_len: 4,
+        length_pointer_null: false,
+    };
     let parameter_spec = pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
         buffer_present: true,
         buffer_len: std::mem::size_of_val(&outer) as u64,
@@ -172,8 +175,11 @@ fn transactional_message_output_rejects_malformed_main_value_before_any_write() 
     response_gcm.iv.fill(0x33);
     response_gcm.tag.fill(0x44);
 
-    let output_spec =
-        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: true, buffer_len: 4 };
+    let output_spec = pkcs11_proxy_ng_types::CkOutputBufferSpec {
+        buffer_present: true,
+        buffer_len: 4,
+        length_pointer_null: false,
+    };
     let parameter_spec = pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
         buffer_present: true,
         buffer_len: std::mem::size_of_val(&outer) as u64,
@@ -251,8 +257,11 @@ fn transactional_message_size_query_keeps_memory_unchanged_on_bad_pointer_class_
     response_gcm.iv.fill(0x33);
     response_gcm.tag.fill(0x44);
 
-    let output_spec =
-        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+    let output_spec = pkcs11_proxy_ng_types::CkOutputBufferSpec {
+        buffer_present: false,
+        buffer_len: 0,
+        length_pointer_null: false,
+    };
     let parameter_spec = pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
         buffer_present: true,
         buffer_len: std::mem::size_of_val(&outer) as u64,
@@ -316,8 +325,11 @@ fn transactional_message_b2s_keeps_all_memory_unchanged_on_bad_ack() {
     response_gcm.iv.fill(0x33);
     response_gcm.tag.fill(0x44);
 
-    let output_spec =
-        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: true, buffer_len: 2 };
+    let output_spec = pkcs11_proxy_ng_types::CkOutputBufferSpec {
+        buffer_present: true,
+        buffer_len: 2,
+        length_pointer_null: false,
+    };
     let parameter_spec = pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
         buffer_present: true,
         buffer_len: std::mem::size_of_val(&outer) as u64,
@@ -437,8 +449,11 @@ fn commit_stage_response(
     outer_len: usize,
     response: &MessageParameter,
 ) -> CK_RV {
-    let output_spec =
-        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+    let output_spec = pkcs11_proxy_ng_types::CkOutputBufferSpec {
+        buffer_present: false,
+        buffer_len: 0,
+        length_pointer_null: false,
+    };
     let parameter_spec = pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
         buffer_present: true,
         buffer_len: outer_len as u64,

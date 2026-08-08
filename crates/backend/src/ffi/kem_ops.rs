@@ -29,6 +29,35 @@ impl FfiBackend {
         let mut out_len: cryptoki_sys::CK_ULONG = 0;
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
 
+        if spec.length_pointer_null {
+            let output = if spec.buffer_present {
+                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
+            } else {
+                std::ptr::null_mut()
+            };
+            let rv = CkRv(unsafe {
+                function(
+                    Self::session_handle(session),
+                    &mut ffi_mech.ck_mechanism,
+                    Self::object_handle(public_key),
+                    Self::ffi_attr_ptr(&ffi_attrs),
+                    Self::ffi_attr_len(&ffi_attrs),
+                    output,
+                    std::ptr::null_mut(),
+                    &mut key_handle,
+                )
+            } as u64);
+            if !rv.is_ok() {
+                return Err(rv);
+            }
+            return Ok(CkOutputAndHandleResult {
+                ck_rv: rv,
+                returned_len: 0,
+                value: None,
+                object_handle: CkObjectHandle(key_handle as u64),
+            });
+        }
+
         if !spec.buffer_present {
             // Size query: pass NULL pCiphertext
             let rv = unsafe {
@@ -182,5 +211,84 @@ impl FfiBackend {
         )?;
 
         Ok(CkObjectHandle(key_handle as u64))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    static OUTPUT_PRESENT: AtomicUsize = AtomicUsize::new(0);
+    static LENGTH_NULL: AtomicUsize = AtomicUsize::new(0);
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn missing_length_encapsulate(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: cryptoki_sys::CK_MECHANISM_PTR,
+        _public_key: cryptoki_sys::CK_OBJECT_HANDLE,
+        _template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _attribute_count: cryptoki_sys::CK_ULONG,
+        output: cryptoki_sys::CK_BYTE_PTR,
+        output_len: cryptoki_sys::CK_ULONG_PTR,
+        key: cryptoki_sys::CK_OBJECT_HANDLE_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        OUTPUT_PRESENT.store(usize::from(!output.is_null()), Ordering::SeqCst);
+        LENGTH_NULL.store(usize::from(output_len.is_null()), Ordering::SeqCst);
+        if !key.is_null() {
+            unsafe { *key = 0x44 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_missing_length_encapsulate()
+    -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_2>)
+    {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
+        functions.C_EncapsulateKey = Some(missing_length_encapsulate);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: base.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: Some(functions.as_ref()),
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+        };
+        (backend, base, functions)
+    }
+
+    #[test]
+    fn null_output_length_kem_forwards_once_and_preserves_provider_handle() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        CALLS.store(0, Ordering::SeqCst);
+        OUTPUT_PRESENT.store(0, Ordering::SeqCst);
+        LENGTH_NULL.store(0, Ordering::SeqCst);
+        let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+
+        let result = backend
+            .ffi_encapsulate_key_exact(
+                CkSessionHandle(1),
+                &mechanism,
+                CkObjectHandle(2),
+                &[],
+                &output_spec,
+            )
+            .expect("provider result envelope");
+
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(OUTPUT_PRESENT.load(Ordering::SeqCst), 1);
+        assert_eq!(LENGTH_NULL.load(Ordering::SeqCst), 1);
+        assert_eq!(result.ck_rv, CkRv::OK);
+        assert_eq!(result.returned_len, 0);
+        assert_eq!(result.value, None);
+        assert_eq!(result.object_handle, CkObjectHandle(0x44));
     }
 }

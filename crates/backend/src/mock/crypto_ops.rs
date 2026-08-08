@@ -405,6 +405,19 @@ impl MockBackend {
         Ok(result)
     }
 
+    fn reject_null_output_length(
+        &self,
+        session: CkSessionHandle,
+        op: MultiPartOp,
+        spec: &CkOutputBufferSpec,
+    ) -> CkResult<Option<CkOutputBufferResult>> {
+        if !spec.length_pointer_null {
+            return Ok(None);
+        }
+        self.state.lock().unwrap().end_op(session, op)?;
+        Ok(Some(CkOutputBufferResult { ck_rv: CkRv::ARGUMENTS_BAD, returned_len: 0, value: None }))
+    }
+
     pub(super) fn sign_exact_impl(
         &self,
         session: CkSessionHandle,
@@ -479,6 +492,9 @@ impl MockBackend {
         data: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        if let Some(result) = self.reject_null_output_length(session, MultiPartOp::Encrypt, spec)? {
+            return Ok(result);
+        }
         let bytes = Self::xor_bytes(data);
         let result = self.exact_terminal_output(session, MultiPartOp::Encrypt, &bytes, spec)?;
         if result.ck_rv == CkRv::OK && result.value.is_some() {
@@ -493,6 +509,9 @@ impl MockBackend {
         part: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        if let Some(result) = self.reject_null_output_length(session, MultiPartOp::Encrypt, spec)? {
+            return Ok(result);
+        }
         let bytes = self.encrypt_update_impl(session, part)?;
         Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
     }
@@ -516,6 +535,9 @@ impl MockBackend {
         encrypted_data: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        if let Some(result) = self.reject_null_output_length(session, MultiPartOp::Decrypt, spec)? {
+            return Ok(result);
+        }
         let bytes = Self::xor_bytes(encrypted_data);
         self.exact_terminal_output(session, MultiPartOp::Decrypt, &bytes, spec)
     }
@@ -526,6 +548,9 @@ impl MockBackend {
         encrypted_part: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        if let Some(result) = self.reject_null_output_length(session, MultiPartOp::Decrypt, spec)? {
+            return Ok(result);
+        }
         let bytes = self.decrypt_update_impl(session, encrypted_part)?;
         Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
     }
@@ -903,7 +928,7 @@ impl MockBackend {
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
         // Authenticated wrap has no input parameter in the mock — return empty.
         let param_result = CkParameterRoundtripResult {
-            ck_rv: CkRv::OK,
+            ck_rv: output_result.ck_rv,
             returned_len: 0,
             value: if param_out_spec.buffer_present { Some(Vec::new()) } else { None },
         };

@@ -444,9 +444,6 @@ pub unsafe extern "C" fn c_encrypt_message(
         if let Some(rv) = pointer_safe_message_capability_error() {
             return rv;
         }
-        if pul_ciphertext_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
-        }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
         let mut operation = operation.lock().expect("message encrypt state poisoned");
         let shape = match operation.shape {
@@ -636,9 +633,6 @@ pub unsafe extern "C" fn c_encrypt_message_next(
         if let Some(rv) = pointer_safe_message_capability_error() {
             return rv;
         }
-        if pul_ciphertext_part_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
-        }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
         let mut operation = operation.lock().expect("message encrypt state poisoned");
         let shape = match operation.shape {
@@ -742,9 +736,6 @@ pub unsafe extern "C" fn c_decrypt_message(
     catch_panics(|| {
         if let Some(rv) = pointer_safe_message_capability_error() {
             return rv;
-        }
-        if pul_plaintext_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
         let mut operation = operation.lock().expect("message decrypt state poisoned");
@@ -935,9 +926,6 @@ pub unsafe extern "C" fn c_decrypt_message_next(
         if let Some(rv) = pointer_safe_message_capability_error() {
             return rv;
         }
-        if pul_plaintext_part_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
-        }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
         let mut operation = operation.lock().expect("message decrypt state poisoned");
         let shape = match operation.shape {
@@ -1039,9 +1027,6 @@ pub unsafe extern "C" fn c_sign_message(
     catch_panics(|| {
         if let Some(rv) = pointer_safe_message_capability_error() {
             return rv;
-        }
-        if pul_signature_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
         }
         let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
         let mut operation = operation.lock().expect("message sign state poisoned");

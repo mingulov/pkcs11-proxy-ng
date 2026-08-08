@@ -13,7 +13,7 @@ pub unsafe extern "C" fn c_wrap_key(
     pul_wrapped_key_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if p_mechanism.is_null() || pul_wrapped_key_len.is_null() {
+        if p_mechanism.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
@@ -34,12 +34,14 @@ pub unsafe extern "C" fn c_wrap_key(
         ));
         match result {
             Ok((r, mechanism_out)) => {
-                let rv = unsafe { write_exact_output(&r, p_wrapped_key, pul_wrapped_key_len) };
-                // Only write back on a successful, buffer-present call.
-                // Size-query (NULL output) doesn't trigger HSM-side IV
-                // generation on most providers, so there's nothing to copy.
+                let rv =
+                    unsafe { write_exact_output(&spec, &r, p_wrapped_key, pul_wrapped_key_len) };
+                // A missing length pointer remains a genuine provider call, so
+                // preserve any successful mechanism writeback independently of
+                // the main output pointer. Ordinary size queries keep the
+                // historical no-writeback behavior.
                 if rv == rv_ok()
-                    && spec.buffer_present
+                    && (spec.buffer_present || spec.length_pointer_null)
                     && let Some(params) = mechanism_out
                 {
                     unsafe { write_mechanism_output_params(p_mechanism, &params) };

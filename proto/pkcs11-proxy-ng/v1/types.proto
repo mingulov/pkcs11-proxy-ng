@@ -173,6 +173,7 @@ message AttributeResult {
 message OutputBufferSpec {
   bool buffer_present = 1;
   uint64 buffer_len = 2;
+  bool length_pointer_null = 3;
 }
 
 // Discriminator for the 18 byte-output PKCS#11 functions that share

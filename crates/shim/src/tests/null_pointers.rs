@@ -159,7 +159,9 @@ fn c_sign_init_null_mechanism_before_initialize_returns_not_initialized() {
 }
 
 #[test]
-fn c_sign_null_pul_len_returns_bad_args() {
+fn c_sign_null_pul_len_reaches_client_state() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
     let rv = unsafe {
         dispatch::general::c_sign(
             0,
@@ -169,14 +171,16 @@ fn c_sign_null_pul_len_returns_bad_args() {
             std::ptr::null_mut(),
         )
     };
-    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 }
 
 #[test]
-fn c_sign_final_null_pul_len_returns_bad_args() {
+fn c_sign_final_null_pul_len_reaches_client_state() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
     let rv =
         unsafe { dispatch::general::c_sign_final(0, std::ptr::null_mut(), std::ptr::null_mut()) };
-    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 }
 
 #[test]
@@ -204,7 +208,9 @@ fn c_verify_recover_init_null_mechanism_before_initialize_returns_not_initialize
 }
 
 #[test]
-fn c_sign_recover_null_pul_len_returns_bad_args() {
+fn c_sign_recover_null_pul_len_reaches_client_state() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
     let rv = unsafe {
         dispatch::general::c_sign_recover(
             0,
@@ -214,11 +220,13 @@ fn c_sign_recover_null_pul_len_returns_bad_args() {
             std::ptr::null_mut(),
         )
     };
-    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 }
 
 #[test]
-fn c_verify_recover_null_pul_len_returns_bad_args() {
+fn c_verify_recover_null_pul_len_reaches_client_state() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
     let rv = unsafe {
         dispatch::general::c_verify_recover(
             0,
@@ -228,7 +236,7 @@ fn c_verify_recover_null_pul_len_returns_bad_args() {
             std::ptr::null_mut(),
         )
     };
-    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 }
 
 #[test]
@@ -240,7 +248,9 @@ fn c_digest_init_null_mechanism_before_initialize_returns_not_initialized() {
 }
 
 #[test]
-fn c_digest_null_pul_len_returns_bad_args() {
+fn c_digest_null_pul_len_reaches_client_state() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
     let rv = unsafe {
         dispatch::general::c_digest(
             0,
@@ -250,7 +260,7 @@ fn c_digest_null_pul_len_returns_bad_args() {
             std::ptr::null_mut(),
         )
     };
-    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 }
 
 #[test]
@@ -262,7 +272,9 @@ fn c_encrypt_init_null_mechanism_before_initialize_returns_not_initialized() {
 }
 
 #[test]
-fn c_encrypt_null_pul_len_returns_bad_args() {
+fn c_encrypt_null_pul_len_reaches_client_state() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
     let rv = unsafe {
         dispatch::general::c_encrypt(
             0,
@@ -272,7 +284,7 @@ fn c_encrypt_null_pul_len_returns_bad_args() {
             std::ptr::null_mut(),
         )
     };
-    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 }
 
 #[test]
@@ -284,7 +296,9 @@ fn c_decrypt_init_null_mechanism_before_initialize_returns_not_initialized() {
 }
 
 #[test]
-fn c_decrypt_null_pul_len_returns_bad_args() {
+fn c_decrypt_null_pul_len_reaches_client_state() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
     let rv = unsafe {
         dispatch::general::c_decrypt(
             0,
@@ -294,7 +308,7 @@ fn c_decrypt_null_pul_len_returns_bad_args() {
             std::ptr::null_mut(),
         )
     };
-    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 }
 
 #[test]
@@ -371,7 +385,7 @@ fn c_generate_random_rejects_length_above_wire_width_before_client_use() {
 }
 
 #[test]
-fn c_wrap_key_null_pul_len_returns_bad_args() {
+fn c_wrap_key_null_mechanism_still_precedes_client_state() {
     let rv = unsafe {
         dispatch::general::c_wrap_key(
             0,
@@ -386,11 +400,13 @@ fn c_wrap_key_null_pul_len_returns_bad_args() {
 }
 
 #[test]
-fn c_get_operation_state_null_pul_len_returns_bad_args() {
+fn c_get_operation_state_null_pul_len_reaches_client_state() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
     let rv = unsafe {
         dispatch::general::c_get_operation_state(0, std::ptr::null_mut(), std::ptr::null_mut())
     };
-    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 }
 
 // ---------------------------------------------------------------------------

@@ -1319,7 +1319,7 @@ impl FfiBackend {
         F: FnMut(
             *mut cryptoki_sys::CK_GCM_MESSAGE_PARAMS,
             *mut cryptoki_sys::CK_BYTE,
-            &mut cryptoki_sys::CK_ULONG,
+            *mut cryptoki_sys::CK_ULONG,
         ) -> cryptoki_sys::CK_RV,
     {
         gcm.validate_for_native_ulong(native_ulong_max())?;
@@ -1341,6 +1341,30 @@ impl FfiBackend {
         };
 
         let mut out_len: cryptoki_sys::CK_ULONG = 0;
+
+        if output_spec.length_pointer_null {
+            let output = if output_spec.buffer_present {
+                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
+            } else {
+                std::ptr::null_mut()
+            };
+            let rv = CkRv(call(&mut ck_params, output, std::ptr::null_mut()) as u64);
+            if rv != CkRv::OK && rv != CkRv::BUFFER_TOO_SMALL {
+                return Err(rv);
+            }
+            return Ok((
+                CkOutputBufferResult { ck_rv: rv, returned_len: 0, value: None },
+                MessageParameter::GcmMessage(GcmMessageParams {
+                    iv: iv_buf,
+                    iv_null_len: gcm.iv_null_len,
+                    iv_fixed_bits: gcm.iv_fixed_bits,
+                    iv_generator: gcm.iv_generator,
+                    tag: tag_buf,
+                    tag_null_len: gcm.tag_null_len,
+                    tag_bits: gcm.tag_bits,
+                }),
+            ));
+        }
 
         if !output_spec.buffer_present {
             // Size query
@@ -1429,7 +1453,7 @@ impl FfiBackend {
         F: FnMut(
             *mut cryptoki_sys::CK_CCM_MESSAGE_PARAMS,
             *mut cryptoki_sys::CK_BYTE,
-            &mut cryptoki_sys::CK_ULONG,
+            *mut cryptoki_sys::CK_ULONG,
         ) -> cryptoki_sys::CK_RV,
     {
         ccm.validate_for_native_ulong(native_ulong_max())?;
@@ -1465,6 +1489,22 @@ impl FfiBackend {
                 mac_len: ccm.mac_len,
             })
         };
+
+        if output_spec.length_pointer_null {
+            let output = if output_spec.buffer_present {
+                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
+            } else {
+                std::ptr::null_mut()
+            };
+            let rv = CkRv(call(&mut ck_params, output, std::ptr::null_mut()) as u64);
+            if rv != CkRv::OK && rv != CkRv::BUFFER_TOO_SMALL {
+                return Err(rv);
+            }
+            return Ok((
+                CkOutputBufferResult { ck_rv: rv, returned_len: 0, value: None },
+                snapshot(&nonce_buf, &mac_buf),
+            ));
+        }
 
         if !output_spec.buffer_present {
             let rv = call(&mut ck_params, std::ptr::null_mut(), &mut out_len);
@@ -1524,7 +1564,7 @@ impl FfiBackend {
         F: FnMut(
             *mut cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS,
             *mut cryptoki_sys::CK_BYTE,
-            &mut cryptoki_sys::CK_ULONG,
+            *mut cryptoki_sys::CK_ULONG,
         ) -> cryptoki_sys::CK_RV,
     {
         params.validate_for_native_ulong(native_ulong_max())?;
@@ -1548,6 +1588,22 @@ impl FfiBackend {
                 tag_null_len: params.tag_null_len,
             })
         };
+
+        if output_spec.length_pointer_null {
+            let output = if output_spec.buffer_present {
+                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
+            } else {
+                std::ptr::null_mut()
+            };
+            let rv = CkRv(call(&mut ck_params, output, std::ptr::null_mut()) as u64);
+            if rv != CkRv::OK && rv != CkRv::BUFFER_TOO_SMALL {
+                return Err(rv);
+            }
+            return Ok((
+                CkOutputBufferResult { ck_rv: rv, returned_len: 0, value: None },
+                snapshot(&nonce_buf, &tag_buf),
+            ));
+        }
 
         if !output_spec.buffer_present {
             let rv = call(&mut ck_params, std::ptr::null_mut(), &mut out_len);
@@ -1610,7 +1666,8 @@ impl FfiBackend {
     {
         let _ = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (aad_ptr, aad_len) = native_message_input(aad)?;
-        let no_output = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+        let no_output =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
         let (_, returned_parameter) =
             match msg_param {
                 MessageParameter::GcmMessage(gcm) => {
@@ -2653,6 +2710,177 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn null_output_length_structured_helpers_forward_once_and_keep_message_output() {
+        let _guard = STRUCTURED_PROVIDER_TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_structured_message_functions();
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let mut calls = 0;
+
+        let gcm = GcmMessageParams {
+            iv: vec![0x11; 12],
+            iv_null_len: None,
+            iv_fixed_bits: 96,
+            iv_generator: 0,
+            tag: vec![0; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        };
+        let (output, returned) = backend
+            .call_with_gcm_message_param(
+                &gcm,
+                &output_spec,
+                |params, main_output, main_output_len: *mut cryptoki_sys::CK_ULONG| {
+                    calls += 1;
+                    assert!(!main_output.is_null());
+                    assert!(main_output_len.is_null());
+                    unsafe { *(*params).pIv = 0xA1 };
+                    cryptoki_sys::CKR_OK
+                },
+            )
+            .expect("GCM provider result envelope");
+        assert_eq!(output, CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 0, value: None });
+        let mut expected_gcm = gcm.clone();
+        expected_gcm.iv[0] = 0xA1;
+        assert_eq!(returned, MessageParameter::GcmMessage(expected_gcm));
+
+        let ccm = CcmMessageParams {
+            data_len: 4,
+            nonce: vec![0x22; 12],
+            nonce_null_len: None,
+            nonce_fixed_bits: 96,
+            nonce_generator: 0,
+            mac: vec![0; 16],
+            mac_null_len: None,
+            mac_len: 16,
+        };
+        let (output, returned) = backend
+            .call_with_ccm_message_param(
+                &ccm,
+                &output_spec,
+                |params, main_output, main_output_len: *mut cryptoki_sys::CK_ULONG| {
+                    calls += 1;
+                    assert!(!main_output.is_null());
+                    assert!(main_output_len.is_null());
+                    unsafe { *(*params).pNonce = 0xA2 };
+                    cryptoki_sys::CKR_OK
+                },
+            )
+            .expect("CCM provider result envelope");
+        assert_eq!(output, CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 0, value: None });
+        let mut expected_ccm = ccm.clone();
+        expected_ccm.nonce[0] = 0xA2;
+        assert_eq!(returned, MessageParameter::CcmMessage(expected_ccm));
+
+        let salsa = Salsa20ChaCha20Poly1305MessageParams {
+            nonce: vec![0x33; 12],
+            nonce_bits: 96,
+            nonce_null_len: None,
+            tag: vec![0; 16],
+            tag_null_len: None,
+        };
+        let (output, returned) = backend
+            .call_with_salsa20_chacha20_poly1305_message_param(
+                &salsa,
+                &output_spec,
+                |params, main_output, main_output_len: *mut cryptoki_sys::CK_ULONG| {
+                    calls += 1;
+                    assert!(!main_output.is_null());
+                    assert!(main_output_len.is_null());
+                    unsafe { *(*params).pTag = 0xA3 };
+                    cryptoki_sys::CKR_OK
+                },
+            )
+            .expect("Salsa/ChaCha provider result envelope");
+        assert_eq!(output, CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 0, value: None });
+        let mut expected_salsa = salsa.clone();
+        expected_salsa.tag[0] = 0xA3;
+        assert_eq!(returned, MessageParameter::SalaChacha(expected_salsa));
+        assert_eq!(calls, 3, "one provider call per structured parameter family");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn null_output_length_structured_helpers_preserve_buffer_too_small_and_message_output() {
+        let _guard = STRUCTURED_PROVIDER_TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_structured_message_functions();
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let mut calls = 0;
+
+        let gcm = GcmMessageParams {
+            iv: vec![0x11; 12],
+            iv_null_len: None,
+            iv_fixed_bits: 96,
+            iv_generator: 0,
+            tag: vec![0; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        };
+        let (output, returned) = backend
+            .call_with_gcm_message_param(&gcm, &output_spec, |params, _, output_len| {
+                calls += 1;
+                assert!(output_len.is_null());
+                unsafe { *(*params).pIv = 0xA1 };
+                cryptoki_sys::CKR_BUFFER_TOO_SMALL
+            })
+            .expect("GCM provider result envelope");
+        assert_eq!(output.ck_rv, CkRv::BUFFER_TOO_SMALL);
+        let mut expected_gcm = gcm.clone();
+        expected_gcm.iv[0] = 0xA1;
+        assert_eq!(returned, MessageParameter::GcmMessage(expected_gcm));
+
+        let ccm = CcmMessageParams {
+            data_len: 4,
+            nonce: vec![0x22; 12],
+            nonce_null_len: None,
+            nonce_fixed_bits: 96,
+            nonce_generator: 0,
+            mac: vec![0; 16],
+            mac_null_len: None,
+            mac_len: 16,
+        };
+        let (output, returned) = backend
+            .call_with_ccm_message_param(&ccm, &output_spec, |params, _, output_len| {
+                calls += 1;
+                assert!(output_len.is_null());
+                unsafe { *(*params).pNonce = 0xA2 };
+                cryptoki_sys::CKR_BUFFER_TOO_SMALL
+            })
+            .expect("CCM provider result envelope");
+        assert_eq!(output.ck_rv, CkRv::BUFFER_TOO_SMALL);
+        let mut expected_ccm = ccm.clone();
+        expected_ccm.nonce[0] = 0xA2;
+        assert_eq!(returned, MessageParameter::CcmMessage(expected_ccm));
+
+        let salsa = Salsa20ChaCha20Poly1305MessageParams {
+            nonce: vec![0x33; 12],
+            nonce_bits: 96,
+            nonce_null_len: None,
+            tag: vec![0; 16],
+            tag_null_len: None,
+        };
+        let (output, returned) = backend
+            .call_with_salsa20_chacha20_poly1305_message_param(
+                &salsa,
+                &output_spec,
+                |params, _, output_len| {
+                    calls += 1;
+                    assert!(output_len.is_null());
+                    unsafe { *(*params).pTag = 0xA3 };
+                    cryptoki_sys::CKR_BUFFER_TOO_SMALL
+                },
+            )
+            .expect("Salsa/ChaCha provider result envelope");
+        assert_eq!(output.ck_rv, CkRv::BUFFER_TOO_SMALL);
+        let mut expected_salsa = salsa.clone();
+        expected_salsa.tag[0] = 0xA3;
+        assert_eq!(returned, MessageParameter::SalaChacha(expected_salsa));
+        assert_eq!(calls, 3, "one provider call per structured parameter family");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn message_init_contract_rejects_provider_pointer_class_or_length_mutation() {
         let _guard = MUTATING_INIT_TEST_LOCK.lock().unwrap();
         MUTATING_INIT_CALLS.store(0, Ordering::SeqCst);
@@ -2822,7 +3050,8 @@ mod tests {
         let _guard = STRUCTURED_PROVIDER_TEST_LOCK.lock().unwrap();
         STRUCTURED_PROVIDER_CALLS.store(0, Ordering::SeqCst);
         let (backend, _base, _functions) = backend_with_structured_message_functions();
-        let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 64 };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 64, length_pointer_null: false };
         let session = CkSessionHandle(7);
         let key = CkObjectHandle(9);
 
@@ -3136,7 +3365,8 @@ mod tests {
         let _guard = STRUCTURED_PROVIDER_TEST_LOCK.lock().unwrap();
         STRUCTURED_PROVIDER_CALLS.store(0, Ordering::SeqCst);
         let (backend, _base, _functions) = backend_with_structured_message_functions();
-        let output_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
         let over_u32 = u32::MAX as u64 + 1;
@@ -3165,7 +3395,8 @@ mod tests {
         let _guard = SIGN_VERIFY_TEST_LOCK.lock().unwrap();
         SIGN_VERIFY_PROVIDER_CALLS.store(0, Ordering::SeqCst);
         let (backend, _base, _functions) = backend_with_sign_verify_message_functions();
-        let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 1 };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 1, length_pointer_null: false };
         let session = CkSessionHandle(7);
 
         for buffer_present in [false, true] {

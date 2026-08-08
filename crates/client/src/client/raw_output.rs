@@ -37,18 +37,26 @@ fn decode_parameter_output_exact_response(
         .map(CkParameterRoundtripResult::from)
         .ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
+    if output_spec.length_pointer_null && (output.returned_len != 0 || output.value.is_some()) {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+
     let validates_memory = output.ck_rv == CkRv::OK || output.ck_rv == CkRv::BUFFER_TOO_SMALL;
     if validates_memory {
-        let output_valid = match output.ck_rv {
-            CkRv::OK if !output_spec.buffer_present => output.value.is_none(),
-            CkRv::OK => output.value.as_ref().is_some_and(|value| {
-                value.len() as u64 == output.returned_len
-                    && output.returned_len <= output_spec.buffer_len
-            }),
-            CkRv::BUFFER_TOO_SMALL if output_spec.buffer_present => {
-                output.value.is_none() && output.returned_len > output_spec.buffer_len
+        let output_valid = if output_spec.length_pointer_null {
+            output.returned_len == 0 && output.value.is_none()
+        } else {
+            match output.ck_rv {
+                CkRv::OK if !output_spec.buffer_present => output.value.is_none(),
+                CkRv::OK => output.value.as_ref().is_some_and(|value| {
+                    value.len() as u64 == output.returned_len
+                        && output.returned_len <= output_spec.buffer_len
+                }),
+                CkRv::BUFFER_TOO_SMALL if output_spec.buffer_present => {
+                    output.value.is_none() && output.returned_len > output_spec.buffer_len
+                }
+                _ => false,
             }
-            _ => false,
         };
         let message_function = matches!(
             function,
@@ -67,6 +75,15 @@ fn decode_parameter_output_exact_response(
                         (false, None) => true,
                         _ => false,
                     }
+            } else if output_spec.length_pointer_null {
+                match (parameter_spec.buffer_present, parameter.value.as_ref()) {
+                    (false, None) => parameter.returned_len == parameter_spec.buffer_len,
+                    (true, Some(value)) => {
+                        value.len() as u64 == parameter.returned_len
+                            && parameter.returned_len <= parameter_spec.buffer_len
+                    }
+                    _ => false,
+                }
             } else {
                 match (output.ck_rv, parameter_spec.buffer_present, parameter.value.as_ref()) {
                     (CkRv::OK, false, None) => true,
@@ -474,6 +491,122 @@ mod message_contract_tests {
     }
 
     #[test]
+    fn null_output_length_accepts_only_canonical_main_envelope_and_exact_rv() {
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
+        let response = |returned_len, value| pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                ck_rv: CkRv::ARGUMENTS_BAD.0,
+                returned_len,
+                value,
+            }),
+            parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult {
+                ck_rv: CkRv::ARGUMENTS_BAD.0,
+                returned_len: 0,
+                value: None,
+            }),
+            message_parameter_out: None,
+        };
+
+        let (output, _, _) = decode_parameter_output_exact_response(
+            response(0, None),
+            &output_spec,
+            &parameter_spec,
+            None,
+            ParameterOutputFunction::WrapKeyAuthenticated,
+        )
+        .expect("canonical missing-length envelope");
+        assert_eq!(output.ck_rv, CkRv::ARGUMENTS_BAD);
+        assert_eq!(
+            decode_parameter_output_exact_response(
+                response(1, None),
+                &output_spec,
+                &parameter_spec,
+                None,
+                ParameterOutputFunction::WrapKeyAuthenticated,
+            ),
+            Err(CkRv::FUNCTION_NOT_SUPPORTED),
+        );
+        assert_eq!(
+            decode_parameter_output_exact_response(
+                response(0, Some(Vec::new())),
+                &output_spec,
+                &parameter_spec,
+                None,
+                ParameterOutputFunction::WrapKeyAuthenticated,
+            ),
+            Err(CkRv::FUNCTION_NOT_SUPPORTED),
+        );
+    }
+
+    #[test]
+    fn null_output_length_ok_preserves_genuine_parameter_output() {
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 3, value: None };
+        let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                ck_rv: CkRv::OK.0,
+                returned_len: 0,
+                value: None,
+            }),
+            parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult {
+                ck_rv: CkRv::OK.0,
+                returned_len: 3,
+                value: Some(vec![1, 0xA5, 3]),
+            }),
+            message_parameter_out: None,
+        };
+
+        let (_, parameter, _) = decode_parameter_output_exact_response(
+            response,
+            &output_spec,
+            &parameter_spec,
+            None,
+            ParameterOutputFunction::WrapKeyAuthenticated,
+        )
+        .expect("genuine parameter output");
+        assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
+    }
+
+    #[test]
+    fn null_output_length_buffer_too_small_preserves_genuine_parameter_output() {
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: true, buffer_len: 3, value: None };
+        let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                ck_rv: CkRv::BUFFER_TOO_SMALL.0,
+                returned_len: 0,
+                value: None,
+            }),
+            parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult {
+                ck_rv: CkRv::BUFFER_TOO_SMALL.0,
+                returned_len: 3,
+                value: Some(vec![1, 0xA5, 3]),
+            }),
+            message_parameter_out: None,
+        };
+
+        let (output, parameter, _) = decode_parameter_output_exact_response(
+            response,
+            &output_spec,
+            &parameter_spec,
+            None,
+            ParameterOutputFunction::WrapKeyAuthenticated,
+        )
+        .expect("canonical buffer-too-small response");
+
+        assert_eq!(output.ck_rv, CkRv::BUFFER_TOO_SMALL);
+        assert_eq!(parameter.ck_rv, CkRv::BUFFER_TOO_SMALL);
+        assert_eq!(parameter.value, Some(vec![1, 0xA5, 3]));
+    }
+
+    #[test]
     fn old_server_missing_parameter_ack_on_b2s_is_rejected() {
         let request = gcm_parameter();
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
@@ -485,7 +618,8 @@ mod message_contract_tests {
             parameter_result: None,
             message_parameter_out: Some((&request).into()),
         };
-        let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 4 };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false };
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 48, value: None };
 
@@ -503,7 +637,8 @@ mod message_contract_tests {
 
     #[test]
     fn exact_contract_rejects_outer_pointer_class_or_length_mutation() {
-        let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 1 };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 1, length_pointer_null: false };
         for parameter_spec in [
             CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None },
             CkParameterRoundtripSpec { buffer_present: false, buffer_len: 7, value: None },
@@ -546,7 +681,8 @@ mod message_contract_tests {
     #[test]
     fn exact_contract_rejects_raw_malformed_or_wrong_variant_response() {
         let request = gcm_parameter();
-        let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 4 };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false };
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 48, value: None };
         let responses = [
@@ -609,7 +745,11 @@ mod message_contract_tests {
         };
         let error = decode_parameter_output_exact_contract_response(
             response,
-            &CkOutputBufferSpec { buffer_present: false, buffer_len: 0 },
+            &CkOutputBufferSpec {
+                buffer_present: false,
+                buffer_len: 0,
+                length_pointer_null: false,
+            },
             &CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None },
             None,
             ParameterOutputFunction::EncryptMessage,
@@ -635,7 +775,8 @@ mod message_contract_tests {
             }),
             message_parameter_out: None,
         };
-        let output_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
 

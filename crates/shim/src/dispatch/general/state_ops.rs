@@ -38,9 +38,6 @@ pub unsafe extern "C" fn c_get_operation_state(
     pul_operation_state_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if pul_operation_state_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
-        }
         let spec = unsafe { output_buffer_spec(p_operation_state, pul_operation_state_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session as u64),
@@ -52,7 +49,9 @@ pub unsafe extern "C" fn c_get_operation_state(
             0,
         ));
         match result {
-            Ok(r) => unsafe { write_exact_output(&r, p_operation_state, pul_operation_state_len) },
+            Ok(r) => unsafe {
+                write_exact_output(&spec, &r, p_operation_state, pul_operation_state_len)
+            },
             Err(e) => rv_err(e),
         }
     })

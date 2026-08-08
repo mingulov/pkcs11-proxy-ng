@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn null_output_length_classic_cipher_operations_follow_provider_owned_lifecycle() {
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_ECB]);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let key = live_key(&backend, session);
+    let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_ECB, params: None };
+    let missing =
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+
+    for update in [false, true] {
+        backend.encrypt_init(session, &mechanism, key).unwrap();
+        let before = backend.data_op_call_count();
+        let result = if update {
+            backend.encrypt_update_exact(session, CkInBuf::Bytes(b"data"), &missing)
+        } else {
+            backend.encrypt_exact(session, CkInBuf::Bytes(b"data"), &missing)
+        }
+        .unwrap();
+        assert_eq!(result.ck_rv, CkRv::ARGUMENTS_BAD);
+        assert_eq!(result.returned_len, 0);
+        assert_eq!(result.value, None);
+        assert_eq!(backend.data_op_call_count(), before + 1);
+        backend.encrypt_init(session, &mechanism, key).unwrap();
+        backend.encrypt_init_cancel(session).unwrap();
+    }
+
+    for update in [false, true] {
+        backend.decrypt_init(session, &mechanism, key).unwrap();
+        let before = backend.data_op_call_count();
+        let result = if update {
+            backend.decrypt_update_exact(session, CkInBuf::Bytes(b"data"), &missing)
+        } else {
+            backend.decrypt_exact(session, CkInBuf::Bytes(b"data"), &missing)
+        }
+        .unwrap();
+        assert_eq!(result.ck_rv, CkRv::ARGUMENTS_BAD);
+        assert_eq!(result.returned_len, 0);
+        assert_eq!(result.value, None);
+        assert_eq!(backend.data_op_call_count(), before + 1);
+        backend.decrypt_init(session, &mechanism, key).unwrap();
+        backend.decrypt_init_cancel(session).unwrap();
+    }
+}
+
+#[test]
 fn typed_message_exact_paths_return_structured_mock_outputs() {
     let backend = MockBackend::new(
         vec![CkSlotId(0)],
@@ -13,7 +58,8 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let key = live_key(&backend, session);
-    let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 64 };
+    let output_spec =
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 64, length_pointer_null: false };
 
     let gcm = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x10; 12],
@@ -212,7 +258,8 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
     }
     assert_eq!(exercised_cells, 24, "three shapes x two directions x Init/one-shot/Begin/Next",);
 
-    let too_small = CkOutputBufferSpec { buffer_present: true, buffer_len: 1 };
+    let too_small =
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 1, length_pointer_null: false };
     let (small, _, _) = backend
         .encrypt_message_exact_msg(
             session,
@@ -296,7 +343,7 @@ fn encapsulate_key_exact_data_query_returns_live_key_with_template_attributes() 
                 attr_type: CkAttributeType::LABEL,
                 value: Some(CkAttributeValue::String("kem-exact".to_string())),
             }],
-            &CkOutputBufferSpec { buffer_present: true, buffer_len: 8 },
+            &CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false },
         )
         .unwrap();
 
@@ -333,7 +380,11 @@ fn encapsulate_key_exact_non_data_queries_do_not_allocate_key() {
             &mechanism,
             public_key,
             &[],
-            &CkOutputBufferSpec { buffer_present: false, buffer_len: 0 },
+            &CkOutputBufferSpec {
+                buffer_present: false,
+                buffer_len: 0,
+                length_pointer_null: false,
+            },
         )
         .unwrap();
     assert_eq!(size_query.ck_rv, CkRv::OK);
@@ -345,7 +396,7 @@ fn encapsulate_key_exact_non_data_queries_do_not_allocate_key() {
             &mechanism,
             public_key,
             &[],
-            &CkOutputBufferSpec { buffer_present: true, buffer_len: 1 },
+            &CkOutputBufferSpec { buffer_present: true, buffer_len: 1, length_pointer_null: false },
         )
         .unwrap();
     assert_eq!(too_small.ck_rv, CkRv::BUFFER_TOO_SMALL);
@@ -374,14 +425,16 @@ fn full_registry_mock_accepts_every_registered_mechanism_for_exact_wrap_workflow
         let wrapping_key = backend.create_object(session, &[]).unwrap();
         let key = backend.create_object(session, &[]).unwrap();
 
-        let size_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+        let size_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
         let size_result =
             backend.wrap_key_exact(session, &mechanism, wrapping_key, key, &size_spec).unwrap();
         assert_eq!(size_result.ck_rv, CkRv::OK);
         assert_eq!(size_result.returned_len, 4);
         assert!(size_result.value.is_none());
 
-        let data_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 4 };
+        let data_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false };
         let data_result =
             backend.wrap_key_exact(session, &mechanism, wrapping_key, key, &data_spec).unwrap();
         assert_eq!(data_result.ck_rv, CkRv::OK);

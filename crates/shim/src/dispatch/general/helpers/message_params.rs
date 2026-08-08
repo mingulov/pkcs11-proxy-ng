@@ -523,6 +523,13 @@ fn validate_exact_output_result(
     result: &CkOutputBufferResult,
     spec: &CkOutputBufferSpec,
 ) -> CkResult<()> {
+    if spec.length_pointer_null {
+        return if result.returned_len == 0 && result.value.is_none() {
+            Ok(())
+        } else {
+            Err(CkRv::GENERAL_ERROR)
+        };
+    }
     match result.ck_rv {
         CkRv::OK if !spec.buffer_present => {
             if result.value.is_none() {
@@ -624,7 +631,9 @@ pub(crate) unsafe fn write_exact_message_output(
     p_output: CK_BYTE_PTR,
     pul_output_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    if pul_output_len.is_null() || output_spec.buffer_present == p_output.is_null() {
+    if pul_output_len.is_null() != output_spec.length_pointer_null
+        || p_output.is_null() == output_spec.buffer_present
+    {
         return rv_err(CkRv::GENERAL_ERROR);
     }
     if validate_exact_output_result(output_result, output_spec).is_err() {
@@ -658,6 +667,9 @@ pub(crate) unsafe fn write_exact_message_output(
     if let Some(response) = response_parameter {
         unsafe { commit_message_parameter_writeback(call, response) };
     }
+    if output_spec.length_pointer_null {
+        return rv_err(output_result.ck_rv);
+    }
     if let Some(value) = output_result.value.as_ref()
         && !value.is_empty()
     {
@@ -677,7 +689,8 @@ pub(crate) unsafe fn write_message_begin_output(
     parameter_result: &CkParameterRoundtripResult,
     response_parameter: Option<&MessageParameter>,
 ) -> CK_RV {
-    let output_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+    let output_spec =
+        CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
     let output_result = CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 0, value: None };
     let mut output_len = 0;
     unsafe {

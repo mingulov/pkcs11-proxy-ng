@@ -103,11 +103,12 @@ pub(super) async fn parameter_output_exact(
     let parameter_spec_present = req.parameter_out_spec.is_some();
 
     // Build the output buffer spec
-    let output_spec = req
-        .output_spec
-        .as_ref()
-        .map(|s| CkOutputBufferSpec { buffer_present: s.buffer_present, buffer_len: s.buffer_len })
-        .unwrap_or(CkOutputBufferSpec { buffer_present: false, buffer_len: 0 });
+    let output_spec =
+        req.output_spec.as_ref().map(CkOutputBufferSpec::from).unwrap_or(CkOutputBufferSpec {
+            buffer_present: false,
+            buffer_len: 0,
+            length_pointer_null: false,
+        });
 
     // Build the parameter roundtrip spec
     let param_out_spec = req
@@ -730,12 +731,86 @@ fn error_response(
 mod ambiguity_tests {
     use super::*;
     use crate::server::context_manager::ContextManager;
-    use crate::server::grpc_service::service_utils::register_session_handle;
+    use crate::server::grpc_service::service_utils::{
+        register_session_handle, register_session_object_handle,
+    };
     use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
     use pkcs11_proxy_ng_proto::convert::message_params::GcmMessageParams;
     use pkcs11_proxy_ng_types::{CkMechanismType, CkSessionFlags, CkSlotId};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn missing_output_length_is_forwarded_to_parameter_output_backend_once() {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend_session =
+            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+        let wrapping_key = mock.create_object(backend_session, &[]).unwrap();
+        let key = mock.create_object(backend_session, &[]).unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        manager.register_slot(CkSlotId(0)).await;
+        let context_id = manager.create_context(None).await.unwrap();
+        let virtual_session =
+            register_session_handle(&manager, &context_id, backend_session, CkSlotId(0))
+                .await
+                .unwrap();
+        let virtual_session = VirtualHandle(virtual_session);
+        let virtual_wrapping_key = register_session_object_handle(
+            &manager,
+            &context_id,
+            virtual_session,
+            wrapping_key,
+            false,
+        )
+        .await;
+        let virtual_key =
+            register_session_object_handle(&manager, &context_id, virtual_session, key, false)
+                .await;
+        let before = mock.data_op_call_count();
+
+        let response = parameter_output_exact(
+            &HandlerContext::for_test(&manager, &backend),
+            Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                client_context_id: context_id.0.clone(),
+                session_handle: virtual_session.0,
+                function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
+                    ParameterOutputFunction::WrapKeyAuthenticated,
+                ),
+                output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
+                    buffer_present: true,
+                    buffer_len: 0,
+                    length_pointer_null: true,
+                }),
+                parameter_out_spec: Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+                    buffer_present: false,
+                    buffer_len: 0,
+                    value: None,
+                }),
+                mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                    mechanism_type: CkMechanismType::RSA_PKCS.0,
+                    params: None,
+                }),
+                wrapping_key_handle: virtual_wrapping_key,
+                key_handle: virtual_key,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        let output = response.output_result.unwrap();
+        assert_eq!(output.ck_rv, CkRv::ARGUMENTS_BAD.0);
+        assert_eq!(output.returned_len, 0);
+        assert_eq!(output.value, None);
+        let parameter = response.parameter_result.unwrap();
+        assert_eq!(parameter.ck_rv, CkRv::ARGUMENTS_BAD.0);
+        assert_eq!(parameter.returned_len, 0);
+        assert_eq!(parameter.value, None);
+        assert_eq!(mock.data_op_call_count(), before + 1);
+    }
 
     #[tokio::test]
     async fn malformed_post_provider_ack_returns_ambiguity_and_clears_server_shape() {
@@ -788,6 +863,7 @@ mod ambiguity_tests {
                 output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
                     buffer_present: true,
                     buffer_len: 8,
+                    length_pointer_null: false,
                 }),
                 input_data: vec![0x22; 8],
                 associated_data: Vec::new(),

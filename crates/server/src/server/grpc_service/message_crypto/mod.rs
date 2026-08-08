@@ -2972,6 +2972,56 @@ mod lifecycle_transition_tests {
         }
     }
 
+    #[tokio::test]
+    async fn sign_message_next_null_pul_len_wire_form_remains_a_feed_call() {
+        let (ctx, mock, context_id, session) =
+            setup_raw_handler(ServerMessageOperation::Sign).await;
+        let data_calls_before = mock.data_op_call_count();
+        let parameter_calls_before = mock.message_parameter_call_count();
+
+        // `request_signature = false` is the dedicated wire form emitted by
+        // C_SignMessageNext when `pulSignatureLen == NULL`. It must not be
+        // reclassified as an exact-output request with a missing length pointer.
+        let response = sign_message_next(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::SignMessageNextRequest {
+                client_context_id: context_id.0.clone(),
+                session_handle: session,
+                parameter: Vec::new(),
+                data_part: b"more".to_vec(),
+                request_signature: false,
+                data_part_null_len: None,
+                parameter_out_spec: Some(pkcs11_proxy_ng_proto::ParameterRoundtripSpec {
+                    buffer_present: false,
+                    buffer_len: 0,
+                    value: None,
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(response.ck_rv, CkRv::OK.0);
+        assert!(response.signature.is_empty());
+        assert_eq!(mock.data_op_call_count(), data_calls_before + 1);
+        assert_eq!(mock.message_parameter_call_count(), parameter_calls_before + 1);
+        assert_eq!(
+            ctx.context_manager
+                .message_operation_lock(
+                    &context_id,
+                    VirtualHandle(session),
+                    ServerMessageOperation::Sign,
+                )
+                .await
+                .unwrap()
+                .lock()
+                .await
+                .shape,
+            Some(MessageParameterShape::Unmodeled),
+        );
+    }
+
     async fn shape(
         ctx: &HandlerContext,
         context_id: &ClientContextId,
@@ -3752,6 +3802,7 @@ mod lifecycle_transition_tests {
                                             pkcs11_proxy_ng_proto::OutputBufferSpec {
                                                 buffer_present: true,
                                                 buffer_len: 1,
+                                                length_pointer_null: false,
                                             },
                                         ),
                                         input_data: vec![0x31],
@@ -3915,6 +3966,7 @@ mod lifecycle_transition_tests {
                         output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
                             buffer_present: true,
                             buffer_len: 8,
+                            length_pointer_null: false,
                         }),
                         input_data: vec![0x33; 8],
                         associated_data: Vec::new(),
@@ -4052,6 +4104,7 @@ mod lifecycle_transition_tests {
                     output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
                         buffer_present: true,
                         buffer_len: 8,
+                        length_pointer_null: false,
                     }),
                     input_data: vec![0x33; 8],
                     associated_data: Vec::new(),
@@ -4196,6 +4249,7 @@ mod lifecycle_transition_tests {
                 output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
                     buffer_present: true,
                     buffer_len: 8,
+                    length_pointer_null: false,
                 }),
                 input_data: vec![0x44; 8],
                 associated_data: Vec::new(),
@@ -4233,6 +4287,7 @@ mod lifecycle_transition_tests {
                 output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
                     buffer_present: true,
                     buffer_len: 8,
+                    length_pointer_null: false,
                 }),
                 input_data: vec![0x55; 8],
                 associated_data: Vec::new(),
@@ -4293,6 +4348,7 @@ mod lifecycle_transition_tests {
                 output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
                     buffer_present: true,
                     buffer_len: 8,
+                    length_pointer_null: false,
                 }),
                 input_data: vec![0x66; 8],
                 associated_data: Vec::new(),
