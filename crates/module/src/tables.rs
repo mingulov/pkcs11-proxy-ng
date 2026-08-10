@@ -153,9 +153,9 @@ pub static FUNCTION_LIST_3_2_EXTRA_FIELDS: &[FnField] = fn_fields!(
 /// Check a function list struct for NULL function pointers.
 ///
 /// # Safety
-/// `base` must point to a valid, properly-aligned struct of the type
-/// that `fields` was generated from. The struct must remain valid
-/// for the duration of this call.
+/// `base` must point to a valid, live struct of the type that `fields`
+/// was generated from. The struct must remain valid for the duration
+/// of this call.
 pub unsafe fn detect_null_functions(base: *const u8, fields: &[FnField]) -> Vec<String> {
     let mut nulls = Vec::new();
     for field in fields {

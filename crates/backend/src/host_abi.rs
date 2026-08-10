@@ -4,9 +4,9 @@
 //! `cryptoki_sys::CK_ULONG` width and the host byte order are the *backend's*
 //! width and order. The server advertises these to narrow clients (via
 //! `GetBackendInterfacesResponse`) so a client whose `CK_ULONG` differs can
-//! bridge ulong-typed attribute values and lengths. This lives in the backend
-//! crate because it is the only crate that links `cryptoki-sys` as a normal
-//! (non-dev) dependency.
+//! bridge ulong-typed attribute values and lengths. This module lives in the
+//! backend crate because the daemon's compiled CK_ULONG width and byte order
+//! define the backend's ABI.
 
 /// The daemon's backend `sizeof(CK_ULONG)` in bytes: 4 on a narrow
 /// (ILP32 / LLP64) build, 8 on an LP64 build.
