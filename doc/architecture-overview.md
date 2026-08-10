@@ -32,6 +32,7 @@ see the individual ADRs in `doc/adr/`.
 | `types` | lib | Pure Rust PKCS#11 type definitions (CK_RV, mechanisms, attributes) |
 | `proto` | lib | Protobuf definitions + tonic generated code + type conversions |
 | `backend` | lib | Backend trait + FFI (dlopen) implementation + mock backend |
+| `module` | lib | Shared module-FFI facts: raw function-table acquisition, field-offset tables, layout selection (`pkcs11-module`; consumed by backend and externally) |
 | `pkcs11-proxy-ng` | bin | Daemon: gRPC server, context/session management, auth |
 | `pkcs11-proxy-ng-client` | lib | Rust client library: gRPC client, error mapping, reconnect |
 | `pkcs11-proxy-ng-cli` | bin | CLI tool for diagnostics and automation |
