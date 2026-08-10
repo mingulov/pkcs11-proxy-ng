@@ -29,7 +29,7 @@ impl FfiBackend {
 
         let primary_from_interface = Self::resolve_get_interface(&lib).is_some();
         let func_list =
-            Self::try_get_interface(&lib).or_else(|_| Self::try_get_function_list(&lib))?;
+            Self::try_get_interface(&lib).or_else(|_| pkcs11_module::function_list(&lib))?;
 
         // Attempt to discover 3.0 and 3.2 function lists. These are optional;
         // a 2.40-only module will simply leave both as None.
@@ -186,26 +186,6 @@ impl FfiBackend {
             return None;
         }
         Some(func_list)
-    }
-
-    /// Fallback: resolve via C_GetFunctionList (2.x).
-    fn try_get_function_list(lib: &Library) -> Result<*mut cryptoki_sys::CK_FUNCTION_LIST, String> {
-        let get_func_list: Symbol<
-            unsafe extern "C" fn(*mut *mut cryptoki_sys::CK_FUNCTION_LIST) -> cryptoki_sys::CK_RV,
-        > = unsafe {
-            lib.get(b"C_GetFunctionList\0")
-                .map_err(|e| format!("C_GetFunctionList not found: {e}"))?
-        };
-
-        let mut func_list: *mut cryptoki_sys::CK_FUNCTION_LIST = std::ptr::null_mut();
-        let rv = unsafe { get_func_list(&mut func_list) };
-        if rv != 0 {
-            return Err(format!("C_GetFunctionList returned 0x{rv:08x}"));
-        }
-        if func_list.is_null() {
-            return Err("C_GetFunctionList returned null".into());
-        }
-        Ok(func_list)
     }
 }
 

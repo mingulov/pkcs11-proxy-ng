@@ -8,8 +8,10 @@
 //! in the pkcs11-scope repository
 //! (`docs/superpowers/specs/2026-08-10-module-crate-extraction-design.md`).
 
+pub mod acquire;
 pub mod tables;
 
+pub use acquire::function_list;
 pub use tables::{
     FUNCTION_LIST_3_0_EXTRA_FIELDS, FUNCTION_LIST_3_2_EXTRA_FIELDS, FUNCTION_LIST_FIELDS, FnField,
     Surface, TableSet, detect_null_functions, read_fn_pointers, tables_for,
