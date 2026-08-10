@@ -24,10 +24,11 @@ see the individual ADRs in `doc/adr/`.
 └─────────────────────────────┘    └──────────────────────────────┘
 ```
 
-## Planned Crate Structure (pkcs11-proxy-ng/ workspace)
+## Current Crate Structure
 
 | Crate | Type | Purpose |
 |-------|------|---------|
+| `audit` | lib | Tamper-evident audit records, hash chain, signed checkpoints, verification |
 | `types` | lib | Pure Rust PKCS#11 type definitions (CK_RV, mechanisms, attributes) |
 | `proto` | lib | Protobuf definitions + tonic generated code + type conversions |
 | `backend` | lib | Backend trait + FFI (dlopen) implementation + mock backend |
@@ -41,8 +42,13 @@ see the individual ADRs in `doc/adr/`.
 Full details in `doc/adr/`:
 
 **ADR-0001 — Function & Mechanism Coverage Policy**
-- Phase 1 targets an explicit seed set of ~28 PKCS#11 functions; long-term goal
-  is complete coverage of 2.40 through 3.2.
+- The standard `cryptoki-sys` function-list tables expose 104 PKCS#11 fields,
+  all represented by the proxy with local test citations. Six `C_DigestXof*`
+  declarations remain explicit spec-only gaps because the published headers and
+  bindings provide no standard function-list slots for them.
+- Parameter modeling covers 79 mechanism shapes and three message-parameter
+  shapes. See `doc/oasis-profile-coverage.md` for generated, source-grounded
+  coverage and the exact-output inventory.
 - Parameterless mechanism calls always forwarded (no parameter data to interpret).
 - Parameterized mechanisms require explicit protobuf modeling; unmodeled params
   rejected with `CKR_MECHANISM_PARAM_INVALID`.
@@ -88,6 +94,9 @@ Full details in `doc/adr/`:
 - Transport authentication failures use gRPC status. Token visibility failures
   on PKCS#11 calls are mapped to PKCS#11 return values that hide unauthorized
   slots.
+- ADR-0012 extends this with opt-in mTLS leaf-SPKI identities, deny-default
+  class/mechanism/object policy, extract denial, rate/session quotas, login
+  budgets, tamper-evident auditing, and the attribute cache.
 
 ### Current Listener Support Matrix
 
@@ -97,12 +106,12 @@ Runtime support and production intent are tracked separately.
 | --- | --- | --- |
 | TCP with `auth = "mtls"` | Production remote transport | Starts with tonic/rustls mTLS, requires CA/server cert/server key, and binds peer certificate identity to `client_context_id` |
 | TCP with `auth = "none"` and `allow_insecure_tcp = true` | Development and local integration tests | Starts only with the explicit unsafe opt-in |
-| Unix socket | Development and test-only local transport | Fails closed in the production daemon; any future implementation must require an explicit dev/test opt-in and socket permissions |
+| Unix socket with `auth = "peer_cred"` | Authenticated local transport on supported Unix platforms | Implemented; binds kernel-supplied UID identity, validates policy identity form, and creates the socket with restrictive permissions |
+| Unix socket with `auth = "none"` | Development and local integration tests | Implemented only with explicit insecure configuration and emits a startup warning |
 
-Unix sockets are not a production security boundary for this project. If a Unix
-listener is enabled for tests later, the daemon must print a startup warning and
-bind the socket with restrictive permissions such as `0600` for single-user
-tests or `0660` for a dedicated test group.
+Unauthenticated Unix sockets are not a production security boundary. Production
+local deployments use `peer_cred`; unauthenticated mode remains an explicit
+development escape hatch.
 
 ## Tech Stack
 
@@ -113,19 +122,19 @@ tests or `0660` for a dedicated test group.
 - **clap** — CLI argument parsing
 - **serde + toml** — configuration parsing
 - **tracing** — structured logging
+- **ed25519-dalek + sha2** — signed checkpoints and audit hash-chain integrity
 - **rustls** — TLS 1.3 for mTLS
 - **nix** — SO_PEERCRED for Unix socket peer credentials
 - **cryptoki-sys** — raw PKCS#11 C FFI type definitions
 
-## Phase 1 Scope
+## Current Scope
 
-**In scope:** Linux daemon, Linux shim, Rust client lib, CLI, gRPC over TCP,
-mTLS TCP transport, PKCS#11 2.40 full function coverage plus 3.0/3.2
-functions (message-based APIs, KEM, VerifySignature, authenticated wrap, async
-polling), SoftHSM2 integration tests, pkcs11-tool / p11tool compatibility
-validation.
+**In scope:** Linux daemon and shim, Rust client library, CLI, gRPC over mTLS
+TCP and authenticated Unix sockets, represented PKCS#11 2.40/3.x function-list
+coverage, explicitly modeled mechanisms, exact-output semantics, SoftHSM2/NSS
+integration, and optional gateway/audit controls.
 
-**Out of scope:** Windows/macOS, full PKCS#11 conformance across every mechanism
-and parameter structure, automatic support for future PKCS#11 versions,
-C_AsyncGetID/C_AsyncJoin persistence (returns spec-compliant refusal codes),
-callbacks, multi-module aggregation within a single daemon.
+**Out of scope:** Windows/macOS runtime targets, automatic support for future
+PKCS#11 versions or unmodeled parameter layouts, backend worker-process
+isolation, callbacks, and multi-module aggregation within a single daemon.
+The proxy is a forwarding layer; provider conformance is validated externally.
