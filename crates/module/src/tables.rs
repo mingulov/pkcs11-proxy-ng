@@ -7,6 +7,7 @@
 use cryptoki_sys::*;
 
 /// A (field_name, byte_offset) pair for a function pointer field.
+#[derive(Debug)]
 pub struct FnField {
     pub name: &'static str,
     pub offset: usize,
@@ -186,6 +187,57 @@ pub unsafe fn read_fn_pointers(base: *const u8, fields: &[FnField]) -> Vec<(&'st
         .collect()
 }
 
+/// Where a function table came from — the input that decides which field
+/// tables may be walked over it (spec §7). Vendor interfaces and NULL
+/// function lists are deliberately unrepresentable: only `is_standard()`
+/// interfaces may be wrapped in `StandardInterface`, and callers never
+/// construct a `Surface` for anything else.
+#[derive(Debug, Clone, Copy)]
+pub enum Surface {
+    /// Obtained via `C_GetFunctionList`. Only known to be base-size,
+    /// regardless of what its own version field claims.
+    LegacyFunctionList,
+    /// A `C_GetInterfaceList`/`C_GetInterface` interface whose reported
+    /// name is exactly "PKCS 11", with its validated reported version.
+    StandardInterface { version: cryptoki_sys::CK_VERSION },
+}
+
+/// The tables that may be walked over a surface, in walk order.
+#[derive(Debug, Clone, Copy)]
+pub enum TableSet {
+    Walk(&'static [&'static [FnField]]),
+    /// 3.x with minor > 2: the listed tables are a safe *prefix*; fields
+    /// beyond the known 3.2 layout exist but must be recorded as excess,
+    /// not walked.
+    WalkKnownPrefix(&'static [&'static [FnField]]),
+    /// Unknown layout (non-2.40 2.x, unknown major): record, walk nothing.
+    Refuse,
+}
+
+static BASE: &[&[FnField]] = &[FUNCTION_LIST_FIELDS];
+static V3_0: &[&[FnField]] = &[FUNCTION_LIST_FIELDS, FUNCTION_LIST_3_0_EXTRA_FIELDS];
+static V3_2: &[&[FnField]] =
+    &[FUNCTION_LIST_FIELDS, FUNCTION_LIST_3_0_EXTRA_FIELDS, FUNCTION_LIST_3_2_EXTRA_FIELDS];
+
+/// The single authority binding provenance + validated version to the
+/// walkable field tables (spec §7). Both the proxy's capability scan and
+/// the discovery helper go through this, so the invariant has one home.
+pub fn tables_for(surface: Surface) -> TableSet {
+    match surface {
+        Surface::LegacyFunctionList => TableSet::Walk(BASE),
+        Surface::StandardInterface { version } => match (version.major, version.minor) {
+            // OASIS mandates 0x02/0x28 ("a version 2.40 compatible
+            // structure") — the only 2.x layout the base table describes.
+            (2, 40) => TableSet::Walk(BASE),
+            (2, _) => TableSet::Refuse,
+            (3, 0) | (3, 1) => TableSet::Walk(V3_0),
+            (3, 2) => TableSet::Walk(V3_2),
+            (3, _) => TableSet::WalkKnownPrefix(V3_2),
+            _ => TableSet::Refuse,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +274,84 @@ mod tests {
         assert_eq!(FUNCTION_LIST_FIELDS.len(), 68);
         assert_eq!(FUNCTION_LIST_3_0_EXTRA_FIELDS.len(), 24);
         assert_eq!(FUNCTION_LIST_3_2_EXTRA_FIELDS.len(), 12);
+    }
+
+    fn std_iface(major: u8, minor: u8) -> Surface {
+        Surface::StandardInterface { version: cryptoki_sys::CK_VERSION { major, minor } }
+    }
+
+    fn walked(set: TableSet) -> Vec<*const FnField> {
+        match set {
+            TableSet::Walk(s) | TableSet::WalkKnownPrefix(s) => {
+                s.iter().map(|f| f.as_ptr()).collect()
+            }
+            TableSet::Refuse => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_walks_base_only_regardless_of_any_version_claim() {
+        // Provenance, not the table's own bytes, decides: legacy is base-only.
+        let set = tables_for(Surface::LegacyFunctionList);
+        assert!(matches!(set, TableSet::Walk(_)));
+        assert_eq!(walked(set), vec![FUNCTION_LIST_FIELDS.as_ptr()]);
+    }
+
+    #[test]
+    fn standard_240_walks_base_and_other_2x_is_refused() {
+        let set = tables_for(std_iface(2, 40));
+        assert!(matches!(set, TableSet::Walk(_)));
+        assert_eq!(walked(set), vec![FUNCTION_LIST_FIELDS.as_ptr()]);
+        // OASIS defines the structure only as 0x02/0x28 "2.40 compatible";
+        // an older 2.x table is not guaranteed to contain the full 2.40 tail.
+        assert!(matches!(tables_for(std_iface(2, 30)), TableSet::Refuse));
+        assert!(matches!(tables_for(std_iface(2, 20)), TableSet::Refuse));
+    }
+
+    #[test]
+    fn standard_30_and_31_walk_base_plus_30() {
+        for minor in [0, 1] {
+            let set = tables_for(std_iface(3, minor));
+            assert!(matches!(set, TableSet::Walk(_)));
+            assert_eq!(
+                walked(set),
+                vec![FUNCTION_LIST_FIELDS.as_ptr(), FUNCTION_LIST_3_0_EXTRA_FIELDS.as_ptr()],
+            );
+        }
+    }
+
+    #[test]
+    fn standard_32_walks_all_three() {
+        let set = tables_for(std_iface(3, 2));
+        assert!(matches!(set, TableSet::Walk(_)));
+        assert_eq!(
+            walked(set),
+            vec![
+                FUNCTION_LIST_FIELDS.as_ptr(),
+                FUNCTION_LIST_3_0_EXTRA_FIELDS.as_ptr(),
+                FUNCTION_LIST_3_2_EXTRA_FIELDS.as_ptr(),
+            ],
+        );
+    }
+
+    #[test]
+    fn standard_3_minor_above_2_walks_known_prefix() {
+        let set = tables_for(std_iface(3, 3));
+        assert!(matches!(set, TableSet::WalkKnownPrefix(_)));
+        assert_eq!(
+            walked(set),
+            vec![
+                FUNCTION_LIST_FIELDS.as_ptr(),
+                FUNCTION_LIST_3_0_EXTRA_FIELDS.as_ptr(),
+                FUNCTION_LIST_3_2_EXTRA_FIELDS.as_ptr(),
+            ],
+        );
+    }
+
+    #[test]
+    fn unknown_majors_are_refused() {
+        assert!(matches!(tables_for(std_iface(4, 0)), TableSet::Refuse));
+        assert!(matches!(tables_for(std_iface(1, 0)), TableSet::Refuse));
+        assert!(matches!(tables_for(std_iface(0, 0)), TableSet::Refuse));
     }
 }

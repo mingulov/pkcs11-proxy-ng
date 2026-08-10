@@ -12,5 +12,5 @@ pub mod tables;
 
 pub use tables::{
     FUNCTION_LIST_3_0_EXTRA_FIELDS, FUNCTION_LIST_3_2_EXTRA_FIELDS, FUNCTION_LIST_FIELDS, FnField,
-    detect_null_functions, read_fn_pointers,
+    Surface, TableSet, detect_null_functions, read_fn_pointers, tables_for,
 };
