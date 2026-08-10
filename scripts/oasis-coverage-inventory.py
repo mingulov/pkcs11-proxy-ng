@@ -1440,7 +1440,7 @@ def official_function_headers(root: Path) -> list[tuple[str, Path]]:
 
 
 def function_field_tables(root: Path) -> Path:
-    return root / "crates/backend/src/ffi/function_field_tables.rs"
+    return root / "crates/module/src/tables.rs"
 
 
 def service_proto(root: Path) -> Path:

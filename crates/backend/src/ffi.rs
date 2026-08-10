@@ -14,8 +14,6 @@ mod call_helpers;
 mod crypto_ops;
 #[path = "ffi/ffi_conversion/mod.rs"]
 mod ffi_conversion;
-#[path = "ffi/function_field_tables.rs"]
-mod function_field_tables;
 #[path = "ffi/interface_caps.rs"]
 mod interface_caps;
 #[path = "ffi/kem_ops.rs"]

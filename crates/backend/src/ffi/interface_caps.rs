@@ -1,7 +1,7 @@
 //! BUG-001: Interface capability detection for FfiBackend.
 
 use super::FfiBackend;
-use super::function_field_tables::*;
+use pkcs11_module::tables::*;
 use pkcs11_proxy_ng_types::{InterfaceCapabilities, InterfaceInfo};
 
 impl FfiBackend {

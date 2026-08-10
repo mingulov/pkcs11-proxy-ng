@@ -159,11 +159,68 @@ pub unsafe fn detect_null_functions(base: *const u8, fields: &[FnField]) -> Vec<
     let mut nulls = Vec::new();
     for field in fields {
         // Each function pointer field is `Option<unsafe extern "C" fn(...)>`,
-        // which is pointer-sized. A None value is all-zero bytes.
-        let ptr_val = unsafe { (base.add(field.offset) as *const usize).read() };
+        // which is pointer-sized. A None value is all-zero bytes. read_unaligned:
+        // on the packed Windows-MSVC cryptoki-sys bindings these fields start at
+        // offset 2 (after CK_VERSION), where an aligned read is UB.
+        let ptr_val = unsafe { (base.add(field.offset) as *const usize).read_unaligned() };
         if ptr_val == 0 {
             nulls.push(field.name.to_string());
         }
     }
     nulls
+}
+
+/// Read every function-pointer field's raw value (for pointer→file-offset
+/// mapping in discovery tooling).
+///
+/// # Safety
+/// Same contract as [`detect_null_functions`]: `base` must point to a
+/// valid, live struct of the type `fields` was generated from.
+pub unsafe fn read_fn_pointers(base: *const u8, fields: &[FnField]) -> Vec<(&'static str, usize)> {
+    fields
+        .iter()
+        .map(|field| {
+            let value = unsafe { (base.add(field.offset) as *const usize).read_unaligned() };
+            (field.name, value)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A byte buffer standing in for a CK_FUNCTION_LIST: one non-NULL slot
+    /// written at the C_Initialize offset, everything else zero.
+    fn fake_base_table() -> Vec<u8> {
+        let mut buf = vec![0u8; std::mem::size_of::<cryptoki_sys::CK_FUNCTION_LIST>()];
+        let off = FUNCTION_LIST_FIELDS[0].offset; // C_Initialize
+        buf[off..off + std::mem::size_of::<usize>()]
+            .copy_from_slice(&0xDEAD_BEEFusize.to_ne_bytes());
+        buf
+    }
+
+    #[test]
+    fn detect_null_functions_reports_all_but_the_set_slot() {
+        let buf = fake_base_table();
+        let nulls = unsafe { detect_null_functions(buf.as_ptr(), FUNCTION_LIST_FIELDS) };
+        assert!(!nulls.contains(&"C_Initialize".to_string()));
+        assert_eq!(nulls.len(), FUNCTION_LIST_FIELDS.len() - 1);
+    }
+
+    #[test]
+    fn read_fn_pointers_returns_names_with_values() {
+        let buf = fake_base_table();
+        let ptrs = unsafe { read_fn_pointers(buf.as_ptr(), FUNCTION_LIST_FIELDS) };
+        assert_eq!(ptrs.len(), FUNCTION_LIST_FIELDS.len());
+        assert_eq!(ptrs[0], ("C_Initialize", 0xDEAD_BEEF));
+        assert!(ptrs[1..].iter().all(|(_, v)| *v == 0));
+    }
+
+    #[test]
+    fn table_sizes_match_the_documented_counts() {
+        assert_eq!(FUNCTION_LIST_FIELDS.len(), 68);
+        assert_eq!(FUNCTION_LIST_3_0_EXTRA_FIELDS.len(), 24);
+        assert_eq!(FUNCTION_LIST_3_2_EXTRA_FIELDS.len(), 12);
+    }
 }

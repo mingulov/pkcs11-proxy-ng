@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
+pkcs11-module = { path = "../module" }
 libloading.workspace = true
 cryptoki-sys.workspace = true
 tracing.workspace = true

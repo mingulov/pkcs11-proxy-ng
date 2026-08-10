@@ -90,7 +90,7 @@ done
 
 packages=(
     pkcs11-proxy-ng-audit pkcs11-proxy-ng-types pkcs11-proxy-ng-proto \
-    pkcs11-proxy-ng-backend pkcs11-proxy-ng pkcs11-proxy-ng-client \
+    pkcs11-module pkcs11-proxy-ng-backend pkcs11-proxy-ng pkcs11-proxy-ng-client \
     pkcs11-proxy-ng-cli pkcs11-proxy-ng-shim
 )
 expected_packages="$(printf '%s\n' "${packages[@]}" | sort)"

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/audit",
+    "crates/module",
     "crates/types",
     "crates/proto",
     "crates/backend",
