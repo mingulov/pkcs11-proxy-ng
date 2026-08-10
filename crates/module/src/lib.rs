@@ -11,7 +11,7 @@
 pub mod acquire;
 pub mod tables;
 
-pub use acquire::function_list;
+pub use acquire::{RawInterface, function_list, interface_list};
 pub use tables::{
     FUNCTION_LIST_3_0_EXTRA_FIELDS, FUNCTION_LIST_3_2_EXTRA_FIELDS, FUNCTION_LIST_FIELDS, FnField,
     Surface, TableSet, detect_null_functions, read_fn_pointers, tables_for,
