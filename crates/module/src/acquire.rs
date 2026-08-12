@@ -26,26 +26,14 @@ pub fn function_list(lib: &Library) -> Result<*mut cryptoki_sys::CK_FUNCTION_LIS
 }
 
 /// One interface exactly as the module reported it. Nothing is resolved,
-/// deduplicated, or reinterpreted; NULL fields are preserved as evidence.
+/// dereferenced, deduplicated, or reinterpreted; NULL fields are preserved.
 #[derive(Debug)]
 pub struct RawInterface {
-    /// Bytes of `pInterfaceName` (no trailing NUL); `None` if NULL.
-    pub name: Option<Vec<u8>>,
-    /// Leading `CK_VERSION` of `pFunctionList`; `None` if that is NULL.
-    pub version: Option<cryptoki_sys::CK_VERSION>,
-    pub flags: cryptoki_sys::CK_FLAGS,
-    /// May be NULL — preserved, never dereferenced then.
+    /// May be NULL or unreadable. Acquisition never follows it.
+    pub name_ptr: *mut cryptoki_sys::CK_UTF8CHAR,
+    /// May be NULL or unreadable. Acquisition never follows it.
     pub func_list: *mut std::ffi::c_void,
-}
-
-impl RawInterface {
-    /// Exact match against the standard interface name. Callers must not
-    /// walk the standard field tables over an interface for which this is
-    /// false (vendor layouts are unrelated; only the leading CK_VERSION is
-    /// guaranteed by the spec).
-    pub fn is_standard(&self) -> bool {
-        self.name.as_deref() == Some(b"PKCS 11")
-    }
+    pub flags: cryptoki_sys::CK_FLAGS,
 }
 
 /// Providers report a handful of interfaces; a garbage count must not
@@ -124,37 +112,18 @@ where
                 "provider claims {filled} interfaces written into capacity {capacity}"
             ));
         }
-        // SAFETY: entries were written by the provider (or are the zeroed
-        // initializers); name/version reads below guard NULL pointers and
-        // use read_unaligned for the version header.
-        return Ok(Some(buf[..filled].iter().map(|i| unsafe { raw_interface(i) }).collect()));
+        return Ok(Some(
+            buf[..filled]
+                .iter()
+                .map(|i| RawInterface {
+                    name_ptr: i.pInterfaceName,
+                    func_list: i.pFunctionList,
+                    flags: i.flags,
+                })
+                .collect(),
+        ));
     }
     Err(format!("C_GetInterfaceList count kept growing after {MAX_ATTEMPTS} attempts"))
-}
-
-/// # Safety
-/// Non-NULL `pInterfaceName` must be a live NUL-terminated string and
-/// non-NULL `pFunctionList` must point at readable memory of at least
-/// `CK_VERSION` size — both guaranteed by the PKCS#11 contract for
-/// interfaces a live module reports.
-unsafe fn raw_interface(iface: &CK_INTERFACE) -> RawInterface {
-    let name = if iface.pInterfaceName.is_null() {
-        None
-    } else {
-        Some(
-            unsafe {
-                std::ffi::CStr::from_ptr(iface.pInterfaceName as *const std::os::raw::c_char)
-            }
-            .to_bytes()
-            .to_vec(),
-        )
-    };
-    let version = if iface.pFunctionList.is_null() {
-        None
-    } else {
-        Some(unsafe { (iface.pFunctionList as *const cryptoki_sys::CK_VERSION).read_unaligned() })
-    };
-    RawInterface { name, version, flags: iface.flags, func_list: iface.pFunctionList }
 }
 
 #[cfg(test)]
@@ -228,8 +197,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(result.len(), 2);
-        assert!(result[0].is_standard());
-        assert!(!result[1].is_standard());
+        assert!(!result[0].name_ptr.is_null());
+        assert!(!result[1].name_ptr.is_null());
+        assert_eq!(result[0].func_list, fake_list_ptr());
+        assert_eq!(result[1].func_list, fake_list_ptr());
     }
 
     #[test]
@@ -275,6 +246,34 @@ mod tests {
     }
 
     #[test]
+    fn interface_targets_are_returned_verbatim_without_being_read() {
+        let name_ptr = 1usize as *mut cryptoki_sys::CK_UTF8CHAR;
+        let func_list = 2usize as *mut std::ffi::c_void;
+        let result =
+            interface_list_impl(Some(|ifaces: *mut CK_INTERFACE, count: *mut CK_ULONG| {
+                if ifaces.is_null() {
+                    unsafe { *count = 1 };
+                } else {
+                    unsafe {
+                        *ifaces = CK_INTERFACE {
+                            pInterfaceName: name_ptr,
+                            pFunctionList: func_list,
+                            flags: 7,
+                        };
+                        *count = 1;
+                    }
+                }
+                CKR_OK
+            }))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result[0].name_ptr, name_ptr);
+        assert_eq!(result[0].func_list, func_list);
+        assert_eq!(result[0].flags, 7);
+    }
+
+    #[test]
     fn null_name_and_null_func_list_are_preserved_not_dereferenced() {
         let result =
             interface_list_impl(Some(|ifaces: *mut CK_INTERFACE, count: *mut CK_ULONG| {
@@ -295,27 +294,10 @@ mod tests {
             }))
             .unwrap()
             .unwrap();
-        assert_eq!(result[0].name, None);
-        assert_eq!(result[0].version.map(|v| (v.major, v.minor)), Some((3, 0)));
-        assert!(!result[0].is_standard()); // no name -> not standard
-        assert_eq!(result[1].name.as_deref(), Some(b"PKCS 11".as_slice()));
-        assert!(result[1].version.is_none()); // NULL list: nothing dereferenced
+        assert!(result[0].name_ptr.is_null());
+        assert_eq!(result[0].func_list, fake_list_ptr());
+        assert!(!result[1].name_ptr.is_null());
         assert!(result[1].func_list.is_null());
-    }
-
-    #[test]
-    fn is_standard_requires_exact_name() {
-        let dangling = std::ptr::NonNull::<std::ffi::c_void>::dangling().as_ptr();
-        let mk = |name: Option<&[u8]>| RawInterface {
-            name: name.map(|n| n.to_vec()),
-            version: None,
-            flags: 0,
-            func_list: dangling,
-        };
-        assert!(mk(Some(b"PKCS 11")).is_standard());
-        assert!(!mk(Some(b"PKCS 11 X")).is_standard());
-        assert!(!mk(Some(b"pkcs 11")).is_standard());
-        assert!(!mk(None).is_standard());
     }
 
     /// Real 3.x provider check (SoftHSM2 2.6 is 2.40-only, so it cannot
@@ -336,8 +318,8 @@ mod tests {
         let listed = listed.expect("a 3.x module exports C_GetInterfaceList");
         assert!(!listed.is_empty());
         assert!(
-            listed.iter().any(|i| i.is_standard()),
-            "a conforming 3.x module reports at least one \"PKCS 11\" interface"
+            listed.iter().any(|i| !i.name_ptr.is_null() && !i.func_list.is_null()),
+            "a conforming 3.x module reports at least one usable raw interface record"
         );
         // The legacy surface must be independently collectable too.
         super::function_list(&lib).expect("legacy 2.40 table");
