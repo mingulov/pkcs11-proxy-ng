@@ -6,9 +6,10 @@ use pkcs11_proxy_ng_types::{InterfaceCapabilities, InterfaceInfo};
 
 fn nulls_for(list: *const u8, surface: Surface) -> Vec<String> {
     match tables_for(surface) {
-        TableSet::Walk(sets) | TableSet::WalkKnownPrefix(sets) => {
-            sets.iter().flat_map(|fields| unsafe { detect_null_functions(list, fields) }).collect()
-        }
+        TableSet::Walk(sets) | TableSet::WalkKnownPrefix(sets) => sets
+            .iter()
+            .flat_map(|span| unsafe { detect_null_functions(list, span.fields()) })
+            .collect(),
         TableSet::Refuse => Vec::new(),
     }
 }
@@ -22,7 +23,12 @@ impl FfiBackend {
         // v2.40 is always present. self.func_list may be legacy- or (validated)
         // interface-derived; both walk base-only, so LegacyFunctionList is the
         // conservative surface for it either way.
-        let null_2_40 = nulls_for(self.func_list as *const u8, Surface::LegacyFunctionList);
+        let null_2_40 = nulls_for(
+            self.func_list as *const u8,
+            Surface::LegacyFunctionList {
+                version: cryptoki_sys::CK_VERSION { major: 2, minor: 40 },
+            },
+        );
         interfaces.push(InterfaceInfo {
             version_major: 2,
             version_minor: 40,

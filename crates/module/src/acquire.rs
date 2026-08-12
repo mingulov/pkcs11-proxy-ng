@@ -247,8 +247,8 @@ mod tests {
 
     #[test]
     fn interface_targets_are_returned_verbatim_without_being_read() {
-        let name_ptr = 1usize as *mut cryptoki_sys::CK_UTF8CHAR;
-        let func_list = 2usize as *mut std::ffi::c_void;
+        let name_ptr = std::ptr::dangling_mut::<cryptoki_sys::CK_UTF8CHAR>();
+        let func_list = std::ptr::dangling_mut::<usize>().cast::<std::ffi::c_void>();
         let result =
             interface_list_impl(Some(|ifaces: *mut CK_INTERFACE, count: *mut CK_ULONG| {
                 if ifaces.is_null() {
