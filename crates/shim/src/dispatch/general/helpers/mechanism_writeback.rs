@@ -2,9 +2,6 @@
 //! output params (generated GCM IVs, SP800-108 derived-key handles)
 //! back into the caller's parameter structs.
 
-use cryptoki_sys::*;
-use pkcs11_proxy_ng_types::*;
-
 use super::*;
 
 pub(crate) unsafe fn write_mechanism_output_params(

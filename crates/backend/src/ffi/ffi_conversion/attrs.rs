@@ -2,8 +2,6 @@
 //! arrays for input templates (incl. structural nested templates,
 //! ADR-0011 D8/D4) and exact-query buffers.
 
-use pkcs11_proxy_ng_types::*;
-
 use super::*;
 
 pub(in crate::ffi) struct FfiAttrs {

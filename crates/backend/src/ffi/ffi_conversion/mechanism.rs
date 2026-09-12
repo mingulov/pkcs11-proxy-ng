@@ -3,8 +3,6 @@
 //! per-shape match, kept flat by design for auditability (see the
 //! contributor rules).
 
-use pkcs11_proxy_ng_types::*;
-
 use super::*;
 
 /// Owns the `CK_MECHANISM` and any backing storage that `pParameter` points

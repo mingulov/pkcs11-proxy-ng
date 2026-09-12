@@ -129,6 +129,9 @@ pub(crate) struct InterfaceAnswer {
     pub func_list: *mut std::ffi::c_void,
 }
 
+type InterfaceQuery<'a> =
+    dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer> + 'a;
+
 const STANDARD_NAME: &[u8] = b"PKCS 11";
 
 /// §6a acceptance rule, applied uniformly to named and unnamed answers:
@@ -144,9 +147,7 @@ fn accepts_standard(ans: &InterfaceAnswer) -> bool {
 /// validated unnamed → legacy. Provenance in the returned bool comes from
 /// the branch that produced the pointer, never from symbol existence.
 fn select_primary(
-    query: Option<
-        &mut dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer>,
-    >,
+    query: Option<&mut InterfaceQuery<'_>>,
     legacy: &mut dyn FnMut() -> Result<*mut cryptoki_sys::CK_FUNCTION_LIST, String>,
 ) -> Result<(*mut cryptoki_sys::CK_FUNCTION_LIST, bool), String> {
     if let Some(q) = query {
@@ -166,7 +167,7 @@ fn select_primary(
 /// the same §6a name rule on the unnamed result. Rejecting a hypothetical
 /// vendor-named answer here is soundness over coverage.
 fn select_versioned(
-    q: &mut dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer>,
+    q: &mut InterfaceQuery<'_>,
     major: u8,
     minor: u8,
 ) -> Option<*mut std::ffi::c_void> {

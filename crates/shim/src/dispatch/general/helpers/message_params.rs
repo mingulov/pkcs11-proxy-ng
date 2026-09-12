@@ -2,7 +2,6 @@
 //! Salsa-ChaCha message params from caller memory and write results
 //! back (incl. the bits-derived-length wild-read guards).
 
-use cryptoki_sys::*;
 use pkcs11_proxy_ng_proto::convert::message_params::{
     CcmMessageParams, GcmMessageParams, MessageParameter, MessageParameterShape,
     Salsa20ChaCha20Poly1305MessageParams,

@@ -26,7 +26,9 @@ The fastest end-to-end path on a laptop, using SoftHSM2 as the backend and
 
 ```bash
 # 1. System prereqs (Debian/Ubuntu — adjust for your distro).
-sudo apt install -y softhsm2 opensc gnutls-bin
+# Install Rust stable through rustup first; see doc/development.md.
+sudo apt install -y build-essential pkg-config protobuf-compiler \
+    softhsm2 opensc gnutls-bin
 
 # 2. Initialise a SoftHSM2 token. The PIN here is for local dev only.
 softhsm2-util --init-token --slot 0 --label dev \
@@ -81,6 +83,8 @@ candidate [release notes](./doc/release/v0.2.0-release-notes.md) are satisfied.
 
 ## Documentation
 
+- [`doc/development.md`](./doc/development.md) — native tools, optional mise
+  setup, MSRV, and local validation commands
 - [`prd.md`](./prd.md) — product requirements
 - [`doc/architecture-overview.md`](./doc/architecture-overview.md) — how the
   shim, daemon, and backend fit together
