@@ -107,12 +107,13 @@ pub unsafe extern "C" fn C_GetInterfaceList(
     })
 }
 
-/// PKCS#11 3.0 — look up a named interface, optionally filtered by version.
+/// PKCS#11 3.0 — look up a named interface, optionally filtered by version and flags.
 ///
 /// - A null `p_interface_name` returns the default (highest-version) interface.
 /// - A null `p_version` matches any version; the highest-version match wins.
 /// - If no match is found, sets `*pp_interface = NULL` and returns `CKR_OK`
 ///   (per PKCS#11 3.0 §5.4).
+/// - Requested flags must be a subset of the returned interface's advertised flags.
 ///
 /// # Safety
 /// `pp_interface` must be a valid, non-null writable pointer.
@@ -121,7 +122,7 @@ pub unsafe extern "C" fn C_GetInterface(
     p_interface_name: *mut CK_UTF8CHAR,
     p_version: *mut CK_VERSION,
     pp_interface: *mut *mut CK_INTERFACE,
-    _flags: CK_FLAGS,
+    flags: CK_FLAGS,
 ) -> CK_RV {
     catch_panics(|| {
         if pp_interface.is_null() {
@@ -141,7 +142,7 @@ pub unsafe extern "C" fn C_GetInterface(
 
         let version = if p_version.is_null() { None } else { Some(unsafe { &*p_version }) };
 
-        let result = interface_probe::find_interface(name, version);
+        let result = interface_probe::find_interface(name, version, flags);
         unsafe {
             *pp_interface = result;
         }

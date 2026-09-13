@@ -888,55 +888,16 @@ pub fn copy_catalog(buf: *mut CK_INTERFACE, buf_len: CK_ULONG) -> CK_ULONG {
 pub fn find_interface(
     name: Option<&std::ffi::CStr>,
     version: Option<&CK_VERSION>,
+    flags: CK_FLAGS,
 ) -> *mut CK_INTERFACE {
     let guard = INTERFACE_STATE.read().unwrap_or_else(|e| e.into_inner());
 
-    // Helper: search a catalog slice and return the best match.
-    fn search(
-        catalog: &[CK_INTERFACE],
-        name: Option<&std::ffi::CStr>,
-        version: Option<&CK_VERSION>,
-    ) -> Option<*const CK_INTERFACE> {
-        // No name → filter by version if specified, else return default (last entry).
-        if name.is_none() {
-            if let Some(req) = version {
-                // Per PKCS#11 spec: NULL name with version returns the matching version.
-                for iface in catalog.iter().rev() {
-                    let fl_ver = unsafe { &*(iface.pFunctionList as *const CK_VERSION) };
-                    if fl_ver.major == req.major && fl_ver.minor == req.minor {
-                        return Some(iface as *const CK_INTERFACE);
-                    }
-                }
-                return None;
-            }
-            return catalog.last().map(|e| e as *const CK_INTERFACE);
-        }
-        let name = name.unwrap();
-        let name_bytes = name.to_bytes();
-
-        let mut found: Option<*const CK_INTERFACE> = None;
-        for iface in catalog.iter() {
-            let iface_name = unsafe {
-                std::ffi::CStr::from_ptr(iface.pInterfaceName as *const std::os::raw::c_char)
-            };
-            if iface_name.to_bytes() != name_bytes {
-                continue;
-            }
-            if let Some(req) = version {
-                let fl_ver = unsafe { &*(iface.pFunctionList as *const CK_VERSION) };
-                if fl_ver.major != req.major || fl_ver.minor != req.minor {
-                    continue;
-                }
-            }
-            found = Some(iface as *const CK_INTERFACE);
-        }
-        found
-    }
-
     match guard.as_ref() {
-        Some(st) => search(&st.catalog[..st.count as usize], name, version)
-            .map(|p| p as *mut CK_INTERFACE)
-            .unwrap_or(std::ptr::null_mut()),
+        Some(st) => {
+            find_interface_in_catalog(&st.catalog[..st.count as usize], name, version, flags)
+                .map(|p| p as *mut CK_INTERFACE)
+                .unwrap_or(std::ptr::null_mut())
+        }
         None => {
             // Fall back to static catalog.  We need a stable &'static
             // reference, so delegate to the OnceLock-based catalog in
@@ -969,11 +930,42 @@ pub fn find_interface(
                     },
                 ])
             });
-            search(&fb.0, name, version)
+            find_interface_in_catalog(&fb.0, name, version, flags)
                 .map(|p| p as *mut CK_INTERFACE)
                 .unwrap_or(std::ptr::null_mut())
         }
     }
+}
+
+/// Find the last catalog entry satisfying the optional name/version and flag subset.
+fn find_interface_in_catalog(
+    catalog: &[CK_INTERFACE],
+    name: Option<&std::ffi::CStr>,
+    version: Option<&CK_VERSION>,
+    flags: CK_FLAGS,
+) -> Option<*const CK_INTERFACE> {
+    catalog.iter().enumerate().rev().find_map(|(index, iface)| {
+        if iface.flags & flags != flags {
+            return None;
+        }
+        if let Some(requested_name) = name {
+            let iface_name = unsafe {
+                std::ffi::CStr::from_ptr(iface.pInterfaceName as *const std::os::raw::c_char)
+            };
+            if iface_name != requested_name {
+                return None;
+            }
+        }
+        if let Some(requested_version) = version {
+            let function_list_version = unsafe { &*(iface.pFunctionList as *const CK_VERSION) };
+            if function_list_version.major != requested_version.major
+                || function_list_version.minor != requested_version.minor
+            {
+                return None;
+            }
+        }
+        Some(&catalog[index] as *const CK_INTERFACE)
+    })
 }
 
 /// Wrapper so we can store a `[CK_INTERFACE; 3]` in a `OnceLock` (the raw
@@ -984,11 +976,50 @@ unsafe impl Sync for FallbackCatalog {}
 
 #[cfg(test)]
 mod backend_abi_tests {
+    use cryptoki_sys::{CK_INTERFACE, CK_VERSION};
+
     use super::{
-        clear_pointer_safe_message_parameters, pointer_safe_message_parameters,
-        record_pointer_safe_message_parameters, resolve_backend_attribute_stride,
-        resolve_backend_ulong_size,
+        clear_pointer_safe_message_parameters, find_interface_in_catalog,
+        pointer_safe_message_parameters, record_pointer_safe_message_parameters,
+        resolve_backend_attribute_stride, resolve_backend_ulong_size,
     };
+
+    fn synthetic_catalog() -> [CK_INTERFACE; 2] {
+        static NAME: &[u8] = b"PKCS 11\0";
+        [
+            CK_INTERFACE {
+                pInterfaceName: NAME.as_ptr() as *mut _,
+                pFunctionList: crate::function_list_3_0::get_function_list_3_0() as *mut _,
+                flags: 0b0011,
+            },
+            CK_INTERFACE {
+                pInterfaceName: NAME.as_ptr() as *mut _,
+                pFunctionList: crate::function_list_3_2::get_function_list_3_2() as *mut _,
+                flags: 0b0011,
+            },
+        ]
+    }
+
+    #[test]
+    fn synthetic_interface_catalog_applies_flag_subset_to_all_selectors() {
+        let catalog = synthetic_catalog();
+        let name = std::ffi::CStr::from_bytes_with_nul(b"PKCS 11\0").unwrap();
+        let version = CK_VERSION { major: 3, minor: 0 };
+
+        for flags in [0, 0b0001, 0b0011] {
+            assert!(find_interface_in_catalog(&catalog, Some(name), None, flags).is_some());
+            assert!(find_interface_in_catalog(&catalog, None, None, flags).is_some());
+            assert!(
+                find_interface_in_catalog(&catalog, Some(name), Some(&version), flags).is_some()
+            );
+            assert!(find_interface_in_catalog(&catalog, None, Some(&version), flags).is_some());
+        }
+        for (name, version) in
+            [(Some(name), None), (None, None), (Some(name), Some(&version)), (None, Some(&version))]
+        {
+            assert!(find_interface_in_catalog(&catalog, name, version, 0b0100).is_none());
+        }
+    }
 
     #[test]
     fn message_parameter_capability_is_cleared_before_reprobe() {
