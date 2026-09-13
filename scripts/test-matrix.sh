@@ -63,7 +63,8 @@ fi
 
 cd "$ROOT_DIR"
 
-# Capture logs for debug bundles
+# Capture logs for local test output. Diagnostic bundles intentionally do not
+# ingest arbitrary logs; review and attach these separately when appropriate.
 LOG_DIR="$(mktemp -d)"
 trap 'rm -rf "$LOG_DIR"' EXIT
 
@@ -80,7 +81,7 @@ run_step() {
         echo "FAILED: $label (exit $rc)" >&2
         if [[ "$collect_bundle_on_fail" -eq 1 ]]; then
             echo "Collecting debug bundle..." >&2
-            "$ROOT_DIR/scripts/collect-debug-bundle.sh" --include-logs "$LOG_DIR" || true
+            "$ROOT_DIR/scripts/collect-debug-bundle.sh" || true
         fi
         return $rc
     fi

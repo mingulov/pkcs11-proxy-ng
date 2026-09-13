@@ -397,6 +397,38 @@ error.
 | `PKCS11_PROXY_MECHANISMS` | Path to a TOML override file the shim layers on top of its embedded default registry at `C_Initialize`. Used only until the server-published registry arrives via `GetBackendInterfaces`. |
 | `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` | If set to any value, the shim ignores the server-published registry and uses only the embedded default + `PKCS11_PROXY_MECHANISMS` override. Test/debug use only — production should leave this unset so vendor mechanisms picked up by the daemon's `[mechanisms].config_path` are honoured. |
 
+## 8c. Private diagnostic bundles
+
+Run `scripts/collect-debug-bundle.sh` to create a small diagnostic archive under
+`target/debug-bundles/`, or select an owned output directory with
+`--output-dir`. The final output directory must be owned by the invoking user
+and must not be group- or world-writable; missing components are created with
+mode `0700`. The collector retains a no-follow descriptor for that directory,
+uses a unique create-only archive name for concurrent runs, and creates the
+archive with mode `0600`. Directories and regular files represented inside the
+archive have modes `0700` and `0600` respectively. If the validated path is
+replaced while collection is running, collection fails and removes only the
+partial archive inode it created.
+
+The archive contains only explicitly allowlisted metadata: normalized system
+and tool versions, the Git commit and dirty-state boolean, presence of known
+provider/build artifacts, and whether selected environment variables are set.
+It does not contain environment values, raw logs, configuration files, command
+errors, arbitrary paths, or workspace file contents. `--include-logs` is
+intentionally rejected because arbitrary logs cannot be generically sanitized.
+Archive construction uses Python's standard-library `tarfile` and `gzip`
+implementations with fixed member names, types, modes, timestamps, numeric
+owners, and no gzip filename. It does not invoke `tar`, `gzip`, or `mktemp`, and
+does not consume `TAR_OPTIONS` or `GZIP`. The shell entrypoint therefore needs
+only Bash and Python 3.9 or newer; the collector is intended for the project's
+supported Linux environment.
+
+The private mode protects the archive on the machine where it is created; it
+does not make the contents anonymous or suitable for automatic publication.
+Always extract and review every file before sharing. If logs or configuration
+details are essential, review and redact them separately and attach only the
+minimum necessary excerpt.
+
 ## 9. Known limitations
 
 These are documented limitations that an on-call engineer may
@@ -415,10 +447,13 @@ trace ID, gRPC health probe, rate-limiter) are closed.
 If the daemon is repeatedly crashing or returning errors and this
 runbook does not resolve the issue:
 
-1. Collect daemon + consumer logs:
-   `kubectl -n <ns> logs -l app=<daemon> --all-containers --tail=1000 > daemon.log`
-2. Capture the rendered configmaps:
-   `kubectl -n <ns> get configmap <daemon-config> -o yaml > config.yaml`
-3. Open an issue with the above attached, plus a description of the
-   change that preceded the symptoms (image bump, config edit, scale
-   change, backend HSM rotation, …).
+1. Run `scripts/collect-debug-bundle.sh`, extract the resulting archive, and
+   review every file before attaching it.
+2. If the allowlisted bundle is insufficient, collect only the relevant daemon
+   or consumer log interval. Review it for PINs, key material, credentials,
+   object values, and identifying metadata before sharing it. The bundle
+   collector does not sanitize or include logs.
+3. Describe the non-secret configuration fields and the change that preceded
+   the symptoms (image bump, config edit, scale change, backend HSM rotation,
+   and so on). Do not attach a rendered ConfigMap or full environment dump by
+   default; these commonly contain credentials.
