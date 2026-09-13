@@ -246,6 +246,7 @@ async fn invoke(
             let r = c
                 .rpc
                 .byte_output_exact(ByteOutputExactRequest {
+                    exact_output_effects_version: 1,
                     client_context_id,
                     session_handle,
                     mechanism,
@@ -270,6 +271,7 @@ async fn invoke(
             let r = c
                 .rpc
                 .parameter_output_exact(ParameterOutputExactRequest {
+                    exact_output_effects_version: 1,
                     authenticated_parameters: Some(AuthenticatedParameters::default()),
                     client_context_id,
                     session_handle,

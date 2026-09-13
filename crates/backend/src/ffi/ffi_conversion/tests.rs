@@ -844,7 +844,7 @@ mod attribute_query_tests {
     use pkcs11_proxy_ng_types::{CkAttributeQuery, CkAttributeType, CkRv};
 
     #[test]
-    fn raw_attribute_queries_preserve_null_buffer_len() {
+    fn raw_attribute_queries_zero_output_only_null_buffer_len_without_reading_caller() {
         let ffi = FfiAttributeQueries::from_queries(&[CkAttributeQuery {
             attr_type: CkAttributeType::LABEL,
             buffer_present: false,
@@ -855,7 +855,7 @@ mod attribute_query_tests {
 
         assert_eq!(ffi.attrs.len(), 1);
         assert!(ffi.attrs[0].pValue.is_null());
-        assert_eq!(ffi.attrs[0].ulValueLen, 17);
+        assert_eq!(ffi.attrs[0].ulValueLen, 0);
     }
 
     #[test]

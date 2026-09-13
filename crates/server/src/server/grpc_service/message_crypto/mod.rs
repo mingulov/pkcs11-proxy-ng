@@ -230,6 +230,7 @@ struct MessageBeginWireResult {
     parameter_out: Vec<u8>,
     parameter_result: Option<pkcs11_proxy_ng_proto::ParameterRoundtripResult>,
     message_parameter_out: Option<pkcs11_proxy_ng_proto::MessageParameter>,
+    message_effects: Option<pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1::MessageParameterEffects>,
 }
 
 fn message_begin_error(error: CkRv) -> MessageBeginWireResult {
@@ -368,37 +369,34 @@ async fn execute_message_begin(
             };
             match provider_result {
                 Ok((provider_ack, returned_parameter)) => {
+                    let native_rv = provider_ack.ck_rv;
                     let valid_parameter =
                         match (request_parameter.as_ref(), returned_parameter.as_ref()) {
                             (Some(request), Some(returned)) => {
-                                returned.validate_structured_shape(installed_shape).is_ok()
-                                    && request.same_layout_and_scalars(returned)
-                                    && (operation_kind != ServerMessageOperation::Decrypt
-                                        || request == returned)
+                                returned.validate_for(request, pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                                    encrypt: operation_kind == ServerMessageOperation::Encrypt,
+                                    generated_stage: true, auth_stage: false, rv: native_rv,
+                                }).is_ok()
                             }
                             (None, None) => true,
                             _ => false,
                         };
-                    if !parameter_result_matches_spec(&provider_ack, &contract.provider_spec)
+                    if provider_ack.returned_len != contract.provider_spec.buffer_len
+                        || provider_ack.value != contract.provider_spec.buffer_present.then(Vec::new)
                         || !valid_parameter
                     {
+                        tracing::warn!(provider_rv = native_rv.0, "native Begin output contract violation; suppressing all effects");
                         transition.settle_ambiguous();
                         return Ok(message_begin_error(CkRv::DEVICE_ERROR));
                     }
-                    let response_parameter = if operation_kind == ServerMessageOperation::Decrypt {
-                        request_parameter
-                    } else {
-                        returned_parameter
-                    };
-                    let outcome = Ok(());
+                    let outcome = if native_rv == CkRv::OK { Ok(()) } else { Err(native_rv) };
                     transition.settle(&outcome, Some(installed_shape));
                     Ok(MessageBeginWireResult {
-                        ck_rv: CkRv::OK.0,
+                        ck_rv: native_rv.0,
                         parameter_out: Vec::new(),
-                        parameter_result: Some(parameter_ack(&contract.caller_spec)),
-                        message_parameter_out: response_parameter
-                            .as_ref()
-                            .map(pkcs11_proxy_ng_proto::MessageParameter::from),
+                        parameter_result: Some((&CkParameterRoundtripResult { ck_rv: native_rv, returned_len: contract.caller_spec.buffer_len, value: contract.caller_spec.buffer_present.then(Vec::new) }).into()),
+                        message_parameter_out: None,
+                        message_effects: returned_parameter.as_ref().map(TryInto::try_into).transpose()?,
                     })
                 }
                 Err(error) => {
@@ -1593,6 +1591,9 @@ pub(crate) async fn encrypt_message_begin(
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageBeginResponse>, Status> {
     let req = request.into_inner();
+    if req.parameter_out_spec.is_some() && req.exact_output_effects_version != 1 {
+        return Err(Status::failed_precondition("exact output effects version 1 is required"));
+    }
     let ctx_id = ClientContextId(req.client_context_id);
     let result = execute_message_begin(
         ctx,
@@ -1611,6 +1612,7 @@ pub(crate) async fn encrypt_message_begin(
         parameter_out: result.parameter_out,
         parameter_result: result.parameter_result,
         message_parameter_out: result.message_parameter_out,
+        message_effects: result.message_effects,
     }))
 }
 
@@ -1837,6 +1839,9 @@ pub(crate) async fn decrypt_message_begin(
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageBeginResponse>, Status> {
     let req = request.into_inner();
+    if req.parameter_out_spec.is_some() && req.exact_output_effects_version != 1 {
+        return Err(Status::failed_precondition("exact output effects version 1 is required"));
+    }
     let ctx_id = ClientContextId(req.client_context_id);
     let result = execute_message_begin(
         ctx,
@@ -1855,6 +1860,7 @@ pub(crate) async fn decrypt_message_begin(
         parameter_out: result.parameter_out,
         parameter_result: result.parameter_result,
         message_parameter_out: result.message_parameter_out,
+        message_effects: result.message_effects,
     }))
 }
 
@@ -3753,6 +3759,7 @@ mod lifecycle_transition_tests {
                                     &ctx,
                                     Request::new(
                                         pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
+                                            exact_output_effects_version: 1,
                                             client_context_id: context_id.0.clone(),
                                             session_handle: session,
                                             parameter: Vec::new(),
@@ -3773,6 +3780,7 @@ mod lifecycle_transition_tests {
                                     &ctx,
                                     Request::new(
                                         pkcs11_proxy_ng_proto::DecryptMessageBeginRequest {
+                                            exact_output_effects_version: 1,
                                             client_context_id: context_id.0.clone(),
                                             session_handle: session,
                                             parameter: Vec::new(),
@@ -3808,7 +3816,7 @@ mod lifecycle_transition_tests {
                             let response = parameter_output_exact(
                                 &ctx,
                                 Request::new(
-                                    pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                                    pkcs11_proxy_ng_proto::ParameterOutputExactRequest { exact_output_effects_version: 1,
                                         authenticated_parameters: None,
                                         client_context_id: context_id.0.clone(),
                                         session_handle: session,
@@ -3910,6 +3918,7 @@ mod lifecycle_transition_tests {
                         encrypt_message_begin(
                             &ctx,
                             Request::new(pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
+                                exact_output_effects_version: 1,
                                 client_context_id: context_id.0.clone(),
                                 session_handle: session,
                                 parameter: Vec::new(),
@@ -3934,6 +3943,7 @@ mod lifecycle_transition_tests {
                         decrypt_message_begin(
                             &ctx,
                             Request::new(pkcs11_proxy_ng_proto::DecryptMessageBeginRequest {
+                                exact_output_effects_version: 1,
                                 client_context_id: context_id.0.clone(),
                                 session_handle: session,
                                 parameter: Vec::new(),
@@ -3974,7 +3984,7 @@ mod lifecycle_transition_tests {
                 };
                 let exact = parameter_output_exact(
                     &ctx,
-                    Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                    Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest { exact_output_effects_version: 1,
                         authenticated_parameters: None,
                         client_context_id: context_id.0.clone(),
                         session_handle: session,
@@ -4040,6 +4050,7 @@ mod lifecycle_transition_tests {
                     encrypt_message_begin(
                         &ctx,
                         Request::new(pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
+                            exact_output_effects_version: 1,
                             client_context_id: context_id.0.clone(),
                             session_handle: session,
                             parameter: Vec::new(),
@@ -4064,6 +4075,7 @@ mod lifecycle_transition_tests {
                     decrypt_message_begin(
                         &ctx,
                         Request::new(pkcs11_proxy_ng_proto::DecryptMessageBeginRequest {
+                            exact_output_effects_version: 1,
                             client_context_id: context_id.0.clone(),
                             session_handle: session,
                             parameter: Vec::new(),
@@ -4111,6 +4123,7 @@ mod lifecycle_transition_tests {
             let exact = parameter_output_exact(
                 &ctx,
                 Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                    exact_output_effects_version: 1,
                     authenticated_parameters: None,
                     client_context_id: context_id.0.clone(),
                     session_handle: session,
@@ -4228,6 +4241,7 @@ mod lifecycle_transition_tests {
         let a_gcm = encrypt_message_begin(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
+                exact_output_effects_version: 1,
                 client_context_id: context_a.0.clone(),
                 session_handle: session_a1,
                 parameter: Vec::new(),
@@ -4252,6 +4266,7 @@ mod lifecycle_transition_tests {
         let b_ccm = encrypt_message_begin(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
+                exact_output_effects_version: 1,
                 client_context_id: context_b.0.clone(),
                 session_handle: session_b1,
                 parameter: Vec::new(),
@@ -4276,6 +4291,7 @@ mod lifecycle_transition_tests {
         let a_decrypt = parameter_output_exact(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                exact_output_effects_version: 1,
                 authenticated_parameters: None,
                 client_context_id: context_a.0.clone(),
                 session_handle: session_a1,
@@ -4315,6 +4331,7 @@ mod lifecycle_transition_tests {
         let a2_encrypt = parameter_output_exact(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                exact_output_effects_version: 1,
                 authenticated_parameters: None,
                 client_context_id: context_a.0.clone(),
                 session_handle: session_a2,
@@ -4354,6 +4371,7 @@ mod lifecycle_transition_tests {
         let begin_mismatch = encrypt_message_begin(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
+                exact_output_effects_version: 1,
                 client_context_id: context_a.0.clone(),
                 session_handle: session_a1,
                 parameter: Vec::new(),
@@ -4377,6 +4395,7 @@ mod lifecycle_transition_tests {
         let exact_mismatch = parameter_output_exact(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                exact_output_effects_version: 1,
                 authenticated_parameters: None,
                 client_context_id: context_a.0.clone(),
                 session_handle: session_a1,

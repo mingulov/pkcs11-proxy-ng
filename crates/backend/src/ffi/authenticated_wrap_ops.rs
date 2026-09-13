@@ -13,7 +13,9 @@ fn legacy_bytes(output: AuthenticatedOutput) -> CkResult<Vec<u8>> {
     match output {
         AuthenticatedOutput::Iv(iv) => Ok(iv),
         AuthenticatedOutput::Unchanged => Ok(Vec::new()),
-        AuthenticatedOutput::Message(_) => Err(CkRv::FUNCTION_NOT_SUPPORTED),
+        AuthenticatedOutput::Message(_)
+        | AuthenticatedOutput::Effects(_)
+        | AuthenticatedOutput::Invalid(_) => Err(CkRv::FUNCTION_NOT_SUPPORTED),
     }
 }
 
@@ -77,19 +79,26 @@ impl FfiBackend {
             aad,
             output_spec,
         )?;
-        if !matches!(main.ck_rv, CkRv::OK | CkRv::BUFFER_TOO_SMALL) {
-            return Err(main.ck_rv);
-        }
-        let bytes = legacy_bytes(output)?;
-        let returned_len = bytes.len() as u64;
-        let value = if param_out_spec.buffer_present
-            && !bytes.is_empty()
-            && (main.ck_rv == CkRv::OK || output_spec.length_pointer_null)
-        {
-            Some(bytes)
-        } else {
-            None
+        let bytes = match legacy_bytes(output) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                tracing::warn!(
+                    provider_rv = main.ck_rv.0,
+                    "native exact parameter contract violation"
+                );
+                return Ok((
+                    CkOutputBufferResult::no_effects(CkRv::DEVICE_ERROR),
+                    CkParameterRoundtripResult {
+                        ck_rv: CkRv::DEVICE_ERROR,
+                        returned_len: 0,
+                        value: None,
+                    },
+                ));
+            }
         };
+        let returned_len = bytes.len() as u64;
+        let value =
+            if param_out_spec.buffer_present && !bytes.is_empty() { Some(bytes) } else { None };
         let parameter = CkParameterRoundtripResult { ck_rv: main.ck_rv, returned_len, value };
         Ok((main, parameter))
     }
@@ -643,7 +652,7 @@ mod tests {
     fn authenticated_typed_aead_exact_roundtrips_only_owned_buffers_once_for_every_output_shape() {
         use crate::Pkcs11Backend;
         use pkcs11_proxy_ng_proto::convert::{
-            authenticated::AuthenticatedOutput, message_params::MessageParameter,
+            authenticated::AuthenticatedOutput, message_effects::MessageEffects,
         };
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (backend, _base, mut functions) = backend_with_missing_length_wrap();
@@ -680,18 +689,24 @@ mod tests {
                     "typed AEAD exact operation must support its legal native shape"
                 );
                 let (main, output) = result.unwrap();
-                assert_eq!((main.ck_rv, main.returned_len), (expected_rv, expected_len));
+                assert_eq!(
+                    (main.ck_rv, main.returned_len),
+                    (expected_rv, (!null).then_some(expected_len))
+                );
                 assert_eq!(CALLS.load(Ordering::SeqCst), 1);
                 assert_eq!(OUTPUT_PRESENT.load(Ordering::SeqCst), usize::from(present));
                 assert_eq!(LENGTH_NULL.load(Ordering::SeqCst), usize::from(null));
-                let wire = pkcs11_proxy_ng_proto::AuthenticatedMechanismOutput::from(&output);
+                let wire =
+                    pkcs11_proxy_ng_proto::AuthenticatedMechanismOutput::try_from(&output).unwrap();
                 let decoded = AuthenticatedOutput::try_from(&wire).unwrap();
                 match decoded {
-                    AuthenticatedOutput::Message(MessageParameter::GcmMessage(p)) => {
-                        assert!(p.iv == [0xa5; 12] && p.tag == [0x5a; 16]);
+                    AuthenticatedOutput::Effects(MessageEffects::Gcm { iv, tag }) => {
+                        assert_eq!(iv, (expected_rv == CkRv::OK).then(|| vec![0xa5; 12]));
+                        assert_eq!(tag, (expected_rv == CkRv::OK).then(|| vec![0x5a; 16]));
                     }
-                    AuthenticatedOutput::Message(MessageParameter::CcmMessage(p)) => {
-                        assert!(p.nonce == [0xa5; 12] && p.mac == [0x5a; 16]);
+                    AuthenticatedOutput::Effects(MessageEffects::Ccm { nonce, mac }) => {
+                        assert_eq!(nonce, (expected_rv == CkRv::OK).then(|| vec![0xa5; 12]));
+                        assert_eq!(mac, (expected_rv == CkRv::OK).then(|| vec![0x5a; 16]));
                     }
                     _ => panic!("expected output-only AEAD transport"),
                 }
@@ -724,8 +739,8 @@ mod tests {
                 },
             );
             assert!(
-                matches!(result, Err(CkRv::DEVICE_ERROR)),
-                "corrupt native parameter must fail closed"
+                matches!(result, Ok((ref output, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput::Invalid(_))) if output.ck_rv == CkRv::OK),
+                "post-native contract violation is a completed native envelope, never a pre-native Err"
             );
             assert_eq!(CALLS.load(Ordering::SeqCst), 1);
         }
@@ -896,7 +911,7 @@ mod tests {
         assert_eq!(OUTPUT_PRESENT.load(Ordering::SeqCst), 1);
         assert_eq!(LENGTH_NULL.load(Ordering::SeqCst), 1);
         assert_eq!(output.ck_rv, CkRv::OK);
-        assert_eq!(output.returned_len, 0);
+        assert_eq!(output.returned_len, None);
         assert_eq!(output.value, None);
         assert_eq!(parameter.ck_rv, CkRv::OK);
         assert_eq!(parameter.returned_len, 16);
@@ -935,7 +950,7 @@ mod tests {
 
         assert_eq!(CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(output.ck_rv, CkRv::BUFFER_TOO_SMALL);
-        assert_eq!(output.returned_len, 0);
+        assert_eq!(output.returned_len, None);
         assert_eq!(output.value, None);
         assert_eq!(parameter.ck_rv, CkRv::BUFFER_TOO_SMALL);
         assert_eq!(parameter.returned_len, 16);

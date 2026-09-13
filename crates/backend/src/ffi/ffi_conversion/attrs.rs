@@ -137,6 +137,8 @@ impl FfiAttrs {
 /// all byte buffers.
 pub(in crate::ffi) struct FfiAttributeQueries {
     pub(in crate::ffi) attrs: Vec<cryptoki_sys::CK_ATTRIBUTE>,
+    original: Vec<cryptoki_sys::CK_ATTRIBUTE>,
+    nested_originals: Vec<Vec<cryptoki_sys::CK_ATTRIBUTE>>,
     _buffers: Vec<Vec<u8>>,
     _nested: Vec<NestedTemplateBacking>,
 }
@@ -148,7 +150,17 @@ impl FfiAttributeQueries {
         let mut nested_backings = Vec::new();
 
         for query in queries {
+            if query.buffer_present
+                && query.buffer_len > super::super::call_helpers::MAX_OUTPUT_BUFFER_BYTES
+            {
+                return Err(CkRv::HOST_MEMORY);
+            }
             if let Some(nested_queries) = &query.nested {
+                if !query.attr_type.is_attribute_template()
+                    || nested_queries.iter().any(|sub| sub.nested.is_some())
+                {
+                    return Err(CkRv::ARGUMENTS_BAD);
+                }
                 // CKF_ARRAY_ATTRIBUTE: allocate a nested CK_ATTRIBUTE[] template
                 Self::build_nested_attr(query, nested_queries, &mut attrs, &mut nested_backings)?;
             } else {
@@ -165,7 +177,7 @@ impl FfiAttributeQueries {
                     buffers.push(buffer);
                     (ptr, ul_value_len)
                 } else {
-                    (std::ptr::null_mut(), ul_value_len)
+                    (std::ptr::null_mut(), 0)
                 };
 
                 attrs.push(cryptoki_sys::CK_ATTRIBUTE {
@@ -176,7 +188,85 @@ impl FfiAttributeQueries {
             }
         }
 
-        Ok(Self { attrs, _buffers: buffers, _nested: nested_backings })
+        let original = attrs.clone();
+        let nested_originals = nested_backings.iter().map(|b| b._template.to_vec()).collect();
+        Ok(Self { attrs, original, nested_originals, _buffers: buffers, _nested: nested_backings })
+    }
+
+    /// Read only immutable allocation owners, never provider-replaced pointers.
+    /// An oversized scalar remains an effect but cannot enlarge an owned slice.
+    pub(in crate::ffi) fn readback(
+        &self,
+        queries: &[CkAttributeQuery],
+        rv: CkRv,
+    ) -> Vec<CkAttributeQueryResult> {
+        let mut results =
+            super::super::mapping::exact_attribute_results_from_ffi(queries, &self.attrs, rv);
+        let values_defined = matches!(
+            rv,
+            CkRv::OK
+                | CkRv::ATTRIBUTE_SENSITIVE
+                | CkRv::ATTRIBUTE_TYPE_INVALID
+                | CkRv::BUFFER_TOO_SMALL
+        );
+        for (((query, native), original), result) in
+            queries.iter().zip(&self.attrs).zip(&self.original).zip(&mut results)
+        {
+            if native.pValue != original.pValue || native.pValue.is_null() {
+                continue;
+            }
+            if let Some(nested_queries) = &query.nested {
+                let Some((index, backing)) = self._nested.iter().enumerate().find(|(_, b)| {
+                    b._template.as_ptr().cast::<std::ffi::c_void>() == original.pValue
+                }) else {
+                    continue;
+                };
+                let stride = std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>();
+                let Ok(length) = usize::try_from(result.returned_len) else {
+                    continue;
+                };
+                if length > backing._template.len() * stride || length % stride != 0 {
+                    continue;
+                }
+                let count = length / stride;
+                let mut nested = super::super::mapping::exact_attribute_results_from_ffi(
+                    &nested_queries[..count.min(nested_queries.len())],
+                    &backing._template[..count],
+                    rv,
+                );
+                for (((sub, old), out), query) in backing
+                    ._template
+                    .iter()
+                    .zip(&self.nested_originals[index])
+                    .zip(&mut nested)
+                    .zip(nested_queries)
+                {
+                    // Nested type is output-bearing only when attribute results are defined.
+                    out.attr_type = if values_defined {
+                        CkAttributeType(sub.type_ as u64)
+                    } else {
+                        CkAttributeType(0)
+                    };
+                    out.apply_type = values_defined;
+                    if values_defined
+                        && !out.attr_type.is_attribute_template()
+                        && sub.pValue == old.pValue
+                        && query.buffer_present
+                    {
+                        out.value = owned_attribute_bytes(
+                            &backing._sub_buffers,
+                            old.pValue,
+                            out.returned_len,
+                        );
+                    }
+                }
+                result.nested = Some(nested);
+            } else if values_defined && query.buffer_present {
+                result.value =
+                    owned_attribute_bytes(&self._buffers, original.pValue, result.returned_len);
+            }
+        }
+        results
     }
 
     /// Build a `CK_ATTRIBUTE` entry for a nested template attribute.
@@ -191,17 +281,23 @@ impl FfiAttributeQueries {
         attrs: &mut Vec<cryptoki_sys::CK_ATTRIBUTE>,
         nested_backings: &mut Vec<NestedTemplateBacking>,
     ) -> CkResult<()> {
-        if !query.buffer_present || nested_queries.is_empty() {
+        if !query.buffer_present {
             // Size query or empty nested: pValue=NULL, ulValueLen carries the
             // requested/expected length.
-            let ul_value_len = cryptoki_sys::CK_ULONG::try_from(query.buffer_len)
-                .map_err(|_| CkRv::HOST_MEMORY)?;
             attrs.push(cryptoki_sys::CK_ATTRIBUTE {
                 type_: narrow_wire_ulong(query.attr_type.0)?,
                 pValue: std::ptr::null_mut(),
-                ulValueLen: ul_value_len,
+                ulValueLen: 0,
             });
             return Ok(());
+        }
+
+        let native_len = nested_queries
+            .len()
+            .checked_mul(std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>())
+            .ok_or(CkRv::HOST_MEMORY)?;
+        if query.buffer_len != native_len as u64 {
+            return Err(CkRv::ARGUMENTS_BAD);
         }
 
         // Allocate sub-buffers first, collecting stable pointers
@@ -210,6 +306,11 @@ impl FfiAttributeQueries {
             Vec::with_capacity(nested_queries.len());
 
         for sub_query in nested_queries {
+            if sub_query.buffer_present
+                && sub_query.buffer_len > super::super::call_helpers::MAX_OUTPUT_BUFFER_BYTES
+            {
+                return Err(CkRv::HOST_MEMORY);
+            }
             let sub_ul_value_len = cryptoki_sys::CK_ULONG::try_from(sub_query.buffer_len)
                 .map_err(|_| CkRv::HOST_MEMORY)?;
 
@@ -223,11 +324,12 @@ impl FfiAttributeQueries {
                 sub_buffers.push(sub_buf);
                 (ptr, sub_ul_value_len)
             } else {
-                (std::ptr::null_mut(), sub_ul_value_len)
+                (std::ptr::null_mut(), 0)
             };
 
             sub_attrs.push(cryptoki_sys::CK_ATTRIBUTE {
-                type_: narrow_wire_ulong(sub_query.attr_type.0)?,
+                // Nested type is ignored on input, never a schema hint.
+                type_: 0,
                 pValue: sub_pvalue,
                 ulValueLen: sub_len,
             });
@@ -256,6 +358,18 @@ impl FfiAttributeQueries {
 
         Ok(())
     }
+}
+
+fn owned_attribute_bytes(
+    buffers: &[Vec<u8>],
+    pointer: *mut std::ffi::c_void,
+    length: u64,
+) -> Option<Vec<u8>> {
+    let length = usize::try_from(length).ok()?;
+    let buffer = buffers.iter().find(|buffer| {
+        !pointer.is_null() && buffer.as_ptr().cast::<std::ffi::c_void>() == pointer
+    })?;
+    buffer.get(..length).map(<[u8]>::to_vec)
 }
 
 #[cfg(test)]

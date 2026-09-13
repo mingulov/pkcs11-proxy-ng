@@ -98,6 +98,7 @@ async fn authenticated_typed_server_negotiates_all_three_routes_without_raw_outp
                     let r = c
                         .rpc
                         .parameter_output_exact(ParameterOutputExactRequest {
+                            exact_output_effects_version: 1,
                             client_context_id: c.context.clone(),
                             session_handle: c.session,
                             mechanism: mechanism(c.keys[2]),
@@ -246,6 +247,7 @@ async fn authenticated_typed_exact_rejects_dual_raw_request_before_dispatch() {
     let response = c
         .rpc
         .parameter_output_exact(ParameterOutputExactRequest {
+            exact_output_effects_version: 1,
             client_context_id: c.context.clone(),
             session_handle: c.session,
             mechanism: mechanism(c.keys[2]),

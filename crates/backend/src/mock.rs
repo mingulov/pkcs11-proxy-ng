@@ -2316,7 +2316,11 @@ impl Pkcs11Backend for MockBackend {
         plaintext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_parameter_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
         let (output, message) = self.encrypt_message_exact_msg_impl(
@@ -2332,7 +2336,17 @@ impl Pkcs11Backend for MockBackend {
             value: provider_spec.buffer_present.then(Vec::new),
         });
         let message = self.next_message_parameter_response_or(message);
-        Ok((output, parameter, message))
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &message,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                encrypt: true,
+                generated_stage: true,
+                auth_stage: true,
+                rv: output.ck_rv,
+            },
+        );
+        Ok((output, parameter, effects))
     }
 
     fn decrypt_message_exact_msg(
@@ -2343,7 +2357,11 @@ impl Pkcs11Backend for MockBackend {
         ciphertext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_parameter_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
         let (output, message) = self.decrypt_message_exact_msg_impl(
@@ -2359,7 +2377,17 @@ impl Pkcs11Backend for MockBackend {
             value: provider_spec.buffer_present.then(Vec::new),
         });
         let message = self.next_message_parameter_response_or(message);
-        Ok((output, parameter, message))
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &message,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                encrypt: false,
+                generated_stage: true,
+                auth_stage: true,
+                rv: output.ck_rv,
+            },
+        );
+        Ok((output, parameter, effects))
     }
 
     fn encrypt_message_begin_msg(
@@ -2368,7 +2396,10 @@ impl Pkcs11Backend for MockBackend {
         msg_param: &MessageParameter,
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_begin_calls.fetch_add(1, Ordering::SeqCst);
         let _ = self.resolve_input(aad)?;
         if !self.state.lock().unwrap().has_session(session) {
@@ -2376,16 +2407,24 @@ impl Pkcs11Backend for MockBackend {
         }
         msg_param.validate_structured()?;
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
-        Ok((
-            self.next_message_parameter_ack_or(CkParameterRoundtripResult {
-                ck_rv: CkRv::OK,
-                returned_len: provider_spec.buffer_len,
-                value: provider_spec.buffer_present.then(Vec::new),
-            }),
-            self.next_message_parameter_response_or(Self::mock_message_begin_parameter_out(
-                msg_param,
-            )),
-        ))
+        let ack = self.next_message_parameter_ack_or(CkParameterRoundtripResult {
+            ck_rv: CkRv::OK,
+            returned_len: provider_spec.buffer_len,
+            value: provider_spec.buffer_present.then(Vec::new),
+        });
+        let returned = self
+            .next_message_parameter_response_or(Self::mock_message_begin_parameter_out(msg_param));
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &returned,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                encrypt: true,
+                generated_stage: true,
+                auth_stage: false,
+                rv: ack.ck_rv,
+            },
+        );
+        Ok((ack, effects))
     }
 
     fn decrypt_message_begin_msg(
@@ -2394,7 +2433,10 @@ impl Pkcs11Backend for MockBackend {
         msg_param: &MessageParameter,
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_begin_calls.fetch_add(1, Ordering::SeqCst);
         let _ = self.resolve_input(aad)?;
         if !self.state.lock().unwrap().has_session(session) {
@@ -2402,14 +2444,23 @@ impl Pkcs11Backend for MockBackend {
         }
         msg_param.validate_structured()?;
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
-        Ok((
-            self.next_message_parameter_ack_or(CkParameterRoundtripResult {
-                ck_rv: CkRv::OK,
-                returned_len: provider_spec.buffer_len,
-                value: provider_spec.buffer_present.then(Vec::new),
-            }),
-            self.next_message_parameter_response_or(msg_param.clone()),
-        ))
+        let ack = self.next_message_parameter_ack_or(CkParameterRoundtripResult {
+            ck_rv: CkRv::OK,
+            returned_len: provider_spec.buffer_len,
+            value: provider_spec.buffer_present.then(Vec::new),
+        });
+        let returned = self.next_message_parameter_response_or(msg_param.clone());
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &returned,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                encrypt: false,
+                generated_stage: true,
+                auth_stage: false,
+                rv: ack.ck_rv,
+            },
+        );
+        Ok((ack, effects))
     }
 
     fn sign_message_exact_msg(
@@ -2430,7 +2481,11 @@ impl Pkcs11Backend for MockBackend {
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_parameter_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
         let (output, message) = self.encrypt_message_next_exact_msg_impl(
@@ -2446,7 +2501,17 @@ impl Pkcs11Backend for MockBackend {
             value: provider_spec.buffer_present.then(Vec::new),
         });
         let message = self.next_message_parameter_response_or(message);
-        Ok((output, parameter, message))
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &message,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                encrypt: true,
+                generated_stage: false,
+                auth_stage: flags.0 & cryptoki_sys::CKF_END_OF_MESSAGE as u64 != 0,
+                rv: output.ck_rv,
+            },
+        );
+        Ok((output, parameter, effects))
     }
 
     fn decrypt_message_next_exact_msg(
@@ -2457,7 +2522,11 @@ impl Pkcs11Backend for MockBackend {
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        CkParameterRoundtripResult,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
+    )> {
         self.message_parameter_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_message_parameter_call.lock().unwrap() = Some(msg_param.clone());
         let (output, message) = self.decrypt_message_next_exact_msg_impl(
@@ -2473,7 +2542,17 @@ impl Pkcs11Backend for MockBackend {
             value: provider_spec.buffer_present.then(Vec::new),
         });
         let message = self.next_message_parameter_response_or(message);
-        Ok((output, parameter, message))
+        let effects = pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+            msg_param,
+            &message,
+            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                encrypt: false,
+                generated_stage: false,
+                auth_stage: flags.0 & cryptoki_sys::CKF_END_OF_MESSAGE as u64 != 0,
+                rv: output.ck_rv,
+            },
+        );
+        Ok((output, parameter, effects))
     }
 
     fn sign_message_next_exact_msg(
@@ -3195,6 +3274,25 @@ impl Pkcs11Backend for MockBackend {
             spec,
             &CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None },
         )?;
+        use pkcs11_proxy_ng_proto::convert::{
+            authenticated::AuthenticatedOutput,
+            message_effects::{MessageEffectContext, MessageEffects},
+        };
+        let output = match (parameter, output) {
+            (Some(input), AuthenticatedOutput::Message(returned)) => {
+                AuthenticatedOutput::Effects(MessageEffects::capture(
+                    input,
+                    &returned,
+                    MessageEffectContext {
+                        encrypt: true,
+                        generated_stage: true,
+                        auth_stage: true,
+                        rv: bytes.ck_rv,
+                    },
+                ))
+            }
+            (_, output) => output,
+        };
         Ok((bytes, output))
     }
 

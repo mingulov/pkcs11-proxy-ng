@@ -52,6 +52,8 @@ fn exact_result_from_cache(
     let value_len = cached.value.len() as u64;
     if !query.buffer_present {
         CkAttributeQueryResult {
+            apply_returned_len: true,
+            apply_type: false,
             attr_type: query.attr_type,
             returned_len: value_len,
             value: None,
@@ -60,6 +62,8 @@ fn exact_result_from_cache(
         }
     } else if query.buffer_len < value_len {
         CkAttributeQueryResult {
+            apply_returned_len: true,
+            apply_type: false,
             attr_type: query.attr_type,
             returned_len: u64::MAX,
             value: None,
@@ -68,6 +72,8 @@ fn exact_result_from_cache(
         }
     } else {
         CkAttributeQueryResult {
+            apply_returned_len: true,
+            apply_type: false,
             attr_type: query.attr_type,
             returned_len: value_len,
             value: Some(cached.value.clone()),
@@ -305,6 +311,9 @@ pub(super) async fn get_attribute_value_exact(
     let started = Instant::now();
     crate::server::resilience::record_get_attribute_value();
     let req = request.into_inner();
+    if req.exact_output_effects_version != 1 {
+        return Err(Status::failed_precondition("exact output effects version 1 required"));
+    }
     let ctx_id = ClientContextId(req.client_context_id);
     let object_handle = req.object_handle;
 
@@ -313,6 +322,7 @@ pub(super) async fn get_attribute_value_exact(
             Ok(handles) => handles,
             Err(error) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+                    exact_output_effects_version: 1,
                     ck_rv: error.0,
                     results: vec![],
                 }));
@@ -345,11 +355,13 @@ pub(super) async fn get_attribute_value_exact(
         .is_err()
         {
             return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+                exact_output_effects_version: 1,
                 ck_rv: CkRv::FUNCTION_FAILED.0,
                 results: vec![],
             }));
         }
         return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+            exact_output_effects_version: 1,
             ck_rv: CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
             results: vec![],
         }));
@@ -365,6 +377,7 @@ pub(super) async fn get_attribute_value_exact(
             Ok((ck_rv, results)) => {
                 validate_exact_attribute_results(&query_types, &results)?;
                 Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+                    exact_output_effects_version: 1,
                     ck_rv: ck_rv.0,
                     results: results
                         .into_iter()
@@ -374,6 +387,7 @@ pub(super) async fn get_attribute_value_exact(
             }
             Err(error) => {
                 Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+                    exact_output_effects_version: 1,
                     ck_rv: error.0,
                     results: vec![],
                 }))
@@ -465,6 +479,7 @@ pub(super) async fn get_attribute_value_exact(
                 // some attrs still missing). Cache hits from this request are
                 // discarded — the caller will retry from scratch.
                 return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+                    exact_output_effects_version: 1,
                     ck_rv: error.0,
                     results: vec![],
                 }));
@@ -479,6 +494,7 @@ pub(super) async fn get_attribute_value_exact(
         .collect();
 
     Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+        exact_output_effects_version: 1,
         ck_rv: combined_rv.0,
         results,
     }))
@@ -596,6 +612,8 @@ mod tests {
         let status = validate_exact_attribute_results(
             &[CkAttributeType::LABEL],
             &[CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::VALUE,
                 returned_len: 0,
                 value: None,
@@ -613,6 +631,8 @@ mod tests {
         validate_exact_attribute_results(
             &[CkAttributeType::LABEL],
             &[CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 3,
                 value: Some(b"key".to_vec()),
@@ -1127,6 +1147,7 @@ mod tests {
             .unwrap();
 
         let make_req = || pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
             object_handle,
@@ -1205,6 +1226,7 @@ mod tests {
 
         // Step 1: warm the cache with an adequate-buffer data query.
         let data_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
             object_handle,
@@ -1225,6 +1247,7 @@ mod tests {
 
         // Step 2: size query (buffer_present=false) — must be served from cache.
         let size_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
             object_handle,
@@ -1297,6 +1320,7 @@ mod tests {
 
         // Step 1: warm the cache with an adequate-buffer data query.
         let data_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
             object_handle,
@@ -1312,6 +1336,7 @@ mod tests {
 
         // Step 2: buffer-too-small query (buffer_len = 1) — must be served from cache.
         let small_req = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            exact_output_effects_version: 1,
             client_context_id: ctx_id.0.clone(),
             session_handle,
             object_handle,

@@ -6,7 +6,7 @@
 //! `C_Encrypt` and `C_WrapKey`, that SP800-108 nested `CK_DERIVED_KEY` handles
 //! are written back through `C_DeriveKey` and invalidated when their owning
 //! session closes, and that slot-event lifecycle errors survive the loaded shim
-//! function-list path. It also verifies that no-source mechanism-info flags are
+//! function-list path. It also verifies that provider mechanism-info flags are
 //! returned through a real caller-owned `CK_MECHANISM_INFO` stack struct without
 //! inventing workflow flags. Message Begin/Next coverage exercises modelled
 //! Encrypt/Decrypt stack structs and the separate empty-only Sign/Verify
@@ -20,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use cryptoki_sys::*;
 use libloading::{Library, Symbol};
-use pkcs11_proxy_ng_backend::MockBackend;
+use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, CkSlotId, GcmParams};
 use tokio::sync::Mutex;
@@ -34,6 +34,18 @@ type CGetInterface = unsafe extern "C" fn(
 ) -> CK_RV;
 
 static SHIM_C_ABI_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+// Must be declared after Library so unwinding finalizes before dlclose.
+// Explicit successful finalization remains asserted; the second finalize on
+// normal drop is harmless and its NOT_INITIALIZED result is intentionally ignored.
+struct FinalizeOnDrop(unsafe extern "C" fn(CK_VOID_PTR) -> CK_RV);
+impl Drop for FinalizeOnDrop {
+    fn drop(&mut self) {
+        unsafe {
+            (self.0)(std::ptr::null_mut());
+        }
+    }
+}
 
 fn find_shim_library() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PKCS11_PROXY_SHIM_LIB")
@@ -144,6 +156,7 @@ async fn loaded_shim_reinitializes_against_current_endpoint_after_finalize() {
         let functions_3_2 = &*((*interface).pFunctionList as *const CK_FUNCTION_LIST_3_2);
         let c_initialize_3_2 = functions_3_2.C_Initialize.expect("C_Initialize");
         let c_finalize_3_2 = functions_3_2.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop_3_2 = FinalizeOnDrop(c_finalize_3_2);
         let c_get_slot_list_3_2 = functions_3_2.C_GetSlotList.expect("C_GetSlotList");
         let c_get_mechanism_list_3_2 =
             functions_3_2.C_GetMechanismList.expect("C_GetMechanismList");
@@ -184,6 +197,7 @@ async fn loaded_shim_reinitializes_against_current_endpoint_after_finalize() {
         let functions = &*function_list;
         let c_initialize = functions.C_Initialize.expect("C_Initialize");
         let c_finalize = functions.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
         let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
         let c_get_mechanism_list = functions.C_GetMechanismList.expect("C_GetMechanismList");
 
@@ -218,7 +232,8 @@ async fn loaded_shim_reinitializes_against_current_endpoint_after_finalize() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a built libpkcs11_proxy_ng_shim.so; run cargo build -p pkcs11-proxy-ng-shim first"]
-async fn loaded_shim_preserves_no_source_mechanism_info_zero_flags() {
+#[allow(clippy::unnecessary_cast)] // CK_ULONG is 32 or 64 bits across supported ABIs.
+async fn loaded_shim_preserves_provider_mechanism_info_flags() {
     let _guard = SHIM_C_ABI_LOCK.get_or_init(|| Mutex::new(())).lock().await;
     let Some(shim_path) = find_shim_library() else {
         eprintln!(
@@ -240,6 +255,17 @@ async fn loaded_shim_preserves_no_source_mechanism_info_zero_flags() {
             CkMechanismType(CKM_DES_CBC),
         ],
     ));
+    let expected: Vec<_> = [CKM_BATON_KEY_GEN, CKM_CAMELLIA_CTR, CKM_DES_CBC]
+        .into_iter()
+        .map(|mechanism| {
+            backend.get_mechanism_info(CkSlotId(0), CkMechanismType(mechanism)).unwrap()
+        })
+        .collect();
+    // BATON and DES now have a source-grounded historical registry; Camellia
+    // CTR remains the no-source case. Compare native provider facts, not stale
+    // pre-registry assumptions about all three returning zero flags.
+    assert_eq!(expected[0].flags.0, (CKF_GENERATE | CKF_GENERATE_KEY_PAIR) as u64);
+    assert_eq!(expected[1].flags.0, 0);
     let (endpoint, _shutdown) = common_3x::mock_daemon(backend).await;
     let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint);
 
@@ -254,6 +280,7 @@ async fn loaded_shim_preserves_no_source_mechanism_info_zero_flags() {
 
         let c_initialize = functions.C_Initialize.expect("C_Initialize");
         let c_finalize = functions.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
         let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
         let c_get_mechanism_info = functions.C_GetMechanismInfo.expect("C_GetMechanismInfo");
 
@@ -272,11 +299,14 @@ async fn loaded_shim_preserves_no_source_mechanism_info_zero_flags() {
             "C_GetSlotList(data)"
         );
 
-        for (mechanism, label) in [
+        for ((mechanism, label), expected) in [
             (CKM_BATON_KEY_GEN, "CKM_BATON_KEY_GEN"),
             (CKM_CAMELLIA_CTR, "CKM_CAMELLIA_CTR"),
             (CKM_DES_CBC, "CKM_DES_CBC"),
-        ] {
+        ]
+        .into_iter()
+        .zip(expected)
+        {
             let mut info =
                 CK_MECHANISM_INFO { ulMinKeySize: 0xCAFE, ulMaxKeySize: 0xBABE, flags: 0xFFFF };
             assert_eq!(
@@ -284,12 +314,42 @@ async fn loaded_shim_preserves_no_source_mechanism_info_zero_flags() {
                 CKR_OK as CK_RV,
                 "C_GetMechanismInfo({label})"
             );
-            assert_eq!(info.ulMinKeySize, 2048, "{label} min key size");
-            assert_eq!(info.ulMaxKeySize, 4096, "{label} max key size");
-            assert_eq!(info.flags, 0, "{label} flags must not be inferred");
+            assert_eq!(info.ulMinKeySize as u64, expected.min_key_size, "{label} min key size");
+            assert_eq!(info.ulMaxKeySize as u64, expected.max_key_size, "{label} max key size");
+            assert_eq!(info.flags as u64, expected.flags.0, "{label} provider flags preserved");
         }
 
         assert_eq!(c_finalize(std::ptr::null_mut()), CKR_OK as CK_RV, "C_Finalize");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a built libpkcs11_proxy_ng_shim.so"]
+async fn loaded_shim_finalize_guard_recovers_after_test_panic() {
+    let _guard = SHIM_C_ABI_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    let shim_path = find_shim_library().expect("explicit loaded-shim gate needs a library");
+    let (endpoint, _shutdown) = common_3x::mock_daemon(Arc::new(MockBackend::default_test())).await;
+    let _endpoint_guard = EnvRestore::set("PKCS11_PROXY_ENDPOINT", &endpoint);
+    unsafe {
+        let library = Library::new(shim_path).unwrap();
+        let get = library.get::<CGetFunctionList>(b"C_GetFunctionList\0").unwrap();
+        let mut pointer = std::ptr::null_mut();
+        assert_eq!(get(&mut pointer), CKR_OK);
+        let functions = &*pointer;
+        let initialize = functions.C_Initialize.unwrap();
+        let finalize = functions.C_Finalize.unwrap();
+        assert_eq!(initialize(std::ptr::null_mut()), CKR_OK);
+        let panic = std::panic::catch_unwind(|| {
+            let _finalize_on_drop = FinalizeOnDrop(finalize);
+            panic!("synthetic test failure exercises cleanup, not a provider panic");
+        });
+        assert!(panic.is_err());
+        let _finalize_on_drop = FinalizeOnDrop(finalize);
+        assert_eq!(
+            initialize(std::ptr::null_mut()),
+            CKR_OK,
+            "previous panic must not leave the shim initialized"
+        );
     }
 }
 
@@ -319,6 +379,7 @@ async fn loaded_shim_rejects_unsafe_official_lengthless_parameter_shapes() {
         let functions = &*function_list;
         let c_initialize = functions.C_Initialize.expect("C_Initialize");
         let c_finalize = functions.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
         let c_sign_init = functions.C_SignInit.expect("C_SignInit");
         let c_derive_key = functions.C_DeriveKey.expect("C_DeriveKey");
         assert_eq!(c_initialize(std::ptr::null_mut()), CKR_OK as CK_RV, "C_Initialize");
@@ -499,6 +560,7 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
 
         let c_initialize = functions.C_Initialize.expect("C_Initialize");
         let c_finalize = functions.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
         let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
         let c_get_mechanism_info = functions.C_GetMechanismInfo.expect("C_GetMechanismInfo");
         let c_open_session = functions.C_OpenSession.expect("C_OpenSession");
@@ -550,7 +612,11 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
         );
         assert_eq!(baton_info.ulMinKeySize, 2048, "no-source min key size");
         assert_eq!(baton_info.ulMaxKeySize, 4096, "no-source max key size");
-        assert_eq!(baton_info.flags, 0, "no-source mechanism flags must not be inferred");
+        assert_eq!(
+            baton_info.flags,
+            CKF_GENERATE | CKF_GENERATE_KEY_PAIR,
+            "source-grounded historical BATON flags preserved"
+        );
 
         let mut session: CK_SESSION_HANDLE = 0;
         assert_eq!(
@@ -901,6 +967,7 @@ async fn loaded_shim_message_begin_next_round_trips_c_stack_params() {
 
         let c_initialize = functions.C_Initialize.expect("C_Initialize");
         let c_finalize = functions.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
         let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
         let c_open_session = functions.C_OpenSession.expect("C_OpenSession");
         let c_close_session = functions.C_CloseSession.expect("C_CloseSession");
@@ -1483,6 +1550,7 @@ async fn loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_
         let functions = &*((*interface).pFunctionList as *const CK_FUNCTION_LIST_3_2);
         let c_initialize = functions.C_Initialize.expect("C_Initialize");
         let c_finalize = functions.C_Finalize.expect("C_Finalize");
+        let _finalize_on_drop = FinalizeOnDrop(c_finalize);
         let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
         let c_open_session = functions.C_OpenSession.expect("C_OpenSession");
         let c_close_session = functions.C_CloseSession.expect("C_CloseSession");

@@ -177,6 +177,7 @@ async fn invoke(
             let r = client
                 .rpc
                 .encapsulate_key_exact(EncapsulateKeyExactRequest {
+                    exact_output_effects_version: 1,
                     client_context_id,
                     session_handle,
                     mechanism,

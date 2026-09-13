@@ -235,6 +235,9 @@ pub(crate) async fn encapsulate_key_exact(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
+    if req.exact_output_effects_version != 1 {
+        return Err(Status::failed_precondition("exact output effects version 1 required"));
+    }
     let ctx_id = ClientContextId(req.client_context_id);
 
     let (session, public_key) = match resolve_session_and_key(
@@ -249,6 +252,8 @@ pub(crate) async fn encapsulate_key_exact(
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
                 result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(false),
+                    apply_object_handle: Some(false),
                     ck_rv: rv.0,
                     returned_len: 0,
                     value: None,
@@ -263,6 +268,8 @@ pub(crate) async fn encapsulate_key_exact(
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
                 result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(false),
+                    apply_object_handle: Some(false),
                     ck_rv: rv.0,
                     returned_len: 0,
                     value: None,
@@ -275,6 +282,8 @@ pub(crate) async fn encapsulate_key_exact(
     if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                apply_returned_len: Some(false),
+                apply_object_handle: Some(false),
                 ck_rv: CkRv::MECHANISM_INVALID.0,
                 returned_len: 0,
                 value: None,
@@ -290,6 +299,8 @@ pub(crate) async fn encapsulate_key_exact(
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                apply_returned_len: Some(false),
+                apply_object_handle: Some(false),
                 ck_rv: rv.0,
                 returned_len: 0,
                 value: None,
@@ -303,6 +314,8 @@ pub(crate) async fn encapsulate_key_exact(
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
                 result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(false),
+                    apply_object_handle: Some(false),
                     ck_rv: rv,
                     returned_len: 0,
                     value: None,
@@ -331,22 +344,20 @@ pub(crate) async fn encapsulate_key_exact(
     match result {
         Ok(r) => {
             // Register the returned object handle through the context manager
-            let virtual_handle = if r.ck_rv == CkRv::OK && r.object_handle.0 != 0 {
-                register_session_object_handle(
-                    ctx_mgr,
-                    &ctx_id,
-                    virtual_session,
-                    r.object_handle,
-                    is_token,
-                )
-                .await
+            let virtual_handle = if r.ck_rv == CkRv::OK
+                && let Some(handle) = r.object_handle.filter(|h| h.0 != 0)
+            {
+                register_session_object_handle(ctx_mgr, &ctx_id, virtual_session, handle, is_token)
+                    .await
             } else {
                 0
             };
             Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
                 result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    apply_returned_len: Some(r.returned_len.is_some()),
+                    apply_object_handle: Some(virtual_handle != 0),
                     ck_rv: r.ck_rv.0,
-                    returned_len: r.returned_len,
+                    returned_len: r.returned_len.unwrap_or(0),
                     value: r.value,
                     object_handle: virtual_handle,
                 }),
@@ -354,6 +365,8 @@ pub(crate) async fn encapsulate_key_exact(
         }
         Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                apply_returned_len: Some(false),
+                apply_object_handle: Some(false),
                 ck_rv: error.0,
                 returned_len: 0,
                 value: None,
@@ -408,6 +421,7 @@ mod tests {
         let result = encapsulate_key_exact(
             &HandlerContext::for_test(&manager, &backend),
             Request::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactRequest {
+                exact_output_effects_version: 1,
                 client_context_id: context_id.0,
                 session_handle: virtual_session.0,
                 mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {

@@ -88,6 +88,7 @@ enum ConnectionSource {
 /// instead of serializing on a `Mutex`.
 #[derive(Clone)]
 pub struct Pkcs11Client {
+    exact_effects_version: std::sync::Arc<std::sync::atomic::AtomicU32>,
     grpc: GrpcClient<tonic::transport::Channel>,
     context_id: Option<String>,
     source: ConnectionSource,

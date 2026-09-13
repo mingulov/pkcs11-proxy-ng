@@ -29,6 +29,7 @@ fn new_grpc_client(channel: Channel) -> GrpcClient<Channel> {
 /// older daemons predating the field).
 #[derive(Debug, Clone)]
 pub struct BackendProbe {
+    pub exact_output_effects_version: Option<u32>,
     pub interfaces: Vec<(u8, u8, Vec<String>)>,
     pub mechanism_registry: Option<MechanismRegistryPayload>,
     /// Backend `sizeof(CK_ULONG)` in bytes (4 or 8), advertised for the width
@@ -130,6 +131,7 @@ impl Pkcs11Client {
         let channel = connect_channel(endpoint, None).await?;
         let grpc = new_grpc_client(channel);
         Ok(Self {
+            exact_effects_version: Default::default(),
             grpc,
             context_id: None,
             source: ConnectionSource::Endpoint { endpoint: endpoint.to_owned(), tls_files: None },
@@ -144,6 +146,7 @@ impl Pkcs11Client {
         let channel = connect_channel(endpoint, Some(tls_files.clone())).await?;
         let grpc = new_grpc_client(channel);
         Ok(Self {
+            exact_effects_version: Default::default(),
             grpc,
             context_id: None,
             source: ConnectionSource::Endpoint {
@@ -157,6 +160,7 @@ impl Pkcs11Client {
     /// channel sharing). Reconnection will not be available.
     pub fn from_channel(channel: tonic::transport::Channel) -> Self {
         Self {
+            exact_effects_version: Default::default(),
             grpc: new_grpc_client(channel),
             context_id: None,
             source: ConnectionSource::SharedChannel,
@@ -224,6 +228,10 @@ impl Pkcs11Client {
             .map_err(|e| format!("GetBackendInterfaces failed: {e}"))?
             .into_inner();
 
+        self.exact_effects_version.store(
+            resp.exact_output_effects_version.unwrap_or(0),
+            std::sync::atomic::Ordering::Release,
+        );
         let interfaces = resp
             .interfaces
             .into_iter()
@@ -231,6 +239,7 @@ impl Pkcs11Client {
             .collect();
 
         Ok(BackendProbe {
+            exact_output_effects_version: resp.exact_output_effects_version,
             pointer_safe_authenticated_parameters: resp.pointer_safe_authenticated_parameters
                 == Some(true),
             interfaces,
@@ -253,6 +262,7 @@ impl Pkcs11Client {
                     .await
                     .map_err(|_| CkRv::DEVICE_ERROR)?;
                 self.grpc = new_grpc_client(channel);
+                self.exact_effects_version = Default::default();
                 if let Some(ref ctx) = self.context_id {
                     let req = pkcs11_proxy_ng_proto::GetSlotListRequest {
                         client_context_id: ctx.clone(),

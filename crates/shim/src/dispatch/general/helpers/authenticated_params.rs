@@ -96,12 +96,19 @@ impl AuthenticatedCall {
         {
             return rv_err(CkRv::GENERAL_ERROR);
         }
-        if !matches!(main.ck_rv, CkRv::OK | CkRv::BUFFER_TOO_SMALL) {
-            return rv_err(main.ck_rv);
-        }
         if let Some(message) = &self.message {
+            let legacy_effects;
             let parameter = match output {
-                AuthenticatedOutput::Message(p) => Some(p),
+                AuthenticatedOutput::Message(p) => {
+                    legacy_effects =
+                        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+                            self.parameter().expect("captured message input"),
+                            p,
+                            super::message_params::effect_context(message, main.ck_rv),
+                        );
+                    Some(&legacy_effects)
+                }
+                AuthenticatedOutput::Effects(effects) => Some(effects),
                 _ => None,
             };
             let ack = CkParameterRoundtripResult {
@@ -122,7 +129,7 @@ impl AuthenticatedCall {
                 )
             };
         }
-        if CK_ULONG::try_from(main.returned_len).is_err() {
+        if main.returned_len.is_some_and(|n| CK_ULONG::try_from(n).is_err()) {
             return rv_err(CkRv::GENERAL_ERROR);
         }
         if let AuthenticatedOutput::Iv(iv) = output
@@ -145,7 +152,7 @@ impl AuthenticatedCall {
                     buffer_len: 0,
                     length_pointer_null: false,
                 },
-                &CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 0, value: None },
+                &CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(0), value: None },
                 output,
                 std::ptr::null_mut(),
                 &mut length,

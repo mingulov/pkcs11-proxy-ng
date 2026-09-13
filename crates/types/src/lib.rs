@@ -46,7 +46,7 @@ pub use object::{CkKeyType, CkObjectClass, CkObjectHandle};
 pub use output::{
     ByteOutputFunction, CkAttributeQuery, CkAttributeQueryResult, CkOutputAndHandleResult,
     CkOutputBufferResult, CkOutputBufferSpec, CkParameterRoundtripResult, CkParameterRoundtripSpec,
-    ParameterOutputFunction,
+    OutputContractViolation, ParameterOutputFunction,
 };
 pub use secret::SecretBytes;
 pub use session::{

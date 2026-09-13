@@ -1,6 +1,7 @@
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
 use pkcs11_proxy_ng_proto::convert::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
@@ -83,6 +84,9 @@ pub(super) async fn parameter_output_exact(
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
     let mut req = request.into_inner();
+    if req.exact_output_effects_version != 1 {
+        return Err(Status::failed_precondition("exact output effects version 1 required"));
+    }
     let ctx_id = ClientContextId(req.client_context_id);
 
     // Parse the function discriminator
@@ -90,6 +94,7 @@ pub(super) async fn parameter_output_exact(
         Some(f) => f,
         None => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                message_effects: None,
                 authenticated_output: None,
                 output_result: None,
                 parameter_result: None,
@@ -177,9 +182,16 @@ pub(super) async fn parameter_output_exact(
                             input_from_wire(&associated_data, associated_data_null_len),
                             &output_spec,
                         )?;
-                        typed_output
-                            .validate_for(&p.mechanism, parameter.as_ref())
-                            .map_err(|_| CkRv::DEVICE_ERROR)?;
+                        if typed_output
+                            .validate_exact_for(&p.mechanism, parameter.as_ref(), output.ck_rv)
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                provider_rv = output.ck_rv.0,
+                                "native exact authenticated parameter contract violation"
+                            );
+                            return Err(CkRv::DEVICE_ERROR);
+                        }
                         let ack = CkParameterRoundtripResult {
                             ck_rv: output.ck_rv,
                             returned_len: 0,
@@ -188,9 +200,9 @@ pub(super) async fn parameter_output_exact(
                         Ok((
                             output,
                             ack,
-                            Some(pkcs11_proxy_ng_proto::AuthenticatedMechanismOutput::from(
+                            Some(pkcs11_proxy_ng_proto::AuthenticatedMechanismOutput::try_from(
                                 &typed_output,
-                            )),
+                            )?),
                         ))
                     } else {
                         backend
@@ -221,6 +233,7 @@ pub(super) async fn parameter_output_exact(
             Ok(Response::new(match result {
                 Ok((output, parameter, authenticated_output)) => {
                     pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                        message_effects: None,
                         output_result: Some((&output).into()),
                         parameter_result: Some((&parameter).into()),
                         message_parameter_out: None,
@@ -369,26 +382,43 @@ pub(super) async fn parameter_output_exact(
                                 &provider_spec,
                                 output.ck_rv,
                             ) && returned_parameter
-                                .validate_structured_shape(installed_shape)
-                                .is_ok()
-                                && request_parameter
-                                    .same_layout_and_scalars(&returned_parameter) =>
+                                .validate_for(
+                                    &request_parameter,
+                                    MessageEffectContext {
+                                        encrypt: matches!(
+                                            function,
+                                            ParameterOutputFunction::EncryptMessage
+                                                | ParameterOutputFunction::EncryptMessageNext
+                                        ),
+                                        generated_stage: matches!(
+                                            function,
+                                            ParameterOutputFunction::EncryptMessage
+                                                | ParameterOutputFunction::DecryptMessage
+                                        ),
+                                        auth_stage: matches!(
+                                            function,
+                                            ParameterOutputFunction::EncryptMessage
+                                                | ParameterOutputFunction::DecryptMessage
+                                        ) || flags.0
+                                            & cryptoki_sys::CKF_END_OF_MESSAGE as u64
+                                            != 0,
+                                        rv: output.ck_rv,
+                                    },
+                                )
+                                .is_ok() =>
                         {
-                            let response_parameter = if matches!(
-                                function,
-                                ParameterOutputFunction::DecryptMessage
-                                    | ParameterOutputFunction::DecryptMessageNext
-                            ) {
-                                request_parameter
-                            } else {
-                                returned_parameter
-                            };
+                            let response_parameter = returned_parameter;
                             let caller_ack = translate_parameter_ack(&output, &param_out_spec);
-                            let outcome = Ok(());
+                            let outcome =
+                                if output.ck_rv == CkRv::OK { Ok(()) } else { Err(output.ck_rv) };
                             transition.settle(&outcome, Some(installed_shape));
                             Ok((output, caller_ack, response_parameter))
                         }
-                        Ok(_) => {
+                        Ok((output, _, _)) => {
+                            tracing::warn!(
+                                provider_rv = output.ck_rv.0,
+                                "native exact parameter contract violation"
+                            );
                             transition.settle_ambiguous();
                             Err(CkRv::DEVICE_ERROR)
                         }
@@ -437,7 +467,8 @@ pub(super) async fn parameter_output_exact(
                                 output.ck_rv,
                             ) =>
                         {
-                            let outcome = Ok(());
+                            let outcome =
+                                if output.ck_rv == CkRv::OK { Ok(()) } else { Err(output.ck_rv) };
                             transition.settle(&outcome, Some(installed_shape));
                             Ok((output, parameter_result))
                         }
@@ -529,7 +560,8 @@ pub(super) async fn parameter_output_exact(
                             output.ck_rv,
                         ) =>
                     {
-                        let outcome = Ok(());
+                        let outcome =
+                            if output.ck_rv == CkRv::OK { Ok(()) } else { Err(output.ck_rv) };
                         transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
                         Ok((output, parameter_result))
                     }
@@ -644,7 +676,7 @@ fn dispatch_message_oneshot_msg(
 ) -> pkcs11_proxy_ng_types::CkResult<(
     pkcs11_proxy_ng_types::CkOutputBufferResult,
     pkcs11_proxy_ng_types::CkParameterRoundtripResult,
-    pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+    MessageEffects,
 )> {
     match function {
         ParameterOutputFunction::EncryptMessage => backend.encrypt_message_exact_msg(
@@ -683,7 +715,7 @@ fn dispatch_message_next_msg(
 ) -> pkcs11_proxy_ng_types::CkResult<(
     pkcs11_proxy_ng_types::CkOutputBufferResult,
     pkcs11_proxy_ng_types::CkParameterRoundtripResult,
-    pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+    MessageEffects,
 )> {
     match function {
         ParameterOutputFunction::EncryptMessageNext => backend.encrypt_message_next_exact_msg(
@@ -712,21 +744,31 @@ fn result_to_proto_msg(
     result: pkcs11_proxy_ng_types::CkResult<(
         pkcs11_proxy_ng_types::CkOutputBufferResult,
         pkcs11_proxy_ng_types::CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        MessageEffects,
     )>,
 ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
     match result {
-        Ok((output, parameter, msg_param)) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
-            authenticated_output: None,
-            output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult::from(&output)),
-            parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult::from(
-                &parameter,
-            )),
-            message_parameter_out: Some(pkcs11_proxy_ng_proto::MessageParameter::from(&msg_param)),
-        },
+        Ok((output, parameter, msg_param)) => {
+            let effects = match pkcs11_proxy_ng_proto::MessageParameterEffects::try_from(&msg_param)
+            {
+                Ok(effects) => effects,
+                Err(rv) => return error_response(rv),
+            };
+            pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                message_effects: Some(effects),
+                authenticated_output: None,
+                output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult::from(&output)),
+                parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult::from(
+                    &parameter,
+                )),
+                message_parameter_out: None,
+            }
+        }
         Err(error) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
             authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(false),
                 ck_rv: error.0,
                 returned_len: 0,
                 value: None,
@@ -749,14 +791,17 @@ fn result_to_proto(
 ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
     match result {
         Ok((output, param)) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
             authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult::from(&output)),
             parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult::from(&param)),
             message_parameter_out: None,
         },
         Err(error) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
             authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(false),
                 ck_rv: error.0,
                 returned_len: 0,
                 value: None,
@@ -775,8 +820,10 @@ fn error_response(
     error: pkcs11_proxy_ng_types::CkRv,
 ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
     pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+        message_effects: None,
         authenticated_output: None,
         output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+            apply_returned_len: Some(false),
             ck_rv: error.0,
             returned_len: 0,
             value: None,
@@ -840,6 +887,7 @@ mod ambiguity_tests {
         let response = parameter_output_exact(
             &HandlerContext::for_test(&manager, &backend),
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                exact_output_effects_version: 1,
                 authenticated_parameters: None,
                 client_context_id: context_id.0.clone(),
                 session_handle: virtual_session.0,
@@ -927,6 +975,7 @@ mod ambiguity_tests {
         let response = parameter_output_exact(
             &HandlerContext::for_test(&manager, &backend),
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                exact_output_effects_version: 1,
                 authenticated_parameters: None,
                 client_context_id: context_id.0.clone(),
                 session_handle: virtual_session,

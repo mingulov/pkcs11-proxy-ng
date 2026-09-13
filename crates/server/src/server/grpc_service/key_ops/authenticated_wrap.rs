@@ -73,7 +73,7 @@ pub(crate) async fn wrap_key_authenticated(
                 output
                     .validate_for(&p.mechanism, parameter.as_ref())
                     .map_err(|_| CkRv::DEVICE_ERROR)?;
-                Ok((bytes, Vec::new(), Some((&output).into())))
+                Ok((bytes, Vec::new(), Some((&output).try_into()?)))
             } else {
                 backend
                     .wrap_key_authenticated(
@@ -275,7 +275,7 @@ async fn unwrap_key_authenticated_impl(
                 key,
             );
             output.validate_for(&mechanism, parameter.as_ref()).map_err(|_| CkRv::DEVICE_ERROR)?;
-            let wire_output = Some((&output).into());
+            let wire_output = Some((&output).try_into()?);
             Ok((created.transfer(), Vec::new(), wire_output))
         } else {
             backend

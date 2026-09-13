@@ -504,6 +504,8 @@ fn get_attribute_value_exact_size_query_returns_length_without_bytes() {
     assert_eq!(
         results,
         vec![CkAttributeQueryResult {
+            apply_returned_len: true,
+            apply_type: false,
             attr_type: CkAttributeType::LABEL,
             returned_len: 3,
             value: None,
@@ -541,6 +543,8 @@ fn get_attribute_value_exact_too_small_returns_backend_length() {
     assert_eq!(
         results,
         vec![CkAttributeQueryResult {
+            apply_returned_len: true,
+            apply_type: false,
             attr_type: CkAttributeType::LABEL,
             returned_len: u64::MAX,
             value: None,
@@ -595,6 +599,8 @@ fn get_attribute_value_exact_mixed_sensitive_and_invalid_preserves_statuses() {
         results,
         vec![
             CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 3,
                 value: None,
@@ -602,6 +608,8 @@ fn get_attribute_value_exact_mixed_sensitive_and_invalid_preserves_statuses() {
                 nested: None,
             },
             CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::VALUE,
                 returned_len: u64::MAX,
                 value: None,
@@ -609,6 +617,8 @@ fn get_attribute_value_exact_mixed_sensitive_and_invalid_preserves_statuses() {
                 nested: None,
             },
             CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::MODULUS,
                 returned_len: u64::MAX,
                 value: None,

@@ -1,5 +1,6 @@
 use super::ffi_conversion::{mechanism_to_ffi, narrow_wire_ulong};
 use super::{FfiBackend, call_3x_fn};
+use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
 use pkcs11_proxy_ng_proto::convert::message_params::{
     CcmMessageParams, GcmMessageParams, MessageParameter, Salsa20ChaCha20Poly1305MessageParams,
 };
@@ -203,7 +204,11 @@ impl MessageInitMechanism {
                     && native.ulIvFixedBits as u64 == p.iv_fixed_bits
                     && native.ivGenerator as u64 == p.iv_generator
                     && native.ulTagBits as u64 == p.tag_bits
-                    && prefix_unchanged(first, &p.iv, p.iv_fixed_bits, p.iv_generator);
+                    && if p.iv_null_len.is_some() {
+                        first.is_empty() && p.iv.is_empty()
+                    } else {
+                        prefix_unchanged(first, &p.iv, p.iv_fixed_bits, p.iv_generator)
+                    };
                 (
                     valid,
                     (&**native as *const cryptoki_sys::CK_GCM_MESSAGE_PARAMS).cast(),
@@ -218,7 +223,11 @@ impl MessageInitMechanism {
                     && native.ulNonceFixedBits as u64 == p.nonce_fixed_bits
                     && native.nonceGenerator as u64 == p.nonce_generator
                     && native.ulMACLen as u64 == p.mac_len
-                    && prefix_unchanged(first, &p.nonce, p.nonce_fixed_bits, p.nonce_generator);
+                    && if p.nonce_null_len.is_some() {
+                        first.is_empty() && p.nonce.is_empty()
+                    } else {
+                        prefix_unchanged(first, &p.nonce, p.nonce_fixed_bits, p.nonce_generator)
+                    };
                 (
                     valid,
                     (&**native as *const cryptoki_sys::CK_CCM_MESSAGE_PARAMS).cast(),
@@ -1401,8 +1410,9 @@ impl FfiBackend {
             aad_ptr as *mut _,
             aad_len,
         );
-        Self::ck_result(rv)?;
-        Ok(empty_parameter_ack(provider_spec))
+        let mut acknowledgement = empty_parameter_ack(provider_spec);
+        acknowledgement.ck_rv = CkRv(rv as u64);
+        Ok(acknowledgement)
     }
 
     /// Common helper: call a message crypto FFI function with a GCM message
@@ -1453,7 +1463,7 @@ impl FfiBackend {
                 return Err(rv);
             }
             return Ok((
-                CkOutputBufferResult { ck_rv: rv, returned_len: 0, value: None },
+                CkOutputBufferResult { ck_rv: rv, returned_len: Some(0), value: None },
                 MessageParameter::GcmMessage(GcmMessageParams {
                     iv: iv_buf,
                     iv_null_len: gcm.iv_null_len,
@@ -1482,7 +1492,7 @@ impl FfiBackend {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
-                        returned_len: out_len as u64,
+                        returned_len: Some(out_len as u64),
                         value: None,
                     },
                     MessageParameter::GcmMessage(result_gcm),
@@ -1510,7 +1520,7 @@ impl FfiBackend {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
-                        returned_len: out_len as u64,
+                        returned_len: Some(out_len as u64),
                         value: Some(buf),
                     },
                     MessageParameter::GcmMessage(result_gcm),
@@ -1519,7 +1529,7 @@ impl FfiBackend {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::BUFFER_TOO_SMALL,
-                        returned_len: out_len as u64,
+                        returned_len: Some(out_len as u64),
                         value: None,
                     },
                     MessageParameter::GcmMessage(GcmMessageParams {
@@ -1601,7 +1611,7 @@ impl FfiBackend {
                 return Err(rv);
             }
             return Ok((
-                CkOutputBufferResult { ck_rv: rv, returned_len: 0, value: None },
+                CkOutputBufferResult { ck_rv: rv, returned_len: Some(0), value: None },
                 snapshot(&nonce_buf, &mac_buf),
             ));
         }
@@ -1612,7 +1622,7 @@ impl FfiBackend {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
-                        returned_len: out_len as u64,
+                        returned_len: Some(out_len as u64),
                         value: None,
                     },
                     snapshot(&nonce_buf, &mac_buf),
@@ -1630,7 +1640,7 @@ impl FfiBackend {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
-                        returned_len: out_len as u64,
+                        returned_len: Some(out_len as u64),
                         value: Some(buf),
                     },
                     snapshot(&nonce_buf, &mac_buf),
@@ -1639,7 +1649,7 @@ impl FfiBackend {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::BUFFER_TOO_SMALL,
-                        returned_len: out_len as u64,
+                        returned_len: Some(out_len as u64),
                         value: None,
                     },
                     snapshot(&nonce_buf, &mac_buf),
@@ -1700,7 +1710,7 @@ impl FfiBackend {
                 return Err(rv);
             }
             return Ok((
-                CkOutputBufferResult { ck_rv: rv, returned_len: 0, value: None },
+                CkOutputBufferResult { ck_rv: rv, returned_len: Some(0), value: None },
                 snapshot(&nonce_buf, &tag_buf),
             ));
         }
@@ -1711,7 +1721,7 @@ impl FfiBackend {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
-                        returned_len: out_len as u64,
+                        returned_len: Some(out_len as u64),
                         value: None,
                     },
                     snapshot(&nonce_buf, &tag_buf),
@@ -1729,7 +1739,7 @@ impl FfiBackend {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
-                        returned_len: out_len as u64,
+                        returned_len: Some(out_len as u64),
                         value: Some(buf),
                     },
                     snapshot(&nonce_buf, &tag_buf),
@@ -1738,7 +1748,7 @@ impl FfiBackend {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::BUFFER_TOO_SMALL,
-                        returned_len: out_len as u64,
+                        returned_len: Some(out_len as u64),
                         value: None,
                     },
                     snapshot(&nonce_buf, &tag_buf),
@@ -1754,8 +1764,9 @@ impl FfiBackend {
         msg_param: &MessageParameter,
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
+        encrypt: bool,
         mut call: F,
-    ) -> CkResult<(CkParameterRoundtripResult, MessageParameter)>
+    ) -> CkResult<(CkParameterRoundtripResult, MessageEffects)>
     where
         F: FnMut(
             *mut std::ffi::c_void,
@@ -1764,53 +1775,26 @@ impl FfiBackend {
             cryptoki_sys::CK_ULONG,
         ) -> cryptoki_sys::CK_RV,
     {
-        let _ = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
+        let mut acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
         let (aad_ptr, aad_len) = native_message_input(aad)?;
-        let no_output =
-            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
-        let (_, returned_parameter) =
-            match msg_param {
-                MessageParameter::GcmMessage(gcm) => {
-                    self.call_with_gcm_message_param(gcm, &no_output, |params, _, _| {
-                        call(
-                            params.cast(),
-                            std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
-                                as cryptoki_sys::CK_ULONG,
-                            aad_ptr as *mut _,
-                            aad_len,
-                        )
-                    })
-                }
-                MessageParameter::CcmMessage(ccm) => {
-                    self.call_with_ccm_message_param(ccm, &no_output, |params, _, _| {
-                        call(
-                            params.cast(),
-                            std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
-                                as cryptoki_sys::CK_ULONG,
-                            aad_ptr as *mut _,
-                            aad_len,
-                        )
-                    })
-                }
-                MessageParameter::SalaChacha(params) => self
-                    .call_with_salsa20_chacha20_poly1305_message_param(
-                        params,
-                        &no_output,
-                        |message, _, _| {
-                            call(
-                                message.cast(),
-                                std::mem::size_of::<
-                                    cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS,
-                                >() as cryptoki_sys::CK_ULONG,
-                                aad_ptr as *mut _,
-                                aad_len,
-                            )
-                        },
-                    ),
-                MessageParameter::Raw(_) => Err(CkRv::MECHANISM_PARAM_INVALID),
-            }?;
-        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
-        Ok((acknowledgement, returned_parameter))
+        let native = build_message_init_mechanism(0, msg_param)?;
+        let rv = CkRv(call(
+            native.ck_mechanism.pParameter,
+            native.ck_mechanism.ulParameterLen,
+            aad_ptr.cast_mut(),
+            aad_len,
+        ) as u64);
+        acknowledgement.ck_rv = rv;
+        let effects = if native.validate_authenticated_inputs(msg_param).is_ok() {
+            MessageEffects::capture(
+                msg_param,
+                &native.authenticated_output(msg_param),
+                MessageEffectContext { encrypt, generated_stage: true, auth_stage: false, rv },
+            )
+        } else {
+            MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity)
+        };
+        Ok((acknowledgement, effects))
     }
 
     pub(super) fn ffi_encrypt_message_begin_msg(
@@ -1819,13 +1803,14 @@ impl FfiBackend {
         msg_param: &MessageParameter,
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(CkParameterRoundtripResult, MessageEffects)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         self.ffi_message_begin_msg_impl(
             msg_param,
             aad,
             provider_spec,
+            true,
             |parameter, len, aad, aad_len| unsafe {
                 f(Self::session_handle(session), parameter, len, aad, aad_len)
             },
@@ -1838,13 +1823,14 @@ impl FfiBackend {
         msg_param: &MessageParameter,
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(CkParameterRoundtripResult, MessageEffects)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         self.ffi_message_begin_msg_impl(
             msg_param,
             aad,
             provider_spec,
+            false,
             |parameter, len, aad, aad_len| unsafe {
                 f(Self::session_handle(session), parameter, len, aad, aad_len)
             },
@@ -1860,75 +1846,39 @@ impl FfiBackend {
         plaintext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageEffects)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let _ = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
-
+        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
+        let (input_ptr, input_len) = native_message_input(plaintext)?;
         let (aad_ptr, aad_len) = native_message_input(aad)?;
-        let (pt_ptr, pt_len) = native_message_input(plaintext)?;
-        let (output, message) =
-            match msg_param {
-                MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
-                    gcm,
-                    output_spec,
-                    |params, output, output_len| unsafe {
-                        f(
-                            Self::session_handle(session),
-                            params as *mut _ as *mut _,
-                            std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
-                                as cryptoki_sys::CK_ULONG,
-                            aad_ptr as *mut _,
-                            aad_len,
-                            pt_ptr as *mut _,
-                            pt_len,
-                            output,
-                            output_len,
-                        )
-                    },
-                ),
-                MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
-                    ccm,
-                    output_spec,
-                    |params, output, output_len| unsafe {
-                        f(
-                            Self::session_handle(session),
-                            params as *mut _ as *mut _,
-                            std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
-                                as cryptoki_sys::CK_ULONG,
-                            aad_ptr as *mut _,
-                            aad_len,
-                            pt_ptr as *mut _,
-                            pt_len,
-                            output,
-                            output_len,
-                        )
-                    },
-                ),
-                MessageParameter::SalaChacha(params_in) => self
-                    .call_with_salsa20_chacha20_poly1305_message_param(
-                        params_in,
-                        output_spec,
-                        |params, output, output_len| unsafe {
-                            f(
-                                Self::session_handle(session),
-                                params as *mut _ as *mut _,
-                                std::mem::size_of::<
-                                    cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS,
-                                >() as cryptoki_sys::CK_ULONG,
-                                aad_ptr as *mut _,
-                                aad_len,
-                                pt_ptr as *mut _,
-                                pt_len,
-                                output,
-                                output_len,
-                            )
-                        },
-                    ),
-                _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
-            }?;
-        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, output.ck_rv)?;
-        Ok((output, acknowledgement, message))
+        let native = build_message_init_mechanism(0, msg_param)?;
+        let output = Self::single_call_bytes_exact(output_spec, |buffer, length| unsafe {
+            f(
+                Self::session_handle(session),
+                native.ck_mechanism.pParameter,
+                native.ck_mechanism.ulParameterLen,
+                aad_ptr.cast_mut(),
+                aad_len,
+                input_ptr.cast_mut(),
+                input_len,
+                buffer,
+                length,
+            )
+        })?;
+        let context = MessageEffectContext {
+            encrypt: true,
+            generated_stage: true,
+            auth_stage: true,
+            rv: output.ck_rv,
+        };
+        let effects = if native.validate_authenticated_inputs(msg_param).is_ok() {
+            MessageEffects::capture(msg_param, &native.authenticated_output(msg_param), context)
+        } else {
+            MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity)
+        };
+        let acknowledgement = CkParameterRoundtripResult { ck_rv: output.ck_rv, ..acknowledgement };
+        Ok((output, acknowledgement, effects))
     }
 
     /// C_DecryptMessage with structured message parameter.
@@ -1940,75 +1890,39 @@ impl FfiBackend {
         ciphertext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageEffects)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let _ = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
-
+        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
+        let (input_ptr, input_len) = native_message_input(ciphertext)?;
         let (aad_ptr, aad_len) = native_message_input(aad)?;
-        let (ct_ptr, ct_len) = native_message_input(ciphertext)?;
-        let (output, message) =
-            match msg_param {
-                MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
-                    gcm,
-                    output_spec,
-                    |params, output, output_len| unsafe {
-                        f(
-                            Self::session_handle(session),
-                            params as *mut _ as *mut _,
-                            std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
-                                as cryptoki_sys::CK_ULONG,
-                            aad_ptr as *mut _,
-                            aad_len,
-                            ct_ptr as *mut _,
-                            ct_len,
-                            output,
-                            output_len,
-                        )
-                    },
-                ),
-                MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
-                    ccm,
-                    output_spec,
-                    |params, output, output_len| unsafe {
-                        f(
-                            Self::session_handle(session),
-                            params as *mut _ as *mut _,
-                            std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
-                                as cryptoki_sys::CK_ULONG,
-                            aad_ptr as *mut _,
-                            aad_len,
-                            ct_ptr as *mut _,
-                            ct_len,
-                            output,
-                            output_len,
-                        )
-                    },
-                ),
-                MessageParameter::SalaChacha(params_in) => self
-                    .call_with_salsa20_chacha20_poly1305_message_param(
-                        params_in,
-                        output_spec,
-                        |params, output, output_len| unsafe {
-                            f(
-                                Self::session_handle(session),
-                                params as *mut _ as *mut _,
-                                std::mem::size_of::<
-                                    cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS,
-                                >() as cryptoki_sys::CK_ULONG,
-                                aad_ptr as *mut _,
-                                aad_len,
-                                ct_ptr as *mut _,
-                                ct_len,
-                                output,
-                                output_len,
-                            )
-                        },
-                    ),
-                _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
-            }?;
-        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, output.ck_rv)?;
-        Ok((output, acknowledgement, message))
+        let native = build_message_init_mechanism(0, msg_param)?;
+        let output = Self::single_call_bytes_exact(output_spec, |buffer, length| unsafe {
+            f(
+                Self::session_handle(session),
+                native.ck_mechanism.pParameter,
+                native.ck_mechanism.ulParameterLen,
+                aad_ptr.cast_mut(),
+                aad_len,
+                input_ptr.cast_mut(),
+                input_len,
+                buffer,
+                length,
+            )
+        })?;
+        let context = MessageEffectContext {
+            encrypt: false,
+            generated_stage: true,
+            auth_stage: true,
+            rv: output.ck_rv,
+        };
+        let effects = if native.validate_authenticated_inputs(msg_param).is_ok() {
+            MessageEffects::capture(msg_param, &native.authenticated_output(msg_param), context)
+        } else {
+            MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity)
+        };
+        let acknowledgement = CkParameterRoundtripResult { ck_rv: output.ck_rv, ..acknowledgement };
+        Ok((output, acknowledgement, effects))
     }
 
     /// C_SignMessage with structured message parameter.
@@ -2086,72 +2000,38 @@ impl FfiBackend {
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageEffects)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let _ = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
-
-        let (pt_ptr, pt_len) = native_message_input(plaintext_part)?;
+        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
+        let (input_ptr, input_len) = native_message_input(plaintext_part)?;
         let flags = native_message_flags(flags)?;
-        let (output, message) =
-            match msg_param {
-                MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
-                    gcm,
-                    output_spec,
-                    |params, output, output_len| unsafe {
-                        f(
-                            Self::session_handle(session),
-                            params as *mut _ as *mut _,
-                            std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
-                                as cryptoki_sys::CK_ULONG,
-                            pt_ptr as *mut _,
-                            pt_len,
-                            output,
-                            output_len,
-                            flags,
-                        )
-                    },
-                ),
-                MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
-                    ccm,
-                    output_spec,
-                    |params, output, output_len| unsafe {
-                        f(
-                            Self::session_handle(session),
-                            params as *mut _ as *mut _,
-                            std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
-                                as cryptoki_sys::CK_ULONG,
-                            pt_ptr as *mut _,
-                            pt_len,
-                            output,
-                            output_len,
-                            flags,
-                        )
-                    },
-                ),
-                MessageParameter::SalaChacha(params_in) => self
-                    .call_with_salsa20_chacha20_poly1305_message_param(
-                        params_in,
-                        output_spec,
-                        |params, output, output_len| unsafe {
-                            f(
-                                Self::session_handle(session),
-                                params as *mut _ as *mut _,
-                                std::mem::size_of::<
-                                    cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS,
-                                >() as cryptoki_sys::CK_ULONG,
-                                pt_ptr as *mut _,
-                                pt_len,
-                                output,
-                                output_len,
-                                flags,
-                            )
-                        },
-                    ),
-                _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
-            }?;
-        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, output.ck_rv)?;
-        Ok((output, acknowledgement, message))
+        let native = build_message_init_mechanism(0, msg_param)?;
+        let output = Self::single_call_bytes_exact(output_spec, |buffer, length| unsafe {
+            f(
+                Self::session_handle(session),
+                native.ck_mechanism.pParameter,
+                native.ck_mechanism.ulParameterLen,
+                input_ptr.cast_mut(),
+                input_len,
+                buffer,
+                length,
+                flags,
+            )
+        })?;
+        let context = MessageEffectContext {
+            encrypt: true,
+            generated_stage: false,
+            auth_stage: flags & cryptoki_sys::CKF_END_OF_MESSAGE != 0,
+            rv: output.ck_rv,
+        };
+        let effects = if native.validate_authenticated_inputs(msg_param).is_ok() {
+            MessageEffects::capture(msg_param, &native.authenticated_output(msg_param), context)
+        } else {
+            MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity)
+        };
+        let acknowledgement = CkParameterRoundtripResult { ck_rv: output.ck_rv, ..acknowledgement };
+        Ok((output, acknowledgement, effects))
     }
 
     /// C_DecryptMessageNext with structured message parameter.
@@ -2163,72 +2043,38 @@ impl FfiBackend {
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageParameter)> {
+    ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageEffects)> {
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        let _ = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
-
-        let (ct_ptr, ct_len) = native_message_input(ciphertext_part)?;
+        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
+        let (input_ptr, input_len) = native_message_input(ciphertext_part)?;
         let flags = native_message_flags(flags)?;
-        let (output, message) =
-            match msg_param {
-                MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
-                    gcm,
-                    output_spec,
-                    |params, output, output_len| unsafe {
-                        f(
-                            Self::session_handle(session),
-                            params as *mut _ as *mut _,
-                            std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>()
-                                as cryptoki_sys::CK_ULONG,
-                            ct_ptr as *mut _,
-                            ct_len,
-                            output,
-                            output_len,
-                            flags,
-                        )
-                    },
-                ),
-                MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
-                    ccm,
-                    output_spec,
-                    |params, output, output_len| unsafe {
-                        f(
-                            Self::session_handle(session),
-                            params as *mut _ as *mut _,
-                            std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>()
-                                as cryptoki_sys::CK_ULONG,
-                            ct_ptr as *mut _,
-                            ct_len,
-                            output,
-                            output_len,
-                            flags,
-                        )
-                    },
-                ),
-                MessageParameter::SalaChacha(params_in) => self
-                    .call_with_salsa20_chacha20_poly1305_message_param(
-                        params_in,
-                        output_spec,
-                        |params, output, output_len| unsafe {
-                            f(
-                                Self::session_handle(session),
-                                params as *mut _ as *mut _,
-                                std::mem::size_of::<
-                                    cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS,
-                                >() as cryptoki_sys::CK_ULONG,
-                                ct_ptr as *mut _,
-                                ct_len,
-                                output,
-                                output_len,
-                                flags,
-                            )
-                        },
-                    ),
-                _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
-            }?;
-        let acknowledgement = structured_parameter_ack(msg_param, provider_spec, output.ck_rv)?;
-        Ok((output, acknowledgement, message))
+        let native = build_message_init_mechanism(0, msg_param)?;
+        let output = Self::single_call_bytes_exact(output_spec, |buffer, length| unsafe {
+            f(
+                Self::session_handle(session),
+                native.ck_mechanism.pParameter,
+                native.ck_mechanism.ulParameterLen,
+                input_ptr.cast_mut(),
+                input_len,
+                buffer,
+                length,
+                flags,
+            )
+        })?;
+        let context = MessageEffectContext {
+            encrypt: false,
+            generated_stage: false,
+            auth_stage: flags & cryptoki_sys::CKF_END_OF_MESSAGE != 0,
+            rv: output.ck_rv,
+        };
+        let effects = if native.validate_authenticated_inputs(msg_param).is_ok() {
+            MessageEffects::capture(msg_param, &native.authenticated_output(msg_param), context)
+        } else {
+            MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity)
+        };
+        let acknowledgement = CkParameterRoundtripResult { ck_rv: output.ck_rv, ..acknowledgement };
+        Ok((output, acknowledgement, effects))
     }
 
     /// C_SignMessageNext with structured message parameter.
@@ -2708,7 +2554,8 @@ mod tests {
         {
             let params = unsafe { &mut *parameter.cast::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>() };
             if !params.pIv.is_null() && params.ulIvLen > 0 {
-                unsafe { *params.pIv = 0x7b };
+                // Keep the caller's fixed 32-bit prefix unchanged.
+                unsafe { *params.pIv.add(4) = 0x7b };
             }
         }
         cryptoki_sys::CKR_OK
@@ -2843,7 +2690,10 @@ mod tests {
                 },
             )
             .expect("GCM provider result envelope");
-        assert_eq!(output, CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 0, value: None });
+        assert_eq!(
+            output,
+            CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(0), value: None }
+        );
         let mut expected_gcm = gcm.clone();
         expected_gcm.iv[0] = 0xA1;
         assert_eq!(returned, MessageParameter::GcmMessage(expected_gcm));
@@ -2871,7 +2721,10 @@ mod tests {
                 },
             )
             .expect("CCM provider result envelope");
-        assert_eq!(output, CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 0, value: None });
+        assert_eq!(
+            output,
+            CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(0), value: None }
+        );
         let mut expected_ccm = ccm.clone();
         expected_ccm.nonce[0] = 0xA2;
         assert_eq!(returned, MessageParameter::CcmMessage(expected_ccm));
@@ -2896,7 +2749,10 @@ mod tests {
                 },
             )
             .expect("Salsa/ChaCha provider result envelope");
-        assert_eq!(output, CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 0, value: None });
+        assert_eq!(
+            output,
+            CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(0), value: None }
+        );
         let mut expected_salsa = salsa.clone();
         expected_salsa.tag[0] = 0xA3;
         assert_eq!(returned, MessageParameter::SalaChacha(expected_salsa));
@@ -3280,7 +3136,17 @@ mod tests {
                 assert_eq!(output.ck_rv, CkRv::OK);
                 assert_eq!(output.value, Some(b"input".to_vec()));
                 assert_eq!(ack.returned_len, native_len);
-                assert_eq!(returned, parameter);
+                returned
+                    .validate_for(
+                        &parameter,
+                        MessageEffectContext {
+                            encrypt,
+                            generated_stage: true,
+                            auth_stage: true,
+                            rv: output.ck_rv,
+                        },
+                    )
+                    .unwrap();
                 exercised_cells += 1;
 
                 STRUCTURED_PROVIDER_PARAMETER_VALID.store(0, Ordering::SeqCst);
@@ -3308,7 +3174,17 @@ mod tests {
                     &format!("{shape} {direction} Begin"),
                 );
                 assert_eq!(ack.returned_len, native_len);
-                assert_eq!(returned, parameter);
+                returned
+                    .validate_for(
+                        &parameter,
+                        MessageEffectContext {
+                            encrypt,
+                            generated_stage: true,
+                            auth_stage: false,
+                            rv: ack.ck_rv,
+                        },
+                    )
+                    .unwrap();
                 exercised_cells += 1;
 
                 STRUCTURED_PROVIDER_PARAMETER_VALID.store(0, Ordering::SeqCst);
@@ -3342,7 +3218,17 @@ mod tests {
                 assert_eq!(output.ck_rv, CkRv::OK);
                 assert_eq!(output.value, Some(b"input".to_vec()));
                 assert_eq!(ack.returned_len, native_len);
-                assert_eq!(returned, parameter);
+                returned
+                    .validate_for(
+                        &parameter,
+                        MessageEffectContext {
+                            encrypt,
+                            generated_stage: false,
+                            auth_stage: false,
+                            rv: output.ck_rv,
+                        },
+                    )
+                    .unwrap();
                 exercised_cells += 1;
             }
         }
@@ -3393,7 +3279,7 @@ mod tests {
         );
         assert_eq!(ack.returned_len, provider_spec.buffer_len);
         match returned {
-            MessageParameter::GcmMessage(gcm) => assert_eq!(gcm.iv[0], 0x7b),
+            MessageEffects::Gcm { iv: Some(iv), .. } => assert_eq!(iv[4], 0x7b),
             other => panic!("unexpected parameter: {other:?}"),
         }
     }
@@ -3488,7 +3374,7 @@ mod tests {
             assert_eq!(result.unwrap_err(), CkRv::FUNCTION_FAILED);
             assert_eq!(STRUCTURED_PROVIDER_CALLS.load(Ordering::SeqCst), 0);
         } else {
-            assert_eq!(result.unwrap_err(), CkRv::MECHANISM_PARAM_INVALID);
+            assert_eq!(result.unwrap().0.ck_rv, CkRv::MECHANISM_PARAM_INVALID);
             assert_eq!(STRUCTURED_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
         }
     }

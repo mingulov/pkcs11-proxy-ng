@@ -20,6 +20,9 @@ pub(super) async fn byte_output_exact(
     let started = std::time::Instant::now();
     let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
+    if req.exact_output_effects_version != 1 {
+        return Err(Status::failed_precondition("exact output effects version 1 required"));
+    }
     let ctx_id = ClientContextId(req.client_context_id);
 
     // Parse the function discriminator
@@ -36,6 +39,7 @@ pub(super) async fn byte_output_exact(
     fn error_response(error: CkRv) -> pkcs11_proxy_ng_proto::ByteOutputExactResponse {
         pkcs11_proxy_ng_proto::ByteOutputExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(false),
                 ck_rv: error.0,
                 returned_len: 0,
                 value: None,
@@ -229,6 +233,7 @@ fn result_to_proto(
     match result {
         Ok(r) => pkcs11_proxy_ng_proto::OutputBufferResult::from(&r),
         Err(error) => pkcs11_proxy_ng_proto::OutputBufferResult {
+            apply_returned_len: Some(false),
             ck_rv: error.0,
             returned_len: 0,
             value: None,
@@ -354,6 +359,7 @@ mod sanitize_inputs_tests {
         let resp = byte_output_exact(
             &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
                 function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,
@@ -402,6 +408,7 @@ mod sanitize_inputs_tests {
         let _resp = byte_output_exact(
             &service.ctx,
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
                 function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,
@@ -434,6 +441,7 @@ mod sanitize_inputs_tests {
         let response = byte_output_exact(
             &HandlerContext::for_test(&ctx_mgr, &backend),
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
                 session_handle: session,
                 function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,

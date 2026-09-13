@@ -76,7 +76,9 @@ impl Pkcs11Client {
     ) -> CkResult<(CkOutputBufferResult, AuthenticatedOutput)> {
         validate_input(mechanism, parameter)?;
         self.require_typed_authenticated_parameters().await?;
+        self.require_exact_output_effects().await?;
         let mut request = wire::ParameterOutputExactRequest {
+            exact_output_effects_version: 1,
             client_context_id: self.context_id()?,
             session_handle: session.0,
             function: wire::ParameterOutputFunction::WrapKeyAuthenticated as i32,
@@ -99,9 +101,14 @@ impl Pkcs11Client {
         let main = response
             .output_result
             .as_ref()
-            .map(CkOutputBufferResult::from)
+            .map(CkOutputBufferResult::try_from)
+            .transpose()?
             .ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        if !matches!(main.ck_rv, CkRv::OK | CkRv::BUFFER_TOO_SMALL) {
+        if !matches!(main.ck_rv, CkRv::OK | CkRv::BUFFER_TOO_SMALL)
+            && main.returned_len.is_none()
+            && main.value.is_none()
+            && response.authenticated_output.is_none()
+        {
             return Err(main.ck_rv);
         }
         let ack = response.parameter_result.as_ref().ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
@@ -112,20 +119,12 @@ impl Pkcs11Client {
         {
             return Err(CkRv::FUNCTION_NOT_SUPPORTED);
         }
-        let valid = if spec.length_pointer_null {
-            main.returned_len == 0 && main.value.is_none()
-        } else if !spec.buffer_present || main.ck_rv == CkRv::BUFFER_TOO_SMALL {
-            main.value.is_none()
-        } else {
-            main.value.as_ref().is_some_and(|v| {
-                v.len() as u64 == main.returned_len && main.returned_len <= spec.buffer_len
-            })
-        };
-        if !valid {
-            return Err(CkRv::FUNCTION_NOT_SUPPORTED);
-        }
+        main.validate_for(spec, u64::MAX).map_err(|_| CkRv::FUNCTION_NOT_SUPPORTED)?;
         let output =
             decode_output(mechanism, parameter, response.authenticated_output.as_ref(), &[])?;
+        output
+            .validate_exact_for(mechanism, parameter, main.ck_rv)
+            .map_err(|_| CkRv::FUNCTION_NOT_SUPPORTED)?;
         Ok((main, output))
     }
 
@@ -214,12 +213,17 @@ mod tests {
             mechanism_type: CkMechanismType::AES_CBC,
             params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0; 16] })),
         };
-        let valid = wire::AuthenticatedMechanismOutput::from(&AuthenticatedOutput::Iv(vec![0; 16]));
+        let valid =
+            wire::AuthenticatedMechanismOutput::try_from(&AuthenticatedOutput::Iv(vec![0; 16]))
+                .unwrap();
         assert!(decode_output(&mechanism, None, Some(&valid), &[]).is_ok());
         for output in [
             None,
             Some(wire::AuthenticatedMechanismOutput::default()),
-            Some(wire::AuthenticatedMechanismOutput::from(&AuthenticatedOutput::Unchanged)),
+            Some(
+                wire::AuthenticatedMechanismOutput::try_from(&AuthenticatedOutput::Unchanged)
+                    .unwrap(),
+            ),
         ] {
             assert!(decode_output(&mechanism, None, output.as_ref(), &[]).is_err());
         }

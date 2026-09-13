@@ -3,6 +3,7 @@ pub mod authenticated;
 pub mod error;
 pub mod mechanism;
 pub mod mechanism_registry;
+pub mod message_effects;
 pub mod message_params;
 pub mod output;
 pub mod session;

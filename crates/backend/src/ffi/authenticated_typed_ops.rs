@@ -146,20 +146,42 @@ impl FfiBackend {
         let f = unsafe { (*fl).C_WrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let (aad_ptr, aad_len) = aad.as_ptr_len();
         let aad_len = narrow_wire_ulong(aad_len)?;
-        with_parameter(mechanism, parameter, |native| {
-            Self::single_call_bytes_exact(spec, |output, length| unsafe {
-                f(
-                    Self::session_handle(session),
-                    native.pointer(),
-                    Self::object_handle(wrapping_key),
-                    Self::object_handle(key),
-                    aad_ptr.cast_mut(),
-                    aad_len,
-                    output,
-                    length,
-                )
-            })
-        })
+        let mut native = NativeParameter::new(mechanism, parameter)?;
+        let output = Self::single_call_bytes_exact(spec, |output, length| unsafe {
+            f(
+                Self::session_handle(session),
+                native.pointer(),
+                Self::object_handle(wrapping_key),
+                Self::object_handle(key),
+                aad_ptr.cast_mut(),
+                aad_len,
+                output,
+                length,
+            )
+        })?;
+        let effects = if native.validate_inputs().is_err() {
+            AuthenticatedOutput::Invalid(OutputContractViolation::ParameterIntegrity)
+        } else {
+            match native.read_output() {
+                Ok(AuthenticatedOutput::Message(post)) => {
+                    let effects =
+                        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
+                            parameter.expect("message storage has immutable typed input"),
+                            &post,
+                            pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                                encrypt: true,
+                                generated_stage: true,
+                                auth_stage: true,
+                                rv: output.ck_rv,
+                            },
+                        );
+                    AuthenticatedOutput::Effects(effects)
+                }
+                Ok(other) => other,
+                Err(_) => AuthenticatedOutput::Invalid(OutputContractViolation::ParameterIntegrity),
+            }
+        };
+        Ok((output, effects))
     }
 
     pub(super) fn ffi_unwrap_authenticated_typed(

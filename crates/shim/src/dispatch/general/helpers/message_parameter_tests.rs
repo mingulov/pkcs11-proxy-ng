@@ -1,11 +1,47 @@
 use super::{
     MessageCallMemory, MessageParameterCall, MessageParameterDirection, MessageParameterStage,
     empty_message_parameter_roundtrip_spec, message_parameter_roundtrip_spec,
-    read_message_parameter_call_for_shape_with_memory, write_exact_message_output,
+    read_message_parameter_call_for_shape_with_memory,
+    write_exact_message_output as commit_exact_effects,
 };
 use cryptoki_sys::*;
+use pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects;
 use pkcs11_proxy_ng_proto::convert::message_params::{MessageParameter, MessageParameterShape};
 use pkcs11_proxy_ng_types::{CkResult, CkRv};
+
+// Preserve the pre-C3 shape/stage fixtures while invoking the production typed
+// commit helper. New effect-contract tests construct their effects explicitly.
+#[allow(clippy::too_many_arguments)]
+unsafe fn write_exact_message_output(
+    output_spec: &pkcs11_proxy_ng_types::CkOutputBufferSpec,
+    parameter_spec: &pkcs11_proxy_ng_types::CkParameterRoundtripSpec,
+    call: &MessageParameterCall,
+    output: &pkcs11_proxy_ng_types::CkOutputBufferResult,
+    ack: &pkcs11_proxy_ng_types::CkParameterRoundtripResult,
+    response: Option<&MessageParameter>,
+    pointer: CK_BYTE_PTR,
+    length: CK_ULONG_PTR,
+) -> CK_RV {
+    let effects = response.zip(call.parameter()).map(|(response, input)| {
+        MessageEffects::capture(
+            input,
+            response,
+            super::message_params::effect_context(call, output.ck_rv),
+        )
+    });
+    unsafe {
+        commit_exact_effects(
+            output_spec,
+            parameter_spec,
+            call,
+            output,
+            ack,
+            effects.as_ref(),
+            pointer,
+            length,
+        )
+    }
+}
 
 unsafe fn read_message_parameter_call_for_shape(
     p_parameter: *const std::ffi::c_void,
@@ -70,6 +106,72 @@ fn empty_sign_verify_parameter_classes_are_preserved_and_positive_is_rejected_wi
 }
 
 #[test]
+fn write_exact_message_error_applies_only_permitted_parameter_effects() {
+    let mut iv = [0x11; 12];
+    let mut tag = [0x22; 16];
+    let mut outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: 12,
+        ulIvFixedBits: 0,
+        ivGenerator: CKG_GENERATE_COUNTER_XOR,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let call = unsafe {
+        read_message_parameter_call_for_shape(
+            (&mut outer as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    }
+    .unwrap();
+    let spec = unsafe {
+        message_parameter_roundtrip_spec(
+            (&mut outer as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+        )
+    }
+    .unwrap();
+    let mut returned_iv = vec![0x11; 12];
+    returned_iv[0] = 0x42;
+    let response = MessageEffects::Gcm { iv: Some(returned_iv), tag: None };
+    let output_spec = pkcs11_proxy_ng_types::CkOutputBufferSpec {
+        buffer_present: false,
+        buffer_len: 0,
+        length_pointer_null: false,
+    };
+    let output = pkcs11_proxy_ng_types::CkOutputBufferResult {
+        ck_rv: CkRv::DEVICE_ERROR,
+        returned_len: Some(7),
+        value: None,
+    };
+    let ack = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
+        ck_rv: CkRv::DEVICE_ERROR,
+        returned_len: spec.buffer_len,
+        value: Some(vec![]),
+    };
+    let mut length = 99;
+    let rv = unsafe {
+        commit_exact_effects(
+            &output_spec,
+            &spec,
+            &call,
+            &output,
+            &ack,
+            Some(&response),
+            std::ptr::null_mut(),
+            &mut length,
+        )
+    };
+    assert_eq!(rv, CKR_DEVICE_ERROR);
+    assert_eq!(iv[0], 0x42, "initialized XOR IV effect must survive the native error");
+    assert_eq!(tag, [0x22; 16], "output-only tag has no defined ordinary-error effect");
+    assert_eq!(length, 7);
+}
+
+#[test]
 fn transactional_message_output_keeps_all_memory_unchanged_on_malformed_ack() {
     let mut iv = [0x11u8; 12];
     let mut tag = [0x22u8; 16];
@@ -109,7 +211,7 @@ fn transactional_message_output_keeps_all_memory_unchanged_on_malformed_ack() {
     };
     let output_result = pkcs11_proxy_ng_types::CkOutputBufferResult {
         ck_rv: CkRv::OK,
-        returned_len: 4,
+        returned_len: Some(4),
         value: Some(vec![1, 2, 3, 4]),
     };
     let malformed_parameter_result = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
@@ -187,7 +289,7 @@ fn transactional_message_output_rejects_malformed_main_value_before_any_write() 
     };
     let malformed_output = pkcs11_proxy_ng_types::CkOutputBufferResult {
         ck_rv: CkRv::OK,
-        returned_len: 4,
+        returned_len: Some(4),
         value: Some(vec![1, 2, 3]),
     };
     let parameter_result = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
@@ -269,7 +371,7 @@ fn transactional_message_size_query_keeps_memory_unchanged_on_bad_pointer_class_
     };
     let output_result = pkcs11_proxy_ng_types::CkOutputBufferResult {
         ck_rv: CkRv::OK,
-        returned_len: 4,
+        returned_len: Some(4),
         value: None,
     };
     let bad_ack = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
@@ -337,7 +439,7 @@ fn transactional_message_b2s_keeps_all_memory_unchanged_on_bad_ack() {
     };
     let output_result = pkcs11_proxy_ng_types::CkOutputBufferResult {
         ck_rv: CkRv::BUFFER_TOO_SMALL,
-        returned_len: 4,
+        returned_len: Some(4),
         value: None,
     };
     let bad_ack = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
@@ -461,7 +563,7 @@ fn commit_stage_response(
     };
     let output_result = pkcs11_proxy_ng_types::CkOutputBufferResult {
         ck_rv: CkRv::OK,
-        returned_len: 0,
+        returned_len: Some(0),
         value: None,
     };
     let parameter_result = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
@@ -564,6 +666,8 @@ fn shape_bound_reader_covers_all_shapes_directions_and_stages() {
             if direction == MessageParameterDirection::Encrypt {
                 let MessageParameter::GcmMessage(response) = &mut response else { unreachable!() };
                 response.iv.fill(0x71);
+                response.iv[0] = 0xAB;
+                response.iv[1] = 0xC1;
                 response.tag.fill(0x72);
             }
             assert_eq!(
@@ -573,7 +677,14 @@ fn shape_bound_reader_covers_all_shapes_directions_and_stages() {
             );
             assert_eq!(
                 iv,
-                if writes_generated { [0x71; 12] } else { original_iv },
+                if writes_generated {
+                    let mut expected = [0x71; 12];
+                    expected[0] = 0xAB;
+                    expected[1] = 0xC1;
+                    expected
+                } else {
+                    original_iv
+                },
                 "GCM {direction_name} {stage_name} IV write timing",
             );
             assert_eq!(
@@ -633,6 +744,8 @@ fn shape_bound_reader_covers_all_shapes_directions_and_stages() {
             if direction == MessageParameterDirection::Encrypt {
                 let MessageParameter::CcmMessage(response) = &mut response else { unreachable!() };
                 response.nonce.fill(0x73);
+                response.nonce[0] = 0xBC;
+                response.nonce[1] = 0xD3;
                 response.mac.fill(0x74);
             }
             assert_eq!(
@@ -642,7 +755,14 @@ fn shape_bound_reader_covers_all_shapes_directions_and_stages() {
             );
             assert_eq!(
                 nonce,
-                if writes_generated { [0x73; 13] } else { original_nonce },
+                if writes_generated {
+                    let mut expected = [0x73; 13];
+                    expected[0] = 0xBC;
+                    expected[1] = 0xD3;
+                    expected
+                } else {
+                    original_nonce
+                },
                 "CCM {direction_name} {stage_name} nonce write timing",
             );
             assert_eq!(

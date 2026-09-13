@@ -26,107 +26,26 @@ impl FfiBackend {
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let ffi_attrs = FfiAttrs::from_slice(template)?;
 
-        let mut out_len: cryptoki_sys::CK_ULONG = 0;
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
-
-        if spec.length_pointer_null {
-            let output = if spec.buffer_present {
-                std::ptr::NonNull::<cryptoki_sys::CK_BYTE>::dangling().as_ptr()
-            } else {
-                std::ptr::null_mut()
-            };
-            let rv = CkRv(unsafe {
-                function(
-                    Self::session_handle(session),
-                    &mut ffi_mech.ck_mechanism,
-                    Self::object_handle(public_key),
-                    Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
-                    output,
-                    std::ptr::null_mut(),
-                    &mut key_handle,
-                )
-            } as u64);
-            if !rv.is_ok() {
-                return Err(rv);
-            }
-            return Ok(CkOutputAndHandleResult {
-                ck_rv: rv,
-                returned_len: 0,
-                value: None,
-                object_handle: CkObjectHandle(key_handle as u64),
-            });
-        }
-
-        if !spec.buffer_present {
-            // Size query: pass NULL pCiphertext
-            let rv = unsafe {
-                function(
-                    Self::session_handle(session),
-                    &mut ffi_mech.ck_mechanism,
-                    Self::object_handle(public_key),
-                    Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
-                    std::ptr::null_mut(),
-                    &mut out_len,
-                    &mut key_handle,
-                )
-            };
-            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV
-                || rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV
-            {
-                // Both CKR_OK and CKR_BUFFER_TOO_SMALL are valid size-query
-                // responses (NSS returns BUFFER_TOO_SMALL). Propagate the
-                // returned length so the caller can allocate correctly.
-                Ok(CkOutputAndHandleResult {
-                    ck_rv: CkRv(rv as u64),
-                    returned_len: out_len as u64,
-                    value: None,
-                    object_handle: CkObjectHandle(if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
-                        key_handle as u64
-                    } else {
-                        0
-                    }),
-                })
-            } else {
-                Err(CkRv(rv as u64))
-            }
-        } else {
-            // Data query: allocate caller-specified buffer
-            let capped = super::call_helpers::capped_output_len(spec.buffer_len);
-            out_len = capped as cryptoki_sys::CK_ULONG;
-            let mut buf = vec![0u8; capped];
-            let rv = unsafe {
-                function(
-                    Self::session_handle(session),
-                    &mut ffi_mech.ck_mechanism,
-                    Self::object_handle(public_key),
-                    Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
-                    buf.as_mut_ptr(),
-                    &mut out_len,
-                    &mut key_handle,
-                )
-            };
-            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
-                buf.truncate(out_len as usize);
-                Ok(CkOutputAndHandleResult {
-                    ck_rv: CkRv::OK,
-                    returned_len: out_len as u64,
-                    value: Some(buf),
-                    object_handle: CkObjectHandle(key_handle as u64),
-                })
-            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
-                Ok(CkOutputAndHandleResult {
-                    ck_rv: CkRv::BUFFER_TOO_SMALL,
-                    returned_len: out_len as u64,
-                    value: None,
-                    object_handle: CkObjectHandle(0),
-                })
-            } else {
-                Err(CkRv(rv as u64))
-            }
-        }
+        let output = Self::single_call_bytes_exact(spec, |buffer, length| unsafe {
+            function(
+                Self::session_handle(session),
+                &mut ffi_mech.ck_mechanism,
+                Self::object_handle(public_key),
+                Self::ffi_attr_ptr(&ffi_attrs),
+                Self::ffi_attr_len(&ffi_attrs),
+                buffer,
+                length,
+                &mut key_handle,
+            )
+        })?;
+        Ok(CkOutputAndHandleResult {
+            ck_rv: output.ck_rv,
+            returned_len: output.returned_len,
+            value: output.value,
+            object_handle: (output.ck_rv == CkRv::OK && key_handle != 0)
+                .then_some(CkObjectHandle(key_handle as u64)),
+        })
     }
 
     pub(super) fn ffi_encapsulate_key(
@@ -288,8 +207,8 @@ mod tests {
         assert_eq!(OUTPUT_PRESENT.load(Ordering::SeqCst), 1);
         assert_eq!(LENGTH_NULL.load(Ordering::SeqCst), 1);
         assert_eq!(result.ck_rv, CkRv::OK);
-        assert_eq!(result.returned_len, 0);
+        assert_eq!(result.returned_len, None);
         assert_eq!(result.value, None);
-        assert_eq!(result.object_handle, CkObjectHandle(0x44));
+        assert_eq!(result.object_handle, Some(CkObjectHandle(0x44)));
     }
 }

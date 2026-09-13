@@ -87,6 +87,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .skip_debug([
             ".pkcs11_proxy_ng.v1.AuthenticatedMechanismOutput",
             ".pkcs11_proxy_ng.v1.AuthenticatedParameters",
+            ".pkcs11_proxy_ng.v1.MessageParameterEffects",
+            ".pkcs11_proxy_ng.v1.GcmMessageEffects",
+            ".pkcs11_proxy_ng.v1.CcmMessageEffects",
+            ".pkcs11_proxy_ng.v1.SalsaMessageEffects",
         ])
         .compile_protos(
             &[

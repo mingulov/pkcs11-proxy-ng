@@ -635,7 +635,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -651,7 +651,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -664,7 +664,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -677,7 +677,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -706,7 +706,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -722,7 +722,7 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }

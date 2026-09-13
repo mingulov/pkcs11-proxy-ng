@@ -96,7 +96,7 @@ impl FfiBackend {
                 )
             })?;
         let rv = CkRv(rv as u64);
-        Ok((rv, exact_attribute_results_from_ffi(queries, &ffi_queries.attrs, rv)))
+        Ok((rv, ffi_queries.readback(queries, rv)))
     }
 
     pub(super) fn ffi_create_object(

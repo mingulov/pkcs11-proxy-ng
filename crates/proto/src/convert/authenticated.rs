@@ -1,6 +1,7 @@
 //! Authenticated parameter transport has a separate output allowlist. In
 //! particular, mechanism inputs must never be reused as output messages: they
 //! may contain backend object handles after authorization/remapping.
+use super::message_effects::{MessageEffectContext, MessageEffects};
 use super::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
@@ -28,6 +29,8 @@ pub enum AuthenticatedOutput {
     Unchanged,
     Iv(Vec<u8>),
     Message(MessageParameter),
+    Effects(MessageEffects),
+    Invalid(OutputContractViolation),
 }
 
 impl std::fmt::Debug for AuthenticatedOutput {
@@ -36,6 +39,8 @@ impl std::fmt::Debug for AuthenticatedOutput {
             Self::Unchanged => "AuthenticatedOutput::Unchanged",
             Self::Iv(_) => "AuthenticatedOutput::Iv([REDACTED])",
             Self::Message(_) => "AuthenticatedOutput::Message([REDACTED])",
+            Self::Effects(_) => "AuthenticatedOutput::Effects([REDACTED])",
+            Self::Invalid(_) => "AuthenticatedOutput::Invalid",
         })
     }
 }
@@ -111,6 +116,29 @@ pub fn decode_parameters(
 }
 
 impl AuthenticatedOutput {
+    pub fn validate_exact_for(
+        &self,
+        mechanism: &CkMechanism,
+        parameter: Option<&MessageParameter>,
+        rv: CkRv,
+    ) -> CkResult<()> {
+        match (self, parameter) {
+            (Self::Effects(effects), Some(input)) => {
+                validate_input(mechanism, parameter)?;
+                effects.validate_for(
+                    input,
+                    MessageEffectContext {
+                        encrypt: true,
+                        generated_stage: true,
+                        auth_stage: true,
+                        rv,
+                    },
+                )
+            }
+            (Self::Message(_), _) | (Self::Invalid(_), _) => Err(CkRv::DEVICE_ERROR),
+            _ => self.validate_for(mechanism, parameter),
+        }
+    }
     pub fn validate_for(
         &self,
         mechanism: &CkMechanism,
@@ -118,6 +146,15 @@ impl AuthenticatedOutput {
     ) -> CkResult<()> {
         validate_input(mechanism, parameter)?;
         match (self, parameter, mechanism.params.as_ref()) {
+            (Self::Effects(effects), Some(input), None) => effects.validate_for(
+                input,
+                MessageEffectContext {
+                    encrypt: true,
+                    generated_stage: true,
+                    auth_stage: true,
+                    rv: CkRv::OK,
+                },
+            ),
             (Self::Message(output), Some(input), None) if input.same_layout_and_scalars(output) => {
                 output.validate_structured()
             }
@@ -132,16 +169,23 @@ impl AuthenticatedOutput {
     }
 }
 
-impl From<&AuthenticatedOutput> for wire::AuthenticatedMechanismOutput {
-    fn from(output: &AuthenticatedOutput) -> Self {
+impl TryFrom<&AuthenticatedOutput> for wire::AuthenticatedMechanismOutput {
+    type Error = CkRv;
+    fn try_from(output: &AuthenticatedOutput) -> CkResult<Self> {
         use wire::authenticated_mechanism_output::Output;
-        Self {
-            output: Some(match output {
-                AuthenticatedOutput::Unchanged => Output::Unchanged(true),
-                AuthenticatedOutput::Iv(iv) => Output::Iv(iv.clone()),
-                AuthenticatedOutput::Message(message) => Output::MessageParameter(message.into()),
-            }),
-        }
+        Ok(Self {
+            output: match output {
+                AuthenticatedOutput::Unchanged => Some(Output::Unchanged(true)),
+                AuthenticatedOutput::Iv(iv) => Some(Output::Iv(iv.clone())),
+                AuthenticatedOutput::Message(message) => {
+                    Some(Output::MessageParameter(message.into()))
+                }
+                AuthenticatedOutput::Effects(effects) => {
+                    Some(Output::MessageEffects(wire::MessageParameterEffects::try_from(effects)?))
+                }
+                AuthenticatedOutput::Invalid(_) => return Err(CkRv::DEVICE_ERROR),
+            },
+        })
     }
 }
 
@@ -156,8 +200,25 @@ impl TryFrom<&wire::AuthenticatedMechanismOutput> for AuthenticatedOutput {
                 validate_structured_wire_parameter(message)?;
                 Ok(Self::Message(MessageParameter::try_from(message)?))
             }
+            Some(Output::MessageEffects(effects)) => Ok(Self::Effects(effects.try_into()?)),
             _ => Err(CkRv::MECHANISM_PARAM_INVALID),
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn invalid_authenticated_native_completion_cannot_serialize_as_empty_wire_output() {
+    for invalid in [
+        AuthenticatedOutput::Invalid(OutputContractViolation::ParameterIntegrity),
+        AuthenticatedOutput::Effects(MessageEffects::Invalid(
+            OutputContractViolation::ParameterIntegrity,
+        )),
+    ] {
+        assert!(
+            wire::AuthenticatedMechanismOutput::try_from(&invalid).is_err(),
+            "invalid native completion must fail conversion, not become an empty wire output"
+        );
     }
 }
 
@@ -169,7 +230,8 @@ mod tests {
     #[test]
     fn authenticated_wire_debug_never_formats_payload_buffers() {
         let output =
-            wire::AuthenticatedMechanismOutput::from(&AuthenticatedOutput::Iv(vec![77, 78]));
+            wire::AuthenticatedMechanismOutput::try_from(&AuthenticatedOutput::Iv(vec![77, 78]))
+                .unwrap();
         assert!(
             !format!("{output:?}").contains("77"),
             "authenticated wire output Debug must redact buffers"
@@ -178,7 +240,8 @@ mod tests {
 
     #[test]
     fn authenticated_output_roundtrips_an_explicit_empty_ack_without_native_fields() {
-        let output = wire::AuthenticatedMechanismOutput::from(&AuthenticatedOutput::Unchanged);
+        let output =
+            wire::AuthenticatedMechanismOutput::try_from(&AuthenticatedOutput::Unchanged).unwrap();
         assert_eq!(output.encode_to_vec(), [8, 1]);
         assert!(matches!(
             AuthenticatedOutput::try_from(&output),

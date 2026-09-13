@@ -41,10 +41,14 @@ mod verify_signature_ops;
 #[path = "ffi/wrap_contract_tests.rs"]
 mod wrap_contract_tests;
 
+#[cfg(all(test, unix))]
+#[path = "ffi/exact_output_contract_tests.rs"]
+mod exact_output_contract_tests;
+
 use ffi_conversion::{FfiAttributeQueries, FfiAttrs, space_pad};
 use mapping::{
-    exact_attribute_results_from_ffi, info_from_ck, mechanism_info_from_ck, session_info_from_ck,
-    slot_info_from_ck, token_info_from_ck, update_template_from_ffi,
+    info_from_ck, mechanism_info_from_ck, session_info_from_ck, slot_info_from_ck,
+    token_info_from_ck, update_template_from_ffi,
 };
 
 macro_rules! session_bytes_input {
@@ -1419,7 +1423,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_encrypt_message_exact_msg(
             session,
@@ -1442,7 +1446,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_decrypt_message_exact_msg(
             session,
@@ -1462,7 +1466,7 @@ impl Pkcs11Backend for FfiBackend {
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_encrypt_message_begin_msg(session, msg_param, aad, provider_spec)
     }
@@ -1475,7 +1479,7 @@ impl Pkcs11Backend for FfiBackend {
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_decrypt_message_begin_msg(session, msg_param, aad, provider_spec)
     }
@@ -1504,7 +1508,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_encrypt_message_next_exact_msg(
             session,
@@ -1527,7 +1531,7 @@ impl Pkcs11Backend for FfiBackend {
     ) -> CkResult<(
         CkOutputBufferResult,
         CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects,
     )> {
         self.ffi_decrypt_message_next_exact_msg(
             session,
