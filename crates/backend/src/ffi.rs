@@ -35,6 +35,10 @@ mod session_ops;
 #[path = "ffi/verify_signature_ops.rs"]
 mod verify_signature_ops;
 
+#[cfg(all(test, unix))]
+#[path = "ffi/wrap_contract_tests.rs"]
+mod wrap_contract_tests;
+
 use ffi_conversion::{FfiAttributeQueries, FfiAttrs, space_pad};
 use mapping::{
     exact_attribute_results_from_ffi, info_from_ck, mechanism_info_from_ck, session_info_from_ck,

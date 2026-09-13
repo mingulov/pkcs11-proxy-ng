@@ -14,10 +14,7 @@ use super::super::context_manager::{
     ClientContextId, MessageOperation, MessageOperationTransition,
 };
 use super::super::handle_map::VirtualHandle;
-use super::service_utils::{
-    check_sanitize, input_from_wire, parse_mechanism, resolve_session,
-    resolve_session_and_two_objects, spawn_backend,
-};
+use super::service_utils::{check_sanitize, input_from_wire, resolve_session, spawn_backend};
 
 use crate::server::grpc_service::HandlerContext;
 
@@ -81,6 +78,7 @@ pub(super) async fn parameter_output_exact(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::ParameterOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ParameterOutputExactResponse>, Status> {
+    let started = std::time::Instant::now();
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
@@ -130,46 +128,47 @@ pub(super) async fn parameter_output_exact(
 
     match function {
         ParameterOutputFunction::WrapKeyAuthenticated => {
-            let mechanism = match parse_mechanism(req.mechanism) {
-                Ok(m) => m,
-                Err(error) => {
-                    return Ok(Response::new(error_response(error)));
+            let outcome = async {
+                let p = match super::key_ops::wrap_preparation::prepare_wrap(
+                    ctx,
+                    &ctx_id,
+                    req.session_handle,
+                    req.wrapping_key_handle,
+                    req.key_handle,
+                    req.mechanism,
+                )
+                .await?
+                {
+                    Ok(p) => p,
+                    Err(rv) => return Ok(Err(rv)),
+                };
+                if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
+                    return Ok(Err(rv));
                 }
-            };
-
-            let (session, wrapping_key, key) = match resolve_session_and_two_objects(
+                let backend = backend_ref.clone();
+                spawn_backend(move || {
+                    backend.wrap_key_authenticated_exact(
+                        p.session,
+                        &p.mechanism,
+                        p.wrapping_key,
+                        p.key,
+                        input_from_wire(&associated_data, associated_data_null_len),
+                        &output_spec,
+                        &param_out_spec,
+                    )
+                })
+                .await
+            }
+            .await;
+            let result = super::audit_events::audit_key_outcome(
                 ctx,
                 &ctx_id,
+                "C_WrapKeyAuthenticated",
                 req.session_handle,
-                req.wrapping_key_handle,
-                req.key_handle,
-            )
-            .await
-            {
-                Ok(handles) => handles,
-                Err(error) => {
-                    return Ok(Response::new(error_response(error)));
-                }
-            };
-
-            // ADR-0010 sanitize_inputs: validate NULL aad pointer before backend call.
-            if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
-                return Ok(Response::new(error_response(rv)));
-            }
-            let backend = backend_ref.clone();
-            let result = spawn_backend(move || {
-                backend.wrap_key_authenticated_exact(
-                    session,
-                    &mechanism,
-                    wrapping_key,
-                    key,
-                    input_from_wire(&associated_data, associated_data_null_len),
-                    &output_spec,
-                    &param_out_spec,
-                )
-            })
-            .await?;
-
+                started,
+                outcome,
+                |(output, _)| output.ck_rv,
+            )?;
             Ok(Response::new(result_to_proto(result)))
         }
 

@@ -40,6 +40,20 @@ promote to **Accepted** after a transparency-matrix validation pass.
 
 ## Context
 
+Ordinary/exact `C_WrapKey`, `C_WrapKeyAuthenticated`, and authenticated unwrap
+audit completed outcomes through the same fail-closed KeyMgmt envelope. Exact
+results contribute their embedded provider RV, including `CKR_BUFFER_TOO_SMALL`.
+A transport/native-task failure has no provider RV and is audited as proxy
+`CKR_FUNCTION_FAILED`; its original transport status is retained if audit accepts.
+If audit rejects, the response is `CKR_FUNCTION_FAILED` and suppresses every
+output channel (bytes, lengths, parameter/mechanism output, and created handle).
+Records contain only the existing identity/method/session/RV/timing metadata.
+Audit failure after native side effects retains the existing divergence contract.
+Cancellation with detached native work still requires completion-owned auditing
+in the separate lifecycle work. Exact native error effects and authenticated
+native-structure writeback remain separate correction gates; input remapping
+does not make authenticated native parameter images safe for wire transport.
+
 `pkcs11-proxy-ng` has one design persona today: a **transport** that forwards
 verbatim and synthesizes nothing (ADR-0010). That persona is correct and must
 be preserved. But a second, distinct persona is repeatedly requested by
@@ -139,10 +153,10 @@ distinguish the shim from the real module.
      payloads. Because fail-closed records are emitted after the backend result
      is known, an audit failure can reject the proxy operation after a backend
      side effect. `EventClass::Deny` remains reserved rather than emitted.
-     The current key-lifecycle emission claim excludes KEM operations, exact
-     wrapping, authenticated unwrapping, and completion after RPC cancellation.
-     Mechanism admission on KEM does not add audit coverage. Outcome-audit parity
-     for these adapters remains separate work; DataPlane stays fail-open.
+     The current key-lifecycle emission claim excludes KEM operations and
+     completion after RPC cancellation. Mechanism admission on KEM does not add
+     audit coverage. Outcome-audit parity for KEM remains separate work;
+     DataPlane stays fail-open.
    - **G2 — Identity hardening + coarse authorization + rate/quota:**
      *Hardening (G2-PR1, implemented locally):* the daemon refuses to start when a
      policy or `allow_all_authenticated = true` is configured alongside an

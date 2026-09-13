@@ -33,10 +33,12 @@ mod object_ops;
 pub mod output_lengths;
 mod session_ops;
 mod state;
+mod wrap_entry;
 
 pub use self::mechanism_entry::{MockEmbeddedHandles, MockMechanismEntry};
 pub use self::mock_types::{MockAbi, MockAttributeSlot, MultiPartOp};
 use self::state::{MockState, compute_session_state};
+pub use self::wrap_entry::{MockWrapAction, MockWrapEntry, MockWrapObservation};
 
 const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
 const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
@@ -93,6 +95,8 @@ const CK_SP800_108_DKM_LENGTH_FORMAT_LEN: usize =
 /// **Large-request cap** (`generate_random`):
 /// Requests for more than `MAX_RANDOM_BYTES` (65 536) bytes return `CKR_DATA_LEN_RANGE`.
 pub struct MockBackend {
+    wrap_entries: Mutex<Vec<MockWrapObservation>>,
+    wrap_action: Mutex<Option<MockWrapAction>>,
     mechanism_entries: Mutex<mechanism_entry::MechanismEntries>,
     pub slots: Vec<CkSlotId>,
     pub mechanisms: Vec<CkMechanismType>,
@@ -286,6 +290,8 @@ impl MockBackend {
             }),
             slot_event_queue: Mutex::new(std::collections::VecDeque::new()),
             mechanism_entries: Mutex::new(mechanism_entry::MechanismEntries::default()),
+            wrap_entries: Mutex::new(Vec::new()),
+            wrap_action: Mutex::new(None),
             slot_event_condvar: Condvar::new(),
             token_presence: Mutex::new(HashMap::new()),
             token_identities: Mutex::new(HashMap::new()),
@@ -1804,6 +1810,7 @@ impl Pkcs11Backend for MockBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
     ) -> CkResult<Vec<u8>> {
+        self.record_wrap_entry(MockWrapEntry::Wrap, s, m, wrapping_key, key, None, None)?;
         self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::WRAP)?;
         let state = self.state.lock().unwrap();
         self.require_live_keys(&state, s, &[wrapping_key, key])?;
@@ -2096,6 +2103,15 @@ impl Pkcs11Backend for MockBackend {
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        self.record_wrap_entry(
+            MockWrapEntry::Exact,
+            s,
+            mechanism,
+            wrapping_key,
+            key,
+            Some(spec),
+            None,
+        )?;
         self.require_mechanism_workflow_for_session(s, mechanism, CkMechanismFlags::WRAP)?;
         let state = self.state.lock().unwrap();
         self.require_live_keys(&state, s, &[wrapping_key, key])?;
@@ -2475,6 +2491,15 @@ impl Pkcs11Backend for MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
+        self.record_wrap_entry(
+            MockWrapEntry::AuthenticatedExact,
+            s,
+            mechanism,
+            wrapping_key,
+            key,
+            Some(output_spec),
+            Some(aad),
+        )?;
         let _ = self.resolve_input(aad)?;
         self.require_mechanism_workflow_for_session(s, mechanism, CkMechanismFlags::WRAP)?;
         let state = self.state.lock().unwrap();
@@ -3130,6 +3155,15 @@ impl Pkcs11Backend for MockBackend {
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+        self.record_wrap_entry(
+            MockWrapEntry::Authenticated,
+            session,
+            mechanism,
+            wrapping_key,
+            key,
+            None,
+            Some(aad),
+        )?;
         let _ = self.resolve_input(aad)?;
         self.require_mechanism_workflow_for_session(session, mechanism, CkMechanismFlags::WRAP)?;
         let state = self.state.lock().unwrap();
@@ -3146,6 +3180,15 @@ impl Pkcs11Backend for MockBackend {
         template: &[CkAttribute],
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
+        self.record_wrap_entry(
+            MockWrapEntry::UnwrapAuthenticated,
+            session,
+            mechanism,
+            unwrapping_key,
+            CkObjectHandle(0),
+            None,
+            Some(aad),
+        )?;
         let _ = self.resolve_input(wrapped_key)?;
         let _ = self.resolve_input(aad)?;
         self.require_mechanism_workflow_for_session(session, mechanism, CkMechanismFlags::UNWRAP)?;

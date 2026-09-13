@@ -90,6 +90,15 @@ pub async fn start_mtls_daemon(
     backend: Arc<MockBackend>,
     grants: [TokenAccessSpec; 2],
 ) -> MtlsFixture {
+    start_mtls_daemon_with_audit(backend, grants, None, false).await
+}
+
+pub async fn start_mtls_daemon_with_audit(
+    backend: Arc<MockBackend>,
+    grants: [TokenAccessSpec; 2],
+    audit: Option<pkcs11_proxy_ng::server::audit::AuditSink>,
+    sanitize_inputs: bool,
+) -> MtlsFixture {
     let temp = tempfile::tempdir().unwrap();
     let (ca_cert, ca_issuer) = new_ca();
     let server = new_leaf(
@@ -129,15 +138,18 @@ pub async fn start_mtls_daemon(
     let backend_ref: Arc<dyn Pkcs11Backend> = backend.clone();
     let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
     context_manager.populate_slots(&backend_ref).await.unwrap();
-    let service = Pkcs11ProxyService::new(
+    let mut service = Pkcs11ProxyService::new(
         context_manager.clone(),
         backend_ref,
         TcpAuthMode::Mtls,
         pkcs11_proxy_ng::config::UnixAuthMode::None,
         Arc::new(token_policy),
         pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource::load(None).unwrap(),
-        None, // audit: not needed for transport tests
+        audit,
     );
+    if sanitize_inputs {
+        service = service.with_sanitize_inputs();
+    }
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

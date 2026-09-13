@@ -5,6 +5,22 @@ Proposed
 
 ## Context
 
+Wrapping adapters share admission in this order: context/session and direct
+objects, mechanism parsing, embedded-handle remapping and authorization,
+mechanism permission, then extraction permission for the wrapped object.
+This covers ordinary/exact `C_WrapKey` and `C_WrapKeyAuthenticated` identically;
+authenticated unwrap also remaps embedded handles before native entry. Object
+and class-only policy both apply. AAD sanitation remains adapter-local, after
+shared wrapping admission. Denied/unknown direct handles retain ADR-0012's
+zero-handle forwarding and provider RV precedence; denied/foreign nonzero
+embedded handles fail with `CKR_OBJECT_HANDLE_INVALID` before native wrap.
+Zero forwarding preserves provider precedence when no independent mechanism
+or extraction denial applies. In particular, an unknown wrapped object cannot
+resolve its UID; an active per-object extraction override then fails closed
+with `CKR_KEY_FUNCTION_NOT_PERMITTED`, matching ordinary wrapping. Visibility
+denial alone does not imply extraction denial for a mapped object whose UID
+can still be resolved.
+
 The PKCS#11 proxy daemon exposes remote access to PKCS#11 tokens and HSMs over Unix sockets and TCP. Before any production deployment, the daemon needs authentication and authorization to prevent unauthorized access to cryptographic material.
 
 The design tension is between security completeness and Phase 1 pragmatism. The project has one design partner and needs a working, auditable auth layer -- not a full multi-tenant RBAC system. The authorization model must be layered and configurable so that development, single-machine, and networked deployments each use the appropriate level of security without requiring code changes.

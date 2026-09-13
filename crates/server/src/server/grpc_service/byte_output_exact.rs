@@ -8,8 +8,7 @@ use pkcs11_proxy_ng_types::{
 
 use super::super::context_manager::ClientContextId;
 use super::service_utils::{
-    check_sanitize, input_from_wire, mechanism_output_to_proto, parse_mechanism, resolve_session,
-    resolve_session_and_two_objects, spawn_backend,
+    check_sanitize, input_from_wire, mechanism_output_to_proto, resolve_session, spawn_backend,
 };
 
 use crate::server::grpc_service::HandlerContext;
@@ -18,6 +17,7 @@ pub(super) async fn byte_output_exact(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::ByteOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ByteOutputExactResponse>, Status> {
+    let started = std::time::Instant::now();
     let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
@@ -58,34 +58,46 @@ pub(super) async fn byte_output_exact(
     match function {
         // Shape: (session, mechanism, wrapping_key, key, spec) -> wrap_key_exact
         ByteOutputFunction::WrapKey => {
-            let mechanism = match parse_mechanism(req.mechanism) {
-                Ok(m) => m,
-                Err(error) => return Ok(Response::new(error_response(error))),
-            };
-
-            let (session, wrapping_key, key) = match resolve_session_and_two_objects(
+            let outcome = async {
+                let p = match super::key_ops::wrap_preparation::prepare_wrap(
+                    ctx,
+                    &ctx_id,
+                    req.session_handle,
+                    req.wrapping_key_handle,
+                    req.key_handle,
+                    req.mechanism,
+                )
+                .await?
+                {
+                    Ok(p) => p,
+                    Err(rv) => return Ok(Err(rv)),
+                };
+                let backend = ctx.backend.clone();
+                spawn_backend(move || {
+                    backend.wrap_key_exact_with_output(
+                        p.session,
+                        &p.mechanism,
+                        p.wrapping_key,
+                        p.key,
+                        &spec,
+                    )
+                })
+                .await
+            }
+            .await;
+            let result = super::audit_events::audit_key_outcome(
                 ctx,
                 &ctx_id,
+                "C_WrapKey",
                 req.session_handle,
-                req.wrapping_key_handle,
-                req.key_handle,
-            )
-            .await
-            {
-                Ok(handles) => handles,
-                Err(error) => return Ok(Response::new(error_response(error))),
-            };
-
-            let backend = ctx.backend.clone();
-            let result = spawn_backend(move || {
-                backend.wrap_key_exact_with_output(session, &mechanism, wrapping_key, key, &spec)
-            })
-            .await?;
+                started,
+                outcome,
+                |(output, _)| output.ck_rv,
+            )?;
             let (wrap_result, mechanism_out) = match result {
                 Ok((output, mech_out)) => (Ok(output), mech_out),
                 Err(error) => (Err(error), None),
             };
-
             Ok(Response::new(pkcs11_proxy_ng_proto::ByteOutputExactResponse {
                 result: Some(result_to_proto(wrap_result)),
                 mechanism_out: mechanism_out.and_then(mechanism_output_to_proto),

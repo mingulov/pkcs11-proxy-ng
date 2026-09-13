@@ -8,155 +8,106 @@ use std::time::Instant;
 
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
-use super::super::authorization::{extract_is_permitted, mechanism_permitted};
+use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
-    resolve_session_and_two_objects, spawn_backend, template_declares_token_object,
+    spawn_backend, template_declares_token_object,
 };
 use crate::server::context_manager::ClientContextId;
-use crate::server::grpc_service::audit_events::emit_auth_event;
+use crate::server::grpc_service::audit_events::audit_key_outcome;
 use crate::server::handle_map::VirtualHandle;
 
 use crate::server::grpc_service::HandlerContext;
 
-/// Outer dispatcher: captures timing + identity, delegates to the impl, then
-/// emits a fail-closed `KeyMgmt` audit record (mirrors the C_WrapKey pattern).
+/// Shared wrapping admission followed by adapter-local AAD validation.
 pub(crate) async fn wrap_key_authenticated(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse>, Status> {
     let started = Instant::now();
-    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
-    let session_for_audit = Some(request.get_ref().session_handle);
-    let response = wrap_key_authenticated_impl(ctx, request).await?;
-    let ck_rv = response.get_ref().ck_rv;
-    if emit_auth_event(
+    let req = request.into_inner();
+    let ctx_id = ClientContextId(req.client_context_id);
+    let outcome = async {
+        let p = match super::wrap_preparation::prepare_wrap(
+            ctx,
+            &ctx_id,
+            req.session_handle,
+            req.wrapping_key_handle,
+            req.key_handle,
+            req.mechanism,
+        )
+        .await?
+        {
+            Ok(p) => p,
+            Err(rv) => return Ok(Err(rv)),
+        };
+        if let Err(rv) = check_sanitize(ctx.sanitize_inputs, req.associated_data_null_len) {
+            return Ok(Err(rv));
+        }
+        let backend = Arc::clone(&ctx.backend);
+        spawn_backend(move || {
+            backend.wrap_key_authenticated(
+                p.session,
+                &p.mechanism,
+                p.wrapping_key,
+                p.key,
+                input_from_wire(&req.associated_data, req.associated_data_null_len),
+            )
+        })
+        .await
+    }
+    .await;
+    let result = audit_key_outcome(
         ctx,
         &ctx_id,
         "C_WrapKeyAuthenticated",
-        EventClass::KeyMgmt,
-        None,
-        session_for_audit,
-        ck_rv,
+        req.session_handle,
         started,
-    )
-    .is_err()
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
-            ck_rv: CkRv::FUNCTION_FAILED.0,
-            wrapped_key: Vec::new(),
-            mechanism_parameter_out: Vec::new(),
-        }));
-    }
-    Ok(response)
+        outcome,
+        |_| CkRv::OK,
+    )?;
+    let (ck_rv, wrapped_key, mechanism_parameter_out) = match result {
+        Ok((bytes, parameter)) => (CkRv::OK.0, bytes, parameter),
+        Err(rv) => (rv.0, Vec::new(), Vec::new()),
+    };
+    Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
+        ck_rv,
+        wrapped_key,
+        mechanism_parameter_out,
+    }))
 }
 
-async fn wrap_key_authenticated_impl(
+pub(crate) async fn unwrap_key_authenticated(
     ctx: &HandlerContext,
-    request: Request<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest>,
-) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse>, Status> {
-    let backend_ref = &ctx.backend;
-    let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
-
-    let (session, wrapping_key, key) = match resolve_session_and_two_objects(
+    request: Request<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedRequest>,
+) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse>, Status> {
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session = request.get_ref().session_handle;
+    let outcome = unwrap_key_authenticated_impl(ctx, request).await.map(Ok);
+    match audit_key_outcome(
         ctx,
         &ctx_id,
-        req.session_handle,
-        req.wrapping_key_handle,
-        req.key_handle,
-    )
-    .await
-    {
-        Ok(handles) => handles,
-        Err(rv) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
-                ck_rv: rv.0,
-                wrapped_key: Vec::new(),
-                mechanism_parameter_out: Vec::new(),
-            }));
-        }
-    };
-
-    let mechanism = match parse_mechanism(req.mechanism) {
-        Ok(mechanism) => mechanism,
-        Err(rv) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
-                ck_rv: rv.0,
-                wrapped_key: Vec::new(),
-                mechanism_parameter_out: Vec::new(),
-            }));
-        }
-    };
-
-    let aad = req.associated_data;
-    let aad_null_len = req.associated_data_null_len;
-    // ADR-0010 sanitize_inputs: validate NULL aad pointer before backend call.
-    if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
+        "C_UnwrapKeyAuthenticated",
+        session,
+        started,
+        outcome,
+        |r| CkRv(r.get_ref().ck_rv),
+    )? {
+        Ok(response) => Ok(response),
+        Err(rv) => Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
             ck_rv: rv.0,
-            wrapped_key: Vec::new(),
-            mechanism_parameter_out: Vec::new(),
-        }));
-    }
-
-    // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
-    // principal's grant does not include this wrapping mechanism.
-    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
-            ck_rv: CkRv::MECHANISM_INVALID.0,
-            wrapped_key: Vec::new(),
-            mechanism_parameter_out: Vec::new(),
-        }));
-    }
-
-    // Extract-deny gate (G2-PR2): wrapping a key exports its material; if the
-    // principal's grant for this token has extract=Deny, reject before calling
-    // the backend. The outer dispatcher emits a KeyMgmt audit record for both
-    // successful authenticated-wrap and this denied attempt (ck_rv =
-    // KEY_FUNCTION_NOT_PERMITTED). Mirrors the C_WrapKey gate in wrapping.rs.
-    if !extract_is_permitted(ctx, &ctx_id, req.session_handle, req.key_handle).await? {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
-            ck_rv: CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
-            wrapped_key: Vec::new(),
-            mechanism_parameter_out: Vec::new(),
-        }));
-    }
-
-    let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || {
-        backend.wrap_key_authenticated(
-            session,
-            &mechanism,
-            wrapping_key,
-            key,
-            input_from_wire(&aad, aad_null_len),
-        )
-    })
-    .await?;
-
-    match result {
-        Ok((wrapped_key, mechanism_parameter_out)) => {
-            Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
-                ck_rv: CkRv::OK.0,
-                wrapped_key,
-                mechanism_parameter_out,
-            }))
-        }
-        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
-            ck_rv: error.0,
-            wrapped_key: Vec::new(),
+            key_handle: 0,
             mechanism_parameter_out: Vec::new(),
         })),
     }
 }
 
-pub(crate) async fn unwrap_key_authenticated(
+async fn unwrap_key_authenticated_impl(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse>, Status> {
@@ -184,7 +135,7 @@ pub(crate) async fn unwrap_key_authenticated(
         }
     };
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
@@ -194,6 +145,16 @@ pub(crate) async fn unwrap_key_authenticated(
             }));
         }
     };
+
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_parameter_out: Vec::new(),
+        }));
+    }
 
     // Mechanism policy gate (G3-PR3 Task 3): deny before backend call when the
     // principal's grant does not include this unwrapping mechanism.
