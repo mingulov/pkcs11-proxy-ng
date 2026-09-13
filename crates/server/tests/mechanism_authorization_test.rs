@@ -14,6 +14,9 @@ use pkcs11_proxy_ng_types::*;
 mod mtls_fixture;
 use mtls_fixture::MtlsFixture;
 
+#[path = "mechanism_authorization/embedded.rs"]
+mod embedded;
+
 fn grants(reverse: bool) -> TokenAccessSpec {
     TokenAccessSpec::Specific(
         ["Token42", "Token1"]
@@ -88,7 +91,23 @@ async fn open(f: &MtlsFixture, second: bool) -> Client {
             .create_object(CreateObjectRequest {
                 client_context_id: context.clone(),
                 session_handle: session.session_handle,
-                template: vec![],
+                template: [
+                    CkAttribute {
+                        attr_type: CkAttributeType::CLASS,
+                        value: Some(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
+                    },
+                    CkAttribute {
+                        attr_type: CkAttributeType::TOKEN,
+                        value: Some(CkAttributeValue::Bool(false)),
+                    },
+                    CkAttribute {
+                        attr_type: CkAttributeType::UNIQUE_ID,
+                        value: Some(CkAttributeValue::Bytes(vec![0xa1])),
+                    },
+                ]
+                .iter()
+                .map(Attribute::from)
+                .collect(),
             })
             .await
             .unwrap()

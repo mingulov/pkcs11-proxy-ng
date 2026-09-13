@@ -24,7 +24,8 @@ pub enum MockMechanismEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MockEmbeddedHandles {
     HkdfSalt(u64),
-    Sp800108(Vec<u64>),
+    /// (Native handle, encoded width in bytes).
+    Sp800108(Vec<(u64, usize)>),
 }
 
 #[derive(Default)]
@@ -65,13 +66,13 @@ impl MockBackend {
     }
 }
 
-fn encoded_handles(params: &[PrfDataParam]) -> Vec<u64> {
+fn encoded_handles(params: &[PrfDataParam]) -> Vec<(u64, usize)> {
     params
         .iter()
         .filter(|p| p.type_ == CK_SP800_108_KEY_HANDLE)
         .filter_map(|p| match p.value.len() {
-            4 => Some(u32::from_ne_bytes(p.value.as_slice().try_into().unwrap()) as u64),
-            8 => Some(u64::from_ne_bytes(p.value.as_slice().try_into().unwrap())),
+            4 => Some((u32::from_ne_bytes(p.value.as_slice().try_into().unwrap()) as u64, 4)),
+            8 => Some((u64::from_ne_bytes(p.value.as_slice().try_into().unwrap()), 8)),
             _ => None,
         })
         .collect()

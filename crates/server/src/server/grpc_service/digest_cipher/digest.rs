@@ -6,6 +6,7 @@ use tonic::{Request, Response, Status};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend,
@@ -46,7 +47,7 @@ pub(crate) async fn digest_init(
         }));
     }
 
-    let mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse { ck_rv: rv.0 }));
@@ -57,6 +58,12 @@ pub(crate) async fn digest_init(
         return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse {
             ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
         }));
+    }
+
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse { ck_rv: rv.0 }));
     }
 
     let backend = Arc::clone(backend_ref);

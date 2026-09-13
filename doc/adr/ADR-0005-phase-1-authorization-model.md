@@ -116,6 +116,16 @@ The `client_context_id` issued by the daemon (see ADR-0002) is bound to the auth
   and combined operations consume initialized state. Restoring opaque state
   with `C_SetOperationState` is not a mechanism-policy enforcement boundary.
 
+  The corrected initializers translate typed embedded object handles through the calling
+  context and enforce either active object or class restrictions. A missing or
+  denied nonzero embedded handle returns `CKR_OBJECT_HANDLE_INVALID` before
+  native dispatch; it must not be rewritten to the optional-zero parameter.
+  Explicit optional zeros retain their existing meaning. SP800-108 derivation
+  applies the same denial rule to byte-encoded input handles, preserves 4/8-byte
+  encoding, rejects narrowing overflow, and uses the real native session for
+  metadata reads. See the [operation coverage](../release/mechanism-authorization.md)
+  for adapter boundaries and remaining gaps.
+
 ### 5. Auth failure error mapping (relationship to ADR-0003)
 
 Authentication and authorization failures are transport-level concerns, not PKCS#11-level concerns:
