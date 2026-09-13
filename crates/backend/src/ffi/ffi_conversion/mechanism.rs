@@ -5,6 +5,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod x3dh_tests;
+
 /// Owns the `CK_MECHANISM` and any backing storage that `pParameter` points
 /// into.  The C struct fields reference heap allocations inside `_backing`,
 /// which stay at a stable address as long as `FfiMechanism` is alive.
@@ -508,7 +511,7 @@ enum FfiParamBacking {
         FfiSp800108DerivedKeys,
     ),
     X3dhInitiate(Box<cryptoki_sys::CK_X3DH_INITIATE_PARAMS>, Vec<u8>, Vec<u8>),
-    X3dhRespond(Box<cryptoki_sys::CK_X3DH_RESPOND_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    X3dhRespond(Box<cryptoki_sys::CK_X3DH_RESPOND_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
     X2RatchetInitialize(Box<cryptoki_sys::CK_X2RATCHET_INITIALIZE_PARAMS>, Vec<u8>),
     X2RatchetRespond(Box<cryptoki_sys::CK_X2RATCHET_RESPOND_PARAMS>, Vec<u8>),
     Otp(Box<cryptoki_sys::CK_OTP_PARAMS>, Vec<cryptoki_sys::CK_OTP_PARAM>, Vec<Vec<u8>>),
@@ -2021,7 +2024,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             }))
         }
 
-        // -- X3DH Respond: struct with 3 pointers + 2 handles -------------------
+        // -- X3DH Respond: struct with 4 pointers + 2 scalars -------------------
         CkMechanismParams::X3dhRespond(p) => {
             let mut identity_buf = (narrow_wire_ulong(p.identity_handle)?).to_ne_bytes().to_vec();
             let mut prekey_buf = (narrow_wire_ulong(p.prekey_handle)?).to_ne_bytes().to_vec();
@@ -2029,6 +2032,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             // pInitiator_ephemeral is also a *mut CK_BYTE in the C struct
             let mut ephem_buf =
                 (narrow_wire_ulong(p.initiator_ephemeral_handle)?).to_ne_bytes().to_vec();
+            // All four buffers have their final size before pointer capture.
+            // Each is retained unchanged in the owner until the native call ends.
             let x3dh = Box::new(cryptoki_sys::CK_X3DH_RESPOND_PARAMS {
                 kdf: narrow_wire_ulong(p.kdf)?,
                 pIdentity_id: identity_buf.as_mut_ptr(),
@@ -2037,12 +2042,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                 pInitiator_identity: narrow_wire_ulong(p.initiator_identity_handle)?,
                 pInitiator_ephemeral: ephem_buf.as_mut_ptr(),
             });
-            // Merge identity_buf and prekey_buf and onetime_buf into fewer vecs
-            // to match backing variant shape (3 Vecs).
-            // Store ephem_buf separately would need 4 vecs. Let's append ephem to onetime.
-            onetime_buf.extend_from_slice(&ephem_buf);
             Ok(FfiMechanism::from_box(mech_type, x3dh, |b| {
-                FfiParamBacking::X3dhRespond(b, identity_buf, prekey_buf, onetime_buf)
+                FfiParamBacking::X3dhRespond(b, identity_buf, prekey_buf, onetime_buf, ephem_buf)
             }))
         }
 
