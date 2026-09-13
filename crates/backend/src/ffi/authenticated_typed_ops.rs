@@ -5,23 +5,66 @@ use pkcs11_proxy_ng_proto::convert::authenticated::{AuthenticatedOutput, validat
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
-enum NativeParameter<'a> {
+enum NativeStorage<'a> {
     Mechanism(FfiMechanism),
     Message(super::message_ops::MessageInitMechanism, &'a MessageParameter),
 }
 
-impl NativeParameter<'_> {
+struct NativeParameter<'a> {
+    storage: NativeStorage<'a>,
+    // Fieldwise snapshot, never serialized or compared as a native image.
+    original: cryptoki_sys::CK_MECHANISM,
+    input: &'a CkMechanism,
+}
+
+impl<'a> NativeParameter<'a> {
+    fn new(mechanism: &'a CkMechanism, parameter: Option<&'a MessageParameter>) -> CkResult<Self> {
+        validate_input(mechanism, parameter)?;
+        let storage = if let Some(parameter) = parameter {
+            NativeStorage::Message(
+                super::message_ops::build_message_init_mechanism(
+                    narrow_wire_ulong(mechanism.mechanism_type.0)?,
+                    parameter,
+                )?,
+                parameter,
+            )
+        } else {
+            NativeStorage::Mechanism(mechanism_to_ffi(mechanism)?)
+        };
+        let original = match &storage {
+            NativeStorage::Mechanism(ffi) => ffi.ck_mechanism,
+            NativeStorage::Message(ffi, _) => ffi.ck_mechanism,
+        };
+        Ok(Self { storage, original, input: mechanism })
+    }
+
     fn pointer(&mut self) -> cryptoki_sys::CK_MECHANISM_PTR {
-        match self {
-            Self::Mechanism(ffi) => &mut ffi.ck_mechanism,
-            Self::Message(ffi, _) => &mut ffi.ck_mechanism,
+        match &mut self.storage {
+            NativeStorage::Mechanism(ffi) => &mut ffi.ck_mechanism,
+            NativeStorage::Message(ffi, _) => &mut ffi.ck_mechanism,
         }
     }
-    fn output(&self) -> CkResult<AuthenticatedOutput> {
-        match self {
-            Self::Mechanism(ffi) => ffi.authenticated_output(),
-            Self::Message(ffi, input) => {
-                Ok(AuthenticatedOutput::Message(ffi.authenticated_output(input)?))
+    fn validate_inputs(&self) -> CkResult<()> {
+        let outer = match &self.storage {
+            NativeStorage::Mechanism(ffi) => &ffi.ck_mechanism,
+            NativeStorage::Message(ffi, _) => &ffi.ck_mechanism,
+        };
+        if outer.mechanism != self.original.mechanism
+            || outer.pParameter != self.original.pParameter
+            || outer.ulParameterLen != self.original.ulParameterLen
+        {
+            return Err(CkRv::DEVICE_ERROR);
+        }
+        match &self.storage {
+            NativeStorage::Mechanism(ffi) => ffi.validate_authenticated_inputs(self.input),
+            NativeStorage::Message(ffi, input) => ffi.validate_authenticated_inputs(input),
+        }
+    }
+    fn read_output(&self) -> CkResult<AuthenticatedOutput> {
+        match &self.storage {
+            NativeStorage::Mechanism(ffi) => ffi.authenticated_output(),
+            NativeStorage::Message(ffi, input) => {
+                Ok(AuthenticatedOutput::Message(ffi.authenticated_output(input)))
             }
         }
     }
@@ -32,20 +75,10 @@ fn with_parameter<T>(
     parameter: Option<&MessageParameter>,
     call: impl FnOnce(&mut NativeParameter<'_>) -> CkResult<T>,
 ) -> CkResult<(T, AuthenticatedOutput)> {
-    validate_input(mechanism, parameter)?;
-    let mut native = if let Some(parameter) = parameter {
-        NativeParameter::Message(
-            super::message_ops::build_message_init_mechanism(
-                narrow_wire_ulong(mechanism.mechanism_type.0)?,
-                parameter,
-            )?,
-            parameter,
-        )
-    } else {
-        NativeParameter::Mechanism(mechanism_to_ffi(mechanism)?)
-    };
+    let mut native = NativeParameter::new(mechanism, parameter)?;
     let result = call(&mut native)?;
-    Ok((result, native.output()?))
+    native.validate_inputs()?;
+    Ok((result, native.read_output()?))
 }
 
 impl FfiBackend {
@@ -78,7 +111,7 @@ impl FfiBackend {
             })?;
             // Validate the first provider call before allowing a second call
             // to observe any changed native pointer or scalar field.
-            native.output()?;
+            native.validate_inputs()?;
             let size = super::call_helpers::capped_output_len(len as u64);
             let mut bytes = vec![0; size];
             len = size as cryptoki_sys::CK_ULONG;
@@ -139,6 +172,7 @@ impl FfiBackend {
         template: &[CkAttribute],
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, AuthenticatedOutput)> {
+        self.object_cleanup.ensure_clear()?;
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_UnwrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let attrs = FfiAttrs::from_slice(template)?;
@@ -146,28 +180,34 @@ impl FfiBackend {
         let aad_len = narrow_wire_ulong(aad_len)?;
         let (wrapped_ptr, wrapped_len) = wrapped_key.as_ptr_len();
         let wrapped_len = narrow_wire_ulong(wrapped_len)?;
-        let (handle, output) = with_parameter(mechanism, parameter, |native| {
-            let mut handle = 0;
-            Self::ck_result(unsafe {
-                f(
-                    Self::session_handle(session),
-                    native.pointer(),
-                    Self::object_handle(unwrapping_key),
-                    wrapped_ptr.cast_mut(),
-                    wrapped_len,
-                    Self::ffi_attr_ptr(&attrs),
-                    Self::ffi_attr_len(&attrs),
-                    aad_ptr.cast_mut(),
-                    aad_len,
-                    &mut handle,
-                )
-            })?;
-            Ok(CkObjectHandle(handle as u64))
+        let mut native = NativeParameter::new(mechanism, parameter)?;
+        let mut handle = 0;
+        Self::ck_result(unsafe {
+            f(
+                Self::session_handle(session),
+                native.pointer(),
+                Self::object_handle(unwrapping_key),
+                wrapped_ptr.cast_mut(),
+                wrapped_len,
+                Self::ffi_attr_ptr(&attrs),
+                Self::ffi_attr_len(&attrs),
+                aad_ptr.cast_mut(),
+                aad_len,
+                &mut handle,
+            )
         })?;
+        let created = crate::object_cleanup::PendingNativeObject::new(
+            self,
+            &self.object_cleanup,
+            session,
+            CkObjectHandle(handle as u64),
+        );
+        native.validate_inputs()?;
+        let output = native.read_output()?;
         // AEAD unwrap consumes the IV and authentication value; those buffers
         // are input-only. Keep the validated acknowledgment, but no provider
         // mutation is authorized to modify these caller inputs.
         let output = parameter.map_or(output, |p| AuthenticatedOutput::Message(p.clone()));
-        Ok((handle, output))
+        Ok((created.transfer(), output))
     }
 }

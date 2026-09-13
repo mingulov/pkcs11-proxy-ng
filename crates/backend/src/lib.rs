@@ -9,6 +9,7 @@
 pub mod ffi;
 pub mod host_abi;
 pub mod mock;
+pub mod object_cleanup;
 pub mod test_backend_3x;
 pub mod traits;
 pub use ffi::FfiBackend;

@@ -19,6 +19,39 @@ pub(crate) struct FfiMechanism {
 }
 
 impl FfiMechanism {
+    pub(in crate::ffi) fn validate_authenticated_inputs(
+        &self,
+        input: &CkMechanism,
+    ) -> CkResult<()> {
+        let valid = match (&self._backing, input.params.as_ref()) {
+            (FfiParamBacking::None, None) => true,
+            (FfiParamBacking::Bytes(bytes), Some(CkMechanismParams::Iv(iv))) => {
+                bytes.len() == iv.iv.len()
+            }
+            (
+                FfiParamBacking::Gostr3410KeyWrap(native, oid, ukm),
+                Some(CkMechanismParams::Gostr3410KeyWrap(input)),
+            ) => {
+                let pointer_matches = |pointer: *mut u8, bytes: &[u8]| {
+                    if bytes.is_empty() {
+                        pointer.is_null()
+                    } else {
+                        std::ptr::eq(pointer, bytes.as_ptr())
+                    }
+                };
+                pointer_matches(native.pWrapOID, oid)
+                    && pointer_matches(native.pUKM, ukm)
+                    && native.ulWrapOIDLen as u64 == input.wrap_oid.len() as u64
+                    && native.ulUKMLen as u64 == input.ukm.len() as u64
+                    && native.hKey as u64 == input.key_handle
+                    && oid == &input.wrap_oid
+                    && ukm == &input.ukm
+            }
+            _ => false,
+        };
+        if valid { Ok(()) } else { Err(CkRv::DEVICE_ERROR) }
+    }
+
     /// Read owned IV bytes only. Never read the native parameter structure as
     /// bytes or return the typed input, which may contain remapped handles.
     pub(in crate::ffi) fn authenticated_output(

@@ -173,10 +173,7 @@ pub(super) struct MessageInitMechanism {
 impl MessageInitMechanism {
     /// Read only the allocations we own. Native pointer and input scalar
     /// replacement is a provider contract error, never a new memory source.
-    pub(super) fn authenticated_output(
-        &self,
-        input: &MessageParameter,
-    ) -> CkResult<MessageParameter> {
+    pub(super) fn validate_authenticated_inputs(&self, input: &MessageParameter) -> CkResult<()> {
         let [first, second] = self._buffers.as_slice() else {
             return Err(CkRv::DEVICE_ERROR);
         };
@@ -185,17 +182,28 @@ impl MessageInitMechanism {
                                null: Option<u64>| {
             if null.is_some() { native.is_null() } else { std::ptr::eq(native, buffer.as_ptr()) }
         };
-        let mut output = input.clone();
-        let (valid, outer, len) = match (&mut output, &self._gcm, &self._ccm, &self._salsa) {
+        let prefix_unchanged = |output: &[u8], input: &[u8], fixed_bits: u64, generator: u64| {
+            if generator == cryptoki_sys::CKG_NO_GENERATE as u64 {
+                return output == input;
+            }
+            let bytes = (fixed_bits / 8) as usize;
+            let remainder = (fixed_bits % 8) as u32;
+            output.get(..bytes) == input.get(..bytes)
+                && (remainder == 0
+                    || output
+                        .get(bytes)
+                        .zip(input.get(bytes))
+                        .is_some_and(|(out, old)| (out ^ old) & (0xff << (8 - remainder)) == 0))
+        };
+        let (valid, outer, len) = match (input, &self._gcm, &self._ccm, &self._salsa) {
             (MessageParameter::GcmMessage(p), Some(native), None, None) => {
                 let valid = pointer_matches(native.pIv, first, p.iv_null_len)
                     && pointer_matches(native.pTag, second, p.tag_null_len)
                     && native.ulIvLen as u64 == p.iv_null_len.unwrap_or(p.iv.len() as u64)
                     && native.ulIvFixedBits as u64 == p.iv_fixed_bits
                     && native.ivGenerator as u64 == p.iv_generator
-                    && native.ulTagBits as u64 == p.tag_bits;
-                p.iv = first.clone();
-                p.tag = second.clone();
+                    && native.ulTagBits as u64 == p.tag_bits
+                    && prefix_unchanged(first, &p.iv, p.iv_fixed_bits, p.iv_generator);
                 (
                     valid,
                     (&**native as *const cryptoki_sys::CK_GCM_MESSAGE_PARAMS).cast(),
@@ -209,9 +217,8 @@ impl MessageInitMechanism {
                     && native.ulNonceLen as u64 == p.nonce_null_len.unwrap_or(p.nonce.len() as u64)
                     && native.ulNonceFixedBits as u64 == p.nonce_fixed_bits
                     && native.nonceGenerator as u64 == p.nonce_generator
-                    && native.ulMACLen as u64 == p.mac_len;
-                p.nonce = first.clone();
-                p.mac = second.clone();
+                    && native.ulMACLen as u64 == p.mac_len
+                    && prefix_unchanged(first, &p.nonce, p.nonce_fixed_bits, p.nonce_generator);
                 (
                     valid,
                     (&**native as *const cryptoki_sys::CK_CCM_MESSAGE_PARAMS).cast(),
@@ -221,9 +228,8 @@ impl MessageInitMechanism {
             (MessageParameter::SalaChacha(p), None, None, Some(native)) => {
                 let valid = pointer_matches(native.pNonce, first, p.nonce_null_len)
                     && pointer_matches(native.pTag, second, p.tag_null_len)
-                    && native.ulNonceLen as u64 == p.nonce_bits;
-                p.nonce = first.clone();
-                p.tag = second.clone();
+                    && native.ulNonceLen as u64 == p.nonce_bits
+                    && first == &p.nonce;
                 (
                     valid,
                     (&**native as *const cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS)
@@ -239,7 +245,28 @@ impl MessageInitMechanism {
         {
             return Err(CkRv::DEVICE_ERROR);
         }
-        Ok(output)
+        Ok(())
+    }
+
+    /// Called only after input validation; never follows native pointers.
+    pub(super) fn authenticated_output(&self, input: &MessageParameter) -> MessageParameter {
+        let mut output = input.clone();
+        match &mut output {
+            MessageParameter::GcmMessage(p) => {
+                p.iv.clone_from(&self._buffers[0]);
+                p.tag.clone_from(&self._buffers[1]);
+            }
+            MessageParameter::CcmMessage(p) => {
+                p.nonce.clone_from(&self._buffers[0]);
+                p.mac.clone_from(&self._buffers[1]);
+            }
+            MessageParameter::SalaChacha(p) => {
+                p.nonce.clone_from(&self._buffers[0]);
+                p.tag.clone_from(&self._buffers[1]);
+            }
+            _ => {}
+        }
+        output
     }
 }
 
@@ -2704,6 +2731,7 @@ mod tests {
             mech_cache: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
         };
         (backend, base, functions)
     }
@@ -2729,6 +2757,7 @@ mod tests {
             mech_cache: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
         };
         (backend, base, functions)
     }
@@ -2756,6 +2785,7 @@ mod tests {
             mech_cache: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
         };
         (backend, base, functions)
     }
@@ -2777,6 +2807,7 @@ mod tests {
             mech_cache: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
         };
         (backend, base, functions)
     }

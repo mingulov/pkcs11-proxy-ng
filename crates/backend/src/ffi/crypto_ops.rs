@@ -594,6 +594,7 @@ mod tests {
             mech_cache: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
         };
         let session = CkSessionHandle(7);
         let mechanism = CkMechanism {

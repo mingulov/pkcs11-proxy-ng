@@ -73,6 +73,7 @@ fn backend()
         mech_cache: DashMap::new(),
         session_slot_map: DashMap::new(),
         slot_sessions: DashMap::new(),
+        object_cleanup: Default::default(),
     };
     (backend, base, functions)
 }

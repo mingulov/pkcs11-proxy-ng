@@ -98,6 +98,7 @@ impl FfiBackend {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::Pkcs11Backend;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -288,7 +289,262 @@ mod tests {
         }
     }
 
+    static MODE: AtomicUsize = AtomicUsize::new(0);
+    static DESTROYS: AtomicUsize = AtomicUsize::new(0);
+    static DESTROY_RV: AtomicUsize = AtomicUsize::new(cryptoki_sys::CKR_OK as usize);
+
+    unsafe extern "C" fn mutate_sizing_input(
+        _: cryptoki_sys::CK_SESSION_HANDLE,
+        mechanism: cryptoki_sys::CK_MECHANISM_PTR,
+        _: cryptoki_sys::CK_OBJECT_HANDLE,
+        _: cryptoki_sys::CK_OBJECT_HANDLE,
+        _: cryptoki_sys::CK_BYTE_PTR,
+        _: cryptoki_sys::CK_ULONG,
+        output: cryptoki_sys::CK_BYTE_PTR,
+        length: cryptoki_sys::CK_ULONG_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        let call = CALLS.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            match MODE.load(Ordering::SeqCst) {
+                0 => unsafe { (*mechanism).mechanism = cryptoki_sys::CKM_AES_CCM },
+                1 => unsafe {
+                    let parameter = &mut *(*mechanism)
+                        .pParameter
+                        .cast::<cryptoki_sys::CK_GOSTR3410_KEY_WRAP_PARAMS>();
+                    parameter.hKey += 1;
+                    parameter.pUKM = std::ptr::null_mut();
+                },
+                2 | 14 => unsafe { (*mechanism).pParameter = std::ptr::null_mut() },
+                3 => unsafe { (*mechanism).pParameter = std::ptr::dangling_mut::<u8>().cast() },
+                4 | 5 | 13 => unsafe { (*mechanism).ulParameterLen += 1 },
+                6..=11 => unsafe {
+                    let p = &mut *(*mechanism)
+                        .pParameter
+                        .cast::<cryptoki_sys::CK_GOSTR3410_KEY_WRAP_PARAMS>();
+                    match MODE.load(Ordering::SeqCst) {
+                        6 => p.pWrapOID = std::ptr::null_mut(),
+                        7 => p.ulWrapOIDLen += 1,
+                        8 => p.ulUKMLen += 1,
+                        9 => *p.pWrapOID ^= 1,
+                        10 => *p.pUKM ^= 1,
+                        _ => p.hKey += 1,
+                    }
+                },
+                12 | 15 => unsafe {
+                    let p =
+                        &mut *(*mechanism).pParameter.cast::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>();
+                    *p.pIv ^= 0x80;
+                },
+                _ => unreachable!(),
+            }
+        }
+        if !length.is_null() {
+            unsafe { *length = 1 };
+        }
+        if !output.is_null() {
+            unsafe { *output = 0 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn run_sizing_mutation(mode: usize) {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (backend, _base, mut functions) = backend_with_missing_length_wrap();
+        functions.C_WrapKeyAuthenticated = Some(mutate_sizing_input);
+        let (mechanism, parameter) = if mode == 0 || mode >= 12 {
+            let (mechanism, mut parameter) = aead_parameter(false);
+            if let pkcs11_proxy_ng_proto::convert::message_params::MessageParameter::GcmMessage(p) =
+                &mut parameter
+            {
+                if mode == 12 {
+                    p.iv_fixed_bits = 1;
+                }
+                if mode == 15 {
+                    p.iv_generator = 0;
+                }
+            }
+            (mechanism, Some(parameter))
+        } else if mode == 1 || (6..=11).contains(&mode) {
+            (
+                CkMechanism {
+                    mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP,
+                    params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
+                        wrap_oid: vec![1; 3],
+                        ukm: vec![2; 8],
+                        key_handle: 7,
+                    })),
+                },
+                None,
+            )
+        } else if mode == 3 || mode == 4 {
+            (CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None }, None)
+        } else {
+            (
+                CkMechanism {
+                    mechanism_type: CkMechanismType::AES_CBC,
+                    params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0; 16] })),
+                },
+                None,
+            )
+        };
+        MODE.store(mode, Ordering::SeqCst);
+        CALLS.store(0, Ordering::SeqCst);
+        let result = backend.wrap_key_authenticated_typed(
+            CkSessionHandle(1),
+            &mechanism,
+            parameter.as_ref(),
+            CkObjectHandle(2),
+            CkObjectHandle(3),
+            CkInBuf::Bytes(&[]),
+        );
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "provider-mutated input must not reach a second native call"
+        );
+        assert!(matches!(result, Err(CkRv::DEVICE_ERROR)));
+    }
+
+    #[test]
+    fn reviewer_authenticated_rejects_sizing_mechanism_discriminator_mutation() {
+        run_sizing_mutation(0);
+    }
+
+    #[test]
+    fn reviewer_authenticated_rejects_sizing_gost_input_rebinding() {
+        run_sizing_mutation(1);
+    }
+
+    #[test]
+    fn reviewer_authenticated_rejects_sizing_iv_outer_rebinding() {
+        run_sizing_mutation(2);
+    }
+
+    #[test]
+    fn reviewer_authenticated_rejects_sizing_input_only_contents_and_all_outer_shapes() {
+        // Removing any input check must stop before a second native invocation.
+        for mode in 3..=15 {
+            run_sizing_mutation(mode);
+        }
+    }
+
+    unsafe extern "C" fn created_key_and_invalid_parameter(
+        _: cryptoki_sys::CK_SESSION_HANDLE,
+        mechanism: cryptoki_sys::CK_MECHANISM_PTR,
+        _: cryptoki_sys::CK_OBJECT_HANDLE,
+        _: cryptoki_sys::CK_BYTE_PTR,
+        _: cryptoki_sys::CK_ULONG,
+        _: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _: cryptoki_sys::CK_ULONG,
+        _: cryptoki_sys::CK_BYTE_PTR,
+        _: cryptoki_sys::CK_ULONG,
+        handle: cryptoki_sys::CK_OBJECT_HANDLE_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        unsafe {
+            let parameter =
+                &mut *(*mechanism).pParameter.cast::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>();
+            if MODE.load(Ordering::SeqCst) != 99 {
+                parameter.pTag = std::ptr::null_mut();
+            }
+            *handle = 4;
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn destroy_created_key(
+        _: cryptoki_sys::CK_SESSION_HANDLE,
+        _: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        DESTROYS.fetch_add(1, Ordering::SeqCst);
+        DESTROY_RV.load(Ordering::SeqCst) as cryptoki_sys::CK_RV
+    }
+
+    #[test]
+    fn reviewer_authenticated_unwrap_retains_cleanup_ownership_on_invalid_output() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (backend, mut base, mut functions) = backend_with_missing_length_wrap();
+        functions.C_UnwrapKeyAuthenticated = Some(created_key_and_invalid_parameter);
+        base.C_DestroyObject = Some(destroy_created_key);
+        CALLS.store(0, Ordering::SeqCst);
+        DESTROYS.store(0, Ordering::SeqCst);
+        DESTROY_RV.store(cryptoki_sys::CKR_OK as usize, Ordering::SeqCst);
+        MODE.store(0, Ordering::SeqCst);
+        let (mechanism, parameter) = aead_parameter(false);
+        let result = backend.unwrap_key_authenticated_typed(
+            CkSessionHandle(1),
+            &mechanism,
+            Some(&parameter),
+            CkObjectHandle(2),
+            CkInBuf::Bytes(&[0; 8]),
+            &[],
+            CkInBuf::Bytes(&[]),
+        );
+        assert!(matches!(result, Err(CkRv::DEVICE_ERROR)));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            DESTROYS.load(Ordering::SeqCst),
+            1,
+            "a successfully created native key must not become unreachable when output validation rejects it"
+        );
+    }
+
     static CORRUPT_PARAMETER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn reviewer_authenticated_unwrap_quarantines_failed_destroy_and_blocks_new_creates() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (backend, mut base, mut functions) = backend_with_missing_length_wrap();
+        functions.C_UnwrapKeyAuthenticated = Some(created_key_and_invalid_parameter);
+        base.C_DestroyObject = Some(destroy_created_key);
+        CALLS.store(0, Ordering::SeqCst);
+        DESTROYS.store(0, Ordering::SeqCst);
+        DESTROY_RV.store(cryptoki_sys::CKR_FUNCTION_FAILED as usize, Ordering::SeqCst);
+        MODE.store(0, Ordering::SeqCst);
+        let (mechanism, parameter) = aead_parameter(false);
+        for _ in 0..2 {
+            let result = backend.unwrap_key_authenticated_typed(
+                CkSessionHandle(1),
+                &mechanism,
+                Some(&parameter),
+                CkObjectHandle(2),
+                CkInBuf::Bytes(&[0; 8]),
+                &[],
+                CkInBuf::Bytes(&[]),
+            );
+            assert!(matches!(result, Err(CkRv::DEVICE_ERROR)));
+        }
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "failed cleanup must quarantine future creation"
+        );
+        assert_eq!(DESTROYS.load(Ordering::SeqCst), 1, "one cleanup attempt, no blind retry");
+    }
+
+    #[test]
+    fn reviewer_authenticated_unwrap_transfers_valid_created_object_without_destroy() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (backend, mut base, mut functions) = backend_with_missing_length_wrap();
+        functions.C_UnwrapKeyAuthenticated = Some(created_key_and_invalid_parameter);
+        base.C_DestroyObject = Some(destroy_created_key);
+        CALLS.store(0, Ordering::SeqCst);
+        DESTROYS.store(0, Ordering::SeqCst);
+        MODE.store(99, Ordering::SeqCst);
+        let (mechanism, parameter) = aead_parameter(false);
+        let result = backend.unwrap_key_authenticated_typed(
+            CkSessionHandle(1),
+            &mechanism,
+            Some(&parameter),
+            CkObjectHandle(2),
+            CkInBuf::Bytes(&[0; 8]),
+            &[],
+            CkInBuf::Bytes(&[]),
+        );
+        assert!(result.is_ok());
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(DESTROYS.load(Ordering::SeqCst), 0);
+    }
 
     unsafe extern "C" fn aead_wrap(
         _: cryptoki_sys::CK_SESSION_HANDLE,
@@ -599,6 +855,7 @@ mod tests {
             mech_cache: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
         };
         (backend, base, functions)
     }

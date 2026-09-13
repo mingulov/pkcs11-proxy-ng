@@ -255,7 +255,9 @@ async fn unwrap_key_authenticated_impl(
     let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
+    let object_cleanup = Arc::clone(&ctx.object_cleanup);
     let result = spawn_backend(move || {
+        object_cleanup.ensure_clear()?;
         if let Some(parameter) = parameter {
             let (key, output) = backend.unwrap_key_authenticated_typed(
                 session,
@@ -266,8 +268,15 @@ async fn unwrap_key_authenticated_impl(
                 &template,
                 input_from_wire(&aad, aad_null_len),
             )?;
+            let created = pkcs11_proxy_ng_backend::object_cleanup::PendingNativeObject::new(
+                &*backend,
+                &object_cleanup,
+                session,
+                key,
+            );
             output.validate_for(&mechanism, parameter.as_ref()).map_err(|_| CkRv::DEVICE_ERROR)?;
-            Ok((key, Vec::new(), Some((&output).into())))
+            let wire_output = Some((&output).into());
+            Ok((created.transfer(), Vec::new(), wire_output))
         } else {
             backend
                 .unwrap_key_authenticated(

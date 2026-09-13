@@ -61,6 +61,7 @@ impl Pkcs11ProxyService {
     ) -> Self {
         Self {
             ctx: HandlerContext {
+                object_cleanup: Arc::default(),
                 context_manager,
                 backend,
                 tcp_auth_mode,

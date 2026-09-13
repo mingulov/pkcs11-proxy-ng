@@ -129,6 +129,7 @@ pub(crate) use call_3x_fn;
 
 /// FFI backend that loads a PKCS#11 shared library via dlopen (ADR-0004 §2).
 pub struct FfiBackend {
+    object_cleanup: crate::object_cleanup::ObjectCleanupQuarantine,
     _lib: Library, // kept alive to prevent unloading
     func_list: *mut cryptoki_sys::CK_FUNCTION_LIST,
     /// PKCS#11 3.0 function list, if the module supports `C_GetInterface`.
@@ -1586,6 +1587,7 @@ mod tests {
             mech_cache: DashMap::new(),
             session_slot_map: DashMap::new(),
             slot_sessions: DashMap::new(),
+            object_cleanup: Default::default(),
         };
 
         (backend, functions)

@@ -97,6 +97,9 @@ const CK_SP800_108_DKM_LENGTH_FORMAT_LEN: usize =
 pub struct MockBackend {
     wrap_entries: Mutex<Vec<MockWrapObservation>>,
     wrap_action: Mutex<Option<MockWrapAction>>,
+    authenticated_unwrap_fault: Mutex<Option<CkRv>>,
+    destroy_error: Mutex<Option<CkRv>>,
+    destroy_calls: AtomicUsize,
     mechanism_entries: Mutex<mechanism_entry::MechanismEntries>,
     pub slots: Vec<CkSlotId>,
     pub mechanisms: Vec<CkMechanismType>,
@@ -292,6 +295,9 @@ impl MockBackend {
             mechanism_entries: Mutex::new(mechanism_entry::MechanismEntries::default()),
             wrap_entries: Mutex::new(Vec::new()),
             wrap_action: Mutex::new(None),
+            authenticated_unwrap_fault: Mutex::new(None),
+            destroy_error: Mutex::new(None),
+            destroy_calls: AtomicUsize::new(0),
             slot_event_condvar: Condvar::new(),
             token_presence: Mutex::new(HashMap::new()),
             token_identities: Mutex::new(HashMap::new()),
@@ -1864,6 +1870,10 @@ impl Pkcs11Backend for MockBackend {
         self.copy_object_impl(session, object, template)
     }
     fn destroy_object(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<()> {
+        self.destroy_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(rv) = *self.destroy_error.lock().unwrap() {
+            return Err(rv);
+        }
         self.destroy_object_impl(session, object)
     }
     fn get_object_size(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<u64> {
@@ -3210,6 +3220,13 @@ impl Pkcs11Backend for MockBackend {
             template,
             aad,
         )?;
+        if let Some(rv) = self.authenticated_unwrap_fault.lock().unwrap().take() {
+            *self.destroy_error.lock().unwrap() = (rv != CkRv::OK).then_some(rv);
+            return Ok((
+                key,
+                pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput::Iv(Vec::new()),
+            ));
+        }
         Ok((key, output))
     }
 

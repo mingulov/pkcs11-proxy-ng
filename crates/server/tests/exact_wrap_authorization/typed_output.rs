@@ -1,5 +1,71 @@
 use super::*;
 
+// The real server must own custom-backend results until validation succeeds.
+#[tokio::test]
+async fn authenticated_typed_invalid_unwrap_output_destroys_without_registering() {
+    assert_invalid_unwrap_cleanup(CkRv::OK).await;
+}
+
+#[tokio::test]
+async fn authenticated_typed_failed_unwrap_cleanup_quarantines_further_creates() {
+    assert_invalid_unwrap_cleanup(CkRv::FUNCTION_FAILED).await;
+}
+
+async fn assert_invalid_unwrap_cleanup(cleanup_rv: CkRv) {
+    let f = fixture(grant()).await;
+    let mut c = open(&f, false).await;
+    let registered_before = f
+        .context_manager
+        .get_context(&ClientContextId(c.context.clone()), |ctx| {
+            (ctx.created_objects.len(), ctx.object_handles.virtual_handles().count())
+        })
+        .await
+        .unwrap();
+    let before = f.backend.wrap_observations().len();
+    f.backend.set_authenticated_unwrap_fault(cleanup_rv);
+    let request = UnwrapKeyAuthenticatedRequest {
+        client_context_id: c.context.clone(),
+        session_handle: c.session,
+        mechanism: mechanism(c.keys[2]),
+        unwrapping_key_handle: c.keys[0],
+        wrapped_key: vec![0; 16],
+        authenticated_parameters: Some(AuthenticatedParameters::default()),
+        ..Default::default()
+    };
+    let response = c.rpc.unwrap_key_authenticated(request.clone()).await.unwrap().into_inner();
+    assert_eq!(response.ck_rv, CkRv::DEVICE_ERROR.0);
+    assert_eq!(response.key_handle, 0);
+    assert!(response.mechanism_parameter_out.is_empty() && response.authenticated_output.is_none());
+    assert_eq!(f.backend.wrap_observations().len() - before, 1);
+    assert_eq!(
+        f.backend.destroy_call_count(),
+        1,
+        "created key needs one cleanup attempt before rejection"
+    );
+    assert_eq!(
+        f.context_manager
+            .get_context(&ClientContextId(c.context.clone()), |ctx| (
+                ctx.created_objects.len(),
+                ctx.object_handles.virtual_handles().count()
+            ))
+            .await
+            .unwrap(),
+        registered_before
+    );
+    if cleanup_rv != CkRv::OK {
+        let second = c.rpc.unwrap_key_authenticated(request).await.unwrap().into_inner();
+        assert_eq!(second.ck_rv, CkRv::DEVICE_ERROR.0);
+        assert_eq!(second.key_handle, 0);
+        assert!(second.authenticated_output.is_none());
+        assert_eq!(
+            f.backend.wrap_observations().len() - before,
+            1,
+            "quarantine must prevent another creation"
+        );
+        assert_eq!(f.backend.destroy_call_count(), 1, "no blind cleanup retry");
+    }
+}
+
 // Break caught: a server still accepting old pointer-bearing requests or
 // serializing backend input handles into authenticated output.
 #[tokio::test]

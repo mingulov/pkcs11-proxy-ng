@@ -194,6 +194,31 @@ rejected because pointer widths, padding, and input handles are not portable
 outputs. Native error effects beyond the existing exact-output contract and
 completion-owned auditing after cancellation remain separate work.
 
+Authenticated native readback validates an immutable fieldwise input snapshot
+before extracting output or making a second convenience-call invocation. This
+includes the mechanism identifier and outer pointer/length even for parameterless
+and byte-array inputs, every GOST pointer/length/handle and OID/UKM input byte,
+and AEAD input fields and fixed nonce/IV prefixes. Only explicitly permitted
+owned IV/nonce and tag/MAC effects survive sizing. Native padding is never
+compared. Rebuilding parameters between calls is an alternative, but requires
+the same precise output-effect allowlist and additional allocations.
+
+A successful authenticated unwrap gains a pending native-object cleanup owner
+before fallible ancillary output validation, both inside the FFI adapter and at
+the server's custom-backend result boundary. Valid success transfers ownership;
+rejection attempts `C_DestroyObject` once. Failed destruction retains the native
+identity and cleanup outcome in a private backend/service-lifetime quarantine
+and blocks further authenticated unwrap creation with `CKR_DEVICE_ERROR`.
+Quarantine is not exposed as a virtual handle or logged payload. It is in-memory
+state, not a durable recovery journal; restarting does not establish that a
+possibly persistent token object was removed. Operator/provider reconciliation
+is required before restoring service. Automatic retries are deliberately absent
+because session/object handles can become stale. Accepting mutated unwrap input
+fields without validation would avoid this particular rejection, but would not
+cover invalid output from arbitrary backends; explicit cleanup ownership covers
+both boundaries without weakening validation. General cancellation and audit
+divergence remain separate lifecycle work.
+
 - Upgrade daemons before shims/clients. A new daemon accepts an old client's
   omitted shape only for the genuinely legacy-safe case: no outer envelope, no
   structured message parameter, and a type-only mechanism with empty

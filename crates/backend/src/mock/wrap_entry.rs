@@ -33,6 +33,16 @@ pub struct MockWrapObservation {
 }
 
 impl MockBackend {
+    /// Test-provider seam: create normally, then return an invalid typed
+    /// acknowledgment and configure the resulting cleanup outcome.
+    pub fn set_authenticated_unwrap_fault(&self, cleanup_rv: CkRv) {
+        *self.authenticated_unwrap_fault.lock().unwrap() = Some(cleanup_rv);
+    }
+
+    pub fn destroy_call_count(&self) -> usize {
+        self.destroy_calls.load(Ordering::SeqCst)
+    }
+
     pub(super) fn authenticated_output(
         &self,
         mechanism: &CkMechanism,
