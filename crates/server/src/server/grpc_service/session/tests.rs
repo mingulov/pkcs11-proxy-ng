@@ -92,7 +92,7 @@ async fn setup_session() -> (Arc<ContextManager>, Arc<dyn Pkcs11Backend>, Client
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
     let virtual_slot = ctx_mgr.virtual_slots().await[0];
@@ -182,7 +182,7 @@ async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in(
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_a = ctx_mgr.create_context(None).await.unwrap();
     let ctx_b = ctx_mgr.create_context(None).await.unwrap();
 
@@ -238,7 +238,7 @@ async fn repeated_login_in_same_logical_client_reaches_backend() {
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
     let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
@@ -261,10 +261,9 @@ async fn closing_last_session_clears_logical_login_state_for_slot() {
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_a = ctx_mgr.create_context(None).await.unwrap();
     let ctx_b = ctx_mgr.create_context(None).await.unwrap();
-    let virtual_slot = ctx_mgr.virtual_slots().await[0];
 
     let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
     assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
@@ -281,7 +280,9 @@ async fn closing_last_session_clears_logical_login_state_for_slot() {
     .into_inner();
     assert_eq!(close_a.ck_rv, CkRv::OK.0);
     let stale_login_state = ctx_mgr
-        .get_context(&ctx_a, |ctx| ctx.login_state.get(&virtual_slot).copied())
+        .get_context(&ctx_a, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
         .await
         .unwrap();
     assert_eq!(
@@ -304,7 +305,7 @@ async fn close_all_sessions_clears_logical_login_state_for_slot() {
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
     let virtual_slot = ctx_mgr.virtual_slots().await[0];
 
@@ -325,7 +326,9 @@ async fn close_all_sessions_clears_logical_login_state_for_slot() {
     assert_eq!(close_all.ck_rv, CkRv::OK.0);
 
     let stale_login_state = ctx_mgr
-        .get_context(&ctx_id, |ctx| ctx.login_state.get(&virtual_slot).copied())
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
         .await
         .unwrap();
     assert_eq!(
@@ -341,9 +344,8 @@ async fn failed_physical_logout_preserves_logical_login_state() {
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
-    let virtual_slot = ctx_mgr.virtual_slots().await[0];
     let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
 
     assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, session).await, CkRv::OK.0);
@@ -359,7 +361,9 @@ async fn failed_physical_logout_preserves_logical_login_state() {
         CkRv::SESSION_HANDLE_INVALID.0
     );
     let login_state = ctx_mgr
-        .get_context(&ctx_id, |ctx| ctx.login_state.get(&virtual_slot).copied())
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
         .await
         .unwrap();
     assert_eq!(
@@ -376,9 +380,8 @@ async fn context_specific_login_logout_reaches_backend_without_logical_state() {
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
-    let virtual_slot = ctx_mgr.virtual_slots().await[0];
     let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
 
     let context_login = login(
@@ -396,7 +399,9 @@ async fn context_specific_login_logout_reaches_backend_without_logical_state() {
     assert_eq!(context_login.ck_rv, CkRv::OK.0);
 
     let logical_login_state = ctx_mgr
-        .get_context(&ctx_id, |ctx| ctx.login_state.get(&virtual_slot).copied())
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
         .await
         .unwrap();
     assert_eq!(
@@ -819,7 +824,7 @@ async fn object_handles_are_isolated_per_context() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_a = ctx_mgr.create_context(None).await.unwrap();
     let ctx_b = ctx_mgr.create_context(None).await.unwrap();
     let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
@@ -886,7 +891,7 @@ async fn wait_for_slot_event_does_not_leak_raw_backend_slot() {
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await; // only slot 0 is mapped; 99 is not
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await; // only slot 0 is mapped; 99 is not
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
     let policy = crate::server::auth::policy::TokenPolicy::from_config(
         &crate::config::AuthConfig::default(),
@@ -922,7 +927,7 @@ async fn wait_for_slot_event_suppresses_events_for_unauthorized_slots() {
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     // An authenticated identity that the (empty, deny-by-default) policy denies.
     let ctx_id =
         ctx_mgr.create_context(Some("x509:issuer=CN=CA;subject=CN=denied".into())).await.unwrap();
@@ -961,7 +966,7 @@ async fn setup_session_with_mock() -> (Arc<ContextManager>, Arc<MockBackend>, Cl
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
     let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
     (ctx_mgr, mock, ctx_id, session)
@@ -1206,7 +1211,7 @@ async fn timed_out_close_holds_context_in_flight_and_reaper_cannot_close_twice()
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::ZERO, 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
     let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
     mock.set_close_session_delay(std::time::Duration::from_millis(80));
@@ -1266,7 +1271,7 @@ async fn production_scoped_close_reuses_one_capped_context_guard() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::ZERO, 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
     let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
     mock.set_close_session_delay(std::time::Duration::from_millis(80));
@@ -1361,7 +1366,7 @@ async fn cross_client_login_with_wrong_pin_is_rejected() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_a = ctx_mgr.create_context(None).await.unwrap();
     let ctx_b = ctx_mgr.create_context(None).await.unwrap();
     let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
@@ -1414,7 +1419,7 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_a = ctx_mgr.create_context(None).await.unwrap();
     let ctx_b = ctx_mgr.create_context(None).await.unwrap();
     let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
@@ -1495,7 +1500,7 @@ async fn set_pin_refreshes_the_cross_client_login_verifier() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_a = ctx_mgr.create_context(None).await.unwrap();
     let ctx_b = ctx_mgr.create_context(None).await.unwrap();
     let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
@@ -1579,7 +1584,7 @@ async fn audit_login_logout_records_chain_ok_and_no_pin() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
 
     let (ctx, sink) = make_audited_ctx(&ctx_mgr, &backend, &dir).await;
 
@@ -1630,6 +1635,12 @@ async fn audit_login_logout_records_chain_ok_and_no_pin() {
     let jsonl = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
     assert!(jsonl.contains("\"C_Login\""), "C_Login method must appear in audit file");
     assert!(jsonl.contains("\"C_Logout\""), "C_Logout method must appear in audit file");
+    let records: Vec<serde_json::Value> =
+        jsonl.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    for method in ["C_Login", "C_Logout"] {
+        let record = records.iter().find(|record| record["method"] == method).unwrap();
+        assert_eq!(record["slot"].as_u64(), Some(1), "audit slots remain virtual, not backend 0");
+    }
     // ck_rv 0 == CKR_OK
     assert!(jsonl.contains("\"ck_rv\":0"), "successful operations must record ck_rv 0");
 
@@ -1661,7 +1672,7 @@ async fn audit_off_login_logout_byte_identical() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
 
     // No audit sink: for_test leaves ctx.audit = None.
     let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
@@ -1717,7 +1728,7 @@ async fn audit_generate_key_emits_key_mgmt_record() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
 
     let (ctx, sink) = make_audited_ctx(&ctx_mgr, &backend, &dir).await;
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
@@ -1767,7 +1778,7 @@ async fn audit_off_generate_key_byte_identical() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
 
     // No audit sink: for_test leaves ctx.audit = None.
     let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
@@ -1862,14 +1873,24 @@ async fn session_count_for_principal_aggregates_correctly() {
 
     // Register one session in ctx_a1.
     ctx_mgr
-        .get_context(&ctx_a1, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+        .get_context(&ctx_a1, |ctx| {
+            ctx.register_session(
+                BackendHandle(1),
+                crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            )
+        })
         .await
         .expect("ctx_a1 must exist");
     assert_eq!(ctx_mgr.session_count_for_principal("uid=1"), 1, "one session in ctx_a1");
 
     // Register one session in ctx_a2 (same identity → aggregates).
     ctx_mgr
-        .get_context(&ctx_a2, |ctx| ctx.register_session(BackendHandle(2), CkSlotId(0)))
+        .get_context(&ctx_a2, |ctx| {
+            ctx.register_session(
+                BackendHandle(2),
+                crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            )
+        })
         .await
         .expect("ctx_a2 must exist");
     assert_eq!(
@@ -1880,7 +1901,12 @@ async fn session_count_for_principal_aggregates_correctly() {
 
     // uid=2 is independent.
     ctx_mgr
-        .get_context(&ctx_b, |ctx| ctx.register_session(BackendHandle(3), CkSlotId(0)))
+        .get_context(&ctx_b, |ctx| {
+            ctx.register_session(
+                BackendHandle(3),
+                crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            )
+        })
         .await
         .expect("ctx_b must exist");
     assert_eq!(
@@ -1892,7 +1918,12 @@ async fn session_count_for_principal_aggregates_correctly() {
 
     // Unauthenticated: principal key is the ctx_id string itself.
     ctx_mgr
-        .get_context(&ctx_anon, |ctx| ctx.register_session(BackendHandle(4), CkSlotId(0)))
+        .get_context(&ctx_anon, |ctx| {
+            ctx.register_session(
+                BackendHandle(4),
+                crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            )
+        })
         .await
         .expect("ctx_anon must exist");
     assert_eq!(
@@ -1913,7 +1944,7 @@ async fn session_count_for_principal_tracks_close_session() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
 
     // No identity → principal key = ctx_id string (unauthenticated path).
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
@@ -1985,7 +2016,7 @@ async fn open_session_quota_enforced_end_to_end() {
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
 
     let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend.clone());
 
@@ -2084,7 +2115,7 @@ async fn failed_login_budget_unset_all_reach_backend_transparently() {
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(CkSlotId(0)).await;
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let ctx_id = ctx_mgr.create_context(None).await.unwrap();
     let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
 

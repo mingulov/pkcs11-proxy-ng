@@ -251,7 +251,7 @@ mod sanitize_inputs_tests {
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let virtual_slot = ctx_mgr.virtual_slots().await[0];
 

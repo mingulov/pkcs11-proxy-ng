@@ -750,12 +750,16 @@ mod ambiguity_tests {
         let key = mock.create_object(backend_session, &[]).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        manager.register_slot(CkSlotId(0)).await;
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
-        let virtual_session =
-            register_session_handle(&manager, &context_id, backend_session, CkSlotId(0))
-                .await
-                .unwrap();
+        let virtual_session = register_session_handle(
+            &manager,
+            &context_id,
+            backend_session,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
         let virtual_session = VirtualHandle(virtual_session);
         let virtual_wrapping_key = register_session_object_handle(
             &manager,
@@ -818,14 +822,18 @@ mod ambiguity_tests {
         mock.initialize().unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        manager.register_slot(CkSlotId(0)).await;
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
         let backend_session =
             mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let virtual_session =
-            register_session_handle(&manager, &context_id, backend_session, CkSlotId(0))
-                .await
-                .unwrap();
+        let virtual_session = register_session_handle(
+            &manager,
+            &context_id,
+            backend_session,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
         let operation = manager
             .message_operation_lock(
                 &context_id,

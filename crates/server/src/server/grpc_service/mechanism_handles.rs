@@ -626,13 +626,20 @@ mod tests {
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
 
         let (vs, vo) = ctx_mgr
             .get_context(&ctx_id, |c| {
-                let vs = c.register_session(BackendHandle(backend_session.0), CkSlotId(0));
+                let vs = c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 let vo = c.object_handles.insert(BackendHandle(backend_object.0));
                 (vs, vo)
             })

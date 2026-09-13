@@ -1,3 +1,4 @@
+use crate::server::slot_map::BackendSlotId;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -36,7 +37,7 @@ async fn resolve_session_slot_login(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
     session_handle: u64,
-) -> Result<(CkSessionHandle, CkSlotId, Option<LoginState>), CkRv> {
+) -> Result<(CkSessionHandle, BackendSlotId, Option<LoginState>), CkRv> {
     let resolved = ctx_mgr
         .get_context(ctx_id, |ctx| {
             let virtual_session = VirtualHandle(session_handle);
@@ -336,15 +337,15 @@ mod tests {
         mock.login(backend_session, CkUserType::User, None).unwrap();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
         // Register the real backend session in the context and record logged-in state.
         let session_vh = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                let vh = ctx.register_session(BackendHandle(backend_session.0), virtual_slot);
-                ctx.login_state.insert(virtual_slot, LoginState::User);
+                let vh = ctx.register_session(BackendHandle(backend_session.0), backend_slot);
+                ctx.login_state.insert(backend_slot, LoginState::User);
                 vh
             })
             .await
@@ -397,8 +398,8 @@ mod tests {
         mock.login(backend_session, CkUserType::User, None).unwrap();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
 
         // Two contexts on the same slot — ctx_a will attempt logout; ctx_b stays logged in,
         // forcing the logical-logout path (backend NOT called).
@@ -407,8 +408,8 @@ mod tests {
 
         let session_a_vh = ctx_mgr
             .get_context(&ctx_a, |ctx| {
-                let vh = ctx.register_session(BackendHandle(backend_session.0), virtual_slot);
-                ctx.login_state.insert(virtual_slot, LoginState::User);
+                let vh = ctx.register_session(BackendHandle(backend_session.0), backend_slot);
+                ctx.login_state.insert(backend_slot, LoginState::User);
                 vh
             })
             .await
@@ -418,7 +419,7 @@ mod tests {
         // return Some, so ctx_a's logout takes the logical path).
         ctx_mgr
             .get_context(&ctx_b, |ctx| {
-                ctx.login_state.insert(virtual_slot, LoginState::User);
+                ctx.login_state.insert(backend_slot, LoginState::User);
             })
             .await;
 
@@ -481,14 +482,14 @@ mod tests {
         let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
         // Session not logged in from the ContextManager's perspective either.
         let session_vh = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                ctx.register_session(BackendHandle(backend_session.0), virtual_slot)
+                ctx.register_session(BackendHandle(backend_session.0), backend_slot)
             })
             .await
             .unwrap();

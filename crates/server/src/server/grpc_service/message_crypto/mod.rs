@@ -2820,12 +2820,18 @@ mod lifecycle_transition_tests {
         mock.initialize().unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(lease_duration, 0));
-        manager.register_slot(CkSlotId(0)).await;
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
         let raw_session =
             mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let virtual_session =
-            register_session_handle(&manager, &context_id, raw_session, CkSlotId(0)).await.unwrap();
+        let virtual_session = register_session_handle(
+            &manager,
+            &context_id,
+            raw_session,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
         let operation = manager
             .message_operation_lock(
                 &context_id,
@@ -2848,12 +2854,18 @@ mod lifecycle_transition_tests {
         mock.initialize().unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        manager.register_slot(CkSlotId(0)).await;
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
         let raw_session =
             mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let virtual_session =
-            register_session_handle(&manager, &context_id, raw_session, CkSlotId(0)).await.unwrap();
+        let virtual_session = register_session_handle(
+            &manager,
+            &context_id,
+            raw_session,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
         manager
             .message_operation_lock(&context_id, VirtualHandle(virtual_session), operation)
             .await
@@ -2873,12 +2885,14 @@ mod lifecycle_transition_tests {
             mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        manager.register_slot(CkSlotId(0)).await;
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(Some(IDENTITY.into())).await.unwrap();
         let (virtual_session, virtual_key) = manager
             .get_context(&context_id, |context| {
-                let session =
-                    context.register_session(BackendHandle(backend_session.0), CkSlotId(0));
+                let session = context.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 let key = context.object_handles.insert(BackendHandle(42));
                 (session, key)
             })
@@ -4144,7 +4158,7 @@ mod lifecycle_transition_tests {
         mock.initialize().unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        manager.register_slot(CkSlotId(0)).await;
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_a = manager.create_context(None).await.unwrap();
         let context_b = manager.create_context(None).await.unwrap();
 
@@ -4154,12 +4168,30 @@ mod lifecycle_transition_tests {
             mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
         let backend_b1 =
             mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let session_a1 =
-            register_session_handle(&manager, &context_a, backend_a1, CkSlotId(0)).await.unwrap();
-        let session_a2 =
-            register_session_handle(&manager, &context_a, backend_a2, CkSlotId(0)).await.unwrap();
-        let session_b1 =
-            register_session_handle(&manager, &context_b, backend_b1, CkSlotId(0)).await.unwrap();
+        let session_a1 = register_session_handle(
+            &manager,
+            &context_a,
+            backend_a1,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
+        let session_a2 = register_session_handle(
+            &manager,
+            &context_a,
+            backend_a2,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
+        let session_b1 = register_session_handle(
+            &manager,
+            &context_b,
+            backend_b1,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             session_a1, session_b1,
             "independent contexts deliberately reuse the same virtual handle",
@@ -4511,7 +4543,7 @@ mod lifecycle_transition_tests {
         mock.initialize().unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        manager.register_slot(CkSlotId(0)).await;
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
         let ctx = HandlerContext::for_test(&manager, &backend);
         let calls_before = mock.message_lifecycle_call_count();

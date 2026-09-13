@@ -107,7 +107,22 @@ Phase 1 exposes **daemon-virtual slot IDs** to clients.
   selectors (for example PKCS#11 URI fragments, token serials, or token labels),
   not raw numeric slot IDs.
 
+The server distinguishes `VirtualSlotId` and `BackendSlotId` without implicit
+conversions. Session ownership, token metadata, logical login state, login
+serialization, PIN verifiers, and failed-login budgets use backend slots.
+Only wire-facing slot arguments/results use virtual slots; native provider
+calls receive the explicitly unwrapped backend identifier. This distinction
+also applies when a virtual slot number equals another native slot number.
+
+On successful `C_GetSessionInfo`, the provider's reported slot must match the
+session's recorded backend owner and have a virtual mapping. An inconsistent
+or unmapped provider slot is a provider-contract failure: return
+`CKR_DEVICE_ERROR` without session information. Otherwise translate the slot
+and preserve every other provider field. Provider errors pass through unchanged.
+Audit session events retain the virtual slot namespace used by slot requests.
+
 ### 5. Handle Namespaces
+
 
 `CK_SESSION_HANDLE` and `CK_OBJECT_HANDLE` values exposed to the client are
 **virtual** and scoped to the logical client instance:

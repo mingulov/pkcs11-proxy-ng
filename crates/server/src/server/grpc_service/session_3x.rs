@@ -214,7 +214,10 @@ mod tests {
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let virtual_session = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                ctx.register_session(BackendHandle(backend_session.0), CkSlotId(1))
+                ctx.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(1)),
+                )
             })
             .await
             .unwrap();

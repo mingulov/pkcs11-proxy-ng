@@ -678,13 +678,22 @@ mod tests {
     ) -> (HandlerContext, ClientContextId, u64) {
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(identity).await.unwrap();
         let session_vh = ctx_mgr
-            .get_context(&ctx_id, |ctx| ctx.register_session(BackendHandle(1), CkSlotId(0)))
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
             .await
             .unwrap();
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
 
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = Arc::new(policy);
@@ -1088,15 +1097,22 @@ mod tests {
         let mock = mock_with_attrs();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
         ctx_mgr
             .get_context(&ctx_id, |c| {
-                c.register_session(BackendHandle(1), CkSlotId(0));
+                c.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 c.object_handles.insert(BackendHandle(1));
             })
             .await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
 
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = Arc::new(allow_policy());
@@ -1158,15 +1174,22 @@ mod tests {
         let mock = mock_with_attrs();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
         ctx_mgr
             .get_context(&ctx_id, |c| {
-                c.register_session(BackendHandle(1), CkSlotId(0));
+                c.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 c.object_handles.insert(BackendHandle(1));
             })
             .await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
 
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = Arc::new(allow_policy());
@@ -1243,15 +1266,22 @@ mod tests {
         let mock = mock_with_attrs();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let ctx_id = ctx_mgr.create_context(Some(MTLS_IDENTITY.into())).await.unwrap();
         ctx_mgr
             .get_context(&ctx_id, |c| {
-                c.register_session(BackendHandle(1), CkSlotId(0));
+                c.register_session(
+                    BackendHandle(1),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 c.object_handles.insert(BackendHandle(1));
             })
             .await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
 
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = Arc::new(allow_policy());

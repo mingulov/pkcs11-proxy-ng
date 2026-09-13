@@ -61,7 +61,7 @@ pub(super) async fn init_token(
     let label = req.label;
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
-        backend.init_token(backend_slot, so_pin.as_deref().map(Vec::as_slice), &label)
+        backend.init_token(backend_slot.0, so_pin.as_deref().map(Vec::as_slice), &label)
     })
     .await?;
 

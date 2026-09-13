@@ -108,6 +108,10 @@ pub struct MockBackend {
     /// Per-slot token presence override. Slots not present in this map default
     /// to token-present to preserve the historical mock behavior.
     token_presence: Mutex<HashMap<CkSlotId, bool>>,
+    token_identities: Mutex<HashMap<CkSlotId, (String, String)>>,
+    token_info_requested_slots: Mutex<Vec<CkSlotId>>,
+    init_token_requested_slots: Mutex<Vec<CkSlotId>>,
+    session_info_slot_overrides: Mutex<HashMap<CkSessionHandle, CkSlotId>>,
     /// Per-slot mechanism list override. Slots without an override use the
     /// global `mechanisms` list to preserve the historical mock behavior.
     slot_mechanisms: Mutex<HashMap<CkSlotId, Vec<CkMechanismType>>>,
@@ -280,6 +284,10 @@ impl MockBackend {
             slot_event_queue: Mutex::new(std::collections::VecDeque::new()),
             slot_event_condvar: Condvar::new(),
             token_presence: Mutex::new(HashMap::new()),
+            token_identities: Mutex::new(HashMap::new()),
+            token_info_requested_slots: Mutex::new(Vec::new()),
+            init_token_requested_slots: Mutex::new(Vec::new()),
+            session_info_slot_overrides: Mutex::new(HashMap::new()),
             slot_mechanisms: Mutex::new(HashMap::new()),
             enforce_source_grounded_workflows: false,
             attribute_store: Mutex::new(HashMap::new()),
@@ -489,6 +497,31 @@ impl MockBackend {
     /// (M9) deduplicates repeated authorization checks.
     pub fn token_info_call_count(&self) -> usize {
         self.token_info_calls.load(Ordering::SeqCst)
+    }
+
+    /// Override only the token's identity; presence and injected errors still apply.
+    pub fn set_slot_token_identity(&self, slot: CkSlotId, label: String, serial: String) {
+        self.token_identities.lock().unwrap().insert(slot, (label, serial));
+    }
+
+    /// Native token-metadata request arguments, including calls that returned errors.
+    pub fn token_info_requested_slots(&self) -> Vec<CkSlotId> {
+        self.token_info_requested_slots.lock().unwrap().clone()
+    }
+
+    /// Native InitToken slot arguments; PIN and label payloads are not retained.
+    pub fn init_token_requested_slots(&self) -> Vec<CkSlotId> {
+        self.init_token_requested_slots.lock().unwrap().clone()
+    }
+
+    /// Simulate a provider reporting an inconsistent session owner.
+    pub fn set_session_info_slot_override(&self, session: CkSessionHandle, slot: Option<CkSlotId>) {
+        let mut overrides = self.session_info_slot_overrides.lock().unwrap();
+        if let Some(slot) = slot {
+            overrides.insert(session, slot);
+        } else {
+            overrides.remove(&session);
+        }
     }
 
     /// Number of `C_GetAttributeValue` calls reaching the backend (regular path).
@@ -1385,6 +1418,7 @@ impl Pkcs11Backend for MockBackend {
 
     fn get_token_info(&self, slot_id: CkSlotId) -> CkResult<CkTokenInfo> {
         self.token_info_calls.fetch_add(1, Ordering::SeqCst);
+        self.token_info_requested_slots.lock().unwrap().push(slot_id);
         self.token_info(slot_id)
     }
 
@@ -1401,6 +1435,7 @@ impl Pkcs11Backend for MockBackend {
     }
 
     fn init_token(&self, slot_id: CkSlotId, _so_pin: Option<&[u8]>, _label: &str) -> CkResult<()> {
+        self.init_token_requested_slots.lock().unwrap().push(slot_id);
         self.require_known_slot(slot_id)?;
         self.noop_ok()
     }
