@@ -1003,7 +1003,7 @@ mod backend_abi_tests {
     #[test]
     fn synthetic_interface_catalog_applies_flag_subset_to_all_selectors() {
         let catalog = synthetic_catalog();
-        let name = std::ffi::CStr::from_bytes_with_nul(b"PKCS 11\0").unwrap();
+        let name = c"PKCS 11";
         let version = CK_VERSION { major: 3, minor: 0 };
 
         for flags in [0, 0b0001, 0b0011] {
