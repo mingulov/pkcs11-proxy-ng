@@ -54,6 +54,13 @@ hand-rolling a config.
 
 ## Beta scope
 
+The selected v0.2 [native ownership contract](./doc/release/native-mechanism-ownership.md)
+is awaiting implementation and native qualification: one provider chain per
+process, DONT_BLOCK-only slot waits with shared native event flags, checked
+widths, and a qualified Linux whole-process lifetime stop. Windows native
+daemon support is deferred; portable Windows clients and mock-only builds
+remain. This is not a v0.2 parity/support receipt.
+
 **Public `v0.1.0` support**
 
 - Linux `x86_64`

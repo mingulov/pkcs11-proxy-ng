@@ -11,6 +11,33 @@ and audit work is implemented locally and partially covered, but local unit and
 integration coverage is not a provenance-complete transparency matrix. Therefore
 this document makes no `v0.2.0` parity or public support claim.
 
+## Selected v0.2 boundary (implementation and qualification pending)
+
+The [native ownership contract](native-mechanism-ownership.md) limits live
+production FFI to qualified Linux GNU/musl x86_64/64-bit and x86/32-bit (i686).
+All four Linux caller/daemon width combinations require actual loaded-shim
+receipts; assembly/cross-compilation and old bridge runs are insufficient.
+Windows native-provider daemon support is explicitly superseded/deferred for
+v0.2 in ADR-0011/0006. Portable Windows client/shim/proto/types and mock-only
+backend/server builds remain, including Windows-client/Linux-daemon use under
+the existing client contract. Windows native loading is lower priority/stretch.
+
+v0.2 supports slot waiting only with `CKF_DONT_BLOCK`; blocking mode is local
+`CKR_FUNCTION_NOT_SUPPORTED`, without polling. One supported waiter uses the
+ordinary lifecycle gate. Logical clients compete for shared native per-slot
+pending flags; logical Initialize does not establish an independent event
+bitmap. No full native per-application event equivalence is claimed. Checked
+flag/RV/slot widths and unchanged caller output on errors are mandatory.
+
+One managed provider chain per embedding process is required, shared via Arc.
+The host supplies one linked backend runtime with exclusive provider access;
+unmanaged calls, another runtime copy or shared downstream aggregator aliases
+are excluded. Independent chains need separate processes. Unresolved native
+lifetime selects qualified raw Linux `exit_group(70)`, affecting all threads
+and co-located clients without cleanup, wiping or an audit-tail guarantee.
+All of this enforcement remains implementation/qualification work; the v0.1.0
+support statement below is unchanged.
+
 ## Platform
 
 | Dimension | Beta support |

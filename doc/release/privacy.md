@@ -3,7 +3,9 @@
 `pkcs11-proxy-ng` transports data that can include PINs, key material, and
 application plaintext. The v0.2.0 privacy contract is data minimization: do not
 log secret payloads, keep project-owned secret copies short-lived, and wipe
-their current allocations before deallocation.
+their current allocations before normal or proven-quiescent deallocation.
+Ordinary permitted unwinding retains this wiping behavior; unresolved native
+retention follows the abnormal-stop exception below.
 
 This is a memory-hygiene guarantee, not a claim that the process is resistant
 to memory inspection by a privileged attacker.
@@ -77,6 +79,24 @@ wire input before secret-bearing generated messages are allocated.
 
 ## Boundary of the guarantee
 
+The selected v0.2 [native ownership contract](native-mechanism-ownership.md)
+requires a private return-aware raw Linux `exit_group(70)` when shutdown cannot
+establish native quiescence or final-domain Drop lacks its proof. This contract
+still needs implementation and native qualification. Still-retained roots
+must not be wiped or freed first. The path initiates no unwinding, user-space
+destruction, provider cleanup, native Finalize, logging or audit flush. It
+promises no wiping, token deletion or complete audit tail. The release panic
+strategy remains unwinding for ordinary panics.
+
+The normal-exit syscall does not intentionally trigger a core, but no global
+no-dumps guarantee follows. External signals, other crash paths, tracing and
+system collectors can still capture secrets; a piped core handler is not
+disabled by `RLIMIT_CORE=0` alone. Operators must manage the complete
+dump/storage/inspection policy. Direct backend users must accept termination
+of the whole embedding application's thread group under the Linux/seccomp
+environment, including unrelated threads; there is no strict disappearance
+deadline or support for arbitrary syscall-denial/interception policies.
+
 The proxy can wipe only memory that it owns and can still address. The wiping
 guarantee does not cover:
 
@@ -85,7 +105,9 @@ guarantee does not cover:
   TLS-library internals, or remote peer memory;
 - copies created by an allocator, operating system, hypervisor, swap, core
   dump, hibernation image, or crash collector; or
-- secret values copied through an API that does not preserve wiping ownership.
+- secret values copied through an API that does not preserve wiping ownership;
+  or
+- abnormal native-lifetime stopping while project memory remains retained.
 
 TLS or mTLS protects bytes in transit but does not replace memory hygiene.
 Unix-domain sockets with peer credentials protect a local transport boundary;

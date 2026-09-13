@@ -64,11 +64,14 @@ before migrating the full call graph.
    prost can replace a long secret with a shorter allocation.
 
 6. **Make the guarantee precise.** The project guarantees best-effort wiping of
-   its currently owned and addressable secret allocations before deallocation.
+   its currently owned and addressable secret allocations before normal or
+   proven-quiescent deallocation, including permitted ordinary unwinding.
    It does not claim to wipe application/provider memory, previous allocations
    abandoned during reallocation, tonic/prost transport buffers, kernel/TLS
    buffers, swap, crash dumps, or remote systems. Panic remains unwinding so
    destructors run; the release profile must not use `panic = "abort"`.
+   The selected v0.2 native-lifetime exception below must not wipe or free
+   still-retained storage merely to satisfy a general Drop guarantee.
 
 7. **Treat protected decode and lifetime migration as a release gate.** This
    decision's owner and manifest do not retroactively protect existing
@@ -76,6 +79,26 @@ before migrating the full call graph.
    redacted generated-message diagnostics, wipe-before-replacement behavior,
    and end-to-end owner migration are required before making the v0.2.0 privacy
    claim.
+
+## v0.2 abnormal native-lifetime exception (2026-09-13)
+
+The [native ownership contract](../release/native-mechanism-ownership.md)
+selects a private return-aware raw Linux `exit_group(70)` for unresolved
+shutdown or final-owner destruction without quiescence proof. Implementation
+and target/native qualification remain pending. The stop initiates no wiping,
+unwind, destructor, audit flush, native Finalize or provider cleanup. It does
+not promise token deletion or a complete audit tail. Normal pre-entry failures
+and ordinary panics retain their wiping/unwinding behavior; the release panic
+profile is unchanged.
+
+No core is intentionally triggered by this normal-exit syscall path, but it
+does not enforce global dump suppression or erase previously captured memory.
+Operators own crash collectors (including piped core handlers), tracing, swap
+and storage policy; `RLIMIT_CORE=0` alone does not disable every collector.
+No signal-handler/core-policy mutation occurs secretly in a backend destructor.
+The final-owner guard must run before dependent destruction; it cannot undo
+earlier destructors. Full placement, predicate and environment limits are in
+the linked contract.
 
 ## Alternatives considered
 

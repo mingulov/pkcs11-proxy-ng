@@ -166,8 +166,9 @@ flag.
 different matter: if the backend module returns a vendor-defined `CK_RV`, the
 proxy passes it through unchanged in the `ck_rv` response field. The proxy does
 not interpret, filter, or remap vendor-defined return values from the backend.
-This is safe because CKR values are plain integers with no pointer or
-serialization hazard.
+At a narrower C-ABI edge, representability must still be checked; the v0.2
+slot-event amendment below forbids truncating a wide provider error into a
+different result.
 
 Note that vendor-defined **mechanisms** are handled separately by ADR-0001: they
 are not exposed in `C_GetMechanismList` unless their parameter structures have
@@ -222,9 +223,10 @@ The following table summarizes which error path is used for each error source:
 ### Design principle
 
 A PKCS#11 application using the client shim should see exactly the same
-`CK_RV` values it would see with a local module, except when the transport
-itself fails. Transport failures map to the most semantically appropriate
-existing `CK_RV` value. If the proxy can determine a correct standard `CK_RV`,
+`CK_RV` values it would see with a local module within the documented support
+and width limits, except when the transport itself fails. Transport failures
+map to the most semantically appropriate existing `CK_RV` value. If the proxy
+can determine a correct standard `CK_RV`,
 it should return `grpc::OK` plus `ck_rv` rather than forcing the client to infer
 one from gRPC status. The application should never receive an error code that
 would be impossible from a local PKCS#11 module.
@@ -261,6 +263,35 @@ transport `Status` is mapped to a CK_RV (client crate `grpc_status_to_ck_rv[_kin
 kryoptic's `DEVICE_ERROR`/`GENERAL_ERROR` catch-alls) from being mistaken for a
 transport failure. (The reconnect flag itself is consumed at `C_Initialize`/interface-
 probe time, so this is a correctness/clarity change, not a runtime-performance one.)
+
+## v0.2 P0 error amendment (2026-09-13)
+
+**Selected contract; implementation pending.** The
+[native ownership contract](../release/native-mechanism-ownership.md) defines
+the complete slot-event precedence and caller-output rules. Preserve existing
+pointer/authentication/ownership/context checks before module admission.
+LoadedUninitialized/Initializing/Draining/Finalizing/Finalized return local
+`CKR_CRYPTOKI_NOT_INITIALIZED`; Uncertain returns local `CKR_DEVICE_ERROR`.
+For Open, native-width overflow returns local `CKR_FUNCTION_FAILED` before
+mode refusal; representable blocking mode returns local
+`CKR_FUNCTION_NOT_SUPPORTED` before supported-wait contention, which returns
+local `CKR_FUNCTION_FAILED`. Each pre-entry refusal has zero provider attempts
+and absent slot effects. Missing-function refusal remains local too.
+
+Supported DONT_BLOCK calls preserve original flags and actual native RVs in
+their completion observations. Caller RV/authorized virtual-slot overflow
+returns local FUNCTION_FAILED without a `pSlot` write; representable provider
+errors pass through. NO_EVENT and every error leave caller output unchanged.
+If native OK cannot complete a required policy query after seal, local
+NOT_INITIALIZED/no output coexists with the original native OK observation.
+Unmapped/policy-suppressed events retain NO_EVENT. Do not classify local support,
+state, contention or width failure as a provider attempt or health failure.
+
+Constructor exclusivity/platform errors use the local constructor `Result`,
+not fabricated provider RVs. The selected abnormal Linux native-lifetime stop
+has process status 70 and produces no successful Finalize response: interrupted
+clients observe the existing transport-failure mapping. Completed observations
+do not guarantee a delivered response or a complete audit tail after that stop.
 
 ## Decision update (2026-09-13): observable exact-output effects
 

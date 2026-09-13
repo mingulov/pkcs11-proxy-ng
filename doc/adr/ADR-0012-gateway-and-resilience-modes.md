@@ -56,8 +56,7 @@ output allowlist; native structure images and input-only remapped handles are
 never returned. Fail-closed audit also suppresses that typed output envelope.
 
 `pkcs11-proxy-ng` has one design persona today: a **transport** that forwards
-verbatim and synthesizes nothing (ADR-0010). That persona is correct and must
-be preserved. But a second, distinct persona is repeatedly requested by
+within ADR-0010's explicit support/width limits. A second, distinct persona is requested by
 would-be operators of the daemon as a shared, multi-client **access gateway** in
 front of a token/HSM: audit of security-relevant operations, per-client
 authorization beyond the coarse token ACL of ADR-0005, rate/quota controls, and
@@ -74,6 +73,8 @@ distinguish the shim from the real module.
 ## Decision
 
 1. **Every gateway/resilience capability is strictly opt-in and default-off.**
+   Mandatory native-lifetime safety and the explicit v0.2 slot-event support
+   limit below are outside this opt-in rule.
    With no `[audit]`, `[policy]`, or `[resilience]` configuration present, the
    daemon is byte-identical to today — same client-visible behavior, same
    `CK_RV`s, same backend call sequence. This is the same contract as
@@ -281,6 +282,32 @@ distinguish the shim from the real module.
    (key generation is an offline operator step). This keeps the strict
    `deny.toml` (`multiple-versions = deny`) satisfied — no additional `getrandom`
    is pulled. `sha2` is already vendored.
+
+## v0.2 native-lifetime amendment (2026-09-13)
+
+**Selected contract; implementation/qualification pending.** The
+[native ownership contract](../release/native-mechanism-ownership.md) requires
+one provider-chain domain and unconditional last-owner protection on qualified
+Linux GNU/musl x86_64/64-bit and x86/32-bit targets. Configured grace and stuck
+thresholds govern proactive stopping; disabling gateway/resilience options
+cannot authorize native-storage destruction without a private quiescence proof.
+
+Shutdown seals admission, drains ordinary workers including supported
+DONT_BLOCK waits, then performs exclusive native Finalize with retained owners
+live. Blocking slot waits are unsupported, without polling. An independent
+deadline controller can invoke the private return-aware raw `exit_group(70)`
+even while a native call or Finalize holds a lifecycle/session lock. The
+existing opt-in `std::process::exit(70)` path does not implement this contract.
+No unsafe last Drop, cleanup callback, audit flush or reason formatting may
+precede that mandatory stop; metadata notice is best effort and cannot delay it.
+
+The stop provides ordinary failure status 70 under the linked environment
+assumptions, not SIGABRT or an unconditional wall-clock termination guarantee.
+The audit tail can be incomplete and token effects unresolved. Supervisors
+need a policy covering ordinary nonzero exit, with rate-limit/manual-stop
+exceptions; the library does not configure restart or global crash-dump policy.
+Native implementation, final-owner/direct-backend tests and same-source native
+GNU/musl/width receipts remain required before release.
 
 ## Consequences
 

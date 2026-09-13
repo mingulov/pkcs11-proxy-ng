@@ -10,6 +10,32 @@
 | Reference k8s manifests | [`examples/k8s/`](../../examples/k8s/) |
 | Example configs (dev/staging/prod) | [`examples/configs/`](../../examples/configs/) |
 
+## v0.2 native-lifetime stop (pending implementation and qualification)
+
+The selected [native ownership contract](../release/native-mechanism-ownership.md)
+uses qualified Linux GNU/musl x86_64/64-bit and x86/32-bit raw `exit_group(70)`
+for unresolved native shutdown or unsafe final-owner Drop. It ends the whole
+daemon thread group, affecting every co-located client. Direct embedders also
+accept termination of unrelated application threads. One managed provider chain
+per process is required; partition independent chains into separate daemons.
+
+The supervisor must observe the actual daemon's ordinary nonzero status:
+systemd on-failure/always can cover 70, on-abnormal/on-abort alone cannot.
+Success/restart-prevention settings, rate limits and manual stops still apply;
+container entrypoints must propagate status and Docker needs an appropriate
+restart policy. Namespace PID 1 termination affects other container processes;
+global host init is excluded. No strict disappearance deadline is promised.
+
+All potential invoking threads and later filters must allow exit_group(70).
+Arbitrary seccomp denial, tracing or syscall interception is unsupported; the
+return-aware loop prevents fallthrough but cannot force a denied group exit.
+The stop runs no cleanup, wiping or audit flush, so the audit tail and token
+effects may remain unresolved. It does not intentionally trigger a core or
+enforce global dump suppression: operators own dump/collector/storage policy,
+including piped collectors not disabled by RLIMIT_CORE=0 alone. Read the linked
+contract before enabling native embeddings; these are future enforcement gates,
+not capabilities supplied by this documentation change.
+
 ## 0. Prerequisites
 
 * Kubernetes cluster ≥ 1.28 (k3s / kind / EKS / GKE / AKS / on-prem).
