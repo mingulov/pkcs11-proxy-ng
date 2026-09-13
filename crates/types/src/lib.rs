@@ -8,6 +8,7 @@ pub mod mechanism_official;
 pub mod mechanism_registry;
 pub mod object;
 pub mod output;
+pub mod secret;
 pub mod session;
 pub mod slot;
 pub mod width;
@@ -47,6 +48,7 @@ pub use output::{
     CkOutputBufferResult, CkOutputBufferSpec, CkParameterRoundtripResult, CkParameterRoundtripSpec,
     ParameterOutputFunction,
 };
+pub use secret::SecretBytes;
 pub use session::{
     CkFlags, CkSessionFlags, CkSessionHandle, CkSessionInfo, CkSessionState, CkUserType,
 };
