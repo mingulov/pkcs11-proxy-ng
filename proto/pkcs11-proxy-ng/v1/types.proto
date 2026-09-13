@@ -1447,11 +1447,14 @@ message WrapKeyAuthenticatedRequest {
   bytes associated_data = 6;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 7;
+  // Presence acknowledges the pointer-safe authenticated contract.
+  AuthenticatedParameters authenticated_parameters = 8;
 }
 message WrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
   bytes wrapped_key = 2;
   bytes mechanism_parameter_out = 3;
+  AuthenticatedMechanismOutput authenticated_output = 4;
 }
 
 // C_UnwrapKeyAuthenticated
@@ -1467,11 +1470,28 @@ message UnwrapKeyAuthenticatedRequest {
   optional uint64 wrapped_key_null_len = 8;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 9;
+  AuthenticatedParameters authenticated_parameters = 10;
 }
 message UnwrapKeyAuthenticatedResponse {
   uint64 ck_rv = 1;
   uint64 key_handle = 2;
   bytes mechanism_parameter_out = 3;
+  AuthenticatedMechanismOutput authenticated_output = 4;
+}
+
+// Authenticated AES-GCM/CCM use CK_*_MESSAGE_PARAMS, not classic/wrap structs.
+// An empty envelope selects the separately typed Mechanism input.
+message AuthenticatedParameters {
+  MessageParameter message_parameter = 1;
+}
+
+// Output-only allowlist. No native structures, input handles, or addresses.
+message AuthenticatedMechanismOutput {
+  oneof output {
+    bool unchanged = 1;
+    bytes iv = 2;
+    MessageParameter message_parameter = 3;
+  }
 }
 
 // C_AsyncComplete
@@ -1562,12 +1582,14 @@ message ParameterOutputExactRequest {
   optional uint64 input_data_null_len = 14;
   // ADR-0010 Scope 2: present => caller passed NULL with this claimed length; associated_data is then empty.
   optional uint64 associated_data_null_len = 15;
+  AuthenticatedParameters authenticated_parameters = 16;
 }
 
 message ParameterOutputExactResponse {
   OutputBufferResult output_result = 1;
   ParameterRoundtripResult parameter_result = 2;
   optional MessageParameter message_parameter_out = 3; // modified message param after backend call
+  AuthenticatedMechanismOutput authenticated_output = 4;
 }
 
 // Track C Task 2: C_EncapsulateKey with exact output semantics
@@ -1621,6 +1643,7 @@ message GetBackendInterfacesResponse {
   // True only when the daemon implements the shape-bound message-parameter
   // contract. Absent from older daemons and therefore treated as false.
   optional bool pointer_safe_message_parameters = 6;
+  optional bool pointer_safe_authenticated_parameters = 7;
 }
 
 // Server-driven mechanism parameter registry payload. Carries the

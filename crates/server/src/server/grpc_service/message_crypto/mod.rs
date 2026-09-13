@@ -3809,6 +3809,7 @@ mod lifecycle_transition_tests {
                                 &ctx,
                                 Request::new(
                                     pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                                        authenticated_parameters: None,
                                         client_context_id: context_id.0.clone(),
                                         session_handle: session,
                                         function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(function),
@@ -3974,6 +3975,7 @@ mod lifecycle_transition_tests {
                 let exact = parameter_output_exact(
                     &ctx,
                     Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                        authenticated_parameters: None,
                         client_context_id: context_id.0.clone(),
                         session_handle: session,
                         function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(function),
@@ -4109,6 +4111,7 @@ mod lifecycle_transition_tests {
             let exact = parameter_output_exact(
                 &ctx,
                 Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                    authenticated_parameters: None,
                     client_context_id: context_id.0.clone(),
                     session_handle: session,
                     function:
@@ -4273,6 +4276,7 @@ mod lifecycle_transition_tests {
         let a_decrypt = parameter_output_exact(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                authenticated_parameters: None,
                 client_context_id: context_a.0.clone(),
                 session_handle: session_a1,
                 function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
@@ -4311,6 +4315,7 @@ mod lifecycle_transition_tests {
         let a2_encrypt = parameter_output_exact(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                authenticated_parameters: None,
                 client_context_id: context_a.0.clone(),
                 session_handle: session_a2,
                 function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
@@ -4372,6 +4377,7 @@ mod lifecycle_transition_tests {
         let exact_mismatch = parameter_output_exact(
             &ctx,
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                authenticated_parameters: None,
                 client_context_id: context_a.0.clone(),
                 session_handle: session_a1,
                 function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(

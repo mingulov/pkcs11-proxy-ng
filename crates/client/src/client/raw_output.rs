@@ -254,7 +254,15 @@ impl Pkcs11Client {
         MessageCallError,
     > {
         let ctx = self.context_id().map_err(MessageCallError::backend)?;
+        if function == ParameterOutputFunction::WrapKeyAuthenticated
+            && mechanism.is_some_and(|m| {
+                !pkcs11_proxy_ng_proto::convert::authenticated::legacy_parameter_supported(m)
+            })
+        {
+            return Err(MessageCallError::backend(CkRv::FUNCTION_NOT_SUPPORTED));
+        }
         let mut req = pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+            authenticated_parameters: None,
             client_context_id: ctx,
             session_handle: session.0,
             function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
@@ -497,6 +505,7 @@ mod message_contract_tests {
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
         let response = |returned_len, value| pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
                 ck_rv: CkRv::ARGUMENTS_BAD.0,
                 returned_len,
@@ -548,6 +557,7 @@ mod message_contract_tests {
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 3, value: None };
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
                 ck_rv: CkRv::OK.0,
                 returned_len: 0,
@@ -579,6 +589,7 @@ mod message_contract_tests {
         let parameter_spec =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 3, value: None };
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
                 ck_rv: CkRv::BUFFER_TOO_SMALL.0,
                 returned_len: 0,
@@ -610,6 +621,7 @@ mod message_contract_tests {
     fn old_server_missing_parameter_ack_on_b2s_is_rejected() {
         let request = gcm_parameter();
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
                 ck_rv: CkRv::BUFFER_TOO_SMALL.0,
                 returned_len: 8,
@@ -657,6 +669,7 @@ mod message_contract_tests {
             for (label, parameter_result) in [("pointer class", wrong_class), ("length", wrong_len)]
             {
                 let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                    authenticated_output: None,
                     output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
                         ck_rv: CkRv::OK.0,
                         returned_len: 1,
@@ -704,6 +717,7 @@ mod message_contract_tests {
 
         for (label, message_parameter_out) in responses {
             let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                authenticated_output: None,
                 output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
                     ck_rv: CkRv::OK.0,
                     returned_len: 4,
@@ -731,6 +745,7 @@ mod message_contract_tests {
     #[test]
     fn completed_parameter_output_error_retains_backend_origin() {
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
                 ck_rv: CkRv::FUNCTION_FAILED.0,
                 returned_len: 0,
@@ -763,6 +778,7 @@ mod message_contract_tests {
     #[test]
     fn authenticated_wrap_accepts_actual_mechanism_parameter_length() {
         let response = pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
                 ck_rv: CkRv::OK.0,
                 returned_len: 8,

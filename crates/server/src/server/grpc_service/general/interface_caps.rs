@@ -57,6 +57,7 @@ pub(super) async fn get_backend_interfaces(
             // Should not happen since get_interface_capabilities() does not fail,
             // but handle gracefully.
             return Ok(Response::new(pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
+                pointer_safe_authenticated_parameters: Some(true),
                 interfaces: vec![],
                 mechanism_registry: Some((*registry_payload).clone()),
                 backend_ulong_size: Some(backend.abi_ulong_size()),
@@ -78,6 +79,7 @@ pub(super) async fn get_backend_interfaces(
         .collect();
 
     Ok(Response::new(pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
+        pointer_safe_authenticated_parameters: Some(true),
         interfaces,
         mechanism_registry: Some((*registry_payload).clone()),
         backend_ulong_size: Some(backend.abi_ulong_size()),

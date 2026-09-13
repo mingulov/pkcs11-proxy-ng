@@ -90,6 +90,7 @@ pub(super) async fn parameter_output_exact(
         Some(f) => f,
         None => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                authenticated_output: None,
                 output_result: None,
                 parameter_result: None,
                 message_parameter_out: None,
@@ -145,17 +146,65 @@ pub(super) async fn parameter_output_exact(
                 if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
                     return Ok(Err(rv));
                 }
+                use pkcs11_proxy_ng_proto::convert::authenticated::{
+                    decode_parameters, legacy_parameter_supported,
+                };
+                let typed = match req.authenticated_parameters.as_ref() {
+                    Some(envelope) => {
+                        if !parameter.is_empty()
+                            || param_out_spec.value.is_some()
+                            || req.message_parameter.is_some()
+                        {
+                            return Ok(Err(CkRv::MECHANISM_PARAM_INVALID));
+                        }
+                        match decode_parameters(&p.mechanism, envelope) {
+                            Ok(parameter) => Some(parameter),
+                            Err(rv) => return Ok(Err(rv)),
+                        }
+                    }
+                    None if legacy_parameter_supported(&p.mechanism) => None,
+                    None => return Ok(Err(CkRv::FUNCTION_NOT_SUPPORTED)),
+                };
                 let backend = backend_ref.clone();
                 spawn_backend(move || {
-                    backend.wrap_key_authenticated_exact(
-                        p.session,
-                        &p.mechanism,
-                        p.wrapping_key,
-                        p.key,
-                        input_from_wire(&associated_data, associated_data_null_len),
-                        &output_spec,
-                        &param_out_spec,
-                    )
+                    if let Some(parameter) = typed {
+                        let (output, typed_output) = backend.wrap_key_authenticated_exact_typed(
+                            p.session,
+                            &p.mechanism,
+                            parameter.as_ref(),
+                            p.wrapping_key,
+                            p.key,
+                            input_from_wire(&associated_data, associated_data_null_len),
+                            &output_spec,
+                        )?;
+                        typed_output
+                            .validate_for(&p.mechanism, parameter.as_ref())
+                            .map_err(|_| CkRv::DEVICE_ERROR)?;
+                        let ack = CkParameterRoundtripResult {
+                            ck_rv: output.ck_rv,
+                            returned_len: 0,
+                            value: None,
+                        };
+                        Ok((
+                            output,
+                            ack,
+                            Some(pkcs11_proxy_ng_proto::AuthenticatedMechanismOutput::from(
+                                &typed_output,
+                            )),
+                        ))
+                    } else {
+                        backend
+                            .wrap_key_authenticated_exact(
+                                p.session,
+                                &p.mechanism,
+                                p.wrapping_key,
+                                p.key,
+                                input_from_wire(&associated_data, associated_data_null_len),
+                                &output_spec,
+                                &param_out_spec,
+                            )
+                            .map(|(output, parameter)| (output, parameter, None))
+                    }
                 })
                 .await
             }
@@ -167,9 +216,19 @@ pub(super) async fn parameter_output_exact(
                 req.session_handle,
                 started,
                 outcome,
-                |(output, _)| output.ck_rv,
+                |(output, _, _)| output.ck_rv,
             )?;
-            Ok(Response::new(result_to_proto(result)))
+            Ok(Response::new(match result {
+                Ok((output, parameter, authenticated_output)) => {
+                    pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                        output_result: Some((&output).into()),
+                        parameter_result: Some((&parameter).into()),
+                        message_parameter_out: None,
+                        authenticated_output,
+                    }
+                }
+                Err(rv) => error_response(rv),
+            }))
         }
 
         // Canonical Encrypt/Decrypt one-shot and Next paths. Their active Init
@@ -658,6 +717,7 @@ fn result_to_proto_msg(
 ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
     match result {
         Ok((output, parameter, msg_param)) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult::from(&output)),
             parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult::from(
                 &parameter,
@@ -665,6 +725,7 @@ fn result_to_proto_msg(
             message_parameter_out: Some(pkcs11_proxy_ng_proto::MessageParameter::from(&msg_param)),
         },
         Err(error) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
                 ck_rv: error.0,
                 returned_len: 0,
@@ -688,11 +749,13 @@ fn result_to_proto(
 ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
     match result {
         Ok((output, param)) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult::from(&output)),
             parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult::from(&param)),
             message_parameter_out: None,
         },
         Err(error) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
                 ck_rv: error.0,
                 returned_len: 0,
@@ -712,6 +775,7 @@ fn error_response(
     error: pkcs11_proxy_ng_types::CkRv,
 ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
     pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+        authenticated_output: None,
         output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
             ck_rv: error.0,
             returned_len: 0,
@@ -776,6 +840,7 @@ mod ambiguity_tests {
         let response = parameter_output_exact(
             &HandlerContext::for_test(&manager, &backend),
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                authenticated_parameters: None,
                 client_context_id: context_id.0.clone(),
                 session_handle: virtual_session.0,
                 function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
@@ -862,6 +927,7 @@ mod ambiguity_tests {
         let response = parameter_output_exact(
             &HandlerContext::for_test(&manager, &backend),
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                authenticated_parameters: None,
                 client_context_id: context_id.0.clone(),
                 session_handle: virtual_session,
                 function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(

@@ -8,6 +8,9 @@ use std::time::Instant;
 
 use tonic::{Request, Response, Status};
 
+use pkcs11_proxy_ng_proto::convert::authenticated::{
+    decode_parameters, legacy_parameter_supported,
+};
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
 
 use super::super::authorization::mechanism_permitted;
@@ -48,15 +51,40 @@ pub(crate) async fn wrap_key_authenticated(
         if let Err(rv) = check_sanitize(ctx.sanitize_inputs, req.associated_data_null_len) {
             return Ok(Err(rv));
         }
+        let parameter = match req.authenticated_parameters.as_ref() {
+            Some(envelope) => match decode_parameters(&p.mechanism, envelope) {
+                Ok(parameter) => Some(parameter),
+                Err(rv) => return Ok(Err(rv)),
+            },
+            None if legacy_parameter_supported(&p.mechanism) => None,
+            None => return Ok(Err(CkRv::FUNCTION_NOT_SUPPORTED)),
+        };
         let backend = Arc::clone(&ctx.backend);
         spawn_backend(move || {
-            backend.wrap_key_authenticated(
-                p.session,
-                &p.mechanism,
-                p.wrapping_key,
-                p.key,
-                input_from_wire(&req.associated_data, req.associated_data_null_len),
-            )
+            if let Some(parameter) = parameter {
+                let (bytes, output) = backend.wrap_key_authenticated_typed(
+                    p.session,
+                    &p.mechanism,
+                    parameter.as_ref(),
+                    p.wrapping_key,
+                    p.key,
+                    input_from_wire(&req.associated_data, req.associated_data_null_len),
+                )?;
+                output
+                    .validate_for(&p.mechanism, parameter.as_ref())
+                    .map_err(|_| CkRv::DEVICE_ERROR)?;
+                Ok((bytes, Vec::new(), Some((&output).into())))
+            } else {
+                backend
+                    .wrap_key_authenticated(
+                        p.session,
+                        &p.mechanism,
+                        p.wrapping_key,
+                        p.key,
+                        input_from_wire(&req.associated_data, req.associated_data_null_len),
+                    )
+                    .map(|(bytes, raw)| (bytes, raw, None))
+            }
         })
         .await
     }
@@ -70,11 +98,12 @@ pub(crate) async fn wrap_key_authenticated(
         outcome,
         |_| CkRv::OK,
     )?;
-    let (ck_rv, wrapped_key, mechanism_parameter_out) = match result {
-        Ok((bytes, parameter)) => (CkRv::OK.0, bytes, parameter),
-        Err(rv) => (rv.0, Vec::new(), Vec::new()),
+    let (ck_rv, wrapped_key, mechanism_parameter_out, authenticated_output) = match result {
+        Ok((bytes, parameter, output)) => (CkRv::OK.0, bytes, parameter, output),
+        Err(rv) => (rv.0, Vec::new(), Vec::new(), None),
     };
     Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
+        authenticated_output,
         ck_rv,
         wrapped_key,
         mechanism_parameter_out,
@@ -100,6 +129,7 @@ pub(crate) async fn unwrap_key_authenticated(
     )? {
         Ok(response) => Ok(response),
         Err(rv) => Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            authenticated_output: None,
             ck_rv: rv.0,
             key_handle: 0,
             mechanism_parameter_out: Vec::new(),
@@ -128,6 +158,7 @@ async fn unwrap_key_authenticated_impl(
         Ok(handles) => handles,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                authenticated_output: None,
                 ck_rv: rv.0,
                 key_handle: 0,
                 mechanism_parameter_out: Vec::new(),
@@ -139,6 +170,7 @@ async fn unwrap_key_authenticated_impl(
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                authenticated_output: None,
                 ck_rv: rv.0,
                 key_handle: 0,
                 mechanism_parameter_out: Vec::new(),
@@ -150,6 +182,7 @@ async fn unwrap_key_authenticated_impl(
         remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            authenticated_output: None,
             ck_rv: rv.0,
             key_handle: 0,
             mechanism_parameter_out: Vec::new(),
@@ -160,6 +193,7 @@ async fn unwrap_key_authenticated_impl(
     // principal's grant does not include this unwrapping mechanism.
     if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            authenticated_output: None,
             ck_rv: CkRv::MECHANISM_INVALID.0,
             key_handle: 0,
             mechanism_parameter_out: Vec::new(),
@@ -170,6 +204,7 @@ async fn unwrap_key_authenticated_impl(
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                authenticated_output: None,
                 ck_rv: rv,
                 key_handle: 0,
                 mechanism_parameter_out: Vec::new(),
@@ -184,6 +219,7 @@ async fn unwrap_key_authenticated_impl(
     // ADR-0010 sanitize_inputs: validate NULL wrapped_key/aad pointers before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, wrapped_key_null_len) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            authenticated_output: None,
             ck_rv: rv.0,
             key_handle: 0,
             mechanism_parameter_out: Vec::new(),
@@ -191,29 +227,64 @@ async fn unwrap_key_authenticated_impl(
     }
     if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            authenticated_output: None,
             ck_rv: rv.0,
             key_handle: 0,
             mechanism_parameter_out: Vec::new(),
         }));
     }
     // An authenticated-unwrapped key is a session object unless CKA_TOKEN is set (B2).
+    let parameter = match req.authenticated_parameters.as_ref() {
+        Some(envelope) => match decode_parameters(&mechanism, envelope) {
+            Ok(parameter) => Some(parameter),
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                    ck_rv: rv.0,
+                    ..Default::default()
+                }));
+            }
+        },
+        None if legacy_parameter_supported(&mechanism) => None,
+        None => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                ck_rv: CkRv::FUNCTION_NOT_SUPPORTED.0,
+                ..Default::default()
+            }));
+        }
+    };
     let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.unwrap_key_authenticated(
-            session,
-            &mechanism,
-            unwrapping_key,
-            input_from_wire(&wrapped_key, wrapped_key_null_len),
-            &template,
-            input_from_wire(&aad, aad_null_len),
-        )
+        if let Some(parameter) = parameter {
+            let (key, output) = backend.unwrap_key_authenticated_typed(
+                session,
+                &mechanism,
+                parameter.as_ref(),
+                unwrapping_key,
+                input_from_wire(&wrapped_key, wrapped_key_null_len),
+                &template,
+                input_from_wire(&aad, aad_null_len),
+            )?;
+            output.validate_for(&mechanism, parameter.as_ref()).map_err(|_| CkRv::DEVICE_ERROR)?;
+            Ok((key, Vec::new(), Some((&output).into())))
+        } else {
+            backend
+                .unwrap_key_authenticated(
+                    session,
+                    &mechanism,
+                    unwrapping_key,
+                    input_from_wire(&wrapped_key, wrapped_key_null_len),
+                    &template,
+                    input_from_wire(&aad, aad_null_len),
+                )
+                .map(|(key, raw)| (key, raw, None))
+        }
     })
     .await?;
 
     match result {
-        Ok((key, mechanism_parameter_out)) => {
+        Ok((key, mechanism_parameter_out, authenticated_output)) => {
             let key_handle = register_session_object_handle(
                 ctx_mgr,
                 &ctx_id,
@@ -223,12 +294,14 @@ async fn unwrap_key_authenticated_impl(
             )
             .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                authenticated_output,
                 ck_rv: CkRv::OK.0,
                 key_handle,
                 mechanism_parameter_out,
             }))
         }
         Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            authenticated_output: None,
             ck_rv: error.0,
             key_handle: 0,
             mechanism_parameter_out: Vec::new(),
@@ -320,6 +393,7 @@ mod tests {
         session_handle: u64,
     ) -> pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest {
         pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest {
+            authenticated_parameters: None,
             client_context_id: ctx_id.0.clone(),
             session_handle,
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {

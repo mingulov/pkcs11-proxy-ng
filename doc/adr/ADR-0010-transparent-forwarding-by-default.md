@@ -166,6 +166,34 @@ exact-output request.
 
 ## Rolling upgrade contract for pointer-safe message parameters
 
+Authenticated wrap/unwrap use a distinct `authenticated_parameters` request
+acknowledgment and `authenticated_output` response. The
+`pointer_safe_authenticated_parameters` capability must be true before a new
+client issues these calls. Upgrade daemons first. Old requests accept only
+parameterless mechanisms and the explicitly modeled pointer-free IV byte
+array; any structure requires the new contract and fails with
+`CKR_FUNCTION_NOT_SUPPORTED` before native entry. No native structure image is
+ever an output format. GOST key-wrap inputs retain their virtual caller handles
+and pointers; their native input-only fields are never echoed.
+
+Authenticated AES-GCM/CCM use `CK_*_MESSAGE_PARAMS` (including separate tag/MAC
+buffers), as required by the PKCS#11 authenticated-function contract. The
+classic `CK_*_WRAP_PARAMS` layouts cannot represent those outputs. The typed
+path reuses bounded message-parameter conversion and writes only allowed
+IV/tag or nonce/MAC buffers through caller pointer snapshots. Other materialized
+authenticated shapes currently fail closed with `CKR_MECHANISM_PARAM_INVALID`.
+The initial allowlist binds standard AEAD message shapes to their mechanism
+identifiers, standard GOST key wrap to its input-only structure, and byte-array
+IVs to the embedded inventory. Runtime vendor extensions require a reviewed
+authenticated-output mapping; they cannot opt into native-image transport by
+claiming an IV shape.
+Extending that allowlist requires a source-grounded output-field contract.
+Rejecting every pointer-bearing shape is the containment alternative; it would
+also disable modeled AEAD and GOST forwarding. ABI-shaped sanitized blobs are
+rejected because pointer widths, padding, and input handles are not portable
+outputs. Native error effects beyond the existing exact-output contract and
+completion-owned auditing after cancellation remain separate work.
+
 - Upgrade daemons before shims/clients. A new daemon accepts an old client's
   omitted shape only for the genuinely legacy-safe case: no outer envelope, no
   structured message parameter, and a type-only mechanism with empty

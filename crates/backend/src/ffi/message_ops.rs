@@ -162,12 +162,85 @@ fn validate_message_init_provider_ack(
 /// heap address) and the buffers live in `_buffers`; both survive a move of this
 /// holder, so the raw pointers stored in `ck_mechanism` and the params struct
 /// stay valid for as long as the holder is alive.
-struct MessageInitMechanism {
-    ck_mechanism: cryptoki_sys::CK_MECHANISM,
+pub(super) struct MessageInitMechanism {
+    pub(super) ck_mechanism: cryptoki_sys::CK_MECHANISM,
     _gcm: Option<Box<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>>,
     _ccm: Option<Box<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>>,
     _salsa: Option<Box<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>>,
     _buffers: Vec<Vec<u8>>,
+}
+
+impl MessageInitMechanism {
+    /// Read only the allocations we own. Native pointer and input scalar
+    /// replacement is a provider contract error, never a new memory source.
+    pub(super) fn authenticated_output(
+        &self,
+        input: &MessageParameter,
+    ) -> CkResult<MessageParameter> {
+        let [first, second] = self._buffers.as_slice() else {
+            return Err(CkRv::DEVICE_ERROR);
+        };
+        let pointer_matches = |native: cryptoki_sys::CK_BYTE_PTR,
+                               buffer: &[u8],
+                               null: Option<u64>| {
+            if null.is_some() { native.is_null() } else { std::ptr::eq(native, buffer.as_ptr()) }
+        };
+        let mut output = input.clone();
+        let (valid, outer, len) = match (&mut output, &self._gcm, &self._ccm, &self._salsa) {
+            (MessageParameter::GcmMessage(p), Some(native), None, None) => {
+                let valid = pointer_matches(native.pIv, first, p.iv_null_len)
+                    && pointer_matches(native.pTag, second, p.tag_null_len)
+                    && native.ulIvLen as u64 == p.iv_null_len.unwrap_or(p.iv.len() as u64)
+                    && native.ulIvFixedBits as u64 == p.iv_fixed_bits
+                    && native.ivGenerator as u64 == p.iv_generator
+                    && native.ulTagBits as u64 == p.tag_bits;
+                p.iv = first.clone();
+                p.tag = second.clone();
+                (
+                    valid,
+                    (&**native as *const cryptoki_sys::CK_GCM_MESSAGE_PARAMS).cast(),
+                    std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>(),
+                )
+            }
+            (MessageParameter::CcmMessage(p), None, Some(native), None) => {
+                let valid = pointer_matches(native.pNonce, first, p.nonce_null_len)
+                    && pointer_matches(native.pMAC, second, p.mac_null_len)
+                    && native.ulDataLen as u64 == p.data_len
+                    && native.ulNonceLen as u64 == p.nonce_null_len.unwrap_or(p.nonce.len() as u64)
+                    && native.ulNonceFixedBits as u64 == p.nonce_fixed_bits
+                    && native.nonceGenerator as u64 == p.nonce_generator
+                    && native.ulMACLen as u64 == p.mac_len;
+                p.nonce = first.clone();
+                p.mac = second.clone();
+                (
+                    valid,
+                    (&**native as *const cryptoki_sys::CK_CCM_MESSAGE_PARAMS).cast(),
+                    std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>(),
+                )
+            }
+            (MessageParameter::SalaChacha(p), None, None, Some(native)) => {
+                let valid = pointer_matches(native.pNonce, first, p.nonce_null_len)
+                    && pointer_matches(native.pTag, second, p.tag_null_len)
+                    && native.ulNonceLen as u64 == p.nonce_bits;
+                p.nonce = first.clone();
+                p.tag = second.clone();
+                (
+                    valid,
+                    (&**native as *const cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS)
+                        .cast(),
+                    std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>(),
+                )
+            }
+            _ => return Err(CkRv::DEVICE_ERROR),
+        };
+        if !valid
+            || !std::ptr::eq(self.ck_mechanism.pParameter, outer)
+            || self.ck_mechanism.ulParameterLen as usize != len
+        {
+            return Err(CkRv::DEVICE_ERROR);
+        }
+        Ok(output)
+    }
 }
 
 /// Build a `CK_MECHANISM` pointing at a boxed `T` (stable heap address).
@@ -191,7 +264,7 @@ fn message_mechanism_for<T>(
 /// that parameter as a provider-native outer struct and keep the outer value
 /// plus all embedded buffers alive for the Init FFI call; raw client ABI bytes
 /// never reach this helper.
-fn build_message_init_mechanism(
+pub(super) fn build_message_init_mechanism(
     mech_type: cryptoki_sys::CK_MECHANISM_TYPE,
     param: &MessageParameter,
 ) -> CkResult<MessageInitMechanism> {

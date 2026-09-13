@@ -22,6 +22,8 @@ use mtls_fixture::MtlsFixture;
 mod audit;
 #[path = "exact_wrap_authorization/regressions.rs"]
 mod regressions;
+#[path = "exact_wrap_authorization/typed_output.rs"]
+mod typed_output;
 
 const ROUTES: [Route; 4] =
     [Route::Wrap, Route::Authenticated, Route::Exact, Route::AuthenticatedExact];
@@ -178,6 +180,7 @@ struct Reply {
     parameter: Option<Vec<u8>>,
     parameter_len: u64,
     mechanism: Option<Mechanism>,
+    authenticated_output: Option<AuthenticatedMechanismOutput>,
     key: u64,
 }
 impl Reply {
@@ -186,6 +189,7 @@ impl Reply {
         assert!(self.value.as_ref().is_none_or(Vec::is_empty));
         assert!(self.parameter.as_ref().is_none_or(Vec::is_empty));
         assert!(self.mechanism.is_none());
+        assert!(self.authenticated_output.is_none());
     }
 }
 
@@ -219,6 +223,7 @@ async fn invoke(
             let r = c
                 .rpc
                 .wrap_key_authenticated(WrapKeyAuthenticatedRequest {
+                    authenticated_parameters: Some(AuthenticatedParameters::default()),
                     client_context_id,
                     session_handle,
                     mechanism,
@@ -233,6 +238,7 @@ async fn invoke(
                 rv: r.ck_rv,
                 value: Some(r.wrapped_key),
                 parameter: Some(r.mechanism_parameter_out),
+                authenticated_output: r.authenticated_output,
                 ..Default::default()
             }
         }
@@ -264,6 +270,7 @@ async fn invoke(
             let r = c
                 .rpc
                 .parameter_output_exact(ParameterOutputExactRequest {
+                    authenticated_parameters: Some(AuthenticatedParameters::default()),
                     client_context_id,
                     session_handle,
                     mechanism,
@@ -274,9 +281,9 @@ async fn invoke(
                     function: ParameterOutputFunction::WrapKeyAuthenticated as i32,
                     output_spec: Some(spec),
                     parameter_out_spec: Some(ParameterRoundtripSpec {
-                        buffer_present: true,
-                        buffer_len: 16,
-                        value: Some(vec![0x43; 16]),
+                        buffer_present: false,
+                        buffer_len: 0,
+                        value: None,
                     }),
                     ..Default::default()
                 })
@@ -291,6 +298,7 @@ async fn invoke(
                 value: out.value,
                 parameter: param.value,
                 parameter_len: param.returned_len,
+                authenticated_output: r.authenticated_output,
                 ..Default::default()
             }
         }
@@ -298,6 +306,7 @@ async fn invoke(
             let r = c
                 .rpc
                 .unwrap_key_authenticated(UnwrapKeyAuthenticatedRequest {
+                    authenticated_parameters: Some(AuthenticatedParameters::default()),
                     client_context_id,
                     session_handle,
                     mechanism,
@@ -312,6 +321,7 @@ async fn invoke(
             Reply {
                 rv: r.ck_rv,
                 key: r.key_handle,
+                authenticated_output: r.authenticated_output,
                 parameter: Some(r.mechanism_parameter_out),
                 ..Default::default()
             }

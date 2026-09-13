@@ -50,9 +50,10 @@ output channel (bytes, lengths, parameter/mechanism output, and created handle).
 Records contain only the existing identity/method/session/RV/timing metadata.
 Audit failure after native side effects retains the existing divergence contract.
 Cancellation with detached native work still requires completion-owned auditing
-in the separate lifecycle work. Exact native error effects and authenticated
-native-structure writeback remain separate correction gates; input remapping
-does not make authenticated native parameter images safe for wire transport.
+in the separate lifecycle work. Exact native error effects remain a separate
+correction gate. Authenticated parameters use ADR-0010's negotiated typed
+output allowlist; native structure images and input-only remapped handles are
+never returned. Fail-closed audit also suppresses that typed output envelope.
 
 `pkcs11-proxy-ng` has one design persona today: a **transport** that forwards
 verbatim and synthesizes nothing (ADR-0010). That persona is correct and must

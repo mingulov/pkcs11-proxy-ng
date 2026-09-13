@@ -33,6 +33,21 @@ pub struct MockWrapObservation {
 }
 
 impl MockBackend {
+    pub(super) fn authenticated_output(
+        &self,
+        mechanism: &CkMechanism,
+        parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+    ) -> CkResult<pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput> {
+        use pkcs11_proxy_ng_proto::convert::authenticated::{AuthenticatedOutput, validate_input};
+        validate_input(mechanism, parameter)?;
+        Ok(if let Some(parameter) = parameter {
+            AuthenticatedOutput::Message(parameter.clone())
+        } else if let Some(CkMechanismParams::Iv(iv)) = &mechanism.params {
+            AuthenticatedOutput::Iv(iv.iv.clone())
+        } else {
+            AuthenticatedOutput::Unchanged
+        })
+    }
     pub fn wrap_observations(&self) -> Vec<MockWrapObservation> {
         self.wrap_entries.lock().unwrap().clone()
     }

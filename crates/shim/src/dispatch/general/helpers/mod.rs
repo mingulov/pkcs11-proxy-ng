@@ -253,62 +253,6 @@ pub(crate) unsafe fn write_object_handle_pair_output(
     }
 }
 
-/// Write parameter_out back to a C caller's pParameter buffer.
-/// Copies min(parameter_out.len(), ul_parameter_len) bytes.
-///
-/// # Safety
-///
-/// `p_parameter` must be either null or point to a writable buffer of at
-/// least `ul_parameter_len` bytes.
-pub(crate) unsafe fn write_parameter_out(
-    parameter_out: &[u8],
-    p_parameter: *mut ::std::os::raw::c_void,
-    ul_parameter_len: CK_ULONG,
-) {
-    if p_parameter.is_null() || ul_parameter_len == 0 {
-        return;
-    }
-    let copy_len = parameter_out.len().min(ul_parameter_len as usize);
-    if copy_len > 0 {
-        unsafe {
-            std::ptr::copy_nonoverlapping(parameter_out.as_ptr(), p_parameter as *mut u8, copy_len);
-        }
-    }
-}
-
-/// Build a `CkParameterRoundtripSpec` from the C caller's parameter pointer pair.
-///
-/// Captures what the caller passed for the dual-purpose parameter buffer:
-/// - Non-null `p_parameter` with `ul_parameter_len > 0` → buffer_present = true,
-///   and we capture the input bytes as `value`.
-/// - Otherwise → buffer_present = false.
-///
-/// # Safety
-///
-/// `p_parameter` must be either null or point to a readable buffer of at
-/// least `ul_parameter_len` bytes.
-pub(crate) unsafe fn parameter_roundtrip_spec(
-    p_parameter: *mut ::std::os::raw::c_void,
-    ul_parameter_len: CK_ULONG,
-) -> pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
-    if p_parameter.is_null() || ul_parameter_len == 0 {
-        pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
-            buffer_present: false,
-            buffer_len: 0,
-            value: None,
-        }
-    } else {
-        let input = unsafe {
-            std::slice::from_raw_parts(p_parameter as *const u8, ul_parameter_len as usize)
-        };
-        pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
-            buffer_present: true,
-            buffer_len: ul_parameter_len as u64,
-            value: Some(input.to_vec()),
-        }
-    }
-}
-
 /// Build a message-parameter roundtrip spec after validating the caller's
 /// pointer pair. Message APIs do not go through `CK_MECHANISM`, so they need
 /// their own null/size guard before any raw byte capture.
@@ -341,38 +285,6 @@ pub(crate) unsafe fn empty_message_parameter_roundtrip_spec(
     unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) }
 }
 
-/// Write both an exact `CkOutputBufferResult` and a `CkParameterRoundtripResult`
-/// back to the C caller.
-///
-/// Handles:
-/// 1. Writing the main output via [`write_exact_output`].
-/// 2. Writing the parameter write-back bytes to the caller's `p_parameter` buffer.
-///
-/// # Safety
-///
-/// Same safety requirements as `write_exact_output` plus `p_parameter` must be
-/// writable for `ul_parameter_len` bytes if non-null.
-pub(crate) unsafe fn write_exact_parameter_output(
-    output_spec: &pkcs11_proxy_ng_types::CkOutputBufferSpec,
-    output_result: &pkcs11_proxy_ng_types::CkOutputBufferResult,
-    param_result: &pkcs11_proxy_ng_types::CkParameterRoundtripResult,
-    p_output: CK_BYTE_PTR,
-    pul_output_len: CK_ULONG_PTR,
-    p_parameter: *mut ::std::os::raw::c_void,
-    ul_parameter_len: CK_ULONG,
-) -> CK_RV {
-    // Write the main output first
-    let rv = unsafe { write_exact_output(output_spec, output_result, p_output, pul_output_len) };
-
-    // Write back the parameter if present and the main result was OK or
-    // BUFFER_TOO_SMALL (parameter write-back happens regardless for size queries)
-    if let Some(ref param_bytes) = param_result.value {
-        unsafe { write_parameter_out(param_bytes, p_parameter, ul_parameter_len) };
-    }
-
-    rv
-}
-
 pub(crate) fn pad_string(dest: &mut [CK_UTF8CHAR], src: &str) {
     let bytes = src.as_bytes();
     let copy_len = bytes.len().min(dest.len());
@@ -400,11 +312,13 @@ where
 /// are bounded by `MAX_SERIALIZABLE_BYTES`.
 pub(crate) const MAX_MECHANISM_PARAM_STRUCT_LEN: usize = 65_536;
 
+mod authenticated_params;
 mod mechanism_read;
 mod mechanism_writeback;
 mod message_params;
 mod template_input;
 
+pub(crate) use authenticated_params::*;
 pub(crate) use mechanism_read::*;
 pub(crate) use mechanism_writeback::*;
 pub(crate) use message_params::*;

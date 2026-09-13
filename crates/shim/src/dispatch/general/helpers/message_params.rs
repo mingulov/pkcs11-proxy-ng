@@ -68,6 +68,9 @@ pub(crate) struct MessageCallMemory {
 }
 
 impl MessageCallMemory {
+    pub(crate) const fn with_mechanism(self, mechanism: CK_MECHANISM_PTR) -> Self {
+        Self { mechanism_outer: mechanism.cast(), ..self }
+    }
     pub(crate) const fn none() -> Self {
         Self {
             mechanism_outer: std::ptr::null(),
@@ -140,7 +143,7 @@ fn allowed_in_place_pair(left: CallerRange, right: CallerRange) -> bool {
     ) && left.start == right.start
 }
 
-fn validate_message_caller_ranges(
+pub(super) fn validate_message_caller_ranges(
     memory: MessageCallMemory,
     parameter_outer: *const std::ffi::c_void,
     parameter_outer_len: u64,
@@ -518,7 +521,7 @@ fn parameter_result_matches_request(
         }
 }
 
-fn validate_exact_output_result(
+pub(super) fn validate_exact_output_result(
     result: &CkOutputBufferResult,
     spec: &CkOutputBufferSpec,
 ) -> CkResult<()> {

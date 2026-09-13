@@ -1,4 +1,5 @@
 pub mod attribute;
+pub mod authenticated;
 pub mod error;
 pub mod mechanism;
 pub mod mechanism_registry;

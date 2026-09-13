@@ -43,6 +43,7 @@ pub struct BackendProbe {
     /// True only when the daemon supports shape-bound message parameters.
     /// Older daemons omit the field and are therefore unsafe.
     pub pointer_safe_message_parameters: bool,
+    pub pointer_safe_authenticated_parameters: bool,
 }
 
 fn pointer_safe_message_parameters_from_wire(advertised: Option<bool>) -> bool {
@@ -230,6 +231,8 @@ impl Pkcs11Client {
             .collect();
 
         Ok(BackendProbe {
+            pointer_safe_authenticated_parameters: resp.pointer_safe_authenticated_parameters
+                == Some(true),
             interfaces,
             mechanism_registry: resp.mechanism_registry,
             backend_ulong_size: resp.backend_ulong_size,

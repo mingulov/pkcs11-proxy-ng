@@ -6,6 +6,8 @@ use pkcs11_proxy_ng_types::*;
 use std::collections::HashSet;
 use std::ffi::CString;
 
+#[path = "ffi/authenticated_typed_ops.rs"]
+mod authenticated_typed_ops;
 #[path = "ffi/authenticated_wrap_ops.rs"]
 mod authenticated_wrap_ops;
 #[path = "ffi/call_helpers.rs"]
@@ -1200,6 +1202,67 @@ impl Pkcs11Backend for FfiBackend {
         aad: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_wrap_key_authenticated(session, mechanism, wrapping_key, key, aad)
+    }
+
+    fn wrap_key_authenticated_typed(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        wrapping_key: CkObjectHandle,
+        key: CkObjectHandle,
+        aad: CkInBuf<'_>,
+    ) -> CkResult<(Vec<u8>, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
+    {
+        self.ffi_wrap_authenticated_typed(session, mechanism, parameter, wrapping_key, key, aad)
+    }
+
+    fn wrap_key_authenticated_exact_typed(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        wrapping_key: CkObjectHandle,
+        key: CkObjectHandle,
+        aad: CkInBuf<'_>,
+        spec: &CkOutputBufferSpec,
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput,
+    )> {
+        self.ffi_wrap_authenticated_exact_typed(
+            session,
+            mechanism,
+            parameter,
+            wrapping_key,
+            key,
+            aad,
+            spec,
+        )
+    }
+
+    fn unwrap_key_authenticated_typed(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        unwrapping_key: CkObjectHandle,
+        wrapped_key: CkInBuf<'_>,
+        template: &[CkAttribute],
+        aad: CkInBuf<'_>,
+    ) -> CkResult<(
+        CkObjectHandle,
+        pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput,
+    )> {
+        self.ffi_unwrap_authenticated_typed(
+            session,
+            mechanism,
+            parameter,
+            unwrapping_key,
+            wrapped_key,
+            template,
+            aad,
+        )
     }
 
     fn unwrap_key_authenticated(

@@ -297,6 +297,11 @@ fn backend_methods_have_proto_rpcs() {
         "decrypt_message_next_exact",
         "sign_message_next_exact",
         "wrap_key_authenticated_exact",
+        // Typed authenticated envelopes reuse the existing authenticated RPCs
+        // and ParameterOutputExact rather than introducing function-list slots.
+        "wrap_key_authenticated_typed",
+        "wrap_key_authenticated_exact_typed",
+        "unwrap_key_authenticated_typed",
         // Batch close via CloseAllSessions RPC
         "close_sessions",
         // Structured message parameter variants (also via ParameterOutputExact RPC)

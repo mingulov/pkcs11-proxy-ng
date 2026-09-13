@@ -3147,6 +3147,72 @@ impl Pkcs11Backend for MockBackend {
         if data == Self::reverse_bytes(signature) { Ok(()) } else { Err(CkRv::SIGNATURE_INVALID) }
     }
 
+    fn wrap_key_authenticated_typed(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        wrapping_key: CkObjectHandle,
+        key: CkObjectHandle,
+        aad: CkInBuf<'_>,
+    ) -> CkResult<(Vec<u8>, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
+    {
+        let output = self.authenticated_output(mechanism, parameter)?;
+        let (bytes, _) = self.wrap_key_authenticated(session, mechanism, wrapping_key, key, aad)?;
+        Ok((bytes, output))
+    }
+
+    fn wrap_key_authenticated_exact_typed(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        wrapping_key: CkObjectHandle,
+        key: CkObjectHandle,
+        aad: CkInBuf<'_>,
+        spec: &CkOutputBufferSpec,
+    ) -> CkResult<(
+        CkOutputBufferResult,
+        pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput,
+    )> {
+        let output = self.authenticated_output(mechanism, parameter)?;
+        let (bytes, _) = self.wrap_key_authenticated_exact(
+            session,
+            mechanism,
+            wrapping_key,
+            key,
+            aad,
+            spec,
+            &CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None },
+        )?;
+        Ok((bytes, output))
+    }
+
+    fn unwrap_key_authenticated_typed(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
+        unwrapping_key: CkObjectHandle,
+        wrapped_key: CkInBuf<'_>,
+        template: &[CkAttribute],
+        aad: CkInBuf<'_>,
+    ) -> CkResult<(
+        CkObjectHandle,
+        pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput,
+    )> {
+        let output = self.authenticated_output(mechanism, parameter)?;
+        let (key, _) = self.unwrap_key_authenticated(
+            session,
+            mechanism,
+            unwrapping_key,
+            wrapped_key,
+            template,
+            aad,
+        )?;
+        Ok((key, output))
+    }
+
     fn wrap_key_authenticated(
         &self,
         session: CkSessionHandle,

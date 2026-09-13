@@ -19,6 +19,20 @@ pub(crate) struct FfiMechanism {
 }
 
 impl FfiMechanism {
+    /// Read owned IV bytes only. Never read the native parameter structure as
+    /// bytes or return the typed input, which may contain remapped handles.
+    pub(in crate::ffi) fn authenticated_output(
+        &self,
+    ) -> CkResult<pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput> {
+        use pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput;
+        match &self._backing {
+            FfiParamBacking::None | FfiParamBacking::Gostr3410KeyWrap(..) => {
+                Ok(AuthenticatedOutput::Unchanged)
+            }
+            FfiParamBacking::Bytes(iv) => Ok(AuthenticatedOutput::Iv(iv.clone())),
+            _ => Err(CkRv::MECHANISM_PARAM_INVALID),
+        }
+    }
     /// Build an `FfiMechanism` from a parameter pointer, length, and backing.
     ///
     /// **SAFETY INVARIANT (callers must uphold):** `ptr` must point into the
