@@ -314,6 +314,16 @@ per-request health policy. Timeout, panic, and circuit-breaker failures remain
 separate transport/infrastructure events; no provisional Success is published
 before classification. This shared wrapper avoids per-function RV conditionals.
 
+The public Encrypt/DecryptMessageBegin RPCs use that same completion path even
+when a legacy client supplies neither a parameter specification nor a message
+envelope. After validating that the legacy parameter is empty, the service uses
+a present-empty native parameter (non-NULL pointer, length zero), preserving
+the original pointer class and making exactly one native call. Such requests
+retain their legacy empty response without an exact acknowledgement, including
+version-zero clients. A missing native Begin function is a pre-native rejection,
+not evidence of backend recovery; operation settlement still uses the embedded
+native RV when a call completes.
+
 Attribute effect definition uses one shared predicate for `CKR_OK`,
 `CKR_ATTRIBUTE_SENSITIVE`, `CKR_ATTRIBUTE_TYPE_INVALID`, and
 `CKR_BUFFER_TOO_SMALL`. Zero-length readable attributes in flat or nested mixed

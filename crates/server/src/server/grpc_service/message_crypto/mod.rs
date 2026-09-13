@@ -329,10 +329,17 @@ async fn execute_message_begin(
         Err(error) => return Ok(message_begin_error(error)),
     };
 
+    let acknowledge_contract = contract.is_some();
+    let contract = contract.unwrap_or_else(|| {
+        // The validated empty legacy Vec previously supplied a non-NULL,
+        // zero-length parameter. Preserve that pointer class without losing
+        // native completion origin through the legacy CkResult adapter.
+        let spec = CkParameterRoundtripSpec { buffer_present: true, buffer_len: 0, value: None };
+        MessageBeginContract { caller_spec: spec.clone(), provider_spec: spec, parameter: None }
+    });
     let backend = Arc::clone(&ctx.backend);
     let mut transition = MessageOperationTransition::begin(operation);
-    let result = if let Some(contract) = contract {
-        super::service_utils::spawn_backend_exact(move || {
+    let result = super::service_utils::spawn_backend_exact(move || {
             transition.mark_started();
             let request_parameter = contract.parameter.clone();
             let provider_result = match (operation_kind, contract.parameter.as_ref()) {
@@ -395,7 +402,7 @@ async fn execute_message_begin(
                     Ok(MessageBeginWireResult {
                         ck_rv: native_rv.0,
                         parameter_out: Vec::new(),
-                        parameter_result: Some((&CkParameterRoundtripResult { ck_rv: native_rv, returned_len: contract.caller_spec.buffer_len, value: contract.caller_spec.buffer_present.then(Vec::new) }).into()),
+                        parameter_result: acknowledge_contract.then(|| (&CkParameterRoundtripResult { ck_rv: native_rv, returned_len: contract.caller_spec.buffer_len, value: contract.caller_spec.buffer_present.then(Vec::new) }).into()),
                         message_parameter_out: None,
                         message_effects: returned_parameter.as_ref().map(TryInto::try_into).transpose()?,
                     })
@@ -406,43 +413,7 @@ async fn execute_message_begin(
                     Ok(message_begin_error(error))
                 }
             })
-        }).await?
-    } else {
-        spawn_backend(move || {
-            transition.mark_started();
-            let mut parameter = legacy_parameter;
-            let provider_result = match operation_kind {
-                ServerMessageOperation::Encrypt => backend.encrypt_message_begin(
-                    session,
-                    &mut parameter,
-                    input_from_wire(&aad, aad_null_len),
-                ),
-                ServerMessageOperation::Decrypt => backend.decrypt_message_begin(
-                    session,
-                    &mut parameter,
-                    input_from_wire(&aad, aad_null_len),
-                ),
-                _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
-            };
-            match provider_result {
-                Ok(parameter_out) if parameter_out.is_empty() => {
-                    let outcome = Ok(());
-                    transition.settle(&outcome, Some(installed_shape));
-                    Ok(MessageBeginWireResult { ck_rv: CkRv::OK.0, ..Default::default() })
-                }
-                Ok(_) => {
-                    transition.settle_ambiguous();
-                    Ok(message_begin_error(CkRv::DEVICE_ERROR))
-                }
-                Err(error) => {
-                    let outcome: CkResult<()> = Err(error);
-                    transition.settle(&outcome, Some(installed_shape));
-                    Ok(message_begin_error(error))
-                }
-            }
-        })
-        .await?
-    };
+        }).await?;
     Ok(match result {
         Ok(result) => result,
         Err(error) => message_begin_error(error),

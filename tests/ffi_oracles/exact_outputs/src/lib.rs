@@ -27,6 +27,8 @@ pub struct ExactOracleObservation {
     pub parameter_stores: u64,
     pub output_stores: u64,
     pub handle_stores: u64,
+    pub begin_parameter_present: u32,
+    pub begin_parameter_length: u64,
 }
 static STATE: Mutex<(ExactOracleScenario, ExactOracleObservation)> = Mutex::new((
     ExactOracleScenario {
@@ -47,6 +49,8 @@ static STATE: Mutex<(ExactOracleScenario, ExactOracleObservation)> = Mutex::new(
         parameter_stores: 0,
         output_stores: 0,
         handle_stores: 0,
+        begin_parameter_present: 0,
+        begin_parameter_length: 0,
     },
 ));
 

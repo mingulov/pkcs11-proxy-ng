@@ -121,6 +121,16 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
         ],
     },
     IgnoredTestLane {
+        file: "crates/server/tests/noncontract_begin_health_test.rs",
+        reason: "Native-oracle legacy Begin completion-health coverage",
+        commands: &[
+            "cargo test -p pkcs11-proxy-ng --test noncontract_begin_health_test -- --ignored --test-threads=1",
+        ],
+        requirements: &[
+            "Normal and missing-message-begin oracle builds via PKCS11_PROXY_EXACT_ORACLE_LIB and PKCS11_PROXY_MISSING_BEGIN_ORACLE_LIB",
+        ],
+    },
+    IgnoredTestLane {
         file: "crates/server/tests/nss_mechanism_coverage_test.rs",
         reason: "NSS softokn mechanism coverage",
         commands: &[

@@ -307,6 +307,11 @@ unsafe extern "C" fn begin(
     _: CK_ULONG,
 ) -> CK_RV {
     let rv = unsafe { ExactOracle_ByteOutput(std::ptr::null_mut(), std::ptr::null_mut()) };
+    {
+        let mut state = STATE.lock().unwrap();
+        state.1.begin_parameter_present = u32::from(!p.is_null());
+        state.1.begin_parameter_length = n as u64;
+    }
     unsafe { parameter(p, n, true, false, rv) };
     rv
 }
@@ -318,6 +323,11 @@ unsafe extern "C" fn decrypt_begin(
     _: CK_ULONG,
 ) -> CK_RV {
     let rv = unsafe { ExactOracle_ByteOutput(std::ptr::null_mut(), std::ptr::null_mut()) };
+    {
+        let mut state = STATE.lock().unwrap();
+        state.1.begin_parameter_present = u32::from(!p.is_null());
+        state.1.begin_parameter_length = n as u64;
+    }
     unsafe { parameter(p, n, false, false, rv) };
     rv
 }
@@ -549,12 +559,12 @@ fn table(version: CK_VERSION) -> CK_FUNCTION_LIST_3_2 {
         C_GetInterface: Some(C_GetInterface),
         C_MessageEncryptInit: Some(init),
         C_EncryptMessage: Some(encrypt_message),
-        C_EncryptMessageBegin: Some(begin),
+        C_EncryptMessageBegin: (!cfg!(feature = "missing-message-begin")).then_some(begin),
         C_EncryptMessageNext: Some(next_message),
         C_MessageEncryptFinal: Some(close),
         C_MessageDecryptInit: Some(init),
         C_DecryptMessage: Some(decrypt_message),
-        C_DecryptMessageBegin: Some(decrypt_begin),
+        C_DecryptMessageBegin: (!cfg!(feature = "missing-message-begin")).then_some(decrypt_begin),
         C_DecryptMessageNext: Some(decrypt_next),
         C_MessageDecryptFinal: Some(close),
         C_MessageSignInit: Some(init),

@@ -52,6 +52,7 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 | `crates/server/tests/kryoptic_mechanism_test.rs` | Kryoptic provider mechanism coverage | Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE | `cargo test -p pkcs11-proxy-ng --test kryoptic_mechanism_test -- --ignored --test-threads=1` |
 | `crates/server/tests/mechanism_out_gcm_iv_test.rs` | Patched-SoftHSM2-backed AES-GCM init-time generated-IV coverage for the Wave 1 + Wave 2 mechanism_out work | Patched libsofthsm2.so built from pkcs11-check/docker/softhsm2/patches/ with SOFTHSM2_GCM_IV_SIM_LIB pointing at it; softhsm2-util | `SOFTHSM2_GCM_IV_SIM_LIB=/path/to/patched/libsofthsm2.so cargo test -p pkcs11-proxy-ng --test mechanism_out_gcm_iv_test -- --ignored --test-threads=1` |
 | `crates/server/tests/shim_c_abi_mechanism_out_test.rs` | Loaded-shim C ABI mechanism-output, C_GetMechanismInfo zero-flag, and C_WaitForSlotEvent lifecycle coverage | Built shim shared library from cargo build -p pkcs11-proxy-ng-shim or PKCS11_PROXY_SHIM_LIB | `cargo build -p pkcs11-proxy-ng-shim && cargo test -p pkcs11-proxy-ng --test shim_c_abi_mechanism_out_test -- --ignored --test-threads=1` |
+| `crates/server/tests/noncontract_begin_health_test.rs` | Native-oracle legacy Begin completion-health coverage | Normal and missing-message-begin oracle builds via PKCS11_PROXY_EXACT_ORACLE_LIB and PKCS11_PROXY_MISSING_BEGIN_ORACLE_LIB | `cargo test -p pkcs11-proxy-ng --test noncontract_begin_health_test -- --ignored --test-threads=1` |
 | `crates/server/tests/nss_mechanism_coverage_test.rs` | NSS softokn mechanism coverage | NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test nss_mechanism_coverage_test -- --ignored --test-threads=1` |
 | `crates/server/tests/parameterized_mechanism_test.rs` | SoftHSM2-backed parameterized mechanism coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --ignored --test-threads=1` |
 | `crates/server/tests/provider_matrix_test.rs` | Optional NSS and Kryoptic provider matrix smoke coverage | NSS softokn libsoftokn3.so and certutil; Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE | `cargo test -p pkcs11-proxy-ng --test provider_matrix_test nss_softokn_smoke_suite -- --ignored --test-threads=1`<br>`cargo test -p pkcs11-proxy-ng --test provider_matrix_test kryoptic_smoke_suite -- --ignored --test-threads=1` |
@@ -59,6 +60,23 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 | `crates/server/tests/template_compat_test.rs` | SoftHSM2-backed template compatibility coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test template_compat_test -- --ignored --test-threads=1` |
 
 ## Environment variables for optional providers
+
+### Legacy Begin native-oracle gate
+
+From the standalone repository root, build the two benign fixture variants in
+separate target directories, then explicitly load both. The feature removes only
+the two native Begin function pointers. Neither fixture is a real cryptographic
+provider; this gate tests RPC/FFI completion, pointer class, and health semantics.
+
+```sh
+cargo build --locked --manifest-path tests/ffi_oracles/exact_outputs/Cargo.toml
+cargo build --locked --manifest-path tests/ffi_oracles/exact_outputs/Cargo.toml \
+  --features missing-message-begin --target-dir target/missing-begin-oracle
+PKCS11_PROXY_EXACT_ORACLE_LIB="$PWD/tests/ffi_oracles/exact_outputs/target/debug/libpkcs11_exact_output_oracle.so" \
+PKCS11_PROXY_MISSING_BEGIN_ORACLE_LIB="$PWD/target/missing-begin-oracle/debug/libpkcs11_exact_output_oracle.so" \
+  cargo test --locked -p pkcs11-proxy-ng --test noncontract_begin_health_test \
+  -- --ignored --test-threads=1 --nocapture
+```
 
 ### NSS softokn
 
