@@ -27,12 +27,14 @@ struct LoginGate {
 mod crypto_ops;
 pub mod echo;
 mod historical_flags;
+mod mechanism_entry;
 mod mock_types;
 mod object_ops;
 pub mod output_lengths;
 mod session_ops;
 mod state;
 
+pub use self::mechanism_entry::{MockEmbeddedHandles, MockMechanismEntry};
 pub use self::mock_types::{MockAbi, MockAttributeSlot, MultiPartOp};
 use self::state::{MockState, compute_session_state};
 
@@ -91,6 +93,7 @@ const CK_SP800_108_DKM_LENGTH_FORMAT_LEN: usize =
 /// **Large-request cap** (`generate_random`):
 /// Requests for more than `MAX_RANDOM_BYTES` (65 536) bytes return `CKR_DATA_LEN_RANGE`.
 pub struct MockBackend {
+    mechanism_entries: Mutex<mechanism_entry::MechanismEntries>,
     pub slots: Vec<CkSlotId>,
     pub mechanisms: Vec<CkMechanismType>,
     /// Session count cap (0 = unlimited).  `open_session` returns `CKR_SESSION_COUNT` when
@@ -282,6 +285,7 @@ impl MockBackend {
                 active_ops: HashMap::new(),
             }),
             slot_event_queue: Mutex::new(std::collections::VecDeque::new()),
+            mechanism_entries: Mutex::new(mechanism_entry::MechanismEntries::default()),
             slot_event_condvar: Condvar::new(),
             token_presence: Mutex::new(HashMap::new()),
             token_identities: Mutex::new(HashMap::new()),
@@ -1537,6 +1541,7 @@ impl Pkcs11Backend for MockBackend {
         self.get_attribute_value_exact_impl(session, object, queries)
     }
     fn sign_init(&self, s: CkSessionHandle, m: &CkMechanism, k: CkObjectHandle) -> CkResult<()> {
+        self.record_mechanism_entry(MockMechanismEntry::SignInit, Some(m));
         self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::SIGN)?;
         self.sign_init_impl(s, m, k)
     }
@@ -1630,12 +1635,14 @@ impl Pkcs11Backend for MockBackend {
         Ok(())
     }
     fn digest_init(&self, s: CkSessionHandle, m: &CkMechanism) -> CkResult<()> {
+        self.record_mechanism_entry(MockMechanismEntry::DigestInit, Some(m));
         self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::DIGEST)?;
         self.digest_init_impl(s)?;
         self.session_digest_mechanism.lock().unwrap().insert(s.0, m.mechanism_type);
         Ok(())
     }
     fn digest_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
+        self.record_mechanism_entry(MockMechanismEntry::DigestInitCancel, None);
         self.session_digest_mechanism.lock().unwrap().remove(&s.0);
         self.init_cancel_impl(s, MultiPartOp::Digest)
     }
@@ -1736,6 +1743,7 @@ impl Pkcs11Backend for MockBackend {
         base_key: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
+        self.record_mechanism_entry(MockMechanismEntry::DeriveKey, Some(m));
         self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::DERIVE)?;
         let state = self.state.lock().unwrap();
         self.require_live_key(&state, session, base_key)?;
@@ -1766,6 +1774,7 @@ impl Pkcs11Backend for MockBackend {
         base_key: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<CkDeriveKeyOutputResult> {
+        self.record_mechanism_entry(MockMechanismEntry::DeriveKey, Some(mechanism));
         if let Err(rv) = self.require_mechanism_workflow_for_session(
             session,
             mechanism,
@@ -1821,6 +1830,7 @@ impl Pkcs11Backend for MockBackend {
         m: &CkMechanism,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
+        self.record_mechanism_entry(MockMechanismEntry::GenerateKey, Some(m));
         self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::GENERATE)?;
         let handle = self.generate_key_impl(session, template)?;
         // CKO_SECRET_KEY, with the key type derived from the mechanism.
@@ -1871,6 +1881,7 @@ impl Pkcs11Backend for MockBackend {
         public_template: &[CkAttribute],
         private_template: &[CkAttribute],
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
+        self.record_mechanism_entry(MockMechanismEntry::GenerateKeyPair, Some(m));
         self.require_mechanism_workflow_for_session(
             session,
             m,
@@ -2125,6 +2136,7 @@ impl Pkcs11Backend for MockBackend {
         public_key: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<(Vec<u8>, CkObjectHandle)> {
+        self.record_mechanism_entry(MockMechanismEntry::EncapsulateKey, Some(mechanism));
         self.require_mechanism_workflow_for_session(
             session,
             mechanism,
@@ -2143,6 +2155,7 @@ impl Pkcs11Backend for MockBackend {
         template: &[CkAttribute],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputAndHandleResult> {
+        self.record_mechanism_entry(MockMechanismEntry::EncapsulateKeyExact, Some(mechanism));
         self.require_mechanism_workflow_for_session(
             session,
             mechanism,
@@ -2543,6 +2556,7 @@ impl Pkcs11Backend for MockBackend {
         template: &[CkAttribute],
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
+        self.record_mechanism_entry(MockMechanismEntry::DecapsulateKey, Some(mechanism));
         let _ = self.resolve_input(ciphertext)?;
         self.require_mechanism_workflow_for_session(
             session,
@@ -3039,6 +3053,14 @@ impl Pkcs11Backend for MockBackend {
         key: CkObjectHandle,
         signature: CkInBuf<'_>,
     ) -> CkResult<()> {
+        self.record_mechanism_entry(
+            if mechanism.is_some() {
+                MockMechanismEntry::VerifySignatureInit
+            } else {
+                MockMechanismEntry::VerifySignatureCancel
+            },
+            mechanism,
+        );
         let state = self.state.lock().unwrap();
         self.require_live_key_for_optional_mechanism_workflow(
             &state,

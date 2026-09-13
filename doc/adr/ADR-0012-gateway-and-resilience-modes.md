@@ -139,6 +139,10 @@ distinguish the shim from the real module.
      payloads. Because fail-closed records are emitted after the backend result
      is known, an audit failure can reject the proxy operation after a backend
      side effect. `EventClass::Deny` remains reserved rather than emitted.
+     The current key-lifecycle emission claim excludes KEM operations, exact
+     wrapping, authenticated unwrapping, and completion after RPC cancellation.
+     Mechanism admission on KEM does not add audit coverage. Outcome-audit parity
+     for these adapters remains separate work; DataPlane stays fail-open.
    - **G2 — Identity hardening + coarse authorization + rate/quota:**
      *Hardening (G2-PR1, implemented locally):* the daemon refuses to start when a
      policy or `allow_all_authenticated = true` is configured alongside an

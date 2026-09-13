@@ -104,6 +104,18 @@ The `client_context_id` issued by the daemon (see ADR-0002) is bound to the auth
   deliberately deferred for Phase 1 because it would add a backend
   `C_GetTokenInfo` to every crypto/object call (the M14 decision).
 
+  This coarse session grant is separate from the opt-in per-mechanism and
+  per-object/class restrictions in ADR-0012. Mechanism-bearing initializers
+  enforce the calling identity's mechanism grant against the session's recorded
+  backend slot. `C_DigestInit`, `C_VerifySignatureInit`, `C_EncapsulateKey`,
+  `C_DecapsulateKey`, and exact encapsulation reject a denied mechanism with
+  `CKR_MECHANISM_INVALID` before native initialization. A failed token-metadata
+  lookup also denies; cold lookups use the backend slot, never its virtual ID.
+  Session and primary-object resolution retain their existing precedence.
+  NULL-mechanism cancellation bypasses mechanism admission; updates, finals,
+  and combined operations consume initialized state. Restoring opaque state
+  with `C_SetOperationState` is not a mechanism-policy enforcement boundary.
+
 ### 5. Auth failure error mapping (relationship to ADR-0003)
 
 Authentication and authorization failures are transport-level concerns, not PKCS#11-level concerns:

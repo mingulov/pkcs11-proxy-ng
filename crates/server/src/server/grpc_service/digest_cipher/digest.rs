@@ -4,6 +4,7 @@ use std::time::Instant;
 use pkcs11_proxy_ng_audit::EventClass;
 use tonic::{Request, Response, Status};
 
+use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
@@ -51,6 +52,12 @@ pub(crate) async fn digest_init(
             return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse { ck_rv: rv.0 }));
         }
     };
+
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+        }));
+    }
 
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.digest_init(session, &mechanism)).await?;

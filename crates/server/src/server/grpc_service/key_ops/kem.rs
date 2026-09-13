@@ -9,6 +9,7 @@ use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 
+use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
@@ -56,6 +57,14 @@ pub(crate) async fn encapsulate_key(
             }));
         }
     };
+
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            ciphertext: Vec::new(),
+            key_handle: 0,
+        }));
+    }
 
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
@@ -144,6 +153,13 @@ pub(crate) async fn decapsulate_key(
             }));
         }
     };
+
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
+            ck_rv: CkRv::MECHANISM_INVALID.0,
+            key_handle: 0,
+        }));
+    }
 
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
@@ -255,6 +271,17 @@ pub(crate) async fn encapsulate_key_exact(
             }));
         }
     };
+
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+            result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                ck_rv: CkRv::MECHANISM_INVALID.0,
+                returned_len: 0,
+                value: None,
+                object_handle: 0,
+            }),
+        }));
+    }
 
     // B1: remap object handles embedded in the mechanism parameters;
     // gate each through per-object authz when active (C1).
