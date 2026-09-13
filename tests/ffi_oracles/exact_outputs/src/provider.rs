@@ -178,7 +178,22 @@ unsafe fn parameter(
                 unsafe { p.pIv.write(0x42) };
                 state.1.parameter_stores += 1;
             }
-            if encrypt && final_part && rv == CKR_OK && !p.pTag.is_null() && p.ulTagBits >= 8 {
+            if encrypt
+                && state.0.parameter_action == 5
+                && rv == CKR_OK
+                && p.ivGenerator == CKG_GENERATE_RANDOM
+                && !p.pIv.is_null()
+            {
+                unsafe { std::ptr::write_bytes(p.pIv, 0x42, p.ulIvLen as usize) };
+                state.1.parameter_stores += 1;
+            }
+            if encrypt
+                && final_part
+                && rv == CKR_OK
+                && state.0.parameter_action != 6
+                && !p.pTag.is_null()
+                && p.ulTagBits >= 8
+            {
                 unsafe { std::ptr::write_bytes(p.pTag, 0x5a, (p.ulTagBits / 8) as usize) };
                 state.1.parameter_stores += 1;
             }
@@ -194,8 +209,32 @@ unsafe fn parameter(
                 unsafe { p.pNonce.write(0x42) };
                 state.1.parameter_stores += 1;
             }
-            if encrypt && final_part && rv == CKR_OK && !p.pMAC.is_null() {
+            if encrypt
+                && state.0.parameter_action == 5
+                && rv == CKR_OK
+                && p.nonceGenerator == CKG_GENERATE_RANDOM
+                && !p.pNonce.is_null()
+            {
+                unsafe { std::ptr::write_bytes(p.pNonce, 0x42, p.ulNonceLen as usize) };
+                state.1.parameter_stores += 1;
+            }
+            if encrypt
+                && final_part
+                && rv == CKR_OK
+                && state.0.parameter_action != 6
+                && !p.pMAC.is_null()
+            {
                 unsafe { std::ptr::write_bytes(p.pMAC, 0x5a, p.ulMACLen as usize) };
+                state.1.parameter_stores += 1;
+            }
+        }
+        CKM_CHACHA20_POLY1305 | CKM_SALSA20_POLY1305
+            if length as usize
+                == std::mem::size_of::<CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>() =>
+        {
+            let p = unsafe { &mut *pointer.cast::<CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>() };
+            if encrypt && final_part && rv == CKR_OK && !p.pTag.is_null() {
+                unsafe { std::ptr::write_bytes(p.pTag, 0x5a, 16) };
                 state.1.parameter_stores += 1;
             }
         }
@@ -353,6 +392,38 @@ unsafe extern "C" fn attributes(
     let scenario = state.0;
     if attrs.is_null() && count != 0 {
         return CKR_ARGUMENTS_BAD;
+    }
+    // Legal mixed template: an empty readable LABEL (optionally nested), plus
+    // a readable VALUE query, a sensitive/missing VALUE, or an undersized VALUE.
+    // Nested input type is deliberately never read.
+    if scenario.parameter_action == 4 && count == 2 {
+        let first = attrs;
+        let second = unsafe { attrs.add(1) };
+        let nested = unsafe { (*first).type_ == CKA_WRAP_TEMPLATE };
+        let empty = if nested {
+            let value = unsafe { (*first).pValue };
+            if value.is_null()
+                || unsafe { (*first).ulValueLen } != std::mem::size_of::<CK_ATTRIBUTE>() as CK_ULONG
+            {
+                return CKR_ARGUMENTS_BAD;
+            }
+            let sub = value.cast::<CK_ATTRIBUTE>();
+            unsafe { std::ptr::addr_of_mut!((*sub).type_).write(CKA_LABEL) };
+            sub
+        } else {
+            first
+        };
+        unsafe { std::ptr::addr_of_mut!((*empty).ulValueLen).write(0) };
+        let rv = scenario.rv as CK_RV;
+        unsafe {
+            std::ptr::addr_of_mut!((*second).ulValueLen).write(if rv == CKR_OK {
+                4
+            } else {
+                CK_UNAVAILABLE_INFORMATION
+            })
+        };
+        state.1.length_stores += 2;
+        return rv;
     }
     for index in 0..count as usize {
         let pointer = unsafe { attrs.add(index) };

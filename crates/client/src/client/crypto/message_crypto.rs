@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
@@ -98,6 +99,7 @@ fn decode_message_begin_contract_response(
                 .validate_for(
                     request,
                     MessageEffectContext {
+                        mode: ParameterEffectCallMode::Begin,
                         encrypt: !decrypt,
                         generated_stage: true,
                         auth_stage: false,

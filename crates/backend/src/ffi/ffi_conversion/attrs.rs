@@ -202,13 +202,7 @@ impl FfiAttributeQueries {
     ) -> Vec<CkAttributeQueryResult> {
         let mut results =
             super::super::mapping::exact_attribute_results_from_ffi(queries, &self.attrs, rv);
-        let values_defined = matches!(
-            rv,
-            CkRv::OK
-                | CkRv::ATTRIBUTE_SENSITIVE
-                | CkRv::ATTRIBUTE_TYPE_INVALID
-                | CkRv::BUFFER_TOO_SMALL
-        );
+        let values_defined = pkcs11_proxy_ng_types::attribute_outputs_defined(rv);
         for (((query, native), original), result) in
             queries.iter().zip(&self.attrs).zip(&self.original).zip(&mut results)
         {

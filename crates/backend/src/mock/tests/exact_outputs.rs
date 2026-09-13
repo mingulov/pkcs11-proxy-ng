@@ -1,4 +1,5 @@
 use super::*;
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 
 #[test]
 fn null_output_length_classic_cipher_operations_follow_provider_owned_lifecycle() {
@@ -183,6 +184,7 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
                     .validate_for(
                         parameter,
                         pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                            mode: ParameterEffectCallMode::Data,
                             encrypt,
                             generated_stage: true,
                             auth_stage: true,
@@ -225,6 +227,7 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
                     .validate_for(
                         parameter,
                         pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                            mode: ParameterEffectCallMode::Data,
                             encrypt,
                             generated_stage: true,
                             auth_stage: false,
@@ -274,6 +277,7 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
                     .validate_for(
                         parameter,
                         pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                            mode: ParameterEffectCallMode::Data,
                             encrypt,
                             generated_stage: false,
                             auth_stage: false,

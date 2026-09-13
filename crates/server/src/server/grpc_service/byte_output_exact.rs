@@ -8,7 +8,8 @@ use pkcs11_proxy_ng_types::{
 
 use super::super::context_manager::ClientContextId;
 use super::service_utils::{
-    check_sanitize, input_from_wire, mechanism_output_to_proto, resolve_session, spawn_backend,
+    ExactCompletion, check_sanitize, input_from_wire, mechanism_output_to_proto, resolve_session,
+    spawn_backend_exact,
 };
 
 use crate::server::grpc_service::HandlerContext;
@@ -77,14 +78,14 @@ pub(super) async fn byte_output_exact(
                     Err(rv) => return Ok(Err(rv)),
                 };
                 let backend = ctx.backend.clone();
-                spawn_backend(move || {
-                    backend.wrap_key_exact_with_output(
+                spawn_backend_exact(move || {
+                    ExactCompletion::capture(backend.wrap_key_exact_with_output(
                         p.session,
                         &p.mechanism,
                         p.wrapping_key,
                         p.key,
                         &spec,
-                    )
+                    ))
                 })
                 .await
             }
@@ -121,9 +122,10 @@ pub(super) async fn byte_output_exact(
                 };
 
             let backend = ctx.backend.clone();
-            let result =
-                spawn_backend(move || dispatch_session_only(function, &*backend, session, &spec))
-                    .await?;
+            let result = spawn_backend_exact(move || {
+                ExactCompletion::capture(dispatch_session_only(function, &*backend, session, &spec))
+            })
+            .await?;
 
             Ok(Response::new(pkcs11_proxy_ng_proto::ByteOutputExactResponse {
                 result: Some(result_to_proto(result)),
@@ -146,9 +148,9 @@ pub(super) async fn byte_output_exact(
 
             let backend = ctx.backend.clone();
             let (result, mechanism_out) = if function == ByteOutputFunction::Encrypt {
-                let result = spawn_backend(move || {
+                let result = spawn_backend_exact(move || {
                     let buf = input_from_wire(&input_data, input_data_null_len);
-                    backend.encrypt_exact_with_output(session, buf, &spec)
+                    ExactCompletion::capture(backend.encrypt_exact_with_output(session, buf, &spec))
                 })
                 .await?;
                 match result {
@@ -156,9 +158,11 @@ pub(super) async fn byte_output_exact(
                     Err(error) => (Err(error), None),
                 }
             } else {
-                let result = spawn_backend(move || {
+                let result = spawn_backend_exact(move || {
                     let buf = input_from_wire(&input_data, input_data_null_len);
-                    dispatch_session_data(function, &*backend, session, buf, &spec)
+                    ExactCompletion::capture(dispatch_session_data(
+                        function, &*backend, session, buf, &spec,
+                    ))
                 })
                 .await?;
                 (result, None)

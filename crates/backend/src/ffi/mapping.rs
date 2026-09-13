@@ -152,7 +152,7 @@ pub(super) fn exact_attribute_results_from_ffi(
 
             CkAttributeQueryResult {
                 apply_returned_len: query.buffer_present
-                    || overall_rv == CkRv::OK
+                    || pkcs11_proxy_ng_types::attribute_outputs_defined(overall_rv)
                     || returned_len != 0,
                 apply_type: false,
                 attr_type: query.attr_type,

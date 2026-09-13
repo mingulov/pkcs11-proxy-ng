@@ -11,7 +11,8 @@ use super::super::HandlerContext;
 use super::super::audit_events::emit_auth_event;
 use super::super::authorization::extract_is_permitted;
 use super::super::service_utils::{
-    ck_rv_only, resolve_session_and_object, spawn_backend, spawn_task,
+    ExactCompletion, ck_rv_only, resolve_session_and_object, spawn_backend, spawn_backend_exact,
+    spawn_task,
 };
 use super::super::{attr_value_to_bytes, ck_result_to_rv, convert_template};
 use super::attribute_results;
@@ -370,9 +371,10 @@ pub(super) async fn get_attribute_value_exact(
     // Off-path: coalescer disabled → pass through unchanged.
     if !crate::server::resilience::coalesce_enabled() {
         let backend = ctx.backend.clone();
-        let result =
-            spawn_backend(move || backend.get_attribute_value_exact(session, object, &queries))
-                .await?;
+        let result = spawn_backend_exact(move || {
+            ExactCompletion::capture(backend.get_attribute_value_exact(session, object, &queries))
+        })
+        .await?;
         return match result {
             Ok((ck_rv, results)) => {
                 validate_exact_attribute_results(&query_types, &results)?;
@@ -430,8 +432,12 @@ pub(super) async fn get_attribute_value_exact(
         let fetch_query_types: Vec<CkAttributeType> =
             fetch_queries.iter().map(|q| q.attr_type).collect();
         let backend = ctx.backend.clone();
-        let result = spawn_backend(move || {
-            backend.get_attribute_value_exact(session, object, &fetch_queries)
+        let result = spawn_backend_exact(move || {
+            ExactCompletion::capture(backend.get_attribute_value_exact(
+                session,
+                object,
+                &fetch_queries,
+            ))
         })
         .await?;
 

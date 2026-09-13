@@ -104,7 +104,7 @@ impl AuthenticatedCall {
                         pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects::capture(
                             self.parameter().expect("captured message input"),
                             p,
-                            super::message_params::effect_context(message, main.ck_rv),
+                            super::message_params::effect_context(message, main.ck_rv, spec),
                         );
                     Some(&legacy_effects)
                 }

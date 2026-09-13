@@ -1,5 +1,6 @@
 use super::ffi_conversion::{mechanism_to_ffi, narrow_wire_ulong};
 use super::{FfiBackend, call_3x_fn};
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
 use pkcs11_proxy_ng_proto::convert::message_params::{
     CcmMessageParams, GcmMessageParams, MessageParameter, Salsa20ChaCha20Poly1305MessageParams,
@@ -1789,7 +1790,13 @@ impl FfiBackend {
             MessageEffects::capture(
                 msg_param,
                 &native.authenticated_output(msg_param),
-                MessageEffectContext { encrypt, generated_stage: true, auth_stage: false, rv },
+                MessageEffectContext {
+                    mode: ParameterEffectCallMode::Begin,
+                    encrypt,
+                    generated_stage: true,
+                    auth_stage: false,
+                    rv,
+                },
             )
         } else {
             MessageEffects::Invalid(OutputContractViolation::ParameterIntegrity)
@@ -1867,6 +1874,7 @@ impl FfiBackend {
             )
         })?;
         let context = MessageEffectContext {
+            mode: ParameterEffectCallMode::from_output_spec(output_spec),
             encrypt: true,
             generated_stage: true,
             auth_stage: true,
@@ -1911,6 +1919,7 @@ impl FfiBackend {
             )
         })?;
         let context = MessageEffectContext {
+            mode: ParameterEffectCallMode::from_output_spec(output_spec),
             encrypt: false,
             generated_stage: true,
             auth_stage: true,
@@ -2020,6 +2029,7 @@ impl FfiBackend {
             )
         })?;
         let context = MessageEffectContext {
+            mode: ParameterEffectCallMode::from_output_spec(output_spec),
             encrypt: true,
             generated_stage: false,
             auth_stage: flags & cryptoki_sys::CKF_END_OF_MESSAGE != 0,
@@ -2063,6 +2073,7 @@ impl FfiBackend {
             )
         })?;
         let context = MessageEffectContext {
+            mode: ParameterEffectCallMode::from_output_spec(output_spec),
             encrypt: false,
             generated_stage: false,
             auth_stage: flags & cryptoki_sys::CKF_END_OF_MESSAGE != 0,
@@ -3140,6 +3151,7 @@ mod tests {
                     .validate_for(
                         &parameter,
                         MessageEffectContext {
+                            mode: ParameterEffectCallMode::Data,
                             encrypt,
                             generated_stage: true,
                             auth_stage: true,
@@ -3178,6 +3190,7 @@ mod tests {
                     .validate_for(
                         &parameter,
                         MessageEffectContext {
+                            mode: ParameterEffectCallMode::Data,
                             encrypt,
                             generated_stage: true,
                             auth_stage: false,
@@ -3222,6 +3235,7 @@ mod tests {
                     .validate_for(
                         &parameter,
                         MessageEffectContext {
+                            mode: ParameterEffectCallMode::Data,
                             encrypt,
                             generated_stage: false,
                             auth_stage: false,

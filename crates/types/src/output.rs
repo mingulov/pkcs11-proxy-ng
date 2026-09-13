@@ -1,5 +1,17 @@
 use crate::{CkAttributeType, CkObjectHandle, CkRv};
 
+/// C_GetAttributeValue's partial-success statuses define every safely readable
+/// attribute's type, length (including zero), and value, not just overall OK.
+pub fn attribute_outputs_defined(rv: CkRv) -> bool {
+    matches!(
+        rv,
+        CkRv::OK
+            | CkRv::ATTRIBUTE_SENSITIVE
+            | CkRv::ATTRIBUTE_TYPE_INVALID
+            | CkRv::BUFFER_TOO_SMALL
+    )
+}
+
 /// Redacted native-completion metadata. Never contains pointers or native images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputContractViolation {

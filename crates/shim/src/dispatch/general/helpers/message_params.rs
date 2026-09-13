@@ -2,6 +2,7 @@
 //! Salsa-ChaCha message params from caller memory and write results
 //! back (incl. the bits-derived-length wild-read guards).
 
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
 use pkcs11_proxy_ng_proto::convert::message_params::{
     CcmMessageParams, GcmMessageParams, MessageParameter, MessageParameterShape,
@@ -537,8 +538,17 @@ unsafe fn copy_message_bytes(target: *mut CK_BYTE, capacity: usize, value: &[u8]
     unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), target, value.len()) };
 }
 
-pub(super) fn effect_context(call: &MessageParameterCall, rv: CkRv) -> MessageEffectContext {
+pub(super) fn effect_context(
+    call: &MessageParameterCall,
+    rv: CkRv,
+    output_spec: &CkOutputBufferSpec,
+) -> MessageEffectContext {
     MessageEffectContext {
+        mode: if call.stage == MessageParameterStage::Begin {
+            ParameterEffectCallMode::Begin
+        } else {
+            ParameterEffectCallMode::from_output_spec(output_spec)
+        },
         encrypt: call.direction == MessageParameterDirection::Encrypt,
         generated_stage: matches!(
             call.stage,
@@ -630,7 +640,7 @@ pub(crate) unsafe fn write_exact_message_output(
     let response_parameter = match (call.parameter(), response_parameter) {
         (Some(request), Some(response))
             if response
-                .validate_for(request, effect_context(call, output_result.ck_rv))
+                .validate_for(request, effect_context(call, output_result.ck_rv, output_spec))
                 .is_ok() =>
         {
             Some(response)

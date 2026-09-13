@@ -2,6 +2,7 @@
 use super::FfiBackend;
 use super::ffi_conversion::{FfiAttrs, FfiMechanism, mechanism_to_ffi, narrow_wire_ulong};
 use pkcs11_proxy_ng_proto::convert::authenticated::{AuthenticatedOutput, validate_input};
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
@@ -169,6 +170,7 @@ impl FfiBackend {
                             parameter.expect("message storage has immutable typed input"),
                             &post,
                             pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                                mode: ParameterEffectCallMode::from_output_spec(spec),
                                 encrypt: true,
                                 generated_stage: true,
                                 auth_stage: true,

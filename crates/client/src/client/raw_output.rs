@@ -1,6 +1,7 @@
 //! Shared raw-output helpers for exact PKCS#11 caller-buffer semantics.
 
 use crate::error::{MessageCallError, grpc_status_to_ck_rv};
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 
 use pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1 as v1_proto;
 use pkcs11_proxy_ng_types::{
@@ -75,6 +76,7 @@ fn decode_parameter_output_exact_response(
                 .validate_for(
                     request,
                     MessageEffectContext {
+                        mode: ParameterEffectCallMode::from_output_spec(output_spec),
                         encrypt: matches!(
                             function,
                             ParameterOutputFunction::EncryptMessage

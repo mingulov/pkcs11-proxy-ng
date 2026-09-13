@@ -674,3 +674,5 @@ async fn exact_attribute_partial_errors_and_nested_bounds_roundtrip() {
     assert_eq!(nested.type_, 0x99);
     assert_eq!(sub_value, [0xa5; 4]);
 }
+#[path = "fix_round_one.rs"]
+mod fix_round_one;

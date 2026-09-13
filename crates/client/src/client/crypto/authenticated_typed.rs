@@ -1,6 +1,7 @@
 use crate::client::Pkcs11Client;
 use crate::error::grpc_status_to_ck_rv;
 use pkcs11_proxy_ng_proto as wire;
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_types::*;
 use wire::convert::authenticated::{AuthenticatedOutput, validate_input};
 use wire::convert::message_params::MessageParameter;
@@ -123,7 +124,12 @@ impl Pkcs11Client {
         let output =
             decode_output(mechanism, parameter, response.authenticated_output.as_ref(), &[])?;
         output
-            .validate_exact_for(mechanism, parameter, main.ck_rv)
+            .validate_exact_for(
+                mechanism,
+                parameter,
+                main.ck_rv,
+                ParameterEffectCallMode::from_output_spec(spec),
+            )
             .map_err(|_| CkRv::FUNCTION_NOT_SUPPORTED)?;
         Ok((main, output))
     }

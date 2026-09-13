@@ -121,6 +121,7 @@ impl AuthenticatedOutput {
         mechanism: &CkMechanism,
         parameter: Option<&MessageParameter>,
         rv: CkRv,
+        mode: super::message_effects::ParameterEffectCallMode,
     ) -> CkResult<()> {
         match (self, parameter) {
             (Self::Effects(effects), Some(input)) => {
@@ -128,6 +129,7 @@ impl AuthenticatedOutput {
                 effects.validate_for(
                     input,
                     MessageEffectContext {
+                        mode,
                         encrypt: true,
                         generated_stage: true,
                         auth_stage: true,
@@ -149,6 +151,7 @@ impl AuthenticatedOutput {
             (Self::Effects(effects), Some(input), None) => effects.validate_for(
                 input,
                 MessageEffectContext {
+                    mode: super::message_effects::ParameterEffectCallMode::Data,
                     encrypt: true,
                     generated_stage: true,
                     auth_stage: true,

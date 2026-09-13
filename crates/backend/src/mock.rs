@@ -1,5 +1,6 @@
 // crates/backend/src/mock.rs
 use crate::traits::{CkDeriveKeyOutputResult, Pkcs11Backend};
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 use std::collections::HashMap;
@@ -2340,6 +2341,7 @@ impl Pkcs11Backend for MockBackend {
             msg_param,
             &message,
             pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: true,
                 generated_stage: true,
                 auth_stage: true,
@@ -2381,6 +2383,7 @@ impl Pkcs11Backend for MockBackend {
             msg_param,
             &message,
             pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: false,
                 generated_stage: true,
                 auth_stage: true,
@@ -2418,6 +2421,7 @@ impl Pkcs11Backend for MockBackend {
             msg_param,
             &returned,
             pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::Begin,
                 encrypt: true,
                 generated_stage: true,
                 auth_stage: false,
@@ -2454,6 +2458,7 @@ impl Pkcs11Backend for MockBackend {
             msg_param,
             &returned,
             pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::Begin,
                 encrypt: false,
                 generated_stage: true,
                 auth_stage: false,
@@ -2505,6 +2510,7 @@ impl Pkcs11Backend for MockBackend {
             msg_param,
             &message,
             pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: true,
                 generated_stage: false,
                 auth_stage: flags.0 & cryptoki_sys::CKF_END_OF_MESSAGE as u64 != 0,
@@ -2546,6 +2552,7 @@ impl Pkcs11Backend for MockBackend {
             msg_param,
             &message,
             pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: false,
                 generated_stage: false,
                 auth_stage: flags.0 & cryptoki_sys::CKF_END_OF_MESSAGE as u64 != 0,
@@ -3284,6 +3291,7 @@ impl Pkcs11Backend for MockBackend {
                     input,
                     &returned,
                     MessageEffectContext {
+                        mode: ParameterEffectCallMode::from_output_spec(spec),
                         encrypt: true,
                         generated_stage: true,
                         auth_stage: true,

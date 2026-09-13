@@ -193,10 +193,23 @@ mod tests {
         };
         output.iv.fill(0xa5);
         output.tag.fill(0x5a);
+        let mut length = 0;
         let rv = unsafe {
-            call.write_parameter(&AuthenticatedOutput::Message(MessageParameter::GcmMessage(
-                output,
-            )))
+            call.write_output(
+                &CkOutputBufferSpec {
+                    buffer_present: true,
+                    buffer_len: 0,
+                    length_pointer_null: false,
+                },
+                &pkcs11_proxy_ng_types::CkOutputBufferResult {
+                    ck_rv: CkRv::OK,
+                    returned_len: Some(0),
+                    value: Some(Vec::new()),
+                },
+                &AuthenticatedOutput::Message(MessageParameter::GcmMessage(output)),
+                std::ptr::NonNull::<u8>::dangling().as_ptr(),
+                &mut length,
+            )
         };
         assert_eq!(rv, CKR_OK);
         assert!(iv == [0xa5; 12] && tag == [0x5a; 16]);

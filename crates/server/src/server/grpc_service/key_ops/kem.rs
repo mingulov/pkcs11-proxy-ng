@@ -13,8 +13,9 @@ use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
-    resolve_session_and_key, spawn_backend, template_declares_token_object,
+    ExactCompletion, check_sanitize, input_from_wire, parse_mechanism,
+    register_session_object_handle, resolve_session_and_key, spawn_backend, spawn_backend_exact,
+    template_declares_token_object,
 };
 use crate::server::context_manager::ClientContextId;
 use crate::server::handle_map::VirtualHandle;
@@ -336,8 +337,10 @@ pub(crate) async fn encapsulate_key_exact(
     let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || {
-        backend.encapsulate_key_exact(session, &mechanism, public_key, &template, &spec)
+    let result = spawn_backend_exact(move || {
+        ExactCompletion::capture(
+            backend.encapsulate_key_exact(session, &mechanism, public_key, &template, &spec),
+        )
     })
     .await?;
 

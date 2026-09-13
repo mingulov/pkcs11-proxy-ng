@@ -699,14 +699,17 @@ mod tests {
                 let wire =
                     pkcs11_proxy_ng_proto::AuthenticatedMechanismOutput::try_from(&output).unwrap();
                 let decoded = AuthenticatedOutput::try_from(&wire).unwrap();
+                // This fixture deliberately writes output-only storage even for
+                // query/missing-length calls; those writes are not defined effects.
+                let data_completed = present && !null && expected_rv == CkRv::OK;
                 match decoded {
                     AuthenticatedOutput::Effects(MessageEffects::Gcm { iv, tag }) => {
-                        assert_eq!(iv, (expected_rv == CkRv::OK).then(|| vec![0xa5; 12]));
-                        assert_eq!(tag, (expected_rv == CkRv::OK).then(|| vec![0x5a; 16]));
+                        assert_eq!(iv, data_completed.then(|| vec![0xa5; 12]));
+                        assert_eq!(tag, data_completed.then(|| vec![0x5a; 16]));
                     }
                     AuthenticatedOutput::Effects(MessageEffects::Ccm { nonce, mac }) => {
-                        assert_eq!(nonce, (expected_rv == CkRv::OK).then(|| vec![0xa5; 12]));
-                        assert_eq!(mac, (expected_rv == CkRv::OK).then(|| vec![0x5a; 16]));
+                        assert_eq!(nonce, data_completed.then(|| vec![0xa5; 12]));
+                        assert_eq!(mac, data_completed.then(|| vec![0x5a; 16]));
                     }
                     _ => panic!("expected output-only AEAD transport"),
                 }
@@ -877,7 +880,7 @@ mod tests {
 
     #[test]
     fn null_output_length_authenticated_wrap_forwards_once_and_keeps_parameter_output() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         CALLS.store(0, Ordering::SeqCst);
         OUTPUT_PRESENT.store(0, Ordering::SeqCst);
         LENGTH_NULL.store(0, Ordering::SeqCst);

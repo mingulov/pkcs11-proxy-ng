@@ -227,13 +227,7 @@ pub(super) fn prepare(
         }
         return Err(CkRv::GENERAL_ERROR);
     }
-    let defined = matches!(
-        rv,
-        CkRv::OK
-            | CkRv::ATTRIBUTE_SENSITIVE
-            | CkRv::ATTRIBUTE_TYPE_INVALID
-            | CkRv::BUFFER_TOO_SMALL
-    );
+    let defined = pkcs11_proxy_ng_types::attribute_outputs_defined(rv);
     let mut writes = Vec::new();
     for (call, result) in calls.iter().zip(results) {
         prepare_one(

@@ -282,7 +282,13 @@ returned length denotes a safely observable effect, not proof of a native store.
   error-buffer bytes are not reconstructed from caller storage or daemon zeros.
   Attribute partial-error RVs retain their defined per-attribute outputs.
 
-Message effects are typed by field, direction, stage, and RV. Initialized
+Message effects are typed by field, direction, stage, call mode, and RV. The
+shared mode distinguishes size query, data, Begin, and missing length pointer.
+A present zero-capacity destination remains a data call. Successful size
+queries and missing-length calls do not define output-only tag/MAC or generated
+IV/nonce stores; zeroed proxy backing must not be echoed into those fields.
+Begin is an explicit generation stage despite having no main output argument.
+Initialized
 COUNTER_XOR IV/nonce effects can survive errors at Encrypt one-shot/Begin;
 output-only generated values and authentication tags require their defined
 successful stages. Decrypt does not write input IV/nonce/tag fields. The
@@ -297,6 +303,23 @@ numeric completion metadata may be logged. Operation settlement treats this as
 executed but unsafe (clear/quarantine); it does not misclassify the call as
 rejected before native entry. Policy, handle remapping, and fail-closed audit
 suppression remain authoritative before caller-visible effects are released.
+
+Every exact service adapter captures completion origin and the original provider
+RV before fallible effect validation or settlement. Preparatory request, width,
+capacity and allocation rejection emits no backend health transition (neither
+failure nor recovery). Completed `CKR_DEVICE_REMOVED` and `CKR_HOST_MEMORY` retain
+their backend-down classification, including when invalid effects replace the
+caller-visible RV with `CKR_DEVICE_ERROR`. Other provider RVs retain the existing
+per-request health policy. Timeout, panic, and circuit-breaker failures remain
+separate transport/infrastructure events; no provisional Success is published
+before classification. This shared wrapper avoids per-function RV conditionals.
+
+Attribute effect definition uses one shared predicate for `CKR_OK`,
+`CKR_ATTRIBUTE_SENSITIVE`, `CKR_ATTRIBUTE_TYPE_INVALID`, and
+`CKR_BUFFER_TOO_SMALL`. Zero-length readable attributes in flat or nested mixed
+templates retain their length effects on all four statuses. Only ordinary-error
+query zero/no-store remains ambiguous; the defined partial statuses are not
+treated as arbitrary errors.
 
 The wire advertises `exact_output_effects_version = 1`. Exact requests and
 structured Begin requests acknowledge that version; result length/handle/type

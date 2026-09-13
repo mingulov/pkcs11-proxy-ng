@@ -9,6 +9,84 @@ use pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects;
 use pkcs11_proxy_ng_proto::convert::message_params::{MessageParameter, MessageParameterShape};
 use pkcs11_proxy_ng_types::{CkResult, CkRv};
 
+#[test]
+fn exact_query_parameter_effect_rejection_is_transactional() {
+    use pkcs11_proxy_ng_types::{
+        CkOutputBufferResult, CkOutputBufferSpec, CkParameterRoundtripResult,
+        CkParameterRoundtripSpec,
+    };
+    let mut iv = [0x11u8; 12];
+    let mut tag = [0xa5u8; 16];
+    let outer = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: 12,
+        ulIvFixedBits: 0,
+        ivGenerator: CKG_GENERATE_COUNTER_XOR,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let call = unsafe {
+        read_message_parameter_call_for_shape(
+            (&outer as *const CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&outer) as CK_ULONG,
+            MessageParameterShape::Gcm,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    }
+    .unwrap();
+    let spec =
+        CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
+    let param_spec = CkParameterRoundtripSpec {
+        buffer_present: true,
+        buffer_len: std::mem::size_of_val(&outer) as u64,
+        value: None,
+    };
+    let output = CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(4), value: None };
+    let ack = CkParameterRoundtripResult {
+        ck_rv: CkRv::OK,
+        returned_len: param_spec.buffer_len,
+        value: Some(Vec::new()),
+    };
+    // Initialized IV effects are permitted, but the forbidden output-only tag
+    // must reject the entire response before IV, tag, or length stores.
+    let invalid = MessageEffects::Gcm { iv: Some(vec![0x42; 12]), tag: Some(vec![0; 16]) };
+    let mut length = 0xdead;
+    assert_eq!(
+        unsafe {
+            commit_exact_effects(
+                &spec,
+                &param_spec,
+                &call,
+                &output,
+                &ack,
+                Some(&invalid),
+                std::ptr::null_mut(),
+                &mut length,
+            )
+        },
+        CKR_GENERAL_ERROR
+    );
+    assert_eq!((iv, tag, length), ([0x11; 12], [0xa5; 16], 0xdead));
+    let valid = MessageEffects::Gcm { iv: Some(vec![0x42; 12]), tag: None };
+    assert_eq!(
+        unsafe {
+            commit_exact_effects(
+                &spec,
+                &param_spec,
+                &call,
+                &output,
+                &ack,
+                Some(&valid),
+                std::ptr::null_mut(),
+                &mut length,
+            )
+        },
+        CKR_OK
+    );
+    assert_eq!((iv, tag, length), ([0x42; 12], [0xa5; 16], 4));
+}
+
 // Preserve the pre-C3 shape/stage fixtures while invoking the production typed
 // commit helper. New effect-contract tests construct their effects explicitly.
 #[allow(clippy::too_many_arguments)]
@@ -26,7 +104,7 @@ unsafe fn write_exact_message_output(
         MessageEffects::capture(
             input,
             response,
-            super::message_params::effect_context(call, output.ck_rv),
+            super::message_params::effect_context(call, output.ck_rv, output_spec),
         )
     });
     unsafe {
@@ -552,7 +630,8 @@ fn commit_stage_response(
     response: &MessageParameter,
 ) -> CK_RV {
     let output_spec = pkcs11_proxy_ng_types::CkOutputBufferSpec {
-        buffer_present: false,
+        // Exercise a zero-byte data operation, not a NULL-output size query.
+        buffer_present: true,
         buffer_len: 0,
         length_pointer_null: false,
     };
@@ -580,7 +659,7 @@ fn commit_stage_response(
             &output_result,
             &parameter_result,
             Some(response),
-            std::ptr::null_mut(),
+            std::ptr::NonNull::<u8>::dangling().as_ptr(),
             &mut output_len,
         )
     }

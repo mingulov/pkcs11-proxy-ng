@@ -12,6 +12,7 @@
 //! - `C_SignMessage` / `C_SignMessageBegin` / `C_SignMessageNext`
 //! - `C_VerifyMessage` / `C_VerifyMessageBegin` / `C_VerifyMessageNext`
 
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -330,9 +331,9 @@ async fn execute_message_begin(
 
     let backend = Arc::clone(&ctx.backend);
     let mut transition = MessageOperationTransition::begin(operation);
-    let result = spawn_backend(move || {
-        transition.mark_started();
-        if let Some(contract) = contract {
+    let result = if let Some(contract) = contract {
+        super::service_utils::spawn_backend_exact(move || {
+            transition.mark_started();
             let request_parameter = contract.parameter.clone();
             let provider_result = match (operation_kind, contract.parameter.as_ref()) {
                 (ServerMessageOperation::Encrypt, Some(parameter)) => backend
@@ -367,13 +368,13 @@ async fn execute_message_begin(
                     .map(|ack| (ack, None)),
                 _ => Err(CkRv::FUNCTION_NOT_SUPPORTED),
             };
-            match provider_result {
+            super::service_utils::ExactCompletion::capture(provider_result).map_result(|provider_result| match provider_result {
                 Ok((provider_ack, returned_parameter)) => {
                     let native_rv = provider_ack.ck_rv;
                     let valid_parameter =
                         match (request_parameter.as_ref(), returned_parameter.as_ref()) {
                             (Some(request), Some(returned)) => {
-                                returned.validate_for(request, pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                                returned.validate_for(request, pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext { mode: ParameterEffectCallMode::Begin,
                                     encrypt: operation_kind == ServerMessageOperation::Encrypt,
                                     generated_stage: true, auth_stage: false, rv: native_rv,
                                 }).is_ok()
@@ -404,8 +405,11 @@ async fn execute_message_begin(
                     transition.settle(&outcome, Some(installed_shape));
                     Ok(message_begin_error(error))
                 }
-            }
-        } else {
+            })
+        }).await?
+    } else {
+        spawn_backend(move || {
+            transition.mark_started();
             let mut parameter = legacy_parameter;
             let provider_result = match operation_kind {
                 ServerMessageOperation::Encrypt => backend.encrypt_message_begin(
@@ -436,9 +440,9 @@ async fn execute_message_begin(
                     Ok(message_begin_error(error))
                 }
             }
-        }
-    })
-    .await?;
+        })
+        .await?
+    };
     Ok(match result {
         Ok(result) => result,
         Err(error) => message_begin_error(error),

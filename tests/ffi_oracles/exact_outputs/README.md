@@ -29,6 +29,13 @@ Use a private task-owned `TMPDIR` and `umask 077` when retaining evidence. The
 native oracle covers deterministic output behavior, not real mechanism support,
 performance, hostile provider memory writes, or the full provider matrix.
 
+The fix-round tests include direct/proxy query/data comparisons for GCM, CCM,
+Salsa20 and ChaCha20-Poly1305; generated Begin versus query effects; legal mixed
+attribute templates; and readiness events for every exact adapter family.
+Readiness is process-global, so its cases share one test and drain setup events
+before measuring each native call. The oversized-capacity cases exercise proven
+pre-native rejection only: their small canary backing is never dereferenced.
+
 The backend's ignored
 `classic_gcm_initialized_error_iv_effect_pending_provenance_prerequisite` test is
 a deliberately retained Phase B RED, not part of this passing oracle gate.
