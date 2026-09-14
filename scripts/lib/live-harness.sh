@@ -8,8 +8,10 @@
 # `harness_extra_cleanup()` before calling `harness_init_workspace`.
 
 # ── SoftHSM2 discovery ───────────────────────────────────────────────
-# Sets SOFTHSM_MODULE_64 ("" when absent).
+# Sets SOFTHSM_MODULE_64 ("" when absent). A pre-exported non-empty
+# SOFTHSM_MODULE_64 is honoured as-is (non-root extracted copies).
 harness_locate_softhsm64() {
+    [[ -n "${SOFTHSM_MODULE_64:-}" ]] && return 0
     SOFTHSM_MODULE_64=""
     local candidate
     for candidate in \
@@ -19,11 +21,16 @@ harness_locate_softhsm64() {
         /usr/local/lib/softhsm/libsofthsm2.so; do
         [[ -f "$candidate" ]] && SOFTHSM_MODULE_64="$candidate" && break
     done
+    # Absence is a normal outcome (caller prints SKIP); never fail under set -e.
+    return 0
 }
 
 # Sets SOFTHSM_MODULE_32 ("" when absent). The i386 package conflicts with
-# the amd64 one, so an extracted copy under /opt is probed too.
+# the amd64 one, so an extracted copy under /opt is probed too. A
+# pre-exported non-empty SOFTHSM_MODULE_32 is honoured as-is (non-root
+# extracted copies).
 harness_locate_softhsm32() {
+    [[ -n "${SOFTHSM_MODULE_32:-}" ]] && return 0
     SOFTHSM_MODULE_32=""
     local candidate
     for candidate in \
@@ -32,6 +39,8 @@ harness_locate_softhsm32() {
         /usr/lib32/softhsm/libsofthsm2.so; do
         [[ -f "$candidate" ]] && SOFTHSM_MODULE_32="$candidate" && break
     done
+    # Absence is a normal outcome (caller prints SKIP); never fail under set -e.
+    return 0
 }
 
 # ── Workspace, token, cleanup ────────────────────────────────────────
