@@ -236,6 +236,9 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
         session_slot_map: DashMap::new(),
         slot_sessions: DashMap::new(),
         object_cleanup: Default::default(),
+        // Test-local backend: bypasses the process reservation without
+        // consuming it; never backs production dispatch (C3M.4).
+        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
     };
     for (present, missing) in [(true, false), (false, false), (true, true), (false, true)] {
         unsafe {
@@ -305,6 +308,9 @@ fn exact_parameter_error_preserves_only_defined_initialized_effects() {
         session_slot_map: DashMap::new(),
         slot_sessions: DashMap::new(),
         object_cleanup: Default::default(),
+        // Test-local backend: bypasses the process reservation without
+        // consuming it; never backs production dispatch (C3M.4).
+        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
     };
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x11; 12],
@@ -387,6 +393,9 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
         session_slot_map: DashMap::new(),
         slot_sessions: DashMap::new(),
         object_cleanup: Default::default(),
+        // Test-local backend: bypasses the process reservation without
+        // consuming it; never backs production dispatch (C3M.4).
+        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
     };
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x11; 12],

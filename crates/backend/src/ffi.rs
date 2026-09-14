@@ -30,6 +30,11 @@ mod mapping;
 mod message_ops;
 #[path = "ffi/native_allocation.rs"]
 mod native_allocation;
+#[path = "ffi/native_domain.rs"]
+mod native_domain;
+#[cfg(test)]
+#[path = "ffi/native_domain_tests.rs"]
+mod native_domain_tests;
 #[path = "ffi/object_ops.rs"]
 mod object_ops;
 #[path = "ffi/session_3x_ops.rs"]
@@ -161,6 +166,10 @@ pub struct FfiBackend {
     /// `C_CloseAllSessions` evict exactly the sessions on one slot in
     /// O(sessions-on-slot) instead of scanning every session (L4).
     slot_sessions: DashMap<u64, HashSet<u64>>,
+    /// Proof that this instance owns the process construction slot (C3M.4).
+    /// The reservation is released when the last owner drops; stale handles
+    /// can never free another epoch's slot.
+    construction: native_domain::ConstructionPermit,
 }
 
 // Safety: PKCS#11 spec requires modules loaded with CKF_OS_LOCKING_OK to be
@@ -1594,6 +1603,9 @@ mod tests {
             session_slot_map: DashMap::new(),
             slot_sessions: DashMap::new(),
             object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         };
 
         (backend, functions)
