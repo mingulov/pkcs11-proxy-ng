@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_close_all_sessions_preserves_target_slot_ownership() {
+    fn native_owner_close_all_isolates_slots() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_CloseAllSessions = Some(close_all_sessions_fails);
         let backend = FfiBackend {
@@ -303,14 +303,16 @@ mod tests {
         };
         let session = CkSessionHandle(23);
         seed_sign_slot(&backend, session, CkSlotId(11));
+        // A bystander session on another slot proves isolation.
+        let other = CkSessionHandle(24);
+        seed_sign_slot(&backend, other, CkSlotId(22));
 
         assert_eq!(
             backend.ffi_close_all_sessions(CkSlotId(11)).unwrap_err(),
             CkRv::FUNCTION_FAILED
         );
 
-        // No CKR_OK: target-slot owners, marker and mappings are preserved;
-        // other slots remain untouched (none exist here, so maps stay whole).
+        // No CKR_OK: target-slot owners, marker and mappings are preserved.
         assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Sign)));
         assert_eq!(
             backend.last_init_family.get(&session.0).as_deref(),
@@ -318,6 +320,11 @@ mod tests {
         );
         assert_eq!(backend.session_slot_map.get(&session.0).as_deref(), Some(&11));
         assert!(backend.slot_sessions.get(&11).is_some());
+        // The other slot is untouched: its owner, marker and mappings stay whole.
+        assert!(backend.mech_cache.contains_key(&(other.0, OperationFamily::Sign)));
+        assert_eq!(backend.last_init_family.get(&other.0).as_deref(), Some(&OperationFamily::Sign));
+        assert_eq!(backend.session_slot_map.get(&other.0).as_deref(), Some(&22));
+        assert!(backend.slot_sessions.get(&22).is_some());
     }
 
     #[test]

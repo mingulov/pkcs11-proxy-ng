@@ -664,8 +664,16 @@ mod tests {
         cryptoki_sys::CKR_OK
     }
 
+    unsafe extern "C" fn encrypt_init_fails(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _key: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_FUNCTION_FAILED
+    }
+
     #[test]
-    fn encrypt_init_then_digest_init_retains_both_family_graphs() {
+    fn native_owner_dual_families_and_cancel_are_independent() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_EncryptInit = Some(encrypt_init_ok);
         functions.C_DigestInit = Some(digest_init_ok);
@@ -711,6 +719,65 @@ mod tests {
         assert_eq!(
             backend.cached_mechanism_output_params_for(session, OperationFamily::Encrypt),
             gcm.params
+        );
+        // Cancelling Digest retires only the Digest slot: the Encrypt graph
+        // stays live and still yields its retained IV output.
+        backend.ffi_digest_init_cancel(session).unwrap();
+        assert!(!backend.mech_cache.contains_key(&(session.0, OperationFamily::Digest)));
+        assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Encrypt)));
+        assert_eq!(
+            backend.cached_mechanism_output_params_for(session, OperationFamily::Encrypt),
+            gcm.params
+        );
+    }
+
+    #[test]
+    fn native_owner_init_failure_preserves_active() {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_EncryptInit = Some(encrypt_init_ok);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+        };
+        let session = CkSessionHandle(12);
+        let gcm = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0xA5; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        };
+        backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+        // A failed re-Init must not disturb the live owner: same slot,
+        // same output, same last-Init marker.
+        functions.C_EncryptInit = Some(encrypt_init_fails);
+        assert_eq!(
+            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            CkRv::FUNCTION_FAILED
+        );
+        assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Encrypt)));
+        assert_eq!(
+            backend.cached_mechanism_output_params_for(session, OperationFamily::Encrypt),
+            gcm.params
+        );
+        assert_eq!(
+            backend.last_init_family.get(&session.0).as_deref(),
+            Some(&OperationFamily::Encrypt)
         );
     }
 }

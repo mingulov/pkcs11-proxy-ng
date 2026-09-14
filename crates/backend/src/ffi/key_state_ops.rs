@@ -565,7 +565,7 @@ mod slot_wait_tests {
     }
 
     #[test]
-    fn blocking_wait_refused_without_native_entry() {
+    fn slot_wait_blocking_rejected_without_native_entry() {
         let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
         let (backend, _functions) = backend_with_wait();
@@ -577,7 +577,7 @@ mod slot_wait_tests {
     }
 
     #[test]
-    fn dont_block_wait_preserves_all_flag_bits() {
+    fn slot_wait_nonblocking_preserves_native_result_and_flags() {
         let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
         let (backend, _functions) = backend_with_wait();
@@ -592,7 +592,7 @@ mod slot_wait_tests {
 
     #[test]
     #[cfg(target_pointer_width = "32")]
-    fn overflow_flags_fail_narrowing_before_native_entry() {
+    fn slot_wait_checked_width_and_precedence() {
         let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
         let (backend, _functions) = backend_with_wait();
