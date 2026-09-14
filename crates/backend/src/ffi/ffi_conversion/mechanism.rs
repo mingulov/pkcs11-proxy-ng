@@ -4,7 +4,10 @@
 //! contributor rules).
 
 use super::*;
+use crate::ffi::native_allocation::NativeAllocation;
 
+#[cfg(test)]
+mod native_owner_tests;
 #[cfg(test)]
 mod x3dh_tests;
 
@@ -35,6 +38,8 @@ impl FfiMechanism {
                 FfiParamBacking::Gostr3410KeyWrap(native, oid, ukm),
                 Some(CkMechanismParams::Gostr3410KeyWrap(input)),
             ) => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let native = unsafe { native.snapshot() };
                 let pointer_matches = |pointer: *mut u8, bytes: &[u8]| {
                     if bytes.is_empty() {
                         pointer.is_null()
@@ -105,27 +110,39 @@ impl FfiMechanism {
     /// The caller passes a closure that constructs the matching
     /// `FfiParamBacking` variant from the same box; this keeps the
     /// box and the pointer-into-box tied together in one expression
-    /// and removes the `&mut *boxed as *mut _ as *mut c_void` /
-    /// `std::mem::size_of::<...>()` boilerplate that repeated at 60+
-    /// sites in `mechanism_to_ffi`.
+    /// and removes the `Box::into_raw` / `std::mem::size_of::<...>()`
+    /// boilerplate that repeated at 60+ sites in `mechanism_to_ffi`.
     ///
-    /// **SAFETY INVARIANT:** `make_backing(b)` MUST move `b` into a
-    /// variant of `FfiParamBacking` so that the C struct's pointer
+    /// **Provenance (C3M.2, defect I1):** the raw root is projected from
+    /// the persistent [`NativeAllocation`] established by a single
+    /// `Box::into_raw`, never from a reborrow (`&mut *boxed`) of a box
+    /// that is subsequently moved into backing: that reborrow pattern
+    /// invalidates pointer provenance under Miri's borrow models as soon
+    /// as the box moves. Ownership transfers exactly once into backing,
+    /// so one allocation keeps one owner and one final `Drop`.
+    ///
+    /// **SAFETY INVARIANT:** `make_backing(a)` MUST move `a` into a
+    /// variant of `FfiParamBacking` so that the C struct's allocation
     /// (and any pointers the struct itself holds into side-data) stay
-    /// live for as long as the returned `FfiMechanism`.
+    /// live for as long as the returned `FfiMechanism`. The allocation
+    /// moves as a [`NativeAllocation`]: its raw root never reborrows, so
+    /// later owner moves cannot strand the stored `pParameter`.
     fn from_box<T>(
         mech_type: cryptoki_sys::CK_MECHANISM_TYPE,
-        mut boxed: Box<T>,
-        make_backing: impl FnOnce(Box<T>) -> FfiParamBacking,
+        boxed: Box<T>,
+        make_backing: impl FnOnce(NativeAllocation<T>) -> FfiParamBacking,
     ) -> Self {
-        let ptr = &mut *boxed as *mut T as *mut std::ffi::c_void;
         let len = std::mem::size_of::<T>();
-        Self::with_param(mech_type, ptr, len, make_backing(boxed))
+        let allocation = NativeAllocation::from_box(boxed);
+        let ptr = allocation.root() as *mut std::ffi::c_void;
+        Self::with_param(mech_type, ptr, len, make_backing(allocation))
     }
 
     pub(in crate::ffi) fn output_params(&self) -> Option<CkMechanismParams> {
         match &self._backing {
             FfiParamBacking::Gcm(gcm, iv, aad) => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let gcm = unsafe { gcm.snapshot() };
                 let iv_len = (gcm.ulIvLen as usize).min(iv.len());
                 let aad_len = (gcm.ulAADLen as usize).min(aad.len());
                 Some(CkMechanismParams::Gcm(GcmParams {
@@ -137,6 +154,8 @@ impl FfiMechanism {
                 }))
             }
             FfiParamBacking::Tls12MasterKeyDerive(tls12, client_random, server_random, version) => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let tls12 = unsafe { tls12.snapshot() };
                 // CK_TLS12_MASTER_KEY_DERIVE_PARAMS.pVersion is OUT —
                 // the HSM writes the negotiated CK_VERSION here when
                 // pVersion is non-NULL. Surface the version_major /
@@ -154,6 +173,8 @@ impl FfiMechanism {
                 }))
             }
             FfiParamBacking::WtlsMasterKeyDerive(wtls, client_random, server_random, version) => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let wtls = unsafe { wtls.snapshot() };
                 Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
                     digest_mechanism: wtls.DigestMechanism as u64,
                     random_info: WtlsRandomData {
@@ -164,6 +185,8 @@ impl FfiMechanism {
                 }))
             }
             FfiParamBacking::WtlsKeyMat(wtls, client_random, server_random, key_mat_out, iv) => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let wtls = unsafe { wtls.snapshot() };
                 let iv_len = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(iv.len());
                 let output_iv =
                     if key_mat_out.pIV.is_null() { Vec::new() } else { iv[..iv_len].to_vec() };
@@ -191,6 +214,8 @@ impl FfiMechanism {
                 client_iv,
                 server_iv,
             ) => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let ssl3 = unsafe { ssl3.snapshot() };
                 let iv_len =
                     (((ssl3.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
                 Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
@@ -227,6 +252,8 @@ impl FfiMechanism {
                 client_iv,
                 server_iv,
             ) => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let tls12 = unsafe { tls12.snapshot() };
                 let iv_len =
                     (((tls12.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(client_iv.len());
                 Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
@@ -258,6 +285,8 @@ impl FfiMechanism {
             FfiParamBacking::Sp800108Kdf(sp800, data_params, data_buffers, derived_keys)
                 if !derived_keys.is_empty() =>
             {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let sp800 = unsafe { sp800.snapshot() };
                 Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                     prf_type: sp800.prfType as u64,
                     data_params: sp800_108_data_params_from_ffi(data_params, data_buffers),
@@ -271,6 +300,8 @@ impl FfiMechanism {
                 iv,
                 derived_keys,
             ) if !derived_keys.is_empty() => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let sp800 = unsafe { sp800.snapshot() };
                 Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                     prf_type: sp800.prfType as u64,
                     data_params: sp800_108_data_params_from_ffi(data_params, data_buffers),
@@ -278,9 +309,12 @@ impl FfiMechanism {
                     additional_derived_keys: derived_keys.output_keys(),
                 }))
             }
-            FfiParamBacking::Pbe(pbe, init_vector, _password, _salt)
-                if !pbe.pInitVector.is_null() =>
-            {
+            FfiParamBacking::Pbe(pbe, init_vector, _password, _salt) => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let pbe = unsafe { pbe.snapshot() };
+                if pbe.pInitVector.is_null() {
+                    return None;
+                }
                 // CK_PBE_PARAMS.pInitVector is OUT — the HSM writes the generated
                 // 8-byte IV here during PBE key generation. Surface ONLY the IV;
                 // the password and salt are caller-supplied secrets/inputs and
@@ -381,72 +415,84 @@ enum FfiParamBacking {
     /// Raw byte buffer (IV params, raw params, MacGeneral ulong, etc.)
     Bytes(Vec<u8>),
     /// Scalar-only C struct stored as a pinned Box (PSS, RC5, RC2MacGeneral, etc.)
-    Pss(Box<cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS>),
-    Rc5(Box<cryptoki_sys::CK_RC5_PARAMS>),
-    Rc5MacGeneral(Box<cryptoki_sys::CK_RC5_MAC_GENERAL_PARAMS>),
-    Rc2MacGeneral(Box<cryptoki_sys::CK_RC2_MAC_GENERAL_PARAMS>),
-    Xeddsa(Box<cryptoki_sys::CK_XEDDSA_PARAMS>),
-    TlsMac(Box<cryptoki_sys::CK_TLS_MAC_PARAMS>),
-    Rc2Cbc(Box<cryptoki_sys::CK_RC2_CBC_PARAMS>),
-    AesCtr(Box<cryptoki_sys::CK_AES_CTR_PARAMS>),
-    CamelliaCtr(Box<cryptoki_sys::CK_CAMELLIA_CTR_PARAMS>),
+    Pss(NativeAllocation<cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS>),
+    Rc5(NativeAllocation<cryptoki_sys::CK_RC5_PARAMS>),
+    Rc5MacGeneral(NativeAllocation<cryptoki_sys::CK_RC5_MAC_GENERAL_PARAMS>),
+    Rc2MacGeneral(NativeAllocation<cryptoki_sys::CK_RC2_MAC_GENERAL_PARAMS>),
+    Xeddsa(NativeAllocation<cryptoki_sys::CK_XEDDSA_PARAMS>),
+    TlsMac(NativeAllocation<cryptoki_sys::CK_TLS_MAC_PARAMS>),
+    Rc2Cbc(NativeAllocation<cryptoki_sys::CK_RC2_CBC_PARAMS>),
+    AesCtr(NativeAllocation<cryptoki_sys::CK_AES_CTR_PARAMS>),
+    CamelliaCtr(NativeAllocation<cryptoki_sys::CK_CAMELLIA_CTR_PARAMS>),
     /// Struct with pointer fields — struct + borrowed buffers.
-    Oaep(Box<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>, Vec<u8>),
-    Gcm(Box<cryptoki_sys::CK_GCM_PARAMS>, Vec<u8>, Vec<u8>),
-    Ccm(Box<cryptoki_sys::CK_CCM_PARAMS>, Vec<u8>, Vec<u8>),
-    Ecdh1(Box<cryptoki_sys::CK_ECDH1_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
-    Rc5Cbc(Box<cryptoki_sys::CK_RC5_CBC_PARAMS>, Vec<u8>),
-    Eddsa(Box<cryptoki_sys::CK_EDDSA_PARAMS>, Vec<u8>),
-    Hkdf(Box<cryptoki_sys::CK_HKDF_PARAMS>, Vec<u8>, Vec<u8>),
-    KeyDerivationString(Box<cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA>, Vec<u8>),
-    AesCbcEncryptData(Box<cryptoki_sys::CK_AES_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
-    DesCbcEncryptData(Box<cryptoki_sys::CK_DES_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
-    AriaCbcEncryptData(Box<cryptoki_sys::CK_ARIA_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
-    CamelliaCbcEncryptData(Box<cryptoki_sys::CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
-    SeedCbcEncryptData(Box<cryptoki_sys::CK_SEED_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
-    GcmWrap(Box<cryptoki_sys::CK_GCM_WRAP_PARAMS>, Vec<u8>, Vec<u8>),
-    CcmWrap(Box<cryptoki_sys::CK_CCM_WRAP_PARAMS>, Vec<u8>, Vec<u8>),
-    ChaCha20(Box<cryptoki_sys::CK_CHACHA20_PARAMS>, Vec<u8>, Vec<u8>),
-    Salsa20(Box<cryptoki_sys::CK_SALSA20_PARAMS>, Vec<u8>, Vec<u8>),
+    Oaep(NativeAllocation<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>, Vec<u8>),
+    Gcm(NativeAllocation<cryptoki_sys::CK_GCM_PARAMS>, Vec<u8>, Vec<u8>),
+    Ccm(NativeAllocation<cryptoki_sys::CK_CCM_PARAMS>, Vec<u8>, Vec<u8>),
+    Ecdh1(NativeAllocation<cryptoki_sys::CK_ECDH1_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
+    Rc5Cbc(NativeAllocation<cryptoki_sys::CK_RC5_CBC_PARAMS>, Vec<u8>),
+    Eddsa(NativeAllocation<cryptoki_sys::CK_EDDSA_PARAMS>, Vec<u8>),
+    Hkdf(NativeAllocation<cryptoki_sys::CK_HKDF_PARAMS>, Vec<u8>, Vec<u8>),
+    KeyDerivationString(NativeAllocation<cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA>, Vec<u8>),
+    AesCbcEncryptData(NativeAllocation<cryptoki_sys::CK_AES_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
+    DesCbcEncryptData(NativeAllocation<cryptoki_sys::CK_DES_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
+    AriaCbcEncryptData(NativeAllocation<cryptoki_sys::CK_ARIA_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
+    CamelliaCbcEncryptData(
+        NativeAllocation<cryptoki_sys::CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS>,
+        Vec<u8>,
+    ),
+    SeedCbcEncryptData(NativeAllocation<cryptoki_sys::CK_SEED_CBC_ENCRYPT_DATA_PARAMS>, Vec<u8>),
+    GcmWrap(NativeAllocation<cryptoki_sys::CK_GCM_WRAP_PARAMS>, Vec<u8>, Vec<u8>),
+    CcmWrap(NativeAllocation<cryptoki_sys::CK_CCM_WRAP_PARAMS>, Vec<u8>, Vec<u8>),
+    ChaCha20(NativeAllocation<cryptoki_sys::CK_CHACHA20_PARAMS>, Vec<u8>, Vec<u8>),
+    Salsa20(NativeAllocation<cryptoki_sys::CK_SALSA20_PARAMS>, Vec<u8>, Vec<u8>),
     Salsa20ChaCha20Poly1305(
-        Box<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_PARAMS>,
         Vec<u8>,
         Vec<u8>,
     ),
-    RsaAesKeyWrap(Box<FfiRsaAesKeyWrapParams>, Box<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>, Vec<u8>),
-    SignAdditionalContext(Box<FfiSignAdditionalContext>, Vec<u8>),
-    HashSignAdditionalContext(Box<FfiHashSignAdditionalContext>, Vec<u8>),
-    Kmac(Box<FfiKmacParams>, Vec<u8>),
-    MuGen(Box<FfiMuGenParams>, Vec<u8>, Vec<u8>),
+    RsaAesKeyWrap(
+        NativeAllocation<FfiRsaAesKeyWrapParams>,
+        Box<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>,
+        Vec<u8>,
+    ),
+    SignAdditionalContext(NativeAllocation<FfiSignAdditionalContext>, Vec<u8>),
+    HashSignAdditionalContext(NativeAllocation<FfiHashSignAdditionalContext>, Vec<u8>),
+    Kmac(NativeAllocation<FfiKmacParams>, Vec<u8>),
+    MuGen(NativeAllocation<FfiMuGenParams>, Vec<u8>, Vec<u8>),
     // Last field is the caller password — wiped on drop (E1).
-    Pkcs5Pbkd2(Box<cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2>, Vec<u8>, Vec<u8>, Zeroizing<Vec<u8>>),
+    Pkcs5Pbkd2(
+        NativeAllocation<cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2>,
+        Vec<u8>,
+        Vec<u8>,
+        Zeroizing<Vec<u8>>,
+    ),
     Tls12MasterKeyDerive(
-        Box<cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_TLS12_MASTER_KEY_DERIVE_PARAMS>,
         Vec<u8>,
         Vec<u8>,
         Box<cryptoki_sys::CK_VERSION>,
     ),
     TlsPrf(
-        Box<cryptoki_sys::CK_TLS_PRF_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_TLS_PRF_PARAMS>,
         Vec<u8>,
         Vec<u8>,
         Vec<u8>,
         Box<cryptoki_sys::CK_ULONG>,
     ),
-    TlsKdf(Box<cryptoki_sys::CK_TLS_KDF_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
+    TlsKdf(NativeAllocation<cryptoki_sys::CK_TLS_KDF_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
     Ssl3MasterKeyDerive(
-        Box<cryptoki_sys::CK_SSL3_MASTER_KEY_DERIVE_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_SSL3_MASTER_KEY_DERIVE_PARAMS>,
         Vec<u8>,
         Vec<u8>,
         Box<cryptoki_sys::CK_VERSION>,
     ),
     Tls12ExtendedMasterKeyDerive(
-        Box<cryptoki_sys::CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS>,
         Vec<u8>,
         Box<cryptoki_sys::CK_VERSION>,
     ),
     Ssl3KeyMat(
-        Box<cryptoki_sys::CK_SSL3_KEY_MAT_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_SSL3_KEY_MAT_PARAMS>,
         Vec<u8>,
         Vec<u8>,
         Box<cryptoki_sys::CK_SSL3_KEY_MAT_OUT>,
@@ -454,7 +500,7 @@ enum FfiParamBacking {
         Vec<u8>,
     ),
     Tls12KeyMat(
-        Box<cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_TLS12_KEY_MAT_PARAMS>,
         Vec<u8>,
         Vec<u8>,
         Box<cryptoki_sys::CK_SSL3_KEY_MAT_OUT>,
@@ -462,70 +508,94 @@ enum FfiParamBacking {
         Vec<u8>,
     ),
     // Middle field is the caller password — wiped on drop (E1).
-    Pbe(Box<cryptoki_sys::CK_PBE_PARAMS>, Vec<u8>, Zeroizing<Vec<u8>>, Vec<u8>),
-    EcdhAesKeyWrap(Box<cryptoki_sys::CK_ECDH_AES_KEY_WRAP_PARAMS>, Vec<u8>),
-    Ecdh2Derive(Box<cryptoki_sys::CK_ECDH2_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
-    EcmqvDerive(Box<cryptoki_sys::CK_ECMQV_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
-    X942Dh1Derive(Box<cryptoki_sys::CK_X9_42_DH1_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
-    X942Dh2Derive(Box<cryptoki_sys::CK_X9_42_DH2_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
-    X942MqvDerive(Box<cryptoki_sys::CK_X9_42_MQV_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
-    Gostr3410Derive(Box<cryptoki_sys::CK_GOSTR3410_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
-    Gostr3410KeyWrap(Box<cryptoki_sys::CK_GOSTR3410_KEY_WRAP_PARAMS>, Vec<u8>, Vec<u8>),
-    KeyWrapSetOaep(Box<cryptoki_sys::CK_KEY_WRAP_SET_OAEP_PARAMS>, Vec<u8>),
-    KeaDerive(Box<cryptoki_sys::CK_KEA_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
-    IkePrfDerive(Box<cryptoki_sys::CK_IKE_PRF_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
-    Ike1PrfDerive(Box<cryptoki_sys::CK_IKE1_PRF_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
-    Ike1ExtendedDerive(Box<cryptoki_sys::CK_IKE1_EXTENDED_DERIVE_PARAMS>, Vec<u8>),
-    Ike2PrfPlusDerive(Box<cryptoki_sys::CK_IKE2_PRF_PLUS_DERIVE_PARAMS>, Vec<u8>),
+    Pbe(NativeAllocation<cryptoki_sys::CK_PBE_PARAMS>, Vec<u8>, Zeroizing<Vec<u8>>, Vec<u8>),
+    EcdhAesKeyWrap(NativeAllocation<cryptoki_sys::CK_ECDH_AES_KEY_WRAP_PARAMS>, Vec<u8>),
+    Ecdh2Derive(NativeAllocation<cryptoki_sys::CK_ECDH2_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    EcmqvDerive(NativeAllocation<cryptoki_sys::CK_ECMQV_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    X942Dh1Derive(NativeAllocation<cryptoki_sys::CK_X9_42_DH1_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
+    X942Dh2Derive(
+        NativeAllocation<cryptoki_sys::CK_X9_42_DH2_DERIVE_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+    ),
+    X942MqvDerive(
+        NativeAllocation<cryptoki_sys::CK_X9_42_MQV_DERIVE_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+    ),
+    Gostr3410Derive(NativeAllocation<cryptoki_sys::CK_GOSTR3410_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
+    Gostr3410KeyWrap(
+        NativeAllocation<cryptoki_sys::CK_GOSTR3410_KEY_WRAP_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+    ),
+    KeyWrapSetOaep(NativeAllocation<cryptoki_sys::CK_KEY_WRAP_SET_OAEP_PARAMS>, Vec<u8>),
+    KeaDerive(NativeAllocation<cryptoki_sys::CK_KEA_DERIVE_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>),
+    IkePrfDerive(NativeAllocation<cryptoki_sys::CK_IKE_PRF_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
+    Ike1PrfDerive(NativeAllocation<cryptoki_sys::CK_IKE1_PRF_DERIVE_PARAMS>, Vec<u8>, Vec<u8>),
+    Ike1ExtendedDerive(NativeAllocation<cryptoki_sys::CK_IKE1_EXTENDED_DERIVE_PARAMS>, Vec<u8>),
+    Ike2PrfPlusDerive(NativeAllocation<cryptoki_sys::CK_IKE2_PRF_PLUS_DERIVE_PARAMS>, Vec<u8>),
     WtlsMasterKeyDerive(
-        Box<cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS>,
         Vec<u8>,
         Vec<u8>,
         Vec<u8>,
     ),
     WtlsPrf(
-        Box<cryptoki_sys::CK_WTLS_PRF_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_WTLS_PRF_PARAMS>,
         Vec<u8>,
         Vec<u8>,
         Vec<u8>,
         Box<cryptoki_sys::CK_ULONG>,
     ),
     WtlsKeyMat(
-        Box<cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS>,
         Vec<u8>,
         Vec<u8>,
         Box<cryptoki_sys::CK_WTLS_KEY_MAT_OUT>,
         Vec<u8>,
     ),
     Sp800108Kdf(
-        Box<cryptoki_sys::CK_SP800_108_KDF_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_SP800_108_KDF_PARAMS>,
         Vec<cryptoki_sys::CK_PRF_DATA_PARAM>,
         Vec<Vec<u8>>,
         FfiSp800108DerivedKeys,
     ),
     Sp800108FeedbackKdf(
-        Box<cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_SP800_108_FEEDBACK_KDF_PARAMS>,
         Vec<cryptoki_sys::CK_PRF_DATA_PARAM>,
         Vec<Vec<u8>>,
         Vec<u8>,
         FfiSp800108DerivedKeys,
     ),
-    X3dhInitiate(Box<cryptoki_sys::CK_X3DH_INITIATE_PARAMS>, Vec<u8>, Vec<u8>),
-    X3dhRespond(Box<cryptoki_sys::CK_X3DH_RESPOND_PARAMS>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
-    X2RatchetInitialize(Box<cryptoki_sys::CK_X2RATCHET_INITIALIZE_PARAMS>, Vec<u8>),
-    X2RatchetRespond(Box<cryptoki_sys::CK_X2RATCHET_RESPOND_PARAMS>, Vec<u8>),
-    Otp(Box<cryptoki_sys::CK_OTP_PARAMS>, Vec<cryptoki_sys::CK_OTP_PARAM>, Vec<Vec<u8>>),
+    X3dhInitiate(NativeAllocation<cryptoki_sys::CK_X3DH_INITIATE_PARAMS>, Vec<u8>, Vec<u8>),
+    X3dhRespond(
+        NativeAllocation<cryptoki_sys::CK_X3DH_RESPOND_PARAMS>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+    ),
+    X2RatchetInitialize(NativeAllocation<cryptoki_sys::CK_X2RATCHET_INITIALIZE_PARAMS>, Vec<u8>),
+    X2RatchetRespond(NativeAllocation<cryptoki_sys::CK_X2RATCHET_RESPOND_PARAMS>, Vec<u8>),
+    Otp(
+        NativeAllocation<cryptoki_sys::CK_OTP_PARAMS>,
+        Vec<cryptoki_sys::CK_OTP_PARAM>,
+        Vec<Vec<u8>>,
+    ),
     // Last field keeps the inner mechanism's own parameter backing alive for as
     // long as the KIP params reference its C struct (L8 — replaces a mem::forget
     // that permanently leaked the inner backing).
     Kip(
-        Box<cryptoki_sys::CK_KIP_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_KIP_PARAMS>,
         Box<cryptoki_sys::CK_MECHANISM>,
         Vec<u8>,
         Box<FfiParamBacking>,
     ),
     CmsSig(
-        Box<cryptoki_sys::CK_CMS_SIG_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_CMS_SIG_PARAMS>,
         Box<cryptoki_sys::CK_MECHANISM>,
         Box<cryptoki_sys::CK_MECHANISM>,
         Vec<u8>,
@@ -536,7 +606,7 @@ enum FfiParamBacking {
         Box<FfiParamBacking>,
     ),
     SkipjackPrivateWrap(
-        Box<cryptoki_sys::CK_SKIPJACK_PRIVATE_WRAP_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_SKIPJACK_PRIVATE_WRAP_PARAMS>,
         Zeroizing<Vec<u8>>, // password — wiped on drop (E1)
         Vec<u8>,            // public_data
         Vec<u8>,            // random_a
@@ -545,7 +615,7 @@ enum FfiParamBacking {
         Vec<u8>,            // subprime_q
     ),
     SkipjackRelayx(
-        Box<cryptoki_sys::CK_SKIPJACK_RELAYX_PARAMS>,
+        NativeAllocation<cryptoki_sys::CK_SKIPJACK_RELAYX_PARAMS>,
         Vec<u8>,            // old_wrapped_x
         Zeroizing<Vec<u8>>, // old_password — wiped on drop (E1)
         Vec<u8>,            // old_public_data
@@ -1067,17 +1137,20 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             });
             let oaep_ptr = &mut *oaep as *mut cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS;
 
-            let mut wrap = Box::new(FfiRsaAesKeyWrapParams {
+            let wrap = Box::new(FfiRsaAesKeyWrapParams {
                 ul_aes_key_bits: narrow_wire_ulong(p.aes_key_bits)?,
                 p_oaep_params: oaep_ptr,
             });
-            let ptr = &mut *wrap as *mut FfiRsaAesKeyWrapParams as *mut std::ffi::c_void;
+            // C3M.2: project the outer root from the persistent allocation,
+            // never from a reborrow of the moved box.
+            let wrap_allocation = NativeAllocation::from_box(wrap);
+            let ptr = wrap_allocation.root() as *mut std::ffi::c_void;
             let len = std::mem::size_of::<FfiRsaAesKeyWrapParams>();
             Ok(FfiMechanism::with_param(
                 mech_type,
                 ptr,
                 len,
-                FfiParamBacking::RsaAesKeyWrap(wrap, oaep, source_data),
+                FfiParamBacking::RsaAesKeyWrap(wrap_allocation, oaep, source_data),
             ))
         }
 

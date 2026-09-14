@@ -22,10 +22,17 @@ fn input(values: [u64; 6]) -> CkMechanism {
 
 /// The only representation-dependent observer: enumerate storage actually
 /// retained by the owner, not storage inferred from native raw pointers.
-fn retained_regions(ffi: &FfiMechanism) -> (&CK_X3DH_RESPOND_PARAMS, Vec<&[u8]>) {
+/// The native record is returned as an owned snapshot plus the live root
+/// address: no live reference into retained storage may cross the owner
+/// moves this suite performs.
+fn retained_regions(
+    ffi: &FfiMechanism,
+) -> (CK_X3DH_RESPOND_PARAMS, *mut CK_X3DH_RESPOND_PARAMS, Vec<&[u8]>) {
     match &ffi._backing {
         FfiParamBacking::X3dhRespond(native, identity, prekey, onetime, ephemeral) => (
-            native,
+            // SAFETY: backing is borrowed alive; the copy carries no provenance.
+            unsafe { native.snapshot() },
+            native.root(),
             vec![identity.as_slice(), prekey.as_slice(), onetime.as_slice(), ephemeral.as_slice()],
         ),
         _ => panic!("expected X3DH response backing"),
@@ -36,9 +43,9 @@ fn retained_regions(ffi: &FfiMechanism) -> (&CK_X3DH_RESPOND_PARAMS, Vec<&[u8]>)
 /// baseline may supply dangling raw pointer values; comparing their addresses
 /// is safe, whereas reading from them (even in a test) would not be.
 fn assert_live_backing(ffi: &FfiMechanism) {
-    let (native, regions) = retained_regions(ffi);
+    let (native, root, regions) = retained_regions(ffi);
     let parameter_pointer = ffi.ck_mechanism.pParameter;
-    assert_eq!(parameter_pointer.cast_const(), std::ptr::from_ref(native).cast());
+    assert_eq!(parameter_pointer, root.cast(), "stored pointer names the live root");
     let parameter_len = ffi.ck_mechanism.ulParameterLen;
     assert_eq!(parameter_len as usize, std::mem::size_of::<CK_X3DH_RESPOND_PARAMS>());
 

@@ -28,6 +28,8 @@ mod loading;
 mod mapping;
 #[path = "ffi/message_ops.rs"]
 mod message_ops;
+#[path = "ffi/native_allocation.rs"]
+mod native_allocation;
 #[path = "ffi/object_ops.rs"]
 mod object_ops;
 #[path = "ffi/session_3x_ops.rs"]
