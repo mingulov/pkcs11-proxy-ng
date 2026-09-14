@@ -1,4 +1,5 @@
 use super::ffi_conversion::{mechanism_to_ffi, narrow_wire_ulong};
+use super::native_allocation::NativeAllocation;
 use super::{FfiBackend, call_3x_fn};
 use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
@@ -160,15 +161,17 @@ fn validate_message_init_provider_ack(
 
 /// Owns a reconstructed `CK_*_MESSAGE_PARAMS` C struct and its backing
 /// IV/tag/nonce/MAC buffers so that a `CK_MECHANISM` can reference them across a
-/// `C_Message{Encrypt,Decrypt}Init` FFI call. The params struct is boxed (stable
-/// heap address) and the buffers live in `_buffers`; both survive a move of this
-/// holder, so the raw pointers stored in `ck_mechanism` and the params struct
-/// stay valid for as long as the holder is alive.
+/// `C_Message{Encrypt,Decrypt}Init` FFI call. The params struct lives in a
+/// persistent [`NativeAllocation`] (stable heap address with no reborrow, so
+/// owner moves cannot strand the stored root) and the buffers live in
+/// `_buffers`; both survive a move of this holder, so the raw pointers stored
+/// in `ck_mechanism` and the params struct stay valid for as long as the
+/// holder is alive.
 pub(super) struct MessageInitMechanism {
     pub(super) ck_mechanism: cryptoki_sys::CK_MECHANISM,
-    _gcm: Option<Box<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>>,
-    _ccm: Option<Box<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>>,
-    _salsa: Option<Box<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>>,
+    _gcm: Option<NativeAllocation<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>>,
+    _ccm: Option<NativeAllocation<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>>,
+    _salsa: Option<NativeAllocation<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>>,
     _buffers: Vec<Vec<u8>>,
 }
 
@@ -199,12 +202,14 @@ impl MessageInitMechanism {
         };
         let (valid, outer, len) = match (input, &self._gcm, &self._ccm, &self._salsa) {
             (MessageParameter::GcmMessage(p), Some(native), None, None) => {
-                let valid = pointer_matches(native.pIv, first, p.iv_null_len)
-                    && pointer_matches(native.pTag, second, p.tag_null_len)
-                    && native.ulIvLen as u64 == p.iv_null_len.unwrap_or(p.iv.len() as u64)
-                    && native.ulIvFixedBits as u64 == p.iv_fixed_bits
-                    && native.ivGenerator as u64 == p.iv_generator
-                    && native.ulTagBits as u64 == p.tag_bits
+                // SAFETY: holder is borrowed alive; the copy carries no provenance.
+                let snapshot = unsafe { native.snapshot() };
+                let valid = pointer_matches(snapshot.pIv, first, p.iv_null_len)
+                    && pointer_matches(snapshot.pTag, second, p.tag_null_len)
+                    && snapshot.ulIvLen as u64 == p.iv_null_len.unwrap_or(p.iv.len() as u64)
+                    && snapshot.ulIvFixedBits as u64 == p.iv_fixed_bits
+                    && snapshot.ivGenerator as u64 == p.iv_generator
+                    && snapshot.ulTagBits as u64 == p.tag_bits
                     && if p.iv_null_len.is_some() {
                         first.is_empty() && p.iv.is_empty()
                     } else {
@@ -212,18 +217,21 @@ impl MessageInitMechanism {
                     };
                 (
                     valid,
-                    (&**native as *const cryptoki_sys::CK_GCM_MESSAGE_PARAMS).cast(),
+                    native.root().cast(),
                     std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>(),
                 )
             }
             (MessageParameter::CcmMessage(p), None, Some(native), None) => {
-                let valid = pointer_matches(native.pNonce, first, p.nonce_null_len)
-                    && pointer_matches(native.pMAC, second, p.mac_null_len)
-                    && native.ulDataLen as u64 == p.data_len
-                    && native.ulNonceLen as u64 == p.nonce_null_len.unwrap_or(p.nonce.len() as u64)
-                    && native.ulNonceFixedBits as u64 == p.nonce_fixed_bits
-                    && native.nonceGenerator as u64 == p.nonce_generator
-                    && native.ulMACLen as u64 == p.mac_len
+                // SAFETY: holder is borrowed alive; the copy carries no provenance.
+                let snapshot = unsafe { native.snapshot() };
+                let valid = pointer_matches(snapshot.pNonce, first, p.nonce_null_len)
+                    && pointer_matches(snapshot.pMAC, second, p.mac_null_len)
+                    && snapshot.ulDataLen as u64 == p.data_len
+                    && snapshot.ulNonceLen as u64
+                        == p.nonce_null_len.unwrap_or(p.nonce.len() as u64)
+                    && snapshot.ulNonceFixedBits as u64 == p.nonce_fixed_bits
+                    && snapshot.nonceGenerator as u64 == p.nonce_generator
+                    && snapshot.ulMACLen as u64 == p.mac_len
                     && if p.nonce_null_len.is_some() {
                         first.is_empty() && p.nonce.is_empty()
                     } else {
@@ -231,19 +239,20 @@ impl MessageInitMechanism {
                     };
                 (
                     valid,
-                    (&**native as *const cryptoki_sys::CK_CCM_MESSAGE_PARAMS).cast(),
+                    native.root().cast(),
                     std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>(),
                 )
             }
             (MessageParameter::SalaChacha(p), None, None, Some(native)) => {
-                let valid = pointer_matches(native.pNonce, first, p.nonce_null_len)
-                    && pointer_matches(native.pTag, second, p.tag_null_len)
-                    && native.ulNonceLen as u64 == p.nonce_bits
+                // SAFETY: holder is borrowed alive; the copy carries no provenance.
+                let snapshot = unsafe { native.snapshot() };
+                let valid = pointer_matches(snapshot.pNonce, first, p.nonce_null_len)
+                    && pointer_matches(snapshot.pTag, second, p.tag_null_len)
+                    && snapshot.ulNonceLen as u64 == p.nonce_bits
                     && first == &p.nonce;
                 (
                     valid,
-                    (&**native as *const cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS)
-                        .cast(),
+                    native.root().cast(),
                     std::mem::size_of::<cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>(),
                 )
             }
@@ -280,14 +289,16 @@ impl MessageInitMechanism {
     }
 }
 
-/// Build a `CK_MECHANISM` pointing at a boxed `T` (stable heap address).
+/// Build a `CK_MECHANISM` pointing at a persistently allocated `T` (stable
+/// heap address). The root projects from the allocation, never from a
+/// reborrow of a moved box (C3M.2 defect I1 class).
 fn message_mechanism_for<T>(
     mech_type: cryptoki_sys::CK_MECHANISM_TYPE,
-    boxed: &mut Box<T>,
+    allocation: &NativeAllocation<T>,
 ) -> cryptoki_sys::CK_MECHANISM {
     cryptoki_sys::CK_MECHANISM {
         mechanism: mech_type,
-        pParameter: (&mut **boxed as *mut T).cast(),
+        pParameter: allocation.root().cast(),
         ulParameterLen: std::mem::size_of::<T>() as cryptoki_sys::CK_ULONG,
     }
 }
@@ -315,18 +326,19 @@ pub(super) fn build_message_init_mechanism(
             let ul_tag_bits = message_ck_ulong(gcm.tag_bits)?;
             let mut iv = gcm.iv.clone();
             let mut tag = gcm.tag.clone();
-            let mut boxed = Box::new(cryptoki_sys::CK_GCM_MESSAGE_PARAMS {
-                pIv: message_pointer(&mut iv, gcm.iv_null_len),
-                ulIvLen: ul_iv_len,
-                ulIvFixedBits: ul_iv_fixed_bits,
-                ivGenerator: iv_generator,
-                pTag: message_pointer(&mut tag, gcm.tag_null_len),
-                ulTagBits: ul_tag_bits,
-            });
-            let ck_mechanism = message_mechanism_for(mech_type, &mut boxed);
+            let allocation =
+                NativeAllocation::from_box(Box::new(cryptoki_sys::CK_GCM_MESSAGE_PARAMS {
+                    pIv: message_pointer(&mut iv, gcm.iv_null_len),
+                    ulIvLen: ul_iv_len,
+                    ulIvFixedBits: ul_iv_fixed_bits,
+                    ivGenerator: iv_generator,
+                    pTag: message_pointer(&mut tag, gcm.tag_null_len),
+                    ulTagBits: ul_tag_bits,
+                }));
+            let ck_mechanism = message_mechanism_for(mech_type, &allocation);
             Ok(MessageInitMechanism {
                 ck_mechanism,
-                _gcm: Some(boxed),
+                _gcm: Some(allocation),
                 _ccm: None,
                 _salsa: None,
                 _buffers: vec![iv, tag],
@@ -341,20 +353,21 @@ pub(super) fn build_message_init_mechanism(
             let ul_mac_len = message_ck_ulong(ccm.mac_len)?;
             let mut nonce = ccm.nonce.clone();
             let mut mac = ccm.mac.clone();
-            let mut boxed = Box::new(cryptoki_sys::CK_CCM_MESSAGE_PARAMS {
-                ulDataLen: ul_data_len,
-                pNonce: message_pointer(&mut nonce, ccm.nonce_null_len),
-                ulNonceLen: ul_nonce_len,
-                ulNonceFixedBits: ul_nonce_fixed_bits,
-                nonceGenerator: nonce_generator,
-                pMAC: message_pointer(&mut mac, ccm.mac_null_len),
-                ulMACLen: ul_mac_len,
-            });
-            let ck_mechanism = message_mechanism_for(mech_type, &mut boxed);
+            let allocation =
+                NativeAllocation::from_box(Box::new(cryptoki_sys::CK_CCM_MESSAGE_PARAMS {
+                    ulDataLen: ul_data_len,
+                    pNonce: message_pointer(&mut nonce, ccm.nonce_null_len),
+                    ulNonceLen: ul_nonce_len,
+                    ulNonceFixedBits: ul_nonce_fixed_bits,
+                    nonceGenerator: nonce_generator,
+                    pMAC: message_pointer(&mut mac, ccm.mac_null_len),
+                    ulMACLen: ul_mac_len,
+                }));
+            let ck_mechanism = message_mechanism_for(mech_type, &allocation);
             Ok(MessageInitMechanism {
                 ck_mechanism,
                 _gcm: None,
-                _ccm: Some(boxed),
+                _ccm: Some(allocation),
                 _salsa: None,
                 _buffers: vec![nonce, mac],
             })
@@ -363,17 +376,19 @@ pub(super) fn build_message_init_mechanism(
             let ul_nonce_len = message_ck_ulong(s.nonce_bits)?;
             let mut nonce = s.nonce.clone();
             let mut tag = s.tag.clone();
-            let mut boxed = Box::new(cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS {
-                pNonce: message_pointer(&mut nonce, s.nonce_null_len),
-                ulNonceLen: ul_nonce_len,
-                pTag: message_pointer(&mut tag, s.tag_null_len),
-            });
-            let ck_mechanism = message_mechanism_for(mech_type, &mut boxed);
+            let allocation = NativeAllocation::from_box(Box::new(
+                cryptoki_sys::CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS {
+                    pNonce: message_pointer(&mut nonce, s.nonce_null_len),
+                    ulNonceLen: ul_nonce_len,
+                    pTag: message_pointer(&mut tag, s.tag_null_len),
+                },
+            ));
+            let ck_mechanism = message_mechanism_for(mech_type, &allocation);
             Ok(MessageInitMechanism {
                 ck_mechanism,
                 _gcm: None,
                 _ccm: None,
-                _salsa: Some(boxed),
+                _salsa: Some(allocation),
                 _buffers: vec![nonce, tag],
             })
         }
@@ -3662,5 +3677,71 @@ mod tests {
             matches!(result, Err(CkRv::MECHANISM_PARAM_INVALID)),
             "raw message param must be rejected",
         );
+    }
+
+    /// Row-6 retained-envelope gate (C3M.6 order item 6): the GCM and CCM
+    /// envelope roots and their output cells must survive production-style
+    /// owner moves with stable addresses, and input validation must still
+    /// accept the moved holder. Reads use unaligned raw projections, never
+    /// typed references into retained storage.
+    #[test]
+    fn native_owner_message_envelopes_survive_moves_and_validate() {
+        let gcm_param = MessageParameter::GcmMessage(GcmMessageParams {
+            iv: vec![0x11; 12],
+            iv_null_len: None,
+            iv_fixed_bits: 0,
+            iv_generator: cryptoki_sys::CKG_GENERATE_COUNTER_XOR as u64,
+            tag: vec![0; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        });
+        let ccm_param = MessageParameter::CcmMessage(CcmMessageParams {
+            data_len: 64,
+            nonce: vec![0x22; 12],
+            nonce_null_len: None,
+            nonce_fixed_bits: 0,
+            nonce_generator: cryptoki_sys::CKG_GENERATE_COUNTER_XOR as u64,
+            mac: vec![0; 16],
+            mac_null_len: None,
+            mac_len: 16,
+        });
+        for (mech_type, param, expected_len) in [
+            (
+                cryptoki_sys::CKM_AES_GCM as cryptoki_sys::CK_MECHANISM_TYPE,
+                &gcm_param,
+                std::mem::size_of::<cryptoki_sys::CK_GCM_MESSAGE_PARAMS>(),
+            ),
+            (
+                cryptoki_sys::CKM_AES_CCM as cryptoki_sys::CK_MECHANISM_TYPE,
+                &ccm_param,
+                std::mem::size_of::<cryptoki_sys::CK_CCM_MESSAGE_PARAMS>(),
+            ),
+        ] {
+            let init =
+                build_message_init_mechanism(mech_type, param).expect("envelope reconstructs");
+            let root = init.ck_mechanism.pParameter;
+            assert!(!root.is_null(), "envelope keeps a live root");
+            assert_eq!(
+                init.ck_mechanism.ulParameterLen as usize, expected_len,
+                "envelope advertises its native struct size"
+            );
+            // Move the holder the way session caches do: Box, then Vec growth.
+            let boxed = Box::new(init);
+            let mut holders = Vec::with_capacity(1);
+            holders.push(*boxed);
+            holders.reserve(8);
+            let moved_holder = holders.pop().expect("moved holder remains present");
+            assert_eq!(
+                moved_holder.ck_mechanism.pParameter, root,
+                "owner move preserves the retained envelope root"
+            );
+            assert_eq!(
+                moved_holder.ck_mechanism.ulParameterLen as usize, expected_len,
+                "owner move preserves the advertised size"
+            );
+            moved_holder
+                .validate_authenticated_inputs(param)
+                .expect("moved envelope still validates its inputs");
+        }
     }
 }
