@@ -25,7 +25,7 @@ fn pss_input() -> CkMechanism {
 #[test]
 fn native_owner_pss_retained_root_survives_moves_and_snapshots() {
     let ffi = mechanism_to_ffi(&pss_input()).expect("PSS parameters convert");
-    let parameter_pointer = ffi.ck_mechanism.pParameter;
+    let parameter_pointer = ffi.ck_mechanism().pParameter;
     assert!(!parameter_pointer.is_null(), "PSS keeps a live parameter root");
     // SAFETY: the owner is alive and unchanged; read once before the move.
     let before = unsafe { (parameter_pointer.cast::<CK_RSA_PKCS_PSS_PARAMS>()).read_unaligned() };
@@ -41,12 +41,13 @@ fn native_owner_pss_retained_root_survives_moves_and_snapshots() {
     let moved_owner = owners.pop().expect("moved owner remains present");
 
     assert_eq!(
-        moved_owner.ck_mechanism.pParameter, parameter_pointer,
+        moved_owner.ck_mechanism().pParameter,
+        parameter_pointer,
         "owner move preserves the retained native root address"
     );
     // SAFETY: the moved owner is alive; the snapshot must read the same root.
     let after = unsafe {
-        (moved_owner.ck_mechanism.pParameter.cast::<CK_RSA_PKCS_PSS_PARAMS>()).read_unaligned()
+        (moved_owner.ck_mechanism().pParameter.cast::<CK_RSA_PKCS_PSS_PARAMS>()).read_unaligned()
     };
     assert_eq!(after.hashAlg, before.hashAlg, "snapshot survives the owner move");
     assert_eq!(after.mgf, before.mgf, "snapshot survives the owner move");

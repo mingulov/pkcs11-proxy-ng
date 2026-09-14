@@ -12,14 +12,14 @@ impl FfiBackend {
     ) -> CkResult<()> {
         match mechanism {
             Some(mech) => {
-                let mut ffi_mech = mechanism_to_ffi(mech)?;
+                let ffi_mech = mechanism_to_ffi(mech)?;
                 let (sig_ptr, sig_len) = signature.as_ptr_len();
                 call_3x_fn!(
                     self,
                     func_list_3_2,
                     C_VerifySignatureInit,
                     Self::session_handle(session),
-                    &mut ffi_mech.ck_mechanism as *mut cryptoki_sys::CK_MECHANISM,
+                    ffi_mech.ck_mechanism_ptr(),
                     Self::object_handle(key),
                     sig_ptr as *mut cryptoki_sys::CK_BYTE,
                     Self::ulong_len_u64(sig_len)

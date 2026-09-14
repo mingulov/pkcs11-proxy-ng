@@ -272,7 +272,7 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        Self::ck_result(call(function, &mut ffi_mech.ck_mechanism))
+        Self::ck_result(call(function, ffi_mech.ck_mechanism_mut()))
     }
 
     /// Like `call_unit_with_mechanism` but caches the `FfiMechanism` in
@@ -295,7 +295,7 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        Self::ck_result(call(function, &mut ffi_mech.ck_mechanism))?;
+        Self::ck_result(call(function, ffi_mech.ck_mechanism_mut()))?;
         // Keep the mechanism's backing memory alive in this family's slot.
         self.mech_cache.insert((session.0, family), ffi_mech);
         self.last_init_family.insert(session.0, family);
@@ -316,7 +316,7 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        Self::ck_result(call(function, &mut ffi_mech.ck_mechanism))?;
+        Self::ck_result(call(function, ffi_mech.ck_mechanism_mut()))?;
         let output_params = ffi_mech.output_params();
         // Keep the mechanism's backing memory alive in this family's slot.
         self.mech_cache.insert((session.0, family), ffi_mech);
@@ -421,7 +421,7 @@ impl FfiBackend {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         Self::two_call_bytes(|output, output_len| {
-            call(function, &mut ffi_mech.ck_mechanism, output, output_len)
+            call(function, ffi_mech.ck_mechanism_mut(), output, output_len)
         })
     }
 
@@ -440,7 +440,7 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        Self::object_output(|handle| call(function, &mut ffi_mech.ck_mechanism, handle))
+        Self::object_output(|handle| call(function, ffi_mech.ck_mechanism_mut(), handle))
     }
 
     /// Single FFI call with exact buffer semantics.
@@ -537,7 +537,7 @@ impl FfiBackend {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         Self::single_call_bytes_exact(spec, |output, output_len| {
-            call(function, &mut ffi_mech.ck_mechanism, output, output_len)
+            call(function, ffi_mech.ck_mechanism_mut(), output, output_len)
         })
     }
 
@@ -562,7 +562,7 @@ impl FfiBackend {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let handle =
-            Self::object_output(|handle| call(function, &mut ffi_mech.ck_mechanism, handle))?;
+            Self::object_output(|handle| call(function, ffi_mech.ck_mechanism_mut(), handle))?;
         Ok((handle, ffi_mech.output_params()))
     }
 
@@ -590,7 +590,7 @@ impl FfiBackend {
             Err(rv) => return Ok(CkDeriveKeyOutputResult::error(rv, None)),
         };
         let mut handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
-        let rv = CkRv(call(function, &mut ffi_mech.ck_mechanism, &mut handle) as u64);
+        let rv = CkRv(call(function, ffi_mech.ck_mechanism_mut(), &mut handle) as u64);
         let mechanism_out = ffi_mech.output_params();
         if rv.is_ok() {
             Ok(CkDeriveKeyOutputResult::ok(CkObjectHandle(handle as u64), mechanism_out))
@@ -628,7 +628,7 @@ impl FfiBackend {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let result = Self::single_call_bytes_exact(spec, |output, output_len| {
-            call(function, &mut ffi_mech.ck_mechanism, output, output_len)
+            call(function, ffi_mech.ck_mechanism_mut(), output, output_len)
         })?;
         // Surface mutated params after successful data calls and genuine
         // missing-length calls. Ordinary NULL-output size queries suppress them.
@@ -724,7 +724,7 @@ impl FfiBackend {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         Self::object_pair_output(|first, second| {
-            call(function, &mut ffi_mech.ck_mechanism, first, second)
+            call(function, ffi_mech.ck_mechanism_mut(), first, second)
         })
     }
 }

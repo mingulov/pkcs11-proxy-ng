@@ -33,7 +33,7 @@ impl<'a> NativeParameter<'a> {
             NativeStorage::Mechanism(mechanism_to_ffi(mechanism)?)
         };
         let original = match &storage {
-            NativeStorage::Mechanism(ffi) => ffi.ck_mechanism,
+            NativeStorage::Mechanism(ffi) => ffi.ck_mechanism(),
             NativeStorage::Message(ffi, _) => ffi.ck_mechanism,
         };
         Ok(Self { storage, original, input: mechanism })
@@ -41,14 +41,14 @@ impl<'a> NativeParameter<'a> {
 
     fn pointer(&mut self) -> cryptoki_sys::CK_MECHANISM_PTR {
         match &mut self.storage {
-            NativeStorage::Mechanism(ffi) => &mut ffi.ck_mechanism,
+            NativeStorage::Mechanism(ffi) => ffi.ck_mechanism_ptr(),
             NativeStorage::Message(ffi, _) => &mut ffi.ck_mechanism,
         }
     }
     fn validate_inputs(&self) -> CkResult<()> {
         let outer = match &self.storage {
-            NativeStorage::Mechanism(ffi) => &ffi.ck_mechanism,
-            NativeStorage::Message(ffi, _) => &ffi.ck_mechanism,
+            NativeStorage::Mechanism(ffi) => ffi.ck_mechanism(),
+            NativeStorage::Message(ffi, _) => ffi.ck_mechanism,
         };
         if outer.mechanism != self.original.mechanism
             || outer.pParameter != self.original.pParameter

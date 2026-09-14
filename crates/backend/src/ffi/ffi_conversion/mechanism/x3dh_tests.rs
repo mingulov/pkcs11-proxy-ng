@@ -44,9 +44,9 @@ fn retained_regions(
 /// is safe, whereas reading from them (even in a test) would not be.
 fn assert_live_backing(ffi: &FfiMechanism) {
     let (native, root, regions) = retained_regions(ffi);
-    let parameter_pointer = ffi.ck_mechanism.pParameter;
+    let parameter_pointer = ffi.ck_mechanism().pParameter;
     assert_eq!(parameter_pointer, root.cast(), "stored pointer names the live root");
-    let parameter_len = ffi.ck_mechanism.ulParameterLen;
+    let parameter_len = ffi.ck_mechanism().ulParameterLen;
     assert_eq!(parameter_len as usize, std::mem::size_of::<CK_X3DH_RESPOND_PARAMS>());
 
     let pointers = [
@@ -119,7 +119,7 @@ fn assert_native_readback(ffi: &FfiMechanism, expected: [u64; 6]) {
     let mut observation = Observation::default();
     // SAFETY: assert_live_backing validated all pointer ranges in this owner;
     // the shared borrow keeps that owner alive and unchanged across the call.
-    let rv = unsafe { native_oracle(&ffi.ck_mechanism, &mut observation) };
+    let rv = unsafe { native_oracle(&ffi.ck_mechanism(), &mut observation) };
     assert_eq!(rv, cryptoki_sys::CKR_DEVICE_ERROR, "native return value is preserved");
     assert_eq!(observation.calls, 1, "exactly one native oracle call");
     assert_eq!(observation.mechanism, cryptoki_sys::CKM_X3DH_RESPOND);
@@ -150,13 +150,13 @@ fn x3dh_respond_four_pointees_keep_native_width_after_owner_move() {
     };
     let ffi = mechanism_to_ffi(&input(values)).expect("native-width values convert");
     assert_live_backing(&ffi);
-    let parameter_pointer = ffi.ck_mechanism.pParameter;
+    let parameter_pointer = ffi.ck_mechanism().pParameter;
     let boxed_owner = Box::new(ffi);
     let mut owners = Vec::with_capacity(1);
     owners.push(*boxed_owner);
     owners.reserve(8);
     let moved_owner = owners.pop().expect("moved owner remains present");
-    assert_eq!(moved_owner.ck_mechanism.pParameter, parameter_pointer);
+    assert_eq!(moved_owner.ck_mechanism().pParameter, parameter_pointer);
     assert_native_readback(&moved_owner, values);
 }
 

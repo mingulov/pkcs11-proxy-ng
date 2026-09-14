@@ -52,6 +52,10 @@ mod wrap_contract_tests;
 #[path = "ffi/exact_output_contract_tests.rs"]
 mod exact_output_contract_tests;
 
+#[cfg(all(test, unix))]
+#[path = "ffi/retained_owner_contract_tests.rs"]
+mod retained_owner_contract_tests;
+
 use ffi_conversion::{FfiAttributeQueries, FfiAttrs, space_pad};
 use mapping::{
     info_from_ck, mechanism_info_from_ck, session_info_from_ck, slot_info_from_ck,

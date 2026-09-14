@@ -15,16 +15,52 @@ mod x3dh_tests;
 /// into.  The C struct fields reference heap allocations inside `_backing`,
 /// which stay at a stable address as long as `FfiMechanism` is alive.
 ///
+/// The outer struct itself is heap-allocated too (C3M uniform outer): the
+/// address handed to native code must stay valid not only for the call but
+/// for every later operation while the owner is retained, because backends
+/// may retain the Init root (proven by the retained-mechanism oracle on
+/// i686, where a frame-local outer is observably clobbered).  Readers get
+/// owned copies only, never a live reference into retained storage.
+///
 /// **Safety contract:** callers must not move the byte buffers inside
-/// `_backing` (no realloc) while `ck_mechanism` is in use.  Since all fields
-/// are private except `ck_mechanism`, and we never push to a Vec after
-/// construction, this is upheld automatically.
+/// `_backing` (no realloc) while the outer is in use.  Since all fields
+/// are private and we never push to a Vec after construction, this is
+/// upheld automatically.
 pub(crate) struct FfiMechanism {
-    pub ck_mechanism: cryptoki_sys::CK_MECHANISM,
+    outer: NativeAllocation<cryptoki_sys::CK_MECHANISM>,
     _backing: FfiParamBacking,
 }
 
 impl FfiMechanism {
+    /// Owned copy of the heap-allocated outer `CK_MECHANISM`.
+    ///
+    /// Copies only: no live `&CK_MECHANISM` into retained storage escapes,
+    /// per the [`NativeAllocation`] discipline.
+    pub(in crate::ffi) fn ck_mechanism(&self) -> cryptoki_sys::CK_MECHANISM {
+        // SAFETY: the outer is a valid initialized CK_MECHANISM owned by
+        // this allocation; the copy carries no provenance.
+        unsafe { self.outer.snapshot() }
+    }
+
+    /// Raw pointer to the heap-allocated outer for native entry.
+    ///
+    /// The address is stable for as long as this owner (and its session
+    /// family slot) is alive, across owner moves and later native calls.
+    pub(in crate::ffi) fn ck_mechanism_ptr(&self) -> *mut cryptoki_sys::CK_MECHANISM {
+        self.outer.root()
+    }
+
+    /// Exclusive access to the heap-allocated outer for pre/post-call
+    /// fixups (e.g. the message fallback NULL/empty acknowledgement).
+    ///
+    /// Like [`NativeAllocation::root`], the caller must hold the
+    /// native-operation guard; the borrow ends before native entry, so no
+    /// live reference crosses a provider call.
+    pub(in crate::ffi) fn ck_mechanism_mut(&mut self) -> &mut cryptoki_sys::CK_MECHANISM {
+        // SAFETY: owned allocation, valid initialized CK_MECHANISM, unique
+        // borrow of the owner; no other reference aliases this storage.
+        unsafe { &mut *self.outer.root() }
+    }
     pub(in crate::ffi) fn validate_authenticated_inputs(
         &self,
         input: &CkMechanism,
@@ -89,14 +125,14 @@ impl FfiMechanism {
         len: usize,
         backing: FfiParamBacking,
     ) -> Self {
-        Self {
-            ck_mechanism: cryptoki_sys::CK_MECHANISM {
-                mechanism: mech_type,
-                pParameter: ptr,
-                ulParameterLen: len as cryptoki_sys::CK_ULONG,
-            },
-            _backing: backing,
-        }
+        // The outer is heap-allocated (uniform outer): its address must
+        // survive the constructing frame for retained providers.
+        let outer = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_MECHANISM {
+            mechanism: mech_type,
+            pParameter: ptr,
+            ulParameterLen: len as cryptoki_sys::CK_ULONG,
+        }));
+        Self { outer, _backing: backing }
     }
 
     /// Build an `FfiMechanism` with no parameter (`pParameter = NULL`).
@@ -2206,7 +2242,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         // -- KIP: nested mechanism pointer + seed + handle ----------------------
         CkMechanismParams::Kip(p) => {
             let inner_ffi = mechanism_to_ffi(&p.mechanism)?;
-            let inner_mech = NativeAllocation::from_box(Box::new(inner_ffi.ck_mechanism));
+            let inner_mech = NativeAllocation::from_box(Box::new(inner_ffi.ck_mechanism()));
             let mut seed = p.seed.clone();
             let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
             let kip = Box::new(cryptoki_sys::CK_KIP_PARAMS {
@@ -2233,8 +2269,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         CkMechanismParams::CmsSig(p) => {
             let sign_ffi = mechanism_to_ffi(&p.signing_mechanism)?;
             let digest_ffi = mechanism_to_ffi(&p.digest_mechanism)?;
-            let sign_mech = NativeAllocation::from_box(Box::new(sign_ffi.ck_mechanism));
-            let digest_mech = NativeAllocation::from_box(Box::new(digest_ffi.ck_mechanism));
+            let sign_mech = NativeAllocation::from_box(Box::new(sign_ffi.ck_mechanism()));
+            let digest_mech = NativeAllocation::from_box(Box::new(digest_ffi.ck_mechanism()));
             let mut content_type = p.content_type.as_bytes().to_vec();
             content_type.push(0); // null-terminate
             let mut req_attrs = p.requested_attributes.clone();

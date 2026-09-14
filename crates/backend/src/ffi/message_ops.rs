@@ -423,13 +423,13 @@ impl FfiBackend {
                 )
             }
             (Some(mech), None) => {
-                let mut ffi_mech = mechanism_to_ffi(mech)?;
+                let ffi_mech = mechanism_to_ffi(mech)?;
                 call_3x_fn!(
                     self,
                     func_list_3_0,
                     C_MessageEncryptInit,
                     Self::session_handle(session),
-                    &mut ffi_mech.ck_mechanism as *mut cryptoki_sys::CK_MECHANISM,
+                    ffi_mech.ck_mechanism_ptr(),
                     Self::object_handle(key)
                 )
             }
@@ -480,15 +480,16 @@ impl FfiBackend {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
             let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-            if ffi_mech.ck_mechanism.pParameter.is_null()
-                && ffi_mech.ck_mechanism.ulParameterLen == 0
+            if ffi_mech.ck_mechanism().pParameter.is_null()
+                && ffi_mech.ck_mechanism().ulParameterLen == 0
             {
-                ffi_mech.ck_mechanism.pParameter = if provider_spec.buffer_present {
+                ffi_mech.ck_mechanism_mut().pParameter = if provider_spec.buffer_present {
                     std::ptr::NonNull::<u8>::dangling().as_ptr().cast()
                 } else {
                     std::ptr::null_mut()
                 };
-                ffi_mech.ck_mechanism.ulParameterLen = message_ck_ulong(provider_spec.buffer_len)?;
+                ffi_mech.ck_mechanism_mut().ulParameterLen =
+                    message_ck_ulong(provider_spec.buffer_len)?;
             } else {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
@@ -497,10 +498,10 @@ impl FfiBackend {
                 func_list_3_0,
                 C_MessageEncryptInit,
                 Self::session_handle(session),
-                &mut ffi_mech.ck_mechanism,
+                ffi_mech.ck_mechanism_ptr(),
                 Self::object_handle(key)
             )?;
-            validate_message_init_provider_ack(&ffi_mech.ck_mechanism, provider_spec)?;
+            validate_message_init_provider_ack(&ffi_mech.ck_mechanism(), provider_spec)?;
         }
         Ok(CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
@@ -537,13 +538,13 @@ impl FfiBackend {
                 )
             }
             (Some(mech), None) => {
-                let mut ffi_mech = mechanism_to_ffi(mech)?;
+                let ffi_mech = mechanism_to_ffi(mech)?;
                 call_3x_fn!(
                     self,
                     func_list_3_0,
                     C_MessageDecryptInit,
                     Self::session_handle(session),
-                    &mut ffi_mech.ck_mechanism as *mut cryptoki_sys::CK_MECHANISM,
+                    ffi_mech.ck_mechanism_ptr(),
                     Self::object_handle(key)
                 )
             }
@@ -594,15 +595,16 @@ impl FfiBackend {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
             let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-            if ffi_mech.ck_mechanism.pParameter.is_null()
-                && ffi_mech.ck_mechanism.ulParameterLen == 0
+            if ffi_mech.ck_mechanism().pParameter.is_null()
+                && ffi_mech.ck_mechanism().ulParameterLen == 0
             {
-                ffi_mech.ck_mechanism.pParameter = if provider_spec.buffer_present {
+                ffi_mech.ck_mechanism_mut().pParameter = if provider_spec.buffer_present {
                     std::ptr::NonNull::<u8>::dangling().as_ptr().cast()
                 } else {
                     std::ptr::null_mut()
                 };
-                ffi_mech.ck_mechanism.ulParameterLen = message_ck_ulong(provider_spec.buffer_len)?;
+                ffi_mech.ck_mechanism_mut().ulParameterLen =
+                    message_ck_ulong(provider_spec.buffer_len)?;
             } else {
                 return Err(CkRv::MECHANISM_PARAM_INVALID);
             }
@@ -611,10 +613,10 @@ impl FfiBackend {
                 func_list_3_0,
                 C_MessageDecryptInit,
                 Self::session_handle(session),
-                &mut ffi_mech.ck_mechanism,
+                ffi_mech.ck_mechanism_ptr(),
                 Self::object_handle(key)
             )?;
-            validate_message_init_provider_ack(&ffi_mech.ck_mechanism, provider_spec)?;
+            validate_message_init_provider_ack(&ffi_mech.ck_mechanism(), provider_spec)?;
         }
         Ok(CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
@@ -637,13 +639,13 @@ impl FfiBackend {
     ) -> CkResult<()> {
         match mechanism {
             Some(mech) => {
-                let mut ffi_mech = mechanism_to_ffi(mech)?;
+                let ffi_mech = mechanism_to_ffi(mech)?;
                 call_3x_fn!(
                     self,
                     func_list_3_0,
                     C_MessageSignInit,
                     Self::session_handle(session),
-                    &mut ffi_mech.ck_mechanism as *mut cryptoki_sys::CK_MECHANISM,
+                    ffi_mech.ck_mechanism_ptr(),
                     Self::object_handle(key)
                 )
             }
@@ -675,13 +677,13 @@ impl FfiBackend {
     ) -> CkResult<()> {
         match mechanism {
             Some(mech) => {
-                let mut ffi_mech = mechanism_to_ffi(mech)?;
+                let ffi_mech = mechanism_to_ffi(mech)?;
                 call_3x_fn!(
                     self,
                     func_list_3_0,
                     C_MessageVerifyInit,
                     Self::session_handle(session),
-                    &mut ffi_mech.ck_mechanism as *mut cryptoki_sys::CK_MECHANISM,
+                    ffi_mech.ck_mechanism_ptr(),
                     Self::object_handle(key)
                 )
             }

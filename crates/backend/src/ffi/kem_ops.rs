@@ -30,7 +30,7 @@ impl FfiBackend {
         let output = Self::single_call_bytes_exact(spec, |buffer, length| unsafe {
             function(
                 Self::session_handle(session),
-                &mut ffi_mech.ck_mechanism,
+                ffi_mech.ck_mechanism_mut(),
                 Self::object_handle(public_key),
                 Self::ffi_attr_ptr(&ffi_attrs),
                 Self::ffi_attr_len(&ffi_attrs),
@@ -69,7 +69,7 @@ impl FfiBackend {
         Self::ck_result(unsafe {
             function(
                 Self::session_handle(session),
-                &mut ffi_mech.ck_mechanism,
+                ffi_mech.ck_mechanism_mut(),
                 Self::object_handle(public_key),
                 Self::ffi_attr_ptr(&ffi_attrs),
                 Self::ffi_attr_len(&ffi_attrs),
@@ -86,7 +86,7 @@ impl FfiBackend {
         Self::ck_result(unsafe {
             function(
                 Self::session_handle(session),
-                &mut ffi_mech.ck_mechanism,
+                ffi_mech.ck_mechanism_mut(),
                 Self::object_handle(public_key),
                 Self::ffi_attr_ptr(&ffi_attrs),
                 Self::ffi_attr_len(&ffi_attrs),
@@ -120,7 +120,7 @@ impl FfiBackend {
             func_list_3_2,
             C_DecapsulateKey,
             Self::session_handle(session),
-            &mut ffi_mech.ck_mechanism,
+            ffi_mech.ck_mechanism_mut(),
             Self::object_handle(private_key),
             Self::ffi_attr_ptr(&ffi_attrs),
             Self::ffi_attr_len(&ffi_attrs),
