@@ -11,8 +11,29 @@ pub mod host_abi;
 pub mod mock;
 pub mod object_cleanup;
 pub mod test_backend_3x;
+#[cfg(feature = "native-owner-test-hooks")]
+pub mod test_hooks;
 pub mod traits;
 pub use ffi::FfiBackend;
 pub use mock::MockBackend;
 pub use test_backend_3x::TestBackend3x;
 pub use traits::Pkcs11Backend;
+
+/// Whether the native-owner test-hook surface is compiled in (C3M.6 row 18).
+///
+/// Default-off. Normal builds must observe `false` here with no hook
+/// symbols and no control listener; the daemon control plane arrives
+/// behind this same feature.
+pub const NATIVE_OWNER_TEST_HOOKS_ENABLED: bool = cfg!(feature = "native-owner-test-hooks");
+
+#[cfg(all(test, not(feature = "native-owner-test-hooks")))]
+mod hook_absence_tests {
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn normal_builds_have_no_hook_surface() {
+        assert!(
+            !super::NATIVE_OWNER_TEST_HOOKS_ENABLED,
+            "default builds must not enable native-owner test hooks"
+        );
+    }
+}

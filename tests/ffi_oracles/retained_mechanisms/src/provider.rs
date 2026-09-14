@@ -80,6 +80,12 @@ pub unsafe extern "C" fn encrypt(
     // Use the retained Init root: re-read the parameter extent and the
     // mechanism type through it. The backend must keep this allocation
     // alive across the two native entries.
+    //
+    // The integer-to-pointer cast is deliberate exposed provenance: it
+    // emulates what a real retaining C provider does with a stored
+    // address (Miri flags the cast with a notice for this reason). The
+    // provenance-clean party must be the backend under test, not this
+    // oracle.
     let retained = state.2.retained_mech as CK_MECHANISM_PTR;
     if !retained.is_null() {
         state.1.encrypt_mech_ptr = retained as u64;
