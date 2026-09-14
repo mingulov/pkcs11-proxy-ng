@@ -17,10 +17,14 @@ The [native ownership contract](native-mechanism-ownership.md) limits live
 production FFI to qualified Linux GNU/musl x86_64/64-bit and x86/32-bit (i686).
 All four Linux caller/daemon width combinations require actual loaded-shim
 receipts; assembly/cross-compilation and old bridge runs are insufficient.
-Windows native-provider daemon support is explicitly superseded/deferred for
-v0.2 in ADR-0011/0006. Portable Windows client/shim/proto/types and mock-only
+Windows native-provider daemon support was deferred for v0.2 in ADR-0011/0006
+and is re-admitted as committed tail stretch (low priority, after the
+provider-matrix gate) per [ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md):
+Windows x64 daemon plus Windows x64
+client shim, both interoperation directions, and the 32-bit/mixed claim.
+Portable Windows client/shim/proto/types and mock-only
 backend/server builds remain, including Windows-client/Linux-daemon use under
-the existing client contract. Windows native loading is lower priority/stretch.
+the existing client contract.
 
 v0.2 supports slot waiting only with `CKF_DONT_BLOCK`; blocking mode is local
 `CKR_FUNCTION_NOT_SUPPORTED`, without polling. One supported waiter uses the

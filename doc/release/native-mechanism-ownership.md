@@ -21,7 +21,10 @@ other architectures/environments and non-Linux native loading are excluded.
 This explicitly supersedes Windows native-provider daemon support in
 [ADR-0011](../adr/ADR-0011-narrow-ck-ulong-client-width-bridging.md) and
 [ADR-0006](../adr/ADR-0006-32-64-bit-cross-platform-compatibility.md) for v0.2.
-Windows native-provider daemon work is deferred, lower priority/stretch work.
+Windows native-provider daemon work is re-admitted as committed v0.2.0 tail
+stretch (low priority, after the provider-matrix gate) per
+[ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md); until that tail
+work lands, the constructor refusal below stays in force.
 
 Portable Windows client/shim/proto/types builds and their existing contracts
 remain; a Windows client may interoperate with a qualified Linux daemon.

@@ -63,7 +63,8 @@ checked with rejection proven on i686 hardware. Still pending: DONT_BLOCK-only
 slot waits with shared native event flags, the qualified Linux
 whole-process lifetime stop, session operation slots, subprocess/topology
 qualification, and the provider parity round. Windows native
-daemon support is deferred; portable Windows clients and mock-only builds
+daemon support is committed v0.2.0 tail stretch (low priority, see ADR-0014);
+portable Windows clients and mock-only builds
 remain. This is not a v0.2 parity/support receipt.
 
 **Public `v0.1.0` support**
