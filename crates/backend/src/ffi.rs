@@ -138,6 +138,24 @@ macro_rules! call_3x_fn {
 #[allow(unused_imports)]
 pub(crate) use call_3x_fn;
 
+/// Operation family owning one retained mechanism slot within a session
+/// (C3M.3 vocabulary).  The names are internal ownership labels, not a claim
+/// about which operations a provider accepts simultaneously.  The five
+/// classic families are the existing `mech_cache` users; the recovery
+/// families own the cancel-only paths that must not evict a classic slot.
+/// Message, VerifySignature and call-scoped (`OneShot`) families arrive with
+/// their migration slices.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(super) enum OperationFamily {
+    Encrypt,
+    Decrypt,
+    Digest,
+    Sign,
+    Verify,
+    SignRecover,
+    VerifyRecover,
+}
+
 /// FFI backend that loads a PKCS#11 shared library via dlopen (ADR-0004 §2).
 pub struct FfiBackend {
     object_cleanup: crate::object_cleanup::ObjectCleanupQuarantine,
@@ -148,16 +166,25 @@ pub struct FfiBackend {
     /// PKCS#11 3.2 function list, if the module supports `C_GetInterface`.
     func_list_3_2: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_2>,
     initialize_args: Option<CString>,
-    /// Per-session mechanism parameter cache.  Some backends (OpenCryptoki)
-    /// store pointers from the mechanism struct passed to *Init calls and
-    /// dereference them during the subsequent operation (Encrypt/Decrypt/…).
-    /// The spec says backends should copy, but for compatibility we keep the
-    /// FfiMechanism (and its backing `Vec<u8>` buffers) alive until the next
-    /// Init call or session close replaces it.
+    /// Per-session, per-family mechanism parameter cache.  Some backends
+    /// (OpenCryptoki) store pointers from the mechanism struct passed to
+    /// *Init calls and dereference them during the subsequent operation
+    /// (Encrypt/Decrypt/…).  The spec says backends should copy, but for
+    /// compatibility we keep the FfiMechanism (and its backing buffers)
+    /// alive until the same family's next Init, cancel, or session close
+    /// replaces it.  Keying by [`OperationFamily`] (C3M.3) means a later
+    /// `*Init` of another family — e.g. Digest after Encrypt, per the pinned
+    /// OASIS dual-operation example — never evicts the first family's
+    /// retained graph, and a cancel retires only its own family's slot.
     ///
     /// Sharded (`DashMap`) so concurrent sessions doing crypto `*Init` calls on
     /// the shared backend do not serialise on one global lock (L4).
-    mech_cache: DashMap<u64, ffi_conversion::FfiMechanism>,
+    mech_cache: DashMap<(u64, OperationFamily), ffi_conversion::FfiMechanism>,
+    /// Per-session marker naming the family stored by the last `*Init` call.
+    /// Preserves the documented [`Pkcs11Backend::session_output_mechanism_params`]
+    /// contract ("set by the last `*_init` call") now that retention slots
+    /// are per-family: the unscoped read resolves through this marker.
+    last_init_family: DashMap<u64, OperationFamily>,
     /// Map of session handle -> slot id. Lets a per-session close path find the
     /// owning slot in O(1) to keep [`slot_sessions`](Self::slot_sessions)
     /// consistent. Populated on successful `ffi_open_session`, drained on close.
@@ -550,7 +577,12 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
     ) -> Option<CkMechanismParams> {
-        self.cached_mechanism_output_params(session)
+        // Last-`*Init`-wins, per the trait contract: resolve the family
+        // recorded by the most recent Init, then read that family's slot.
+        // A retired marker family yields None rather than a sibling's graph.
+        self.last_init_family
+            .get(&session.0)
+            .and_then(|family| self.cached_mechanism_output_params_for(session, *family))
     }
 
     fn decrypt(&self, session: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
@@ -1606,6 +1638,7 @@ mod tests {
             func_list_3_2: None,
             initialize_args: None,
             mech_cache: DashMap::new(),
+            last_init_family: DashMap::new(),
             session_slot_map: DashMap::new(),
             slot_sessions: DashMap::new(),
             object_cleanup: Default::default(),
@@ -1621,7 +1654,7 @@ mod tests {
     fn seed_cache(backend: &FfiBackend) {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
-        backend.mech_cache.insert(7, ffi_mechanism);
+        backend.mech_cache.insert((7, OperationFamily::Sign), ffi_mechanism);
         // Use the public path so the forward map and reverse index stay in sync.
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
     }
@@ -1633,7 +1666,7 @@ mod tests {
 
         assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
 
-        assert!(backend.mech_cache.contains_key(&7));
+        assert!(backend.mech_cache.contains_key(&(7, OperationFamily::Sign)));
         assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
     }
 
@@ -1656,19 +1689,31 @@ mod tests {
         let (backend, _functions) = backend_with_finalize(Some(finalize_ok));
         for (session, slot) in [(7u64, 11u64), (8, 11), (9, 22)] {
             let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-            backend
-                .mech_cache
-                .insert(session, ffi_conversion::mechanism_to_ffi(&mechanism).unwrap());
+            backend.mech_cache.insert(
+                (session, OperationFamily::Sign),
+                ffi_conversion::mechanism_to_ffi(&mechanism).unwrap(),
+            );
             backend.remember_session_slot(CkSessionHandle(session as u64), CkSlotId(slot as u64));
         }
+        // Session 7 holds a second family slot: per-slot eviction must drop
+        // every family of the evicted sessions, not just one entry.
+        backend.mech_cache.insert(
+            (7, OperationFamily::Encrypt),
+            ffi_conversion::mechanism_to_ffi(&CkMechanism {
+                mechanism_type: CkMechanismType::RSA_PKCS,
+                params: None,
+            })
+            .unwrap(),
+        );
 
         backend.drop_mech_cache_for_slot(CkSlotId(11));
 
         for evicted in [7u64, 8] {
-            assert!(!backend.mech_cache.contains_key(&evicted));
+            assert!(!backend.mech_cache.contains_key(&(evicted, OperationFamily::Sign)));
             assert!(backend.session_slot_map.get(&evicted).is_none());
         }
-        assert!(backend.mech_cache.contains_key(&9));
+        assert!(!backend.mech_cache.contains_key(&(7, OperationFamily::Encrypt)));
+        assert!(backend.mech_cache.contains_key(&(9, OperationFamily::Sign)));
         assert_eq!(backend.session_slot_map.get(&9).as_deref(), Some(&22));
         // The emptied slot-11 reverse entry is pruned; slot 22 still maps to {9}.
         assert!(backend.slot_sessions.get(&11).is_none());

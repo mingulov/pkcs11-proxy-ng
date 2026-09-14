@@ -79,6 +79,7 @@ mod tests {
             func_list_3_2: None,
             initialize_args: None,
             mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
             object_cleanup: Default::default(),

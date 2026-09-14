@@ -71,6 +71,7 @@ fn backend()
         func_list_3_2: Some(functions.as_ref()),
         initialize_args: None,
         mech_cache: DashMap::new(),
+        last_init_family: DashMap::new(),
         session_slot_map: DashMap::new(),
         slot_sessions: DashMap::new(),
         object_cleanup: Default::default(),

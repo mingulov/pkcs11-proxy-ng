@@ -134,7 +134,7 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_close_session(&self, session: CkSessionHandle) -> CkResult<()> {
-        self.drop_mech_cache(session);
+        self.drop_mech_cache_session(session);
         self.forget_session_slot(session);
         Self::call_unit(unsafe { (*self.func_list).C_CloseSession }, |function| unsafe {
             function(Self::session_handle(session))
