@@ -442,6 +442,17 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         tracing::info!(path = %sock.display(), "resilience metrics endpoint bound");
     }
 
+    // Hook-gated control plane (C3M.6 row 18): fail closed when configured
+    // without a hook-enabled build, otherwise bind the control socket.
+    server::validate_test_hooks_config(&config).map_err(std::io::Error::other)?;
+    #[cfg(feature = "native-owner-test-hooks")]
+    if let Some(ref sock) = config.test_hooks.control_socket {
+        server::control::spawn_control_endpoint(sock.clone())
+            .await
+            .map_err(|e| format!("failed to bind control socket {}: {e}", sock.display()))?;
+        tracing::info!(path = %sock.display(), "test-hooks control endpoint bound");
+    }
+
     let (svc, context_manager, registry_source) =
         build_service(&config, &backend, audit_sink.clone()).await?;
 
