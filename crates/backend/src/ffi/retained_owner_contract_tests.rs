@@ -75,10 +75,7 @@ fn init_and_encrypt(
     session: CkSessionHandle,
     controls: OracleControls,
 ) -> Vec<u8> {
-    unsafe {
-        (controls.set_scenario)(&RetainedOracleScenario { encrypt_rv: 0, output_len: 16 });
-    }
-    (controls.reset_observation)();
+    reset_oracle(controls, 16);
     let gcm = gcm_mechanism();
     backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
     backend.ffi_encrypt(session, CkInBuf::Bytes(b"data")).unwrap()
@@ -184,4 +181,128 @@ fn native_owner_oracle_retains_init_root_across_calls() {
 
     backend.ffi_close_session(session).expect("oracle close session");
     backend.finalize().expect("oracle finalize");
+}
+
+/// Bring the shared in-process oracle to a known state: gate open (so no
+/// worker stranded by an earlier failure stays blocked), then the caller's
+/// scenario and a zeroed observation. Every test starts this way because
+/// the oracle instance is process-global.
+fn reset_oracle(controls: OracleControls, output_len: u64) {
+    unsafe {
+        RetainedOracle_ReleaseGate();
+        (controls.set_scenario)(&RetainedOracleScenario { encrypt_rv: 0, output_len });
+    }
+    (controls.reset_observation)();
+}
+
+fn wait_for_condition(timeout: std::time::Duration, mut ready: impl FnMut() -> bool) {
+    let start = std::time::Instant::now();
+    while !ready() {
+        if start.elapsed() > timeout {
+            panic!("condition not met within {timeout:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn oracle_gate_holds_native_entry_until_released() {
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let controls = OracleControls {
+        set_scenario: RetainedOracle_SetScenario,
+        reset_observation: RetainedOracle_ResetObservation,
+        get_observation: RetainedOracle_GetObservation,
+    };
+    reset_oracle(controls, 0);
+    unsafe {
+        RetainedOracle_ArmGate(RETAINED_OP_ENCRYPT);
+    }
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut length: cryptoki_sys::CK_ULONG = 0;
+            let rv = unsafe {
+                oracle::provider::encrypt(
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut length,
+                )
+            };
+            done_tx.send((rv, length)).unwrap();
+        });
+        // The native entry is held at the gate: entered but not returned.
+        wait_for_condition(std::time::Duration::from_secs(5), || {
+            read_observation(controls).gate_holds_current > 0
+        });
+        assert!(done_rx.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+        unsafe {
+            RetainedOracle_ReleaseGate();
+        }
+        let (rv, length) = done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(rv, cryptoki_sys::CKR_OK);
+        assert_eq!(length, 0);
+    });
+
+    let observation = read_observation(controls);
+    assert_eq!(observation.encrypt_calls, 1);
+    assert_eq!(observation.gate_holds_current, 0);
+    assert_eq!(observation.gate_holds_total, 1);
+    unsafe {
+        RetainedOracle_ReleaseGate();
+    }
+}
+
+#[test]
+fn native_owner_call_readback_is_one_transaction() {
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (backend, _functions) = backend_with_oracle_provider();
+    let controls = OracleControls {
+        set_scenario: RetainedOracle_SetScenario,
+        reset_observation: RetainedOracle_ResetObservation,
+        get_observation: RetainedOracle_GetObservation,
+    };
+    reset_oracle(controls, 16);
+    let session = CkSessionHandle(32);
+
+    // The Init write lands ungated; the readback (Encrypt) is held at the
+    // gate, proving the two native entries form one ordered transaction:
+    // no second Init can interleave, and the backend-side retained graph
+    // is already in its family slot before the native readback completes.
+    let gcm = gcm_mechanism();
+    backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+    assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Encrypt)));
+    unsafe {
+        RetainedOracle_ArmGate(RETAINED_OP_ENCRYPT);
+    }
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let out = backend.ffi_encrypt(session, CkInBuf::Bytes(b"data")).unwrap();
+            done_tx.send(out).unwrap();
+        });
+        wait_for_condition(std::time::Duration::from_secs(5), || {
+            read_observation(controls).gate_holds_current > 0
+        });
+        // Still held: exactly one Init write, one Encrypt entry, no return.
+        let observation = read_observation(controls);
+        assert_eq!(observation.init_calls, 1);
+        assert_eq!(observation.encrypt_calls, 1);
+        assert!(done_rx.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+        unsafe {
+            RetainedOracle_ReleaseGate();
+        }
+        let out = done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(out.len(), 16);
+    });
+
+    // Released once: sizing + fill both passed the open gate as one
+    // transaction against the single retained root.
+    assert_retention(&read_observation(controls));
+    unsafe {
+        RetainedOracle_ReleaseGate();
+    }
 }

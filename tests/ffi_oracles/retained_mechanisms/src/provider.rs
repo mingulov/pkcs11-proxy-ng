@@ -68,9 +68,15 @@ pub unsafe extern "C" fn encrypt(
     if length.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
+    {
+        let mut state = lock_state();
+        state.1.encrypt_calls += 1;
+    }
+    // Observable barrier before the retained-root readback. The STATE lock
+    // is not held across the wait, so observers stay live while held.
+    wait_at_gate(RETAINED_OP_ENCRYPT);
     let mut state = lock_state();
     let scenario = state.0;
-    state.1.encrypt_calls += 1;
     // Use the retained Init root: re-read the parameter extent and the
     // mechanism type through it. The backend must keep this allocation
     // alive across the two native entries.
