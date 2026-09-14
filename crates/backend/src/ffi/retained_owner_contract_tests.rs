@@ -17,8 +17,6 @@ use super::*;
 mod oracle;
 use oracle::*;
 
-static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn backend_with_oracle_provider() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
     let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     functions.C_Initialize = Some(oracle::provider::initialize);
@@ -107,7 +105,7 @@ fn assert_retention(observation: &RetainedOracleObservation) {
 
 #[test]
 fn oracle_retains_init_root_across_native_calls() {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::acquire_test_serial();
     let (backend, _functions) = backend_with_oracle_provider();
     let session = CkSessionHandle(31);
     let controls = OracleControls {
@@ -132,7 +130,7 @@ fn oracle_retains_init_root_across_native_calls() {
 #[test]
 #[ignore = "C3M.6: requires the built retained-mechanism oracle cdylib, run serially"]
 fn native_owner_oracle_retains_init_root_across_calls() {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::acquire_test_serial();
     let Some(lib) = std::env::var_os("PKCS11_PROXY_RETAINED_ORACLE_LIB") else {
         eprintln!("SKIP: PKCS11_PROXY_RETAINED_ORACLE_LIB is not set");
         return;
@@ -207,7 +205,7 @@ fn wait_for_condition(timeout: std::time::Duration, mut ready: impl FnMut() -> b
 
 #[test]
 fn oracle_gate_holds_native_entry_until_released() {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::acquire_test_serial();
     let controls = OracleControls {
         set_scenario: RetainedOracle_SetScenario,
         reset_observation: RetainedOracle_ResetObservation,
@@ -257,7 +255,7 @@ fn oracle_gate_holds_native_entry_until_released() {
 
 #[test]
 fn native_owner_call_readback_is_one_transaction() {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::acquire_test_serial();
     let (backend, _functions) = backend_with_oracle_provider();
     let controls = OracleControls {
         set_scenario: RetainedOracle_SetScenario,

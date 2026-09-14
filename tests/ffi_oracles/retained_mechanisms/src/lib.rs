@@ -97,6 +97,23 @@ fn lock_state() -> std::sync::MutexGuard<
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Process-global test serialization for every suite that drives this
+/// oracle instance.
+///
+/// The sources compile both into the oracle's own test suite and (via
+/// `#[path]`) into the backend contract-test binary, where the backend's
+/// contract tests share the same instance state. Both groups must take
+/// this one lock — separate per-file mutexes do not exclude each other
+/// and produce order-dependent count/gate failures.
+#[cfg(test)]
+static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+/// Acquire the oracle test serialization lock.
+#[cfg(test)]
+pub fn acquire_test_serial() -> std::sync::MutexGuard<'static, ()> {
+    TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Observable entry barrier (row-9 mechanics).
 ///
 /// While armed for an operation, every matching native entry waits here —
@@ -194,4 +211,123 @@ pub unsafe extern "C" fn RetainedOracle_GetObservation(
     }
     unsafe { observation.write(lock_state().1) };
     0
+}
+
+#[cfg(test)]
+mod state_machine_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn observation() -> RetainedOracleObservation {
+        let mut observation = RetainedOracleObservation::default();
+        assert_eq!(unsafe { RetainedOracle_GetObservation(&mut observation) }, 0);
+        observation
+    }
+
+    /// Full hermetic start: gate open, default scenario, zeroed observation.
+    /// Every test starts this way because scenario persists across resets.
+    fn reset_full() {
+        assert_eq!(unsafe { RetainedOracle_ReleaseGate() }, 0);
+        assert_eq!(unsafe { RetainedOracle_SetScenario(&RetainedOracleScenario::default()) }, 0);
+        assert_eq!(RetainedOracle_ResetObservation(), 0);
+    }
+
+    fn wait_for_holders(expected: u64) {
+        let start = std::time::Instant::now();
+        loop {
+            let holders = GATE.lock().unwrap_or_else(|e| e.into_inner()).holders;
+            if holders == expected {
+                return;
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                panic!("gate holders did not reach {expected}");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn scenario_roundtrip_preserves_values() {
+        let _guard = acquire_test_serial();
+        let scenario = RetainedOracleScenario { encrypt_rv: 7, output_len: 42 };
+        assert_eq!(unsafe { RetainedOracle_SetScenario(&scenario) }, 0);
+        assert_eq!(lock_state().0.encrypt_rv, 7);
+        assert_eq!(lock_state().0.output_len, 42);
+        reset_full();
+    }
+
+    #[test]
+    fn null_control_arguments_rejected_without_panic() {
+        let _guard = acquire_test_serial();
+        assert_eq!(unsafe { RetainedOracle_SetScenario(std::ptr::null()) }, 1);
+        assert_eq!(unsafe { RetainedOracle_GetObservation(std::ptr::null_mut()) }, 1);
+    }
+
+    #[test]
+    fn reset_zeroes_counters_and_opens_gate() {
+        let _guard = acquire_test_serial();
+        reset_full();
+        assert_eq!(unsafe { RetainedOracle_ArmGate(RETAINED_OP_ENCRYPT) }, 0);
+        assert_eq!(observation().gate_armed_op, RETAINED_OP_ENCRYPT);
+        assert_eq!(RetainedOracle_ResetObservation(), 0);
+        let observation = observation();
+        assert_eq!(observation.gate_armed_op, 0);
+        assert_eq!(observation.gate_holds_current, 0);
+        assert_eq!(observation.gate_holds_total, 0);
+        assert_eq!(observation.init_calls, 0);
+        assert_eq!(observation.encrypt_calls, 0);
+        assert_eq!(unsafe { RetainedOracle_ReleaseGate() }, 0);
+    }
+
+    #[test]
+    fn gate_holds_entry_until_released() {
+        let _guard = acquire_test_serial();
+        reset_full();
+        assert_eq!(unsafe { RetainedOracle_ArmGate(RETAINED_OP_ENCRYPT) }, 0);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut length: CK_ULONG = 0;
+                let rv = unsafe {
+                    provider::encrypt(1, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut length)
+                };
+                done_tx.send((rv, length)).unwrap();
+            });
+            wait_for_holders(1);
+            assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+            assert_eq!(unsafe { RetainedOracle_ReleaseGate() }, 0);
+            let (rv, length) = done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert_eq!(rv, CKR_OK);
+            assert_eq!(length, 0);
+        });
+        let observation = observation();
+        assert_eq!(observation.encrypt_calls, 1);
+        assert_eq!(observation.gate_holds_current, 0);
+        assert_eq!(observation.gate_holds_total, 1);
+        assert_eq!(unsafe { RetainedOracle_ReleaseGate() }, 0);
+    }
+
+    #[test]
+    fn reset_during_hold_opens_gate_without_stranding() {
+        let _guard = acquire_test_serial();
+        reset_full();
+        assert_eq!(unsafe { RetainedOracle_ArmGate(RETAINED_OP_ENCRYPT) }, 0);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut length: CK_ULONG = 0;
+                let rv = unsafe {
+                    provider::encrypt(1, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut length)
+                };
+                done_tx.send((rv, length)).unwrap();
+            });
+            wait_for_holders(1);
+            // No explicit release: the reset broadcast must open the gate.
+            assert_eq!(RetainedOracle_ResetObservation(), 0);
+            let (rv, _) = done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert_eq!(rv, CKR_OK);
+        });
+        assert_eq!(observation().gate_holds_current, 0);
+        assert_eq!(unsafe { RetainedOracle_ReleaseGate() }, 0);
+    }
 }
