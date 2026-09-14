@@ -9,6 +9,7 @@ mod skip;
 
 #[allow(unused_imports)]
 pub use consumers::*;
+#[allow(unused_imports)]
 pub use daemon::*;
 #[allow(unused_imports)]
 pub use mechanism_tests::{

@@ -11,7 +11,7 @@
 //! which `(mech, param)` bytes a native owner received), and a fault
 //! injector (so tests can force failing closes without a hostile HSM).
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Monotonic hook-call sequence shared by every hook in this module.
@@ -19,18 +19,25 @@ static HOOK_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Process-unique daemon backend instance identity.
 ///
-/// Assigned once per process from a global counter XOR the hook-call
-/// sequence so that two daemon processes (or a restarted daemon under a
-/// subprocess runner) never share an identity, while repeated reads in
-/// one process are stable.
+/// Assigned once per process from process id, wall-clock nanos, and the
+/// hook-call sequence, so that two daemon processes (or a restarted daemon
+/// under a subprocess runner) never share an identity, while repeated reads
+/// in one process are stable. (A bare in-process counter is NOT enough: a
+/// fresh process would restart the counter at the same value — caught by
+/// the subprocess topology test.)
 pub fn daemon_instance_id() -> u64 {
     static INSTANCE: OnceLock<u64> = OnceLock::new();
     *INSTANCE.get_or_init(|| {
-        static NEXT: AtomicUsize = AtomicUsize::new(1);
-        let n = NEXT.fetch_add(1, Ordering::Relaxed) as u64;
-        // Mix in the hook sequence so the id is never a bare small int.
-        (n.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ HOOK_SEQ.fetch_add(1, Ordering::Relaxed))
-            | 0x0100_0000_0000_0001
+        let pid = std::process::id() as u64;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x1234_5678);
+        let seq = HOOK_SEQ.fetch_add(1, Ordering::Relaxed);
+        pid.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(nanos ^ nanos.wrapping_shr(32))
+            .wrapping_add(seq.wrapping_mul(0xBF58_476D_1CE4_E5B9))
+            | 1
     })
 }
 
