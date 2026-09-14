@@ -134,13 +134,18 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_close_session(&self, session: CkSessionHandle) -> CkResult<()> {
-        self.drop_mech_cache_session(session);
-        self.forget_session_slot(session);
+        // Enter with owners live: retire the family's retained graphs and the
+        // slot mapping only after the native close proves terminal cleanup
+        // (C3M.4). A failed close — or a pre-entry refusal below — keeps the
+        // session's owners, marker and mapping so the still-owned incarnation
+        // remains usable; the open count likewise stays high (fail-closed
+        // toward slot poisoning on Drop).
         Self::call_unit(unsafe { (*self.func_list).C_CloseSession }, |function| unsafe {
             function(Self::session_handle(session))
         })?;
-        // Count only provider-confirmed closes; a failed close leaves the
-        // count high (fail-closed toward slot poisoning on Drop).
+        self.drop_mech_cache_session(session);
+        self.forget_session_slot(session);
+        // Count only provider-confirmed closes.
         self.lifecycle.note_sessions_closed(1);
         Ok(())
     }
@@ -148,14 +153,13 @@ impl FfiBackend {
     pub(super) fn ffi_close_all_sessions(&self, slot_id: CkSlotId) -> CkResult<()> {
         let known_open =
             self.slot_sessions.get(&slot_id.0).map(|sessions| sessions.len()).unwrap_or(0);
-        // Drop our Rust-owned `mech_cache` entries for the slot first; the
-        // underlying lib's `C_CloseAllSessions` then invalidates the session
-        // handles. Even if the underlying call fails, the application's
-        // notion of which sessions are valid is already in disarray.
-        self.drop_mech_cache_for_slot(slot_id);
+        // Keep all target-slot owners through the one native call and clear
+        // only after CKR_OK (C3M.4). A failed close preserves target-slot
+        // ownership/index, and other slots remain untouched either way.
         Self::call_unit(unsafe { (*self.func_list).C_CloseAllSessions }, |function| unsafe {
             function(Self::slot_id(slot_id))
         })?;
+        self.drop_mech_cache_for_slot(slot_id);
         self.lifecycle.note_sessions_closed(known_open);
         Ok(())
     }
@@ -204,5 +208,130 @@ impl FfiBackend {
         Self::call_unit(unsafe { (*self.func_list).C_CancelFunction }, |function| unsafe {
             function(Self::session_handle(session))
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" fn close_session_fails(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_FUNCTION_FAILED
+    }
+
+    unsafe extern "C" fn close_session_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn close_all_sessions_fails(
+        _slot: cryptoki_sys::CK_SLOT_ID,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_FUNCTION_FAILED
+    }
+
+    fn backend_with_close(
+        close: cryptoki_sys::CK_C_CloseSession,
+    ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_CloseSession = close;
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+        };
+        (backend, functions)
+    }
+
+    fn seed_sign_slot(backend: &FfiBackend, session: CkSessionHandle, slot: CkSlotId) {
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        let ffi_mechanism = super::super::ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
+        backend.mech_cache.insert((session.0, OperationFamily::Sign), ffi_mechanism);
+        backend.last_init_family.insert(session.0, OperationFamily::Sign);
+        backend.remember_session_slot(session, slot);
+    }
+
+    #[test]
+    fn failed_close_session_keeps_owners_live() {
+        let (backend, _functions) = backend_with_close(Some(close_session_fails));
+        let session = CkSessionHandle(21);
+        seed_sign_slot(&backend, session, CkSlotId(11));
+
+        assert_eq!(backend.ffi_close_session(session).unwrap_err(), CkRv::FUNCTION_FAILED);
+
+        // No proven terminal cleanup: the failed close must not retire the
+        // family's retained graph, the last-Init marker, or the slot mapping.
+        assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Sign)));
+        assert_eq!(
+            backend.last_init_family.get(&session.0).as_deref(),
+            Some(&OperationFamily::Sign)
+        );
+        assert_eq!(backend.session_slot_map.get(&session.0).as_deref(), Some(&11));
+    }
+
+    #[test]
+    fn failed_close_all_sessions_preserves_target_slot_ownership() {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_CloseAllSessions = Some(close_all_sessions_fails);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+        };
+        let session = CkSessionHandle(23);
+        seed_sign_slot(&backend, session, CkSlotId(11));
+
+        assert_eq!(
+            backend.ffi_close_all_sessions(CkSlotId(11)).unwrap_err(),
+            CkRv::FUNCTION_FAILED
+        );
+
+        // No CKR_OK: target-slot owners, marker and mappings are preserved;
+        // other slots remain untouched (none exist here, so maps stay whole).
+        assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Sign)));
+        assert_eq!(
+            backend.last_init_family.get(&session.0).as_deref(),
+            Some(&OperationFamily::Sign)
+        );
+        assert_eq!(backend.session_slot_map.get(&session.0).as_deref(), Some(&11));
+        assert!(backend.slot_sessions.get(&11).is_some());
+    }
+
+    #[test]
+    fn successful_close_session_retires_owners() {
+        let (backend, _functions) = backend_with_close(Some(close_session_ok));
+        let session = CkSessionHandle(22);
+        seed_sign_slot(&backend, session, CkSlotId(11));
+
+        backend.ffi_close_session(session).unwrap();
+
+        // Proven terminal cleanup: every family slot, the marker and the
+        // slot mapping for the closed session are gone.
+        assert!(backend.mech_cache.is_empty());
+        assert!(backend.last_init_family.get(&session.0).is_none());
+        assert!(backend.session_slot_map.get(&session.0).is_none());
     }
 }
