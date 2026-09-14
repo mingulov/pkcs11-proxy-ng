@@ -1655,6 +1655,7 @@ mod tests {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
         backend.mech_cache.insert((7, OperationFamily::Sign), ffi_mechanism);
+        backend.last_init_family.insert(7, OperationFamily::Sign);
         // Use the public path so the forward map and reverse index stay in sync.
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
     }
@@ -1667,6 +1668,7 @@ mod tests {
         assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
 
         assert!(backend.mech_cache.contains_key(&(7, OperationFamily::Sign)));
+        assert_eq!(backend.last_init_family.get(&7).as_deref(), Some(&OperationFamily::Sign));
         assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
     }
 
@@ -1678,6 +1680,7 @@ mod tests {
         backend.finalize().unwrap();
 
         assert!(backend.mech_cache.is_empty());
+        assert!(backend.last_init_family.is_empty());
         assert!(backend.session_slot_map.is_empty());
         assert!(backend.slot_sessions.is_empty());
     }
