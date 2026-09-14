@@ -206,6 +206,64 @@ mod mechanism_to_ffi_tests {
         assert_eq!(aad, [0xAA, 0xBB, 0xCC]);
     }
 
+    // Row 7 (C3M.6 order item 7): classic-GCM IV lengths must round-trip
+    // exactly — the provider-visible ulIvLen always names the caller input
+    // length (zero selects provider-generated IVs) while the retained buffer
+    // keeps max(input, iv_buffer_len) writable bytes. Lengths here span
+    // sub-block, block, and multi-block IVs on every topology.
+    #[test]
+    fn gcm_iv_length_sweep_preserves_lengths_and_buffer_capacity() {
+        for (iv_len, buffer_len) in
+            [(0usize, 12), (1, 1), (7, 8), (8, 8), (12, 12), (16, 16), (24, 32)]
+        {
+            let ffi = convert(
+                CkMechanismType::AES_GCM,
+                CkMechanismParams::Gcm(GcmParams {
+                    iv: vec![0x5A; iv_len],
+                    iv_bits: 96,
+                    iv_buffer_len: buffer_len as u64,
+                    aad: Vec::new(),
+                    tag_bits: 128,
+                }),
+            );
+            let gcm =
+                unsafe { &*(ffi.ck_mechanism.pParameter as *const cryptoki_sys::CK_GCM_PARAMS) };
+            assert_eq!(gcm.ulIvLen as usize, iv_len, "provider-visible IV length");
+            let retained = match ffi.output_params() {
+                Some(CkMechanismParams::Gcm(params)) => params,
+                other => panic!("unexpected output params: {other:?}"),
+            };
+            assert_eq!(retained.iv.len(), iv_len, "output IV names the input bytes");
+            assert_eq!(
+                retained.iv_buffer_len as usize,
+                iv_len.max(buffer_len),
+                "retained buffer keeps generated-IV capacity"
+            );
+            if iv_len == 0 {
+                assert!(gcm.pIv.is_null() == (buffer_len == 0));
+            } else {
+                assert!(!gcm.pIv.is_null());
+            }
+        }
+    }
+
+    // Row 7: an absurd iv_buffer_len must reject before any backing buffer is
+    // allocated, on every width topology.
+    #[test]
+    fn gcm_absurd_iv_buffer_len_rejects_without_allocating() {
+        let result = mechanism_to_ffi(&CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: Vec::new(),
+                iv_bits: 96,
+                iv_buffer_len: u64::MAX,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        });
+        assert_eq!(result.err(), Some(CkRv::MECHANISM_PARAM_INVALID));
+    }
+
     // E1: the PBE/PBKDF2 password is held in the FFI backing via `Zeroizing`
     // (wiped on drop). These guard that wrapping the password in `Zeroizing`
     // did not break the C-struct contract — the pointer must still address the
