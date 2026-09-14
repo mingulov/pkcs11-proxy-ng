@@ -103,6 +103,77 @@ fn native_domain_global_serial_second_load_rejected_and_rollback() {
 }
 
 #[test]
+fn native_domain_lifecycle_fresh_backend_releases() {
+    let tracker = LifecycleTracker::default();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+}
+
+#[test]
+fn native_domain_lifecycle_initialized_without_finalize_poisons() {
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
+}
+
+#[test]
+fn native_domain_lifecycle_finalize_restores_release() {
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized();
+    tracker.note_session_opened();
+    tracker.note_session_opened();
+    tracker.note_finalized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+}
+
+#[test]
+fn native_domain_lifecycle_open_sessions_block_release_until_closed() {
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized();
+    tracker.note_finalized();
+    tracker.note_session_opened();
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "a live open session blocks release even after finalize"
+    );
+    tracker.note_sessions_closed(1);
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+    tracker.note_initialized();
+    tracker.note_session_opened();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
+    tracker.note_sessions_closed(1);
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
+    tracker.note_finalized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+}
+
+#[test]
+fn native_domain_lifecycle_close_surprise_never_hides_sessions() {
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized();
+    tracker.note_session_opened();
+    tracker.note_sessions_closed(5);
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "underflow surprise keeps the count high"
+    );
+    tracker.note_sessions_closed(1);
+    tracker.note_finalized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+}
+
+#[test]
+fn native_domain_lifecycle_reinitialize_clears_finalized() {
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized();
+    tracker.note_finalized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+    tracker.note_initialized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
+}
+
+#[test]
 fn native_domain_current_host_reports_qualified_or_refuses() {
     let reported = check_native_platform();
     assert_eq!(

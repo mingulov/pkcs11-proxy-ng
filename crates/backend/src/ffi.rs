@@ -170,6 +170,9 @@ pub struct FfiBackend {
     /// The reservation is released when the last owner drops; stale handles
     /// can never free another epoch's slot.
     construction: native_domain::ConstructionPermit,
+    /// Locally observed init/finalize/session lifecycle driving the honest
+    /// retirement decision in `Drop` (C3M.4).
+    lifecycle: native_domain::LifecycleTracker,
 }
 
 // Safety: PKCS#11 spec requires modules loaded with CKF_OS_LOCKING_OK to be
@@ -207,7 +210,9 @@ impl Pkcs11Backend for FfiBackend {
         };
         Self::call_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
             function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
-        })
+        })?;
+        self.lifecycle.note_initialized();
+        Ok(())
     }
 
     fn finalize(&self) -> CkResult<()> {
@@ -219,6 +224,7 @@ impl Pkcs11Backend for FfiBackend {
         // and closes its sessions. Once the underlying module accepts
         // C_Finalize, every cached session binding is out of scope.
         self.drop_all_mech_cache();
+        self.lifecycle.note_finalized();
         Ok(())
     }
 
@@ -1606,6 +1612,7 @@ mod tests {
             // Test-local backend: bypasses the process reservation without
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
         };
 
         (backend, functions)

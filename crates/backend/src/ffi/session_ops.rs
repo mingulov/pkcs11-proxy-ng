@@ -129,6 +129,7 @@ impl FfiBackend {
         // Record the session->slot binding so we can drop per-slot
         // `mech_cache` entries in `C_CloseAllSessions`.
         self.remember_session_slot(handle, slot_id);
+        self.lifecycle.note_session_opened();
         Ok(handle)
     }
 
@@ -137,10 +138,16 @@ impl FfiBackend {
         self.forget_session_slot(session);
         Self::call_unit(unsafe { (*self.func_list).C_CloseSession }, |function| unsafe {
             function(Self::session_handle(session))
-        })
+        })?;
+        // Count only provider-confirmed closes; a failed close leaves the
+        // count high (fail-closed toward slot poisoning on Drop).
+        self.lifecycle.note_sessions_closed(1);
+        Ok(())
     }
 
     pub(super) fn ffi_close_all_sessions(&self, slot_id: CkSlotId) -> CkResult<()> {
+        let known_open =
+            self.slot_sessions.get(&slot_id.0).map(|sessions| sessions.len()).unwrap_or(0);
         // Drop our Rust-owned `mech_cache` entries for the slot first; the
         // underlying lib's `C_CloseAllSessions` then invalidates the session
         // handles. Even if the underlying call fails, the application's
@@ -148,7 +155,9 @@ impl FfiBackend {
         self.drop_mech_cache_for_slot(slot_id);
         Self::call_unit(unsafe { (*self.func_list).C_CloseAllSessions }, |function| unsafe {
             function(Self::slot_id(slot_id))
-        })
+        })?;
+        self.lifecycle.note_sessions_closed(known_open);
+        Ok(())
     }
 
     pub(super) fn ffi_get_session_info(&self, session: CkSessionHandle) -> CkResult<CkSessionInfo> {

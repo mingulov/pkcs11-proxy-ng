@@ -111,6 +111,7 @@ impl FfiBackend {
             slot_sessions: dashmap::DashMap::new(),
             object_cleanup: Default::default(),
             construction: permit,
+            lifecycle: super::native_domain::LifecycleTracker::default(),
         })
     }
 
@@ -158,12 +159,21 @@ impl FfiBackend {
 }
 
 impl Drop for FfiBackend {
-    /// Retire the exact-epoch construction reservation after normal unload so
-    /// the slot is reusable. Stale handles and poisoned slots are untouched.
-    /// Interim C3M rule: proof of session quiescence and successful native
-    /// `Finalize` before retirement lands with the lifecycle slice.
+    /// Retire the construction reservation honestly: release the exact epoch
+    /// only when the instance lifecycle proves quiescence (never initialized,
+    /// or finalized with no open sessions); otherwise retain ownership and
+    /// poison the slot until process restart. Stale handles and already
+    /// poisoned slots are untouched.
     fn drop(&mut self) {
-        super::native_domain::ConstructionPermit::release_if_owner(self.construction.epoch);
+        use super::native_domain::RetirementDecision::{Poison, Release};
+        match self.lifecycle.retirement_decision() {
+            Release => {
+                super::native_domain::ConstructionPermit::release_if_owner(self.construction.epoch);
+            }
+            Poison => {
+                self.construction.poison();
+            }
+        }
     }
 }
 

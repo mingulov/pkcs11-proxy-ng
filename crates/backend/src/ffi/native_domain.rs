@@ -16,6 +16,7 @@
 
 use std::fmt;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering::SeqCst;
 
 /// Build-time native-FFI qualifier for v0.2: Linux GNU/musl, x86_64 with
 /// 64-bit pointers or x86 with 32-bit pointers. x32, other
@@ -262,8 +263,9 @@ impl ConstructionPermit {
 
     /// Retire the slot after any post-`dlopen` failure or unprovable state:
     /// the exact epoch becomes `Poisoned` and no new chain loads until process
-    /// restart. Stale permits change nothing.
-    pub(in crate::ffi) fn poison(self) {
+    /// restart. Stale permits change nothing. Takes `&self` so backend `Drop`
+    /// can poison without moving the owned permit.
+    pub(in crate::ffi) fn poison(&self) {
         let _ = with_registry(|registry| registry.poison(self.epoch));
     }
 
@@ -285,5 +287,70 @@ impl ConstructionPermit {
         // `EpochExhausted`), so this sentinel matches no live epoch and every
         // registry transition ignores it.
         Self { epoch: u64::MAX }
+    }
+}
+
+/// Backend-instance lifecycle for an honest retirement decision (C3M.4).
+///
+/// Tracks only locally observed facts: successful native `C_Initialize`,
+/// successful native `C_Finalize`, and native sessions opened/closed through
+/// this instance. Counters move fail-closed: provider failures never reduce
+/// the open-session count, so an uncertain state poisons the slot instead of
+/// recycling it. Lock-free atomics; no mutex joins the native call path.
+#[derive(Debug, Default)]
+pub(in crate::ffi) struct LifecycleTracker {
+    initialized: std::sync::atomic::AtomicBool,
+    finalized_ok: std::sync::atomic::AtomicBool,
+    open_sessions: std::sync::atomic::AtomicUsize,
+}
+
+/// Retirement outcome for backend `Drop`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::ffi) enum RetirementDecision {
+    /// Proven quiescent (never initialized, or finalized with no open
+    /// sessions): the exact epoch may publish the next `Vacant`.
+    Release,
+    /// Anything else: retain ownership and poison the slot until restart.
+    Poison,
+}
+
+impl LifecycleTracker {
+    /// Record a successful native `C_Initialize`. A new initialization cycle
+    /// always clears a previously observed finalization.
+    pub(in crate::ffi) fn note_initialized(&self) {
+        self.initialized.store(true, SeqCst);
+        self.finalized_ok.store(false, SeqCst);
+    }
+
+    /// Record a successful native `C_Finalize`. The provider has destroyed
+    /// every session, matching `drop_all_mech_cache`, so the open count
+    /// returns to zero together with the cleared session maps.
+    pub(in crate::ffi) fn note_finalized(&self) {
+        self.finalized_ok.store(true, SeqCst);
+        self.open_sessions.store(0, SeqCst);
+    }
+
+    /// Record one provider-confirmed session open.
+    pub(in crate::ffi) fn note_session_opened(&self) {
+        self.open_sessions.fetch_add(1, SeqCst);
+    }
+
+    /// Record provider-confirmed session closes. A single compare-exchange
+    /// attempt applies the exact decrement; an underflow surprise or a lost
+    /// race keeps the count high (fail-closed toward
+    /// [`RetirementDecision::Poison`]) instead of hiding live sessions.
+    pub(in crate::ffi) fn note_sessions_closed(&self, count: usize) {
+        let open = self.open_sessions.load(SeqCst);
+        if let Some(next) = open.checked_sub(count) {
+            let _ = self.open_sessions.compare_exchange(open, next, SeqCst, SeqCst);
+        }
+    }
+
+    /// Decide backend `Drop`: release only when quiescent with no open
+    /// sessions; poison on every uncertain state.
+    pub(in crate::ffi) fn retirement_decision(&self) -> RetirementDecision {
+        use RetirementDecision::{Poison, Release};
+        let quiescent = !self.initialized.load(SeqCst) || self.finalized_ok.load(SeqCst);
+        if quiescent && self.open_sessions.load(SeqCst) == 0 { Release } else { Poison }
     }
 }

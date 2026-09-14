@@ -598,6 +598,7 @@ mod tests {
             // Test-local backend: bypasses the process reservation without
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
         };
         let session = CkSessionHandle(7);
         let mechanism = CkMechanism {
