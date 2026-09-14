@@ -1,4 +1,4 @@
-use super::{session_bytes_input, *};
+use super::{ffi_conversion::narrow_wire_ulong, session_bytes_input, *};
 
 /// Maximum bytes a single `C_GenerateRandom` may request. Random output cannot
 /// be returned short, so an over-large request is rejected (CKR_DATA_LEN_RANGE)
@@ -267,11 +267,20 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_wait_for_slot_event(&self, flags: u64) -> CkResult<CkSlotId> {
+        // C3M.4 ordered boundary: checked width first, then mode. Flags the
+        // native CK_FLAGS cannot represent fail loudly (FUNCTION_FAILED) —
+        // a native module could not have been handed that value either —
+        // and blocking mode is refused locally (FUNCTION_NOT_SUPPORTED) so
+        // no native wait can block the daemon worker. Neither refusal makes
+        // a native attempt; the sole supported DONT_BLOCK call preserves
+        // every original bit, including representable unknown ones.
+        let native_flags = narrow_wire_ulong(flags)?;
+        if native_flags & cryptoki_sys::CKF_DONT_BLOCK == 0 {
+            return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+        }
         Self::call_slot_output(
             unsafe { (*self.func_list).C_WaitForSlotEvent },
-            |function, slot| unsafe {
-                function(flags as cryptoki_sys::CK_FLAGS, slot, std::ptr::null_mut())
-            },
+            |function, slot| unsafe { function(native_flags, slot, std::ptr::null_mut()) },
         )
     }
 
@@ -508,5 +517,90 @@ mod generate_random_bound_tests {
     #[test]
     fn bound_is_512_mib() {
         assert_eq!(MAX_RANDOM_BYTES, 512 * 1024 * 1024);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod slot_wait_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    static SLOT_WAIT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static SLOT_WAIT_FLAGS: AtomicU64 = AtomicU64::new(0);
+    static SLOT_WAIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn recording_wait(
+        flags: cryptoki_sys::CK_FLAGS,
+        slot: *mut cryptoki_sys::CK_SLOT_ID,
+        _reserved: *mut std::ffi::c_void,
+    ) -> cryptoki_sys::CK_RV {
+        SLOT_WAIT_CALLS.fetch_add(1, Ordering::SeqCst);
+        SLOT_WAIT_FLAGS.store(flags as u64, Ordering::SeqCst);
+        if !slot.is_null() {
+            unsafe { *slot = 7 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_wait() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_WaitForSlotEvent = Some(recording_wait);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+        };
+        (backend, functions)
+    }
+
+    #[test]
+    fn blocking_wait_refused_without_native_entry() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_wait();
+
+        // C3M.4: blocking mode is refused locally; the provider is never
+        // entered, so no native wait can block the daemon worker.
+        assert_eq!(backend.ffi_wait_for_slot_event(0).unwrap_err(), CkRv::FUNCTION_NOT_SUPPORTED);
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn dont_block_wait_preserves_all_flag_bits() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_wait();
+
+        // Representable unknown bits ride along untouched (C3M.4): the sole
+        // supported waiter makes one native call with every original bit.
+        let flags = cryptoki_sys::CKF_DONT_BLOCK as u64 | 0x8000_0000;
+        assert_eq!(backend.ffi_wait_for_slot_event(flags).unwrap(), CkSlotId(7));
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(SLOT_WAIT_FLAGS.load(Ordering::SeqCst), flags);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "32")]
+    fn overflow_flags_fail_narrowing_before_native_entry() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_wait();
+
+        // C3M.4: flags the native CK_FLAGS cannot represent fail checked
+        // narrowing (FUNCTION_FAILED) before any mode check or native entry.
+        let flags = 1u64 << 32 | cryptoki_sys::CKF_DONT_BLOCK as u64;
+        assert_eq!(backend.ffi_wait_for_slot_event(flags).unwrap_err(), CkRv::FUNCTION_FAILED);
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 0);
     }
 }
