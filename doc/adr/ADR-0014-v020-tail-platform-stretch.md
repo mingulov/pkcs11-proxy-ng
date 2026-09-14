@@ -18,7 +18,8 @@ after the Linux correction/parity work — instead of dropping it.
 ## Decision
 
 The following are committed v0.2.0 **tail stretch**, ordered after the
-comprehensive provider-matrix gate and before the publication gate:
+candidate gate and before the comprehensive provider-matrix gate (so the
+full matrix validates the new legs), with publication last:
 
 1. **Windows x64/MSVC native daemon** consuming Windows provider DLLs.
 2. **Windows x64 PKCS#11 client shim** (`pkcs11-proxy-ng-shim` DLL) for
