@@ -763,6 +763,97 @@ mod output_cap_tests {
     }
 
     #[test]
+    fn native_owner_convenience_observes_one_two_three_attempt_sequences() {
+        // C3M.6 row 11: the query/fill convenience helper makes exactly one
+        // native attempt for failed or zero-count sizing, two for an
+        // ordinary fill, and three when BUFFER_TOO_SMALL demands a retry.
+        // A non-retryable fill error stops after the second attempt.
+        // Already-green invariant kept as a named regression.
+        use std::cell::Cell;
+
+        // Failed sizing: the query error propagates after one attempt.
+        let attempts = Cell::new(0);
+        let err = FfiBackend::two_call_array(|_: *mut u8, _: &mut cryptoki_sys::CK_ULONG| {
+            attempts.set(attempts.get() + 1);
+            cryptoki_sys::CKR_GENERAL_ERROR
+        })
+        .unwrap_err();
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(err, CkRv::GENERAL_ERROR);
+
+        // Zero-count sizing: one query, no fill, empty result.
+        let attempts = Cell::new(0);
+        let empty: Vec<u8> =
+            FfiBackend::two_call_array(|values: *mut u8, count: &mut cryptoki_sys::CK_ULONG| {
+                attempts.set(attempts.get() + 1);
+                assert!(values.is_null(), "zero-count sizing must not reach fill");
+                *count = 0;
+                cryptoki_sys::CKR_OK
+            })
+            .expect("zero-count sizing succeeds");
+        assert_eq!(attempts.get(), 1);
+        assert!(empty.is_empty());
+
+        // Ordinary fill: query plus one fill.
+        let attempts = Cell::new(0);
+        let filled: Vec<u8> =
+            FfiBackend::two_call_array(|values: *mut u8, count: &mut cryptoki_sys::CK_ULONG| {
+                attempts.set(attempts.get() + 1);
+                if values.is_null() {
+                    *count = 3;
+                } else {
+                    unsafe { std::ptr::copy_nonoverlapping(b"abc".as_ptr(), values, 3) };
+                }
+                cryptoki_sys::CKR_OK
+            })
+            .expect("ordinary fill succeeds");
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(filled, b"abc");
+
+        // BUFFER_TOO_SMALL with a larger count: query, fill, retry fill.
+        let attempts = Cell::new(0);
+        let grown: Vec<u8> =
+            FfiBackend::two_call_array(|values: *mut u8, count: &mut cryptoki_sys::CK_ULONG| {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                match attempt {
+                    1 => {
+                        assert!(values.is_null());
+                        *count = 2;
+                        cryptoki_sys::CKR_OK
+                    }
+                    2 => {
+                        *count = 5;
+                        cryptoki_sys::CKR_BUFFER_TOO_SMALL
+                    }
+                    _ => {
+                        assert_eq!(*count as usize, 5);
+                        cryptoki_sys::CKR_OK
+                    }
+                }
+            })
+            .expect("retry fill succeeds");
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(grown.len(), 5);
+
+        // Non-retryable fill error: query plus one failed fill, no retry.
+        let attempts = Cell::new(0);
+        let err =
+            FfiBackend::two_call_array(|values: *mut u8, count: &mut cryptoki_sys::CK_ULONG| {
+                attempts.set(attempts.get() + 1);
+                if values.is_null() {
+                    *count = 2;
+                    cryptoki_sys::CKR_OK
+                } else {
+                    cryptoki_sys::CKR_DEVICE_ERROR
+                }
+            })
+            .unwrap_err();
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(err, CkRv::DEVICE_ERROR);
+    }
+
+    #[test]
     fn null_output_length_shared_helper_preserves_all_three_native_shapes() {
         let missing_len_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
