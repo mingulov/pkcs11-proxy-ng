@@ -1744,6 +1744,64 @@ mod tests {
     }
 
     #[test]
+    fn stale_init_completion_does_not_publish_into_new_incarnation() {
+        // C3M.4/row 10: an Init whose native call ran under a dead
+        // incarnation must not publish its owner into the new one, even
+        // when the numeric session handle was reused and the native call
+        // itself succeeded.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+        backend.initialize().expect("first initialization succeeds");
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        let err = backend
+            .call_init_with_mechanism(
+                CkSessionHandle(7),
+                OperationFamily::Sign,
+                Some(0u8),
+                &mechanism,
+                |_, _| {
+                    // Deterministic race simulation: the incarnation turns
+                    // over while the native Init runs (failed Finalize,
+                    // then a new Initialize).
+                    backend.lifecycle.note_finalize_failed();
+                    backend.lifecycle.note_initialized();
+                    cryptoki_sys::CKR_OK
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err, CkRv::SESSION_HANDLE_INVALID);
+        assert!(backend.mech_cache.is_empty());
+        assert!(backend.last_init_family.is_empty());
+    }
+
+    #[test]
+    fn stale_init_completion_with_output_does_not_publish() {
+        // Same dead-incarnation refusal through the output-bearing Init
+        // choke point: extracted native output is discarded with the
+        // retired owner, never published.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+        backend.initialize().expect("first initialization succeeds");
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        let err = backend
+            .call_init_with_mechanism_output(
+                CkSessionHandle(7),
+                OperationFamily::Sign,
+                Some(0u8),
+                &mechanism,
+                |_, _| {
+                    backend.lifecycle.note_finalize_failed();
+                    backend.lifecycle.note_initialized();
+                    cryptoki_sys::CKR_OK
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err, CkRv::SESSION_HANDLE_INVALID);
+        assert!(backend.mech_cache.is_empty());
+        assert!(backend.last_init_family.is_empty());
+    }
+
+    #[test]
     fn double_initialize_without_finalize_keeps_current_incarnation() {
         // Re-affirming an already-open incarnation must not evict its live
         // session bindings or reset its open count.

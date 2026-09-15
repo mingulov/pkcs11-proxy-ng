@@ -293,9 +293,17 @@ impl FfiBackend {
         TFunction: Copy,
         F: FnOnce(TFunction, &mut cryptoki_sys::CK_MECHANISM) -> cryptoki_sys::CK_RV,
     {
+        let generation = self.lifecycle.current_generation();
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         Self::ck_result(call(function, ffi_mech.ck_mechanism_mut()))?;
+        // Row-10 stale-completion guard: if re-initialization advanced the
+        // generation while the native call ran, this completion belongs to
+        // a dead incarnation. Retire its owner instead of publishing it —
+        // the slot may already belong to a reused handle in the new one.
+        if self.lifecycle.current_generation() != generation {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
         // Keep the mechanism's backing memory alive in this family's slot.
         self.mech_cache.insert((session.0, family), ffi_mech);
         self.last_init_family.insert(session.0, family);
@@ -314,10 +322,16 @@ impl FfiBackend {
         TFunction: Copy,
         F: FnOnce(TFunction, &mut cryptoki_sys::CK_MECHANISM) -> cryptoki_sys::CK_RV,
     {
+        let generation = self.lifecycle.current_generation();
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         Self::ck_result(call(function, ffi_mech.ck_mechanism_mut()))?;
         let output_params = ffi_mech.output_params();
+        // Row-10 stale-completion guard: same dead-incarnation refusal as
+        // `call_init_with_mechanism` — never publish into a reused slot.
+        if self.lifecycle.current_generation() != generation {
+            return Err(CkRv::SESSION_HANDLE_INVALID);
+        }
         // Keep the mechanism's backing memory alive in this family's slot.
         self.mech_cache.insert((session.0, family), ffi_mech);
         self.last_init_family.insert(session.0, family);
