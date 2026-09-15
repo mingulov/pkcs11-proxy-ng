@@ -145,6 +145,48 @@ fn example_fips_mechanism_params_parses() {
     // filtering them out.
 }
 
+/// FIPS example: every `[[params]]` shape must resolve to a known shim
+/// arm, and historically mislabeled entries must stay fixed. The file
+/// once used PascalCase shape names (which never match the snake_case
+/// arms, silently degrading those mechanisms to Raw-then-rejected via
+/// the override-wins merge) and listed real PQC hash IDs as HKDF.
+#[test]
+fn example_fips_mechanism_shapes_resolve() {
+    use pkcs11_proxy_ng_types::MechanismRegistry;
+    use std::collections::HashSet;
+    let default = MechanismRegistry::load(None).expect("embedded default must load");
+    let known: HashSet<&str> = default.param_shapes_view().values().map(|s| s.as_str()).collect();
+    let p = submodule_root().join("examples/configs/fips/mechanism_params.toml");
+    let src = std::fs::read_to_string(&p).expect("read fips mechanism toml");
+    let fips = MechanismRegistry::load(Some(&p)).expect("fips must parse");
+    for (mech, shape) in fips.param_shapes_view() {
+        assert!(
+            known.contains(shape.as_str()),
+            "FIPS shape {shape} for {mech:#x} must resolve to a known arm"
+        );
+    }
+    // Spot-check the previously-PascalCase mappings (override wins, so
+    // these must equal the default's correct snake_case names).
+    assert_eq!(fips.param_shape(0x000Du64), Some("rsa_pss"));
+    assert_eq!(fips.param_shape(0x1087u64), Some("gcm"));
+    assert_eq!(fips.param_shape(0x0021u64), Some("iv"));
+    assert_eq!(fips.param_shape(0x0031u64), Some("x942_dh1_derive"));
+    // Real HKDF IDs per OASIS pkcs11t.h 3.02 (0x402A/B/C) — never the
+    // 0x0028-0x002A values, which are PQC hash mechanisms.
+    assert_eq!(fips.param_shape(0x402Au64), Some("hkdf"));
+    assert!(src.contains("0x402A"), "FIPS file must reference real HKDF IDs");
+    assert!(
+        !src.contains("0x0028,  # CKM_HKDF"),
+        "FIPS file must not mislabel PQC hash IDs as HKDF"
+    );
+    // Parameterized AES modes must not sit in the file's own
+    // parameterless list (section ends at the first [[params]]).
+    let head = src.split("[[params]]").next().unwrap_or("");
+    for id in ["0x1086", "0x108B", "0x108E"] {
+        assert!(!head.contains(id), "FIPS parameterless must not list parameterized {id}");
+    }
+}
+
 /// Forward-compat: an older shipped proxy.toml (the one used by the
 /// resilience fixture, predating later-added fields) must still
 /// parse cleanly with the current daemon. New fields default.

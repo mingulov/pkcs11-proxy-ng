@@ -127,6 +127,30 @@ mod mechanism_to_ffi_tests {
     }
 
     #[test]
+    fn official_pqc_mechanisms_flow_parameterless_to_null_ffi() {
+        // OASIS v3.2 (ml-kem.md): CKM_ML_KEM keygen/encaps/decaps take no
+        // parameters; ML-DSA/SLH-DSA likewise (hash variants take only an
+        // optional additional context). The transparent path must deliver
+        // them with NULL params — this is what CloudHSM PQC rides on, and
+        // it must keep working while vendor shapes are gated.
+        let pqc_ids = [
+            (0x0000_000F, "CKM_ML_KEM_KEY_PAIR_GEN"),
+            (0x0000_0017, "CKM_ML_KEM"),
+            (0x0000_001C, "CKM_ML_DSA_KEY_PAIR_GEN"),
+            (0x0000_001D, "CKM_ML_DSA"),
+            (0x0000_002D, "CKM_SLH_DSA_KEY_PAIR_GEN"),
+            (0x0000_002E, "CKM_SLH_DSA"),
+        ];
+        for (id, name) in pqc_ids {
+            let mech = CkMechanism { mechanism_type: CkMechanismType(id), params: None };
+            let ffi = mechanism_to_ffi(&mech).expect("official PQC flows parameterless");
+            let native = ffi.ck_mechanism();
+            assert!(native.pParameter.is_null(), "{name}: NULL params on the wire");
+            assert_eq!(native.ulParameterLen, 0, "{name}: zero param length");
+        }
+    }
+
+    #[test]
     fn pss_params_reconstruct_c_struct() {
         let ffi = convert(
             CkMechanismType::RSA_PKCS_PSS,

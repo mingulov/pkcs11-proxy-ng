@@ -98,10 +98,10 @@ parameterless = [
     0x1081,  # CKM_AES_ECB
     0x1082,  # CKM_AES_CBC
     0x1085,  # CKM_AES_CBC_PAD
-    0x1086,  # CKM_AES_CTR
+    # NOTE: CKM_AES_CTR, CKM_AES_CMAC_GENERAL and CKM_AES_GMAC take
+    # parameters — they are NOT parameterless. Their shapes come from
+    # the embedded default; do not re-add their IDs here.
     0x108A,  # CKM_AES_CMAC
-    0x108B,  # CKM_AES_CMAC_GENERAL
-    0x108E,  # CKM_AES_GMAC
     0x2109,  # CKM_AES_KEY_WRAP
     0x210A,  # CKM_AES_KEY_WRAP_PAD
     0x210B,  # CKM_AES_KEY_WRAP_KWP
@@ -115,15 +115,17 @@ parameterless = [
     0x0138,  # CKM_DES3_CMAC
 
     # ── KDF / KBKDF ──
-    0x0028,  # CKM_HKDF_DERIVE
-    0x0029,  # CKM_HKDF_DATA
-    0x002A,  # CKM_HKDF_KEY_GEN
+    # Real HKDF IDs per OASIS pkcs11t.h 3.02 are 0x402A/0x402B/0x402C
+    # (0x0028-0x002A are PQC hash mechanisms, not HKDF). DERIVE/DATA
+    # take CK_HKDF_PARAMS (see [[params]] below); KEY_GEN is
+    # parameterless.
+    0x402C,  # CKM_HKDF_KEY_GEN
 ]
 
 # ─── Parameterized mechanisms (FIPS-approved parameter shapes) ────────
 
 [[params]]
-shape = "RsaPkcsPss"
+shape = "rsa_pss"
 mechanisms = [
     0x000D,  # CKM_RSA_PKCS_PSS
     0x0043,  # CKM_SHA256_RSA_PKCS_PSS
@@ -137,39 +139,51 @@ mechanisms = [
 ]
 
 [[params]]
-shape = "RsaPkcsOaep"
+shape = "rsa_oaep"
 mechanisms = [
     0x0009,  # CKM_RSA_PKCS_OAEP
 ]
 
 [[params]]
-shape = "AesGcm"
+shape = "gcm"
 mechanisms = [
     0x1087,  # CKM_AES_GCM
 ]
 
 [[params]]
-shape = "AesCcm"
+shape = "ccm"
 mechanisms = [
     0x1088,  # CKM_AES_CCM
 ]
 
 [[params]]
-shape = "Ecdh1Derive"
+shape = "ecdh1_derive"
 mechanisms = [
     0x1050,  # CKM_ECDH1_DERIVE
     0x1051,  # CKM_ECDH1_COFACTOR_DERIVE
 ]
 
 [[params]]
-shape = "DhPkcsDerive"
+shape = "iv"
 mechanisms = [
-    0x0021,  # CKM_DH_PKCS_DERIVE
+    0x0021,  # CKM_DH_PKCS_DERIVE (raw public value bytes)
+]
+
+[[params]]
+shape = "x942_dh1_derive"
+mechanisms = [
     0x0031,  # CKM_X9_42_DH_DERIVE
 ]
 
 [[params]]
-shape = "Pkcs5Pbkd2"
+shape = "pkcs5_pbkd2"
 mechanisms = [
     0x03B0,  # CKM_PKCS5_PBKD2
+]
+
+[[params]]
+shape = "hkdf"
+mechanisms = [
+    0x402A,  # CKM_HKDF_DERIVE
+    0x402B,  # CKM_HKDF_DATA
 ]
