@@ -302,6 +302,17 @@ pub(in crate::ffi) struct LifecycleTracker {
     initialized: std::sync::atomic::AtomicBool,
     finalized_ok: std::sync::atomic::AtomicBool,
     open_sessions: std::sync::atomic::AtomicUsize,
+    /// Initialization-cycle generation (C3M.4/row 10): advances once per
+    /// successful initialization cycle inside this reservation, so session
+    /// identities can be qualified against the incarnation that created
+    /// them and stale work cannot publish into a reinitialized domain.
+    generation: std::sync::atomic::AtomicU64,
+    /// A `C_Finalize` failed since the current incarnation opened. The old
+    /// incarnation is then uncertain (not cleanly closed): a later
+    /// successful `C_Initialize` starts a new cycle rather than re-affirming
+    /// the stale one. Used only for the new-cycle predicate, never to
+    /// soften the retirement decision.
+    finalize_failed: std::sync::atomic::AtomicBool,
 }
 
 /// Retirement outcome for backend `Drop`.
@@ -317,9 +328,35 @@ pub(in crate::ffi) enum RetirementDecision {
 impl LifecycleTracker {
     /// Record a successful native `C_Initialize`. A new initialization cycle
     /// always clears a previously observed finalization.
+    ///
+    /// Only the first initialization of an incarnation advances the
+    /// generation and resets the open-session count: re-affirming an
+    /// already-open incarnation keeps its generation, bindings and count,
+    /// while a cycle after `C_Finalize` starts clean so a reused numeric
+    /// handle cannot alias the dead incarnation's owners.
     pub(in crate::ffi) fn note_initialized(&self) {
+        let new_cycle = !self.initialized.load(SeqCst)
+            || self.finalized_ok.load(SeqCst)
+            || self.finalize_failed.load(SeqCst);
         self.initialized.store(true, SeqCst);
         self.finalized_ok.store(false, SeqCst);
+        self.finalize_failed.store(false, SeqCst);
+        if new_cycle {
+            self.generation.fetch_add(1, SeqCst);
+            self.open_sessions.store(0, SeqCst);
+        }
+    }
+
+    /// Current initialization-cycle generation. Session identities created
+    /// under an older generation are stale after re-initialization.
+    pub(in crate::ffi) fn current_generation(&self) -> u64 {
+        self.generation.load(SeqCst)
+    }
+
+    /// Test-only read of the provider-confirmed open-session count.
+    #[cfg(test)]
+    pub(in crate::ffi) fn open_session_count_for_tests(&self) -> usize {
+        self.open_sessions.load(SeqCst)
     }
 
     /// Record a successful native `C_Finalize`. The provider has destroyed
@@ -327,7 +364,17 @@ impl LifecycleTracker {
     /// returns to zero together with the cleared session maps.
     pub(in crate::ffi) fn note_finalized(&self) {
         self.finalized_ok.store(true, SeqCst);
+        self.finalize_failed.store(false, SeqCst);
         self.open_sessions.store(0, SeqCst);
+    }
+
+    /// Record a failed native `C_Finalize`. The incarnation is uncertain —
+    /// not cleanly closed — so a later successful `C_Initialize` opens a new
+    /// cycle instead of re-affirming the stale one. Session bindings and the
+    /// open count are deliberately retained here (the failure proves
+    /// nothing about provider state); they reset when the new cycle starts.
+    pub(in crate::ffi) fn note_finalize_failed(&self) {
+        self.finalize_failed.store(true, SeqCst);
     }
 
     /// Record one provider-confirmed session open.

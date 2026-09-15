@@ -148,6 +148,22 @@ fn native_domain_lifecycle_open_sessions_block_release_until_closed() {
 }
 
 #[test]
+fn native_domain_lifecycle_generation_advances_per_initialization_cycle() {
+    // C3M.4/row 10: each initialization cycle gets a fresh generation so
+    // stale work cannot publish into a reinitialized domain. Re-affirming
+    // an already-open incarnation is not a new cycle.
+    let tracker = LifecycleTracker::default();
+    assert_eq!(tracker.current_generation(), 0);
+    tracker.note_initialized();
+    assert_eq!(tracker.current_generation(), 1);
+    tracker.note_initialized();
+    assert_eq!(tracker.current_generation(), 1);
+    tracker.note_finalized();
+    tracker.note_initialized();
+    assert_eq!(tracker.current_generation(), 2);
+}
+
+#[test]
 fn native_domain_lifecycle_close_surprise_never_hides_sessions() {
     let tracker = LifecycleTracker::default();
     tracker.note_initialized();

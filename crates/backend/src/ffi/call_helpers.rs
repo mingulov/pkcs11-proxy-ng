@@ -386,6 +386,8 @@ impl FfiBackend {
     /// Clear all `mech_cache` entries and session-slot mappings after
     /// successful `C_Finalize` so Rust-owned mechanism backing memory is
     /// released even when the caller doesn't close sessions individually first.
+    /// Also used when a successful `C_Initialize` opens a new incarnation:
+    /// bindings cached under the dead generation must not survive it.
     pub(super) fn drop_all_mech_cache(&self) {
         self.mech_cache.clear();
         self.last_init_family.clear();

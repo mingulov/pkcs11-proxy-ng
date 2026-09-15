@@ -242,14 +242,29 @@ impl Pkcs11Backend for FfiBackend {
         Self::call_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
             function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
         })?;
+        // A new initialization cycle starts a clean incarnation (C3M.4/row
+        // 10): session bindings cached under a dead generation must not
+        // survive, or a reused numeric handle would alias stale owners.
+        // Re-affirming an already-open incarnation keeps its live bindings.
+        let generation_before = self.lifecycle.current_generation();
         self.lifecycle.note_initialized();
+        if self.lifecycle.current_generation() != generation_before {
+            self.drop_all_mech_cache();
+        }
         Ok(())
     }
 
     fn finalize(&self) -> CkResult<()> {
-        Self::call_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
+        let outcome = Self::call_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
             function(std::ptr::null_mut())
-        })?;
+        });
+        if outcome.is_err() {
+            // The failure proves nothing about provider state, so every
+            // binding stays — but the incarnation is now uncertain, and a
+            // later re-initialization must open a new cycle (C3M.4/row 10).
+            self.lifecycle.note_finalize_failed();
+            return outcome;
+        }
         // This is the daemon/backend finalizer, not the per-client gRPC
         // Finalize path. Per-client Finalize removes only that client context
         // and closes its sessions. Once the underlying module accepts
@@ -1629,10 +1644,22 @@ mod tests {
         cryptoki_sys::CKR_GENERAL_ERROR
     }
 
+    unsafe extern "C" fn initialize_ok(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
     fn backend_with_finalize(
         finalize: cryptoki_sys::CK_C_Finalize,
     ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        backend_with_init_and_finalize(None, finalize)
+    }
+
+    fn backend_with_init_and_finalize(
+        initialize: cryptoki_sys::CK_C_Initialize,
+        finalize: cryptoki_sys::CK_C_Finalize,
+    ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_Initialize = initialize;
         functions.C_Finalize = finalize;
 
         let backend = FfiBackend {
@@ -1687,6 +1714,49 @@ mod tests {
         assert!(backend.last_init_family.is_empty());
         assert!(backend.session_slot_map.is_empty());
         assert!(backend.slot_sessions.is_empty());
+    }
+
+    #[test]
+    fn initialize_after_failed_finalize_starts_a_clean_incarnation() {
+        // C3M.4/row 10: a re-initialization after a failed Finalize is a new
+        // lifecycle generation. Stale session bindings and the stale open
+        // count must not leak into it, or a reused numeric handle would alias
+        // a dead incarnation's owners.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+        backend.initialize().expect("first initialization succeeds");
+        assert_eq!(backend.lifecycle.current_generation(), 1);
+        backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+        backend.lifecycle.note_session_opened();
+        backend.lifecycle.note_session_opened();
+        assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
+        // Failed Finalize retains everything (existing contract).
+        assert!(backend.session_slot_map.contains_key(&7));
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 2);
+
+        backend.initialize().expect("re-initialization succeeds");
+        assert_eq!(backend.lifecycle.current_generation(), 2);
+        assert!(backend.session_slot_map.is_empty());
+        assert!(backend.slot_sessions.is_empty());
+        assert!(backend.mech_cache.is_empty());
+        assert!(backend.last_init_family.is_empty());
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 0);
+    }
+
+    #[test]
+    fn double_initialize_without_finalize_keeps_current_incarnation() {
+        // Re-affirming an already-open incarnation must not evict its live
+        // session bindings or reset its open count.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_fails));
+        backend.initialize().expect("first initialization succeeds");
+        backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+        backend.lifecycle.note_session_opened();
+
+        backend.initialize().expect("second initialization succeeds");
+        assert_eq!(backend.lifecycle.current_generation(), 1);
+        assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 1);
     }
 
     #[test]
