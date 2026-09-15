@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static LOCK: Mutex<()> = Mutex::new(());
 static CALLS: Mutex<Vec<(bool, Option<u64>)>> = Mutex::new(Vec::new());
 static FAIL_SIZING: AtomicBool = AtomicBool::new(false);
+static MUTATE_SIZING_INPUTS: AtomicBool = AtomicBool::new(false);
 
 unsafe fn output(
     output: cryptoki_sys::CK_BYTE_PTR,
@@ -47,7 +48,7 @@ unsafe extern "C" fn wrap(
 }
 unsafe extern "C" fn authenticated(
     _: cryptoki_sys::CK_SESSION_HANDLE,
-    _: cryptoki_sys::CK_MECHANISM_PTR,
+    mechanism: cryptoki_sys::CK_MECHANISM_PTR,
     _: cryptoki_sys::CK_OBJECT_HANDLE,
     _: cryptoki_sys::CK_OBJECT_HANDLE,
     _: cryptoki_sys::CK_BYTE_PTR,
@@ -55,6 +56,13 @@ unsafe extern "C" fn authenticated(
     out: cryptoki_sys::CK_BYTE_PTR,
     len: cryptoki_sys::CK_ULONG_PTR,
 ) -> cryptoki_sys::CK_RV {
+    // Row-11 fault injection: poison the mechanism root during the sizing
+    // call so the typed path's post-sizing validation must refuse the fill.
+    if MUTATE_SIZING_INPUTS.load(Ordering::SeqCst) && out.is_null() && !mechanism.is_null() {
+        unsafe {
+            (*mechanism).pParameter = std::ptr::null_mut();
+        }
+    }
     unsafe { output(out, len) }
 }
 
@@ -176,4 +184,31 @@ fn ordinary_wrap_native_sizing_calls_twice_and_stops_on_error() {
         }
     }
     FAIL_SIZING.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn native_owner_authenticated_validation_precedes_second_call() {
+    // C3M.6 row 11: the typed authenticated path validates the mechanism
+    // root after the sizing call and before the fill. A provider-mutated
+    // input must stop the sequence after exactly one native entry with
+    // DEVICE_ERROR — the fill must never observe the poisoned pointer.
+    // Already-green invariant kept as a named regression.
+    let _guard = LOCK.lock().unwrap();
+    MUTATE_SIZING_INPUTS.store(true, Ordering::SeqCst);
+    CALLS.lock().unwrap().clear();
+    let (b, _base, _functions) = backend();
+    let err = b
+        .ffi_wrap_authenticated_typed(
+            CkSessionHandle(4),
+            &mechanism(),
+            None,
+            CkObjectHandle(8),
+            CkObjectHandle(9),
+            CkInBuf::Bytes(&[]),
+        )
+        .map(|r| r.0)
+        .unwrap_err();
+    assert_eq!(err, CkRv::DEVICE_ERROR);
+    assert_eq!(*CALLS.lock().unwrap(), vec![(false, Some(0))]);
+    MUTATE_SIZING_INPUTS.store(false, Ordering::SeqCst);
 }
