@@ -21,16 +21,18 @@ impl FfiBackend {
 
     pub(super) fn ffi_get_slot_info(&self, slot_id: CkSlotId) -> CkResult<CkSlotInfo> {
         let mut info = cryptoki_sys::CK_SLOT_INFO::default();
+        let h_slot = Self::slot_id(slot_id)?;
         Self::call_unit(unsafe { (*self.func_list).C_GetSlotInfo }, |function| unsafe {
-            function(Self::slot_id(slot_id), &mut info)
+            function(h_slot, &mut info)
         })?;
         Ok(slot_info_from_ck(&info))
     }
 
     pub(super) fn ffi_get_token_info(&self, slot_id: CkSlotId) -> CkResult<CkTokenInfo> {
         let mut info = cryptoki_sys::CK_TOKEN_INFO::default();
+        let h_slot = Self::slot_id(slot_id)?;
         Self::call_unit(unsafe { (*self.func_list).C_GetTokenInfo }, |function| unsafe {
-            function(Self::slot_id(slot_id), &mut info)
+            function(h_slot, &mut info)
         })?;
         Ok(token_info_from_ck(&info))
     }
@@ -39,11 +41,10 @@ impl FfiBackend {
         &self,
         slot_id: CkSlotId,
     ) -> CkResult<Vec<CkMechanismType>> {
+        let h_slot = Self::slot_id(slot_id)?;
         let mechanisms = Self::call_array::<_, cryptoki_sys::CK_MECHANISM_TYPE, _>(
             unsafe { (*self.func_list).C_GetMechanismList },
-            |function, mechanisms, count| unsafe {
-                function(Self::slot_id(slot_id), mechanisms, count)
-            },
+            |function, mechanisms, count| unsafe { function(h_slot, mechanisms, count) },
         )?;
         Ok(mechanisms.into_iter().map(|x| CkMechanismType(x as u64)).collect())
     }
@@ -54,8 +55,10 @@ impl FfiBackend {
         mech: CkMechanismType,
     ) -> CkResult<CkMechanismInfo> {
         let mut info = cryptoki_sys::CK_MECHANISM_INFO::default();
+        let h_slot = Self::slot_id(slot_id)?;
+        let h_mech = Self::mechanism_type(mech)?;
         Self::call_unit(unsafe { (*self.func_list).C_GetMechanismInfo }, |function| unsafe {
-            function(Self::slot_id(slot_id), mech.0 as cryptoki_sys::CK_MECHANISM_TYPE, &mut info)
+            function(h_slot, h_mech, &mut info)
         })?;
         Ok(mechanism_info_from_ck(&info))
     }
@@ -71,8 +74,9 @@ impl FfiBackend {
             Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
             None => (std::ptr::null_mut(), 0),
         };
+        let h_slot = Self::slot_id(slot_id)?;
         Self::call_unit(unsafe { (*self.func_list).C_InitToken }, |function| unsafe {
-            function(Self::slot_id(slot_id), pin_ptr, pin_len, label_buf.as_mut_ptr())
+            function(h_slot, pin_ptr, pin_len, label_buf.as_mut_ptr())
         })
     }
 
@@ -85,8 +89,9 @@ impl FfiBackend {
             Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
             None => (std::ptr::null_mut(), 0),
         };
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_InitPIN }, |function| unsafe {
-            function(Self::session_handle(session), pin_ptr, pin_len)
+            function(h_session, pin_ptr, pin_len)
         })
     }
 
@@ -104,8 +109,9 @@ impl FfiBackend {
             Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
             None => (std::ptr::null_mut(), 0),
         };
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_SetPIN }, |function| unsafe {
-            function(Self::session_handle(session), old_ptr, old_len, new_ptr, new_len)
+            function(h_session, old_ptr, old_len, new_ptr, new_len)
         })
     }
 
@@ -114,11 +120,12 @@ impl FfiBackend {
         slot_id: CkSlotId,
         flags: CkSessionFlags,
     ) -> CkResult<CkSessionHandle> {
+        let h_slot = Self::slot_id(slot_id)?;
         let handle = Self::call_session_output(
             unsafe { (*self.func_list).C_OpenSession },
             |function, handle| unsafe {
                 function(
-                    Self::slot_id(slot_id),
+                    h_slot,
                     flags.0 as cryptoki_sys::CK_FLAGS,
                     std::ptr::null_mut(),
                     None,
@@ -140,8 +147,9 @@ impl FfiBackend {
         // session's owners, marker and mapping so the still-owned incarnation
         // remains usable; the open count likewise stays high (fail-closed
         // toward slot poisoning on Drop).
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_CloseSession }, |function| unsafe {
-            function(Self::session_handle(session))
+            function(h_session)
         })?;
         self.drop_mech_cache_session(session);
         self.forget_session_slot(session);
@@ -156,8 +164,9 @@ impl FfiBackend {
         // Keep all target-slot owners through the one native call and clear
         // only after CKR_OK (C3M.4). A failed close preserves target-slot
         // ownership/index, and other slots remain untouched either way.
+        let h_slot = Self::slot_id(slot_id)?;
         Self::call_unit(unsafe { (*self.func_list).C_CloseAllSessions }, |function| unsafe {
-            function(Self::slot_id(slot_id))
+            function(h_slot)
         })?;
         self.drop_mech_cache_for_slot(slot_id);
         self.lifecycle.note_sessions_closed(known_open);
@@ -166,8 +175,9 @@ impl FfiBackend {
 
     pub(super) fn ffi_get_session_info(&self, session: CkSessionHandle) -> CkResult<CkSessionInfo> {
         let mut info = cryptoki_sys::CK_SESSION_INFO::default();
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_GetSessionInfo }, |function| unsafe {
-            function(Self::session_handle(session), &mut info)
+            function(h_session, &mut info)
         })?;
         Ok(session_info_from_ck(&info))
     }
@@ -182,31 +192,30 @@ impl FfiBackend {
             Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
             None => (std::ptr::null_mut(), 0),
         };
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_Login }, |function| unsafe {
-            function(
-                Self::session_handle(session),
-                user_type as cryptoki_sys::CK_USER_TYPE,
-                pin_ptr,
-                pin_len,
-            )
+            function(h_session, user_type as cryptoki_sys::CK_USER_TYPE, pin_ptr, pin_len)
         })
     }
 
     pub(super) fn ffi_logout(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_Logout }, |function| unsafe {
-            function(Self::session_handle(session))
+            function(h_session)
         })
     }
 
     pub(super) fn ffi_get_function_status(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_GetFunctionStatus }, |function| unsafe {
-            function(Self::session_handle(session))
+            function(h_session)
         })
     }
 
     pub(super) fn ffi_cancel_function(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_CancelFunction }, |function| unsafe {
-            function(Self::session_handle(session))
+            function(h_session)
         })
     }
 }

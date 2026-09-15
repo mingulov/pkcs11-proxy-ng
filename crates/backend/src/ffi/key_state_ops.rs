@@ -20,14 +20,16 @@ impl FfiBackend {
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
         let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let h_session = Self::session_handle(session)?;
+        let h_base_key = Self::object_handle(base_key)?;
         Self::call_object_with_mechanism(
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
             |function, mech, handle| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     mech,
-                    Self::object_handle(base_key),
+                    h_base_key,
                     Self::ffi_attr_ptr(&ffi_attrs),
                     Self::ffi_attr_len(&ffi_attrs),
                     handle,
@@ -48,14 +50,16 @@ impl FfiBackend {
         template: &[CkAttribute],
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let h_session = Self::session_handle(session)?;
+        let h_base_key = Self::object_handle(base_key)?;
         Self::call_object_with_mechanism_output(
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
             |function, mech, handle| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     mech,
-                    Self::object_handle(base_key),
+                    h_base_key,
                     Self::ffi_attr_ptr(&ffi_attrs),
                     Self::ffi_attr_len(&ffi_attrs),
                     handle,
@@ -72,14 +76,16 @@ impl FfiBackend {
         template: &[CkAttribute],
     ) -> CkResult<crate::traits::CkDeriveKeyOutputResult> {
         let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let h_session = Self::session_handle(session)?;
+        let h_base_key = Self::object_handle(base_key)?;
         Self::call_object_with_mechanism_output_result(
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
             |function, mech, handle| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     mech,
-                    Self::object_handle(base_key),
+                    h_base_key,
                     Self::ffi_attr_ptr(&ffi_attrs),
                     Self::ffi_attr_len(&ffi_attrs),
                     handle,
@@ -95,18 +101,14 @@ impl FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
     ) -> CkResult<Vec<u8>> {
+        let h_session = Self::session_handle(session)?;
+        let h_wrapping_key = Self::object_handle(wrapping_key)?;
+        let h_key = Self::object_handle(key)?;
         Self::call_bytes_with_mechanism(
             unsafe { (*self.func_list).C_WrapKey },
             mechanism,
             |function, mech, output, output_len| unsafe {
-                function(
-                    Self::session_handle(session),
-                    mech,
-                    Self::object_handle(wrapping_key),
-                    Self::object_handle(key),
-                    output,
-                    output_len,
-                )
+                function(h_session, mech, h_wrapping_key, h_key, output, output_len)
             },
         )
     }
@@ -119,19 +121,15 @@ impl FfiBackend {
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let h_session = Self::session_handle(session)?;
+        let h_wrapping_key = Self::object_handle(wrapping_key)?;
+        let h_key = Self::object_handle(key)?;
         Self::call_bytes_exact_with_mechanism(
             unsafe { (*self.func_list).C_WrapKey },
             mechanism,
             spec,
             |function, mech, output, output_len| unsafe {
-                function(
-                    Self::session_handle(session),
-                    mech,
-                    Self::object_handle(wrapping_key),
-                    Self::object_handle(key),
-                    output,
-                    output_len,
-                )
+                function(h_session, mech, h_wrapping_key, h_key, output, output_len)
             },
         )
     }
@@ -148,19 +146,15 @@ impl FfiBackend {
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)> {
+        let h_session = Self::session_handle(session)?;
+        let h_wrapping_key = Self::object_handle(wrapping_key)?;
+        let h_key = Self::object_handle(key)?;
         Self::call_bytes_exact_with_mechanism_output(
             unsafe { (*self.func_list).C_WrapKey },
             mechanism,
             spec,
             |function, mech, output, output_len| unsafe {
-                function(
-                    Self::session_handle(session),
-                    mech,
-                    Self::object_handle(wrapping_key),
-                    Self::object_handle(key),
-                    output,
-                    output_len,
-                )
+                function(h_session, mech, h_wrapping_key, h_key, output, output_len)
             },
         )
     }
@@ -175,14 +169,16 @@ impl FfiBackend {
     ) -> CkResult<CkObjectHandle> {
         let ffi_attrs = FfiAttrs::from_slice(template)?;
         let (wk_ptr, wk_len) = wrapped_key.as_ptr_len();
+        let h_session = Self::session_handle(session)?;
+        let h_unwrapping_key = Self::object_handle(unwrapping_key)?;
         Self::call_object_with_mechanism(
             unsafe { (*self.func_list).C_UnwrapKey },
             mechanism,
             |function, mech, handle| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     mech,
-                    Self::object_handle(unwrapping_key),
+                    h_unwrapping_key,
                     wk_ptr as *mut _,
                     Self::ulong_len_u64(wk_len),
                     Self::ffi_attr_ptr(&ffi_attrs),
@@ -200,12 +196,13 @@ impl FfiBackend {
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
         let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let h_session = Self::session_handle(session)?;
         Self::call_object_with_mechanism(
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
             |function, mech, handle| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     mech,
                     Self::ffi_attr_ptr(&ffi_attrs),
                     Self::ffi_attr_len(&ffi_attrs),
@@ -224,12 +221,13 @@ impl FfiBackend {
         template: &[CkAttribute],
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let h_session = Self::session_handle(session)?;
         Self::call_object_with_mechanism_output(
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
             |function, mech, handle| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     mech,
                     Self::ffi_attr_ptr(&ffi_attrs),
                     Self::ffi_attr_len(&ffi_attrs),
@@ -248,12 +246,13 @@ impl FfiBackend {
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
         let pub_ffi = FfiAttrs::from_slice(pub_template)?;
         let priv_ffi = FfiAttrs::from_slice(priv_template)?;
+        let h_session = Self::session_handle(session)?;
         Self::call_object_pair_with_mechanism(
             unsafe { (*self.func_list).C_GenerateKeyPair },
             mechanism,
             |function, mech, public_handle, private_handle| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     mech,
                     Self::ffi_attr_ptr(&pub_ffi),
                     Self::ffi_attr_len(&pub_ffi),
@@ -285,11 +284,10 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_get_operation_state(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+        let h_session = Self::session_handle(session)?;
         Self::call_bytes(
             unsafe { (*self.func_list).C_GetOperationState },
-            |function, state, state_len| unsafe {
-                function(Self::session_handle(session), state, state_len)
-            },
+            |function, state, state_len| unsafe { function(h_session, state, state_len) },
         )
     }
 
@@ -298,12 +296,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let h_session = Self::session_handle(session)?;
         Self::call_bytes_exact(
             unsafe { (*self.func_list).C_GetOperationState },
             spec,
-            |function, state, state_len| unsafe {
-                function(Self::session_handle(session), state, state_len)
-            },
+            |function, state, state_len| unsafe { function(h_session, state, state_len) },
         )
     }
 
@@ -315,13 +312,16 @@ impl FfiBackend {
         auth_key: CkObjectHandle,
     ) -> CkResult<()> {
         let (state_ptr, state_len) = state.as_ptr_len();
+        let h_session = Self::session_handle(session)?;
+        let h_enc_key = Self::object_handle(enc_key)?;
+        let h_auth_key = Self::object_handle(auth_key)?;
         Self::call_unit(unsafe { (*self.func_list).C_SetOperationState }, |function| unsafe {
             function(
-                Self::session_handle(session),
+                h_session,
                 state_ptr as *mut _,
                 Self::ulong_len_u64(state_len),
-                Self::object_handle(enc_key),
-                Self::object_handle(auth_key),
+                h_enc_key,
+                h_auth_key,
             )
         })
     }
@@ -332,12 +332,9 @@ impl FfiBackend {
         seed: CkInBuf<'_>,
     ) -> CkResult<()> {
         let (seed_ptr, seed_len) = seed.as_ptr_len();
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_SeedRandom }, |function| unsafe {
-            function(
-                Self::session_handle(session),
-                seed_ptr as *mut _,
-                Self::ulong_len_u64(seed_len),
-            )
+            function(h_session, seed_ptr as *mut _, Self::ulong_len_u64(seed_len))
         })
     }
 
@@ -347,12 +344,11 @@ impl FfiBackend {
         len: u32,
     ) -> CkResult<Vec<u8>> {
         let len = checked_random_len(len)?;
+        let h_session = Self::session_handle(session)?;
         Self::fill_bytes(
             unsafe { (*self.func_list).C_GenerateRandom },
             len,
-            |function, output, output_len| unsafe {
-                function(Self::session_handle(session), output, output_len)
-            },
+            |function, output, output_len| unsafe { function(h_session, output, output_len) },
         )
     }
 
@@ -362,11 +358,12 @@ impl FfiBackend {
         part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         let (part_ptr, part_len) = part.as_ptr_len();
+        let h_session = Self::session_handle(session)?;
         Self::call_bytes(
             unsafe { (*self.func_list).C_DigestEncryptUpdate },
             |function, output, output_len| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     part_ptr as *mut _,
                     Self::ulong_len_u64(part_len),
                     output,
@@ -397,11 +394,12 @@ impl FfiBackend {
         encrypted_part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
+        let h_session = Self::session_handle(session)?;
         Self::call_bytes(
             unsafe { (*self.func_list).C_DecryptDigestUpdate },
             |function, output, output_len| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     ep_ptr as *mut _,
                     Self::ulong_len_u64(ep_len),
                     output,
@@ -432,11 +430,12 @@ impl FfiBackend {
         part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         let (part_ptr, part_len) = part.as_ptr_len();
+        let h_session = Self::session_handle(session)?;
         Self::call_bytes(
             unsafe { (*self.func_list).C_SignEncryptUpdate },
             |function, output, output_len| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     part_ptr as *mut _,
                     Self::ulong_len_u64(part_len),
                     output,
@@ -467,11 +466,12 @@ impl FfiBackend {
         encrypted_part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
+        let h_session = Self::session_handle(session)?;
         Self::call_bytes(
             unsafe { (*self.func_list).C_DecryptVerifyUpdate },
             |function, output, output_len| unsafe {
                 function(
-                    Self::session_handle(session),
+                    h_session,
                     ep_ptr as *mut _,
                     Self::ulong_len_u64(ep_len),
                     output,

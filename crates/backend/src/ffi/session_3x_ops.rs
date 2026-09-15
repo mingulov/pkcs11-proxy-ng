@@ -15,7 +15,7 @@ impl FfiBackend {
             self,
             func_list_3_0,
             C_LoginUser,
-            Self::session_handle(session),
+            Self::session_handle(session)?,
             user_type as cryptoki_sys::CK_USER_TYPE,
             pin.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR,
             Self::ulong_len(pin.len()),
@@ -30,7 +30,7 @@ impl FfiBackend {
         flags: CkFlags,
     ) -> CkResult<()> {
         let flags = narrow_wire_ulong(flags.0)?;
-        call_3x_fn!(self, func_list_3_0, C_SessionCancel, Self::session_handle(session), flags)
+        call_3x_fn!(self, func_list_3_0, C_SessionCancel, Self::session_handle(session)?, flags)
     }
 
     pub(super) fn ffi_get_session_validation_flags(
@@ -43,7 +43,7 @@ impl FfiBackend {
             self,
             func_list_3_2,
             C_GetSessionValidationFlags,
-            Self::session_handle(session),
+            Self::session_handle(session)?,
             flags_type as cryptoki_sys::CK_SESSION_VALIDATION_FLAGS_TYPE,
             &mut flags
         )?;

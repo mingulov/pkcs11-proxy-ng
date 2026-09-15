@@ -415,7 +415,7 @@ async fn context_specific_login_logout_reaches_backend_without_logical_state() {
     );
 }
 
-async fn capture_logs<F, Fut>(f: F) -> String
+pub(crate) async fn capture_logs<F, Fut>(f: F) -> String
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,

@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
-use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
@@ -55,12 +54,13 @@ pub(super) async fn init_token(
         }
     }
 
-    // Zeroize SO PIN bytes when the closure drops.
-    let so_pin = req.so_pin.map(Zeroizing::new);
+    // Hold the SO PIN in `SecretBytes` (wiped on drop, redacted in Debug).
+    let so_pin = req.so_pin.map(SecretBytes::new);
     let label_for_log = req.label.clone();
     let label = req.label;
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
+        let so_pin = so_pin.map(SecretBytes::into_zeroizing);
         backend.init_token(backend_slot.0, so_pin.as_deref().map(Vec::as_slice), &label)
     })
     .await?;
@@ -94,11 +94,14 @@ pub(super) async fn init_pin(
         }
     };
 
-    // Zeroize user PIN on closure drop.
-    let pin = req.pin.map(Zeroizing::new);
+    // Hold the user PIN in `SecretBytes` (wiped on drop, redacted in Debug).
+    let pin = req.pin.map(SecretBytes::new);
     let backend = backend_ref.clone();
-    let result =
-        spawn_backend(move || backend.init_pin(session, pin.as_deref().map(Vec::as_slice))).await?;
+    let result = spawn_backend(move || {
+        let pin = pin.map(SecretBytes::into_zeroizing);
+        backend.init_pin(session, pin.as_deref().map(Vec::as_slice))
+    })
+    .await?;
 
     let ck_rv = match &result {
         Ok(()) => {
@@ -129,14 +132,17 @@ pub(super) async fn set_pin(
         }
     };
 
-    // Zeroize both old and new PINs on closure drop.
-    let old_pin = req.old_pin.map(Zeroizing::new);
-    let new_pin = req.new_pin.map(Zeroizing::new);
+    // Hold both PINs in `SecretBytes` (wiped on drop, redacted in Debug).
+    let old_pin = req.old_pin.map(SecretBytes::new);
+    let new_pin = req.new_pin.map(SecretBytes::new);
     // Pre-hash the new PIN and capture (slot, login state) so the per-slot PIN
     // verifier can be refreshed on success: after a PIN change a co-located
     // logical login with the NEW PIN must be accepted, not fail closed against
     // the old verifier (A1 / ADR-0008).
-    let new_pin_hash = ctx_mgr.hash_pin(new_pin.as_deref().map(Vec::as_slice));
+    let new_pin_hash = match &new_pin {
+        Some(secret) => secret.expose(|bytes| ctx_mgr.hash_pin(Some(bytes))),
+        None => ctx_mgr.hash_pin(None),
+    };
     let virtual_session = VirtualHandle(req.session_handle);
     let slot_state = ctx_mgr
         .get_context(&ctx_id, |ctx| {
@@ -149,6 +155,8 @@ pub(super) async fn set_pin(
         .flatten();
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
+        let old_pin = old_pin.map(SecretBytes::into_zeroizing);
+        let new_pin = new_pin.map(SecretBytes::into_zeroizing);
         backend.set_pin(
             session,
             old_pin.as_deref().map(Vec::as_slice),
@@ -172,4 +180,30 @@ pub(super) async fn set_pin(
     };
 
     Ok(Response::new(pkcs11_proxy_ng_proto::SetPinResponse { ck_rv }))
+}
+
+#[cfg(test)]
+mod tests {
+    /// The management handlers' PIN holders (SO PIN, user PIN, old/new
+    /// PINs) must redact secrets in Debug. Mirrors the holder
+    /// constructions in `init_token` / `init_pin` / `set_pin`.
+    /// Byte-wise assertion: `Vec<u8>` Debug renders decimal byte values,
+    /// never the original text.
+    #[test]
+    fn pin_holders_debug_redact_secrets() {
+        use pkcs11_proxy_ng_types::SecretBytes;
+        let so_bytes = b"TopSecretSOPin99";
+        let old_bytes = b"OldPin!001";
+        let new_bytes = b"NewPin!002";
+        let so_pin = Some(SecretBytes::new(so_bytes.to_vec()));
+        let old_pin = Some(SecretBytes::new(old_bytes.to_vec()));
+        let new_pin = Some(SecretBytes::new(new_bytes.to_vec()));
+        let rendered = format!("{so_pin:?} {old_pin:?} {new_pin:?}");
+        for byte in so_bytes.iter().chain(old_bytes.iter()).chain(new_bytes.iter()) {
+            assert!(
+                !rendered.contains(&byte.to_string()),
+                "management PIN holder leaks secret byte {byte} via Debug: {rendered}"
+            );
+        }
+    }
 }

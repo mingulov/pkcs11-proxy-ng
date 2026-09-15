@@ -137,12 +137,29 @@ fn example_fips_mechanism_params_parses() {
             "{name} ({mech:#010x}) must be in the FIPS registry"
         );
     }
-    // Note: the registry is additive (FIPS override appends to the
-    // embedded default). Disallowed mechanisms like CKM_MD5 / CKM_RC4
-    // are still in the union — the FIPS interlock relies on the
-    // backend (e.g., NSS softokn in FIPS mode) not advertising them
-    // plus the operator's policy layer, not on the registry
-    // filtering them out.
+    // Operation-time gate: the FIPS file hard-excludes historical
+    // mechanisms via `exclude`, so direct invocations are rejected even
+    // though the additive merge keeps the embedded default's shapes.
+    // (Filtered discovery alone only hides them from C_GetMechanismList.)
+    for (mech, name) in &[(0x0111u64, "CKM_RC4"), (0x0210, "CKM_MD5"), (0x0122, "CKM_DES_CBC")] {
+        assert_eq!(
+            registry.check_operation(*mech, false),
+            Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID),
+            "{name} ({mech:#010x}) must be hard-excluded by the FIPS registry"
+        );
+    }
+    // Exclusion wins over the default's shapes, so parameterized
+    // invocations are rejected too.
+    assert_eq!(
+        registry.check_operation(0x0122, true),
+        Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID),
+        "CKM_DES_CBC with params must be hard-excluded"
+    );
+    // Excluded mechanisms stay out of discovery as well.
+    assert!(
+        registry.filter_mechanisms(&[0x0111, 0x1087]).iter().all(|m| *m != 0x0111),
+        "CKM_RC4 must not be advertised by the FIPS registry"
+    );
 }
 
 /// FIPS example: every `[[params]]` shape must resolve to a known shim

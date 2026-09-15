@@ -385,4 +385,4 @@ pub(super) async fn cancel_function(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

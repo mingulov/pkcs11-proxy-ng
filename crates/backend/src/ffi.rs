@@ -64,10 +64,16 @@ use mapping::{
 
 macro_rules! session_bytes_input {
     ($session:expr, $input:expr, $function:ident, $output:ident, $output_len:ident) => {{
+        // The macro always expands as the tail of a CK_RV-returning closure:
+        // an unrepresentable handle fails the call loudly, never truncates.
+        let _ck_session = match Self::session_handle($session) {
+            Ok(h) => h,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
         let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
         unsafe {
             $function(
-                Self::session_handle($session),
+                _ck_session,
                 _ck_in_ptr as *mut _,
                 Self::ulong_len_u64(_ck_in_len),
                 $output,
@@ -80,36 +86,58 @@ pub(crate) use session_bytes_input;
 
 macro_rules! session_unit_input {
     ($session:expr, $input:expr, $function:ident) => {{
+        // See session_bytes_input: fail loudly, never truncate.
+        let _ck_session = match Self::session_handle($session) {
+            Ok(h) => h,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
         let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
-        unsafe {
-            $function(
-                Self::session_handle($session),
-                _ck_in_ptr as *mut _,
-                Self::ulong_len_u64(_ck_in_len),
-            )
-        }
+        unsafe { $function(_ck_session, _ck_in_ptr as *mut _, Self::ulong_len_u64(_ck_in_len)) }
     }};
 }
 pub(crate) use session_unit_input;
 
 macro_rules! mechanism_key_init {
-    ($session:expr, $mechanism:expr, $key:expr, $function:ident, $mech:ident) => {
-        unsafe { $function(Self::session_handle($session), $mech, Self::object_handle($key)) }
-    };
+    ($session:expr, $mechanism:expr, $key:expr, $function:ident, $mech:ident) => {{
+        // See session_bytes_input: fail loudly, never truncate.
+        let _ck_session = match Self::session_handle($session) {
+            Ok(h) => h,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
+        let _ck_key = match Self::object_handle($key) {
+            Ok(h) => h,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
+        unsafe { $function(_ck_session, $mech, _ck_key) }
+    }};
 }
 pub(crate) use mechanism_key_init;
 
 macro_rules! session_bytes_final {
-    ($session:expr, $function:ident, $output:ident, $output_len:ident) => {
-        unsafe { $function(Self::session_handle($session), $output, $output_len) }
-    };
+    ($session:expr, $function:ident, $output:ident, $output_len:ident) => {{
+        // See session_bytes_input: fail loudly, never truncate.
+        let _ck_session = match Self::session_handle($session) {
+            Ok(h) => h,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
+        unsafe { $function(_ck_session, $output, $output_len) }
+    }};
 }
 pub(crate) use session_bytes_final;
 
 macro_rules! session_object_unit {
-    ($session:expr, $object:expr, $function:ident) => {
-        unsafe { $function(Self::session_handle($session), Self::object_handle($object)) }
-    };
+    ($session:expr, $object:expr, $function:ident) => {{
+        // See session_bytes_input: fail loudly, never truncate.
+        let _ck_session = match Self::session_handle($session) {
+            Ok(h) => h,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
+        let _ck_object = match Self::object_handle($object) {
+            Ok(h) => h,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
+        unsafe { $function(_ck_session, _ck_object) }
+    }};
 }
 pub(crate) use session_object_unit;
 

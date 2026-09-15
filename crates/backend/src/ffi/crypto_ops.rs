@@ -10,20 +10,21 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
+        let h_key = Self::object_handle(key)?;
         self.call_init_with_mechanism(
             session,
             OperationFamily::Sign,
             unsafe { (*self.func_list).C_SignInit },
             mechanism,
-            |function, mech| unsafe {
-                function(Self::session_handle(session), mech, Self::object_handle(key))
-            },
+            |function, mech| unsafe { function(h_session, mech, h_key) },
         )
     }
 
     pub(super) fn ffi_sign_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_SignInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
         self.drop_mech_cache_family(session, OperationFamily::Sign);
         Ok(())
@@ -75,8 +76,9 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_sign_recover_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_SignRecoverInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
         self.drop_mech_cache_family(session, OperationFamily::SignRecover);
         Ok(())
@@ -168,8 +170,9 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_verify_recover_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_VerifyRecoverInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
         self.drop_mech_cache_family(session, OperationFamily::VerifyRecover);
         Ok(())
@@ -208,8 +211,9 @@ impl FfiBackend {
         // init-cancel paths, so the module's native RV reaches the client
         // (ADR-0010 transparent forwarding). A module that SEGVs on it crashes
         // the daemon — its direct-load behavior, accepted by ADR-0010.
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_VerifyInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
         self.drop_mech_cache_family(session, OperationFamily::Verify);
         Ok(())
@@ -223,9 +227,10 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let (data_ptr, data_len) = data.as_ptr_len();
         let (sig_ptr, sig_len) = signature.as_ptr_len();
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_Verify }, |function| unsafe {
             function(
-                Self::session_handle(session),
+                h_session,
                 data_ptr as *mut _,
                 Self::ulong_len_u64(data_len),
                 sig_ptr as *mut _,
@@ -259,12 +264,13 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
     ) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         self.call_init_with_mechanism(
             session,
             OperationFamily::Digest,
             unsafe { (*self.func_list).C_DigestInit },
             mechanism,
-            |function, mech| unsafe { function(Self::session_handle(session), mech) },
+            |function, mech| unsafe { function(h_session, mech) },
         )
     }
 
@@ -273,8 +279,9 @@ impl FfiBackend {
         // decides — softhsm2/kryoptic cancel the active digest, others reject.
         // NSS softokn SEGVs on it; that is its direct-load behavior and an
         // accepted shared-daemon trade-off per ADR-0010.
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_DigestInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut())
+            function(h_session, std::ptr::null_mut())
         })?;
         self.drop_mech_cache_family(session, OperationFamily::Digest);
         Ok(())
@@ -364,8 +371,9 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_encrypt_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_EncryptInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
         self.drop_mech_cache_family(session, OperationFamily::Encrypt);
         Ok(())
@@ -419,8 +427,9 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_decrypt_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let h_session = Self::session_handle(session)?;
         Self::call_unit(unsafe { (*self.func_list).C_DecryptInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
+            function(h_session, std::ptr::null_mut(), 0)
         })?;
         self.drop_mech_cache_family(session, OperationFamily::Decrypt);
         Ok(())

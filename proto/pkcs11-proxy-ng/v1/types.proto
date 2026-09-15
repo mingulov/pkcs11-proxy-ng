@@ -1700,6 +1700,11 @@ message MechanismRegistryPayload {
   repeated uint64 parameterless = 3;
   // shape -> mechanisms mapping (one entry per known shape name).
   repeated MechanismParamEntry params = 4;
+  // CK_MECHANISM_TYPE values the operator hard-disabled via the registry
+  // `exclude` list. The shim rejects these at operation time (even without
+  // params) and hides them from discovery in every discovery mode.
+  // Absent from older daemons and therefore treated as empty.
+  repeated uint64 excluded = 5;
 }
 
 message MechanismParamEntry {

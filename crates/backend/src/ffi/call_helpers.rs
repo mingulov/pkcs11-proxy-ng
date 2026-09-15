@@ -1,4 +1,7 @@
-use super::{FfiBackend, OperationFamily, ffi_conversion::mechanism_to_ffi};
+use super::{
+    FfiBackend, OperationFamily,
+    ffi_conversion::{mechanism_to_ffi, narrow_wire_ulong},
+};
 use crate::traits::CkDeriveKeyOutputResult;
 use pkcs11_proxy_ng_types::*;
 
@@ -14,21 +17,35 @@ pub(super) fn capped_output_len(buffer_len: u64) -> usize {
 }
 
 impl FfiBackend {
+    /// Checked narrowing for handles crossing into native calls. On a
+    /// narrow-`CK_ULONG` host an unrepresentable handle fails loudly with
+    /// `CKR_FUNCTION_FAILED`, never truncates (same doctrine as
+    /// `narrow_wire_ulong`, which these delegate to). On 64-bit hosts this
+    /// is an infallible pass-through.
     #[inline]
-    pub(super) const fn slot_id(slot_id: CkSlotId) -> cryptoki_sys::CK_SLOT_ID {
-        slot_id.0 as cryptoki_sys::CK_SLOT_ID
+    pub(super) fn slot_id(slot_id: CkSlotId) -> CkResult<cryptoki_sys::CK_SLOT_ID> {
+        narrow_wire_ulong(slot_id.0)
     }
 
     #[inline]
-    pub(super) const fn session_handle(
+    pub(super) fn session_handle(
         session: CkSessionHandle,
-    ) -> cryptoki_sys::CK_SESSION_HANDLE {
-        session.0 as cryptoki_sys::CK_SESSION_HANDLE
+    ) -> CkResult<cryptoki_sys::CK_SESSION_HANDLE> {
+        narrow_wire_ulong(session.0)
     }
 
     #[inline]
-    pub(super) const fn object_handle(object: CkObjectHandle) -> cryptoki_sys::CK_OBJECT_HANDLE {
-        object.0 as cryptoki_sys::CK_OBJECT_HANDLE
+    pub(super) fn object_handle(
+        object: CkObjectHandle,
+    ) -> CkResult<cryptoki_sys::CK_OBJECT_HANDLE> {
+        narrow_wire_ulong(object.0)
+    }
+
+    #[inline]
+    pub(super) fn mechanism_type(
+        mech: CkMechanismType,
+    ) -> CkResult<cryptoki_sys::CK_MECHANISM_TYPE> {
+        narrow_wire_ulong(mech.0)
     }
 
     #[inline]
@@ -748,7 +765,10 @@ impl FfiBackend {
 #[cfg(test)]
 mod output_cap_tests {
     use super::{FfiBackend, MAX_OUTPUT_BUFFER_BYTES, capped_output_len};
-    use pkcs11_proxy_ng_types::{CkOutputBufferSpec, CkParameterRoundtripSpec, CkRv};
+    use pkcs11_proxy_ng_types::{
+        CkObjectHandle, CkOutputBufferSpec, CkParameterRoundtripSpec, CkRv, CkSessionHandle,
+        CkSlotId,
+    };
 
     #[test]
     fn caps_absurd_buffer_len() {
@@ -1070,5 +1090,33 @@ mod output_cap_tests {
         assert_eq!(calls, 1);
         assert_eq!(result.returned_len, 0);
         assert_eq!(result.value, Some(Vec::new()));
+    }
+
+    #[test]
+    fn small_handles_convert_on_all_platforms() {
+        assert_eq!(FfiBackend::slot_id(CkSlotId(7)).unwrap(), 7);
+        assert_eq!(FfiBackend::session_handle(CkSessionHandle(7)).unwrap(), 7);
+        assert_eq!(FfiBackend::object_handle(CkObjectHandle(7)).unwrap(), 7);
+    }
+
+    #[test]
+    fn oversized_handle_fails_loudly_on_narrow_hosts() {
+        // On wide hosts CK_ULONG is 64-bit so every u64 fits (pass-through);
+        // on narrow hosts (32-bit CK_ULONG) an unrepresentable handle must
+        // fail with FUNCTION_FAILED, never truncate.
+        let too_big = u64::from(u32::MAX) + 1;
+        if size_of::<cryptoki_sys::CK_ULONG>() >= size_of::<u64>() {
+            assert!(FfiBackend::session_handle(CkSessionHandle(too_big)).is_ok());
+        } else {
+            assert_eq!(
+                FfiBackend::session_handle(CkSessionHandle(too_big)),
+                Err(CkRv::FUNCTION_FAILED)
+            );
+            assert_eq!(
+                FfiBackend::object_handle(CkObjectHandle(u64::MAX)),
+                Err(CkRv::FUNCTION_FAILED)
+            );
+            assert_eq!(FfiBackend::slot_id(CkSlotId(u64::MAX)), Err(CkRv::FUNCTION_FAILED));
+        }
     }
 }

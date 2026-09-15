@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
-use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
@@ -118,12 +117,16 @@ pub(super) async fn login(
         }));
     }
 
-    // Wrap PIN bytes in `Zeroizing` so the backing buffer is overwritten when
-    // dropped. Read it up-front and pre-hash it so the logical-login path can
+    // Hold PIN bytes in `SecretBytes`: the backing buffer is overwritten
+    // when dropped, and Debug redacts the secret (audit/log safety net).
+    // Read it up-front and pre-hash it so the logical-login path can
     // validate the PIN and the verifier can be stored after the PIN is moved
     // into the backend call.
-    let pin = req.pin.map(Zeroizing::new);
-    let pin_hash = ctx_mgr.hash_pin(pin.as_deref().map(Vec::as_slice));
+    let pin = req.pin.map(SecretBytes::new);
+    let pin_hash = match &pin {
+        Some(secret) => secret.expose(|bytes| ctx_mgr.hash_pin(Some(bytes))),
+        None => ctx_mgr.hash_pin(None),
+    };
 
     if current_login_state.is_none()
         && let Some(requested) = requested_login_state
@@ -175,9 +178,13 @@ pub(super) async fn login(
 
     let user_type_raw = req.user_type;
     let backend = backend_ref.clone();
-    let result =
-        spawn_backend(move || backend.login(session, user_type, pin.as_deref().map(Vec::as_slice)))
-            .await?;
+    let result = spawn_backend(move || {
+        // Transfer into a wiping owner for the FFI boundary; the moved
+        // `SecretBytes` (and this transfer) are wiped on drop.
+        let pin = pin.map(SecretBytes::into_zeroizing);
+        backend.login(session, user_type, pin.as_deref().map(Vec::as_slice))
+    })
+    .await?;
 
     let ck_rv = match &result {
         Ok(()) => {
@@ -538,5 +545,25 @@ mod tests {
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         let gone = ClientContextId("nonexistent".into());
         ctx_mgr.attr_cache_clear(&gone).await; // must not panic
+    }
+
+    /// The login handler's PIN holder must redact secrets in Debug: any
+    /// future log line capturing the holder (or its container) must not
+    /// leak PIN bytes. Mirrors the holder construction in `login`.
+    ///
+    /// NOTE: `Vec<u8>` renders in Debug as decimal byte values (`[83,
+    /// 117, ...]`), never as a string — so the assertion scans for every
+    /// PIN byte's decimal rendering, not the PIN text.
+    #[test]
+    fn pin_holder_debug_redacts_secret() {
+        let pin_bytes = b"SuperSecretPIN!42";
+        let pin = Some(SecretBytes::new(pin_bytes.to_vec()));
+        let rendered = format!("{pin:?}");
+        for byte in pin_bytes {
+            assert!(
+                !rendered.contains(&byte.to_string()),
+                "PIN holder leaks secret byte {byte} via Debug: {rendered}"
+            );
+        }
     }
 }

@@ -26,12 +26,14 @@ impl FfiBackend {
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let ffi_attrs = FfiAttrs::from_slice(template)?;
 
+        let h_session = Self::session_handle(session)?;
+        let h_public_key = Self::object_handle(public_key)?;
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
         let output = Self::single_call_bytes_exact(spec, |buffer, length| unsafe {
             function(
-                Self::session_handle(session),
+                h_session,
                 ffi_mech.ck_mechanism_mut(),
-                Self::object_handle(public_key),
+                h_public_key,
                 Self::ffi_attr_ptr(&ffi_attrs),
                 Self::ffi_attr_len(&ffi_attrs),
                 buffer,
@@ -68,9 +70,9 @@ impl FfiBackend {
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
         Self::ck_result(unsafe {
             function(
-                Self::session_handle(session),
+                Self::session_handle(session)?,
                 ffi_mech.ck_mechanism_mut(),
-                Self::object_handle(public_key),
+                Self::object_handle(public_key)?,
                 Self::ffi_attr_ptr(&ffi_attrs),
                 Self::ffi_attr_len(&ffi_attrs),
                 std::ptr::null_mut(),
@@ -85,9 +87,9 @@ impl FfiBackend {
         let mut ciphertext = vec![0u8; capped_len as usize];
         Self::ck_result(unsafe {
             function(
-                Self::session_handle(session),
+                Self::session_handle(session)?,
                 ffi_mech.ck_mechanism_mut(),
-                Self::object_handle(public_key),
+                Self::object_handle(public_key)?,
                 Self::ffi_attr_ptr(&ffi_attrs),
                 Self::ffi_attr_len(&ffi_attrs),
                 ciphertext.as_mut_ptr(),
@@ -119,9 +121,9 @@ impl FfiBackend {
             self,
             func_list_3_2,
             C_DecapsulateKey,
-            Self::session_handle(session),
+            Self::session_handle(session)?,
             ffi_mech.ck_mechanism_mut(),
-            Self::object_handle(private_key),
+            Self::object_handle(private_key)?,
             Self::ffi_attr_ptr(&ffi_attrs),
             Self::ffi_attr_len(&ffi_attrs),
             ct_ptr as *mut cryptoki_sys::CK_BYTE,

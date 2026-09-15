@@ -125,7 +125,7 @@ fn authenticated_null_backing_accepts_aligned_and_partial_fixed_prefixes_without
             }),
         ] {
             let native = super::message_ops::build_message_init_mechanism(
-                cryptoki_sys::CKM_AES_GCM,
+                u64::from(cryptoki_sys::CKM_AES_GCM),
                 &parameter,
             )
             .unwrap();

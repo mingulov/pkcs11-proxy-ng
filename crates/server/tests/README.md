@@ -58,6 +58,7 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 | `crates/server/tests/provider_matrix_test.rs` | Optional NSS and Kryoptic provider matrix smoke coverage | NSS softokn libsoftokn3.so and certutil; Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE | `cargo test -p pkcs11-proxy-ng --test provider_matrix_test nss_softokn_smoke_suite -- --ignored --test-threads=1`<br>`cargo test -p pkcs11-proxy-ng --test provider_matrix_test kryoptic_smoke_suite -- --ignored --test-threads=1` |
 | `crates/server/tests/softhsm_fixture_test.rs` | SoftHSM2 fixture variant coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test softhsm_fixture_test -- --ignored --test-threads=1` |
 | `crates/server/tests/template_compat_test.rs` | SoftHSM2-backed template compatibility coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test template_compat_test -- --ignored --test-threads=1` |
+| `crates/server/tests/test_hooks_topology_test.rs` | Hook-gated control-plane topology coverage (real daemon subprocess) | SoftHSM2 module and softhsm2-util; native-owner-test-hooks feature build; built workspace binaries | `cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test test_hooks_topology_test -- --ignored --test-threads=1` |
 
 ## Environment variables for optional providers
 

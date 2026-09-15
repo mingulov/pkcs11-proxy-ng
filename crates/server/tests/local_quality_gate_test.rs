@@ -174,6 +174,18 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
         ],
         requirements: &["SoftHSM2 module and softhsm2-util"],
     },
+    IgnoredTestLane {
+        file: "crates/server/tests/test_hooks_topology_test.rs",
+        reason: "Hook-gated control-plane topology coverage (real daemon subprocess)",
+        commands: &[
+            "cargo test -p pkcs11-proxy-ng --features native-owner-test-hooks --test test_hooks_topology_test -- --ignored --test-threads=1",
+        ],
+        requirements: &[
+            "SoftHSM2 module and softhsm2-util",
+            "native-owner-test-hooks feature build",
+            "built workspace binaries",
+        ],
+    },
 ];
 
 fn workspace_root() -> PathBuf {
@@ -4288,9 +4300,7 @@ fn oasis_inventory_tracks_mechanism_info_flag_semantic_gaps() {
     );
     assert!(
         no_source["local_tests"].as_array().expect("local_tests should be an array").iter().any(
-            |candidate| {
-                candidate == "loaded_shim_preserves_no_source_mechanism_info_zero_flags"
-            }
+            |candidate| { candidate == "loaded_shim_preserves_provider_mechanism_info_flags" }
         ),
         "no-source mechanism-info rows should cite the loaded-shim C ABI zero-flag test"
     );
@@ -4814,7 +4824,7 @@ fn oasis_inventory_markdown_exposes_human_readable_matrices() {
          no_source_workflow_flags_available | \
          `mock_mechanism_info_leaves_flags_empty_without_source_workflow_evidence`, \
          `grpc_mechanism_info_preserves_zero_flags_without_source_workflow_evidence`, \
-         `loaded_shim_preserves_no_source_mechanism_info_zero_flags`, \
+         `loaded_shim_preserves_provider_mechanism_info_flags`, \
          `official_source_grounded_mock_rejects_all_no_source_workflow_mechanisms` |"
     ));
     assert!(markdown.contains("## Mechanism Matrix"));

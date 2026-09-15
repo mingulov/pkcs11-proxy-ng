@@ -161,8 +161,7 @@ pub unsafe extern "C" fn get_slot_info(_: CK_SLOT_ID, info: CK_SLOT_INFO_PTR) ->
         return CKR_ARGUMENTS_BAD;
     }
     unsafe {
-        let mut slot = CK_SLOT_INFO::default();
-        slot.flags = CKF_TOKEN_PRESENT;
+        let slot = CK_SLOT_INFO { flags: CKF_TOKEN_PRESENT, ..Default::default() };
         info.write(slot);
     }
     CKR_OK

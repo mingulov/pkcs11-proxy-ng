@@ -24,7 +24,7 @@ impl<'a> NativeParameter<'a> {
         let storage = if let Some(parameter) = parameter {
             NativeStorage::Message(
                 super::message_ops::build_message_init_mechanism(
-                    narrow_wire_ulong(mechanism.mechanism_type.0)?,
+                    mechanism.mechanism_type.0,
                     parameter,
                 )?,
                 parameter,
@@ -100,10 +100,10 @@ impl FfiBackend {
             let mut len = 0;
             Self::ck_result(unsafe {
                 f(
-                    Self::session_handle(session),
+                    Self::session_handle(session)?,
                     native.pointer(),
-                    Self::object_handle(wrapping_key),
-                    Self::object_handle(key),
+                    Self::object_handle(wrapping_key)?,
+                    Self::object_handle(key)?,
                     aad_ptr.cast_mut(),
                     aad_len,
                     std::ptr::null_mut(),
@@ -118,10 +118,10 @@ impl FfiBackend {
             len = size as cryptoki_sys::CK_ULONG;
             Self::ck_result(unsafe {
                 f(
-                    Self::session_handle(session),
+                    Self::session_handle(session)?,
                     native.pointer(),
-                    Self::object_handle(wrapping_key),
-                    Self::object_handle(key),
+                    Self::object_handle(wrapping_key)?,
+                    Self::object_handle(key)?,
                     aad_ptr.cast_mut(),
                     aad_len,
                     bytes.as_mut_ptr(),
@@ -148,12 +148,15 @@ impl FfiBackend {
         let (aad_ptr, aad_len) = aad.as_ptr_len();
         let aad_len = narrow_wire_ulong(aad_len)?;
         let mut native = NativeParameter::new(mechanism, parameter)?;
+        let h_session = Self::session_handle(session)?;
+        let h_wrapping_key = Self::object_handle(wrapping_key)?;
+        let h_key = Self::object_handle(key)?;
         let output = Self::single_call_bytes_exact(spec, |output, length| unsafe {
             f(
-                Self::session_handle(session),
+                h_session,
                 native.pointer(),
-                Self::object_handle(wrapping_key),
-                Self::object_handle(key),
+                h_wrapping_key,
+                h_key,
                 aad_ptr.cast_mut(),
                 aad_len,
                 output,
@@ -208,9 +211,9 @@ impl FfiBackend {
         let mut handle = 0;
         Self::ck_result(unsafe {
             f(
-                Self::session_handle(session),
+                Self::session_handle(session)?,
                 native.pointer(),
-                Self::object_handle(unwrapping_key),
+                Self::object_handle(unwrapping_key)?,
                 wrapped_ptr.cast_mut(),
                 wrapped_len,
                 Self::ffi_attr_ptr(&attrs),
