@@ -960,6 +960,84 @@ async fn wait_for_slot_event_suppresses_events_for_unauthorized_slots() {
     assert_eq!(resp.slot_id, 0, "no slot id is surfaced when suppressed");
 }
 
+#[tokio::test]
+async fn slot_wait_server_abort_retains_ordinary_owner() {
+    // C3M.6 row 14: aborting the gRPC waiter while the native call is
+    // stuck must not strand or corrupt anything. The blocking worker
+    // keeps its captured backend/context ownership through native
+    // settlement; the aborted call delivers no response; the backend
+    // stays usable afterwards.
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = std::sync::Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    // Empty queue + blocking flags: the native call parks on the condvar.
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let mock_ref = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .unwrap();
+
+    let waiter = tokio::spawn({
+        let ctx_mgr = ctx_mgr.clone();
+        let backend = backend.clone();
+        let ctx = ctx_id.0.clone();
+        async move {
+            // Move ownership into the future so the waiter holds its own
+            // policy through native settlement (Send, 'static).
+            let policy = policy;
+            wait_for_slot_event_with_policy(
+                &ctx_mgr,
+                &backend,
+                &policy,
+                Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+                    client_context_id: ctx,
+                    flags: 0, // blocking: parks until an event arrives
+                }),
+            )
+            .await
+        }
+    });
+    // Let the native call enter (order-independent: an early event would
+    // just queue, a late abort still precedes settlement either way).
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    waiter.abort();
+    let aborted = waiter.await.unwrap_err();
+    assert!(aborted.is_cancelled(), "the aborted waiter delivers no response");
+
+    // Settle the native call after the abort: the retained worker must
+    // complete crash-free with its captured ownership intact.
+    mock_ref.enqueue_slot_event(CkSlotId(0));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // The backend serves a fresh waiter afterwards: no leak, no poison.
+    // (The aborted worker consumed the settlement event while completing,
+    // so a new event proves liveness rather than a stale queue entry.)
+    mock_ref.enqueue_slot_event(CkSlotId(0));
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .unwrap();
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1, // DONT_BLOCK: dequeues the fresh event
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::OK.0, "backend usable after abort+settlement");
+}
+
 async fn setup_session_with_mock() -> (Arc<ContextManager>, Arc<MockBackend>, ClientContextId, u64)
 {
     let mock = Arc::new(MockBackend::default_test());
