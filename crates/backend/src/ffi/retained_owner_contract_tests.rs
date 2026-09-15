@@ -188,7 +188,13 @@ fn native_owner_oracle_retains_init_root_across_calls() {
 fn reset_oracle(controls: OracleControls, output_len: u64) {
     unsafe {
         RetainedOracle_ReleaseGate();
-        (controls.set_scenario)(&RetainedOracleScenario { encrypt_rv: 0, output_len });
+        (controls.set_scenario)(&RetainedOracleScenario {
+            encrypt_rv: 0,
+            output_len,
+            // Hermetic tests assert observations directly, including
+            // mismatched roots: keep the fail-closed E2E gate off here.
+            fail_unless_ptr_equal: 0,
+        });
     }
     (controls.reset_observation)();
 }

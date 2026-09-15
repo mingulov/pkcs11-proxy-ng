@@ -34,6 +34,10 @@ pub struct RetainedOracleScenario {
     pub encrypt_rv: u64,
     /// Canned output length produced by C_Encrypt.
     pub output_len: u64,
+    /// When nonzero, C_Encrypt fails closed with CKR_DEVICE_ERROR unless
+    /// the retained root reproduces the Init root (row-12 E2E retention
+    /// proof through the plain C API).
+    pub fail_unless_ptr_equal: u64,
 }
 
 /// Operation selector for [`RetainedOracle_ArmGate`]. Only Encrypt is gated
@@ -73,7 +77,7 @@ struct ProviderState {
 
 static STATE: Mutex<(RetainedOracleScenario, RetainedOracleObservation, ProviderState)> =
     Mutex::new((
-        RetainedOracleScenario { encrypt_rv: 0, output_len: 0 },
+        RetainedOracleScenario { encrypt_rv: 0, output_len: 0, fail_unless_ptr_equal: 0 },
         RetainedOracleObservation {
             init_calls: 0,
             encrypt_calls: 0,
@@ -249,10 +253,12 @@ mod state_machine_tests {
     #[test]
     fn scenario_roundtrip_preserves_values() {
         let _guard = acquire_test_serial();
-        let scenario = RetainedOracleScenario { encrypt_rv: 7, output_len: 42 };
+        let scenario =
+            RetainedOracleScenario { encrypt_rv: 7, output_len: 42, fail_unless_ptr_equal: 1 };
         assert_eq!(unsafe { RetainedOracle_SetScenario(&scenario) }, 0);
         assert_eq!(lock_state().0.encrypt_rv, 7);
         assert_eq!(lock_state().0.output_len, 42);
+        assert_eq!(lock_state().0.fail_unless_ptr_equal, 1);
         reset_full();
     }
 
@@ -305,6 +311,94 @@ mod state_machine_tests {
         assert_eq!(observation.gate_holds_current, 0);
         assert_eq!(observation.gate_holds_total, 1);
         assert_eq!(unsafe { RetainedOracle_ReleaseGate() }, 0);
+    }
+
+    #[test]
+    fn fail_unless_ptr_equal_rejects_mismatched_root() {
+        // Row-12 E2E vehicle: with the gate armed, an Encrypt whose
+        // retained root does not reproduce the Init root must fail
+        // closed instead of returning the scenario RV.
+        let _guard = acquire_test_serial();
+        reset_full();
+        assert_eq!(
+            unsafe {
+                RetainedOracle_SetScenario(&RetainedOracleScenario {
+                    encrypt_rv: 0,
+                    output_len: 16,
+                    fail_unless_ptr_equal: 1,
+                })
+            },
+            0
+        );
+        // No Init performed: the retained root is null, so the identity
+        // check fails and the call fails closed.
+        let mut length: CK_ULONG = 0;
+        let rv = unsafe {
+            provider::encrypt(1, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut length)
+        };
+        assert_eq!(rv, CKR_DEVICE_ERROR);
+        reset_full();
+    }
+
+    #[test]
+    fn fail_unless_ptr_equal_passes_matched_root() {
+        // Positive control: Init followed by Encrypt through the live
+        // root satisfies the gate and returns the scenario RV.
+        let _guard = acquire_test_serial();
+        reset_full();
+        assert_eq!(
+            unsafe {
+                RetainedOracle_SetScenario(&RetainedOracleScenario {
+                    encrypt_rv: 0,
+                    output_len: 16,
+                    fail_unless_ptr_equal: 1,
+                })
+            },
+            0
+        );
+        let mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_CBC as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        assert_eq!(
+            unsafe { provider::encrypt_init(1, &mechanism as *const _ as CK_MECHANISM_PTR, 0) },
+            CKR_OK
+        );
+        let mut length: CK_ULONG = 0;
+        let rv = unsafe {
+            provider::encrypt(1, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut length)
+        };
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(length, 16);
+        reset_full();
+    }
+
+    #[test]
+    fn initialize_applies_env_scenario_overrides() {
+        // Row-12 E2E vehicle: the cdylib merges test-only
+        // RETAINED_ORACLE_* env overrides at C_Initialize so an
+        // out-of-process runner can steer the scenario without a
+        // same-process SetScenario call. Absent or invalid values keep
+        // the current scenario.
+        let _guard = acquire_test_serial();
+        reset_full();
+        unsafe {
+            std::env::set_var("RETAINED_ORACLE_OUTPUT_LEN", "16");
+            std::env::set_var("RETAINED_ORACLE_ENCRYPT_RV", "0");
+            std::env::set_var("RETAINED_ORACLE_FAIL_UNLESS_PTR_EQUAL", "yes");
+        }
+        assert_eq!(unsafe { provider::initialize(std::ptr::null_mut()) }, CKR_OK);
+        assert_eq!(lock_state().0.output_len, 16);
+        assert_eq!(lock_state().0.encrypt_rv, 0);
+        // "yes" is not a u64: invalid values are ignored.
+        assert_eq!(lock_state().0.fail_unless_ptr_equal, 0);
+        unsafe {
+            std::env::remove_var("RETAINED_ORACLE_OUTPUT_LEN");
+            std::env::remove_var("RETAINED_ORACLE_ENCRYPT_RV");
+            std::env::remove_var("RETAINED_ORACLE_FAIL_UNLESS_PTR_EQUAL");
+        }
+        reset_full();
     }
 
     #[test]
