@@ -3750,4 +3750,89 @@ mod tests {
                 .expect("moved envelope still validates its inputs");
         }
     }
+
+    #[cfg(unix)]
+    unsafe extern "C" fn message_init_ok(
+        _: cryptoki_sys::CK_SESSION_HANDLE,
+        _: *mut cryptoki_sys::CK_MECHANISM,
+        _: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Row-11 private-owner gate (C3M.6 order item 11): message Init paths
+    /// must use call-scoped private owners, never the shared per-family
+    /// mechanism slot. A successful AEAD or plain message Init therefore
+    /// leaves `mech_cache` and the last-Init marker empty.
+    /// Already-green invariant kept as a named regression.
+    #[cfg(unix)]
+    #[test]
+    fn native_owner_message_envelopes_use_private_owner() {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let mut functions_3_0 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+        functions_3_0.C_MessageEncryptInit = Some(message_init_ok);
+        functions_3_0.C_MessageDecryptInit = Some(message_init_ok);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: base.as_mut(),
+            func_list_3_0: Some(functions_3_0.as_ref()),
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+        };
+
+        let gcm_mech = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
+        let gcm_param = MessageParameter::GcmMessage(GcmMessageParams {
+            iv: vec![0x11; 12],
+            iv_null_len: None,
+            iv_fixed_bits: 0,
+            iv_generator: cryptoki_sys::CKG_GENERATE_COUNTER_XOR as u64,
+            tag: vec![0; 16],
+            tag_null_len: None,
+            tag_bits: 128,
+        });
+        backend
+            .ffi_message_encrypt_init(
+                CkSessionHandle(7),
+                Some(&gcm_mech),
+                Some(&gcm_param),
+                CkObjectHandle(1),
+            )
+            .expect("AEAD message Init succeeds");
+        backend
+            .ffi_message_decrypt_init(
+                CkSessionHandle(7),
+                Some(&gcm_mech),
+                Some(&gcm_param),
+                CkObjectHandle(1),
+            )
+            .expect("AEAD message decrypt Init succeeds");
+
+        let plain_mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        backend
+            .ffi_message_encrypt_init(
+                CkSessionHandle(7),
+                Some(&plain_mech),
+                None,
+                CkObjectHandle(1),
+            )
+            .expect("plain message Init succeeds");
+
+        assert!(
+            backend.mech_cache.is_empty(),
+            "message Inits must not publish into the shared mechanism slot"
+        );
+        assert!(
+            backend.last_init_family.is_empty(),
+            "message Inits must not plant a last-Init marker"
+        );
+    }
 }
