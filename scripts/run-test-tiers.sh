@@ -44,6 +44,8 @@ run_regression() {
 
 run_live() {
     echo "=== tier: live (skip-clean when tooling is absent) ==="
+    scripts/test-daemon-startup-logging.sh
+    scripts/test-live-harness-locators.sh
     scripts/run-cross-width-live-test.sh
     scripts/run-llp64-wine-smoke.sh
     scripts/run-windows-daemon-wine-smoke.sh

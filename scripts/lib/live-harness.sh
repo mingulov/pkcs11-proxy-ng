@@ -8,21 +8,29 @@
 # `harness_extra_cleanup()` before calling `harness_init_workspace`.
 
 # ── SoftHSM2 discovery ───────────────────────────────────────────────
+# Prints the first candidate that exists (nothing when absent).
+# Absence is a normal outcome (caller prints SKIP); always returns 0
+# so callers under `set -e` survive it.
+harness_first_existing() {
+    local candidate
+    for candidate in "$@"; do
+        if [[ -f "$candidate" ]]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 0
+}
+
 # Sets SOFTHSM_MODULE_64 ("" when absent). A pre-exported non-empty
 # SOFTHSM_MODULE_64 is honoured as-is (non-root extracted copies).
 harness_locate_softhsm64() {
     [[ -n "${SOFTHSM_MODULE_64:-}" ]] && return 0
-    SOFTHSM_MODULE_64=""
-    local candidate
-    for candidate in \
+    SOFTHSM_MODULE_64="$(harness_first_existing \
         /usr/lib/softhsm/libsofthsm2.so \
         /usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so \
         /usr/lib64/pkcs11/libsofthsm2.so \
-        /usr/local/lib/softhsm/libsofthsm2.so; do
-        [[ -f "$candidate" ]] && SOFTHSM_MODULE_64="$candidate" && break
-    done
-    # Absence is a normal outcome (caller prints SKIP); never fail under set -e.
-    return 0
+        /usr/local/lib/softhsm/libsofthsm2.so)"
 }
 
 # Sets SOFTHSM_MODULE_32 ("" when absent). The i386 package conflicts with
@@ -31,16 +39,10 @@ harness_locate_softhsm64() {
 # extracted copies).
 harness_locate_softhsm32() {
     [[ -n "${SOFTHSM_MODULE_32:-}" ]] && return 0
-    SOFTHSM_MODULE_32=""
-    local candidate
-    for candidate in \
+    SOFTHSM_MODULE_32="$(harness_first_existing \
         /usr/lib/i386-linux-gnu/softhsm/libsofthsm2.so \
         /opt/softhsm2-i386/usr/lib/i386-linux-gnu/softhsm/libsofthsm2.so \
-        /usr/lib32/softhsm/libsofthsm2.so; do
-        [[ -f "$candidate" ]] && SOFTHSM_MODULE_32="$candidate" && break
-    done
-    # Absence is a normal outcome (caller prints SKIP); never fail under set -e.
-    return 0
+        /usr/lib32/softhsm/libsofthsm2.so)"
 }
 
 # ── Workspace, token, cleanup ────────────────────────────────────────

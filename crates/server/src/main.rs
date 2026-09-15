@@ -45,7 +45,15 @@ async fn shutdown_signal() {
 }
 
 fn init_tracing() {
-    tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).json().init();
+    // Default to INFO when RUST_LOG is unset: from_default_env() falls
+    // back to ERROR, which suppressed every startup line and left a
+    // healthy daemon with a 0-byte log. An explicit RUST_LOG still wins.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .json()
+        .init();
 }
 
 fn load_backend(config: &config::DaemonConfig) -> Result<Backend, BoxError> {
