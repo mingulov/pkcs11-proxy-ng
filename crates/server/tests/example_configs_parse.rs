@@ -187,6 +187,58 @@ fn example_fips_mechanism_shapes_resolve() {
     }
 }
 
+/// Vendor/example TOMLs: every `shape = "..."` literal (commented or
+/// not — templates are meant to be uncommented) must either resolve to
+/// a known registry shape, or the file must carry an explicit
+/// `# NOT-YET-IMPLEMENTED(<shape>): <reason>` marker. This keeps
+/// shipped examples honest: an unresolvable shape without a marker is
+/// a typo-grade trap (it degrades to Raw-then-rejected at runtime).
+#[test]
+fn example_vendor_shape_names_resolve_or_marked() {
+    use pkcs11_proxy_ng_types::MechanismRegistry;
+    use std::collections::HashSet;
+    let default = MechanismRegistry::load(None).expect("embedded default must load");
+    let known: HashSet<&str> = default.param_shapes_view().values().map(|s| s.as_str()).collect();
+    let root = submodule_root();
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("examples/vendors"))
+        .expect("vendors dir must exist")
+        .map(|e| e.expect("vendor entry must read").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.push(root.join("packaging/config/mechanism_params.cloudhsm.toml.example"));
+    files.push(root.join("examples/k8s/10-configmap.yaml"));
+    assert!(!files.is_empty(), "must scan at least one example file");
+    for path in &files {
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|_| panic!("example file must read: {}", path.display()));
+        let mut shapes = HashSet::new();
+        for line in src.lines() {
+            let t = line.trim().trim_start_matches('#').trim();
+            let rest = match t.strip_prefix("shape") {
+                Some(r) => r.trim(),
+                None => continue,
+            };
+            let rest = match rest.strip_prefix('=') {
+                Some(r) => r.trim(),
+                None => continue,
+            };
+            if let Some(name) = rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+                shapes.insert(name.to_string());
+            }
+        }
+        for shape in &shapes {
+            if known.contains(shape.as_str()) {
+                continue;
+            }
+            assert!(
+                src.contains(&format!("NOT-YET-IMPLEMENTED({shape})")),
+                "{}: shape {shape} resolves nowhere and carries no NOT-YET-IMPLEMENTED marker",
+                path.display()
+            );
+        }
+    }
+}
+
 /// Forward-compat: an older shipped proxy.toml (the one used by the
 /// resilience fixture, predating later-added fields) must still
 /// parse cleanly with the current daemon. New fields default.

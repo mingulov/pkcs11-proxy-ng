@@ -28,15 +28,23 @@ shape = "mac_general"
 mechanisms = [0x80010009]  # CKM_IBM_CMAC
 
 # --- Post-quantum cryptography ---
+# NOT-YET-IMPLEMENTED(dilithium): pre-standard IBM PQC name; backend FFI
+# reconstruction needs the ep11.h C struct layout (not in cryptoki-sys).
+# Fail-closed PARAM_INVALID until then; official CKM_ML_DSA flows instead.
 [[params]]
 shape = "dilithium"
 mechanisms = [0x80010023]  # CKM_IBM_DILITHIUM
 
+# NOT-YET-IMPLEMENTED(kyber): pre-standard IBM PQC name; backend FFI
+# reconstruction needs the ep11.h C struct layout (not in cryptoki-sys).
+# Fail-closed PARAM_INVALID until then; official CKM_ML_KEM flows instead.
 [[params]]
 shape = "kyber"
 mechanisms = [0x80010024]  # CKM_IBM_KYBER
 
 # --- Blockchain key derivation ---
+# NOT-YET-IMPLEMENTED(hd_key_derive): backend FFI reconstruction needs
+# the EP11 BTC/ETH derive C struct layout. Fail-closed until then.
 [[params]]
 shape = "hd_key_derive"
 mechanisms = [0x80070001, 0x80070002]  # CKM_IBM_BTC_DERIVE, CKM_IBM_ETH_DERIVE
