@@ -220,6 +220,26 @@ where
         .await
 }
 
+/// Testable variant of [`spawn_backend_with_timeout`] with explicit
+/// breaker/stuck counters. Tests asserting exact stuck deltas must not
+/// use the global gauges: concurrent suite tests move them, which makes
+/// exact-delta asserts racy (and a failure there can strand a parked
+/// backend thread — see the session hang-guard tests).
+#[cfg(test)]
+pub(super) async fn spawn_backend_with_counters<T, F>(
+    counter: &'static AtomicUsize,
+    stuck_gauge: &'static AtomicUsize,
+    timeout: Duration,
+    max_calls: usize,
+    operation: F,
+) -> Result<CkResult<T>, Status>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CkResult<T> + Send + 'static,
+{
+    spawn_backend_core(counter, stuck_gauge, timeout, max_calls, operation).await
+}
+
 pub(super) async fn spawn_backend_with_optional_timeout<T, F>(
     timeout: Option<Duration>,
     operation: F,

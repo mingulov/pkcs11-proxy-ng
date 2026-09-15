@@ -268,7 +268,11 @@ impl MockBackend {
             if let Some(slot) = queue.pop_front() {
                 return Ok(slot);
             }
-            if dont_block {
+            // A faulty hanging provider parks even nonblocking waiters;
+            // injectable for abnormal-stop coverage (row 14). Clearing the
+            // flag wakes parked waiters so they re-check instead of
+            // stranding.
+            if dont_block && !*self.hang_slot_event.lock().unwrap() {
                 return Err(CkRv::NO_EVENT);
             }
             queue = self.slot_event_condvar.wait(queue).unwrap();

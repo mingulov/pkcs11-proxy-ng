@@ -1038,6 +1038,135 @@ async fn slot_wait_server_abort_retains_ordinary_owner() {
     assert_eq!(resp.ck_rv, CkRv::OK.0, "backend usable after abort+settlement");
 }
 
+/// Backstop for injected slot-event hangs: clearing the hang on drop
+/// (including unwinding after a test failure) so a parked backend
+/// thread is always released. Without this, a failure before the
+/// explicit release strands a parked blocking-pool thread, and the
+/// tokio runtime shutdown joins it forever — wedging the whole suite
+/// binary with no output.
+struct SlotEventHangGuard {
+    mock: std::sync::Arc<MockBackend>,
+}
+
+impl SlotEventHangGuard {
+    fn inject(mock: &std::sync::Arc<MockBackend>) -> Self {
+        mock.inject_slot_event_hang(true);
+        Self { mock: mock.clone() }
+    }
+}
+
+impl Drop for SlotEventHangGuard {
+    fn drop(&mut self) {
+        // Enqueue BEFORE clearing: both notifies then happen after the
+        // push, so a woken waiter always finds the event (deterministic
+        // Ok). Clearing first would let a waiter win the re-lock race,
+        // re-check an empty queue with the flag already false, and take
+        // the NO_EVENT path — harmless for release, but nondeterministic
+        // for tests observing the outcome. The queue lock additionally
+        // serializes the release against a waiter that has checked the
+        // flag but not yet parked, so no wakeup is missed either way.
+        self.mock.enqueue_slot_event(CkSlotId(0));
+        self.mock.inject_slot_event_hang(false);
+    }
+}
+
+#[tokio::test]
+async fn slot_event_hang_guard_releases_parked_waiter_on_drop() {
+    // A DONT_BLOCK waiter parked by the injected hang must answer once
+    // the guard drops. The drop enqueues before clearing, so every
+    // wakeup finds the event queued and every interleaving ends with
+    // the waiter consuming it (no timing assumption beyond reaching
+    // the park).
+    use std::sync::mpsc;
+    let mock = std::sync::Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let guard = SlotEventHangGuard::inject(&mock);
+    let _waiter = std::thread::spawn({
+        let backend: std::sync::Arc<dyn Pkcs11Backend> = mock.clone();
+        move || tx.send(backend.wait_for_slot_event(1)).unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    drop(guard);
+    let outcome = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("released waiter must answer promptly");
+    assert_eq!(outcome.unwrap(), CkSlotId(0), "waiter consumes the wakeup event");
+}
+
+#[tokio::test]
+async fn slot_wait_nonblocking_hang_abnormal_stop() {
+    // C3M.6 row 14: a faulty provider that hangs even a DONT_BLOCK
+    // waiter must hit the daemon timeout (independent stop) with no
+    // cleanup/unload of the library. The stuck call settles exactly
+    // once released, and the backend stays initialized and usable.
+    use crate::server::grpc_service::service_utils::spawn_backend_with_counters;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // Dedicated breaker/stuck counters: the global IN_FLIGHT/STUCK_CALLS
+    // gauges move under concurrent suite tests, so an exact delta on the
+    // globals is racy in-suite (and a failure there strands the parked
+    // thread — see SlotEventHangGuard).
+    static HANG_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static HANG_GAUGE: AtomicUsize = AtomicUsize::new(0);
+
+    let mock = std::sync::Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    // Backstop: clearing the injected hang on drop (including test
+    // failure) so a parked backend thread can never strand the tokio
+    // runtime shutdown and wedge the whole suite binary.
+    let _hang_guard = SlotEventHangGuard::inject(&mock);
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let waiter = tokio::spawn({
+        let backend = backend.clone();
+        async move {
+            spawn_backend_with_counters(
+                &HANG_COUNTER,
+                &HANG_GAUGE,
+                std::time::Duration::from_millis(100),
+                8,
+                move || {
+                    backend.wait_for_slot_event(1) // CKF_DONT_BLOCK — hangs anyway (faulty)
+                },
+            )
+            .await
+        }
+    });
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("hung waiter must hit the daemon timeout, not the test timeout")
+        .expect("waiter task must not panic");
+    assert_eq!(
+        outcome.expect("no transport error").unwrap_err(),
+        CkRv::DEVICE_ERROR,
+        "a hung waiter surfaces the timeout promptly"
+    );
+    assert_eq!(HANG_GAUGE.load(Ordering::Relaxed), 1, "the still-parked call counts as stuck");
+
+    // Independent stop performed no cleanup/unload: release the native
+    // call and it settles; the library answers afterwards. Enqueue
+    // before clearing (see SlotEventHangGuard::drop) so the waiter
+    // deterministically consumes the wakeup event.
+    mock.enqueue_slot_event(CkSlotId(0));
+    mock.inject_slot_event_hang(false);
+    for _ in 0..200 {
+        if HANG_GAUGE.load(Ordering::Relaxed) == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        HANG_GAUGE.load(Ordering::Relaxed),
+        0,
+        "stuck gauge returns to zero once the native call settles"
+    );
+    assert_eq!(
+        backend.wait_for_slot_event(1).unwrap_err(),
+        CkRv::NO_EVENT,
+        "empty queue after settlement means alive-and-initialized, not unloaded"
+    );
+}
+
 async fn setup_session_with_mock() -> (Arc<ContextManager>, Arc<MockBackend>, ClientContextId, u64)
 {
     let mock = Arc::new(MockBackend::default_test());

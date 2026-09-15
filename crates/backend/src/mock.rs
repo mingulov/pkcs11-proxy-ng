@@ -116,6 +116,12 @@ pub struct MockBackend {
     /// Pending slot events (FIFO queue). Drained by wait_for_slot_event.
     slot_event_queue: Mutex<std::collections::VecDeque<CkSlotId>>,
     slot_event_condvar: Condvar,
+    /// When set, even DONT_BLOCK `wait_for_slot_event` calls park on the
+    /// condvar, simulating a faulty provider that hangs a nonblocking
+    /// waiter. Set via `inject_slot_event_hang()`; releasing works through
+    /// the normal `enqueue_slot_event` wakeup (or by clearing the flag,
+    /// which also wakes parked waiters to re-check).
+    hang_slot_event: Mutex<bool>,
     /// Per-slot token presence override. Slots not present in this map default
     /// to token-present to preserve the historical mock behavior.
     token_presence: Mutex<HashMap<CkSlotId, bool>>,
@@ -293,6 +299,7 @@ impl MockBackend {
                 active_ops: HashMap::new(),
             }),
             slot_event_queue: Mutex::new(std::collections::VecDeque::new()),
+            hang_slot_event: Mutex::new(false),
             mechanism_entries: Mutex::new(mechanism_entry::MechanismEntries::default()),
             wrap_entries: Mutex::new(Vec::new()),
             wrap_action: Mutex::new(None),
@@ -440,6 +447,15 @@ impl MockBackend {
     pub fn enqueue_slot_event(&self, slot: CkSlotId) {
         self.slot_event_queue.lock().unwrap().push_back(slot);
         self.slot_event_condvar.notify_one();
+    }
+
+    /// Make `wait_for_slot_event` park even for DONT_BLOCK calls until the
+    /// flag is cleared (which wakes parked waiters to re-check) or an event
+    /// is enqueued. Simulates a faulty hanging provider for abnormal-stop
+    /// coverage; clearing performs no cleanup or unload by itself.
+    pub fn inject_slot_event_hang(&self, hang: bool) {
+        *self.hang_slot_event.lock().unwrap() = hang;
+        self.slot_event_condvar.notify_all();
     }
 
     /// Configure whether a token is present in a known slot.
