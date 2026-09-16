@@ -457,8 +457,7 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
 }
 
 #[test]
-#[ignore = "C3 Phase B: requires independently accepted common mechanism provenance prerequisite"]
-fn classic_gcm_initialized_error_iv_effect_pending_provenance_prerequisite() {
+fn classic_gcm_initialized_error_iv_effect() {
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
         params: Some(CkMechanismParams::Gcm(GcmParams {
