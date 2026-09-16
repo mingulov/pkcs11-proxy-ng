@@ -41,11 +41,23 @@ impl FfiAttrs {
                     backing.push(bytes);
                     (ptr, len)
                 }
+                // T4-AUDIT site 4: pass NULL for empty values. An empty
+                // slice's `as_ptr()` is a dangling non-null pointer; the
+                // same NULL+0 encoding `None` uses (and nested sub-values
+                // use below) is the backend-safe empty shape.
                 Some(CkAttributeValue::Bytes(b)) => {
-                    (b.as_ptr() as *mut _, b.len() as cryptoki_sys::CK_ULONG)
+                    if b.is_empty() {
+                        (std::ptr::null_mut(), 0)
+                    } else {
+                        (b.as_ptr() as *mut _, b.len() as cryptoki_sys::CK_ULONG)
+                    }
                 }
                 Some(CkAttributeValue::String(s)) => {
-                    (s.as_ptr() as *mut _, s.len() as cryptoki_sys::CK_ULONG)
+                    if s.is_empty() {
+                        (std::ptr::null_mut(), 0)
+                    } else {
+                        (s.as_ptr() as *mut _, s.len() as cryptoki_sys::CK_ULONG)
+                    }
                 }
                 Some(CkAttributeValue::NestedTemplate(subs)) => {
                     // Rebuild a native CK_ATTRIBUTE[] the backend can walk:
@@ -322,7 +334,14 @@ impl FfiAttributeQueries {
                 let mut sub_buf = Vec::new();
                 sub_buf.try_reserve_exact(sub_buf_len).map_err(|_| CkRv::HOST_MEMORY)?;
                 sub_buf.resize(sub_buf_len, 0);
-                let ptr = sub_buf.as_mut_ptr() as *mut std::ffi::c_void;
+                // T4-AUDIT site 2: NULL for 0-length sub buffers (same
+                // T4-FIX shape as the flat arm: dangling non-null + 0
+                // segfaults null-check-then-write backends).
+                let ptr = if sub_buf.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    sub_buf.as_mut_ptr() as *mut std::ffi::c_void
+                };
                 sub_buffers.push(sub_buf);
                 (ptr, sub_ul_value_len)
             } else {
@@ -344,7 +363,14 @@ impl FfiAttributeQueries {
             sub_attrs.into_boxed_slice().into();
 
         // The parent attribute points into the pinned template.
-        let template_ptr = template_box.as_mut_ptr() as *mut std::ffi::c_void;
+        // T4-AUDIT site 5: NULL for a degenerate empty template box
+        // (`nested=Some(vec![])` + `buffer_len==0`); an empty box slice's
+        // `as_mut_ptr()` is dangling non-null with length 0.
+        let template_ptr = if template_box.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            template_box.as_mut_ptr() as *mut std::ffi::c_void
+        };
         let template_byte_len = (template_box.len()
             * std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>())
             as cryptoki_sys::CK_ULONG;
@@ -492,6 +518,39 @@ mod ffi_attrs_narrowing_tests {
                 assert_eq!(rv, CkRv::FUNCTION_FAILED);
             }
         }
+    }
+
+    #[test]
+    fn empty_bytes_value_materializes_null_pvalue() {
+        // T4-AUDIT site 4: `Some(Bytes(vec![]))` reaches this seam via the
+        // in-repo CLI (`create-object --value ""` → `hex::decode("")` is
+        // `Ok(vec![])`, no empty check) and must pass NULL, not the dangling
+        // empty-slice pointer — the same encoding `None` already uses.
+        let template = [CkAttribute {
+            attr_type: CkAttributeType::VALUE,
+            value: Some(CkAttributeValue::Bytes(Vec::new())),
+        }];
+        let attrs = FfiAttrs::from_slice(&template).expect("empty bytes convert");
+        assert!(attrs.attrs[0].pValue.is_null());
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
+        let ul_value_len = attrs.attrs[0].ulValueLen;
+        assert_eq!(ul_value_len, 0);
+    }
+
+    #[test]
+    fn empty_string_value_materializes_null_pvalue() {
+        // T4-AUDIT site 4: `Some(String(""))` reaches this seam via the
+        // in-repo CLI (`create-object --label ""`, no empty check) and must
+        // pass NULL, not the dangling empty-slice pointer.
+        let template = [CkAttribute {
+            attr_type: CkAttributeType::LABEL,
+            value: Some(CkAttributeValue::String(String::new())),
+        }];
+        let attrs = FfiAttrs::from_slice(&template).expect("empty string converts");
+        assert!(attrs.attrs[0].pValue.is_null());
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
+        let ul_value_len = attrs.attrs[0].ulValueLen;
+        assert_eq!(ul_value_len, 0);
     }
 
     #[test]

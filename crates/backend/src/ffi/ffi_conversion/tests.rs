@@ -1011,6 +1011,62 @@ mod attribute_query_tests {
     }
 
     #[test]
+    fn nested_zero_length_sub_query_yields_null_sub_pvalue() {
+        // T4-AUDIT site 2: a nested exact sub-query with a 0-length buffer
+        // (shim: sub CK_ATTRIBUTE with non-null pValue + ulValueLen 0 — the
+        // nested capture path has no zero-length reject) must pass NULL for
+        // the sub pValue, not the dangling empty-Vec pointer.
+        let stride = std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>() as u64;
+        let ffi = FfiAttributeQueries::from_queries(&[CkAttributeQuery {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            buffer_present: true,
+            buffer_len: stride,
+            nested: Some(vec![CkAttributeQuery {
+                attr_type: CkAttributeType(0),
+                buffer_present: true,
+                buffer_len: 0,
+                nested: None,
+            }]),
+        }])
+        .expect("ffi queries");
+
+        assert_eq!(ffi.attrs.len(), 1);
+        assert!(!ffi.attrs[0].pValue.is_null(), "one-entry template box stays materialized");
+        let sub_pvalue = unsafe {
+            std::slice::from_raw_parts(ffi.attrs[0].pValue as *const cryptoki_sys::CK_ATTRIBUTE, 1)
+        }[0]
+        .pValue;
+        // E0793: CK_ATTRIBUTE is packed on Windows; sub length by-value copy.
+        let sub_len = unsafe {
+            std::slice::from_raw_parts(ffi.attrs[0].pValue as *const cryptoki_sys::CK_ATTRIBUTE, 1)
+        }[0]
+        .ulValueLen;
+        assert!(sub_pvalue.is_null());
+        assert_eq!(sub_len, 0);
+    }
+
+    #[test]
+    fn empty_nested_template_query_yields_null_parent_pvalue() {
+        // T4-AUDIT site 5: a degenerate nested template query (shim: template
+        // attr with non-null pValue + ulValueLen 0 → nested `Some(vec![])`,
+        // buffer_len 0) must pass NULL for the parent pValue, not the dangling
+        // empty-box-slice pointer.
+        let ffi = FfiAttributeQueries::from_queries(&[CkAttributeQuery {
+            attr_type: CkAttributeType::WRAP_TEMPLATE,
+            buffer_present: true,
+            buffer_len: 0,
+            nested: Some(vec![]),
+        }])
+        .expect("ffi queries");
+
+        assert_eq!(ffi.attrs.len(), 1);
+        assert!(ffi.attrs[0].pValue.is_null());
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
+        let ul_value_len = ffi.attrs[0].ulValueLen;
+        assert_eq!(ul_value_len, 0);
+    }
+
+    #[test]
     fn raw_attribute_queries_reject_unallocatable_buffer_len() {
         let err = match FfiAttributeQueries::from_queries(&[CkAttributeQuery {
             attr_type: CkAttributeType::LABEL,
