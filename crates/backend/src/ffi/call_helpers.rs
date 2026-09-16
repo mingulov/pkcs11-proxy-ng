@@ -668,16 +668,13 @@ impl FfiBackend {
         // Surface mutated params after successful data calls and genuine
         // missing-length calls. Ordinary NULL-output size queries suppress them.
         let after = ffi_mech.output_params();
-        let mechanism_out =
-            if !(spec.buffer_present || spec.length_pointer_null) {
-                None
-            } else if result.ck_rv == CkRv::OK {
-                after
-            } else if after != before {
-                after
-            } else {
-                None
-            };
+        let mechanism_out = if !(spec.buffer_present || spec.length_pointer_null) {
+            None
+        } else if result.ck_rv == CkRv::OK || after != before {
+            after
+        } else {
+            None
+        };
         Ok((result, mechanism_out))
     }
 
