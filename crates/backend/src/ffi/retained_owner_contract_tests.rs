@@ -259,6 +259,7 @@ fn oracle_gate_holds_native_entry_until_released() {
     }
 }
 
+#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
 #[test]
 fn native_owner_call_readback_is_one_transaction() {
     let _guard = oracle::acquire_test_serial();

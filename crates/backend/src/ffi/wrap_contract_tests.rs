@@ -186,6 +186,7 @@ fn ordinary_wrap_native_sizing_calls_twice_and_stops_on_error() {
     FAIL_SIZING.store(false, Ordering::SeqCst);
 }
 
+#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
 #[test]
 fn native_owner_authenticated_validation_precedes_second_call() {
     // C3M.6 row 11: the typed authenticated path validates the mechanism

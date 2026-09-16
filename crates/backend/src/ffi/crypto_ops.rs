@@ -681,6 +681,7 @@ mod tests {
         cryptoki_sys::CKR_FUNCTION_FAILED
     }
 
+    #[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
     #[test]
     fn native_owner_dual_families_and_cancel_are_independent() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
@@ -740,6 +741,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
     #[test]
     fn native_owner_init_failure_preserves_active() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());

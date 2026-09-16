@@ -3763,6 +3763,7 @@ mod tests {
     /// leaves `mech_cache` and the last-Init marker empty.
     /// Already-green invariant kept as a named regression.
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
     #[test]
     fn native_owner_message_envelopes_use_private_owner() {
         let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());

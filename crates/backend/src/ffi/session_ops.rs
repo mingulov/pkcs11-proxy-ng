@@ -292,6 +292,7 @@ mod tests {
         assert_eq!(backend.session_slot_map.get(&session.0).as_deref(), Some(&11));
     }
 
+    #[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
     #[test]
     fn native_owner_close_all_isolates_slots() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
