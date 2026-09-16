@@ -237,6 +237,14 @@ pub struct FfiBackend {
     /// Locally observed init/finalize/session lifecycle driving the honest
     /// retirement decision in `Drop` (C3M.4).
     lifecycle: native_domain::LifecycleTracker,
+    /// Last-field retirement sentinel (C3M step 7). MUST stay the last
+    /// field: field drops run in declaration order, so its `Drop`
+    /// publishes the next `Vacant` only after every other field —
+    /// dependent graphs, the `Library` (`dlclose`), the permit and the
+    /// lifecycle — has retired. The `Drop` body publishes only `Retiring`
+    /// on the Release path. Never read: its only role is its `Drop`.
+    #[allow(dead_code)]
+    retirement_sentinel: native_domain::RetirementSentinel,
 }
 
 // Safety: PKCS#11 spec requires modules loaded with CKF_OS_LOCKING_OK to be
@@ -1711,6 +1719,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
 
         (backend, functions)

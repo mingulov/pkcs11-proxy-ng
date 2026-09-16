@@ -130,6 +130,7 @@ impl FfiBackend {
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
             object_cleanup: Default::default(),
+            retirement_sentinel: super::native_domain::RetirementSentinel::for_permit(&permit),
             construction: permit,
             lifecycle: super::native_domain::LifecycleTracker::default(),
         })
@@ -191,10 +192,13 @@ fn stop_fire_condition(
 }
 
 impl Drop for FfiBackend {
-    /// Retire the construction reservation honestly: release the exact epoch
-    /// only when the instance lifecycle proves quiescence (never initialized,
-    /// or finalized with no open sessions); otherwise retain ownership and
-    /// poison the slot until process restart. Stale handles and already
+    /// Retire the construction reservation honestly: enter `Retiring` for the
+    /// exact epoch only when the instance lifecycle proves quiescence (never
+    /// initialized, or finalized with no open sessions) — the slot stays
+    /// occupied throughout dependent retirement and library close, and the
+    /// last-field [`super::native_domain::RetirementSentinel`] publishes the
+    /// next `Vacant` once every field has dropped; otherwise retain ownership
+    /// and poison the slot until process restart. Stale handles and already
     /// poisoned slots are untouched.
     fn drop(&mut self) {
         use super::native_domain::RetirementDecision::{Poison, Release};
@@ -229,7 +233,7 @@ impl Drop for FfiBackend {
         }
         match decision {
             Release => {
-                super::native_domain::ConstructionPermit::release_if_owner(self.construction.epoch);
+                self.construction.begin_retirement();
             }
             Poison => {
                 self.construction.poison();

@@ -241,6 +241,7 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
+        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
     for (present, missing) in [(true, false), (false, false), (true, true), (false, true)] {
         unsafe {
@@ -315,6 +316,7 @@ fn exact_parameter_error_preserves_only_defined_initialized_effects() {
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
+        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x11; 12],
@@ -402,6 +404,7 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
         // consuming it; never backs production dispatch (C3M.4).
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
+        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x11; 12],

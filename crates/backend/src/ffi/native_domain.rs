@@ -81,27 +81,15 @@ impl fmt::Display for DomainError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegistryState {
-    Vacant {
-        next_epoch: u64,
-    },
-    Reserved {
-        epoch: u64,
-        next_epoch: u64,
-    },
-    Active {
-        epoch: u64,
-        next_epoch: u64,
-    },
-    // Entered by the Finalize-drain flow landing with the lifecycle slice;
-    // matched (never constructed) by release paths already.
-    #[allow(dead_code)]
-    Retiring {
-        epoch: u64,
-        next_epoch: u64,
-    },
-    Poisoned {
-        epoch: u64,
-    },
+    Vacant { next_epoch: u64 },
+    Reserved { epoch: u64, next_epoch: u64 },
+    Active { epoch: u64, next_epoch: u64 },
+    // Entered by the backend `Drop` body on the Release path (C3M step
+    // 7): the slot stays occupied throughout dependent retirement and
+    // library close, and only the last-field [`RetirementSentinel`]
+    // publishes the next `Vacant` once every field has dropped.
+    Retiring { epoch: u64, next_epoch: u64 },
+    Poisoned { epoch: u64 },
 }
 
 impl RegistryState {
@@ -180,6 +168,20 @@ impl DomainRegistry {
                 self.state = RegistryState::Poisoned { epoch };
             }
             _ => {}
+        }
+    }
+
+    /// Enter `Retiring` for the exact epoch after a normal-unload
+    /// decision (C3M step 7). Returns `true` only when this call published
+    /// `Retiring`; anything but the live `Active` epoch is stale and
+    /// changes nothing.
+    pub(in crate::ffi) fn begin_retirement(&mut self, epoch: u64) -> bool {
+        match self.state {
+            RegistryState::Active { epoch: live, next_epoch } if live == epoch => {
+                self.state = RegistryState::Retiring { epoch, next_epoch };
+                true
+            }
+            _ => false,
         }
     }
 
@@ -285,11 +287,21 @@ impl ConstructionPermit {
         let _ = with_registry(|registry| registry.poison(self.epoch));
     }
 
+    /// Enter `Retiring` for the exact epoch after a normal-unload
+    /// decision (C3M step 7): the slot remains occupied throughout
+    /// dependent retirement and library close. Returns `true` only when
+    /// this call published `Retiring`. Stale permits change nothing.
+    /// Called by the backend `Drop` body; the [`RetirementSentinel`]
+    /// publishes the next `Vacant` once every field has dropped.
+    pub(in crate::ffi) fn begin_retirement(&self) -> bool {
+        with_registry(|registry| registry.begin_retirement(self.epoch)).unwrap_or(false)
+    }
+
     /// Retire an exact-epoch `Active`/`Retiring` reservation after normal
     /// unload so the slot is reusable. Returns `true` only when this call
     /// published the next `Vacant`. Stale releases, late workers and old
-    /// destructors can never free another epoch's slot. Used by backend
-    /// `Drop` and by tests probing stale handles.
+    /// destructors can never free another epoch's slot. Used by the
+    /// [`RetirementSentinel`] and by tests probing stale handles.
     pub(in crate::ffi) fn release_if_owner(epoch: u64) -> bool {
         with_registry(|registry| registry.release_if_owner(epoch)).unwrap_or(false)
     }
@@ -313,6 +325,41 @@ impl ConstructionPermit {
         // `EpochExhausted`), so this sentinel matches no live epoch and every
         // registry transition ignores it.
         Self { epoch: u64::MAX, managed: false }
+    }
+}
+
+/// Last-field retirement sentinel (C3M step 7): publishes the next `Vacant`
+/// for the exact epoch once every other backend field — dependent graphs,
+/// the `Library` (`dlclose`), the permit and the lifecycle — has dropped.
+///
+/// Must stay the LAST field of [`super::FfiBackend`]: field drops run in
+/// declaration order, so this `Drop` runs after all of them, while the
+/// backend `Drop` body (which runs before every field drop) publishes only
+/// `Retiring` on the Release path. Stale epochs and poisoned slots are
+/// untouched, so the Poison path and unmanaged test backends drop through
+/// here with no effect.
+pub(in crate::ffi) struct RetirementSentinel {
+    epoch: u64,
+}
+
+impl RetirementSentinel {
+    /// Sentinel retiring the same epoch the permit owns. Borrow the permit
+    /// before moving it into the backend literal.
+    pub(in crate::ffi) fn for_permit(permit: &ConstructionPermit) -> Self {
+        Self { epoch: permit.epoch }
+    }
+
+    /// Test-only sentinel matching no live registry epoch, pairing with
+    /// [`ConstructionPermit::unmanaged_test_only`].
+    #[cfg(test)]
+    pub(in crate::ffi) fn unmanaged_test_only() -> Self {
+        Self { epoch: u64::MAX }
+    }
+}
+
+impl Drop for RetirementSentinel {
+    fn drop(&mut self) {
+        ConstructionPermit::release_if_owner(self.epoch);
     }
 }
 

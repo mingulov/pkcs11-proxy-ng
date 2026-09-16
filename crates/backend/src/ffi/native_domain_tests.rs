@@ -201,6 +201,92 @@ fn native_domain_lifecycle_reinitialize_clears_finalized() {
 }
 
 #[test]
+fn native_domain_begin_retirement_occupies_until_vacant() {
+    // C3M step 7: the Release path publishes `Retiring` (still occupied)
+    // for the dependent-retirement window; only the completed unload
+    // publishes the next `Vacant`.
+    let mut registry = fresh();
+    let first = registry.reserve().expect("first reservation succeeds");
+    registry.activate(first.epoch).expect("owner activates");
+    assert!(registry.begin_retirement(first.epoch), "owner enters Retiring");
+    match registry.reserve() {
+        Err(DomainError::AlreadyReserved { epoch }) => {
+            assert_eq!(epoch, first.epoch, "Retiring denies for the live epoch");
+        }
+        Err(other) => panic!("Retiring must deny with AlreadyReserved, got {other:?}"),
+        Ok(_) => panic!("Retiring must stay occupied until Vacant"),
+    }
+    assert!(registry.release_if_owner(first.epoch), "completed unload publishes Vacant");
+    let second = registry.reserve().expect("slot is reusable after Vacant");
+    assert_eq!(second.epoch, 1, "epochs advance monotonically");
+}
+
+#[test]
+fn native_domain_stale_begin_retirement_changes_nothing() {
+    let mut registry = fresh();
+    assert!(!registry.begin_retirement(0), "Vacant has no epoch to retire");
+    let first = registry.reserve().expect("first reservation succeeds");
+    assert!(!registry.begin_retirement(first.epoch), "Reserved is not Active");
+    registry.activate(first.epoch).expect("owner activates");
+    let stale = first.epoch.wrapping_add(1);
+    assert!(!registry.begin_retirement(stale), "stale epoch changes nothing");
+    assert!(
+        matches!(registry.reserve(), Err(DomainError::AlreadyReserved { .. })),
+        "stale begin_retirement must not free the live epoch"
+    );
+    registry.poison(first.epoch);
+    assert!(!registry.begin_retirement(first.epoch), "Poisoned never re-enters Retiring");
+    assert!(
+        matches!(registry.reserve(), Err(DomainError::Poisoned)),
+        "poisoned registry denies new chains"
+    );
+}
+
+#[test]
+fn native_domain_unmanaged_sentinel_drop_touches_nothing() {
+    // The unmanaged sentinel pairs with unmanaged test backends: its
+    // epoch matches no live reservation, so dropping it never mutates
+    // the registry (a stale release is a pure no-op).
+    let _serial = serial_domain_test_guard();
+    drop(RetirementSentinel::unmanaged_test_only());
+    reserve_for_construction().expect("slot untouched").rollback_before_native();
+}
+
+#[test]
+fn native_domain_global_serial_release_drop_recycles_after_full_retirement() {
+    // C3M step 7 end-state pin: dropping a never-initialized managed
+    // backend (Release path) leaves the slot Vacant and reusable once
+    // every field — dependent graphs, `dlclose`, permit, lifecycle,
+    // sentinel — has retired.
+    let _serial = serial_domain_test_guard();
+    let permit = reserve_for_construction().expect("first reservation succeeds");
+    permit.activate().expect("owner activates");
+    let first_epoch = permit.epoch;
+    {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let backend = FfiBackend {
+            _lib: super::loading::test_library_handle(),
+            func_list: functions.as_mut() as *mut cryptoki_sys::CK_FUNCTION_LIST,
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            retirement_sentinel: RetirementSentinel::for_permit(&permit),
+            construction: permit,
+            lifecycle: Default::default(),
+        };
+        drop(backend);
+    }
+    let second = reserve_for_construction().expect("slot is reusable after full retirement");
+    assert_eq!(second.epoch, first_epoch + 1, "epochs advance monotonically");
+    second.rollback_before_native();
+}
+
+#[test]
 fn native_domain_current_host_reports_qualified_or_refuses() {
     let reported = check_native_platform();
     assert_eq!(
