@@ -546,7 +546,7 @@ mod slot_wait_tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_WaitForSlotEvent = Some(recording_wait);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,

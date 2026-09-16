@@ -227,7 +227,7 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
     table.C_EncapsulateKey = Some(kem_error);
     let backend = FfiBackend {
-        _lib: libloading::os::unix::Library::this().into(),
+        _lib: crate::ffi::loading::test_library_handle(),
         func_list: base.as_mut(),
         func_list_3_0: None,
         func_list_3_2: Some(table.as_ref()),
@@ -301,7 +301,7 @@ fn exact_parameter_error_preserves_only_defined_initialized_effects() {
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
     table.C_EncryptMessage = Some(message_error);
     let backend = FfiBackend {
-        _lib: libloading::os::unix::Library::this().into(),
+        _lib: crate::ffi::loading::test_library_handle(),
         func_list: base.as_mut(),
         func_list_3_0: Some(table.as_ref()),
         func_list_3_2: None,
@@ -388,7 +388,7 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
     table.C_EncryptMessageBegin = Some(begin_error);
     let backend = FfiBackend {
-        _lib: libloading::os::unix::Library::this().into(),
+        _lib: crate::ffi::loading::test_library_handle(),
         func_list: base.as_mut(),
         func_list_3_0: Some(table.as_ref()),
         func_list_3_2: None,

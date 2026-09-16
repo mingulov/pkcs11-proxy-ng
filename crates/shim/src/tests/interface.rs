@@ -237,8 +237,15 @@ fn get_interface_3_0_list_has_nonnull_get_interface_list_slot() {
     assert!(!pp.is_null());
     unsafe {
         let fl3 = &*((*pp).pFunctionList as *const CK_FUNCTION_LIST_3_0);
-        assert!(fl3.C_GetInterfaceList.is_some());
-        assert!(fl3.C_GetInterface.is_some());
+        // E0793: CK lists are packed on Windows; `is_some()` runs on by-value copies.
+        assert!({
+            let f = fl3.C_GetInterfaceList;
+            f.is_some()
+        });
+        assert!({
+            let f = fl3.C_GetInterface;
+            f.is_some()
+        });
     }
 }
 
@@ -253,8 +260,15 @@ fn get_interface_2_40_list_has_nonnull_legacy_async_slots() {
     assert!(!pp.is_null());
     unsafe {
         let fl = &*((*pp).pFunctionList as *const CK_FUNCTION_LIST);
-        assert!(fl.C_GetFunctionStatus.is_some());
-        assert!(fl.C_CancelFunction.is_some());
+        // E0793: CK lists are packed on Windows; `is_some()` runs on by-value copies.
+        assert!({
+            let f = fl.C_GetFunctionStatus;
+            f.is_some()
+        });
+        assert!({
+            let f = fl.C_CancelFunction;
+            f.is_some()
+        });
     }
 }
 
@@ -276,30 +290,175 @@ fn all_3_0_out_of_scope_slots_are_nonnull() {
     let fl3 = get_3_0_list();
     unsafe {
         let fl = &*fl3;
-        assert!(fl.C_GetFunctionStatus.is_some(), "C_GetFunctionStatus");
-        assert!(fl.C_CancelFunction.is_some(), "C_CancelFunction");
-        assert!(fl.C_LoginUser.is_some(), "C_LoginUser");
-        assert!(fl.C_SessionCancel.is_some(), "C_SessionCancel");
-        assert!(fl.C_MessageEncryptInit.is_some(), "C_MessageEncryptInit");
-        assert!(fl.C_EncryptMessage.is_some(), "C_EncryptMessage");
-        assert!(fl.C_EncryptMessageBegin.is_some(), "C_EncryptMessageBegin");
-        assert!(fl.C_EncryptMessageNext.is_some(), "C_EncryptMessageNext");
-        assert!(fl.C_MessageEncryptFinal.is_some(), "C_MessageEncryptFinal");
-        assert!(fl.C_MessageDecryptInit.is_some(), "C_MessageDecryptInit");
-        assert!(fl.C_DecryptMessage.is_some(), "C_DecryptMessage");
-        assert!(fl.C_DecryptMessageBegin.is_some(), "C_DecryptMessageBegin");
-        assert!(fl.C_DecryptMessageNext.is_some(), "C_DecryptMessageNext");
-        assert!(fl.C_MessageDecryptFinal.is_some(), "C_MessageDecryptFinal");
-        assert!(fl.C_MessageSignInit.is_some(), "C_MessageSignInit");
-        assert!(fl.C_SignMessage.is_some(), "C_SignMessage");
-        assert!(fl.C_SignMessageBegin.is_some(), "C_SignMessageBegin");
-        assert!(fl.C_SignMessageNext.is_some(), "C_SignMessageNext");
-        assert!(fl.C_MessageSignFinal.is_some(), "C_MessageSignFinal");
-        assert!(fl.C_MessageVerifyInit.is_some(), "C_MessageVerifyInit");
-        assert!(fl.C_VerifyMessage.is_some(), "C_VerifyMessage");
-        assert!(fl.C_VerifyMessageBegin.is_some(), "C_VerifyMessageBegin");
-        assert!(fl.C_VerifyMessageNext.is_some(), "C_VerifyMessageNext");
-        assert!(fl.C_MessageVerifyFinal.is_some(), "C_MessageVerifyFinal");
+        // E0793: CK lists are packed on Windows; `is_some()` runs on by-value copies.
+        assert!(
+            {
+                let f = fl.C_GetFunctionStatus;
+                f.is_some()
+            },
+            "C_GetFunctionStatus"
+        );
+        assert!(
+            {
+                let f = fl.C_CancelFunction;
+                f.is_some()
+            },
+            "C_CancelFunction"
+        );
+        assert!(
+            {
+                let f = fl.C_LoginUser;
+                f.is_some()
+            },
+            "C_LoginUser"
+        );
+        assert!(
+            {
+                let f = fl.C_SessionCancel;
+                f.is_some()
+            },
+            "C_SessionCancel"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageEncryptInit;
+                f.is_some()
+            },
+            "C_MessageEncryptInit"
+        );
+        assert!(
+            {
+                let f = fl.C_EncryptMessage;
+                f.is_some()
+            },
+            "C_EncryptMessage"
+        );
+        assert!(
+            {
+                let f = fl.C_EncryptMessageBegin;
+                f.is_some()
+            },
+            "C_EncryptMessageBegin"
+        );
+        assert!(
+            {
+                let f = fl.C_EncryptMessageNext;
+                f.is_some()
+            },
+            "C_EncryptMessageNext"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageEncryptFinal;
+                f.is_some()
+            },
+            "C_MessageEncryptFinal"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageDecryptInit;
+                f.is_some()
+            },
+            "C_MessageDecryptInit"
+        );
+        assert!(
+            {
+                let f = fl.C_DecryptMessage;
+                f.is_some()
+            },
+            "C_DecryptMessage"
+        );
+        assert!(
+            {
+                let f = fl.C_DecryptMessageBegin;
+                f.is_some()
+            },
+            "C_DecryptMessageBegin"
+        );
+        assert!(
+            {
+                let f = fl.C_DecryptMessageNext;
+                f.is_some()
+            },
+            "C_DecryptMessageNext"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageDecryptFinal;
+                f.is_some()
+            },
+            "C_MessageDecryptFinal"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageSignInit;
+                f.is_some()
+            },
+            "C_MessageSignInit"
+        );
+        assert!(
+            {
+                let f = fl.C_SignMessage;
+                f.is_some()
+            },
+            "C_SignMessage"
+        );
+        assert!(
+            {
+                let f = fl.C_SignMessageBegin;
+                f.is_some()
+            },
+            "C_SignMessageBegin"
+        );
+        assert!(
+            {
+                let f = fl.C_SignMessageNext;
+                f.is_some()
+            },
+            "C_SignMessageNext"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageSignFinal;
+                f.is_some()
+            },
+            "C_MessageSignFinal"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageVerifyInit;
+                f.is_some()
+            },
+            "C_MessageVerifyInit"
+        );
+        assert!(
+            {
+                let f = fl.C_VerifyMessage;
+                f.is_some()
+            },
+            "C_VerifyMessage"
+        );
+        assert!(
+            {
+                let f = fl.C_VerifyMessageBegin;
+                f.is_some()
+            },
+            "C_VerifyMessageBegin"
+        );
+        assert!(
+            {
+                let f = fl.C_VerifyMessageNext;
+                f.is_some()
+            },
+            "C_VerifyMessageNext"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageVerifyFinal;
+                f.is_some()
+            },
+            "C_MessageVerifyFinal"
+        );
     }
 }
 
@@ -378,42 +537,259 @@ fn all_3_2_out_of_scope_slots_are_nonnull() {
     let fl3 = get_3_2_list();
     unsafe {
         let fl = &*fl3;
-        assert!(fl.C_GetInterfaceList.is_some(), "C_GetInterfaceList");
-        assert!(fl.C_GetInterface.is_some(), "C_GetInterface");
-        assert!(fl.C_LoginUser.is_some(), "C_LoginUser");
-        assert!(fl.C_SessionCancel.is_some(), "C_SessionCancel");
-        assert!(fl.C_MessageEncryptInit.is_some(), "C_MessageEncryptInit");
-        assert!(fl.C_EncryptMessage.is_some(), "C_EncryptMessage");
-        assert!(fl.C_EncryptMessageBegin.is_some(), "C_EncryptMessageBegin");
-        assert!(fl.C_EncryptMessageNext.is_some(), "C_EncryptMessageNext");
-        assert!(fl.C_MessageEncryptFinal.is_some(), "C_MessageEncryptFinal");
-        assert!(fl.C_MessageDecryptInit.is_some(), "C_MessageDecryptInit");
-        assert!(fl.C_DecryptMessage.is_some(), "C_DecryptMessage");
-        assert!(fl.C_DecryptMessageBegin.is_some(), "C_DecryptMessageBegin");
-        assert!(fl.C_DecryptMessageNext.is_some(), "C_DecryptMessageNext");
-        assert!(fl.C_MessageDecryptFinal.is_some(), "C_MessageDecryptFinal");
-        assert!(fl.C_MessageSignInit.is_some(), "C_MessageSignInit");
-        assert!(fl.C_SignMessage.is_some(), "C_SignMessage");
-        assert!(fl.C_SignMessageBegin.is_some(), "C_SignMessageBegin");
-        assert!(fl.C_SignMessageNext.is_some(), "C_SignMessageNext");
-        assert!(fl.C_MessageSignFinal.is_some(), "C_MessageSignFinal");
-        assert!(fl.C_MessageVerifyInit.is_some(), "C_MessageVerifyInit");
-        assert!(fl.C_VerifyMessage.is_some(), "C_VerifyMessage");
-        assert!(fl.C_VerifyMessageBegin.is_some(), "C_VerifyMessageBegin");
-        assert!(fl.C_VerifyMessageNext.is_some(), "C_VerifyMessageNext");
-        assert!(fl.C_MessageVerifyFinal.is_some(), "C_MessageVerifyFinal");
-        assert!(fl.C_EncapsulateKey.is_some(), "C_EncapsulateKey");
-        assert!(fl.C_DecapsulateKey.is_some(), "C_DecapsulateKey");
-        assert!(fl.C_VerifySignatureInit.is_some(), "C_VerifySignatureInit");
-        assert!(fl.C_VerifySignature.is_some(), "C_VerifySignature");
-        assert!(fl.C_VerifySignatureUpdate.is_some(), "C_VerifySignatureUpdate");
-        assert!(fl.C_VerifySignatureFinal.is_some(), "C_VerifySignatureFinal");
-        assert!(fl.C_GetSessionValidationFlags.is_some(), "C_GetSessionValidationFlags");
-        assert!(fl.C_AsyncComplete.is_some(), "C_AsyncComplete");
-        assert!(fl.C_AsyncGetID.is_some(), "C_AsyncGetID");
-        assert!(fl.C_AsyncJoin.is_some(), "C_AsyncJoin");
-        assert!(fl.C_WrapKeyAuthenticated.is_some(), "C_WrapKeyAuthenticated");
-        assert!(fl.C_UnwrapKeyAuthenticated.is_some(), "C_UnwrapKeyAuthenticated");
+        // E0793: CK lists are packed on Windows; `is_some()` runs on by-value copies.
+        assert!(
+            {
+                let f = fl.C_GetInterfaceList;
+                f.is_some()
+            },
+            "C_GetInterfaceList"
+        );
+        assert!(
+            {
+                let f = fl.C_GetInterface;
+                f.is_some()
+            },
+            "C_GetInterface"
+        );
+        assert!(
+            {
+                let f = fl.C_LoginUser;
+                f.is_some()
+            },
+            "C_LoginUser"
+        );
+        assert!(
+            {
+                let f = fl.C_SessionCancel;
+                f.is_some()
+            },
+            "C_SessionCancel"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageEncryptInit;
+                f.is_some()
+            },
+            "C_MessageEncryptInit"
+        );
+        assert!(
+            {
+                let f = fl.C_EncryptMessage;
+                f.is_some()
+            },
+            "C_EncryptMessage"
+        );
+        assert!(
+            {
+                let f = fl.C_EncryptMessageBegin;
+                f.is_some()
+            },
+            "C_EncryptMessageBegin"
+        );
+        assert!(
+            {
+                let f = fl.C_EncryptMessageNext;
+                f.is_some()
+            },
+            "C_EncryptMessageNext"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageEncryptFinal;
+                f.is_some()
+            },
+            "C_MessageEncryptFinal"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageDecryptInit;
+                f.is_some()
+            },
+            "C_MessageDecryptInit"
+        );
+        assert!(
+            {
+                let f = fl.C_DecryptMessage;
+                f.is_some()
+            },
+            "C_DecryptMessage"
+        );
+        assert!(
+            {
+                let f = fl.C_DecryptMessageBegin;
+                f.is_some()
+            },
+            "C_DecryptMessageBegin"
+        );
+        assert!(
+            {
+                let f = fl.C_DecryptMessageNext;
+                f.is_some()
+            },
+            "C_DecryptMessageNext"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageDecryptFinal;
+                f.is_some()
+            },
+            "C_MessageDecryptFinal"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageSignInit;
+                f.is_some()
+            },
+            "C_MessageSignInit"
+        );
+        assert!(
+            {
+                let f = fl.C_SignMessage;
+                f.is_some()
+            },
+            "C_SignMessage"
+        );
+        assert!(
+            {
+                let f = fl.C_SignMessageBegin;
+                f.is_some()
+            },
+            "C_SignMessageBegin"
+        );
+        assert!(
+            {
+                let f = fl.C_SignMessageNext;
+                f.is_some()
+            },
+            "C_SignMessageNext"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageSignFinal;
+                f.is_some()
+            },
+            "C_MessageSignFinal"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageVerifyInit;
+                f.is_some()
+            },
+            "C_MessageVerifyInit"
+        );
+        assert!(
+            {
+                let f = fl.C_VerifyMessage;
+                f.is_some()
+            },
+            "C_VerifyMessage"
+        );
+        assert!(
+            {
+                let f = fl.C_VerifyMessageBegin;
+                f.is_some()
+            },
+            "C_VerifyMessageBegin"
+        );
+        assert!(
+            {
+                let f = fl.C_VerifyMessageNext;
+                f.is_some()
+            },
+            "C_VerifyMessageNext"
+        );
+        assert!(
+            {
+                let f = fl.C_MessageVerifyFinal;
+                f.is_some()
+            },
+            "C_MessageVerifyFinal"
+        );
+        assert!(
+            {
+                let f = fl.C_EncapsulateKey;
+                f.is_some()
+            },
+            "C_EncapsulateKey"
+        );
+        assert!(
+            {
+                let f = fl.C_DecapsulateKey;
+                f.is_some()
+            },
+            "C_DecapsulateKey"
+        );
+        assert!(
+            {
+                let f = fl.C_VerifySignatureInit;
+                f.is_some()
+            },
+            "C_VerifySignatureInit"
+        );
+        assert!(
+            {
+                let f = fl.C_VerifySignature;
+                f.is_some()
+            },
+            "C_VerifySignature"
+        );
+        assert!(
+            {
+                let f = fl.C_VerifySignatureUpdate;
+                f.is_some()
+            },
+            "C_VerifySignatureUpdate"
+        );
+        assert!(
+            {
+                let f = fl.C_VerifySignatureFinal;
+                f.is_some()
+            },
+            "C_VerifySignatureFinal"
+        );
+        assert!(
+            {
+                let f = fl.C_GetSessionValidationFlags;
+                f.is_some()
+            },
+            "C_GetSessionValidationFlags"
+        );
+        assert!(
+            {
+                let f = fl.C_AsyncComplete;
+                f.is_some()
+            },
+            "C_AsyncComplete"
+        );
+        assert!(
+            {
+                let f = fl.C_AsyncGetID;
+                f.is_some()
+            },
+            "C_AsyncGetID"
+        );
+        assert!(
+            {
+                let f = fl.C_AsyncJoin;
+                f.is_some()
+            },
+            "C_AsyncJoin"
+        );
+        assert!(
+            {
+                let f = fl.C_WrapKeyAuthenticated;
+                f.is_some()
+            },
+            "C_WrapKeyAuthenticated"
+        );
+        assert!(
+            {
+                let f = fl.C_UnwrapKeyAuthenticated;
+                f.is_some()
+            },
+            "C_UnwrapKeyAuthenticated"
+        );
     }
 }
 

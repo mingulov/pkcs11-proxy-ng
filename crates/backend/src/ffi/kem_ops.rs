@@ -171,7 +171,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
         functions.C_EncapsulateKey = Some(missing_length_encapsulate);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: base.as_mut(),
             func_list_3_0: None,
             func_list_3_2: Some(functions.as_ref()),

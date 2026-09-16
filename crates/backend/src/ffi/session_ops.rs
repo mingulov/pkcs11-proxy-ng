@@ -248,7 +248,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_CloseSession = close;
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -298,7 +298,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_CloseAllSessions = Some(close_all_sessions_fails);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,

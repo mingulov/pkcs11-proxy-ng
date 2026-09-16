@@ -440,7 +440,9 @@ mod ffi_attrs_narrowing_tests {
         }
         assert_eq!(cryptoki_sys::CK_ULONG::from_ne_bytes(class_bytes), 4);
         assert_eq!(subs[1].type_ as u64, CkAttributeType::EXTRACTABLE.0);
-        assert_eq!(subs[1].ulValueLen, 1);
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
+        let ul_value_len = subs[1].ulValueLen;
+        assert_eq!(ul_value_len, 1);
         assert_eq!(unsafe { *(subs[1].pValue as *const u8) }, 1);
     }
 

@@ -3,6 +3,25 @@ use libloading::{Library, Symbol};
 use std::ffi::CString;
 use std::path::Path;
 
+/// Portable test-only stand-in for the provider-module handle.
+///
+/// Unit tests build `FfiBackend` values with hand-written function lists and
+/// need a placeholder `_lib` that is never used for symbol lookup. The unix
+/// arm is the historical `dlopen(NULL)` self handle; the Windows arm is the
+/// process image handle (`GetModuleHandleExW(0, NULL, _)`, libloading 0.8.9).
+#[cfg(test)]
+#[cfg(unix)]
+pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
+    libloading::os::unix::Library::this().into()
+}
+
+/// Portable test-only stand-in for the provider-module handle (Windows arm).
+#[cfg(test)]
+#[cfg(windows)]
+pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
+    libloading::os::windows::Library::this().expect("test process image handle").into()
+}
+
 /// Type alias for the `C_GetInterface` symbol signature.
 type GetInterfaceFn = unsafe extern "C" fn(
     *mut cryptoki_sys::CK_UTF8CHAR,

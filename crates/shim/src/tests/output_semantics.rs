@@ -423,7 +423,9 @@ fn shim_get_attribute_value_size_query_returns_exact_length_without_copy() {
     let rv =
         unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
     assert_eq!(rv, CKR_OK as CK_RV);
-    assert_eq!(attr.ulValueLen, 3);
+    // E0793: CK_ATTRIBUTE is packed on Windows; assert on by-value copies.
+    let ul_value_len = attr.ulValueLen;
+    assert_eq!(ul_value_len, 3);
 }
 
 #[test]
@@ -464,7 +466,8 @@ fn shim_get_attribute_value_exact_fit_copies_bytes() {
     let rv =
         unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
     assert_eq!(rv, CKR_OK as CK_RV);
-    assert_eq!(attr.ulValueLen, 3);
+    let ul_value_len = attr.ulValueLen;
+    assert_eq!(ul_value_len, 3);
     assert_eq!(&bytes, b"key");
 }
 
@@ -485,7 +488,8 @@ fn shim_get_attribute_value_too_small_preserves_unavailable_information() {
     let rv =
         unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
     assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV);
-    assert_eq!(attr.ulValueLen, CK_UNAVAILABLE_INFORMATION);
+    let ul_value_len = attr.ulValueLen;
+    assert_eq!(ul_value_len, CK_UNAVAILABLE_INFORMATION);
     assert_eq!(bytes, [0xAA, 0xAA]);
 }
 
@@ -529,9 +533,11 @@ fn shim_get_attribute_value_mixed_template_reflects_backend_semantics() {
     };
     assert_eq!(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
     assert_eq!(&label, b"key");
-    assert_eq!(template[0].ulValueLen, 3);
-    assert_eq!(template[1].ulValueLen, CK_UNAVAILABLE_INFORMATION);
-    assert_eq!(template[2].ulValueLen, CK_UNAVAILABLE_INFORMATION);
+    let (len0, len1, len2) =
+        (template[0].ulValueLen, template[1].ulValueLen, template[2].ulValueLen);
+    assert_eq!(len0, 3);
+    assert_eq!(len1, CK_UNAVAILABLE_INFORMATION);
+    assert_eq!(len2, CK_UNAVAILABLE_INFORMATION);
 }
 
 #[test]
@@ -2431,9 +2437,10 @@ fn gcm_generated_iv_round_trips_through_shim_client_and_server() {
 
     daemon.backend.set_encrypt_init_output(None);
     assert_eq!(rv, CKR_OK as CK_RV, "C_EncryptInit");
-    assert_eq!(params.ulIvLen, generated_iv.len() as CK_ULONG, "provider IV length writeback");
-    assert_eq!(params.ulIvBits, 96, "provider IV bit length writeback");
-    assert_eq!(params.ulTagBits, 128, "provider tag bit length writeback");
+    let (ul_iv_len, ul_iv_bits, ul_tag_bits) = (params.ulIvLen, params.ulIvBits, params.ulTagBits);
+    assert_eq!(ul_iv_len, generated_iv.len() as CK_ULONG, "provider IV length writeback");
+    assert_eq!(ul_iv_bits, 96, "provider IV bit length writeback");
+    assert_eq!(ul_tag_bits, 128, "provider tag bit length writeback");
     assert_eq!(iv_buffer.as_slice(), generated_iv.as_slice(), "generated IV writeback");
 }
 
@@ -2485,7 +2492,8 @@ fn gcm_delayed_iv_round_trips_after_encrypt_data_query() {
     assert_eq!(encrypt_rv, CKR_OK as CK_RV, "C_Encrypt(data)");
     assert_eq!(ciphertext_len, plaintext.len() as CK_ULONG);
     assert_eq!(ciphertext, [0x2A, 0x27, 0x2E, 0x2E, 0x2D], "mock ciphertext");
-    assert_eq!(params.ulIvLen, generated_iv.len() as CK_ULONG, "delayed IV length writeback");
+    let ul_iv_len = params.ulIvLen;
+    assert_eq!(ul_iv_len, generated_iv.len() as CK_ULONG, "delayed IV length writeback");
     assert_eq!(iv_buffer.as_slice(), generated_iv.as_slice(), "delayed IV writeback");
 }
 
@@ -3429,13 +3437,14 @@ fn nested_template_attribute_data_query() {
     assert_eq!(rv, CKR_OK as CK_RV, "data query should succeed");
 
     // Verify sub-attribute types were set on output
+    let (sub0_type, sub1_type) = (sub_attrs[0].type_, sub_attrs[1].type_);
     assert_eq!(
-        sub_attrs[0].type_,
+        sub0_type,
         CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE,
         "sub-attr[0] type should be CKA_CLASS"
     );
     assert_eq!(
-        sub_attrs[1].type_,
+        sub1_type,
         CkAttributeType::KEY_TYPE.0 as CK_ATTRIBUTE_TYPE,
         "sub-attr[1] type should be CKA_KEY_TYPE"
     );
@@ -3487,8 +3496,9 @@ fn nested_template_attribute_sub_size_query() {
     assert_eq!(rv, CKR_OK as CK_RV, "sub size query should succeed");
 
     // Verify types were set
-    assert_eq!(sub_attrs[0].type_, CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE);
-    assert_eq!(sub_attrs[1].type_, CkAttributeType::LABEL.0 as CK_ATTRIBUTE_TYPE);
+    let (sub0_type, sub1_type) = (sub_attrs[0].type_, sub_attrs[1].type_);
+    assert_eq!(sub0_type, CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE);
+    assert_eq!(sub1_type, CkAttributeType::LABEL.0 as CK_ATTRIBUTE_TYPE);
 
     // Verify returned lengths
     let ulong_size = std::mem::size_of::<CK_ULONG>();
@@ -3551,14 +3561,16 @@ fn nested_template_attribute_sub_buffer_too_small_preserves_partial_outputs() {
         sub_attrs.len() * std::mem::size_of::<CK_ATTRIBUTE>(),
         "outer array length should still reflect the backend template size",
     );
-    assert_eq!(sub_attrs[0].type_, CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE);
+    let sub0_type = sub_attrs[0].type_;
+    assert_eq!(sub0_type, CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE);
     assert_eq!(sub_attrs[0].ulValueLen as usize, ulong_size);
     assert_eq!(
         CK_ULONG::from_le_bytes(class_buf[..ulong_size].try_into().unwrap()),
         class_value as CK_ULONG
     );
-    assert_eq!(sub_attrs[1].type_, CkAttributeType::LABEL.0 as CK_ATTRIBUTE_TYPE);
-    assert_eq!(sub_attrs[1].ulValueLen, CK_UNAVAILABLE_INFORMATION);
+    let (sub1_type, sub1_len) = (sub_attrs[1].type_, sub_attrs[1].ulValueLen);
+    assert_eq!(sub1_type, CkAttributeType::LABEL.0 as CK_ATTRIBUTE_TYPE);
+    assert_eq!(sub1_len, CK_UNAVAILABLE_INFORMATION);
     assert_eq!(short_label_buf, [0xBB; 2], "too-small nested buffer must not be copied");
 }
 

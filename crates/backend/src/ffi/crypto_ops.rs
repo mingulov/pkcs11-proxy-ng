@@ -611,7 +611,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_Encrypt = Some(encrypt_ok);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -714,7 +714,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_Encrypt = Some(encrypt);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -862,7 +862,7 @@ mod tests {
         functions.C_EncryptInit = Some(encrypt_init_ok);
         functions.C_DigestInit = Some(digest_init_ok);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -921,7 +921,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_EncryptInit = Some(encrypt_init_ok);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -972,7 +972,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_EncryptInit = Some(encrypt_init_fails);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,
@@ -1017,7 +1017,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_EncryptInit = Some(encrypt_init_ok);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,

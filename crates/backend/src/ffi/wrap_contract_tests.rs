@@ -73,7 +73,7 @@ fn backend()
     let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
     functions.C_WrapKeyAuthenticated = Some(authenticated);
     let backend = FfiBackend {
-        _lib: libloading::os::unix::Library::this().into(),
+        _lib: crate::ffi::loading::test_library_handle(),
         func_list: base.as_mut(),
         func_list_3_0: None,
         func_list_3_2: Some(functions.as_ref()),
@@ -237,7 +237,7 @@ fn gcm_error_backend() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     base.C_WrapKey = Some(wrap_gcm_error);
     let backend = FfiBackend {
-        _lib: libloading::os::unix::Library::this().into(),
+        _lib: crate::ffi::loading::test_library_handle(),
         func_list: base.as_mut(),
         func_list_3_0: None,
         func_list_3_2: None,

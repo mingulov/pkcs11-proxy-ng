@@ -146,7 +146,9 @@ mod mechanism_to_ffi_tests {
             let ffi = mechanism_to_ffi(&mech).expect("official PQC flows parameterless");
             let native = ffi.ck_mechanism();
             assert!(native.pParameter.is_null(), "{name}: NULL params on the wire");
-            assert_eq!(native.ulParameterLen, 0, "{name}: zero param length");
+            // E0793: CK_MECHANISM is packed on Windows; assert on a by-value copy.
+            let ul_parameter_len = native.ulParameterLen;
+            assert_eq!(ul_parameter_len, 0, "{name}: zero param length");
         }
     }
 
@@ -161,16 +163,19 @@ mod mechanism_to_ffi_tests {
             }),
         );
 
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS>() as cryptoki_sys::CK_ULONG
         );
         let pss = unsafe {
             &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_RSA_PKCS_PSS_PARAMS)
         };
-        assert_eq!(pss.hashAlg, CkMechanismType::SHA256.0 as cryptoki_sys::CK_MECHANISM_TYPE);
-        assert_eq!(pss.mgf, 1);
-        assert_eq!(pss.sLen, 32);
+        let (hash_alg, mgf, s_len) = (pss.hashAlg, pss.mgf, pss.sLen);
+        assert_eq!(hash_alg, CkMechanismType::SHA256.0 as cryptoki_sys::CK_MECHANISM_TYPE);
+        assert_eq!(mgf, 1);
+        assert_eq!(s_len, 32);
     }
 
     #[test]
@@ -185,17 +190,21 @@ mod mechanism_to_ffi_tests {
             }),
         );
 
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>() as cryptoki_sys::CK_ULONG
         );
         let oaep = unsafe {
             &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS)
         };
-        assert_eq!(oaep.hashAlg, CkMechanismType::SHA256.0 as cryptoki_sys::CK_MECHANISM_TYPE);
-        assert_eq!(oaep.mgf, 1);
-        assert_eq!(oaep.source, 1);
-        assert_eq!(oaep.ulSourceDataLen, 3);
+        let (hash_alg, mgf, source, ul_source_data_len) =
+            (oaep.hashAlg, oaep.mgf, oaep.source, oaep.ulSourceDataLen);
+        assert_eq!(hash_alg, CkMechanismType::SHA256.0 as cryptoki_sys::CK_MECHANISM_TYPE);
+        assert_eq!(mgf, 1);
+        assert_eq!(source, 1);
+        assert_eq!(ul_source_data_len, 3);
         let source = unsafe {
             std::slice::from_raw_parts(oaep.pSourceData as *const u8, oaep.ulSourceDataLen as usize)
         };
@@ -215,16 +224,20 @@ mod mechanism_to_ffi_tests {
             }),
         );
 
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<cryptoki_sys::CK_GCM_PARAMS>() as cryptoki_sys::CK_ULONG
         );
         let gcm =
             unsafe { &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_GCM_PARAMS) };
-        assert_eq!(gcm.ulIvLen, 12);
-        assert_eq!(gcm.ulIvBits, 96);
-        assert_eq!(gcm.ulAADLen, 3);
-        assert_eq!(gcm.ulTagBits, 128);
+        let (ul_iv_len, ul_iv_bits, ul_aad_len, ul_tag_bits) =
+            (gcm.ulIvLen, gcm.ulIvBits, gcm.ulAADLen, gcm.ulTagBits);
+        assert_eq!(ul_iv_len, 12);
+        assert_eq!(ul_iv_bits, 96);
+        assert_eq!(ul_aad_len, 3);
+        assert_eq!(ul_tag_bits, 128);
         let iv = unsafe { std::slice::from_raw_parts(gcm.pIv, gcm.ulIvLen as usize) };
         let aad = unsafe { std::slice::from_raw_parts(gcm.pAAD, gcm.ulAADLen as usize) };
         assert_eq!(iv, [0x10; 12]);
@@ -307,8 +320,10 @@ mod mechanism_to_ffi_tests {
         );
         let pbe =
             unsafe { &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_PBE_PARAMS) };
-        assert_eq!(pbe.ulPasswordLen, password.len() as cryptoki_sys::CK_ULONG);
-        assert_eq!(pbe.ulIteration, 1000);
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let (ul_password_len, ul_iteration) = (pbe.ulPasswordLen, pbe.ulIteration);
+        assert_eq!(ul_password_len, password.len() as cryptoki_sys::CK_ULONG);
+        assert_eq!(ul_iteration, 1000);
         let pass = unsafe { std::slice::from_raw_parts(pbe.pPassword, pbe.ulPasswordLen as usize) };
         assert_eq!(pass, password.as_slice());
     }
@@ -330,7 +345,9 @@ mod mechanism_to_ffi_tests {
         let p = unsafe {
             &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_PKCS5_PBKD2_PARAMS2)
         };
-        assert_eq!(p.ulPasswordLen, password.len() as cryptoki_sys::CK_ULONG);
+        // E0793: CK structs are packed on Windows; assert on a by-value copy.
+        let ul_password_len = p.ulPasswordLen;
+        assert_eq!(ul_password_len, password.len() as cryptoki_sys::CK_ULONG);
         let pass = unsafe { std::slice::from_raw_parts(p.pPassword, p.ulPasswordLen as usize) };
         assert_eq!(pass, password.as_slice());
     }
@@ -351,8 +368,10 @@ mod mechanism_to_ffi_tests {
         let gcm =
             unsafe { &mut *(ffi.ck_mechanism().pParameter as *mut cryptoki_sys::CK_GCM_PARAMS) };
         assert!(!gcm.pIv.is_null());
-        assert_eq!(gcm.ulIvLen, 0);
-        assert_eq!(gcm.ulIvBits, 96);
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let (ul_iv_len, ul_iv_bits) = (gcm.ulIvLen, gcm.ulIvBits);
+        assert_eq!(ul_iv_len, 0);
+        assert_eq!(ul_iv_bits, 96);
 
         let generated = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         unsafe {
@@ -594,7 +613,9 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::Iv(IvParams { iv: vec![0x55; 16] }),
         );
 
-        assert_eq!(ffi.ck_mechanism().ulParameterLen, 16);
+        // E0793: CK_MECHANISM is packed on Windows; assert on a by-value copy.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
+        assert_eq!(ul_parameter_len, 16);
         let iv = unsafe {
             std::slice::from_raw_parts(
                 ffi.ck_mechanism().pParameter as *const u8,
@@ -611,13 +632,16 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::AesCtr(AesCtrParams { counter_bits: 128, cb: vec![0x33; 16] }),
         );
 
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<cryptoki_sys::CK_AES_CTR_PARAMS>() as cryptoki_sys::CK_ULONG
         );
         let ctr =
             unsafe { &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_AES_CTR_PARAMS) };
-        assert_eq!(ctr.ulCounterBits, 128);
+        let ul_counter_bits = ctr.ulCounterBits;
+        assert_eq!(ul_counter_bits, 128);
         assert_eq!(ctr.cb, [0x33; 16]);
     }
 
@@ -628,8 +652,10 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::Extract(ExtractParams { bit_position: 21 }),
         );
 
+        // E0793: CK_MECHANISM is packed on Windows; assert on a by-value copy.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<cryptoki_sys::CK_EXTRACT_PARAMS>() as cryptoki_sys::CK_ULONG
         );
         let bit_position =
@@ -644,8 +670,10 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::ObjectHandle(ObjectHandleParam { handle: 0xCAFE }),
         );
 
+        // E0793: CK_MECHANISM is packed on Windows; assert on a by-value copy.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<cryptoki_sys::CK_OBJECT_HANDLE>() as cryptoki_sys::CK_ULONG
         );
         let handle =
@@ -662,15 +690,18 @@ mod mechanism_to_ffi_tests {
             }),
         );
 
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA>()
                 as cryptoki_sys::CK_ULONG
         );
         let params = unsafe {
             &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_KEY_DERIVATION_STRING_DATA)
         };
-        assert_eq!(params.ulLen, 4);
+        let ul_len = params.ulLen;
+        assert_eq!(ul_len, 4);
         let data = unsafe { std::slice::from_raw_parts(params.pData, params.ulLen as usize) };
         assert_eq!(data, [0xDE, 0xAD, 0xBE, 0xEF]);
     }
@@ -686,14 +717,17 @@ mod mechanism_to_ffi_tests {
             }),
         );
 
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<super::FfiSignAdditionalContext>() as cryptoki_sys::CK_ULONG
         );
         let params =
             unsafe { &*(ffi.ck_mechanism().pParameter as *const super::FfiSignAdditionalContext) };
-        assert_eq!(params.hedge_variant, 1);
-        assert_eq!(params.ul_context_len, 3);
+        let (hedge_variant, ul_context_len) = (params.hedge_variant, params.ul_context_len);
+        assert_eq!(hedge_variant, 1);
+        assert_eq!(ul_context_len, 3);
         let context =
             unsafe { std::slice::from_raw_parts(params.p_context, params.ul_context_len as usize) };
         assert_eq!(context, [0xA1, 0xA2, 0xA3]);
@@ -712,16 +746,20 @@ mod mechanism_to_ffi_tests {
             }),
         );
 
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<super::FfiHashSignAdditionalContext>() as cryptoki_sys::CK_ULONG
         );
         let params = unsafe {
             &*(ffi.ck_mechanism().pParameter as *const super::FfiHashSignAdditionalContext)
         };
-        assert_eq!(params.hedge_variant, 1);
-        assert_eq!(params.ul_context_len, 2);
-        assert_eq!(params.hash, 0x0000_0250);
+        let (hedge_variant, ul_context_len, hash) =
+            (params.hedge_variant, params.ul_context_len, params.hash);
+        assert_eq!(hedge_variant, 1);
+        assert_eq!(ul_context_len, 2);
+        assert_eq!(hash, 0x0000_0250);
         let context =
             unsafe { std::slice::from_raw_parts(params.p_context, params.ul_context_len as usize) };
         assert_eq!(context, [0xB1, 0xB2]);
@@ -738,14 +776,18 @@ mod mechanism_to_ffi_tests {
             }),
         );
 
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<super::FfiKmacParams>() as cryptoki_sys::CK_ULONG
         );
         let kmac = unsafe { &*(ffi.ck_mechanism().pParameter as *const super::FfiKmacParams) };
-        assert_eq!(kmac.h_key, 0xCAFE);
-        assert_eq!(kmac.ul_mac_length, 64);
-        assert_eq!(kmac.ul_customization_string_len, 6);
+        let (h_key, ul_mac_length, ul_customization_string_len) =
+            (kmac.h_key, kmac.ul_mac_length, kmac.ul_customization_string_len);
+        assert_eq!(h_key, 0xCAFE);
+        assert_eq!(ul_mac_length, 64);
+        assert_eq!(ul_customization_string_len, 6);
         let customization = unsafe {
             std::slice::from_raw_parts(
                 kmac.p_customization_string as *const u8,
@@ -766,14 +808,17 @@ mod mechanism_to_ffi_tests {
             }),
         );
 
+        // E0793: CK structs are packed on Windows; assert on by-value copies.
+        let ul_parameter_len = ffi.ck_mechanism().ulParameterLen;
         assert_eq!(
-            ffi.ck_mechanism().ulParameterLen,
+            ul_parameter_len,
             std::mem::size_of::<super::FfiMuGenParams>() as cryptoki_sys::CK_ULONG
         );
         let mu_gen = unsafe { &*(ffi.ck_mechanism().pParameter as *const super::FfiMuGenParams) };
-        assert_eq!(mu_gen.h_key, 0xA11CE);
-        assert_eq!(mu_gen.ul_tr_len, 14);
-        assert_eq!(mu_gen.ul_ctx_len, 7);
+        let (h_key, ul_tr_len, ul_ctx_len) = (mu_gen.h_key, mu_gen.ul_tr_len, mu_gen.ul_ctx_len);
+        assert_eq!(h_key, 0xA11CE);
+        assert_eq!(ul_tr_len, 14);
+        assert_eq!(ul_ctx_len, 7);
         let tr = unsafe { std::slice::from_raw_parts(mu_gen.p_tr, mu_gen.ul_tr_len as usize) };
         let context =
             unsafe { std::slice::from_raw_parts(mu_gen.p_ctx, mu_gen.ul_ctx_len as usize) };
@@ -939,7 +984,9 @@ mod attribute_query_tests {
 
         assert_eq!(ffi.attrs.len(), 1);
         assert!(ffi.attrs[0].pValue.is_null());
-        assert_eq!(ffi.attrs[0].ulValueLen, 0);
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
+        let ul_value_len = ffi.attrs[0].ulValueLen;
+        assert_eq!(ul_value_len, 0);
     }
 
     #[test]

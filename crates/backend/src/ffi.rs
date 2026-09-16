@@ -1691,7 +1691,7 @@ mod tests {
         functions.C_Finalize = finalize;
 
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
             func_list_3_0: None,
             func_list_3_2: None,

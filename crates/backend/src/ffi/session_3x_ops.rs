@@ -73,7 +73,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
         functions.C_SessionCancel = Some(counted_session_cancel);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: base.as_mut(),
             func_list_3_0: Some(functions.as_ref()),
             func_list_3_2: None,

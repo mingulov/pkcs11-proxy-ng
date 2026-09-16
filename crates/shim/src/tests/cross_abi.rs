@@ -135,7 +135,9 @@ fn scalar_ulong_attribute_bridges_both_directions() {
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
         assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "{abi:?} too-small");
-        assert_eq!(attr.ulValueLen, CK_UNAVAILABLE_INFORMATION, "{abi:?}: client-width sentinel");
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
+        let ul_value_len = attr.ulValueLen;
+        assert_eq!(ul_value_len, CK_UNAVAILABLE_INFORMATION, "{abi:?}: client-width sentinel");
     }
 }
 
@@ -261,7 +263,8 @@ fn nested_template_data_query_bridges_sub_values() {
             );
             assert_eq!(class_buf, vec![0; w]);
             assert_eq!(key_type_buf, vec![0; w]);
-            assert_eq!(sub_attrs[0].ulValueLen, w as CK_ULONG);
+            let ul_value_len = sub_attrs[0].ulValueLen;
+            assert_eq!(ul_value_len, w as CK_ULONG);
             continue;
         }
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} nested data query");
@@ -308,14 +311,16 @@ fn nested_template_sub_too_small_yields_client_width_sentinel() {
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
         if abi.ulong_width() != w {
             assert_eq!(rv, CKR_FUNCTION_NOT_SUPPORTED);
-            assert_eq!(sub_attrs[0].ulValueLen, (w / 2) as CK_ULONG);
+            let ul_value_len = sub_attrs[0].ulValueLen;
+            assert_eq!(ul_value_len, (w / 2) as CK_ULONG);
             assert_eq!(small, vec![0; w / 2]);
             assert_eq!(ok_buf, vec![0; w]);
             continue;
         }
         assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "{abi:?} sub-too-small overall rv");
+        let ul_value_len = sub_attrs[0].ulValueLen;
         assert_eq!(
-            sub_attrs[0].ulValueLen, CK_UNAVAILABLE_INFORMATION,
+            ul_value_len, CK_UNAVAILABLE_INFORMATION,
             "{abi:?}: too-small sub gets the client-width sentinel"
         );
         let ok_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
@@ -406,7 +411,8 @@ fn create_with_template_round_trips_across_abis() {
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} vendor read-back");
         assert_eq!(vendor_buf, [9, 8, 7], "{abi:?}: vendor bytes are opaque (D7)");
-        assert_eq!(attr.ulValueLen, 3, "{abi:?}: vendor length is byte-addressed");
+        let ul_value_len = attr.ulValueLen;
+        assert_eq!(ul_value_len, 3, "{abi:?}: vendor length is byte-addressed");
     }
 }
 
@@ -479,7 +485,8 @@ fn nested_template_input_round_trips_across_abis() {
             continue;
         }
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} nested data query");
-        assert_eq!(out_subs[0].type_, CKA_CLASS, "{abi:?}: sub type");
+        let sub_type = out_subs[0].type_;
+        assert_eq!(sub_type, CKA_CLASS, "{abi:?}: sub type");
         let class_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
             class_buf.as_slice().try_into().expect("width");
         assert_eq!(
@@ -520,7 +527,8 @@ fn assert_wrap_template_holds_class(
         return;
     }
     assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} {context}: nested read-back");
-    assert_eq!(out_subs[0].type_, CKA_CLASS, "{abi:?} {context}: sub type");
+    let sub_type = out_subs[0].type_;
+    assert_eq!(sub_type, CKA_CLASS, "{abi:?} {context}: sub type");
     let bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
         class_buf.as_slice().try_into().expect("width");
     assert_eq!(
