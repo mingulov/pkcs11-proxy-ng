@@ -13,7 +13,7 @@ Usage: scripts/release-windows.sh [options]
 
 Cross-compile the Windows x64 (MSVC) release artifacts with cargo-xwin,
 stage the deterministic asset bundle layout, and emit a reproducible ZIP
-plus SHA256SUMS without requiring a Windows runner or Wine.
+plus SHA256SUMS-windows without requiring a Windows runner or Wine.
 
 Options:
   --prefix DIR   Stage artifacts under DIR instead of a temporary directory
@@ -153,7 +153,7 @@ fi
 
 STAGE="$PREFIX/$BUNDLE"
 ZIP_PATH="$PREFIX/${BUNDLE}.zip"
-SUMS_PATH="$PREFIX/SHA256SUMS"
+SUMS_PATH="$PREFIX/SHA256SUMS-windows"
 
 install -d "$STAGE/bin" "$STAGE/lib"
 install -m 0755 "$DAEMON_BIN" "$STAGE/bin/pkcs11-proxy-ng.exe"
@@ -212,7 +212,7 @@ with zipfile.ZipFile(zip_path) as zf:
         raise SystemExit(f"ZIP integrity check failed on entry: {bad}")
 EOF
 
-( cd "$PREFIX" && sha256sum "${BUNDLE}.zip" > SHA256SUMS )
+( cd "$PREFIX" && sha256sum "${BUNDLE}.zip" > SHA256SUMS-windows )
 test -s "$ZIP_PATH"
 test -s "$SUMS_PATH"
 
@@ -223,7 +223,7 @@ if [[ -n "$DIST_COPY" ]]; then
     mkdir -p "$ROOT_DIR/dist"
     cp "$ZIP_PATH" "$SUMS_PATH" "$ROOT_DIR/dist/"
     ZIP_PATH="$ROOT_DIR/dist/${BUNDLE}.zip"
-    SUMS_PATH="$ROOT_DIR/dist/SHA256SUMS"
+    SUMS_PATH="$ROOT_DIR/dist/SHA256SUMS-windows"
 fi
 
 cat <<EOF
