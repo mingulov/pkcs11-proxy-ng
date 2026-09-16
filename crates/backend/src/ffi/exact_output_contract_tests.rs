@@ -490,3 +490,170 @@ fn classic_gcm_initialized_error_iv_effect() {
     };
     assert_eq!(gcm.iv[0], 0x42);
 }
+
+#[test]
+fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
+    let input = GcmParams {
+        iv: vec![0x11; 12],
+        iv_bits: 96,
+        iv_buffer_len: 12,
+        aad: vec![],
+        tag_bits: 128,
+    };
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(input.clone())),
+    };
+    let modes = [
+        (
+            "data",
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
+        ),
+        (
+            "size query",
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false },
+        ),
+        (
+            "missing-length with buffer",
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: true },
+        ),
+        (
+            "missing-length without buffer",
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: true },
+        ),
+    ];
+    let rvs = [
+        (CkRv::OK, cryptoki_sys::CKR_OK),
+        (CkRv::BUFFER_TOO_SMALL, cryptoki_sys::CKR_BUFFER_TOO_SMALL),
+        (CkRv::FUNCTION_FAILED, cryptoki_sys::CKR_FUNCTION_FAILED),
+        (CkRv::DEVICE_ERROR, cryptoki_sys::CKR_DEVICE_ERROR),
+        (CkRv::ARGUMENTS_BAD, cryptoki_sys::CKR_ARGUMENTS_BAD),
+        (CkRv(0x8000_0017), 0x8000_0017),
+    ];
+    for (mode_name, spec) in &modes {
+        for (rv, native_rv) in &rvs {
+            for write in [true, false] {
+                let cell = format!("{mode_name} {rv:?} write={write}");
+                let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
+                    Some(()),
+                    &mechanism,
+                    spec,
+                    |(), native, _, length| {
+                        if write {
+                            // Benign native-provider effect: write within an
+                            // initialized owned IV, plus the length cell when one exists.
+                            let gcm = unsafe {
+                                &*native.pParameter.cast::<cryptoki_sys::CK_GCM_PARAMS>()
+                            };
+                            unsafe { gcm.pIv.write(0x42) };
+                            if !length.is_null() {
+                                unsafe { length.write(7) };
+                            }
+                        }
+                        *native_rv
+                    },
+                )
+                .unwrap();
+                assert_eq!(output.ck_rv, *rv, "{cell}: rv");
+                let (expected_len, expected_value) = if spec.length_pointer_null {
+                    (None, None)
+                } else if spec.buffer_present {
+                    if write {
+                        (Some(7), None)
+                    } else if *rv == CkRv::OK {
+                        (Some(4), Some(vec![0u8; 4]))
+                    } else {
+                        (Some(4), None)
+                    }
+                } else if write {
+                    (Some(7), None)
+                } else if *rv == CkRv::OK {
+                    (Some(0), None)
+                } else {
+                    (None, None)
+                };
+                assert_eq!(output.returned_len, expected_len, "{cell}: returned_len");
+                assert_eq!(output.value, expected_value, "{cell}: value");
+                let gated = spec.buffer_present || spec.length_pointer_null;
+                if !gated {
+                    assert_eq!(effects, None, "{cell}: size query suppresses effects");
+                } else if write {
+                    let Some(CkMechanismParams::Gcm(gcm)) = &effects else {
+                        panic!("{cell}: expected mutated GCM effects, got {effects:?}");
+                    };
+                    assert_eq!(gcm.iv[0], 0x42, "{cell}: mutated IV byte");
+                    assert_eq!(gcm.iv.len(), 12, "{cell}: IV length preserved");
+                } else if *rv == CkRv::OK {
+                    assert_eq!(
+                        effects,
+                        Some(CkMechanismParams::Gcm(input.clone())),
+                        "{cell}: OK echoes unchanged input params"
+                    );
+                } else {
+                    assert_eq!(effects, None, "{cell}: unchanged error surfaces no effects");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
+    let input = GcmParams {
+        iv: vec![0x11; 12],
+        iv_bits: 96,
+        iv_buffer_len: 12,
+        aad: vec![],
+        tag_bits: 128,
+    };
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(input.clone())),
+    };
+    let modes = [
+        (
+            "data",
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
+            true,
+        ),
+        (
+            "missing-length with buffer",
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: true },
+            true,
+        ),
+        (
+            "missing-length without buffer",
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: true },
+            true,
+        ),
+        (
+            "size query",
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false },
+            false,
+        ),
+    ];
+    for (mode_name, spec, expect_echo) in &modes {
+        let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
+            Some(()),
+            &mechanism,
+            spec,
+            |(), _, _, length| {
+                if !length.is_null() {
+                    unsafe { length.write(3) };
+                }
+                cryptoki_sys::CKR_OK
+            },
+        )
+        .unwrap();
+        assert_eq!(output.ck_rv, CkRv::OK, "{mode_name}");
+        if *expect_echo {
+            assert_eq!(
+                effects,
+                Some(CkMechanismParams::Gcm(input.clone())),
+                "{mode_name}: OK echoes unchanged input params"
+            );
+        } else {
+            assert_eq!(effects, None, "{mode_name}: OK size query suppresses effects");
+        }
+    }
+}
