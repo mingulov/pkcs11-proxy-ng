@@ -14,7 +14,9 @@ import argparse
 import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -1443,8 +1445,53 @@ def official_function_headers(root: Path) -> list[tuple[str, Path]]:
     ]
 
 
+@lru_cache(maxsize=None)
+def pkcs11_abi_package(root: Path) -> tuple[Path, str, str]:
+    """Resolve the pinned pkcs11-abi dependency to (manifest path, source, rev).
+
+    pkcs11-module/pkcs11-abi moved to the pkcs11-components repo and are
+    consumed as a rev-pinned git dependency, so the function-list field
+    catalog no longer lives under this root. `cargo metadata` reports the
+    locked checkout location.
+    """
+    try:
+        completed = subprocess.run(
+            [
+                "cargo",
+                "metadata",
+                "--format-version",
+                "1",
+                "--manifest-path",
+                str(root / "Cargo.toml"),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SystemExit(f"cannot resolve pkcs11-abi via cargo metadata: {exc}")
+    try:
+        metadata = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"cargo metadata output is not valid JSON: {exc}")
+    for package in metadata.get("packages", []):
+        if package.get("name") == "pkcs11-abi":
+            source = package.get("source") or ""
+            rev = source.rsplit("#", 1)[-1] if "#" in source else ""
+            return Path(package["manifest_path"]), source, rev
+    raise SystemExit("pkcs11-abi not found in cargo metadata output")
+
+
 def function_field_tables(root: Path) -> Path:
-    return root / "crates/module/src/tables.rs"
+    manifest, _, _ = pkcs11_abi_package(root)
+    return manifest.parent / "src/layout.rs"
+
+
+def function_field_table_evidence() -> str:
+    # Stable citation for the upstream field catalog. The rev-pinned
+    # dependency source and rev are recorded separately in the inventory
+    # `source` section.
+    return "pkcs11-abi:crates/abi/src/layout.rs"
 
 
 def service_proto(root: Path) -> Path:
@@ -1668,11 +1715,15 @@ def parse_function_list_fields(path: Path) -> dict[str, str]:
     fields: dict[str, str] = {}
     section = "unknown"
     for line in text.splitlines():
-        if "FUNCTION_LIST_3_2_EXTRA_FIELDS" in line:
+        # Both the historical nested `fn_fields!` tables (FUNCTION_LIST_*
+        # statics) and the upstream pkcs11-abi catalog (`base`/`v3_0`/`v3_2`
+        # blocks) are accepted; only the latter is reachable now.
+        stripped = line.strip()
+        if "FUNCTION_LIST_3_2_EXTRA_FIELDS" in line or stripped == "v3_2 [":
             section = "3.2"
-        elif "FUNCTION_LIST_3_0_EXTRA_FIELDS" in line:
+        elif "FUNCTION_LIST_3_0_EXTRA_FIELDS" in line or stripped == "v3_0 [":
             section = "3.0"
-        elif "FUNCTION_LIST_FIELDS" in line:
+        elif "FUNCTION_LIST_FIELDS" in line or stripped == "base [":
             section = "2.40"
         for name in RUST_FUNCTION_LIST_RE.findall(line):
             fields.setdefault(name, section)
@@ -3191,7 +3242,7 @@ def build_inventory() -> dict[str, Any]:
     spec_mechanism_names = set(spec_mechanisms)
 
     function_matrix = []
-    function_field_table_source = function_field_tables(root).relative_to(root).as_posix()
+    function_field_table_source = function_field_table_evidence()
     for name in sorted(spec_function_names | function_field_names):
         snake = c_function_to_snake(name)
         shim_fn = f"c_{snake}"
@@ -3363,6 +3414,9 @@ def build_inventory() -> dict[str, Any]:
             "spec_markdown_file_count": len(list(spec_dir.glob("*.md"))),
             "official_function_headers": official_function_headers_source,
             "function_field_tables": str(function_field_tables(root)),
+            "function_field_tables_evidence": function_field_table_evidence(),
+            "function_field_tables_dependency": pkcs11_abi_package(root)[1],
+            "function_field_tables_rev": pkcs11_abi_package(root)[2],
             "official_mechanism_headers": official_headers,
             "rust_official_mechanism_inventory": str(official_mechanism_rust(root)),
             "mock_backend_source": str(mock_backend_source(root)),

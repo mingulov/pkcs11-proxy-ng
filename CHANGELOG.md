@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `pkcs11-module` is now consumed as a rev-pinned git dependency from
+  `https://github.com/mingulov/pkcs11-components` (which also provides the
+  `pkcs11-abi` layout catalog) instead of the nested `crates/module`; the
+  nested crate is removed. The backend keeps using the same
+  `pkcs11_module::{function_list, tables::{...}}` API via the upstream
+  re-export, so runtime behavior is unchanged. `pkcs11-proxy-ng-types` stays
+  nested: it carries proxy-specific exact-output contracts and registry
+  policy (effect validation, apply flags, operator exclusion, wiping secret
+  owners) that the generic upstream `pkcs11-types` does not provide.
+
 ## [0.2.0] - 2026-09-15
 
 ### Added
