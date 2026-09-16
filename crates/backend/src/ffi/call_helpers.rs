@@ -665,8 +665,9 @@ impl FfiBackend {
         let result = Self::single_call_bytes_exact(spec, |output, output_len| {
             call(function, ffi_mech.ck_mechanism_mut(), output, output_len)
         })?;
-        // Surface mutated params after successful data calls and genuine
-        // missing-length calls. Ordinary NULL-output size queries suppress them.
+        // Surface post-call params on data and genuine missing-length calls:
+        // always on OK, and on errors iff the params changed since the
+        // pre-call snapshot. Ordinary NULL-output size queries suppress them.
         let after = ffi_mech.output_params();
         let mechanism_out = if !(spec.buffer_present || spec.length_pointer_null) {
             None
