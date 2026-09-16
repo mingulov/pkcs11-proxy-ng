@@ -178,6 +178,18 @@ impl FfiBackend {
     }
 }
 
+/// Pure fire condition for the abnormal-stop guard: stop only when the
+/// retiring instance cannot prove quiescence (`Poison`) and still holds
+/// the process-registry slot (managed permit). Ungated so the unit-test
+/// matrix below exercises it on every host; the `Drop` guard applies the
+/// qualified-target cfg around the call.
+fn stop_fire_condition(
+    decision: super::native_domain::RetirementDecision,
+    holds_slot: bool,
+) -> bool {
+    matches!(decision, super::native_domain::RetirementDecision::Poison) && holds_slot
+}
+
 impl Drop for FfiBackend {
     /// Retire the construction reservation honestly: release the exact epoch
     /// only when the instance lifecycle proves quiescence (never initialized,
@@ -187,21 +199,30 @@ impl Drop for FfiBackend {
     fn drop(&mut self) {
         use super::native_domain::RetirementDecision::{Poison, Release};
         let decision = self.lifecycle.retirement_decision();
-        // Linux/x86 only: abnormally stop the native lifetime when the
-        // managed final owner cannot prove quiescence. First statement and
+        // Qualified targets only (Linux x86_64/x86 GNU/musl, Windows MSVC
+        // x86_64): abnormally stop the native lifetime when the managed
+        // final owner cannot prove quiescence. First statement and
         // lock-free (atomic-only decision plus a plain-bool slot check), so
         // it precedes the lock-taking poison path and all dependent field
-        // drops. Off-Linux this block cfg-compiles out and the arms below
+        // drops. Elsewhere this block cfg-compiles out and the arms below
         // keep today's behavior bit-for-bit.
-        #[cfg(all(
-            target_os = "linux",
-            any(target_env = "gnu", target_env = "musl"),
-            any(
-                all(target_arch = "x86_64", target_pointer_width = "64"),
-                all(target_arch = "x86", target_pointer_width = "32")
+        #[cfg(any(
+            all(
+                target_os = "linux",
+                any(target_env = "gnu", target_env = "musl"),
+                any(
+                    all(target_arch = "x86_64", target_pointer_width = "64"),
+                    all(target_arch = "x86", target_pointer_width = "32")
+                )
+            ),
+            all(
+                target_os = "windows",
+                target_env = "msvc",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
             )
         ))]
-        if matches!(decision, Poison) && self.construction.holds_registry_slot() {
+        if stop_fire_condition(decision, self.construction.holds_registry_slot()) {
             super::native_stop::abnormal_stop_native_lifetime(
                 super::native_stop::StopReason::UnprovenFinalOwner,
             );
@@ -317,6 +338,27 @@ fn ffi_query(
 
 #[cfg(test)]
 mod tests {
+    /// T7: the factored stop-fire condition preserves the guard's
+    /// `Poison + holds_registry_slot` truth table exactly. The `Drop`
+    /// guard applies the qualified-target cfg; this matrix pins the pure
+    /// decision logic on every host.
+    #[test]
+    fn stop_fire_condition_matrix() {
+        use crate::ffi::native_domain::RetirementDecision::{Poison, Release};
+        for (decision, holds_slot, expected) in [
+            (Poison, true, true),
+            (Poison, false, false),
+            (Release, true, false),
+            (Release, false, false),
+        ] {
+            assert_eq!(
+                super::stop_fire_condition(decision, holds_slot),
+                expected,
+                "decision={decision:?} holds_slot={holds_slot}"
+            );
+        }
+    }
+
     /// Verify that a backend constructed with `None` for the 3.x fields
     /// reports both as absent.
     #[test]

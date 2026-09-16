@@ -1,14 +1,17 @@
-//! Abnormal native-lifetime stop via raw `exit_group(70)`.
+//! Abnormal native-lifetime stop: raw `exit_group(70)` on qualified
+//! Linux, `TerminateProcess(70)` on qualified Windows.
 //!
 //! The final-owner guard (`Drop` in `ffi/loading.rs`) and the
 //! shutdown-deadline controller below are the only production callers. Both
-//! reach `abnormal_stop_native_lifetime`, which retries raw `exit_group(70)`
+//! reach `abnormal_stop_native_lifetime`, which retries the raw stop
 //! until the process is gone: a return means interception — retry, never
-//! fall through to dependent destruction.
+//! fall through to dependent destruction. (The Windows stub models
+//! non-return and spins itself; the outer loop is unreachable there.)
 //!
 //! Contract rows live in `doc/release/native-mechanism-ownership.md`
 //! (x86_64: `syscall` nr 231 with status 70 in RDI; i686: `int 0x80`
-//! nr 252 with status 70 via ECX into EBX and balanced push/pop). Both
+//! nr 252 with status 70 via ECX into EBX and balanced push/pop;
+//! Windows MSVC x86_64: `TerminateProcess` with status 70). Both Linux
 //! stubs model a possible return; the outer loop retries on interception.
 
 use std::sync::OnceLock;
@@ -31,19 +34,7 @@ pub(in crate::ffi) enum StopReason {
     /// Final owner cannot prove quiescence.
     ///
     /// Constructed only by the `Drop` guard, which is cfg-gated to the
-    /// qualified Linux arms; off-Linux the guard compiles out and this
-    /// variant is never constructed (T7 owns the Windows arm).
-    #[cfg_attr(
-        not(all(
-            target_os = "linux",
-            any(target_env = "gnu", target_env = "musl"),
-            any(
-                all(target_arch = "x86_64", target_pointer_width = "64"),
-                all(target_arch = "x86", target_pointer_width = "32")
-            )
-        )),
-        allow(dead_code)
-    )]
+    /// qualified Linux and Windows arms.
     UnprovenFinalOwner,
     /// Shutdown deadline expired with native work still outstanding.
     ShutdownDeadlineExpired,
@@ -124,9 +115,58 @@ mod arch {
     }
 }
 
-// Everything else (incl. Windows; T7 owns that arm): compiling fallback,
-// reachable only if a future guard arm calls it (today's guard is cfg-gated
-// to the Linux arms, and the controller fires only past an armed deadline).
+// Windows MSVC x86_64: contract row 3 (reviewer Q3 ruling).
+#[cfg(all(
+    target_os = "windows",
+    target_env = "msvc",
+    target_arch = "x86_64",
+    target_pointer_width = "64"
+))]
+mod arch {
+    use std::ffi::{c_int, c_uint, c_void};
+
+    /// Win32 `HANDLE` (opaque pointer).
+    type HANDLE = *mut c_void;
+    /// Win32 `BOOL` (32-bit int).
+    type BOOL = c_int;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> HANDLE;
+        fn TerminateProcess(hProcess: HANDLE, uExitCode: c_uint) -> BOOL;
+    }
+
+    /// One abnormal-stop attempt via `TerminateProcess(70)`.
+    ///
+    /// Modeled non-return: `TerminateProcess` on the current-process
+    /// pseudo-handle never returns on success, so the trailing `loop {}`
+    /// is unreachable in practice; a hypothetical return spins instead of
+    /// falling through to dependent destruction.
+    ///
+    /// # Safety
+    ///
+    /// Ends the process on success with status 70; no DLL detach
+    /// routines, C exit handlers, or Rust destructors run.
+    #[inline(never)]
+    pub(in crate::ffi) unsafe fn raw_exit_group_70() -> super::RawStopAttempt {
+        // SAFETY: whole-process immediate termination with status 70.
+        unsafe {
+            TerminateProcess(GetCurrentProcess(), 70);
+        }
+        loop {}
+    }
+}
+
+// Fallback: every target outside the v0.2 native-FFI qualification
+// boundary. Partition proof — each target lands on exactly one `arch`
+// arm: (1) Linux x86_64 GNU/musl 64-bit, (2) Linux x86 GNU/musl 32-bit,
+// (3) Windows MSVC x86_64 64-bit, (4) this fallback. Arms 1-3 are
+// pairwise disjoint (the linux-x86_64, linux-x86, and windows-msvc
+// predicates differ on target_os/target_arch), and arm 4 is the exact
+// `not(any(1, 2, 3))` complement, hence exhaustive and disjoint by
+// construction. Reachable only if a future guard arm calls it (today's
+// guard is cfg-gated to the qualified Linux and Windows arms, and the
+// controller fires only past an armed deadline).
 #[cfg(not(any(
     all(
         target_os = "linux",
@@ -139,28 +179,38 @@ mod arch {
         any(target_env = "gnu", target_env = "musl"),
         target_arch = "x86",
         target_pointer_width = "32"
+    ),
+    all(
+        target_os = "windows",
+        target_env = "msvc",
+        target_arch = "x86_64",
+        target_pointer_width = "64"
     )
 )))]
 mod arch {
     use super::RawStopAttempt;
 
-    /// Compiling fallback for targets without a qualified Linux stub.
+    /// Compiling fallback for targets without a qualified stop stub.
     ///
     /// # Safety
     ///
-    /// Never reached on the qualified Linux arms: the guard call site is
-    /// cfg-gated there, and the controller fires only past an armed
-    /// deadline. T7 owns the Windows arm.
+    /// Never reached on the qualified Linux/Windows arms: the guard call
+    /// site is cfg-gated there, and the controller fires only past an
+    /// armed deadline.
     #[inline(never)]
     pub(in crate::ffi) unsafe fn raw_exit_group_70() -> RawStopAttempt {
-        unimplemented!("native stop: non-Linux arm not owned by STOP-IMPL (T7 owns Windows)")
+        unimplemented!(
+            "native stop: no qualified stop arm for this target \
+             (Linux x86_64/x86 GNU/musl or Windows MSVC x86_64 required)"
+        )
     }
 }
 
 /// Abnormally stop the native lifetime; never returns to the caller.
 ///
 /// Consumes `reason` for debugger/codegen-visible discrimination, then
-/// retries raw `exit_group(70)` until the process is gone. A return means
+/// retries the raw stop (Linux `exit_group(70)`, Windows
+/// `TerminateProcess(70)`) until the process is gone. A return means
 /// interception: retry, never fall through to dependent destruction.
 pub(in crate::ffi) fn abnormal_stop_native_lifetime(reason: StopReason) -> ! {
     let _ = reason;
