@@ -264,9 +264,15 @@ mod mechanism_to_ffi_tests {
                     tag_bits: 128,
                 }),
             );
-            let gcm =
-                unsafe { &*(ffi.ck_mechanism().pParameter as *const cryptoki_sys::CK_GCM_PARAMS) };
-            assert_eq!(gcm.ulIvLen as usize, iv_len, "provider-visible IV length");
+            // SAFETY: the owner is alive and unchanged; snapshot once per
+            // length. Only unaligned raw reads, never typed references into
+            // retained native storage (row-1 discipline).
+            // E0793: CK structs are packed on Windows; assert on by-value copies.
+            let gcm = unsafe {
+                ffi.ck_mechanism().pParameter.cast::<cryptoki_sys::CK_GCM_PARAMS>().read_unaligned()
+            };
+            let (ul_iv_len, p_iv) = (gcm.ulIvLen, gcm.pIv);
+            assert_eq!(ul_iv_len as usize, iv_len, "provider-visible IV length");
             let retained = match ffi.output_params() {
                 Some(CkMechanismParams::Gcm(params)) => params,
                 other => panic!("unexpected output params: {other:?}"),
@@ -278,9 +284,9 @@ mod mechanism_to_ffi_tests {
                 "retained buffer keeps generated-IV capacity"
             );
             if iv_len == 0 {
-                assert!(gcm.pIv.is_null() == (buffer_len == 0));
+                assert!(p_iv.is_null() == (buffer_len == 0));
             } else {
-                assert!(!gcm.pIv.is_null());
+                assert!(!p_iv.is_null());
             }
         }
     }
