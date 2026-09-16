@@ -127,7 +127,7 @@ fn native_domain_lifecycle_init_attempt_without_success_poisons() {
     let tracker = LifecycleTracker::default();
     tracker.note_init_attempted();
     assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     assert_eq!(
         tracker.retirement_decision(),
         RetirementDecision::Poison,
@@ -140,14 +140,14 @@ fn native_domain_lifecycle_init_attempt_without_success_poisons() {
 #[test]
 fn native_domain_lifecycle_initialized_without_finalize_poisons() {
     let tracker = LifecycleTracker::default();
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
 }
 
 #[test]
 fn native_domain_lifecycle_finalize_restores_release() {
     let tracker = LifecycleTracker::default();
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     tracker.note_session_opened();
     tracker.note_session_opened();
     tracker.note_finalized();
@@ -157,7 +157,7 @@ fn native_domain_lifecycle_finalize_restores_release() {
 #[test]
 fn native_domain_lifecycle_open_sessions_block_release_until_closed() {
     let tracker = LifecycleTracker::default();
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     tracker.note_finalized();
     tracker.note_session_opened();
     assert_eq!(
@@ -167,7 +167,7 @@ fn native_domain_lifecycle_open_sessions_block_release_until_closed() {
     );
     tracker.note_sessions_closed(1);
     assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     tracker.note_session_opened();
     assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
     tracker.note_sessions_closed(1);
@@ -183,19 +183,68 @@ fn native_domain_lifecycle_generation_advances_per_initialization_cycle() {
     // an already-open incarnation is not a new cycle.
     let tracker = LifecycleTracker::default();
     assert_eq!(tracker.current_generation(), 0);
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     assert_eq!(tracker.current_generation(), 1);
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     assert_eq!(tracker.current_generation(), 1);
     tracker.note_finalized();
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     assert_eq!(tracker.current_generation(), 2);
+}
+
+#[test]
+fn native_domain_lifecycle_generation_exhaustion_refuses_without_wrapping() {
+    // F-08/MISS 1: the lifecycle generation is checked — at `u64::MAX` no
+    // new cycle opens, and the counter never wraps back to the pre-initial
+    // identity 0. Precedent: `native_domain_exhaustion_rejects_without_wrapping`.
+    // Exhaustion blocks only NEW cycles: re-affirming the live `u64::MAX`
+    // incarnation needs no fresh identity, so it still records.
+    let tracker = LifecycleTracker::default();
+    tracker.set_generation_for_tests(u64::MAX - 1);
+    tracker.note_initialized().expect("MAX-1 advances to MAX");
+    assert_eq!(tracker.current_generation(), u64::MAX);
+    tracker.check_reinitialize().expect("live MAX incarnation re-affirms");
+    tracker.note_initialized().expect("re-affirm needs no fresh identity");
+    assert_eq!(tracker.current_generation(), u64::MAX);
+    tracker.note_finalized();
+    assert_eq!(tracker.check_reinitialize().unwrap_err(), LifecycleRefusal::GenerationExhausted);
+    assert_eq!(tracker.note_initialized().unwrap_err(), LifecycleRefusal::GenerationExhausted);
+    assert_eq!(tracker.current_generation(), u64::MAX, "exhausted counter never wraps");
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Release,
+        "refused cycle consumes no finalized evidence"
+    );
+}
+
+#[test]
+fn native_domain_lifecycle_reinitialize_after_failed_finalize_is_refused() {
+    // F-08/MISS 2 at the tracker: a failed Finalize can never satisfy a new
+    // cycle — the gate and the recorder both refuse, and the retained
+    // evidence (generation, open count) is untouched. Recovery stays
+    // possible: a later successful Finalize satisfies re-init again.
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized().expect("first cycle opens");
+    tracker.note_session_opened();
+    tracker.note_finalize_failed();
+    assert_eq!(
+        tracker.check_reinitialize().unwrap_err(),
+        LifecycleRefusal::FailedFinalizeUnresolved
+    );
+    assert_eq!(tracker.note_initialized().unwrap_err(), LifecycleRefusal::FailedFinalizeUnresolved);
+    assert_eq!(tracker.current_generation(), 1);
+    assert_eq!(tracker.open_session_count_for_tests(), 1);
+    tracker.note_finalized();
+    tracker.check_reinitialize().expect("successful finalize re-satisfies re-init");
+    tracker.note_initialized().expect("new cycle opens after successful finalize");
+    assert_eq!(tracker.current_generation(), 2);
+    assert_eq!(tracker.open_session_count_for_tests(), 0);
 }
 
 #[test]
 fn native_domain_lifecycle_close_surprise_never_hides_sessions() {
     let tracker = LifecycleTracker::default();
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     tracker.note_session_opened();
     tracker.note_sessions_closed(5);
     assert_eq!(
@@ -211,10 +260,10 @@ fn native_domain_lifecycle_close_surprise_never_hides_sessions() {
 #[test]
 fn native_domain_lifecycle_reinitialize_clears_finalized() {
     let tracker = LifecycleTracker::default();
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     tracker.note_finalized();
     assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
-    tracker.note_initialized();
+    tracker.note_initialized().expect("in-contract cycle records");
     assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
 }
 

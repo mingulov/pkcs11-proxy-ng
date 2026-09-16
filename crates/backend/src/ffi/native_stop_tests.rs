@@ -472,15 +472,17 @@ fn run_s8_finalize_deadline() -> ! {
     std::process::exit(23);
 }
 
-/// S9 child: unknown entry (stale generation: failed Finalize, re-init).
+/// S9 child: unknown entry (unresolved failed Finalize, re-init refused).
 fn run_s9_unknown() -> ! {
     let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
     if backend.initialize().is_err() {
         std::process::exit(14);
     }
-    // Dead-incarnation turnover: the new cycle is still dirty (no finalize).
+    // F-08: a failed Finalize can no longer turn the incarnation over — the
+    // re-init is refused and the drop below stops from the unresolved
+    // failed-Finalize state with retained evidence.
     backend.lifecycle.note_finalize_failed();
-    backend.lifecycle.note_initialized();
+    let _ = backend.lifecycle.note_initialized();
     let barrier = Arc::new(Barrier::new(4));
     for index in 0..3 {
         spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
@@ -801,7 +803,7 @@ fn native_stop_s8_failed_finalize_controller_deadline() {
     assert_stop_status(&output, "s8-finalize-deadline");
 }
 
-/// S9: unknown entry (stale generation after failed Finalize + re-init).
+/// S9: unknown entry (unresolved failed Finalize; re-init refused, F-08).
 #[test]
 fn native_stop_s9_unknown_entry_stop() {
     let (child, _permit) = spawn_stop_child("s9-unknown");

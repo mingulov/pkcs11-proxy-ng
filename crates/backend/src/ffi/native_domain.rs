@@ -387,10 +387,10 @@ pub(in crate::ffi) struct LifecycleTracker {
     /// them and stale work cannot publish into a reinitialized domain.
     generation: std::sync::atomic::AtomicU64,
     /// A `C_Finalize` failed since the current incarnation opened. The old
-    /// incarnation is then uncertain (not cleanly closed): a later
-    /// successful `C_Initialize` starts a new cycle rather than re-affirming
-    /// the stale one. Used only for the new-cycle predicate, never to
-    /// soften the retirement decision.
+    /// incarnation is then uncertain (not cleanly closed): re-initialization
+    /// is refused until a later successful `C_Finalize` (F-08). Used only to
+    /// refuse new cycles, never to soften the retirement decision; cleared
+    /// only by [`LifecycleTracker::note_finalized`].
     finalize_failed: std::sync::atomic::AtomicBool,
 }
 
@@ -405,12 +405,45 @@ pub(in crate::ffi) enum RetirementDecision {
     Poison,
 }
 
+/// Why a (re-)initialization was refused without opening a cycle (F-08).
+///
+/// Denial idiom follows [`DomainError`]: explicit refusal variants, never a
+/// wrapped or reused identity. The dispatch boundary
+/// (`super::FfiBackend::initialize`) maps these to caller-visible `CK_RV`s;
+/// this module fabricates no provider return values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::ffi) enum LifecycleRefusal {
+    /// A `C_Finalize` failed since the current incarnation opened, so the
+    /// provider state is unknown: the old incarnation may still be live, and
+    /// only a later successful `C_Finalize` can satisfy a new cycle.
+    FailedFinalizeUnresolved,
+    /// No fresh lifecycle generation remains: the counter stands at
+    /// `u64::MAX`, so the cycle is rejected rather than wrapping back to the
+    /// pre-initial identity. Precedent: [`DomainError::EpochExhausted`].
+    GenerationExhausted,
+}
+
 impl LifecycleTracker {
     /// Record a `C_Initialize` attempt BEFORE native entry. Callers must
     /// set this before invoking the provider so a failed attempt (native
     /// code ran, error RV) poisons instead of recycling the reservation.
     pub(in crate::ffi) fn note_init_attempted(&self) {
         self.init_attempted.store(true, SeqCst);
+    }
+
+    /// Pre-native gate for (re-)initialization: refuse cycles the contract
+    /// forbids BEFORE any provider contact, with zero lifecycle side effects
+    /// — not even the init-attempt marker — so a refused cycle keeps the
+    /// retained-session evidence intact (F-08).
+    pub(in crate::ffi) fn check_reinitialize(&self) -> Result<(), LifecycleRefusal> {
+        if self.finalize_failed.load(SeqCst) {
+            return Err(LifecycleRefusal::FailedFinalizeUnresolved);
+        }
+        let new_cycle = !self.initialized.load(SeqCst) || self.finalized_ok.load(SeqCst);
+        if new_cycle && self.generation.load(SeqCst) == u64::MAX {
+            return Err(LifecycleRefusal::GenerationExhausted);
+        }
+        Ok(())
     }
 
     /// Record a successful native `C_Initialize`. A new initialization cycle
@@ -421,23 +454,48 @@ impl LifecycleTracker {
     /// already-open incarnation keeps its generation, bindings and count,
     /// while a cycle after `C_Finalize` starts clean so a reused numeric
     /// handle cannot alias the dead incarnation's owners.
-    pub(in crate::ffi) fn note_initialized(&self) {
-        let new_cycle = !self.initialized.load(SeqCst)
-            || self.finalized_ok.load(SeqCst)
-            || self.finalize_failed.load(SeqCst);
-        self.initialized.store(true, SeqCst);
-        self.finalized_ok.store(false, SeqCst);
-        self.finalize_failed.store(false, SeqCst);
+    ///
+    /// Fails closed (F-08): a set `finalize_failed` flag refuses the cycle
+    /// instead of opening a new one, and the generation bump is checked — at
+    /// `u64::MAX` there is no next identity, so the cycle is refused WITHOUT
+    /// consuming the finalized evidence, purging bindings or resetting the
+    /// count. The flag itself is never cleared here — only
+    /// [`LifecycleTracker::note_finalized`] clears it — so a Finalize that
+    /// fails concurrently with this call still denies every later cycle.
+    pub(in crate::ffi) fn note_initialized(&self) -> Result<(), LifecycleRefusal> {
+        if self.finalize_failed.load(SeqCst) {
+            return Err(LifecycleRefusal::FailedFinalizeUnresolved);
+        }
+        let new_cycle = !self.initialized.load(SeqCst) || self.finalized_ok.load(SeqCst);
         if new_cycle {
-            self.generation.fetch_add(1, SeqCst);
+            // Checked claim: `fetch_update` keeps the bump atomic under
+            // concurrent initializers, and `checked_add` refuses at
+            // `u64::MAX` rather than wrapping to the pre-initial identity.
+            if self
+                .generation
+                .fetch_update(SeqCst, SeqCst, |generation| generation.checked_add(1))
+                .is_err()
+            {
+                return Err(LifecycleRefusal::GenerationExhausted);
+            }
+            self.initialized.store(true, SeqCst);
+            self.finalized_ok.store(false, SeqCst);
             self.open_sessions.store(0, SeqCst);
         }
+        Ok(())
     }
 
     /// Current initialization-cycle generation. Session identities created
     /// under an older generation are stale after re-initialization.
     pub(in crate::ffi) fn current_generation(&self) -> u64 {
         self.generation.load(SeqCst)
+    }
+
+    /// Seed the lifecycle generation for boundary tests. Production cycles
+    /// advance only through [`LifecycleTracker::note_initialized`].
+    #[cfg(test)]
+    pub(in crate::ffi) fn set_generation_for_tests(&self, generation: u64) {
+        self.generation.store(generation, SeqCst);
     }
 
     /// Test-only read of the provider-confirmed open-session count.
@@ -456,10 +514,10 @@ impl LifecycleTracker {
     }
 
     /// Record a failed native `C_Finalize`. The incarnation is uncertain —
-    /// not cleanly closed — so a later successful `C_Initialize` opens a new
-    /// cycle instead of re-affirming the stale one. Session bindings and the
-    /// open count are deliberately retained here (the failure proves
-    /// nothing about provider state); they reset when the new cycle starts.
+    /// not cleanly closed — so re-initialization is refused until a later
+    /// successful `C_Finalize` (F-08). Session bindings and the open count
+    /// are deliberately retained here (the failure proves nothing about
+    /// provider state); they reset only when a legitimate new cycle starts.
     pub(in crate::ffi) fn note_finalize_failed(&self) {
         self.finalize_failed.store(true, SeqCst);
     }
