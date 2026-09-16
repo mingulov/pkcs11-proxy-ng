@@ -35,6 +35,8 @@ mod native_domain;
 #[cfg(test)]
 #[path = "ffi/native_domain_tests.rs"]
 mod native_domain_tests;
+#[path = "ffi/native_stop.rs"]
+mod native_stop;
 #[path = "ffi/object_ops.rs"]
 mod object_ops;
 #[path = "ffi/session_3x_ops.rs"]
