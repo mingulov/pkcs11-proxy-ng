@@ -64,7 +64,7 @@ impl FfiBackend {
             Ok(lib) => lib,
             Err(e) => {
                 permit.rollback_before_native();
-                return Err(format!("dlopen failed: {e}"));
+                return Err(format!("native module load failed: {e}"));
             }
         };
 

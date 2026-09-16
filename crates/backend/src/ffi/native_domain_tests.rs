@@ -97,7 +97,7 @@ fn native_domain_global_serial_second_load_rejected_and_rollback() {
     let retry_err =
         FfiBackend::load(missing).map(|_| ()).expect_err("retry after rollback still fails");
     assert!(
-        retry_err.contains("dlopen failed"),
+        retry_err.contains("native module load failed"),
         "rolled-back registry must attempt loading again, got: {retry_err}"
     );
 }

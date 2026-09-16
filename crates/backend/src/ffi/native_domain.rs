@@ -18,13 +18,18 @@ use std::fmt;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering::SeqCst;
 
-/// Build-time native-FFI qualifier for v0.2: Linux GNU/musl, x86_64 with
-/// 64-bit pointers or x86 with 32-bit pointers. x32, other
-/// architectures/environments and non-Linux native loading are excluded.
-pub(in crate::ffi) const NATIVE_FFI_QUALIFIED: bool = cfg!(target_os = "linux")
+/// Build-time native-FFI qualifier for v0.2: Linux GNU/musl on x86_64 with
+/// 64-bit pointers or x86 with 32-bit pointers, or Windows MSVC on x86_64
+/// with 64-bit pointers. x32, other architectures/environments and other
+/// operating systems are excluded.
+pub(in crate::ffi) const NATIVE_FFI_QUALIFIED: bool = (cfg!(target_os = "linux")
     && cfg!(any(target_env = "gnu", target_env = "musl"))
     && ((cfg!(target_arch = "x86_64") && cfg!(target_pointer_width = "64"))
-        || (cfg!(target_arch = "x86") && cfg!(target_pointer_width = "32")));
+        || (cfg!(target_arch = "x86") && cfg!(target_pointer_width = "32"))))
+    || (cfg!(target_os = "windows")
+        && cfg!(target_env = "msvc")
+        && cfg!(target_arch = "x86_64")
+        && cfg!(target_pointer_width = "64"));
 
 /// Local constructor-domain failure. These are never fabricated provider
 /// `CK_RV` values; [`super::FfiBackend::load`] surfaces them as `Err(String)`.
@@ -50,7 +55,8 @@ impl fmt::Display for DomainError {
             DomainError::UnsupportedPlatform { detail } => write!(
                 f,
                 "native FFI unavailable on this platform ({detail}); v0.2 requires \
-                 Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit); refusing to load provider"
+                 Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit), or \
+                 Windows MSVC x86_64 (64-bit); refusing to load provider"
             ),
             DomainError::AlreadyReserved { epoch } => write!(
                 f,
@@ -221,7 +227,9 @@ pub(in crate::ffi) fn check_native_platform() -> Result<(), DomainError> {
     if NATIVE_FFI_QUALIFIED {
         return Ok(());
     }
-    let detail = if !cfg!(target_os = "linux") {
+    let detail = if cfg!(target_os = "windows") {
+        "non-MSVC/non-x86_64 Windows target"
+    } else if !cfg!(target_os = "linux") {
         "non-Linux target_os"
     } else if !cfg!(any(target_env = "gnu", target_env = "musl")) {
         "non-GNU/musl target_env"
@@ -399,5 +407,28 @@ impl LifecycleTracker {
         use RetirementDecision::{Poison, Release};
         let quiescent = !self.initialized.load(SeqCst) || self.finalized_ok.load(SeqCst);
         if quiescent && self.open_sessions.load(SeqCst) == 0 { Release } else { Poison }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn t3_qualified_host_platform_check_is_ok() {
+        // This test runs on a qualified native-FFI host (Linux GNU/musl
+        // x86_64/x86); the const itself is covered by
+        // `native_domain_current_host_reports_qualified_or_refuses`.
+        assert!(check_native_platform().is_ok());
+    }
+
+    #[test]
+    fn t3_unsupported_platform_display_names_qualified_hosts() {
+        let msg = DomainError::UnsupportedPlatform { detail: "test-detail" }.to_string();
+        assert!(msg.contains("Linux GNU/musl"), "Display must name Linux hosts, got: {msg}");
+        assert!(
+            msg.contains("Windows MSVC x86_64"),
+            "Display must name Windows MSVC x86_64 hosts, got: {msg}"
+        );
     }
 }
