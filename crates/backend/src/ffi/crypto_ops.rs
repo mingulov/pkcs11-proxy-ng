@@ -966,6 +966,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore)] // Miri: backend instance needs dlopen + DashMap; helper-level matrix covers the rule under Miri
     #[test]
     fn native_owner_first_init_failure_publishes_nothing() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
@@ -1010,6 +1011,7 @@ mod tests {
         assert!(backend.last_init_family.get(&session.0).is_none());
     }
 
+    #[cfg_attr(miri, ignore)] // Miri: backend instance needs dlopen + DashMap; helper-level matrix covers the rule under Miri
     #[test]
     fn native_owner_failed_reinit_keeps_marker_and_graph() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
