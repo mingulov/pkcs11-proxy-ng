@@ -103,6 +103,17 @@ fn native_domain_global_serial_second_load_rejected_and_rollback() {
 }
 
 #[test]
+fn native_domain_holds_registry_slot_scopes_guard_to_managed() {
+    let mut registry = fresh();
+    let managed = registry.reserve().expect("vacant registry reserves");
+    assert!(managed.holds_registry_slot(), "registry-issued permits must hold the slot");
+    assert!(
+        !ConstructionPermit::unmanaged_test_only().holds_registry_slot(),
+        "unmanaged test permits must not hold the slot"
+    );
+}
+
+#[test]
 fn native_domain_lifecycle_fresh_backend_releases() {
     let tracker = LifecycleTracker::default();
     assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);

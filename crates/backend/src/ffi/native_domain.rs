@@ -143,7 +143,7 @@ impl DomainRegistry {
                 }
                 self.state =
                     RegistryState::Reserved { epoch: next_epoch, next_epoch: next_epoch + 1 };
-                Ok(ConstructionPermit { epoch: next_epoch })
+                Ok(ConstructionPermit { epoch: next_epoch, managed: true })
             }
             RegistryState::Reserved { epoch, .. }
             | RegistryState::Active { epoch, .. }
@@ -253,6 +253,25 @@ pub(in crate::ffi) fn reserve_for_construction() -> Result<ConstructionPermit, D
 /// unmanaged sentinel, which never matches a live registry epoch).
 pub(in crate::ffi) struct ConstructionPermit {
     pub(in crate::ffi) epoch: u64,
+    /// True when the permit came from the process registry (`reserve`);
+    /// false only for the `cfg(test)` unmanaged sentinel. Structural flag —
+    /// no lock, no registry read — so the final-owner guard can scope itself
+    /// to managed permits on the lock-free stop path.
+    //
+    // The guard (cfg-gated to qualified Linux) is the only non-test reader;
+    // off-Linux this is unreferenced until T7 wires its arm.
+    #[cfg_attr(
+        not(all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            any(
+                all(target_arch = "x86_64", target_pointer_width = "64"),
+                all(target_arch = "x86", target_pointer_width = "32")
+            )
+        )),
+        allow(dead_code)
+    )]
+    managed: bool,
 }
 
 impl ConstructionPermit {
@@ -286,6 +305,27 @@ impl ConstructionPermit {
         with_registry(|registry| registry.release_if_owner(epoch)).unwrap_or(false)
     }
 
+    /// Whether this permit holds a process-registry slot. Plain-bool read:
+    /// lock-free, so the final-owner guard may call it on the stop path.
+    /// False only for the `cfg(test)` unmanaged sentinel.
+    //
+    // The guard (cfg-gated to qualified Linux) is the only non-test caller;
+    // off-Linux this is unreferenced until T7 wires its arm.
+    #[cfg_attr(
+        not(all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            any(
+                all(target_arch = "x86_64", target_pointer_width = "64"),
+                all(target_arch = "x86", target_pointer_width = "32")
+            )
+        )),
+        allow(dead_code)
+    )]
+    pub(in crate::ffi) fn holds_registry_slot(&self) -> bool {
+        self.managed
+    }
+
     /// Test-only permit that matches no live registry epoch: in-crate test
     /// backends built from `Library::this()` bypass the process reservation
     /// without consuming or freeing it. Must never back production dispatch.
@@ -294,7 +334,7 @@ impl ConstructionPermit {
         // `u64::MAX` is never issued (`Vacant { u64::MAX }` rejects with
         // `EpochExhausted`), so this sentinel matches no live epoch and every
         // registry transition ignores it.
-        Self { epoch: u64::MAX }
+        Self { epoch: u64::MAX, managed: false }
     }
 }
 

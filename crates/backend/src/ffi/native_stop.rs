@@ -1,13 +1,20 @@
 //! Abnormal native-lifetime stop via raw `exit_group(70)`.
 //!
-//! Fragment A (stubs only): two Linux raw-syscall stubs plus a compiling
-//! fallback for all other targets. The guard (fragment B) owns the call
-//! sites; tests (fragment C) qualify the linked bytes.
+//! The final-owner guard (`Drop` in `ffi/loading.rs`) and the
+//! shutdown-deadline controller below are the only production callers. Both
+//! reach `abnormal_stop_native_lifetime`, which retries raw `exit_group(70)`
+//! until the process is gone: a return means interception — retry, never
+//! fall through to dependent destruction.
 //!
 //! Contract rows live in `doc/release/native-mechanism-ownership.md`
 //! (x86_64: `syscall` nr 231 with status 70 in RDI; i686: `int 0x80`
 //! nr 252 with status 70 via ECX into EBX and balanced push/pop). Both
 //! stubs model a possible return; the outer loop retries on interception.
+
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::SeqCst;
+use std::time::{Duration, Instant};
 
 /// Return carrier for one raw `exit_group(70)` attempt.
 ///
@@ -16,14 +23,27 @@
 /// the 64-bit RAX result; the i686 stub carries EAX directly.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // STOP-B removes: wired by guard
 pub(in crate::ffi) struct RawStopAttempt(pub(in crate::ffi) i32);
 
 /// Why the native lifetime must stop abnormally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // STOP-B removes: wired by guard
 pub(in crate::ffi) enum StopReason {
     /// Final owner cannot prove quiescence.
+    ///
+    /// Constructed only by the `Drop` guard, which is cfg-gated to the
+    /// qualified Linux arms; off-Linux the guard compiles out and this
+    /// variant is never constructed (T7 owns the Windows arm).
+    #[cfg_attr(
+        not(all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            any(
+                all(target_arch = "x86_64", target_pointer_width = "64"),
+                all(target_arch = "x86", target_pointer_width = "32")
+            )
+        )),
+        allow(dead_code)
+    )]
     UnprovenFinalOwner,
     /// Shutdown deadline expired with native work still outstanding.
     ShutdownDeadlineExpired,
@@ -48,7 +68,6 @@ mod arch {
     ///
     /// Ends the process on success; on hypothetical return the value is the
     /// raw RAX result and the caller must retry, never fall through.
-    #[allow(dead_code)] // STOP-B removes: wired by guard
     #[inline(never)]
     pub(in crate::ffi) unsafe fn raw_exit_group_70() -> RawStopAttempt {
         let mut nr_ret: i64 = 231;
@@ -87,7 +106,6 @@ mod arch {
     ///
     /// Ends the process on success; on hypothetical return the value is the
     /// raw EAX result and the caller must retry, never fall through.
-    #[allow(dead_code)] // STOP-B removes: wired by guard
     #[inline(never)]
     pub(in crate::ffi) unsafe fn raw_exit_group_70() -> RawStopAttempt {
         let mut nr_ret: i32 = 252;
@@ -107,7 +125,8 @@ mod arch {
 }
 
 // Everything else (incl. Windows; T7 owns that arm): compiling fallback,
-// unreachable because the guard call site is cfg-gated to the Linux arms.
+// reachable only if a future guard arm calls it (today's guard is cfg-gated
+// to the Linux arms, and the controller fires only past an armed deadline).
 #[cfg(not(any(
     all(
         target_os = "linux",
@@ -129,8 +148,9 @@ mod arch {
     ///
     /// # Safety
     ///
-    /// Never called: the guard call site is cfg-gated to the Linux arms.
-    #[allow(dead_code)] // STOP-B removes: wired by guard
+    /// Never reached on the qualified Linux arms: the guard call site is
+    /// cfg-gated there, and the controller fires only past an armed
+    /// deadline. T7 owns the Windows arm.
     #[inline(never)]
     pub(in crate::ffi) unsafe fn raw_exit_group_70() -> RawStopAttempt {
         unimplemented!("native stop: non-Linux arm not owned by STOP-IMPL (T7 owns Windows)")
@@ -142,11 +162,172 @@ mod arch {
 /// Consumes `reason` for debugger/codegen-visible discrimination, then
 /// retries raw `exit_group(70)` until the process is gone. A return means
 /// interception: retry, never fall through to dependent destruction.
-#[allow(dead_code)] // STOP-B removes: wired by guard
 pub(in crate::ffi) fn abnormal_stop_native_lifetime(reason: StopReason) -> ! {
     let _ = reason;
     loop {
         // SAFETY: raw exit_group(70); a return means interception — retry.
-        unsafe { arch::raw_exit_group_70() };
+        let attempt = unsafe { arch::raw_exit_group_70() };
+        // Keep the modeled return visible so codegen cannot fold the stub
+        // into a noreturn shape; the value itself is never acted on.
+        let _ = attempt.0;
+    }
+}
+
+/// Default shutdown-deadline grace when no override is configured.
+pub(in crate::ffi) const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
+/// Env override (milliseconds) for the proactive deadline, read once at
+/// first arm. It can only lengthen/shorten the proactive deadline, never
+/// suppress the final-owner guard: a longer grace delays the controller,
+/// never the `Drop`-time stop.
+const GRACE_OVERRIDE_ENV: &str = "PKCS11_PROXY_NATIVE_STOP_GRACE_MS";
+
+/// Seq of the latest armed deadline (0 = none yet).
+static ARMED_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Seq of the latest completed/disarm.
+static DONE_SEQ: AtomicU64 = AtomicU64::new(0);
+/// Armed deadline as nanos since `BASE`.
+static DEADLINE_NANOS: AtomicU64 = AtomicU64::new(0);
+/// Controller thread handle, spawned lazily once at first arm.
+static CONTROLLER_THREAD: OnceLock<std::thread::Thread> = OnceLock::new();
+/// Monotonic base for `DEADLINE_NANOS`.
+static BASE: OnceLock<Instant> = OnceLock::new();
+/// Grace override, read once at first arm (never on the hot/stop path).
+static GRACE_OVERRIDE: OnceLock<Duration> = OnceLock::new();
+
+/// Effective shutdown-deadline grace: the env override when set and
+/// parseable, else [`DEFAULT_SHUTDOWN_GRACE`]. Read once per process.
+pub(in crate::ffi) fn shutdown_grace() -> Duration {
+    *GRACE_OVERRIDE.get_or_init(|| {
+        std::env::var(GRACE_OVERRIDE_ENV)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            // `from_millis` is total over `u64` (u64::MAX ms fits in a
+            // `Duration`), so hostile input cannot panic here.
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_SHUTDOWN_GRACE)
+    })
+}
+
+fn base_instant() -> Instant {
+    *BASE.get_or_init(Instant::now)
+}
+
+fn nanos_since_base() -> u64 {
+    base_instant().elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn nanos_limited(timeout: Duration) -> u64 {
+    timeout.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+/// Arm the shutdown deadline: if no [`DeadlineGuard`] disarms within
+/// `timeout`, the controller stops the group with
+/// [`StopReason::ShutdownDeadlineExpired`]. Single-flight: arming while
+/// armed replaces the deadline, and a stale guard's disarm is ignored by
+/// seq comparison (fail-safe toward stopping, never toward suppressing).
+pub(in crate::ffi) fn arm_shutdown_deadline(timeout: Duration) -> DeadlineGuard {
+    ensure_controller();
+    let deadline = nanos_since_base().saturating_add(nanos_limited(timeout));
+    DEADLINE_NANOS.store(deadline, SeqCst);
+    let seq = ARMED_SEQ.fetch_add(1, SeqCst).wrapping_add(1);
+    if let Some(thread) = CONTROLLER_THREAD.get() {
+        thread.unpark();
+    }
+    DeadlineGuard { seq }
+}
+
+/// Spawn the controller thread once. A plain OS thread — never a tokio
+/// task, never a worker-pool thread. Detached: nothing ever joins it (it
+/// parks forever after normal shutdown; `exit_group` kills it with the
+/// group). Spawn failure leaves the deadline unenforced (best-effort).
+fn ensure_controller() {
+    if CONTROLLER_THREAD.get().is_none()
+        && let Ok(handle) = std::thread::Builder::new()
+            .name("pkcs11-stop-controller".to_owned())
+            .spawn(controller_loop)
+    {
+        // A lost start race just leaks a second parking controller;
+        // both enforce the same atomics, so the duplicate is benign.
+        let _ = CONTROLLER_THREAD.set(handle.thread().clone());
+    }
+}
+
+/// Controller hot path: park until armed, then until the deadline, then
+/// stop. Only atomic loads/stores, `Instant::now` (via
+/// `nanos_since_base`), park/unpark and the stop itself — no locks, no
+/// allocation, no logging, no provider calls, no panic path.
+fn controller_loop() {
+    loop {
+        let armed = ARMED_SEQ.load(SeqCst);
+        if armed != DONE_SEQ.load(SeqCst) {
+            let now = nanos_since_base();
+            let deadline = DEADLINE_NANOS.load(SeqCst);
+            if now >= deadline {
+                abnormal_stop_native_lifetime(StopReason::ShutdownDeadlineExpired);
+            }
+            std::thread::park_timeout(Duration::from_nanos(deadline.saturating_sub(now)));
+        } else {
+            std::thread::park();
+        }
+    }
+}
+
+/// Armed-deadline guard: dropping disarms via one lock-free seq store.
+/// Runs on the armed worker thread (normal path), never on the controller.
+pub(in crate::ffi) struct DeadlineGuard {
+    seq: u64,
+}
+
+impl Drop for DeadlineGuard {
+    fn drop(&mut self) {
+        // Monotonic max: a stale guard (superseded by a newer arm) cannot
+        // disarm the newer deadline. Lock-free, panic-free, allocation-free.
+        DONE_SEQ.fetch_max(self.seq, SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static SERIAL_STOP_TESTS: Mutex<()> = Mutex::new(());
+
+    fn serial_stop_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL_STOP_TESTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn default_shutdown_grace_is_thirty_seconds() {
+        assert_eq!(DEFAULT_SHUTDOWN_GRACE, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn disarm_before_deadline_never_fires() {
+        let _serial = serial_stop_test_guard();
+        let guard = arm_shutdown_deadline(Duration::from_millis(100));
+        let seq = guard.seq;
+        drop(guard);
+        assert!(DONE_SEQ.load(SeqCst) >= seq, "dropping the guard must disarm its seq");
+        std::thread::sleep(Duration::from_millis(300));
+        // Still alive past the deadline: the disarmed deadline never fired.
+        assert!(DONE_SEQ.load(SeqCst) >= seq, "disarmed deadline must stay disarmed");
+    }
+
+    #[test]
+    fn stale_guard_disarm_does_not_cancel_newer_deadline() {
+        let _serial = serial_stop_test_guard();
+        let older = arm_shutdown_deadline(Duration::from_secs(60));
+        let newer = arm_shutdown_deadline(Duration::from_secs(60));
+        assert!(newer.seq > older.seq, "arms must issue strictly increasing seqs");
+        let newer_seq = newer.seq;
+        drop(older);
+        assert!(
+            DONE_SEQ.load(SeqCst) < ARMED_SEQ.load(SeqCst),
+            "stale guard must not disarm the newer deadline"
+        );
+        drop(newer);
+        assert!(DONE_SEQ.load(SeqCst) >= newer_seq, "dropping the newest guard must disarm");
     }
 }

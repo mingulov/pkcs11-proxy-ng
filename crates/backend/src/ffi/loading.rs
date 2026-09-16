@@ -186,7 +186,27 @@ impl Drop for FfiBackend {
     /// poisoned slots are untouched.
     fn drop(&mut self) {
         use super::native_domain::RetirementDecision::{Poison, Release};
-        match self.lifecycle.retirement_decision() {
+        let decision = self.lifecycle.retirement_decision();
+        // Linux/x86 only: abnormally stop the native lifetime when the
+        // managed final owner cannot prove quiescence. First statement and
+        // lock-free (atomic-only decision plus a plain-bool slot check), so
+        // it precedes the lock-taking poison path and all dependent field
+        // drops. Off-Linux this block cfg-compiles out and the arms below
+        // keep today's behavior bit-for-bit.
+        #[cfg(all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            any(
+                all(target_arch = "x86_64", target_pointer_width = "64"),
+                all(target_arch = "x86", target_pointer_width = "32")
+            )
+        ))]
+        if matches!(decision, Poison) && self.construction.holds_registry_slot() {
+            super::native_stop::abnormal_stop_native_lifetime(
+                super::native_stop::StopReason::UnprovenFinalOwner,
+            );
+        }
+        match decision {
             Release => {
                 super::native_domain::ConstructionPermit::release_if_owner(self.construction.epoch);
             }

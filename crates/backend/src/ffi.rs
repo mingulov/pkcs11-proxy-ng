@@ -285,6 +285,7 @@ impl Pkcs11Backend for FfiBackend {
     }
 
     fn finalize(&self) -> CkResult<()> {
+        let _deadline = native_stop::arm_shutdown_deadline(native_stop::shutdown_grace());
         let outcome = Self::call_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
             function(std::ptr::null_mut())
         });
