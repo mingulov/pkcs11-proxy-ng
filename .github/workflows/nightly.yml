@@ -175,6 +175,9 @@ jobs:
         with:
           targets: i686-unknown-linux-gnu
 
+      - name: Build release daemon
+        run: cargo build --release -p pkcs11-proxy-ng
+
       - name: Run live tier
         run: scripts/run-test-tiers.sh live
 
