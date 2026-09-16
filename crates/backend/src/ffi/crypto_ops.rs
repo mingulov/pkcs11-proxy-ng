@@ -965,4 +965,102 @@ mod tests {
             Some(&OperationFamily::Encrypt)
         );
     }
+
+    #[test]
+    fn native_owner_first_init_failure_publishes_nothing() {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_EncryptInit = Some(encrypt_init_fails);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+        };
+        let session = CkSessionHandle(25);
+        let gcm = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0xA5; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        };
+        // A failed FIRST Init on an empty slot publishes nothing: no cache
+        // entry, no last-Init marker.
+        assert_eq!(
+            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            CkRv::FUNCTION_FAILED
+        );
+        assert!(
+            !backend.mech_cache.iter().any(|entry| entry.key().0 == session.0),
+            "failed first Init must not publish any mech_cache entry"
+        );
+        assert!(backend.last_init_family.get(&session.0).is_none());
+    }
+
+    #[test]
+    fn native_owner_failed_reinit_keeps_marker_and_graph() {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_EncryptInit = Some(encrypt_init_ok);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+        };
+        let session = CkSessionHandle(26);
+        let gcm = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0xA5; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        };
+        let first = backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
+        assert_eq!(first, gcm.params);
+        // Two consecutive failed re-Inits must still preserve the original
+        // graph bytes and the last-Init marker.
+        functions.C_EncryptInit = Some(encrypt_init_fails);
+        assert_eq!(
+            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            CkRv::FUNCTION_FAILED
+        );
+        assert_eq!(
+            backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap_err(),
+            CkRv::FUNCTION_FAILED
+        );
+        assert_eq!(
+            backend.cached_mechanism_output_params_for(session, OperationFamily::Encrypt),
+            first
+        );
+        assert_eq!(
+            backend.last_init_family.get(&session.0).as_deref(),
+            Some(&OperationFamily::Encrypt)
+        );
+    }
 }
