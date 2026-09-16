@@ -120,6 +120,24 @@ fn native_domain_lifecycle_fresh_backend_releases() {
 }
 
 #[test]
+fn native_domain_lifecycle_init_attempt_without_success_poisons() {
+    // C3M steps 4-5: a recorded Initialize attempt without a later
+    // success means native code may have run — never recycle. Only a
+    // successful Finalize re-earns release.
+    let tracker = LifecycleTracker::default();
+    tracker.note_init_attempted();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Poison);
+    tracker.note_initialized();
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "initialized without finalize still poisons"
+    );
+    tracker.note_finalized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+}
+
+#[test]
 fn native_domain_lifecycle_initialized_without_finalize_poisons() {
     let tracker = LifecycleTracker::default();
     tracker.note_initialized();

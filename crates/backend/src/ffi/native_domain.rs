@@ -372,6 +372,12 @@ impl Drop for RetirementSentinel {
 /// recycling it. Lock-free atomics; no mutex joins the native call path.
 #[derive(Debug, Default)]
 pub(in crate::ffi) struct LifecycleTracker {
+    /// A `C_Initialize` attempt reached native entry (set BEFORE the call,
+    /// fail-closed). Once native code may have run, only a later successful
+    /// `C_Finalize` re-earns release; a failed attempt without success
+    /// poisons instead of recycling (C3M steps 4-5). Monotonic: never
+    /// cleared, so failed/unknown initialization retains ownership.
+    init_attempted: std::sync::atomic::AtomicBool,
     initialized: std::sync::atomic::AtomicBool,
     finalized_ok: std::sync::atomic::AtomicBool,
     open_sessions: std::sync::atomic::AtomicUsize,
@@ -391,14 +397,22 @@ pub(in crate::ffi) struct LifecycleTracker {
 /// Retirement outcome for backend `Drop`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::ffi) enum RetirementDecision {
-    /// Proven quiescent (never initialized, or finalized with no open
-    /// sessions): the exact epoch may publish the next `Vacant`.
+    /// Proven quiescent (no Initialize attempt and never initialized,
+    /// or finalized with no open sessions): the exact epoch may publish
+    /// the next `Vacant` after completed normal unload.
     Release,
     /// Anything else: retain ownership and poison the slot until restart.
     Poison,
 }
 
 impl LifecycleTracker {
+    /// Record a `C_Initialize` attempt BEFORE native entry. Callers must
+    /// set this before invoking the provider so a failed attempt (native
+    /// code ran, error RV) poisons instead of recycling the reservation.
+    pub(in crate::ffi) fn note_init_attempted(&self) {
+        self.init_attempted.store(true, SeqCst);
+    }
+
     /// Record a successful native `C_Initialize`. A new initialization cycle
     /// always clears a previously observed finalization.
     ///
@@ -467,10 +481,13 @@ impl LifecycleTracker {
     }
 
     /// Decide backend `Drop`: release only when quiescent with no open
-    /// sessions; poison on every uncertain state.
+    /// sessions; poison on every uncertain state. A recorded Initialize
+    /// attempt without a later successful Finalize is uncertain (native
+    /// code may have run), even when initialization never succeeded.
     pub(in crate::ffi) fn retirement_decision(&self) -> RetirementDecision {
         use RetirementDecision::{Poison, Release};
-        let quiescent = !self.initialized.load(SeqCst) || self.finalized_ok.load(SeqCst);
+        let never_exposed = !self.init_attempted.load(SeqCst) && !self.initialized.load(SeqCst);
+        let quiescent = never_exposed || self.finalized_ok.load(SeqCst);
         if quiescent && self.open_sessions.load(SeqCst) == 0 { Release } else { Poison }
     }
 }

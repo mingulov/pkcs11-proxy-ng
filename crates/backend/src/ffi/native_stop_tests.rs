@@ -114,8 +114,8 @@ fn native_stop_child_entry() {
 /// (11 bad scenario, 12 reserve failed, 13 activate failed, 14 initialize
 /// failed, 15 no-new-privs failed, 16 seccomp failed, 17 thread spawn failed,
 /// 18 handoff failed, 19 sync timeout, 20 stop did not fire, 21 unexpected
-/// worker completion, 22 mech failed, 23 controller did not fire, 99 fell
-/// through the denied stop).
+/// worker completion, 22 mech failed, 23 controller did not fire, 24
+/// initialize unexpectedly succeeded, 99 fell through the denied stop).
 fn run_stop_child(scenario: &str) -> ! {
     match scenario {
         "s1-main" => run_s1_main(),
@@ -130,6 +130,7 @@ fn run_stop_child(scenario: &str) -> ! {
         "s9-unknown" => run_s9_unknown(),
         "s10-unsettled" => run_s10_unsettled(),
         "s11-gated" => run_s11_gated(),
+        "s12-failed-init" => run_s12_failed_init(),
         "c1-never-init" => run_c1_never_init(),
         "c2-unmanaged" => run_c2_unmanaged(),
         "n1-seccomp" => run_n1_seccomp(),
@@ -144,6 +145,11 @@ unsafe extern "C" fn child_initialize_ok(_: *mut std::ffi::c_void) -> cryptoki_s
 
 unsafe extern "C" fn child_finalize_ok(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
     cryptoki_sys::CKR_OK
+}
+
+/// Failing Initialize stub for S12: native entered, error RV, no session.
+unsafe extern "C" fn child_initialize_fails(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+    cryptoki_sys::CKR_GENERAL_ERROR
 }
 
 /// Never-returning Finalize stub for S8: parks forever holding no locks.
@@ -548,6 +554,25 @@ fn run_s11_gated() -> ! {
     std::process::exit(20);
 }
 
+/// S12 child: failed Initialize (native entered, error RV) on a managed
+/// backend, then drop. C3M steps 4-5: the attempt poisons, so the
+/// final-owner guard stops the group at 70 instead of recycling.
+fn run_s12_failed_init() -> ! {
+    let backend = child_backend_managed(Some(child_initialize_fails), Some(child_finalize_ok));
+    if backend.initialize().is_ok() {
+        std::process::exit(24);
+    }
+    let barrier = Arc::new(Barrier::new(4));
+    for index in 0..3 {
+        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
+    }
+    barrier.wait();
+    let _ = writeln!(std::io::stdout(), "READY s12-failed-init");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    std::process::exit(20);
+}
+
 /// Build an unmanaged backend (test-only sentinel, no registry reservation).
 fn child_backend_unmanaged(
     initialize: cryptoki_sys::CK_C_Initialize,
@@ -798,6 +823,14 @@ fn native_stop_s11_gated_waiter_stop() {
     let (child, _permit) = spawn_stop_child("s11-gated");
     let output = child.wait_with_output().expect("reap stop child");
     assert_stop_status(&output, "s11-gated");
+}
+
+/// S12: failed Initialize poisons (native entered) — the drop stops.
+#[test]
+fn native_stop_s12_failed_initialize_stop() {
+    let (child, _permit) = spawn_stop_child("s12-failed-init");
+    let output = child.wait_with_output().expect("reap stop child");
+    assert_stop_status(&output, "s12-failed-init");
 }
 
 /// C1: never-initialized control (normal Drop, child exit 0, no stop).

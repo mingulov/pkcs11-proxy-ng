@@ -280,6 +280,10 @@ impl Pkcs11Backend for FfiBackend {
                 .map(|s| s.as_ptr() as *mut std::ffi::c_void)
                 .unwrap_or(std::ptr::null_mut()),
         };
+        // Fail-closed attempt marker BEFORE native entry (C3M steps 4-5):
+        // a failed `C_Initialize` ran provider code, so the reservation
+        // must poison instead of recycling.
+        self.lifecycle.note_init_attempted();
         Self::call_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
             function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
         })?;
@@ -1690,6 +1694,10 @@ mod tests {
         cryptoki_sys::CKR_OK
     }
 
+    unsafe extern "C" fn initialize_fails(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_GENERAL_ERROR
+    }
+
     fn backend_with_finalize(
         finalize: cryptoki_sys::CK_C_Finalize,
     ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
@@ -1733,6 +1741,36 @@ mod tests {
         backend.last_init_family.insert(7, OperationFamily::Sign);
         // Use the public path so the forward map and reverse index stay in sync.
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+    }
+
+    #[test]
+    fn failed_initialize_poisons_instead_of_recycling() {
+        // C3M steps 4-5: a failed `C_Initialize` ran native code, so the
+        // reservation must never recycle — the retirement decision is
+        // Poison (retain ownership), never Vacant.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_fails), Some(finalize_ok));
+        assert_eq!(backend.initialize().unwrap_err(), CkRv::GENERAL_ERROR);
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            crate::ffi::native_domain::RetirementDecision::Poison,
+            "failed Initialize must poison, never recycle"
+        );
+        assert_eq!(backend.lifecycle.open_session_count_for_tests(), 0);
+        assert_eq!(backend.lifecycle.current_generation(), 0);
+    }
+
+    #[test]
+    fn never_attempted_initialize_releases() {
+        // Control leg: a backend whose `C_Initialize` was never attempted
+        // stays on the Release path (C1 at the decision level).
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_fails), Some(finalize_ok));
+        assert_eq!(
+            backend.lifecycle.retirement_decision(),
+            crate::ffi::native_domain::RetirementDecision::Release,
+            "never-attempted backend must stay on the Release path"
+        );
     }
 
     #[test]
