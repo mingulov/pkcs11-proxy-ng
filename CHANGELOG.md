@@ -114,7 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discovery in every discovery mode — unlike a filtered allowlist,
   which only hides. Exclusions travel to shims in the new
   `MechanismRegistryPayload.excluded` field (absent from older
-  daemons, treated as empty). The FIPS example hard-excludes 73
+  daemons, treated as empty). The FIPS example hard-excludes 74
   historical mechanisms (MD2/MD5, RC2/RC4, single-DES, CAST, IDEA,
   SEED, Camellia, ARIA, including parameterized variants) so a FIPS
   deployment no longer forwards them on direct invocation.
