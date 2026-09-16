@@ -990,6 +990,27 @@ mod attribute_query_tests {
     }
 
     #[test]
+    fn raw_attribute_queries_zero_length_exact_query_yields_null_pvalue() {
+        // T4-FIX: a 0-length exact query (buffer_present=true, buffer_len=0 —
+        // e.g. a sub-element cross-width buffer mapped to 0) must pass NULL
+        // pValue, not the dangling Vec::new() pointer (0x1): backends that
+        // null-check pValue and then write (NSS softokn) segfault the daemon.
+        let ffi = FfiAttributeQueries::from_queries(&[CkAttributeQuery {
+            attr_type: CkAttributeType::CLASS,
+            buffer_present: true,
+            buffer_len: 0,
+            nested: None,
+        }])
+        .expect("ffi queries");
+
+        assert_eq!(ffi.attrs.len(), 1);
+        assert!(ffi.attrs[0].pValue.is_null());
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
+        let ul_value_len = ffi.attrs[0].ulValueLen;
+        assert_eq!(ul_value_len, 0);
+    }
+
+    #[test]
     fn raw_attribute_queries_reject_unallocatable_buffer_len() {
         let err = match FfiAttributeQueries::from_queries(&[CkAttributeQuery {
             attr_type: CkAttributeType::LABEL,

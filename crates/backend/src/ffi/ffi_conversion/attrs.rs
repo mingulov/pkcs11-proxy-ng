@@ -173,7 +173,15 @@ impl FfiAttributeQueries {
                     let mut buffer = Vec::new();
                     buffer.try_reserve_exact(buffer_len).map_err(|_| CkRv::HOST_MEMORY)?;
                     buffer.resize(buffer_len, 0);
-                    let ptr = buffer.as_mut_ptr() as *mut std::ffi::c_void;
+                    // T4-FIX: pass NULL for 0-length buffers. An empty Vec's
+                    // `as_mut_ptr()` is a dangling non-null pointer (0x1);
+                    // backends that null-check pValue and then write
+                    // regardless of length (NSS softokn) segfault on it.
+                    let ptr = if buffer.is_empty() {
+                        std::ptr::null_mut()
+                    } else {
+                        buffer.as_mut_ptr() as *mut std::ffi::c_void
+                    };
                     buffers.push(buffer);
                     (ptr, ul_value_len)
                 } else {
