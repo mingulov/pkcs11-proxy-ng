@@ -255,6 +255,7 @@ fn gcm_error_backend() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
     (backend, base)
 }
 
+#[cfg_attr(miri, ignore = "Miri cannot dlopen; covered natively")]
 #[test]
 fn ordinary_wrap_error_iv_effect_matches_one_shot_rule() {
     let _guard = LOCK.lock().unwrap();
