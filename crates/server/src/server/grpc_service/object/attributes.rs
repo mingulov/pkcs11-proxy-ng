@@ -286,6 +286,7 @@ pub(super) async fn get_attribute_value(
                         &ctx_id,
                         object_handle,
                         fetched_attr.attr_type,
+                        // ADR-0013 §5: adopt-via-copy; `bytes` also feeds the response below.
                         CachedAttr { value: SecretBytes::new(bytes.clone()), ck_rv: CkRv::OK.0 },
                     )
                     .await;

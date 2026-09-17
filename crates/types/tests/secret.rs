@@ -66,18 +66,33 @@ fn public_api_is_allowlisted_with_no_borrow_or_extraction() {
     // of truth (`src/secret.rs`) directly, from both directions: every
     // inherent method and trait impl must be allowlisted, and every
     // forbidden API shape must be absent. Any new public API fails here
-    // until it is reviewed into the allowlist.
+    // until it is reviewed into the allowlist. Method collection matches
+    // every `pub` qualifier spelling (`const`/`unsafe`/`async`), and the
+    // struct representation is pinned so a new `pub` field cannot evade
+    // the audit either.
     let source = include_str!("../src/secret.rs");
 
     let mut methods = BTreeSet::new();
     let mut impls = Vec::new();
+    let mut structs = Vec::new();
     for line in source.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("pub fn ") {
-            let name: String =
-                rest.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
-            assert!(!name.is_empty(), "unparseable method line: {line}");
-            assert!(methods.insert(name.clone()), "duplicate method {name}");
+        if let Some(rest) = line.strip_prefix("pub ") {
+            if let Some(name) = pub_fn_name(rest) {
+                assert!(!name.is_empty(), "unparseable method line: {line}");
+                assert!(methods.insert(name.clone()), "duplicate method {name}");
+            } else if line.starts_with("pub struct ") {
+                structs.push(line.to_owned());
+            } else {
+                panic!(
+                    "unexpected public item in SecretBytes source (review against ADR-0013 §4): {line}"
+                );
+            }
+        }
+        if line.starts_with("pub(") {
+            panic!(
+                "restricted-visibility item in SecretBytes source (review against ADR-0013 §4): {line}"
+            );
         }
         if let Some(rest) = line.strip_prefix("impl ") {
             impls.push(rest.to_owned());
@@ -95,6 +110,11 @@ fn public_api_is_allowlisted_with_no_borrow_or_extraction() {
             "new".to_owned(),
         ]),
         "SecretBytes inherent API changed: review the new method against ADR-0013 §4"
+    );
+    assert_eq!(
+        structs,
+        ["pub struct SecretBytes(Zeroizing<Vec<u8>>);"],
+        "SecretBytes representation changed: fields must stay private (review against ADR-0013 §4)"
     );
     let mut impls_sorted = impls.clone();
     impls_sorted.sort();
@@ -150,6 +170,25 @@ fn public_api_is_allowlisted_with_no_borrow_or_extraction() {
             "forbidden SecretBytes API shape present: {forbidden}"
         );
     }
+}
+
+/// Strips `pub`-qualifier spellings (`const`/`unsafe`/`async`, any
+/// combination and order) and returns the function name when the declaration
+/// is a `fn`. Returns `None` for non-`fn` public items, which the caller
+/// audits separately so no new public shape passes silently.
+fn pub_fn_name(mut rest: &str) -> Option<String> {
+    loop {
+        let stripped = rest
+            .strip_prefix("const ")
+            .or_else(|| rest.strip_prefix("unsafe "))
+            .or_else(|| rest.strip_prefix("async "));
+        match stripped {
+            Some(next) => rest = next,
+            None => break,
+        }
+    }
+    let rest = rest.strip_prefix("fn ")?;
+    Some(rest.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect())
 }
 
 #[test]

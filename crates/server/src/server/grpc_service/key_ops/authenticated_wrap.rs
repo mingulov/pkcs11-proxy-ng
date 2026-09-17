@@ -89,6 +89,9 @@ pub(crate) async fn wrap_key_authenticated(
                             p.key,
                             input_from_wire(aad_raw, req.associated_data_null_len),
                         )
+                        // ADR-0013 §5 (per-site): converted inside the `expose` closure, so the
+                        // plain `mechanism_parameter_out` crosses thread + await back to the
+                        // handler; transient (response construction → encode → drop), never logged.
                         .map(|(bytes, raw)| (bytes, secret_to_plain(&raw), None))
                 }
             })
@@ -298,6 +301,9 @@ async fn unwrap_key_authenticated_impl(
                             &template,
                             input_from_wire(aad_raw, aad_null_len),
                         )
+                        // ADR-0013 §5 (per-site): converted inside the `expose` closure, so the
+                        // plain `mechanism_parameter_out` crosses thread + await back to the
+                        // handler; transient (response construction → encode → drop), never logged.
                         .map(|(key, raw)| (key, secret_to_plain(&raw), None))
                 }
             })

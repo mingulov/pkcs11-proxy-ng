@@ -14,10 +14,13 @@ use pkcs11_proxy_ng_proto::{
     REDACTED_WIRE_MESSAGES,
     attribute::Value as AttributeValue,
     attribute_result::Result as AttributeResultValue,
+    authenticated_mechanism_output::Output as AuthenticatedOutput,
     message_parameter::Params as MessageParams,
+    message_parameter_effects::Effect as MessageEffect,
     pkcs11_proxy_ng::v1::{
-        Attribute, AttributeResult, AuthenticatedParameters, DecryptResponse, EncryptResponse,
-        GcmMessageEffects, GcmParams, LoginRequest, MessageParameter, MessageParameterEffects,
+        Attribute, AttributeResult, AuthenticatedMechanismOutput, AuthenticatedParameters,
+        CcmMessageEffects, DecryptResponse, EncryptResponse, GcmMessageEffects, GcmParams,
+        LoginRequest, MessageParameter, MessageParameterEffects, SalsaMessageEffects,
         SeedRandomRequest, SignRequest, Sp800108Attribute,
     },
     sp800108_attribute::Value as Sp800108Value,
@@ -168,6 +171,102 @@ fn attribute_and_message_parameter_oneofs_render_no_payload() {
         format!("{:?}", Sp800108Value::BytesValue(PIN_CANARY.to_vec())),
         "sp800108_attribute.Value([REDACTED])"
     );
+}
+
+#[test]
+fn authenticated_mechanism_output_oneof_renders_no_payload() {
+    let parent =
+        AuthenticatedMechanismOutput { output: Some(AuthenticatedOutput::Iv(PIN_CANARY.to_vec())) };
+    assert_eq!(format!("{parent:?}"), "AuthenticatedMechanismOutput([REDACTED])");
+    assert_eq!(
+        format!("{:?}", AuthenticatedOutput::Unchanged(true)),
+        "authenticated_mechanism_output.Output([REDACTED])"
+    );
+    // The secret member (`bytes iv = 2`, manifest `key_attributes_material`).
+    assert_eq!(
+        format!("{:?}", AuthenticatedOutput::Iv(PIN_CANARY.to_vec())),
+        "authenticated_mechanism_output.Output([REDACTED])"
+    );
+    let parameter = MessageParameter { params: Some(MessageParams::Raw(PIN_CANARY.to_vec())) };
+    assert_eq!(
+        format!("{:?}", AuthenticatedOutput::MessageParameter(parameter)),
+        "authenticated_mechanism_output.Output([REDACTED])"
+    );
+    let effects = MessageParameterEffects { effect: None };
+    assert_eq!(
+        format!("{:?}", AuthenticatedOutput::MessageEffects(effects)),
+        "authenticated_mechanism_output.Output([REDACTED])"
+    );
+}
+
+#[test]
+fn message_parameter_effects_oneof_renders_no_payload() {
+    let parent = MessageParameterEffects {
+        effect: Some(MessageEffect::Gcm(GcmMessageEffects {
+            iv: Some(PIN_CANARY.to_vec()),
+            tag: Some(PIN_CANARY.to_vec()),
+        })),
+    };
+    assert_eq!(format!("{parent:?}"), "MessageParameterEffects([REDACTED])");
+    // Every member message is itself redacted; the enum level must not print them either.
+    assert_eq!(
+        format!(
+            "{:?}",
+            MessageEffect::Gcm(GcmMessageEffects {
+                iv: Some(PIN_CANARY.to_vec()),
+                tag: Some(PIN_CANARY.to_vec())
+            })
+        ),
+        "message_parameter_effects.Effect([REDACTED])"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            MessageEffect::Ccm(CcmMessageEffects {
+                nonce: Some(PIN_CANARY.to_vec()),
+                mac: Some(PIN_CANARY.to_vec())
+            })
+        ),
+        "message_parameter_effects.Effect([REDACTED])"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            MessageEffect::Salsa(SalsaMessageEffects { tag: Some(PIN_CANARY.to_vec()) })
+        ),
+        "message_parameter_effects.Effect([REDACTED])"
+    );
+}
+
+/// The oneof enums under a redacted parent, each with a generated
+/// `Path([REDACTED])` impl. Mirrors `build.rs` emission: every oneof whose
+/// parent message is in the redacted set gets a manual `Debug` impl. A
+/// dropped impl falls back to derived `Debug` (payload-printing), so this
+/// audits the generated file directly — the failure names the missing impl.
+/// (`mechanism::Params` is the deliberate exception: message-only variants,
+/// each redacted-or-safe; see the 7.2 report.)
+const EXPECTED_ONEOF_IMPLS: &[&str] = &[
+    "attribute::Value",
+    "attribute_result::Result",
+    "authenticated_mechanism_output::Output",
+    "message_parameter::Params",
+    "message_parameter_effects::Effect",
+    "sp800108_attribute::Value",
+];
+
+#[test]
+fn emitted_oneof_debug_impls_match_expected_set_exactly() {
+    let generated = std::fs::read_to_string(concat!(env!("OUT_DIR"), "/redacted_debug_gen.rs"))
+        .expect("build.rs must emit redacted_debug_gen.rs");
+    const PREFIX: &str = "impl ::std::fmt::Debug for crate::pkcs11_proxy_ng::v1::";
+    let mut actual: Vec<&str> = generated
+        .lines()
+        .filter_map(|line| line.strip_prefix(PREFIX))
+        .filter_map(|path| path.strip_suffix(" {"))
+        .filter(|path| path.contains("::"))
+        .collect();
+    actual.sort();
+    assert_eq!(actual, EXPECTED_ONEOF_IMPLS, "emitted oneof Debug impl set drifted");
 }
 
 #[test]
