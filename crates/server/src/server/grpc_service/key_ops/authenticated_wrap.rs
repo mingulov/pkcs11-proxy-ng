@@ -11,6 +11,9 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_proto::convert::authenticated::{
     decode_parameters, legacy_parameter_supported,
 };
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, SecretBytes};
 
@@ -35,6 +38,7 @@ pub(crate) async fn wrap_key_authenticated(
     let started = Instant::now();
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
+    let associated_data = SecretBytes::new(req.associated_data);
     let outcome = async {
         let p = match super::wrap_preparation::prepare_wrap(
             ctx,
@@ -62,30 +66,32 @@ pub(crate) async fn wrap_key_authenticated(
         };
         let backend = Arc::clone(&ctx.backend);
         spawn_backend(move || {
-            if let Some(parameter) = parameter {
-                let (bytes, output) = backend.wrap_key_authenticated_typed(
-                    p.session,
-                    &p.mechanism,
-                    parameter.as_ref(),
-                    p.wrapping_key,
-                    p.key,
-                    input_from_wire(&req.associated_data, req.associated_data_null_len),
-                )?;
-                output
-                    .validate_for(&p.mechanism, parameter.as_ref())
-                    .map_err(|_| CkRv::DEVICE_ERROR)?;
-                Ok((bytes, Vec::new(), Some((&output).try_into()?)))
-            } else {
-                backend
-                    .wrap_key_authenticated(
+            associated_data.expose(|aad_raw| {
+                if let Some(parameter) = parameter {
+                    let (bytes, output) = backend.wrap_key_authenticated_typed(
                         p.session,
                         &p.mechanism,
+                        parameter.as_ref(),
                         p.wrapping_key,
                         p.key,
-                        input_from_wire(&req.associated_data, req.associated_data_null_len),
-                    )
-                    .map(|(bytes, raw)| (bytes, secret_to_plain(&raw), None))
-            }
+                        input_from_wire(aad_raw, req.associated_data_null_len),
+                    )?;
+                    output
+                        .validate_for(&p.mechanism, parameter.as_ref())
+                        .map_err(|_| CkRv::DEVICE_ERROR)?;
+                    Ok((bytes, Vec::new(), Some((&output).try_into()?)))
+                } else {
+                    backend
+                        .wrap_key_authenticated(
+                            p.session,
+                            &p.mechanism,
+                            p.wrapping_key,
+                            p.key,
+                            input_from_wire(aad_raw, req.associated_data_null_len),
+                        )
+                        .map(|(bytes, raw)| (bytes, secret_to_plain(&raw), None))
+                }
+            })
         })
         .await
     }
@@ -213,9 +219,9 @@ async fn unwrap_key_authenticated_impl(
         }
     };
 
-    let wrapped_key = req.wrapped_key;
+    let wrapped_key = SecretBytes::new(req.wrapped_key);
     let wrapped_key_null_len = req.wrapped_key_null_len;
-    let aad = req.associated_data;
+    let aad = SecretBytes::new(req.associated_data);
     let aad_null_len = req.associated_data_null_len;
     // ADR-0010 sanitize_inputs: validate NULL wrapped_key/aad pointers before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, wrapped_key_null_len) {
@@ -258,38 +264,44 @@ async fn unwrap_key_authenticated_impl(
     let backend = Arc::clone(backend_ref);
     let object_cleanup = Arc::clone(&ctx.object_cleanup);
     let result = spawn_backend(move || {
-        object_cleanup.ensure_clear()?;
-        if let Some(parameter) = parameter {
-            let (key, output) = backend.unwrap_key_authenticated_typed(
-                session,
-                &mechanism,
-                parameter.as_ref(),
-                unwrapping_key,
-                input_from_wire(&wrapped_key, wrapped_key_null_len),
-                &template,
-                input_from_wire(&aad, aad_null_len),
-            )?;
-            let created = pkcs11_proxy_ng_backend::object_cleanup::PendingNativeObject::new(
-                &*backend,
-                &object_cleanup,
-                session,
-                key,
-            );
-            output.validate_for(&mechanism, parameter.as_ref()).map_err(|_| CkRv::DEVICE_ERROR)?;
-            let wire_output = Some((&output).try_into()?);
-            Ok((created.transfer(), Vec::new(), wire_output))
-        } else {
-            backend
-                .unwrap_key_authenticated(
-                    session,
-                    &mechanism,
-                    unwrapping_key,
-                    input_from_wire(&wrapped_key, wrapped_key_null_len),
-                    &template,
-                    input_from_wire(&aad, aad_null_len),
-                )
-                .map(|(key, raw)| (key, secret_to_plain(&raw), None))
-        }
+        wrapped_key.expose(|wrapped_raw| {
+            aad.expose(|aad_raw| {
+                object_cleanup.ensure_clear()?;
+                if let Some(parameter) = parameter {
+                    let (key, output) = backend.unwrap_key_authenticated_typed(
+                        session,
+                        &mechanism,
+                        parameter.as_ref(),
+                        unwrapping_key,
+                        input_from_wire(wrapped_raw, wrapped_key_null_len),
+                        &template,
+                        input_from_wire(aad_raw, aad_null_len),
+                    )?;
+                    let created = pkcs11_proxy_ng_backend::object_cleanup::PendingNativeObject::new(
+                        &*backend,
+                        &object_cleanup,
+                        session,
+                        key,
+                    );
+                    output
+                        .validate_for(&mechanism, parameter.as_ref())
+                        .map_err(|_| CkRv::DEVICE_ERROR)?;
+                    let wire_output = Some((&output).try_into()?);
+                    Ok((created.transfer(), Vec::new(), wire_output))
+                } else {
+                    backend
+                        .unwrap_key_authenticated(
+                            session,
+                            &mechanism,
+                            unwrapping_key,
+                            input_from_wire(wrapped_raw, wrapped_key_null_len),
+                            &template,
+                            input_from_wire(aad_raw, aad_null_len),
+                        )
+                        .map(|(key, raw)| (key, secret_to_plain(&raw), None))
+                }
+            })
+        })
     })
     .await?;
 

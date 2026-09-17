@@ -594,7 +594,9 @@ async fn logout_produces_audit_log() {
 }
 
 #[test]
-fn proto_pin_requests_debug_exposes_data() {
+fn proto_pin_requests_debug_redacts_data() {
+    // ADR-0013 §7: secret-bearing wire messages print only
+    // `TypeName([REDACTED])` — neither the PIN payload nor its field name.
     let login = pkcs11_proxy_ng_proto::LoginRequest {
         client_context_id: "ctx-test".into(),
         session_handle: 1,
@@ -602,7 +604,8 @@ fn proto_pin_requests_debug_exposes_data() {
         pin: Some(b"secret-pin-data".to_vec()),
     };
     let debug_output = format!("{:?}", login);
-    assert!(debug_output.contains("pin"));
+    assert_eq!(debug_output, "LoginRequest([REDACTED])");
+    assert!(!debug_output.contains("secret-pin-data"));
 }
 
 #[test]

@@ -3,12 +3,15 @@
 //! - `C_EncapsulateKey`
 //! - `C_DecapsulateKey`
 
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv, SecretBytes};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
@@ -187,7 +190,7 @@ pub(crate) async fn decapsulate_key(
     // A decapsulated key is a session object unless CKA_TOKEN is set (B2).
     let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
-    let ciphertext = SecretBytes::new(req.ciphertext);
+    let ciphertext = req.ciphertext;
     let ciphertext_null_len = req.ciphertext_null_len;
     // ADR-0010 sanitize_inputs: validate NULL ciphertext pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, ciphertext_null_len) {
@@ -198,15 +201,13 @@ pub(crate) async fn decapsulate_key(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        ciphertext.expose(|raw| {
-            backend.decapsulate_key(
-                session,
-                &mechanism,
-                private_key,
-                &template,
-                input_from_wire(raw, ciphertext_null_len),
-            )
-        })
+        backend.decapsulate_key(
+            session,
+            &mechanism,
+            private_key,
+            &template,
+            input_from_wire(&ciphertext, ciphertext_null_len),
+        )
     })
     .await?;
 

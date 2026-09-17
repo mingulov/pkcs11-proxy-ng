@@ -78,7 +78,7 @@ pub(crate) async fn verify_signature_init(
             }));
         }
 
-        let signature = SecretBytes::new(req.signature);
+        let signature = req.signature;
         let signature_null_len = req.signature_null_len;
         // ADR-0010 sanitize_inputs: validate NULL signature pointer before backend call.
         if let Err(rv) = check_sanitize(sanitize_inputs, signature_null_len) {
@@ -88,14 +88,12 @@ pub(crate) async fn verify_signature_init(
         }
         let backend = Arc::clone(backend_ref);
         let result = spawn_backend(move || {
-            signature.expose(|raw| {
-                backend.verify_signature_init(
-                    session,
-                    Some(&mechanism),
-                    key,
-                    input_from_wire(raw, signature_null_len),
-                )
-            })
+            backend.verify_signature_init(
+                session,
+                Some(&mechanism),
+                key,
+                input_from_wire(&signature, signature_null_len),
+            )
         })
         .await?;
 

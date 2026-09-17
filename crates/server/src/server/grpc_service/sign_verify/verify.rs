@@ -1,3 +1,6 @@
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 use std::time::Instant;
@@ -104,7 +107,7 @@ pub(crate) async fn verify(
 
     let data = SecretBytes::new(req.data);
     let data_null_len = req.data_null_len;
-    let signature = SecretBytes::new(req.signature);
+    let signature = req.signature;
     let signature_null_len = req.signature_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data/signature pointers before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
@@ -116,13 +119,11 @@ pub(crate) async fn verify(
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         data.expose(|data_raw| {
-            signature.expose(|sig_raw| {
-                backend.verify(
-                    session,
-                    input_from_wire(data_raw, data_null_len),
-                    input_from_wire(sig_raw, signature_null_len),
-                )
-            })
+            backend.verify(
+                session,
+                input_from_wire(data_raw, data_null_len),
+                input_from_wire(&signature, signature_null_len),
+            )
         })
     })
     .await?;
@@ -192,7 +193,7 @@ pub(crate) async fn verify_final(
         }
     };
 
-    let signature = SecretBytes::new(req.signature);
+    let signature = req.signature;
     let signature_null_len = req.signature_null_len;
     // ADR-0010 sanitize_inputs: validate NULL signature pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, signature_null_len) {
@@ -200,8 +201,7 @@ pub(crate) async fn verify_final(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        signature
-            .expose(|raw| backend.verify_final(session, input_from_wire(raw, signature_null_len)))
+        backend.verify_final(session, input_from_wire(&signature, signature_null_len))
     })
     .await?;
     let ck_rv = ck_rv_only(result);
@@ -316,7 +316,7 @@ pub(crate) async fn verify_recover(
         }
     };
 
-    let signature = SecretBytes::new(req.signature);
+    let signature = req.signature;
     let signature_null_len = req.signature_null_len;
     // ADR-0010 sanitize_inputs: validate NULL signature pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, signature_null_len) {
@@ -327,8 +327,7 @@ pub(crate) async fn verify_recover(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        signature
-            .expose(|raw| backend.verify_recover(session, input_from_wire(raw, signature_null_len)))
+        backend.verify_recover(session, input_from_wire(&signature, signature_null_len))
     })
     .await?;
     let (ck_rv, data) = super::super::ck_result_to_rv(result);

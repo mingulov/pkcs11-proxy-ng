@@ -1,3 +1,6 @@
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 use std::time::Instant;
@@ -349,12 +352,10 @@ pub(crate) async fn decrypt(
         }
     };
 
-    let encrypted_data = SecretBytes::new(req.encrypted_data);
+    let encrypted_data = req.encrypted_data;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || {
-        encrypted_data.expose(|raw| backend.decrypt(session, CkInBuf::Bytes(raw)))
-    })
-    .await?;
+    let result =
+        spawn_backend(move || backend.decrypt(session, CkInBuf::Bytes(&encrypted_data))).await?;
     let (ck_rv, data) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
@@ -398,12 +399,11 @@ pub(crate) async fn decrypt_update(
         }
     };
 
-    let encrypted_part = SecretBytes::new(req.encrypted_part);
+    let encrypted_part = req.encrypted_part;
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || {
-        encrypted_part.expose(|raw| backend.decrypt_update(session, CkInBuf::Bytes(raw)))
-    })
-    .await?;
+    let result =
+        spawn_backend(move || backend.decrypt_update(session, CkInBuf::Bytes(&encrypted_part)))
+            .await?;
     let (ck_rv, part) = ck_result_to_rv(result);
     let mechanism_out = session_mechanism_out_if_ok(backend_ref, session, ck_rv);
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptUpdateResponse {

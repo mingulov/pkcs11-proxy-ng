@@ -22,6 +22,9 @@ use tracing::{info, warn};
 use pkcs11_proxy_ng_proto::convert::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::*;
 
@@ -293,8 +296,8 @@ async fn execute_message_begin(
     ctx_id: ClientContextId,
     virtual_session: u64,
     operation_kind: ServerMessageOperation,
-    legacy_parameter: Vec<u8>,
-    aad: Vec<u8>,
+    legacy_parameter: SecretBytes,
+    aad: SecretBytes,
     aad_null_len: Option<u64>,
     wire_spec: Option<pkcs11_proxy_ng_proto::ParameterRoundtripSpec>,
     wire_parameter: Option<pkcs11_proxy_ng_proto::MessageParameter>,
@@ -319,13 +322,15 @@ async fn execute_message_begin(
         Some(shape) => shape,
         None => return Ok(message_begin_error(CkRv::OPERATION_NOT_INITIALIZED)),
     };
-    let contract = match validate_message_begin_contract(
-        ctx.sanitize_inputs,
-        installed_shape,
-        &legacy_parameter,
-        wire_spec.as_ref(),
-        wire_parameter.as_ref(),
-    ) {
+    let contract = match legacy_parameter.expose(|legacy_raw| {
+        validate_message_begin_contract(
+            ctx.sanitize_inputs,
+            installed_shape,
+            legacy_raw,
+            wire_spec.as_ref(),
+            wire_parameter.as_ref(),
+        )
+    }) {
         Ok(contract) => contract,
         Err(error) => return Ok(message_begin_error(error)),
     };
@@ -341,6 +346,7 @@ async fn execute_message_begin(
     let backend = Arc::clone(&ctx.backend);
     let mut transition = MessageOperationTransition::begin(operation);
     let result = super::service_utils::spawn_backend_exact(move || {
+        aad.expose(|aad_raw| {
             transition.mark_started();
             let request_parameter = contract.parameter.clone();
             let provider_result = match (operation_kind, contract.parameter.as_ref()) {
@@ -348,7 +354,7 @@ async fn execute_message_begin(
                     .encrypt_message_begin_msg(
                         session,
                         parameter,
-                        input_from_wire(&aad, aad_null_len),
+                        input_from_wire(aad_raw, aad_null_len),
                         &contract.provider_spec,
                     )
                     .map(|(ack, parameter)| (ack, Some(parameter))),
@@ -356,21 +362,21 @@ async fn execute_message_begin(
                     .decrypt_message_begin_msg(
                         session,
                         parameter,
-                        input_from_wire(&aad, aad_null_len),
+                        input_from_wire(aad_raw, aad_null_len),
                         &contract.provider_spec,
                     )
                     .map(|(ack, parameter)| (ack, Some(parameter))),
                 (ServerMessageOperation::Encrypt, None) => backend
                     .encrypt_message_begin_exact(
                         session,
-                        input_from_wire(&aad, aad_null_len),
+                        input_from_wire(aad_raw, aad_null_len),
                         &contract.provider_spec,
                     )
                     .map(|ack| (ack, None)),
                 (ServerMessageOperation::Decrypt, None) => backend
                     .decrypt_message_begin_exact(
                         session,
-                        input_from_wire(&aad, aad_null_len),
+                        input_from_wire(aad_raw, aad_null_len),
                         &contract.provider_spec,
                     )
                     .map(|ack| (ack, None)),
@@ -414,6 +420,7 @@ async fn execute_message_begin(
                     Ok(message_begin_error(error))
                 }
             })
+        })
         }).await?;
     Ok(match result {
         Ok(result) => result,
@@ -1509,9 +1516,9 @@ pub(crate) async fn encrypt_message(
         }
     };
 
-    let aad = req.associated_data;
+    let aad = SecretBytes::new(req.associated_data);
     let aad_null_len = req.associated_data_null_len;
-    let plaintext = req.plaintext;
+    let plaintext = SecretBytes::new(req.plaintext);
     let plaintext_null_len = req.plaintext_null_len;
     // ADR-0010 sanitize_inputs: validate NULL aad/plaintext pointers before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
@@ -1533,13 +1540,17 @@ pub(crate) async fn encrypt_message(
         MessageOperationTransition::begin(operation),
         installed_shape,
         move || {
-            let mut parameter = [];
-            backend.encrypt_message(
-                session,
-                &mut parameter,
-                input_from_wire(&aad, aad_null_len),
-                input_from_wire(&plaintext, plaintext_null_len),
-            )
+            aad.expose(|aad_raw| {
+                plaintext.expose(|pt_raw| {
+                    let mut parameter = [];
+                    backend.encrypt_message(
+                        session,
+                        &mut parameter,
+                        input_from_wire(aad_raw, aad_null_len),
+                        input_from_wire(pt_raw, plaintext_null_len),
+                    )
+                })
+            })
         },
     )
     .await?;
@@ -1576,8 +1587,8 @@ pub(crate) async fn encrypt_message_begin(
         ctx_id,
         req.session_handle,
         ServerMessageOperation::Encrypt,
-        req.parameter,
-        req.associated_data,
+        SecretBytes::new(req.parameter),
+        SecretBytes::new(req.associated_data),
         req.associated_data_null_len,
         req.parameter_out_spec,
         req.message_parameter,
@@ -1653,7 +1664,7 @@ pub(crate) async fn encrypt_message_next(
         }
     };
 
-    let plaintext_part = req.plaintext_part;
+    let plaintext_part = SecretBytes::new(req.plaintext_part);
     let plaintext_part_null_len = req.plaintext_part_null_len;
     let flags = CkFlags(req.flags as u64);
     // ADR-0010 sanitize_inputs: validate NULL plaintext_part pointer before backend call.
@@ -1669,13 +1680,15 @@ pub(crate) async fn encrypt_message_next(
         MessageOperationTransition::begin(operation),
         installed_shape,
         move || {
-            let mut parameter = [];
-            backend.encrypt_message_next(
-                session,
-                &mut parameter,
-                input_from_wire(&plaintext_part, plaintext_part_null_len),
-                flags,
-            )
+            plaintext_part.expose(|pp_raw| {
+                let mut parameter = [];
+                backend.encrypt_message_next(
+                    session,
+                    &mut parameter,
+                    input_from_wire(pp_raw, plaintext_part_null_len),
+                    flags,
+                )
+            })
         },
     )
     .await?;
@@ -1757,7 +1770,7 @@ pub(crate) async fn decrypt_message(
         }
     };
 
-    let aad = req.associated_data;
+    let aad = SecretBytes::new(req.associated_data);
     let aad_null_len = req.associated_data_null_len;
     let ciphertext = req.ciphertext;
     let ciphertext_null_len = req.ciphertext_null_len;
@@ -1781,13 +1794,15 @@ pub(crate) async fn decrypt_message(
         MessageOperationTransition::begin(operation),
         installed_shape,
         move || {
-            let mut parameter = [];
-            backend.decrypt_message(
-                session,
-                &mut parameter,
-                input_from_wire(&aad, aad_null_len),
-                input_from_wire(&ciphertext, ciphertext_null_len),
-            )
+            aad.expose(|aad_raw| {
+                let mut parameter = [];
+                backend.decrypt_message(
+                    session,
+                    &mut parameter,
+                    input_from_wire(aad_raw, aad_null_len),
+                    input_from_wire(&ciphertext, ciphertext_null_len),
+                )
+            })
         },
     )
     .await?;
@@ -1824,8 +1839,8 @@ pub(crate) async fn decrypt_message_begin(
         ctx_id,
         req.session_handle,
         ServerMessageOperation::Decrypt,
-        req.parameter,
-        req.associated_data,
+        SecretBytes::new(req.parameter),
+        SecretBytes::new(req.associated_data),
         req.associated_data_null_len,
         req.parameter_out_spec,
         req.message_parameter,
@@ -2005,7 +2020,7 @@ pub(crate) async fn sign_message(
         }
     };
 
-    let data = req.data;
+    let data = SecretBytes::new(req.data);
     let data_null_len = req.data_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
@@ -2020,8 +2035,10 @@ pub(crate) async fn sign_message(
         MessageOperationTransition::begin(operation),
         installed_shape,
         move || {
-            let mut parameter = [];
-            backend.sign_message(session, &mut parameter, input_from_wire(&data, data_null_len))
+            data.expose(|d_raw| {
+                let mut parameter = [];
+                backend.sign_message(session, &mut parameter, input_from_wire(d_raw, data_null_len))
+            })
         },
     )
     .await?;
@@ -2243,7 +2260,7 @@ pub(crate) async fn sign_message_next(
             }));
         }
     };
-    let data_part = req.data_part;
+    let data_part = SecretBytes::new(req.data_part);
     let data_part_null_len = req.data_part_null_len;
     let request_signature = req.request_signature;
     // ADR-0010 sanitize_inputs: validate NULL data_part pointer before backend call.
@@ -2260,27 +2277,29 @@ pub(crate) async fn sign_message_next(
     if let Some(spec) = contract {
         let response_spec = spec.clone();
         let result = spawn_backend(move || {
-            transition.mark_started();
-            match backend.sign_message_next_feed_exact(
-                session,
-                input_from_wire(&data_part, data_part_null_len),
-                &spec,
-            ) {
-                Ok(ack) if parameter_result_matches_spec(&ack, &spec) => {
-                    let outcome = Ok(());
-                    transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
-                    outcome
+            data_part.expose(|dp_raw| {
+                transition.mark_started();
+                match backend.sign_message_next_feed_exact(
+                    session,
+                    input_from_wire(dp_raw, data_part_null_len),
+                    &spec,
+                ) {
+                    Ok(ack) if parameter_result_matches_spec(&ack, &spec) => {
+                        let outcome = Ok(());
+                        transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                        outcome
+                    }
+                    Ok(_) => {
+                        transition.settle_ambiguous();
+                        Err(CkRv::DEVICE_ERROR)
+                    }
+                    Err(error) => {
+                        let outcome = Err(error);
+                        transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                        outcome
+                    }
                 }
-                Ok(_) => {
-                    transition.settle_ambiguous();
-                    Err(CkRv::DEVICE_ERROR)
-                }
-                Err(error) => {
-                    let outcome = Err(error);
-                    transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
-                    outcome
-                }
-            }
+            })
         })
         .await?;
         let (ck_rv, parameter_result) = match result {
@@ -2295,31 +2314,34 @@ pub(crate) async fn sign_message_next(
         }))
     } else {
         let result = spawn_backend(move || {
-            transition.mark_started();
-            let mut parameter = Vec::new();
-            match backend.sign_message_next(
-                session,
-                &mut parameter,
-                input_from_wire(&data_part, data_part_null_len),
-                request_signature,
-            ) {
-                Ok((parameter_out, signature))
-                    if parameter_out.is_empty() && (request_signature || signature.is_empty()) =>
-                {
-                    let outcome = Ok(());
-                    transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
-                    Ok(signature)
+            data_part.expose(|dp_raw| {
+                transition.mark_started();
+                let mut parameter = Vec::new();
+                match backend.sign_message_next(
+                    session,
+                    &mut parameter,
+                    input_from_wire(dp_raw, data_part_null_len),
+                    request_signature,
+                ) {
+                    Ok((parameter_out, signature))
+                        if parameter_out.is_empty()
+                            && (request_signature || signature.is_empty()) =>
+                    {
+                        let outcome = Ok(());
+                        transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                        Ok(signature)
+                    }
+                    Ok(_) => {
+                        transition.settle_ambiguous();
+                        Err(CkRv::DEVICE_ERROR)
+                    }
+                    Err(error) => {
+                        let outcome: CkResult<()> = Err(error);
+                        transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                        Err(error)
+                    }
                 }
-                Ok(_) => {
-                    transition.settle_ambiguous();
-                    Err(CkRv::DEVICE_ERROR)
-                }
-                Err(error) => {
-                    let outcome: CkResult<()> = Err(error);
-                    transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
-                    Err(error)
-                }
-            }
+            })
         })
         .await?;
         match result {
@@ -2399,7 +2421,7 @@ pub(crate) async fn verify_message(
             }));
         }
     };
-    let data = req.data;
+    let data = SecretBytes::new(req.data);
     let data_null_len = req.data_null_len;
     let signature = req.signature;
     let signature_null_len = req.signature_null_len;
@@ -2421,28 +2443,30 @@ pub(crate) async fn verify_message(
     if let Some(spec) = contract {
         let response_spec = spec.clone();
         let result = spawn_backend(move || {
-            transition.mark_started();
-            match backend.verify_message_exact(
-                session,
-                input_from_wire(&data, data_null_len),
-                input_from_wire(&signature, signature_null_len),
-                &spec,
-            ) {
-                Ok(ack) if parameter_result_matches_spec(&ack, &spec) => {
-                    let outcome = Ok(());
-                    transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
-                    outcome
+            data.expose(|d_raw| {
+                transition.mark_started();
+                match backend.verify_message_exact(
+                    session,
+                    input_from_wire(d_raw, data_null_len),
+                    input_from_wire(&signature, signature_null_len),
+                    &spec,
+                ) {
+                    Ok(ack) if parameter_result_matches_spec(&ack, &spec) => {
+                        let outcome = Ok(());
+                        transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                        outcome
+                    }
+                    Ok(_) => {
+                        transition.settle_ambiguous();
+                        Err(CkRv::DEVICE_ERROR)
+                    }
+                    Err(error) => {
+                        let outcome = Err(error);
+                        transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                        outcome
+                    }
                 }
-                Ok(_) => {
-                    transition.settle_ambiguous();
-                    Err(CkRv::DEVICE_ERROR)
-                }
-                Err(error) => {
-                    let outcome = Err(error);
-                    transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
-                    outcome
-                }
-            }
+            })
         })
         .await?;
         let (ck_rv, parameter_result) = match result {
@@ -2452,15 +2476,17 @@ pub(crate) async fn verify_message(
         Ok(Response::new(pkcs11_proxy_ng_proto::VerifyMessageResponse { ck_rv, parameter_result }))
     } else {
         let result = spawn_backend(move || {
-            transition.mark_started();
-            let result = backend.verify_message(
-                session,
-                &[],
-                input_from_wire(&data, data_null_len),
-                input_from_wire(&signature, signature_null_len),
-            );
-            transition.settle(&result, Some(MessageParameterShape::Unmodeled));
-            result
+            data.expose(|d_raw| {
+                transition.mark_started();
+                let result = backend.verify_message(
+                    session,
+                    &[],
+                    input_from_wire(d_raw, data_null_len),
+                    input_from_wire(&signature, signature_null_len),
+                );
+                transition.settle(&result, Some(MessageParameterShape::Unmodeled));
+                result
+            })
         })
         .await?;
         Ok(Response::new(pkcs11_proxy_ng_proto::VerifyMessageResponse {
@@ -2642,7 +2668,7 @@ pub(crate) async fn verify_message_next(
             }));
         }
     };
-    let data_part = req.data_part;
+    let data_part = SecretBytes::new(req.data_part);
     let data_part_null_len = req.data_part_null_len;
     let is_final = req.is_final;
     let signature = req.signature;
@@ -2665,29 +2691,31 @@ pub(crate) async fn verify_message_next(
     if let Some(spec) = contract {
         let response_spec = spec.clone();
         let result = spawn_backend(move || {
-            transition.mark_started();
-            match backend.verify_message_next_exact(
-                session,
-                input_from_wire(&data_part, data_part_null_len),
-                is_final,
-                input_from_wire(&signature, signature_null_len),
-                &spec,
-            ) {
-                Ok(ack) if parameter_result_matches_spec(&ack, &spec) => {
-                    let outcome = Ok(());
-                    transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
-                    outcome
+            data_part.expose(|dp_raw| {
+                transition.mark_started();
+                match backend.verify_message_next_exact(
+                    session,
+                    input_from_wire(dp_raw, data_part_null_len),
+                    is_final,
+                    input_from_wire(&signature, signature_null_len),
+                    &spec,
+                ) {
+                    Ok(ack) if parameter_result_matches_spec(&ack, &spec) => {
+                        let outcome = Ok(());
+                        transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                        outcome
+                    }
+                    Ok(_) => {
+                        transition.settle_ambiguous();
+                        Err(CkRv::DEVICE_ERROR)
+                    }
+                    Err(error) => {
+                        let outcome = Err(error);
+                        transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                        outcome
+                    }
                 }
-                Ok(_) => {
-                    transition.settle_ambiguous();
-                    Err(CkRv::DEVICE_ERROR)
-                }
-                Err(error) => {
-                    let outcome = Err(error);
-                    transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
-                    outcome
-                }
-            }
+            })
         })
         .await?;
         let (ck_rv, parameter_result) = match result {
@@ -2700,16 +2728,18 @@ pub(crate) async fn verify_message_next(
         }))
     } else {
         let result = spawn_backend(move || {
-            transition.mark_started();
-            let result = backend.verify_message_next(
-                session,
-                &[],
-                input_from_wire(&data_part, data_part_null_len),
-                is_final,
-                input_from_wire(&signature, signature_null_len),
-            );
-            transition.settle(&result, Some(MessageParameterShape::Unmodeled));
-            result
+            data_part.expose(|dp_raw| {
+                transition.mark_started();
+                let result = backend.verify_message_next(
+                    session,
+                    &[],
+                    input_from_wire(dp_raw, data_part_null_len),
+                    is_final,
+                    input_from_wire(&signature, signature_null_len),
+                );
+                transition.settle(&result, Some(MessageParameterShape::Unmodeled));
+                result
+            })
         })
         .await?;
         Ok(Response::new(pkcs11_proxy_ng_proto::VerifyMessageNextResponse {
