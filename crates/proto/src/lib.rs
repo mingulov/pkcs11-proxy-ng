@@ -5,6 +5,7 @@ pub mod pkcs11_proxy_ng {
 }
 
 pub mod convert;
+pub mod protected_decode;
 pub mod secret_boundary;
 
 // ADR-0013 redacted generated-message diagnostics, emitted by build.rs from
