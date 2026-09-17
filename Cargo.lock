@@ -1441,6 +1441,7 @@ version = "0.2.0"
 dependencies = [
  "pkcs11-proxy-ng-types",
  "prost",
+ "toml",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
