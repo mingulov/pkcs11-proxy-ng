@@ -6,6 +6,9 @@ use super::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
 use crate::pkcs11_proxy_ng::v1 as wire;
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use crate::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::*;
 

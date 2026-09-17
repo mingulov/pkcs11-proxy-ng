@@ -364,7 +364,7 @@ mod tests {
                 &ctx_id,
                 42,
                 CkAttributeType::ID,
-                CachedAttr { value: b"cached-id".to_vec(), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: SecretBytes::new(b"cached-id".to_vec()), ck_rv: CkRv::OK.0 },
             )
             .await;
         assert!(
@@ -436,7 +436,7 @@ mod tests {
                 &ctx_a,
                 7,
                 CkAttributeType::LABEL,
-                CachedAttr { value: b"my-label".to_vec(), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: SecretBytes::new(b"my-label".to_vec()), ck_rv: CkRv::OK.0 },
             )
             .await;
         assert!(
@@ -469,7 +469,7 @@ mod tests {
                 &ctx_b,
                 7,
                 CkAttributeType::LABEL,
-                CachedAttr { value: b"other".to_vec(), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: SecretBytes::new(b"other".to_vec()), ck_rv: CkRv::OK.0 },
             )
             .await;
         assert!(
@@ -507,7 +507,7 @@ mod tests {
                 &ctx_id,
                 5,
                 CkAttributeType::TOKEN,
-                CachedAttr { value: vec![0x01], ck_rv: CkRv::OK.0 },
+                CachedAttr { value: SecretBytes::new(vec![0x01]), ck_rv: CkRv::OK.0 },
             )
             .await;
 

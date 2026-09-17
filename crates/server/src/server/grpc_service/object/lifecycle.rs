@@ -217,7 +217,7 @@ mod tests {
                 &ctx_id,
                 obj_vh.0,
                 CkAttributeType::ID,
-                CachedAttr { value: b"obj-id".to_vec(), ck_rv: CkRv::OK.0 },
+                CachedAttr { value: SecretBytes::new(b"obj-id".to_vec()), ck_rv: CkRv::OK.0 },
             )
             .await;
         assert!(
@@ -280,7 +280,7 @@ mod tests {
                 &ctx_id,
                 obj_vh.0,
                 CkAttributeType::TOKEN,
-                CachedAttr { value: vec![0x01], ck_rv: CkRv::OK.0 },
+                CachedAttr { value: SecretBytes::new(vec![0x01]), ck_rv: CkRv::OK.0 },
             )
             .await;
 

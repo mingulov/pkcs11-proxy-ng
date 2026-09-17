@@ -5,7 +5,9 @@ use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::attribute::is_value_bearing_secret;
-use pkcs11_proxy_ng_types::{CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkRv};
+use pkcs11_proxy_ng_types::{
+    CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkRv, SecretBytes,
+};
 
 use super::super::super::context_manager::{CachedAttr, ClientContextId};
 use super::super::HandlerContext;
@@ -30,9 +32,12 @@ fn proto_result_from_cache(
     cached: CachedAttr,
 ) -> pkcs11_proxy_ng_proto::AttributeResult {
     let actual_length = cached.value.len() as u64;
+    // ADR-0013 §5: the prost response owns a plain `Vec<u8>`; the cached
+    // `SecretBytes` is borrowed for the copy and wiped when `cached` drops.
+    let value = secret_to_plain(&cached.value);
     pkcs11_proxy_ng_proto::AttributeResult {
         attr_type: attr_type.0,
-        result: Some(pkcs11_proxy_ng_proto::attribute_result::Result::Value(cached.value)),
+        result: Some(pkcs11_proxy_ng_proto::attribute_result::Result::Value(value)),
         actual_length,
     }
 }
@@ -78,7 +83,7 @@ fn exact_result_from_cache(
             apply_type: false,
             attr_type: query.attr_type,
             returned_len: value_len,
-            value: Some(cached.value.clone().into()),
+            value: Some(cached.value.clone()),
             ck_rv: None,
             nested: None,
         }
@@ -281,7 +286,7 @@ pub(super) async fn get_attribute_value(
                         &ctx_id,
                         object_handle,
                         fetched_attr.attr_type,
-                        CachedAttr { value: bytes.clone(), ck_rv: CkRv::OK.0 },
+                        CachedAttr { value: SecretBytes::new(bytes.clone()), ck_rv: CkRv::OK.0 },
                     )
                     .await;
             }
@@ -470,10 +475,7 @@ pub(super) async fn get_attribute_value_exact(
                                 &ctx_id,
                                 object_handle,
                                 fetched_result.attr_type,
-                                CachedAttr {
-                                    value: secret_to_plain(&bytes.clone()),
-                                    ck_rv: CkRv::OK.0,
-                                },
+                                CachedAttr { value: bytes.clone(), ck_rv: CkRv::OK.0 },
                             )
                             .await;
                     }

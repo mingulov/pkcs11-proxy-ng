@@ -15,7 +15,10 @@
 //!   `secret_to_plain` borrows, so the source is still wiped on drop.
 //! - Duplicate-field encodings — which would otherwise multiply the freed
 //!   plain allocations prost drops during merge — are rejected before decode
-//!   by [`crate::protected_decode`] (server requests, client responses).
+//!   by [`crate::protected_decode`] for inbound server requests (untrusted
+//!   clients). Client responses come from the trusted daemon over the same
+//!   schema, so no client-side scan is wired; the daemon is the only party
+//!   that must distrust its peer's encodings.
 //!
 //! Every other direction (prost `Vec<u8>`/`String` into `SecretBytes`) must
 //! wrap immediately via `SecretBytes::new` (adopting, zero-copy) or

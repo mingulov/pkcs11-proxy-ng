@@ -193,7 +193,12 @@ pub struct ObjectMetadata {
 #[derive(Debug, Clone)]
 pub struct CachedAttr {
     /// Raw attribute value bytes as returned by the backend (may be empty on error).
-    pub value: Vec<u8>,
+    ///
+    /// A wiping owner (ADR-0013 §2): attribute fields are polymorphic and
+    /// vendor-defined types fail closed to secret, so even though the
+    /// coalescer declines to cache known-secret types, whatever IS cached
+    /// (including vendor-unknown values) wipes on eviction/session drop.
+    pub value: SecretBytes,
     /// The raw `CK_RV` returned by the backend for this attribute.
     pub ck_rv: u64,
 }

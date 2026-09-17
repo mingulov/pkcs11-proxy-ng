@@ -1,5 +1,6 @@
 use super::*;
 use crate::server::handle_map::BackendHandle;
+use pkcs11_proxy_ng_types::SecretBytes;
 
 #[tokio::test]
 async fn backend_slot_metadata_invalidation_does_not_touch_colliding_virtual_number() {
@@ -724,7 +725,7 @@ async fn cache_object_metadata_noop_for_missing_context() {
 // --- per-object attribute cache (R2 coalescer, Task 1) ---
 
 fn make_cached_attr(value: Vec<u8>, rv: u64) -> super::CachedAttr {
-    super::CachedAttr { value, ck_rv: rv }
+    super::CachedAttr { value: SecretBytes::new(value), ck_rv: rv }
 }
 
 #[tokio::test]
@@ -787,7 +788,8 @@ fn attr_cache_cleared_on_teardown() {
     let mut ctx = LogicalClientInstance::new(None);
     let obj = VirtualHandle(55);
     let attr = CkAttributeType::CLASS;
-    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0xff], ck_rv: 0 });
+    ctx.attr_cache
+        .insert((obj, attr), super::CachedAttr { value: SecretBytes::new(vec![0xff]), ck_rv: 0 });
     let _ = ctx.teardown();
     assert!(ctx.attr_cache.is_empty(), "teardown must clear the attribute cache");
 }
@@ -803,7 +805,10 @@ fn attr_cache_evicted_on_session_close_via_remove_session() {
     ctx.record_session_object(session, obj);
 
     let attr = CkAttributeType::CLASS;
-    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![1, 2, 3], ck_rv: 0 });
+    ctx.attr_cache.insert(
+        (obj, attr),
+        super::CachedAttr { value: SecretBytes::new(vec![1, 2, 3]), ck_rv: 0 },
+    );
 
     ctx.remove_session(session);
 
@@ -824,7 +829,8 @@ fn attr_cache_evicted_on_session_close_via_remove_sessions_for_slot() {
     ctx.record_session_object(session, obj);
 
     let attr = CkAttributeType::TOKEN;
-    ctx.attr_cache.insert((obj, attr), super::CachedAttr { value: vec![0x01], ck_rv: 0 });
+    ctx.attr_cache
+        .insert((obj, attr), super::CachedAttr { value: SecretBytes::new(vec![0x01]), ck_rv: 0 });
 
     ctx.remove_sessions_for_slot(crate::server::slot_map::BackendSlotId(CkSlotId(7)));
 

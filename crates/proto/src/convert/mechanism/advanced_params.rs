@@ -3,6 +3,9 @@
 
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
 use crate::pkcs11_proxy_ng::v1::sp800108_attribute;
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use crate::secret_boundary::{secret_to_plain, secret_to_plain_string};
 use pkcs11_proxy_ng_types::{
     AesCmacKeyDerivationParams, CkAttribute, CkAttributeType, CkAttributeValue, CkMechanism, CkRv,

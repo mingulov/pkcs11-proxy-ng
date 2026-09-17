@@ -58,6 +58,101 @@ fn debug_reports_only_type_and_length() {
 }
 
 #[test]
+fn public_api_is_allowlisted_with_no_borrow_or_extraction() {
+    // ADR-0013 §4 forbids `Deref`/`AsRef`/serialization/plain-`Vec`
+    // extraction on `SecretBytes`. Stable Rust cannot express "does not
+    // implement" as a bound, and snapshot-based compile-fail harnesses
+    // drift with the unpinned CI toolchain, so this test audits the source
+    // of truth (`src/secret.rs`) directly, from both directions: every
+    // inherent method and trait impl must be allowlisted, and every
+    // forbidden API shape must be absent. Any new public API fails here
+    // until it is reviewed into the allowlist.
+    let source = include_str!("../src/secret.rs");
+
+    let mut methods = BTreeSet::new();
+    let mut impls = Vec::new();
+    for line in source.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("pub fn ") {
+            let name: String =
+                rest.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
+            assert!(!name.is_empty(), "unparseable method line: {line}");
+            assert!(methods.insert(name.clone()), "duplicate method {name}");
+        }
+        if let Some(rest) = line.strip_prefix("impl ") {
+            impls.push(rest.to_owned());
+        }
+    }
+    assert_eq!(
+        methods,
+        BTreeSet::from([
+            "copy_from_slice".to_owned(),
+            "expose".to_owned(),
+            "expose_mut".to_owned(),
+            "into_zeroizing".to_owned(),
+            "is_empty".to_owned(),
+            "len".to_owned(),
+            "new".to_owned(),
+        ]),
+        "SecretBytes inherent API changed: review the new method against ADR-0013 §4"
+    );
+    let mut impls_sorted = impls.clone();
+    impls_sorted.sort();
+    assert_eq!(
+        impls_sorted,
+        [
+            "Clone for SecretBytes {",
+            "Default for SecretBytes {",
+            "Eq for SecretBytes {}",
+            "From<&[u8]> for SecretBytes {",
+            "From<&str> for SecretBytes {",
+            "From<String> for SecretBytes {",
+            "From<Vec<u8>> for SecretBytes {",
+            "From<Zeroizing<Vec<u8>>> for SecretBytes {",
+            "PartialEq for SecretBytes {",
+            "SecretBytes {",
+            "Zeroize for SecretBytes {",
+            "ZeroizeOnDrop for SecretBytes {}",
+            "fmt::Debug for SecretBytes {",
+        ],
+        "SecretBytes trait impls changed: review against ADR-0013 §4"
+    );
+
+    // Denylist: borrow, extraction, serialization, and encoding APIs that
+    // must never appear, in any spelling. (`to_vec` on a borrowed slice
+    // inside a method body is fine; a `to_vec`/`into_vec` METHOD is not,
+    // so method-position shapes are matched with `fn ` prefixes.)
+    for forbidden in [
+        "Deref",
+        "AsRef",
+        "AsMut",
+        "Borrow<",
+        "Serialize",
+        "Deserialize",
+        "fn as_",
+        "fn into_vec",
+        "fn to_vec",
+        "fn into_bytes",
+        "fn to_bytes",
+        "fn as_bytes",
+        "fn as_slice",
+        "fn as_str",
+        "-> Vec<u8>",
+        "-> String",
+        "-> &[u8]",
+        "-> &str",
+        "Into<Vec<u8>>",
+        "Into<String>",
+        "From<SecretBytes>",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "forbidden SecretBytes API shape present: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn access_is_closure_scoped_and_ownership_transfer_stays_wiping() {
     let mut secret = SecretBytes::copy_from_slice(b"secret");
     assert_eq!(secret.expose(|bytes| bytes.len()), 6);

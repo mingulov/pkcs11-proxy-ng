@@ -1,3 +1,6 @@
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 

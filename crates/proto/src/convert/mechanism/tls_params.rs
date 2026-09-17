@@ -1,6 +1,9 @@
 //! Proto <-> Rust conversions for TLS/SSL and WTLS mechanism parameters.
 
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
+// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
+// boundary (response/request construction); the standing justification lives in
+// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use crate::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::{
     CkRv, SecretBytes, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData,
