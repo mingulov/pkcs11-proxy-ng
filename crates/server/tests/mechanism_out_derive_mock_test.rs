@@ -26,16 +26,16 @@ const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
 const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
 
 fn sp800_108_counter_iteration_param() -> PrfDataParam {
-    PrfDataParam { type_: CK_SP800_108_ITERATION_VARIABLE, value: vec![0; 16] }
+    PrfDataParam { type_: CK_SP800_108_ITERATION_VARIABLE, value: vec![0; 16].into() }
 }
 
 #[tokio::test]
 async fn derive_key_mechanism_out_surfaces_pbe_iv_through_mock_grpc_stack() {
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CKM_PBE_MD2_DES_CBC]));
     let expected_output = CkMechanismParams::Pbe(PbeParams {
-        init_vector: vec![0xA5; 8],
-        password: b"password".to_vec(),
-        salt: b"salt".to_vec(),
+        init_vector: vec![0xA5; 8].into(),
+        password: b"password".to_vec().into(),
+        salt: b"salt".to_vec().into(),
         iteration: 4096,
     });
     backend.set_derive_key_output(Some(expected_output.clone()));
@@ -157,8 +157,8 @@ async fn derive_key_mechanism_out_surfaces_tls_key_material_through_mock_grpc_st
         server_mac_secret_handle: 102,
         client_key_handle: 201,
         server_key_handle: 202,
-        client_iv: vec![0xA1, 0xA2, 0xA3, 0xA4],
-        server_iv: vec![0xB1, 0xB2, 0xB3, 0xB4],
+        client_iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
+        server_iv: vec![0xB1, 0xB2, 0xB3, 0xB4].into(),
     });
     backend.set_derive_key_output(Some(expected_output.clone()));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
@@ -183,8 +183,8 @@ async fn derive_key_mechanism_out_surfaces_tls_key_material_through_mock_grpc_st
             server_mac_secret_handle: 0,
             client_key_handle: 0,
             server_key_handle: 0,
-            client_iv: vec![0; 4],
-            server_iv: vec![0; 4],
+            client_iv: vec![0; 4].into(),
+            server_iv: vec![0; 4].into(),
         })),
     };
 
@@ -258,7 +258,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles()
         .await
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(data_results[0].value, Some(32_u64.to_le_bytes().to_vec()));
+    assert_eq!(data_results[0].value, Some(SecretBytes::new(32_u64.to_le_bytes().to_vec())));
     client.destroy_object(session, additional_key).await.unwrap();
 }
 
@@ -280,13 +280,15 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_addition
                 sp800_108_counter_iteration_param(),
                 PrfDataParam {
                     type_: CK_SP800_108_KEY_HANDLE,
-                    value: base_key.0.to_ne_bytes().to_vec(),
+                    value: base_key.0.to_ne_bytes().to_vec().into(),
                 },
             ],
             additional_derived_keys: vec![Sp800108DerivedKey {
                 template: vec![CkAttribute {
                     attr_type: CkAttributeType::LABEL,
-                    value: Some(CkAttributeValue::String("double-pipeline-extra".to_string())),
+                    value: Some(CkAttributeValue::String(
+                        "double-pipeline-extra".to_string().into(),
+                    )),
                 }],
                 key_handle: 0,
             }],
@@ -317,7 +319,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_addition
         .await
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(data_results[0].value, Some(b"double-pipeline-extra".to_vec()));
+    assert_eq!(data_results[0].value, Some(SecretBytes::new(b"double-pipeline-extra".to_vec())));
     client.destroy_object(session, additional_key).await.unwrap();
 }
 
@@ -424,7 +426,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_
         .await
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(data_results[0].value, Some(64_u64.to_le_bytes().to_vec()));
+    assert_eq!(data_results[0].value, Some(SecretBytes::new(64_u64.to_le_bytes().to_vec())));
     client.destroy_object(session, additional_key).await.unwrap();
 }
 
@@ -446,7 +448,7 @@ async fn derive_key_rejects_invalid_sp800_108_key_handle_data_param() {
                 sp800_108_counter_iteration_param(),
                 PrfDataParam {
                     type_: CK_SP800_108_KEY_HANDLE,
-                    value: invalid_nested_key.0.to_ne_bytes().to_vec(),
+                    value: invalid_nested_key.0.to_ne_bytes().to_vec().into(),
                 },
             ],
             additional_derived_keys: Vec::new(),

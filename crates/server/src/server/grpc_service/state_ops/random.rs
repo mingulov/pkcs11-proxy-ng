@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -34,7 +35,7 @@ pub(super) async fn generate_random(
 
     Ok(Response::new(pkcs11_proxy_ng_proto::GenerateRandomResponse {
         ck_rv,
-        random_data: random_data.unwrap_or_default(),
+        random_data: secret_to_plain(&random_data.unwrap_or_default()),
     }))
 }
 

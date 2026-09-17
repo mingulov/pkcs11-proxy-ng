@@ -95,7 +95,7 @@ fn derive_key_validates_source_grounded_signal_parameter_handles() {
     let x2_initialize =
         |peer_public_prekey_handle, peer_public_identity_handle, own_public_identity_handle| {
             CkMechanismParams::X2RatchetInitialize(X2RatchetInitializeParams {
-                sk: vec![0x42; 32],
+                sk: vec![0x42; 32].into(),
                 peer_public_prekey_handle,
                 peer_public_identity_handle,
                 own_public_identity_handle,
@@ -130,7 +130,7 @@ fn derive_key_validates_source_grounded_signal_parameter_handles() {
 
     let x2_respond = |own_prekey_handle, initiator_identity_handle, own_identity_handle| {
         CkMechanismParams::X2RatchetRespond(X2RatchetRespondParams {
-            sk: vec![0x24; 32],
+            sk: vec![0x24; 32].into(),
             own_prekey_handle,
             initiator_identity_handle,
             own_identity_handle,
@@ -240,8 +240,9 @@ fn cms_sig_workflows_validate_optional_certificate_handle() {
     let live_cert_mechanism = cms_sig_mechanism(certificate);
     backend.sign_init(session, &live_cert_mechanism, signing_key).unwrap();
     let signature = backend.sign_final(session).unwrap();
+    let signature_bytes = signature.expose(|raw| raw.to_vec());
     backend.verify_init(session, &live_cert_mechanism, signing_key).unwrap();
-    backend.verify_final(session, CkInBuf::Bytes(&signature)).unwrap();
+    backend.verify_final(session, CkInBuf::Bytes(&signature_bytes)).unwrap();
     backend.sign_recover_init(session, &live_cert_mechanism, signing_key).unwrap();
     backend.sign_recover(session, CkInBuf::Bytes(b"data")).unwrap();
     backend.verify_recover_init(session, &live_cert_mechanism, signing_key).unwrap();
@@ -341,13 +342,14 @@ fn kip_derive_and_mac_validate_hkey_but_wrap_does_not_use_it() {
     let valid_mac = kip_mechanism(CkMechanismType::KIP_MAC, entropy_key);
     backend.sign_init(session, &valid_mac, base_key).unwrap();
     let signature = backend.sign_final(session).unwrap();
+    let signature_bytes = signature.expose(|raw| raw.to_vec());
     backend.verify_init(session, &valid_mac, base_key).unwrap();
-    backend.verify_final(session, CkInBuf::Bytes(&signature)).unwrap();
+    backend.verify_final(session, CkInBuf::Bytes(&signature_bytes)).unwrap();
 
     let wrap_mechanism = kip_mechanism(CkMechanismType::KIP_WRAP, invalid);
     assert_eq!(
         backend.wrap_key(session, &wrap_mechanism, wrapping_key, wrapped_key).unwrap(),
-        vec![0xDE, 0xAD, 0xBE, 0xEF]
+        vec![0xDE, 0xAD, 0xBE, 0xEF].into()
     );
     assert_ne!(
         backend
@@ -381,7 +383,7 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
     let ecdh2 = |private_data_handle| {
         CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams {
             kdf: 1,
-            shared_data: b"shared".to_vec(),
+            shared_data: b"shared".to_vec().into(),
             public_data: b"peer-public-1".to_vec(),
             private_data_len: 32,
             private_data_handle,
@@ -399,7 +401,7 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
     let ecmqv = |private_data_handle, public_key_handle| {
         CkMechanismParams::EcmqvDerive(EcmqvDeriveParams {
             kdf: 1,
-            shared_data: b"shared".to_vec(),
+            shared_data: b"shared".to_vec().into(),
             public_data: b"peer-public-1".to_vec(),
             private_data_len: 32,
             private_data_handle,
@@ -425,7 +427,7 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
     let x942_dh2 = |private_data_handle| {
         CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams {
             kdf: 1,
-            other_info: b"other".to_vec(),
+            other_info: b"other".to_vec().into(),
             public_data: b"dh-public-1".to_vec(),
             private_data_len: 32,
             private_data_handle,
@@ -443,7 +445,7 @@ fn derive_key_validates_dual_ec_and_x942_parameter_handles() {
     let x942_mqv = |private_data_handle, public_key_handle| {
         CkMechanismParams::X942MqvDerive(X942MqvDeriveParams {
             kdf: 1,
-            other_info: b"other".to_vec(),
+            other_info: b"other".to_vec().into(),
             public_data: b"dh-public-1".to_vec(),
             private_data_len: 32,
             private_data_handle,
@@ -512,9 +514,9 @@ fn derive_key_with_output_returns_configured_pbe_iv_output_params() {
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_03A0), params: None };
     let output = CkMechanismParams::Pbe(PbeParams {
-        init_vector: vec![0x5A; 8],
-        password: b"password".to_vec(),
-        salt: b"salt".to_vec(),
+        init_vector: vec![0x5A; 8].into(),
+        password: b"password".to_vec().into(),
+        salt: b"salt".to_vec().into(),
         iteration: 4096,
     });
     backend.set_derive_key_output(Some(output.clone()));
@@ -550,7 +552,7 @@ fn derive_key_with_sp800_108_additional_keys_allocates_output_handles() {
                 Sp800108DerivedKey {
                     template: vec![CkAttribute {
                         attr_type: CkAttributeType::LABEL,
-                        value: Some(CkAttributeValue::String("extra".to_string())),
+                        value: Some(CkAttributeValue::String("extra".to_string().into())),
                     }],
                     key_handle: 0,
                 },
@@ -595,7 +597,7 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
                         },
                         CkAttribute {
                             attr_type: CkAttributeType::LABEL,
-                            value: Some(CkAttributeValue::String("sp800 extra".to_string())),
+                            value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
                         },
                     ],
                     key_handle: 0,
@@ -616,7 +618,7 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
                         },
                         CkAttribute {
                             attr_type: CkAttributeType::LABEL,
-                            value: Some(CkAttributeValue::String("sp800 extra".to_string())),
+                            value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
                         },
                     ],
                     key_handle: 0,
@@ -692,9 +694,9 @@ fn derive_key_with_sp800_108_additional_key_handles_preserves_templates() {
         assert_eq!(rv, CkRv::OK);
         assert_eq!(
             data_results[0].value,
-            Some((48 as cryptoki_sys::CK_ULONG).to_le_bytes().to_vec())
+            Some(SecretBytes::new((48 as cryptoki_sys::CK_ULONG).to_le_bytes().to_vec()))
         );
-        assert_eq!(data_results[1].value, Some(b"sp800 extra".to_vec()));
+        assert_eq!(data_results[1].value, Some(SecretBytes::new(b"sp800 extra".to_vec())));
     }
 }
 
@@ -705,7 +707,7 @@ fn derive_key_with_sp800_108_enforces_mode_data_param_rules() {
     const CKM_SP800_108_DOUBLE_PIPELINE_KDF: CkMechanismType = CkMechanismType(0x0000_03AE);
     const CK_SP800_108_COUNTER: u64 = 0x0000_0002;
 
-    let counter_field = PrfDataParam { type_: CK_SP800_108_COUNTER, value: vec![0; 16] };
+    let counter_field = PrfDataParam { type_: CK_SP800_108_COUNTER, value: vec![0; 16].into() };
     for (name, mechanism_type, params) in [
         (
             "counter mode missing iteration variable",
@@ -785,7 +787,7 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
                 prf_type: CKM_SHA256_HMAC,
                 data_params: vec![PrfDataParam {
                     type_: CK_SP800_108_ITERATION_VARIABLE,
-                    value: Vec::new(),
+                    value: Vec::new().into(),
                 }],
                 additional_derived_keys: Vec::new(),
             }),
@@ -799,7 +801,7 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_COUNTER,
-                        value: short_counter_format.clone(),
+                        value: short_counter_format.clone().into(),
                     },
                 ],
                 iv: vec![0xA5; 16],
@@ -813,7 +815,10 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
                 prf_type: CKM_SHA256_HMAC,
                 data_params: vec![
                     sp800_108_null_iteration_param(),
-                    PrfDataParam { type_: CK_SP800_108_DKM_LENGTH, value: short_dkm_length_format },
+                    PrfDataParam {
+                        type_: CK_SP800_108_DKM_LENGTH,
+                        value: short_dkm_length_format.into(),
+                    },
                 ],
                 additional_derived_keys: Vec::new(),
             }),
@@ -825,7 +830,7 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
                 prf_type: CKM_SHA256_HMAC,
                 data_params: vec![
                     sp800_108_counter_iteration_param(),
-                    PrfDataParam { type_: CK_SP800_108_BYTE_ARRAY, value: Vec::new() },
+                    PrfDataParam { type_: CK_SP800_108_BYTE_ARRAY, value: Vec::new().into() },
                 ],
                 additional_derived_keys: Vec::new(),
             }),
@@ -837,8 +842,11 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
                 prf_type: CKM_SHA256_HMAC,
                 data_params: vec![
                     sp800_108_null_iteration_param(),
-                    PrfDataParam { type_: CK_SP800_108_COUNTER, value: counter_format.clone() },
-                    PrfDataParam { type_: CK_SP800_108_COUNTER, value: counter_format },
+                    PrfDataParam {
+                        type_: CK_SP800_108_COUNTER,
+                        value: counter_format.clone().into(),
+                    },
+                    PrfDataParam { type_: CK_SP800_108_COUNTER, value: counter_format.into() },
                 ],
                 iv: vec![0xA5; 16],
                 additional_derived_keys: Vec::new(),
@@ -853,9 +861,12 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_DKM_LENGTH,
-                        value: dkm_length_format.clone(),
+                        value: dkm_length_format.clone().into(),
                     },
-                    PrfDataParam { type_: CK_SP800_108_DKM_LENGTH, value: dkm_length_format },
+                    PrfDataParam {
+                        type_: CK_SP800_108_DKM_LENGTH,
+                        value: dkm_length_format.into(),
+                    },
                 ],
                 additional_derived_keys: Vec::new(),
             }),
@@ -869,7 +880,7 @@ fn derive_key_with_sp800_108_validates_data_param_payload_shapes_and_singletons(
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_DKM_LENGTH,
-                        value: sp800_108_dkm_length_format_bytes_with_method(0xDEAD_BEEF),
+                        value: sp800_108_dkm_length_format_bytes_with_method(0xDEAD_BEEF).into(),
                     },
                 ],
                 additional_derived_keys: Vec::new(),
@@ -918,7 +929,7 @@ fn derive_key_with_sp800_108_key_handle_data_param_requires_live_input_key() {
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_KEY_HANDLE,
-                        value: 0xBAD_u64.to_ne_bytes().to_vec(),
+                        value: 0xBAD_u64.to_ne_bytes().to_vec().into(),
                     },
                 ],
                 additional_derived_keys: Vec::new(),
@@ -932,7 +943,7 @@ fn derive_key_with_sp800_108_key_handle_data_param_requires_live_input_key() {
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_KEY_HANDLE,
-                        value: 0xBAD_u64.to_ne_bytes().to_vec(),
+                        value: 0xBAD_u64.to_ne_bytes().to_vec().into(),
                     },
                 ],
                 iv: Vec::new(),
@@ -970,7 +981,7 @@ fn derive_key_with_sp800_108_key_handle_data_param_accepts_live_input_key() {
                     sp800_108_counter_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_KEY_HANDLE,
-                        value: input_key.0.to_ne_bytes().to_vec(),
+                        value: input_key.0.to_ne_bytes().to_vec().into(),
                     },
                 ],
                 additional_derived_keys: Vec::new(),
@@ -984,7 +995,7 @@ fn derive_key_with_sp800_108_key_handle_data_param_accepts_live_input_key() {
                     sp800_108_null_iteration_param(),
                     PrfDataParam {
                         type_: CK_SP800_108_KEY_HANDLE,
-                        value: input_key.0.to_ne_bytes().to_vec(),
+                        value: input_key.0.to_ne_bytes().to_vec().into(),
                     },
                 ],
                 iv: Vec::new(),
@@ -1021,7 +1032,7 @@ fn derive_key_preserves_primary_key_template() {
                 },
                 CkAttribute {
                     attr_type: CkAttributeType::LABEL,
-                    value: Some(CkAttributeValue::String("primary derive".to_string())),
+                    value: Some(CkAttributeValue::String("primary derive".to_string().into())),
                 },
             ],
         )
@@ -1034,7 +1045,10 @@ fn derive_key_preserves_primary_key_template() {
     backend.get_attribute_value(session, derived_key, &mut template).unwrap();
 
     assert_eq!(template[0].value, Some(CkAttributeValue::Ulong(24)));
-    assert_eq!(template[1].value, Some(CkAttributeValue::String("primary derive".to_string())));
+    assert_eq!(
+        template[1].value,
+        Some(CkAttributeValue::String("primary derive".to_string().into()))
+    );
 }
 
 #[test]
@@ -1052,7 +1066,7 @@ fn derive_key_with_sp800_108_additional_key_handles_rejects_small_attribute_buff
             additional_derived_keys: vec![Sp800108DerivedKey {
                 template: vec![CkAttribute {
                     attr_type: CkAttributeType::LABEL,
-                    value: Some(CkAttributeValue::String("sp800 extra".to_string())),
+                    value: Some(CkAttributeValue::String("sp800 extra".to_string().into())),
                 }],
                 key_handle: 0,
             }],

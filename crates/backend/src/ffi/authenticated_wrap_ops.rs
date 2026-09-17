@@ -9,10 +9,10 @@ fn require_legacy_parameter(mechanism: &CkMechanism) -> CkResult<()> {
     if legacy_parameter_supported(mechanism) { Ok(()) } else { Err(CkRv::FUNCTION_NOT_SUPPORTED) }
 }
 
-fn legacy_bytes(output: AuthenticatedOutput) -> CkResult<Vec<u8>> {
+fn legacy_bytes(output: AuthenticatedOutput) -> CkResult<SecretBytes> {
     match output {
         AuthenticatedOutput::Iv(iv) => Ok(iv),
-        AuthenticatedOutput::Unchanged => Ok(Vec::new()),
+        AuthenticatedOutput::Unchanged => Ok(SecretBytes::default()),
         AuthenticatedOutput::Message(_)
         | AuthenticatedOutput::Effects(_)
         | AuthenticatedOutput::Invalid(_) => Err(CkRv::FUNCTION_NOT_SUPPORTED),
@@ -28,11 +28,11 @@ impl FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         require_legacy_parameter(mechanism)?;
         let (bytes, output) =
             self.ffi_wrap_authenticated_typed(session, mechanism, None, wrapping_key, key, aad)?;
-        Ok((bytes, legacy_bytes(output)?))
+        Ok((bytes.into(), legacy_bytes(output)?))
     }
 
     pub(super) fn ffi_unwrap_key_authenticated(
@@ -43,7 +43,7 @@ impl FfiBackend {
         wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
         aad: CkInBuf<'_>,
-    ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
+    ) -> CkResult<(CkObjectHandle, SecretBytes)> {
         require_legacy_parameter(mechanism)?;
         let (key, output) = self.ffi_unwrap_authenticated_typed(
             session,
@@ -902,7 +902,7 @@ mod tests {
         let parameter_spec = CkParameterRoundtripSpec {
             buffer_present: true,
             buffer_len: 16,
-            value: Some(vec![0x11; 16]),
+            value: Some(vec![0x11; 16].into()),
         };
 
         let (output, parameter) = backend
@@ -925,7 +925,7 @@ mod tests {
         assert_eq!(output.value, None);
         assert_eq!(parameter.ck_rv, CkRv::OK);
         assert_eq!(parameter.returned_len, 16);
-        assert_eq!(parameter.value.as_ref().map(|value| value[0]), Some(0xA5));
+        assert_eq!(parameter.value.as_ref().map(|value| value.expose(|raw| raw[0])), Some(0xA5));
     }
 
     #[test]
@@ -943,7 +943,7 @@ mod tests {
         let parameter_spec = CkParameterRoundtripSpec {
             buffer_present: true,
             buffer_len: 16,
-            value: Some(vec![0x11; 16]),
+            value: Some(vec![0x11; 16].into()),
         };
 
         let (output, parameter) = backend
@@ -964,6 +964,6 @@ mod tests {
         assert_eq!(output.value, None);
         assert_eq!(parameter.ck_rv, CkRv::BUFFER_TOO_SMALL);
         assert_eq!(parameter.returned_len, 16);
-        assert_eq!(parameter.value.as_ref().map(|value| value[0]), Some(0xA5));
+        assert_eq!(parameter.value.as_ref().map(|value| value.expose(|raw| raw[0])), Some(0xA5));
     }
 }

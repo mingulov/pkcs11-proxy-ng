@@ -1,8 +1,9 @@
 //! Proto <-> Rust conversions for TLS/SSL and WTLS mechanism parameters.
 
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
+use crate::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::{
-    CkRv, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData,
+    CkRv, SecretBytes, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData,
     Tls12ExtendedMasterKeyDeriveParams, Tls12MasterKeyDeriveParams, TlsKdfParams, TlsPrfParams,
     WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
 };
@@ -58,13 +59,21 @@ fn required_wtls_random_from_option(
 
 impl From<&TlsPrfParams> for v1_proto::TlsPrfParams {
     fn from(p: &TlsPrfParams) -> Self {
-        Self { seed: p.seed.clone(), label: p.label.clone(), output_len: p.output_len }
+        Self {
+            seed: secret_to_plain(&p.seed),
+            label: secret_to_plain(&p.label),
+            output_len: p.output_len,
+        }
     }
 }
 
 impl From<&v1_proto::TlsPrfParams> for TlsPrfParams {
     fn from(p: &v1_proto::TlsPrfParams) -> Self {
-        Self { seed: p.seed.clone(), label: p.label.clone(), output_len: p.output_len }
+        Self {
+            seed: SecretBytes::copy_from_slice(&p.seed),
+            label: SecretBytes::copy_from_slice(&p.label),
+            output_len: p.output_len,
+        }
     }
 }
 
@@ -76,9 +85,9 @@ impl From<&TlsKdfParams> for v1_proto::TlsKdfParams {
     fn from(p: &TlsKdfParams) -> Self {
         Self {
             prf_mechanism: p.prf_mechanism,
-            label: p.label.clone(),
+            label: secret_to_plain(&p.label),
             random_info: Some(ssl_random_to_proto(&p.random_info)),
-            context_data: p.context_data.clone(),
+            context_data: secret_to_plain(&p.context_data),
         }
     }
 }
@@ -89,9 +98,9 @@ impl TryFrom<&v1_proto::TlsKdfParams> for TlsKdfParams {
     fn try_from(p: &v1_proto::TlsKdfParams) -> Result<Self, Self::Error> {
         Ok(Self {
             prf_mechanism: p.prf_mechanism,
-            label: p.label.clone(),
+            label: SecretBytes::copy_from_slice(&p.label),
             random_info: required_ssl_random_from_option(&p.random_info)?,
-            context_data: p.context_data.clone(),
+            context_data: SecretBytes::copy_from_slice(&p.context_data),
         })
     }
 }
@@ -193,8 +202,8 @@ impl From<&Ssl3KeyMatParams> for v1_proto::Ssl3KeyMatParams {
             server_mac_secret_handle: p.server_mac_secret_handle,
             client_key_handle: p.client_key_handle,
             server_key_handle: p.server_key_handle,
-            client_iv: p.client_iv.clone(),
-            server_iv: p.server_iv.clone(),
+            client_iv: secret_to_plain(&p.client_iv),
+            server_iv: secret_to_plain(&p.server_iv),
         }
     }
 }
@@ -214,8 +223,8 @@ impl TryFrom<&v1_proto::Ssl3KeyMatParams> for Ssl3KeyMatParams {
             server_mac_secret_handle: p.server_mac_secret_handle,
             client_key_handle: p.client_key_handle,
             server_key_handle: p.server_key_handle,
-            client_iv: p.client_iv.clone(),
-            server_iv: p.server_iv.clone(),
+            client_iv: SecretBytes::copy_from_slice(&p.client_iv),
+            server_iv: SecretBytes::copy_from_slice(&p.server_iv),
         })
     }
 }
@@ -254,8 +263,8 @@ impl From<&WtlsPrfParams> for v1_proto::WtlsPrfParams {
     fn from(p: &WtlsPrfParams) -> Self {
         Self {
             digest_mechanism: p.digest_mechanism,
-            seed: p.seed.clone(),
-            label: p.label.clone(),
+            seed: secret_to_plain(&p.seed),
+            label: secret_to_plain(&p.label),
             output_len: p.output_len,
         }
     }
@@ -265,8 +274,8 @@ impl From<&v1_proto::WtlsPrfParams> for WtlsPrfParams {
     fn from(p: &v1_proto::WtlsPrfParams) -> Self {
         Self {
             digest_mechanism: p.digest_mechanism,
-            seed: p.seed.clone(),
-            label: p.label.clone(),
+            seed: SecretBytes::copy_from_slice(&p.seed),
+            label: SecretBytes::copy_from_slice(&p.label),
             output_len: p.output_len,
         }
     }

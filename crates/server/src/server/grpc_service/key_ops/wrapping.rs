@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -59,7 +60,7 @@ pub(crate) async fn wrap_key(
     let (ck_rv, wrapped_key) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyResponse {
         ck_rv,
-        wrapped_key: wrapped_key.unwrap_or_default(),
+        wrapped_key: secret_to_plain(&wrapped_key.unwrap_or_default()),
     }))
 }
 
@@ -422,7 +423,7 @@ mod tests {
                 &ctx_id,
                 object_vh.0,
                 ObjectMetadata {
-                    unique_id: object_uid,
+                    unique_id: object_uid.into(),
                     class: Some(CkObjectClass::SECRET_KEY),
                     is_token: false,
                 },

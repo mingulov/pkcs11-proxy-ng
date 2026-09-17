@@ -730,7 +730,10 @@ pub(super) async fn gate_object_handle(
 
     // --- 4. Policy checks ---
     // Per-object uid check (opt-in; pass-through when no objects grant configured).
-    if !ctx.token_policy.allows_object_use(&identity, &label, &serial, &meta.unique_id) {
+    if !meta
+        .unique_id
+        .expose(|raw| ctx.token_policy.allows_object_use(&identity, &label, &serial, raw))
+    {
         // Constant-work deny: substitute the NOT-FOUND sentinel. The handler
         // forwards handle 0 to the backend which returns CKR_OBJECT_HANDLE_INVALID,
         // IDENTICAL to a genuinely-nonexistent object. No log, no audit, no metric.
@@ -921,7 +924,9 @@ pub(super) fn template_declares_token_object(template: &[CkAttribute]) -> bool {
         attr.attr_type == CkAttributeType::TOKEN
             && match &attr.value {
                 Some(CkAttributeValue::Bool(b)) => *b,
-                Some(CkAttributeValue::Bytes(bytes)) => bytes.first().is_some_and(|&b| b != 0),
+                Some(CkAttributeValue::Bytes(bytes)) => {
+                    bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0))
+                }
                 Some(CkAttributeValue::Ulong(u)) => *u != 0,
                 _ => false,
             }
@@ -1052,7 +1057,7 @@ mod tests {
             iv: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: Vec::new(),
+            aad: Vec::new().into(),
             tag_bits: 128,
         });
         let proto_mech = mechanism_output_to_proto(params).expect("gcm should convert");
@@ -1081,7 +1086,7 @@ mod tests {
         // should return None so the response carries no mech_out rather
         // than panicking or sending wrong type info.
         let params = CkMechanismParams::Raw(pkcs11_proxy_ng_types::RawMechanismParams {
-            data: vec![1, 2, 3],
+            data: vec![1, 2, 3].into(),
         });
         assert!(mechanism_output_to_proto(params).is_none());
     }
@@ -1503,7 +1508,7 @@ mod tests {
             mock.set_attribute(
                 backend_object,
                 CkAttributeType::UNIQUE_ID,
-                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid)),
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.into())),
             );
         }
 
@@ -1750,7 +1755,7 @@ mod tests {
         mock.set_attribute(
             backend_object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone().into())),
         );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
@@ -1826,7 +1831,7 @@ mod tests {
         mock.set_attribute(
             backend_object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec().into())),
         );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
@@ -1926,7 +1931,7 @@ mod tests {
         mock.set_attribute(
             backend_object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec().into())),
         );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
@@ -2079,7 +2084,7 @@ mod tests {
         mock.set_attribute(
             backend_object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec().into())),
         );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
@@ -2149,7 +2154,7 @@ mod tests {
         mock.set_attribute(
             backend_object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(OTHER_UID_BYTES.to_vec().into())),
         );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;

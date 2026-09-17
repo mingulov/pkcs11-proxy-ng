@@ -5,7 +5,8 @@
 //! the message-based API layer stabilises.
 
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
-use pkcs11_proxy_ng_types::CkObjectHandle;
+use crate::secret_boundary::secret_to_plain;
+use pkcs11_proxy_ng_types::{CkObjectHandle, SecretBytes};
 
 // ---------------------------------------------------------------------------
 // Rust-side struct definitions
@@ -47,19 +48,25 @@ pub struct Salsa20ChaCha20Poly1305MessageParams {
 }
 
 /// CK_ASYNC_DATA — result structure for C_AsyncComplete.
+///
+/// `value` is `SecretBytes` (ADR-0013): `AsyncData.value` is classified
+/// secret and the polymorphic async payload fails closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsyncData {
     pub version: u64,
-    pub value: Vec<u8>,
+    pub value: SecretBytes,
     pub value_len: u64,
     pub object_handle: CkObjectHandle,
     pub additional_object_handle: CkObjectHandle,
 }
 
 /// Rust-side enum for the `MessageParameter` oneof.
+///
+/// `Raw` is `SecretBytes` (ADR-0013): `MessageParameter.raw` is classified
+/// secret (unknown vendor bytes fail closed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageParameter {
-    Raw(Vec<u8>),
+    Raw(SecretBytes),
     GcmMessage(GcmMessageParams),
     CcmMessage(CcmMessageParams),
     SalaChacha(Salsa20ChaCha20Poly1305MessageParams),
@@ -455,7 +462,7 @@ impl From<&AsyncData> for v1_proto::AsyncData {
     fn from(a: &AsyncData) -> Self {
         v1_proto::AsyncData {
             version: a.version,
-            value: a.value.clone(),
+            value: secret_to_plain(&a.value),
             value_len: a.value_len,
             object_handle: a.object_handle.0,
             additional_object_handle: a.additional_object_handle.0,
@@ -467,7 +474,7 @@ impl From<&v1_proto::AsyncData> for AsyncData {
     fn from(a: &v1_proto::AsyncData) -> Self {
         AsyncData {
             version: a.version,
-            value: a.value.clone(),
+            value: SecretBytes::copy_from_slice(&a.value),
             value_len: a.value_len,
             object_handle: CkObjectHandle(a.object_handle),
             additional_object_handle: CkObjectHandle(a.additional_object_handle),
@@ -482,7 +489,9 @@ impl From<&v1_proto::AsyncData> for AsyncData {
 impl From<&MessageParameter> for v1_proto::MessageParameter {
     fn from(p: &MessageParameter) -> Self {
         let params = match p {
-            MessageParameter::Raw(data) => v1_proto::message_parameter::Params::Raw(data.clone()),
+            MessageParameter::Raw(data) => {
+                v1_proto::message_parameter::Params::Raw(secret_to_plain(data))
+            }
             MessageParameter::GcmMessage(p) => {
                 v1_proto::message_parameter::Params::GcmMessageParams(p.into())
             }
@@ -548,7 +557,7 @@ impl TryFrom<&v1_proto::MessageParameter> for MessageParameter {
     fn try_from(p: &v1_proto::MessageParameter) -> Result<Self, Self::Error> {
         match &p.params {
             Some(v1_proto::message_parameter::Params::Raw(data)) => {
-                Ok(MessageParameter::Raw(data.clone()))
+                Ok(MessageParameter::Raw(SecretBytes::copy_from_slice(data)))
             }
             Some(params @ v1_proto::message_parameter::Params::GcmMessageParams(p)) => {
                 validate_structured_wire_params(params)?;
@@ -672,7 +681,7 @@ mod tests {
     fn async_data_round_trip() {
         let original = AsyncData {
             version: 1,
-            value: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            value: vec![0xDE, 0xAD, 0xBE, 0xEF].into(),
             value_len: 4,
             object_handle: CkObjectHandle(42),
             additional_object_handle: CkObjectHandle(99),
@@ -686,7 +695,7 @@ mod tests {
     fn async_data_zero_handles() {
         let original = AsyncData {
             version: 0,
-            value: vec![],
+            value: vec![].into(),
             value_len: 0,
             object_handle: CkObjectHandle(0),
             additional_object_handle: CkObjectHandle(0),
@@ -700,7 +709,7 @@ mod tests {
     fn async_data_max_handles() {
         let original = AsyncData {
             version: u64::MAX,
-            value: vec![0xFF; 32],
+            value: vec![0xFF; 32].into(),
             value_len: 32,
             object_handle: CkObjectHandle(u64::MAX),
             additional_object_handle: CkObjectHandle(u64::MAX),
@@ -712,7 +721,7 @@ mod tests {
 
     #[test]
     fn message_parameter_raw_round_trip() {
-        let original = MessageParameter::Raw(vec![0x01, 0x02, 0x03]);
+        let original = MessageParameter::Raw(vec![0x01, 0x02, 0x03].into());
         let proto: v1_proto::MessageParameter = (&original).into();
         let back = MessageParameter::try_from(&proto).unwrap();
         assert_eq!(back, original);
@@ -720,7 +729,7 @@ mod tests {
 
     #[test]
     fn message_parameter_raw_empty() {
-        let original = MessageParameter::Raw(vec![]);
+        let original = MessageParameter::Raw(vec![].into());
         let proto: v1_proto::MessageParameter = (&original).into();
         let back = MessageParameter::try_from(&proto).unwrap();
         assert_eq!(back, original);

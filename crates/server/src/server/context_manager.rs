@@ -174,7 +174,10 @@ impl Drop for CloseSessionTransition {
 /// (I2 fix, ADR-0012 §G3).
 #[derive(Debug, Clone)]
 pub struct ObjectMetadata {
-    pub unique_id: Vec<u8>,
+    /// `CKA_UNIQUE_ID` bytes (ADR-0013: attribute values are secret-classified
+    /// and fail closed). Wiping owner; cached copies wipe on eviction, and
+    /// the derived `Debug` redacts via `SecretBytes`.
+    pub unique_id: SecretBytes,
     /// `None` when `CKA_CLASS` is absent or unparseable (M2: uid-only deployments must not
     /// fail on a missing class attribute). Class-confined gates treat `None` as fail-closed
     /// (deny); uid-only deployments ignore this field entirely.

@@ -7,7 +7,7 @@ use super::{
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects;
 use pkcs11_proxy_ng_proto::convert::message_params::{MessageParameter, MessageParameterShape};
-use pkcs11_proxy_ng_types::{CkResult, CkRv};
+use pkcs11_proxy_ng_types::{CkResult, CkRv, SecretBytes};
 
 #[test]
 fn exact_query_parameter_effect_rejection_is_transactional() {
@@ -46,7 +46,7 @@ fn exact_query_parameter_effect_rejection_is_transactional() {
     let ack = CkParameterRoundtripResult {
         ck_rv: CkRv::OK,
         returned_len: param_spec.buffer_len,
-        value: Some(Vec::new()),
+        value: Some(Vec::new().into()),
     };
     // Initialized IV effects are permitted, but the forbidden output-only tag
     // must reject the entire response before IV, tag, or length stores.
@@ -228,7 +228,7 @@ fn write_exact_message_error_applies_only_permitted_parameter_effects() {
     let ack = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
         ck_rv: CkRv::DEVICE_ERROR,
         returned_len: spec.buffer_len,
-        value: Some(vec![]),
+        value: Some(vec![].into()),
     };
     let mut length = 99;
     let rv = unsafe {
@@ -290,12 +290,12 @@ fn transactional_message_output_keeps_all_memory_unchanged_on_malformed_ack() {
     let output_result = pkcs11_proxy_ng_types::CkOutputBufferResult {
         ck_rv: CkRv::OK,
         returned_len: Some(4),
-        value: Some(vec![1, 2, 3, 4]),
+        value: Some(vec![1, 2, 3, 4].into()),
     };
     let malformed_parameter_result = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
         ck_rv: CkRv::OK,
         returned_len: parameter_spec.buffer_len + 1,
-        value: Some(Vec::new()),
+        value: Some(Vec::new().into()),
     };
     let mut output = [0xAAu8; 4];
     let mut output_len = output.len() as CK_ULONG;
@@ -368,12 +368,12 @@ fn transactional_message_output_rejects_malformed_main_value_before_any_write() 
     let malformed_output = pkcs11_proxy_ng_types::CkOutputBufferResult {
         ck_rv: CkRv::OK,
         returned_len: Some(4),
-        value: Some(vec![1, 2, 3]),
+        value: Some(vec![1, 2, 3].into()),
     };
     let parameter_result = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
         ck_rv: CkRv::OK,
         returned_len: parameter_spec.buffer_len,
-        value: Some(Vec::new()),
+        value: Some(Vec::new().into()),
     };
     let mut output = [0xAAu8; 4];
     let mut output_len = output.len() as CK_ULONG;
@@ -523,7 +523,7 @@ fn transactional_message_b2s_keeps_all_memory_unchanged_on_bad_ack() {
     let bad_ack = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
         ck_rv: CkRv::OK,
         returned_len: parameter_spec.buffer_len,
-        value: Some(Vec::new()),
+        value: Some(Vec::new().into()),
     };
     let mut output = [0xAAu8; 2];
     let mut output_len = output.len() as CK_ULONG;
@@ -648,7 +648,7 @@ fn commit_stage_response(
     let parameter_result = pkcs11_proxy_ng_types::CkParameterRoundtripResult {
         ck_rv: CkRv::OK,
         returned_len: outer_len as u64,
-        value: Some(Vec::new()),
+        value: Some(Vec::new().into()),
     };
     let mut output_len = 0;
     unsafe {
@@ -1334,9 +1334,9 @@ fn write_mechanism_output_params_writes_pbe_init_vector() {
 
     let generated_iv = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
     let mech_out = CkMechanismParams::Pbe(PbeParams {
-        init_vector: generated_iv.clone(),
-        password: Vec::new(),
-        salt: Vec::new(),
+        init_vector: generated_iv.clone().into(),
+        password: Vec::new().into(),
+        salt: Vec::new().into(),
         iteration: 1000,
     });
 
@@ -1370,9 +1370,9 @@ fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
         ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
     };
     let mech_out = CkMechanismParams::Pbe(PbeParams {
-        init_vector: vec![9u8; 8],
-        password: Vec::new(),
-        salt: Vec::new(),
+        init_vector: vec![9u8; 8].into(),
+        password: Vec::new().into(),
+        salt: Vec::new().into(),
         iteration: 1,
     });
     // Must not panic / deref NULL.
@@ -1609,8 +1609,8 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             assert_eq!(params.server_mac_secret_handle, 0);
             assert_eq!(params.client_key_handle, 0);
             assert_eq!(params.server_key_handle, 0);
-            assert_eq!(params.client_iv, [0u8; 4]);
-            assert_eq!(params.server_iv, [0u8; 4]);
+            assert_eq!(params.client_iv, SecretBytes::copy_from_slice(&[0u8; 4]));
+            assert_eq!(params.server_iv, SecretBytes::copy_from_slice(&[0u8; 4]));
         }
         other => panic!("unexpected SSL3/TLS key material params: {other:?}"),
     }
@@ -1629,8 +1629,8 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         server_mac_secret_handle: 102,
         client_key_handle: 201,
         server_key_handle: 202,
-        client_iv: vec![0xA1, 0xA2, 0xA3, 0xA4],
-        server_iv: vec![0xB1, 0xB2, 0xB3, 0xB4],
+        client_iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
+        server_iv: vec![0xB1, 0xB2, 0xB3, 0xB4].into(),
     });
     unsafe {
         super::write_mechanism_output_params(&mut mechanism, &mech_out);

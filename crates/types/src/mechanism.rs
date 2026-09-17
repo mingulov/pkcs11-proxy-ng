@@ -1,4 +1,5 @@
 use crate::attribute::CkAttribute;
+use crate::secret::SecretBytes;
 
 /// Mechanism type identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -301,7 +302,7 @@ pub struct RsaPkcsOaepParams {
     pub hash_alg: CkMechanismType,
     pub mgf: u64,
     pub source: u64,
-    pub source_data: Vec<u8>,
+    pub source_data: SecretBytes,
 }
 
 /// CK_GCM_PARAMS — parameters for CKM_AES_GCM.
@@ -316,7 +317,7 @@ pub struct GcmParams {
     pub iv: Vec<u8>,
     pub iv_bits: u64,
     pub iv_buffer_len: u64,
-    pub aad: Vec<u8>,
+    pub aad: SecretBytes,
     pub tag_bits: u64,
 }
 
@@ -328,7 +329,7 @@ pub struct GcmParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ecdh1DeriveParams {
     pub kdf: u64,
-    pub shared_data: Vec<u8>,
+    pub shared_data: SecretBytes,
     pub public_data: Vec<u8>,
 }
 
@@ -414,35 +415,35 @@ pub struct Rc5CbcParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AesCbcEncryptDataParams {
     pub iv: Vec<u8>, // 16-byte IV
-    pub data: Vec<u8>,
+    pub data: SecretBytes,
 }
 
 /// CK_DES_CBC_ENCRYPT_DATA_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesCbcEncryptDataParams {
     pub iv: Vec<u8>, // 8-byte IV
-    pub data: Vec<u8>,
+    pub data: SecretBytes,
 }
 
 /// CK_ARIA_CBC_ENCRYPT_DATA_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AriaCbcEncryptDataParams {
     pub iv: Vec<u8>, // 16-byte IV
-    pub data: Vec<u8>,
+    pub data: SecretBytes,
 }
 
 /// CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CamelliaCbcEncryptDataParams {
     pub iv: Vec<u8>, // 16-byte IV
-    pub data: Vec<u8>,
+    pub data: SecretBytes,
 }
 
 /// CK_SEED_CBC_ENCRYPT_DATA_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedCbcEncryptDataParams {
     pub iv: Vec<u8>, // 16-byte IV
-    pub data: Vec<u8>,
+    pub data: SecretBytes,
 }
 
 // --- AEAD parameter structs ---
@@ -452,7 +453,7 @@ pub struct SeedCbcEncryptDataParams {
 pub struct CcmParams {
     pub data_len: u64,
     pub nonce: Vec<u8>,
-    pub aad: Vec<u8>,
+    pub aad: SecretBytes,
     pub mac_len: u64,
 }
 
@@ -477,7 +478,7 @@ pub struct Salsa20Params {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Salsa20ChaCha20Poly1305Params {
     pub nonce: Vec<u8>,
-    pub aad: Vec<u8>,
+    pub aad: SecretBytes,
 }
 
 /// CK_GCM_WRAP_PARAMS
@@ -486,7 +487,7 @@ pub struct GcmWrapParams {
     pub iv: Vec<u8>,
     pub iv_fixed_bits: u64,
     pub iv_generator: u64,
-    pub aad: Vec<u8>,
+    pub aad: SecretBytes,
     pub tag_bits: u64,
 }
 
@@ -497,7 +498,7 @@ pub struct CcmWrapParams {
     pub nonce: Vec<u8>,
     pub nonce_fixed_bits: u64,
     pub nonce_generator: u64,
-    pub aad: Vec<u8>,
+    pub aad: SecretBytes,
     pub mac_len: u64,
 }
 
@@ -509,7 +510,7 @@ pub struct CcmWrapParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ecdh2DeriveParams {
     pub kdf: u64,
-    pub shared_data: Vec<u8>,
+    pub shared_data: SecretBytes,
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
     pub private_data_handle: u64,
@@ -520,7 +521,7 @@ pub struct Ecdh2DeriveParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EcmqvDeriveParams {
     pub kdf: u64,
-    pub shared_data: Vec<u8>,
+    pub shared_data: SecretBytes,
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
     pub private_data_handle: u64,
@@ -532,7 +533,7 @@ pub struct EcmqvDeriveParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X942Dh1DeriveParams {
     pub kdf: u64,
-    pub other_info: Vec<u8>,
+    pub other_info: SecretBytes,
     pub public_data: Vec<u8>,
 }
 
@@ -540,7 +541,7 @@ pub struct X942Dh1DeriveParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X942Dh2DeriveParams {
     pub kdf: u64,
-    pub other_info: Vec<u8>,
+    pub other_info: SecretBytes,
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
     pub private_data_handle: u64,
@@ -551,7 +552,7 @@ pub struct X942Dh2DeriveParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X942MqvDeriveParams {
     pub kdf: u64,
-    pub other_info: Vec<u8>,
+    pub other_info: SecretBytes,
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
     pub private_data_handle: u64,
@@ -566,16 +567,16 @@ pub struct HkdfParams {
     pub expand: bool,
     pub prf_hash_mechanism: u64,
     pub salt_type: u64,
-    pub salt: Vec<u8>,
+    pub salt: SecretBytes,
     pub salt_key_handle: u64,
-    pub info: Vec<u8>,
+    pub info: SecretBytes,
 }
 
 /// CK_EDDSA_PARAMS — EdDSA signature parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EddsaParams {
     pub ph_flag: bool,
-    pub context_data: Vec<u8>,
+    pub context_data: SecretBytes,
 }
 
 /// CK_GOSTR3410_DERIVE_PARAMS — GOST R 34.10 key derivation.
@@ -604,7 +605,7 @@ pub struct KeaDeriveParams {
 pub struct EcdhAesKeyWrapParams {
     pub aes_key_bits: u64,
     pub kdf: u64,
-    pub shared_data: Vec<u8>,
+    pub shared_data: SecretBytes,
 }
 
 /// CK_RSA_AES_KEY_WRAP_PARAMS — RSA-OAEP + AES key wrap (nested OAEP params).
@@ -626,7 +627,7 @@ pub struct Gostr3410KeyWrapParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyWrapSetOaepParams {
     pub bc: u32,
-    pub x: Vec<u8>,
+    pub x: SecretBytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -640,9 +641,9 @@ pub struct KeyWrapSetOaepParams {
 /// is overwritten when the value is dropped.
 #[derive(Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct PbeParams {
-    pub init_vector: Vec<u8>,
-    pub password: Vec<u8>,
-    pub salt: Vec<u8>,
+    pub init_vector: SecretBytes,
+    pub password: SecretBytes,
+    pub salt: SecretBytes,
     pub iteration: u64,
 }
 
@@ -668,11 +669,11 @@ impl std::fmt::Debug for PbeParams {
 #[derive(Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct Pkcs5Pbkd2Params {
     pub salt_source: u64,
-    pub salt_source_data: Vec<u8>,
+    pub salt_source_data: SecretBytes,
     pub iterations: u64,
     pub prf: u64,
-    pub prf_data: Vec<u8>,
-    pub password: Vec<u8>,
+    pub prf_data: SecretBytes,
+    pub password: SecretBytes,
 }
 
 impl std::fmt::Debug for Pkcs5Pbkd2Params {
@@ -704,8 +705,8 @@ pub struct SslRandomData {
 /// CK_TLS_PRF_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsPrfParams {
-    pub seed: Vec<u8>,
-    pub label: Vec<u8>,
+    pub seed: SecretBytes,
+    pub label: SecretBytes,
     pub output_len: u64,
 }
 
@@ -713,9 +714,9 @@ pub struct TlsPrfParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsKdfParams {
     pub prf_mechanism: u64,
-    pub label: Vec<u8>,
+    pub label: SecretBytes,
     pub random_info: SslRandomData,
-    pub context_data: Vec<u8>,
+    pub context_data: SecretBytes,
 }
 
 /// CK_SSL3_MASTER_KEY_DERIVE_PARAMS
@@ -757,8 +758,8 @@ pub struct Ssl3KeyMatParams {
     pub server_mac_secret_handle: u64,
     pub client_key_handle: u64,
     pub server_key_handle: u64,
-    pub client_iv: Vec<u8>,
-    pub server_iv: Vec<u8>,
+    pub client_iv: SecretBytes,
+    pub server_iv: SecretBytes,
 }
 
 /// CK_WTLS_RANDOM_DATA
@@ -780,8 +781,8 @@ pub struct WtlsMasterKeyDeriveParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WtlsPrfParams {
     pub digest_mechanism: u64,
-    pub seed: Vec<u8>,
-    pub label: Vec<u8>,
+    pub seed: SecretBytes,
+    pub label: SecretBytes,
     pub output_len: u64,
 }
 
@@ -810,8 +811,8 @@ pub struct IkePrfDeriveParams {
     pub prf_mechanism: u64,
     pub data_as_key: bool,
     pub rekey: bool,
-    pub ni: Vec<u8>,
-    pub nr: Vec<u8>,
+    pub ni: SecretBytes,
+    pub nr: SecretBytes,
     pub new_key_handle: u64,
 }
 
@@ -822,8 +823,8 @@ pub struct Ike1PrfDeriveParams {
     pub has_prev_key: bool,
     pub keygxy_handle: u64,
     pub prev_key_handle: u64,
-    pub ckyi: Vec<u8>,
-    pub ckyr: Vec<u8>,
+    pub ckyi: SecretBytes,
+    pub ckyr: SecretBytes,
     pub key_number: u32,
 }
 
@@ -833,7 +834,7 @@ pub struct Ike1ExtendedDeriveParams {
     pub prf_mechanism: u64,
     pub has_keygxy: bool,
     pub keygxy_handle: u64,
-    pub extra_data: Vec<u8>,
+    pub extra_data: SecretBytes,
 }
 
 /// CK_IKE2_PRF_PLUS_DERIVE_PARAMS
@@ -842,7 +843,7 @@ pub struct Ike2PrfPlusDeriveParams {
     pub prf_mechanism: u64,
     pub has_seed_key: bool,
     pub seed_key_handle: u64,
-    pub seed_data: Vec<u8>,
+    pub seed_data: SecretBytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -853,7 +854,7 @@ pub struct Ike2PrfPlusDeriveParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrfDataParam {
     pub type_: u64,
-    pub value: Vec<u8>,
+    pub value: SecretBytes,
 }
 
 /// CK_SP800_108_KDF_PARAMS
@@ -923,7 +924,7 @@ pub struct X3dhRespondParams {
 /// CK_X2RATCHET_INITIALIZE_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X2RatchetInitializeParams {
-    pub sk: Vec<u8>,
+    pub sk: SecretBytes,
     pub peer_public_prekey_handle: u64,
     pub peer_public_identity_handle: u64,
     pub own_public_identity_handle: u64,
@@ -936,7 +937,7 @@ pub struct X2RatchetInitializeParams {
 /// CK_X2RATCHET_RESPOND_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X2RatchetRespondParams {
-    pub sk: Vec<u8>,
+    pub sk: SecretBytes,
     pub own_prekey_handle: u64,
     pub initiator_identity_handle: u64,
     pub own_identity_handle: u64,
@@ -954,7 +955,7 @@ pub struct X2RatchetRespondParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OtpParam {
     pub type_: u64,
-    pub value: Vec<u8>,
+    pub value: SecretBytes,
 }
 
 /// CK_OTP_PARAMS
@@ -968,7 +969,7 @@ pub struct OtpParams {
 pub struct KipParams {
     pub mechanism: Box<CkMechanism>,
     pub key_handle: u64,
-    pub seed: Vec<u8>,
+    pub seed: SecretBytes,
 }
 
 /// CK_CMS_SIG_PARAMS — references nested Mechanisms (boxed to avoid infinite size).
@@ -978,8 +979,8 @@ pub struct CmsSigParams {
     pub signing_mechanism: Box<CkMechanism>,
     pub digest_mechanism: Box<CkMechanism>,
     pub content_type: String,
-    pub requested_attributes: Vec<u8>,
-    pub required_attributes: Vec<u8>,
+    pub requested_attributes: SecretBytes,
+    pub required_attributes: SecretBytes,
 }
 
 /// CK_SKIPJACK_PRIVATE_WRAP_PARAMS
@@ -988,7 +989,7 @@ pub struct CmsSigParams {
 /// [`PbeParams`].
 #[derive(Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct SkipjackPrivateWrapParams {
-    pub password: Vec<u8>,
+    pub password: SecretBytes,
     pub public_data: Vec<u8>,
     pub password_length: u64,
     pub random_a: Vec<u8>,
@@ -1020,13 +1021,13 @@ impl std::fmt::Debug for SkipjackPrivateWrapParams {
 /// drop, as in [`PbeParams`].
 #[derive(Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct SkipjackRelayxParams {
-    pub old_wrapped_x: Vec<u8>,
-    pub old_password: Vec<u8>,
-    pub old_public_data: Vec<u8>,
-    pub old_random_a: Vec<u8>,
-    pub new_password: Vec<u8>,
-    pub new_public_data: Vec<u8>,
-    pub new_random_a: Vec<u8>,
+    pub old_wrapped_x: SecretBytes,
+    pub old_password: SecretBytes,
+    pub old_public_data: SecretBytes,
+    pub old_random_a: SecretBytes,
+    pub new_password: SecretBytes,
+    pub new_public_data: SecretBytes,
+    pub new_random_a: SecretBytes,
 }
 
 impl std::fmt::Debug for SkipjackRelayxParams {
@@ -1080,7 +1081,7 @@ pub struct ExtractParams {
 /// Used by CONCATENATE_BASE_AND_DATA, CONCATENATE_DATA_AND_BASE, etc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyDerivationStringData {
-    pub data: Vec<u8>,
+    pub data: SecretBytes,
 }
 
 /// CK_SIGN_ADDITIONAL_CONTEXT (`hash == 0`) or, for the generic
@@ -1090,7 +1091,7 @@ pub struct KeyDerivationStringData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignAdditionalContext {
     pub hedge_variant: u64,
-    pub context: Vec<u8>,
+    pub context: SecretBytes,
     /// 0 = plain CK_SIGN_ADDITIONAL_CONTEXT; non-zero = CK_HASH_SIGN_ADDITIONAL_CONTEXT.
     pub hash: u64,
 }
@@ -1100,15 +1101,15 @@ pub struct SignAdditionalContext {
 pub struct KmacParams {
     pub key_handle: u64,
     pub mac_length: u64,
-    pub customization_string: Vec<u8>,
+    pub customization_string: SecretBytes,
 }
 
 /// CK_MU_GEN_PARAMS — ML-DSA external-mu generation inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MuGenParams {
     pub key_handle: u64,
-    pub tr: Vec<u8>,
-    pub context: Vec<u8>,
+    pub tr: SecretBytes,
+    pub context: SecretBytes,
 }
 
 /// Opaque raw parameter bytes — opt-in escape hatch for vendor-specific
@@ -1116,7 +1117,7 @@ pub struct MuGenParams {
 /// The config registry controls which mechanisms can use this variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawMechanismParams {
-    pub data: Vec<u8>,
+    pub data: SecretBytes,
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,14 +1131,14 @@ pub struct EciesParams {
     pub derivation_mechanism: Box<CkMechanism>,
     pub encryption_mechanism: Box<CkMechanism>,
     pub mac_mechanism: Box<CkMechanism>,
-    pub shared_data: Vec<u8>,
+    pub shared_data: SecretBytes,
 }
 
 /// CK_NC_AES_CMAC_KEY_DERIVATION_PARAMS — AES-CMAC key derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AesCmacKeyDerivationParams {
-    pub context: Vec<u8>,
-    pub label: Vec<u8>,
+    pub context: SecretBytes,
+    pub label: SecretBytes,
 }
 
 /// CK_IBM_DILITHIUM_PARAMS — Dilithium / ML-DSA post-quantum signature parameters.
@@ -1153,8 +1154,8 @@ pub struct KyberParams {
     pub version: u64,
     pub mode: u64,
     pub secret_handle: u64,
-    pub shared_data: Vec<u8>,
-    pub blob: Vec<u8>,
+    pub shared_data: SecretBytes,
+    pub blob: SecretBytes,
 }
 
 /// CK_IBM_BTC_DERIVE_PARAMS — HD key derivation (BIP-32, BIP-44, SLIP-10).
@@ -1162,7 +1163,7 @@ pub struct KyberParams {
 pub struct HdKeyDeriveParams {
     pub derive_type: u64,
     pub child_key_index: u64,
-    pub chain_code: Vec<u8>,
+    pub chain_code: SecretBytes,
     pub version: u64,
 }
 
@@ -1170,15 +1171,15 @@ pub struct HdKeyDeriveParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VendorObjectExtractParams {
     pub format: u64,
-    pub context: Vec<u8>,
+    pub context: SecretBytes,
 }
 
 /// Vendor object insertion (restore) parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VendorObjectInsertParams {
     pub format: u64,
-    pub context: Vec<u8>,
-    pub object_data: Vec<u8>,
+    pub context: SecretBytes,
+    pub object_data: SecretBytes,
 }
 
 /// A mechanism with optional typed parameters.
@@ -1621,15 +1622,15 @@ mod tests {
     fn pbe_params_zeroizes_password_on_explicit_call() {
         use zeroize::Zeroize;
         let mut p = PbeParams {
-            init_vector: vec![1u8; 16],
-            password: vec![0xAAu8; 32],
-            salt: vec![2u8; 16],
+            init_vector: vec![1u8; 16].into(),
+            password: vec![0xAAu8; 32].into(),
+            salt: vec![2u8; 16].into(),
             iteration: 4096,
         };
         p.zeroize();
         // After Zeroize::zeroize() Vec<u8> fields are cleared/truncated.
-        assert!(p.password.iter().all(|&b| b == 0), "password bytes not zeroed");
-        assert!(p.init_vector.iter().all(|&b| b == 0), "iv bytes not zeroed");
+        assert!(p.password.expose(|b| b.iter().all(|&x| x == 0)), "password bytes not zeroed");
+        assert!(p.init_vector.expose(|b| b.iter().all(|&x| x == 0)), "iv bytes not zeroed");
     }
 
     #[test]
@@ -1637,21 +1638,21 @@ mod tests {
         use zeroize::Zeroize;
         let mut p = Pkcs5Pbkd2Params {
             salt_source: 1,
-            salt_source_data: vec![1u8; 8],
+            salt_source_data: vec![1u8; 8].into(),
             iterations: 10_000,
             prf: 0x40,
-            prf_data: vec![2u8; 4],
-            password: b"hunter2".to_vec(),
+            prf_data: vec![2u8; 4].into(),
+            password: b"hunter2".to_vec().into(),
         };
         p.zeroize();
-        assert!(p.password.iter().all(|&b| b == 0));
+        assert!(p.password.expose(|b| b.iter().all(|&x| x == 0)));
     }
 
     #[test]
     fn skipjack_params_zeroize_passwords() {
         use zeroize::Zeroize;
         let mut a = SkipjackPrivateWrapParams {
-            password: b"old-secret".to_vec(),
+            password: b"old-secret".to_vec().into(),
             public_data: vec![],
             password_length: 10,
             random_a: vec![],
@@ -1660,20 +1661,20 @@ mod tests {
             subprime_q: vec![],
         };
         a.zeroize();
-        assert!(a.password.iter().all(|&b| b == 0));
+        assert!(a.password.expose(|b| b.iter().all(|&x| x == 0)));
 
         let mut b = SkipjackRelayxParams {
-            old_wrapped_x: vec![],
-            old_password: b"old-pin".to_vec(),
-            old_public_data: vec![],
-            old_random_a: vec![],
-            new_password: b"new-pin".to_vec(),
-            new_public_data: vec![],
-            new_random_a: vec![],
+            old_wrapped_x: vec![].into(),
+            old_password: b"old-pin".to_vec().into(),
+            old_public_data: vec![].into(),
+            old_random_a: vec![].into(),
+            new_password: b"new-pin".to_vec().into(),
+            new_public_data: vec![].into(),
+            new_random_a: vec![].into(),
         };
         b.zeroize();
-        assert!(b.old_password.iter().all(|&n| n == 0));
-        assert!(b.new_password.iter().all(|&n| n == 0));
+        assert!(b.old_password.expose(|b| b.iter().all(|&x| x == 0)));
+        assert!(b.new_password.expose(|b| b.iter().all(|&x| x == 0)));
     }
 
     // Witness whose Zeroize impl records that it ran, so ZeroizeOnDrop's
@@ -1725,9 +1726,9 @@ mod tests {
     #[test]
     fn pbe_params_debug_redacts_password() {
         let p = PbeParams {
-            init_vector: vec![1u8; 16],
-            password: b"hunter2".to_vec(),
-            salt: vec![2u8; 16],
+            init_vector: vec![1u8; 16].into(),
+            password: b"hunter2".to_vec().into(),
+            salt: vec![2u8; 16].into(),
             iteration: 4096,
         };
         let formatted = format!("{p:?}");
@@ -1740,11 +1741,11 @@ mod tests {
     fn pkcs5_pbkd2_debug_redacts_password() {
         let p = Pkcs5Pbkd2Params {
             salt_source: 1,
-            salt_source_data: vec![],
+            salt_source_data: vec![].into(),
             iterations: 1,
             prf: 0,
-            prf_data: vec![],
-            password: b"correct horse battery staple".to_vec(),
+            prf_data: vec![].into(),
+            password: b"correct horse battery staple".to_vec().into(),
         };
         let formatted = format!("{p:?}");
         assert!(!formatted.contains("correct horse"), "password leaked: {formatted}");
@@ -1754,7 +1755,7 @@ mod tests {
     #[test]
     fn skipjack_debug_redacts_passwords() {
         let a = SkipjackPrivateWrapParams {
-            password: b"alpha-pw".to_vec(),
+            password: b"alpha-pw".to_vec().into(),
             public_data: vec![],
             password_length: 8,
             random_a: vec![],
@@ -1767,13 +1768,13 @@ mod tests {
         assert!(af.contains("REDACTED"));
 
         let b = SkipjackRelayxParams {
-            old_wrapped_x: vec![],
-            old_password: b"old-pw".to_vec(),
-            old_public_data: vec![],
-            old_random_a: vec![],
-            new_password: b"new-pw".to_vec(),
-            new_public_data: vec![],
-            new_random_a: vec![],
+            old_wrapped_x: vec![].into(),
+            old_password: b"old-pw".to_vec().into(),
+            old_public_data: vec![].into(),
+            old_random_a: vec![].into(),
+            new_password: b"new-pw".to_vec().into(),
+            new_public_data: vec![].into(),
+            new_random_a: vec![].into(),
         };
         let bf = format!("{b:?}");
         assert!(!bf.contains("old-pw"));

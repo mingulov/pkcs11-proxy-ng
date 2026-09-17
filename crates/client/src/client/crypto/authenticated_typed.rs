@@ -219,9 +219,10 @@ mod tests {
             mechanism_type: CkMechanismType::AES_CBC,
             params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0; 16] })),
         };
-        let valid =
-            wire::AuthenticatedMechanismOutput::try_from(&AuthenticatedOutput::Iv(vec![0; 16]))
-                .unwrap();
+        let valid = wire::AuthenticatedMechanismOutput::try_from(&AuthenticatedOutput::Iv(
+            vec![0; 16].into(),
+        ))
+        .unwrap();
         assert!(decode_output(&mechanism, None, Some(&valid), &[]).is_ok());
         for output in [
             None,

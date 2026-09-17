@@ -102,7 +102,7 @@ async fn open(f: &MtlsFixture, second: bool) -> Client {
                     },
                     CkAttribute {
                         attr_type: CkAttributeType::UNIQUE_ID,
-                        value: Some(CkAttributeValue::Bytes(vec![0xa1])),
+                        value: Some(CkAttributeValue::Bytes(vec![0xa1].into())),
                     },
                 ]
                 .iter()

@@ -467,7 +467,7 @@ fn classic_gcm_initialized_error_iv_effect() {
             iv: vec![0x11; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![],
+            aad: vec![].into(),
             tag_bits: 128,
         })),
     };
@@ -500,7 +500,7 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
         iv: vec![0x11; 12],
         iv_bits: 96,
         iv_buffer_len: 12,
-        aad: vec![],
+        aad: vec![].into(),
         tag_bits: 128,
     };
     let mechanism = CkMechanism {
@@ -576,7 +576,7 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
                     (None, None)
                 };
                 assert_eq!(output.returned_len, expected_len, "{cell}: returned_len");
-                assert_eq!(output.value, expected_value, "{cell}: value");
+                assert_eq!(output.value, expected_value.map(SecretBytes::new), "{cell}: value");
                 let gated = spec.buffer_present || spec.length_pointer_null;
                 if !gated {
                     assert_eq!(effects, None, "{cell}: size query suppresses effects");
@@ -606,7 +606,7 @@ fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
         iv: vec![0x11; 12],
         iv_bits: 96,
         iv_buffer_len: 12,
-        aad: vec![],
+        aad: vec![].into(),
         tag_bits: 128,
     };
     let mechanism = CkMechanism {

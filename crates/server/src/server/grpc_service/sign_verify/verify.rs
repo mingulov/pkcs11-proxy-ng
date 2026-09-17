@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -326,6 +327,6 @@ pub(crate) async fn verify_recover(
     let (ck_rv, data) = super::super::ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::VerifyRecoverResponse {
         ck_rv,
-        data: data.unwrap_or_default(),
+        data: secret_to_plain(&data.unwrap_or_default()),
     }))
 }

@@ -544,14 +544,14 @@ async fn loaded_shim_writes_mechanism_out_to_caller_stack_after_encrypt_wrap_and
         iv: encrypt_generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: encrypt_generated_iv.len() as u64,
-        aad: b"aad".to_vec(),
+        aad: b"aad".to_vec().into(),
         tag_bits: 128,
     })));
     backend.set_wrap_key_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
         iv: wrap_generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: wrap_generated_iv.len() as u64,
-        aad: b"wrap-aad".to_vec(),
+        aad: b"wrap-aad".to_vec().into(),
         tag_bits: 128,
     })));
     let (endpoint, _shutdown) = common_3x::mock_daemon(backend).await;

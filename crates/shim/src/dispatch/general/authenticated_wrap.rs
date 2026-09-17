@@ -204,7 +204,7 @@ mod tests {
                 &pkcs11_proxy_ng_types::CkOutputBufferResult {
                     ck_rv: CkRv::OK,
                     returned_len: Some(0),
-                    value: Some(Vec::new()),
+                    value: Some(Vec::new().into()),
                 },
                 &AuthenticatedOutput::Message(MessageParameter::GcmMessage(output)),
                 std::ptr::NonNull::<u8>::dangling().as_ptr(),
@@ -276,7 +276,7 @@ mod tests {
                 &CkOutputBufferResult {
                     ck_rv: CkRv::OK,
                     returned_len: Some(4),
-                    value: Some(vec![4; 4]),
+                    value: Some(vec![4; 4].into()),
                 },
                 &AuthenticatedOutput::Message(MessageParameter::GcmMessage(output)),
                 bytes.as_mut_ptr(),

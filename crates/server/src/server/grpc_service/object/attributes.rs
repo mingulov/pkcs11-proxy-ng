@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::time::Instant;
 
 use tonic::{Request, Response, Status};
@@ -77,7 +78,7 @@ fn exact_result_from_cache(
             apply_type: false,
             attr_type: query.attr_type,
             returned_len: value_len,
-            value: Some(cached.value.clone()),
+            value: Some(cached.value.clone().into()),
             ck_rv: None,
             nested: None,
         }
@@ -469,7 +470,10 @@ pub(super) async fn get_attribute_value_exact(
                                 &ctx_id,
                                 object_handle,
                                 fetched_result.attr_type,
-                                CachedAttr { value: bytes.clone(), ck_rv: CkRv::OK.0 },
+                                CachedAttr {
+                                    value: secret_to_plain(&bytes.clone()),
+                                    ck_rv: CkRv::OK.0,
+                                },
                             )
                             .await;
                     }
@@ -641,7 +645,7 @@ mod tests {
                 apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 3,
-                value: Some(b"key".to_vec()),
+                value: Some(b"key".to_vec().into()),
                 ck_rv: None,
                 nested: None,
             }],
@@ -831,12 +835,12 @@ mod tests {
         mock.set_attribute(
             CkObjectHandle(1),
             CkAttributeType::ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(b"my-id".to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(b"my-id".to_vec().into())),
         );
         mock.set_attribute(
             CkObjectHandle(1),
             CkAttributeType::LABEL,
-            MockAttributeSlot::Value(CkAttributeValue::String("my-label".to_owned())),
+            MockAttributeSlot::Value(CkAttributeValue::String("my-label".to_owned().into())),
         );
         // CKA_VALUE is registered as secret (VALUE_BEARING_SECRET); no need to
         // set it — the backend will return no value for unregistered attrs by default.

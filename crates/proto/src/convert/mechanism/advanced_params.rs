@@ -3,14 +3,15 @@
 
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
 use crate::pkcs11_proxy_ng::v1::sp800108_attribute;
+use crate::secret_boundary::{secret_to_plain, secret_to_plain_string};
 use pkcs11_proxy_ng_types::{
     AesCmacKeyDerivationParams, CkAttribute, CkAttributeType, CkAttributeValue, CkMechanism, CkRv,
     CmsSigParams, DilithiumParams, EciesParams, HdKeyDeriveParams, Ike1ExtendedDeriveParams,
     Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams, IkePrfDeriveParams, KipParams, KyberParams,
-    OtpParam, OtpParams, PrfDataParam, SkipjackPrivateWrapParams, SkipjackRelayxParams,
-    Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams, VendorObjectExtractParams,
-    VendorObjectInsertParams, X2RatchetInitializeParams, X2RatchetRespondParams,
-    X3dhInitiateParams, X3dhRespondParams,
+    OtpParam, OtpParams, PrfDataParam, SecretBytes, SkipjackPrivateWrapParams,
+    SkipjackRelayxParams, Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams,
+    VendorObjectExtractParams, VendorObjectInsertParams, X2RatchetInitializeParams,
+    X2RatchetRespondParams, X3dhInitiateParams, X3dhRespondParams,
 };
 
 // ---------------------------------------------------------------------------
@@ -23,8 +24,8 @@ impl From<&IkePrfDeriveParams> for v1_proto::IkePrfDeriveParams {
             prf_mechanism: p.prf_mechanism,
             data_as_key: p.data_as_key,
             rekey: p.rekey,
-            ni: p.ni.clone(),
-            nr: p.nr.clone(),
+            ni: secret_to_plain(&p.ni),
+            nr: secret_to_plain(&p.nr),
             new_key_handle: p.new_key_handle,
         }
     }
@@ -36,8 +37,8 @@ impl From<&v1_proto::IkePrfDeriveParams> for IkePrfDeriveParams {
             prf_mechanism: p.prf_mechanism,
             data_as_key: p.data_as_key,
             rekey: p.rekey,
-            ni: p.ni.clone(),
-            nr: p.nr.clone(),
+            ni: SecretBytes::copy_from_slice(&p.ni),
+            nr: SecretBytes::copy_from_slice(&p.nr),
             new_key_handle: p.new_key_handle,
         }
     }
@@ -54,8 +55,8 @@ impl From<&Ike1PrfDeriveParams> for v1_proto::Ike1PrfDeriveParams {
             has_prev_key: p.has_prev_key,
             keygxy_handle: p.keygxy_handle,
             prev_key_handle: p.prev_key_handle,
-            ckyi: p.ckyi.clone(),
-            ckyr: p.ckyr.clone(),
+            ckyi: secret_to_plain(&p.ckyi),
+            ckyr: secret_to_plain(&p.ckyr),
             key_number: p.key_number,
         }
     }
@@ -68,8 +69,8 @@ impl From<&v1_proto::Ike1PrfDeriveParams> for Ike1PrfDeriveParams {
             has_prev_key: p.has_prev_key,
             keygxy_handle: p.keygxy_handle,
             prev_key_handle: p.prev_key_handle,
-            ckyi: p.ckyi.clone(),
-            ckyr: p.ckyr.clone(),
+            ckyi: SecretBytes::copy_from_slice(&p.ckyi),
+            ckyr: SecretBytes::copy_from_slice(&p.ckyr),
             key_number: p.key_number,
         }
     }
@@ -85,7 +86,7 @@ impl From<&Ike1ExtendedDeriveParams> for v1_proto::Ike1ExtendedDeriveParams {
             prf_mechanism: p.prf_mechanism,
             has_keygxy: p.has_keygxy,
             keygxy_handle: p.keygxy_handle,
-            extra_data: p.extra_data.clone(),
+            extra_data: secret_to_plain(&p.extra_data),
         }
     }
 }
@@ -96,7 +97,7 @@ impl From<&v1_proto::Ike1ExtendedDeriveParams> for Ike1ExtendedDeriveParams {
             prf_mechanism: p.prf_mechanism,
             has_keygxy: p.has_keygxy,
             keygxy_handle: p.keygxy_handle,
-            extra_data: p.extra_data.clone(),
+            extra_data: SecretBytes::copy_from_slice(&p.extra_data),
         }
     }
 }
@@ -111,7 +112,7 @@ impl From<&Ike2PrfPlusDeriveParams> for v1_proto::Ike2PrfPlusDeriveParams {
             prf_mechanism: p.prf_mechanism,
             has_seed_key: p.has_seed_key,
             seed_key_handle: p.seed_key_handle,
-            seed_data: p.seed_data.clone(),
+            seed_data: secret_to_plain(&p.seed_data),
         }
     }
 }
@@ -122,7 +123,7 @@ impl From<&v1_proto::Ike2PrfPlusDeriveParams> for Ike2PrfPlusDeriveParams {
             prf_mechanism: p.prf_mechanism,
             has_seed_key: p.has_seed_key,
             seed_key_handle: p.seed_key_handle,
-            seed_data: p.seed_data.clone(),
+            seed_data: SecretBytes::copy_from_slice(&p.seed_data),
         }
     }
 }
@@ -132,11 +133,11 @@ impl From<&v1_proto::Ike2PrfPlusDeriveParams> for Ike2PrfPlusDeriveParams {
 // ---------------------------------------------------------------------------
 
 fn prf_data_to_proto(p: &PrfDataParam) -> v1_proto::PrfDataParam {
-    v1_proto::PrfDataParam { r#type: p.type_, value: p.value.clone() }
+    v1_proto::PrfDataParam { r#type: p.type_, value: secret_to_plain(&p.value) }
 }
 
 fn prf_data_from_proto(p: &v1_proto::PrfDataParam) -> PrfDataParam {
-    PrfDataParam { type_: p.r#type, value: p.value.clone() }
+    PrfDataParam { type_: p.r#type, value: SecretBytes::copy_from_slice(&p.value) }
 }
 
 fn sp800_108_attribute_to_proto(attr: &CkAttribute) -> v1_proto::Sp800108Attribute {
@@ -145,10 +146,10 @@ fn sp800_108_attribute_to_proto(attr: &CkAttribute) -> v1_proto::Sp800108Attribu
         Some(CkAttributeValue::Bool(value)) => Some(sp800108_attribute::Value::BoolValue(*value)),
         Some(CkAttributeValue::Ulong(value)) => Some(sp800108_attribute::Value::UlongValue(*value)),
         Some(CkAttributeValue::Bytes(value)) => {
-            Some(sp800108_attribute::Value::BytesValue(value.clone()))
+            Some(sp800108_attribute::Value::BytesValue(secret_to_plain(value)))
         }
         Some(CkAttributeValue::String(value)) => {
-            Some(sp800108_attribute::Value::StringValue(value.clone()))
+            Some(sp800108_attribute::Value::StringValue(secret_to_plain_string(value)))
         }
         // A CKA_*_TEMPLATE inside an SP800-108 derived-key sub-template is
         // not representable in Sp800108Attribute (and no real provider
@@ -165,10 +166,10 @@ fn sp800_108_attribute_from_proto(attr: &v1_proto::Sp800108Attribute) -> CkAttri
         Some(sp800108_attribute::Value::BoolValue(value)) => Some(CkAttributeValue::Bool(*value)),
         Some(sp800108_attribute::Value::UlongValue(value)) => Some(CkAttributeValue::Ulong(*value)),
         Some(sp800108_attribute::Value::BytesValue(value)) => {
-            Some(CkAttributeValue::Bytes(value.clone()))
+            Some(CkAttributeValue::Bytes(SecretBytes::copy_from_slice(value)))
         }
         Some(sp800108_attribute::Value::StringValue(value)) => {
-            Some(CkAttributeValue::String(value.clone()))
+            Some(CkAttributeValue::String(SecretBytes::copy_from_slice(value.as_bytes())))
         }
     };
     CkAttribute { attr_type: CkAttributeType(attr.attr_type), value }
@@ -323,7 +324,7 @@ impl From<&v1_proto::X3dhRespondParams> for X3dhRespondParams {
 impl From<&X2RatchetInitializeParams> for v1_proto::X2RatchetInitializeParams {
     fn from(p: &X2RatchetInitializeParams) -> Self {
         Self {
-            sk: p.sk.clone(),
+            sk: secret_to_plain(&p.sk),
             peer_public_prekey_handle: p.peer_public_prekey_handle,
             peer_public_identity_handle: p.peer_public_identity_handle,
             own_public_identity_handle: p.own_public_identity_handle,
@@ -338,7 +339,7 @@ impl From<&X2RatchetInitializeParams> for v1_proto::X2RatchetInitializeParams {
 impl From<&v1_proto::X2RatchetInitializeParams> for X2RatchetInitializeParams {
     fn from(p: &v1_proto::X2RatchetInitializeParams) -> Self {
         Self {
-            sk: p.sk.clone(),
+            sk: SecretBytes::copy_from_slice(&p.sk),
             peer_public_prekey_handle: p.peer_public_prekey_handle,
             peer_public_identity_handle: p.peer_public_identity_handle,
             own_public_identity_handle: p.own_public_identity_handle,
@@ -357,7 +358,7 @@ impl From<&v1_proto::X2RatchetInitializeParams> for X2RatchetInitializeParams {
 impl From<&X2RatchetRespondParams> for v1_proto::X2RatchetRespondParams {
     fn from(p: &X2RatchetRespondParams) -> Self {
         Self {
-            sk: p.sk.clone(),
+            sk: secret_to_plain(&p.sk),
             own_prekey_handle: p.own_prekey_handle,
             initiator_identity_handle: p.initiator_identity_handle,
             own_identity_handle: p.own_identity_handle,
@@ -372,7 +373,7 @@ impl From<&X2RatchetRespondParams> for v1_proto::X2RatchetRespondParams {
 impl From<&v1_proto::X2RatchetRespondParams> for X2RatchetRespondParams {
     fn from(p: &v1_proto::X2RatchetRespondParams) -> Self {
         Self {
-            sk: p.sk.clone(),
+            sk: SecretBytes::copy_from_slice(&p.sk),
             own_prekey_handle: p.own_prekey_handle,
             initiator_identity_handle: p.initiator_identity_handle,
             own_identity_handle: p.own_identity_handle,
@@ -394,7 +395,10 @@ impl From<&OtpParams> for v1_proto::OtpParams {
             params: p
                 .params
                 .iter()
-                .map(|op| v1_proto::OtpParam { r#type: op.type_, value: op.value.clone() })
+                .map(|op| v1_proto::OtpParam {
+                    r#type: op.type_,
+                    value: secret_to_plain(&op.value),
+                })
                 .collect(),
         }
     }
@@ -406,7 +410,10 @@ impl From<&v1_proto::OtpParams> for OtpParams {
             params: p
                 .params
                 .iter()
-                .map(|op| OtpParam { type_: op.r#type, value: op.value.clone() })
+                .map(|op| OtpParam {
+                    type_: op.r#type,
+                    value: SecretBytes::copy_from_slice(&op.value),
+                })
                 .collect(),
         }
     }
@@ -436,7 +443,7 @@ impl From<&KipParams> for v1_proto::KipParams {
         Self {
             mechanism: Some(Box::new(mechanism_to_proto(&p.mechanism))),
             key_handle: p.key_handle,
-            seed: p.seed.clone(),
+            seed: secret_to_plain(&p.seed),
         }
     }
 }
@@ -448,7 +455,7 @@ impl TryFrom<&v1_proto::KipParams> for KipParams {
         Ok(Self {
             mechanism: Box::new(required_mechanism_from_boxed_option(&p.mechanism)?),
             key_handle: p.key_handle,
-            seed: p.seed.clone(),
+            seed: SecretBytes::copy_from_slice(&p.seed),
         })
     }
 }
@@ -464,8 +471,8 @@ impl From<&CmsSigParams> for v1_proto::CmsSigParams {
             signing_mechanism: Some(Box::new(mechanism_to_proto(&p.signing_mechanism))),
             digest_mechanism: Some(Box::new(mechanism_to_proto(&p.digest_mechanism))),
             content_type: p.content_type.clone(),
-            requested_attributes: p.requested_attributes.clone(),
-            required_attributes: p.required_attributes.clone(),
+            requested_attributes: secret_to_plain(&p.requested_attributes),
+            required_attributes: secret_to_plain(&p.required_attributes),
         }
     }
 }
@@ -481,8 +488,8 @@ impl TryFrom<&v1_proto::CmsSigParams> for CmsSigParams {
             )?),
             digest_mechanism: Box::new(required_mechanism_from_boxed_option(&p.digest_mechanism)?),
             content_type: p.content_type.clone(),
-            requested_attributes: p.requested_attributes.clone(),
-            required_attributes: p.required_attributes.clone(),
+            requested_attributes: SecretBytes::copy_from_slice(&p.requested_attributes),
+            required_attributes: SecretBytes::copy_from_slice(&p.required_attributes),
         })
     }
 }
@@ -494,7 +501,7 @@ impl TryFrom<&v1_proto::CmsSigParams> for CmsSigParams {
 impl From<&SkipjackPrivateWrapParams> for v1_proto::SkipjackPrivateWrapParams {
     fn from(p: &SkipjackPrivateWrapParams) -> Self {
         Self {
-            password: p.password.clone(),
+            password: secret_to_plain(&p.password),
             public_data: p.public_data.clone(),
             password_length: p.password_length,
             random_a: p.random_a.clone(),
@@ -508,7 +515,7 @@ impl From<&SkipjackPrivateWrapParams> for v1_proto::SkipjackPrivateWrapParams {
 impl From<&v1_proto::SkipjackPrivateWrapParams> for SkipjackPrivateWrapParams {
     fn from(p: &v1_proto::SkipjackPrivateWrapParams) -> Self {
         Self {
-            password: p.password.clone(),
+            password: SecretBytes::copy_from_slice(&p.password),
             public_data: p.public_data.clone(),
             password_length: p.password_length,
             random_a: p.random_a.clone(),
@@ -526,13 +533,13 @@ impl From<&v1_proto::SkipjackPrivateWrapParams> for SkipjackPrivateWrapParams {
 impl From<&SkipjackRelayxParams> for v1_proto::SkipjackRelayxParams {
     fn from(p: &SkipjackRelayxParams) -> Self {
         Self {
-            old_wrapped_x: p.old_wrapped_x.clone(),
-            old_password: p.old_password.clone(),
-            old_public_data: p.old_public_data.clone(),
-            old_random_a: p.old_random_a.clone(),
-            new_password: p.new_password.clone(),
-            new_public_data: p.new_public_data.clone(),
-            new_random_a: p.new_random_a.clone(),
+            old_wrapped_x: secret_to_plain(&p.old_wrapped_x),
+            old_password: secret_to_plain(&p.old_password),
+            old_public_data: secret_to_plain(&p.old_public_data),
+            old_random_a: secret_to_plain(&p.old_random_a),
+            new_password: secret_to_plain(&p.new_password),
+            new_public_data: secret_to_plain(&p.new_public_data),
+            new_random_a: secret_to_plain(&p.new_random_a),
         }
     }
 }
@@ -540,13 +547,13 @@ impl From<&SkipjackRelayxParams> for v1_proto::SkipjackRelayxParams {
 impl From<&v1_proto::SkipjackRelayxParams> for SkipjackRelayxParams {
     fn from(p: &v1_proto::SkipjackRelayxParams) -> Self {
         Self {
-            old_wrapped_x: p.old_wrapped_x.clone(),
-            old_password: p.old_password.clone(),
-            old_public_data: p.old_public_data.clone(),
-            old_random_a: p.old_random_a.clone(),
-            new_password: p.new_password.clone(),
-            new_public_data: p.new_public_data.clone(),
-            new_random_a: p.new_random_a.clone(),
+            old_wrapped_x: SecretBytes::copy_from_slice(&p.old_wrapped_x),
+            old_password: SecretBytes::copy_from_slice(&p.old_password),
+            old_public_data: SecretBytes::copy_from_slice(&p.old_public_data),
+            old_random_a: SecretBytes::copy_from_slice(&p.old_random_a),
+            new_password: SecretBytes::copy_from_slice(&p.new_password),
+            new_public_data: SecretBytes::copy_from_slice(&p.new_public_data),
+            new_random_a: SecretBytes::copy_from_slice(&p.new_random_a),
         }
     }
 }
@@ -561,7 +568,7 @@ impl From<&EciesParams> for v1_proto::EciesParams {
             derivation_mechanism: Some(Box::new(mechanism_to_proto(&p.derivation_mechanism))),
             encryption_mechanism: Some(Box::new(mechanism_to_proto(&p.encryption_mechanism))),
             mac_mechanism: Some(Box::new(mechanism_to_proto(&p.mac_mechanism))),
-            shared_data: p.shared_data.clone(),
+            shared_data: secret_to_plain(&p.shared_data),
         }
     }
 }
@@ -578,7 +585,7 @@ impl TryFrom<&v1_proto::EciesParams> for EciesParams {
                 &p.encryption_mechanism,
             )?),
             mac_mechanism: Box::new(required_mechanism_from_boxed_option(&p.mac_mechanism)?),
-            shared_data: p.shared_data.clone(),
+            shared_data: SecretBytes::copy_from_slice(&p.shared_data),
         })
     }
 }
@@ -589,13 +596,16 @@ impl TryFrom<&v1_proto::EciesParams> for EciesParams {
 
 impl From<&AesCmacKeyDerivationParams> for v1_proto::AesCmacKeyDerivationParams {
     fn from(p: &AesCmacKeyDerivationParams) -> Self {
-        Self { context: p.context.clone(), label: p.label.clone() }
+        Self { context: secret_to_plain(&p.context), label: secret_to_plain(&p.label) }
     }
 }
 
 impl From<&v1_proto::AesCmacKeyDerivationParams> for AesCmacKeyDerivationParams {
     fn from(p: &v1_proto::AesCmacKeyDerivationParams) -> Self {
-        Self { context: p.context.clone(), label: p.label.clone() }
+        Self {
+            context: SecretBytes::copy_from_slice(&p.context),
+            label: SecretBytes::copy_from_slice(&p.label),
+        }
     }
 }
 
@@ -625,8 +635,8 @@ impl From<&KyberParams> for v1_proto::KyberParams {
             version: p.version,
             mode: p.mode,
             secret_handle: p.secret_handle,
-            shared_data: p.shared_data.clone(),
-            blob: p.blob.clone(),
+            shared_data: secret_to_plain(&p.shared_data),
+            blob: secret_to_plain(&p.blob),
         }
     }
 }
@@ -637,8 +647,8 @@ impl From<&v1_proto::KyberParams> for KyberParams {
             version: p.version,
             mode: p.mode,
             secret_handle: p.secret_handle,
-            shared_data: p.shared_data.clone(),
-            blob: p.blob.clone(),
+            shared_data: SecretBytes::copy_from_slice(&p.shared_data),
+            blob: SecretBytes::copy_from_slice(&p.blob),
         }
     }
 }
@@ -652,7 +662,7 @@ impl From<&HdKeyDeriveParams> for v1_proto::HdKeyDeriveParams {
         Self {
             derive_type: p.derive_type,
             child_key_index: p.child_key_index,
-            chain_code: p.chain_code.clone(),
+            chain_code: secret_to_plain(&p.chain_code),
             version: p.version,
         }
     }
@@ -663,7 +673,7 @@ impl From<&v1_proto::HdKeyDeriveParams> for HdKeyDeriveParams {
         Self {
             derive_type: p.derive_type,
             child_key_index: p.child_key_index,
-            chain_code: p.chain_code.clone(),
+            chain_code: SecretBytes::copy_from_slice(&p.chain_code),
             version: p.version,
         }
     }
@@ -675,13 +685,13 @@ impl From<&v1_proto::HdKeyDeriveParams> for HdKeyDeriveParams {
 
 impl From<&VendorObjectExtractParams> for v1_proto::VendorObjectExtractParams {
     fn from(p: &VendorObjectExtractParams) -> Self {
-        Self { format: p.format, context: p.context.clone() }
+        Self { format: p.format, context: secret_to_plain(&p.context) }
     }
 }
 
 impl From<&v1_proto::VendorObjectExtractParams> for VendorObjectExtractParams {
     fn from(p: &v1_proto::VendorObjectExtractParams) -> Self {
-        Self { format: p.format, context: p.context.clone() }
+        Self { format: p.format, context: SecretBytes::copy_from_slice(&p.context) }
     }
 }
 
@@ -691,12 +701,20 @@ impl From<&v1_proto::VendorObjectExtractParams> for VendorObjectExtractParams {
 
 impl From<&VendorObjectInsertParams> for v1_proto::VendorObjectInsertParams {
     fn from(p: &VendorObjectInsertParams) -> Self {
-        Self { format: p.format, context: p.context.clone(), object_data: p.object_data.clone() }
+        Self {
+            format: p.format,
+            context: secret_to_plain(&p.context),
+            object_data: secret_to_plain(&p.object_data),
+        }
     }
 }
 
 impl From<&v1_proto::VendorObjectInsertParams> for VendorObjectInsertParams {
     fn from(p: &v1_proto::VendorObjectInsertParams) -> Self {
-        Self { format: p.format, context: p.context.clone(), object_data: p.object_data.clone() }
+        Self {
+            format: p.format,
+            context: SecretBytes::copy_from_slice(&p.context),
+            object_data: SecretBytes::copy_from_slice(&p.object_data),
+        }
     }
 }

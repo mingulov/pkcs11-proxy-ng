@@ -78,6 +78,16 @@ impl From<&str> for SecretBytes {
     }
 }
 
+impl From<Zeroizing<Vec<u8>>> for SecretBytes {
+    /// Adopts a wiping allocation without copying. The wiping guarantee
+    /// transfers with the allocation; this is the inverse of
+    /// [`SecretBytes::into_zeroizing`] for readback paths that rebuild a
+    /// `SecretBytes` from wiping FFI backing.
+    fn from(bytes: Zeroizing<Vec<u8>>) -> Self {
+        Self(bytes)
+    }
+}
+
 impl Clone for SecretBytes {
     /// Copies the bytes into a new, independently wiping owner.
     ///

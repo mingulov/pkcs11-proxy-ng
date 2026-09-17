@@ -100,7 +100,7 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let h_session = Self::session_handle(session)?;
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
@@ -283,7 +283,10 @@ impl FfiBackend {
         )
     }
 
-    pub(super) fn ffi_get_operation_state(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub(super) fn ffi_get_operation_state(
+        &self,
+        session: CkSessionHandle,
+    ) -> CkResult<SecretBytes> {
         let h_session = Self::session_handle(session)?;
         Self::call_bytes(
             unsafe { (*self.func_list).C_GetOperationState },
@@ -342,7 +345,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         len: u32,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let len = checked_random_len(len)?;
         let h_session = Self::session_handle(session)?;
         Self::fill_bytes(
@@ -356,7 +359,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let (part_ptr, part_len) = part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         Self::call_bytes(
@@ -392,7 +395,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         Self::call_bytes(
@@ -428,7 +431,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let (part_ptr, part_len) = part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         Self::call_bytes(
@@ -464,7 +467,7 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         Self::call_bytes(

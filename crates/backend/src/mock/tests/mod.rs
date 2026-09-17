@@ -28,7 +28,7 @@ fn unsupported_mechanism_fixture()
 fn label_attr(label: &str) -> CkAttribute {
     CkAttribute {
         attr_type: CkAttributeType::LABEL,
-        value: Some(CkAttributeValue::String(label.to_string())),
+        value: Some(CkAttributeValue::String(label.to_string().into())),
     }
 }
 
@@ -167,13 +167,16 @@ where
 fn sp800_108_counter_iteration_param() -> PrfDataParam {
     const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
 
-    PrfDataParam { type_: CK_SP800_108_ITERATION_VARIABLE, value: sp800_108_counter_format_bytes() }
+    PrfDataParam {
+        type_: CK_SP800_108_ITERATION_VARIABLE,
+        value: sp800_108_counter_format_bytes().into(),
+    }
 }
 
 fn sp800_108_null_iteration_param() -> PrfDataParam {
     const CK_SP800_108_ITERATION_VARIABLE: u64 = 0x0000_0001;
 
-    PrfDataParam { type_: CK_SP800_108_ITERATION_VARIABLE, value: Vec::new() }
+    PrfDataParam { type_: CK_SP800_108_ITERATION_VARIABLE, value: Vec::new().into() }
 }
 
 fn sp800_108_counter_format_bytes() -> Vec<u8> {
@@ -215,7 +218,7 @@ fn assert_mock_label(
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(results[0].value, Some(expected.as_bytes().to_vec()));
+    assert_eq!(results[0].value, Some(SecretBytes::new(expected.as_bytes().to_vec())));
 }
 
 fn assert_invalid_session_does_not_allocate_object<R: std::fmt::Debug>(
@@ -284,8 +287,8 @@ fn cms_sig_mechanism(certificate_handle: CkObjectHandle) -> CkMechanism {
                 params: None,
             }),
             content_type: "application/octet-stream".to_string(),
-            requested_attributes: Vec::new(),
-            required_attributes: Vec::new(),
+            requested_attributes: Vec::new().into(),
+            required_attributes: Vec::new().into(),
         })),
     }
 }
@@ -299,7 +302,7 @@ fn kip_mechanism(mechanism_type: CkMechanismType, key_handle: CkObjectHandle) ->
                 params: None,
             }),
             key_handle: key_handle.0,
-            seed: b"seed".to_vec(),
+            seed: b"seed".to_vec().into(),
         })),
     }
 }
@@ -333,7 +336,7 @@ fn gcm_mechanism_output() -> CkMechanismParams {
         iv: vec![0xA5; 12],
         iv_bits: 96,
         iv_buffer_len: 12,
-        aad: b"mock-aad".to_vec(),
+        aad: b"mock-aad".to_vec().into(),
         tag_bits: 128,
     })
 }

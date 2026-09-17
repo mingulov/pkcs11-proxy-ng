@@ -22,6 +22,7 @@ use tracing::{info, warn};
 use pkcs11_proxy_ng_proto::convert::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::context_manager::{
@@ -45,9 +46,9 @@ async fn execute_empty_legacy_message_output<F>(
     mut transition: MessageOperationTransition,
     installed_shape: MessageParameterShape,
     operation: F,
-) -> Result<CkResult<Vec<u8>>, Status>
+) -> Result<CkResult<SecretBytes>, Status>
 where
-    F: FnOnce() -> CkResult<(Vec<u8>, Vec<u8>)> + Send + 'static,
+    F: FnOnce() -> CkResult<(SecretBytes, SecretBytes)> + Send + 'static,
 {
     spawn_backend(move || {
         transition.mark_started();
@@ -184,7 +185,7 @@ fn parameter_result_matches_spec(
 ) -> bool {
     result.ck_rv == CkRv::OK
         && result.returned_len == spec.buffer_len
-        && result.value == spec.buffer_present.then(Vec::new)
+        && result.value == spec.buffer_present.then(Vec::new).map(SecretBytes::new)
 }
 
 fn parameter_ack(
@@ -193,7 +194,7 @@ fn parameter_ack(
     (&CkParameterRoundtripResult {
         ck_rv: CkRv::OK,
         returned_len: spec.buffer_len,
-        value: spec.buffer_present.then(Vec::new),
+        value: spec.buffer_present.then(Vec::new).map(SecretBytes::new),
     })
         .into()
 }
@@ -211,7 +212,7 @@ fn validate_empty_message_parameter_contract(
     let spec = CkParameterRoundtripSpec {
         buffer_present: wire_spec.buffer_present,
         buffer_len: wire_spec.buffer_len,
-        value: wire_spec.value.clone(),
+        value: wire_spec.value.clone().map(SecretBytes::new),
     };
     if spec.buffer_len > 0 || spec.value.is_some() {
         return Err(CkRv::MECHANISM_PARAM_INVALID);
@@ -390,7 +391,7 @@ async fn execute_message_begin(
                             _ => false,
                         };
                     if provider_ack.returned_len != contract.provider_spec.buffer_len
-                        || provider_ack.value != contract.provider_spec.buffer_present.then(Vec::new)
+                        || provider_ack.value != contract.provider_spec.buffer_present.then(Vec::new).map(SecretBytes::new)
                         || !valid_parameter
                     {
                         tracing::warn!(provider_rv = native_rv.0, "native Begin output contract violation; suppressing all effects");
@@ -402,7 +403,7 @@ async fn execute_message_begin(
                     Ok(MessageBeginWireResult {
                         ck_rv: native_rv.0,
                         parameter_out: Vec::new(),
-                        parameter_result: acknowledge_contract.then(|| (&CkParameterRoundtripResult { ck_rv: native_rv, returned_len: contract.caller_spec.buffer_len, value: contract.caller_spec.buffer_present.then(Vec::new) }).into()),
+                        parameter_result: acknowledge_contract.then(|| (&CkParameterRoundtripResult { ck_rv: native_rv, returned_len: contract.caller_spec.buffer_len, value: contract.caller_spec.buffer_present.then(Vec::new).map(SecretBytes::new) }).into()),
                         message_parameter_out: None,
                         message_effects: returned_parameter.as_ref().map(TryInto::try_into).transpose()?,
                     })
@@ -1547,7 +1548,7 @@ pub(crate) async fn encrypt_message(
         Ok(ciphertext) => Ok(Response::new(pkcs11_proxy_ng_proto::EncryptMessageResponse {
             ck_rv: CkRv::OK.0,
             parameter_out: Vec::new(),
-            ciphertext,
+            ciphertext: secret_to_plain(&ciphertext),
         })),
         Err(e) => Ok(Response::new(pkcs11_proxy_ng_proto::EncryptMessageResponse {
             ck_rv: e.0,
@@ -1684,7 +1685,7 @@ pub(crate) async fn encrypt_message_next(
             Ok(Response::new(pkcs11_proxy_ng_proto::EncryptMessageNextResponse {
                 ck_rv: CkRv::OK.0,
                 parameter_out: Vec::new(),
-                ciphertext_part,
+                ciphertext_part: secret_to_plain(&ciphertext_part),
             }))
         }
         Err(e) => Ok(Response::new(pkcs11_proxy_ng_proto::EncryptMessageNextResponse {
@@ -1795,7 +1796,7 @@ pub(crate) async fn decrypt_message(
         Ok(plaintext) => Ok(Response::new(pkcs11_proxy_ng_proto::DecryptMessageResponse {
             ck_rv: CkRv::OK.0,
             parameter_out: Vec::new(),
-            plaintext,
+            plaintext: secret_to_plain(&plaintext),
         })),
         Err(e) => Ok(Response::new(pkcs11_proxy_ng_proto::DecryptMessageResponse {
             ck_rv: e.0,
@@ -1932,7 +1933,7 @@ pub(crate) async fn decrypt_message_next(
             Ok(Response::new(pkcs11_proxy_ng_proto::DecryptMessageNextResponse {
                 ck_rv: CkRv::OK.0,
                 parameter_out: Vec::new(),
-                plaintext_part,
+                plaintext_part: secret_to_plain(&plaintext_part),
             }))
         }
         Err(e) => Ok(Response::new(pkcs11_proxy_ng_proto::DecryptMessageNextResponse {
@@ -2029,7 +2030,7 @@ pub(crate) async fn sign_message(
         Ok(signature) => Ok(Response::new(pkcs11_proxy_ng_proto::SignMessageResponse {
             ck_rv: CkRv::OK.0,
             parameter_out: Vec::new(),
-            signature,
+            signature: secret_to_plain(&signature),
         })),
         Err(e) => Ok(Response::new(pkcs11_proxy_ng_proto::SignMessageResponse {
             ck_rv: e.0,
@@ -2325,7 +2326,7 @@ pub(crate) async fn sign_message_next(
             Ok(signature) => Ok(Response::new(pkcs11_proxy_ng_proto::SignMessageNextResponse {
                 ck_rv: CkRv::OK.0,
                 parameter_out: Vec::new(),
-                signature,
+                signature: secret_to_plain(&signature),
                 parameter_result: None,
             })),
             Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::SignMessageNextResponse {

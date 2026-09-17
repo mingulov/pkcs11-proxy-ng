@@ -187,14 +187,20 @@ fn prepare_one(
         };
         if result.apply_returned_len {
             // All translation and narrowing happens before any caller store.
-            (value, length) = super::super::width_bridge::bridge_output_value(
-                attribute_type,
-                result.value.as_deref(),
-                length,
-                backend_width,
-                client_width,
-            )
-            .map_err(|_| CkRv::GENERAL_ERROR)?;
+            let bridged = |value: Option<&[u8]>| {
+                super::super::width_bridge::bridge_output_value(
+                    attribute_type,
+                    value,
+                    length,
+                    backend_width,
+                    client_width,
+                )
+                .map_err(|_| CkRv::GENERAL_ERROR)
+            };
+            (value, length) = match &result.value {
+                Some(secret) => secret.expose(|raw| bridged(Some(raw)))?,
+                None => bridged(None)?,
+            };
         }
         if value.as_ref().is_some_and(|bytes| bytes.len() as u64 > call.capacity) {
             return Err(CkRv::GENERAL_ERROR);
@@ -359,7 +365,7 @@ mod tests {
             returned_len: 4,
             apply_returned_len: true,
             apply_type: false,
-            value: Some(vec![1; 4]),
+            value: Some(vec![1; 4].into()),
             ck_rv: None,
             nested: None,
         };

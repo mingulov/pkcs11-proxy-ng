@@ -163,11 +163,11 @@ pub async fn create_data_object(
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label.to_string())),
+            value: Some(CkAttributeValue::String(label.to_string().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(value.to_vec())),
+            value: Some(CkAttributeValue::Bytes(value.to_vec().into())),
         },
     ];
     client
@@ -183,7 +183,7 @@ pub async fn find_objects_by_label(
 ) -> Result<Vec<CkObjectHandle>, String> {
     let template = vec![CkAttribute {
         attr_type: CkAttributeType::LABEL,
-        value: Some(CkAttributeValue::String(label.to_string())),
+        value: Some(CkAttributeValue::String(label.to_string().into())),
     }];
     client
         .find_objects_init(session, &template)
@@ -207,7 +207,7 @@ pub async fn find_objects_by_id(
 ) -> Result<Vec<CkObjectHandle>, String> {
     let template = vec![CkAttribute {
         attr_type: CkAttributeType::ID,
-        value: Some(CkAttributeValue::Bytes(key_id.to_vec())),
+        value: Some(CkAttributeValue::Bytes(key_id.to_vec().into())),
     }];
     client
         .find_objects_init(session, &template)
@@ -264,7 +264,12 @@ pub async fn get_attribute_bytes(
     if rv.is_err() {
         return Err(format!("C_GetAttributeValueExact(data) failed: 0x{:08X}", rv.0));
     }
-    Ok(results.into_iter().next().and_then(|result| result.value))
+    Ok(results
+        .into_iter()
+        .next()
+        .and_then(|result| result.value)
+        .as_ref()
+        .map(pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain))
 }
 
 pub async fn generate_named_rsa_key_pair(
@@ -292,7 +297,7 @@ pub async fn generate_named_rsa_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::PUBLIC_EXPONENT,
-            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01])),
+            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01].into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,
@@ -304,11 +309,11 @@ pub async fn generate_named_rsa_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(public_label.clone())),
+            value: Some(CkAttributeValue::String(public_label.clone().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::ID,
-            value: Some(CkAttributeValue::Bytes(key_id.clone())),
+            value: Some(CkAttributeValue::Bytes(key_id.clone().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::ENCRYPT,
@@ -338,11 +343,11 @@ pub async fn generate_named_rsa_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(private_label.clone())),
+            value: Some(CkAttributeValue::String(private_label.clone().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::ID,
-            value: Some(CkAttributeValue::Bytes(key_id.clone())),
+            value: Some(CkAttributeValue::Bytes(key_id.clone().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::DECRYPT,
@@ -469,7 +474,7 @@ pub async fn rsa_oaep_encrypt(
             hash_alg: CkMechanismType(0x00000220), // CKM_SHA_1
             mgf: 0x00000001,                       // CKG_MGF1_SHA1
             source: CKZ_DATA_SPECIFIED,
-            source_data: Vec::new(),
+            source_data: Vec::new().into(),
         })),
     };
     client

@@ -6,6 +6,7 @@ use super::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
 use crate::pkcs11_proxy_ng::v1 as wire;
+use crate::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::*;
 
 impl std::fmt::Debug for wire::AuthenticatedMechanismOutput {
@@ -27,7 +28,9 @@ impl std::fmt::Debug for wire::AuthenticatedParameters {
 #[derive(Clone, PartialEq, Eq)]
 pub enum AuthenticatedOutput {
     Unchanged,
-    Iv(Vec<u8>),
+    /// `AuthenticatedMechanismOutput.iv` is classified secret (ADR-0013
+    /// key-attributes material): wiping owner, redacted `Debug` below.
+    Iv(SecretBytes),
     Message(MessageParameter),
     Effects(MessageEffects),
     Invalid(OutputContractViolation),
@@ -179,7 +182,7 @@ impl TryFrom<&AuthenticatedOutput> for wire::AuthenticatedMechanismOutput {
         Ok(Self {
             output: match output {
                 AuthenticatedOutput::Unchanged => Some(Output::Unchanged(true)),
-                AuthenticatedOutput::Iv(iv) => Some(Output::Iv(iv.clone())),
+                AuthenticatedOutput::Iv(iv) => Some(Output::Iv(secret_to_plain(iv))),
                 AuthenticatedOutput::Message(message) => {
                     Some(Output::MessageParameter(message.into()))
                 }
@@ -198,7 +201,7 @@ impl TryFrom<&wire::AuthenticatedMechanismOutput> for AuthenticatedOutput {
         use wire::authenticated_mechanism_output::Output;
         match output.output.as_ref() {
             Some(Output::Unchanged(true)) => Ok(Self::Unchanged),
-            Some(Output::Iv(iv)) => Ok(Self::Iv(iv.clone())),
+            Some(Output::Iv(iv)) => Ok(Self::Iv(SecretBytes::copy_from_slice(iv))),
             Some(Output::MessageParameter(message)) => {
                 validate_structured_wire_parameter(message)?;
                 Ok(Self::Message(MessageParameter::try_from(message)?))
@@ -232,9 +235,10 @@ mod tests {
 
     #[test]
     fn authenticated_wire_debug_never_formats_payload_buffers() {
-        let output =
-            wire::AuthenticatedMechanismOutput::try_from(&AuthenticatedOutput::Iv(vec![77, 78]))
-                .unwrap();
+        let output = wire::AuthenticatedMechanismOutput::try_from(&AuthenticatedOutput::Iv(
+            vec![77, 78].into(),
+        ))
+        .unwrap();
         assert!(
             !format!("{output:?}").contains("77"),
             "authenticated wire output Debug must redact buffers"
@@ -259,13 +263,14 @@ mod tests {
     fn authenticated_conversion_rejects_raw_message_and_wrong_output_shape() {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
         let raw = wire::AuthenticatedParameters {
-            message_parameter: Some(wire::MessageParameter::from(&MessageParameter::Raw(vec![
-                0;
-                16
-            ]))),
+            message_parameter: Some(wire::MessageParameter::from(&MessageParameter::Raw(
+                vec![0; 16].into(),
+            ))),
         };
         assert!(matches!(decode_parameters(&mechanism, &raw), Err(CkRv::MECHANISM_PARAM_INVALID)));
-        assert!(AuthenticatedOutput::Iv(vec![0; 16]).validate_for(&mechanism, None).is_err());
+        assert!(
+            AuthenticatedOutput::Iv(vec![0; 16].into()).validate_for(&mechanism, None).is_err()
+        );
     }
 
     #[test]

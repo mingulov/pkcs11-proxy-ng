@@ -470,7 +470,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_sign_init_cancel(session)
     }
 
-    fn sign(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn sign(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.ffi_sign(session, data)
     }
 
@@ -478,7 +478,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_sign_update(session, part)
     }
 
-    fn sign_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    fn sign_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.ffi_sign_final(session)
     }
 
@@ -495,7 +495,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_sign_recover_init_cancel(session)
     }
 
-    fn sign_recover(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn sign_recover(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.ffi_sign_recover(session, data)
     }
 
@@ -551,7 +551,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         signature: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_verify_recover(session, signature)
     }
 
@@ -593,7 +593,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_digest_init_cancel(session)
     }
 
-    fn digest(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn digest(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.ffi_digest(session, data)
     }
 
@@ -605,7 +605,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_digest_key(session, key)
     }
 
-    fn digest_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    fn digest_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.ffi_digest_final(session)
     }
 
@@ -639,15 +639,15 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_encrypt_init_cancel(session)
     }
 
-    fn encrypt(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn encrypt(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.ffi_encrypt(session, data)
     }
 
-    fn encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<SecretBytes> {
         self.ffi_encrypt_update(session, part)
     }
 
-    fn encrypt_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    fn encrypt_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.ffi_encrypt_final(session)
     }
 
@@ -676,7 +676,11 @@ impl Pkcs11Backend for FfiBackend {
             .and_then(|family| self.cached_mechanism_output_params_for(session, *family))
     }
 
-    fn decrypt(&self, session: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
+    fn decrypt(
+        &self,
+        session: CkSessionHandle,
+        encrypted_data: CkInBuf<'_>,
+    ) -> CkResult<SecretBytes> {
         self.ffi_decrypt(session, encrypted_data)
     }
 
@@ -684,11 +688,11 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_decrypt_update(session, encrypted_part)
     }
 
-    fn decrypt_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    fn decrypt_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.ffi_decrypt_final(session)
     }
 
@@ -789,7 +793,7 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_wrap_key(session, mechanism, wrapping_key, key)
     }
 
@@ -892,7 +896,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_wait_for_slot_event(flags)
     }
 
-    fn get_operation_state(&self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    fn get_operation_state(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.ffi_get_operation_state(session)
     }
 
@@ -918,7 +922,7 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_seed_random(session, seed)
     }
 
-    fn generate_random(&self, session: CkSessionHandle, len: u32) -> CkResult<Vec<u8>> {
+    fn generate_random(&self, session: CkSessionHandle, len: u32) -> CkResult<SecretBytes> {
         self.ffi_generate_random(session, len)
     }
 
@@ -934,7 +938,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_digest_encrypt_update(session, part)
     }
 
@@ -951,7 +955,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_decrypt_digest_update(session, encrypted_part)
     }
 
@@ -968,7 +972,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_sign_encrypt_update(session, part)
     }
 
@@ -985,7 +989,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_decrypt_verify_update(session, encrypted_part)
     }
 
@@ -1039,7 +1043,7 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
         template: &[CkAttribute],
-    ) -> CkResult<(Vec<u8>, CkObjectHandle)> {
+    ) -> CkResult<(SecretBytes, CkObjectHandle)> {
         self.ffi_encapsulate_key(session, mechanism, public_key, template)
     }
 
@@ -1140,7 +1144,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
         plaintext: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_encrypt_message(session, parameter, aad, plaintext)
     }
 
@@ -1149,7 +1153,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_encrypt_message_begin(session, parameter, aad)
     }
 
@@ -1168,7 +1172,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: &mut [u8],
         plaintext_part: CkInBuf<'_>,
         flags: CkFlags,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_encrypt_message_next(session, parameter, plaintext_part, flags)
     }
 
@@ -1178,7 +1182,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
         ciphertext: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_decrypt_message(session, parameter, aad, ciphertext)
     }
 
@@ -1187,7 +1191,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_decrypt_message_begin(session, parameter, aad)
     }
 
@@ -1206,7 +1210,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: &mut [u8],
         ciphertext_part: CkInBuf<'_>,
         flags: CkFlags,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_decrypt_message_next(session, parameter, ciphertext_part, flags)
     }
 
@@ -1215,7 +1219,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         parameter: &mut [u8],
         data: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_sign_message(session, parameter, data)
     }
 
@@ -1223,7 +1227,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         self.ffi_sign_message_begin(session, parameter)
     }
 
@@ -1241,7 +1245,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: &mut [u8],
         data_part: CkInBuf<'_>,
         request_signature: bool,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_sign_message_next(session, parameter, data_part, request_signature)
     }
 
@@ -1345,7 +1349,7 @@ impl Pkcs11Backend for FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         self.ffi_wrap_key_authenticated(session, mechanism, wrapping_key, key, aad)
     }
 
@@ -1357,7 +1361,7 @@ impl Pkcs11Backend for FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
+    ) -> CkResult<(SecretBytes, pkcs11_proxy_ng_proto::convert::authenticated::AuthenticatedOutput)>
     {
         self.ffi_wrap_authenticated_typed(session, mechanism, parameter, wrapping_key, key, aad)
     }
@@ -1418,7 +1422,7 @@ impl Pkcs11Backend for FfiBackend {
         wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
         aad: CkInBuf<'_>,
-    ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
+    ) -> CkResult<(CkObjectHandle, SecretBytes)> {
         self.ffi_unwrap_key_authenticated(
             session,
             mechanism,

@@ -1,8 +1,9 @@
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
+use crate::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::{
     ByteOutputFunction, CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkObjectHandle,
     CkOutputAndHandleResult, CkOutputBufferResult, CkOutputBufferSpec, CkParameterRoundtripResult,
-    CkParameterRoundtripSpec, CkRv, ParameterOutputFunction,
+    CkParameterRoundtripSpec, CkRv, ParameterOutputFunction, SecretBytes,
 };
 
 fn attribute_queries_to_proto(queries: &[CkAttributeQuery]) -> v1_proto::AttributeQueryList {
@@ -68,7 +69,7 @@ impl From<&CkOutputBufferResult> for v1_proto::OutputBufferResult {
         Self {
             ck_rv: result.ck_rv.0,
             returned_len: result.returned_len.unwrap_or(0),
-            value: result.value.clone(),
+            value: result.value.as_ref().map(secret_to_plain),
             apply_returned_len: Some(result.returned_len.is_some()),
         }
     }
@@ -84,7 +85,7 @@ impl TryFrom<&v1_proto::OutputBufferResult> for CkOutputBufferResult {
         Ok(Self {
             ck_rv: CkRv(result.ck_rv),
             returned_len: apply.then_some(result.returned_len),
-            value: result.value.clone(),
+            value: result.value.clone().map(SecretBytes::new),
         })
     }
 }
@@ -94,7 +95,7 @@ impl From<&CkParameterRoundtripSpec> for v1_proto::ParameterRoundtripSpec {
         Self {
             buffer_present: spec.buffer_present,
             buffer_len: spec.buffer_len,
-            value: spec.value.clone(),
+            value: spec.value.as_ref().map(secret_to_plain),
         }
     }
 }
@@ -104,7 +105,7 @@ impl From<&v1_proto::ParameterRoundtripSpec> for CkParameterRoundtripSpec {
         Self {
             buffer_present: spec.buffer_present,
             buffer_len: spec.buffer_len,
-            value: spec.value.clone(),
+            value: spec.value.clone().map(SecretBytes::new),
         }
     }
 }
@@ -114,7 +115,7 @@ impl From<&CkParameterRoundtripResult> for v1_proto::ParameterRoundtripResult {
         Self {
             ck_rv: result.ck_rv.0,
             returned_len: result.returned_len,
-            value: result.value.clone(),
+            value: result.value.as_ref().map(secret_to_plain),
         }
     }
 }
@@ -124,7 +125,7 @@ impl From<&v1_proto::ParameterRoundtripResult> for CkParameterRoundtripResult {
         Self {
             ck_rv: CkRv(result.ck_rv),
             returned_len: result.returned_len,
-            value: result.value.clone(),
+            value: result.value.clone().map(SecretBytes::new),
         }
     }
 }
@@ -134,7 +135,7 @@ impl From<&CkOutputAndHandleResult> for v1_proto::OutputAndHandleResult {
         Self {
             ck_rv: result.ck_rv.0,
             returned_len: result.returned_len.unwrap_or(0),
-            value: result.value.clone(),
+            value: result.value.as_ref().map(secret_to_plain),
             object_handle: result.object_handle.map_or(0, |handle| handle.0),
             apply_returned_len: Some(result.returned_len.is_some()),
             apply_object_handle: Some(result.object_handle.is_some()),
@@ -156,7 +157,7 @@ impl TryFrom<&v1_proto::OutputAndHandleResult> for CkOutputAndHandleResult {
         Ok(Self {
             ck_rv: CkRv(result.ck_rv),
             returned_len: apply.then_some(result.returned_len),
-            value: result.value.clone(),
+            value: result.value.clone().map(SecretBytes::new),
             object_handle: handle.then_some(CkObjectHandle(result.object_handle)),
         })
     }
@@ -191,7 +192,7 @@ impl From<&CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
             apply_type: Some(result.apply_type),
             attr_type: result.attr_type.0,
             returned_len: result.returned_len,
-            value: result.value.clone(),
+            value: result.value.as_ref().map(secret_to_plain),
             ck_rv: result.ck_rv.map(|rv| rv.0),
             nested: result.nested.as_deref().map(attribute_query_results_to_proto),
         }
@@ -205,7 +206,7 @@ impl From<CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
             apply_type: Some(result.apply_type),
             attr_type: result.attr_type.0,
             returned_len: result.returned_len,
-            value: result.value,
+            value: result.value.as_ref().map(secret_to_plain),
             ck_rv: result.ck_rv.map(|rv| rv.0),
             nested: result.nested.map(attribute_query_results_into_proto),
         }
@@ -238,7 +239,7 @@ fn decode_attribute_result(
         apply_type,
         attr_type: CkAttributeType(result.attr_type),
         returned_len: result.returned_len,
-        value: result.value.clone(),
+        value: result.value.clone().map(SecretBytes::new),
         ck_rv: result.ck_rv.map(CkRv),
         nested: result
             .nested
@@ -535,7 +536,7 @@ mod tests {
         let original = CkParameterRoundtripSpec {
             buffer_present: true,
             buffer_len: 0,
-            value: Some(Vec::new()),
+            value: Some(Vec::new().into()),
         };
         let proto = v1_proto::ParameterRoundtripSpec::from(&original);
         let back = CkParameterRoundtripSpec::from(&proto);
@@ -547,7 +548,7 @@ mod tests {
         let original = CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
             returned_len: 7,
-            value: Some(vec![1, 2, 3, 4, 5, 6, 7]),
+            value: Some(vec![1, 2, 3, 4, 5, 6, 7].into()),
         };
         let proto = v1_proto::ParameterRoundtripResult::from(&original);
         let back = CkParameterRoundtripResult::from(&proto);
@@ -559,7 +560,7 @@ mod tests {
         let original = CkOutputAndHandleResult {
             ck_rv: CkRv::OK,
             returned_len: Some(3),
-            value: Some(vec![0xAA, 0xBB, 0xCC]),
+            value: Some(vec![0xAA, 0xBB, 0xCC].into()),
             object_handle: Some(CkObjectHandle(41)),
         };
         let proto = v1_proto::OutputAndHandleResult::from(&original);
@@ -607,7 +608,7 @@ mod tests {
                 apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 4,
-                value: Some(b"test".to_vec()),
+                value: Some(b"test".to_vec().into()),
                 ck_rv: None,
                 nested: Some(vec![]),
             }]),
@@ -638,7 +639,7 @@ mod tests {
                 apply_type: false,
                 attr_type: CkAttributeType::VALUE,
                 returned_len: 0,
-                value: Some(Vec::new()),
+                value: Some(Vec::new().into()),
                 ck_rv: None,
                 nested: None,
             },

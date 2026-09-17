@@ -19,17 +19,20 @@ fn hkdf(handle: u64) -> Option<Mechanism> {
             expand: true,
             prf_hash_mechanism: CkMechanismType::SHA256.0,
             salt_type: cryptoki_sys::CKF_HKDF_SALT_KEY as u64,
-            salt: vec![],
+            salt: vec![].into(),
             salt_key_handle: handle,
-            info: vec![],
+            info: vec![].into(),
         })),
     }))
 }
 
 fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
     let data_params = vec![
-        PrfDataParam { type_: cryptoki_sys::CK_SP800_108_ITERATION_VARIABLE as u64, value: vec![] },
-        PrfDataParam { type_: cryptoki_sys::CK_SP800_108_KEY_HANDLE as u64, value },
+        PrfDataParam {
+            type_: cryptoki_sys::CK_SP800_108_ITERATION_VARIABLE as u64,
+            value: vec![].into(),
+        },
+        PrfDataParam { type_: cryptoki_sys::CK_SP800_108_KEY_HANDLE as u64, value: value.into() },
     ];
     Some(Mechanism::from(&CkMechanism {
         mechanism_type: CkMechanismType::SHA256,
@@ -175,7 +178,7 @@ async fn stale_token_mapping(
                 },
                 CkAttribute {
                     attr_type: CkAttributeType::UNIQUE_ID,
-                    value: Some(CkAttributeValue::Bytes(vec![uid])),
+                    value: Some(CkAttributeValue::Bytes(vec![uid].into())),
                 },
             ],
         )

@@ -87,7 +87,7 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
             iv: vec![0u8; 12],
             iv_bits: 0,
             iv_buffer_len: 12,
-            aad: Vec::new(),
+            aad: Vec::new().into(),
             tag_bits: 128,
         })),
     };
@@ -133,7 +133,7 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
             iv: iv.clone(),
             iv_bits: 96,
             iv_buffer_len: iv.len() as u64,
-            aad: Vec::new(),
+            aad: Vec::new().into(),
             tag_bits: 128,
         })),
     };
@@ -171,7 +171,7 @@ async fn aes_gcm_strict_convention_iv_round_trip() -> Result<(), String> {
             iv: Vec::new(),
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: Vec::new(),
+            aad: Vec::new().into(),
             tag_bits: 128,
         })),
     };

@@ -3,6 +3,7 @@
 //! - `C_EncapsulateKey`
 //! - `C_DecapsulateKey`
 
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -110,7 +111,7 @@ pub(crate) async fn encapsulate_key(
             .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
                 ck_rv: CkRv::OK.0,
-                ciphertext,
+                ciphertext: secret_to_plain(&ciphertext),
                 key_handle,
             }))
         }
@@ -361,7 +362,10 @@ pub(crate) async fn encapsulate_key_exact(
                     apply_object_handle: Some(virtual_handle != 0),
                     ck_rv: r.ck_rv.0,
                     returned_len: r.returned_len.unwrap_or(0),
-                    value: r.value,
+                    value: r
+                        .value
+                        .as_ref()
+                        .map(pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain),
                     object_handle: virtual_handle,
                 }),
             }))

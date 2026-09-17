@@ -67,7 +67,7 @@ pub(crate) async fn unwrap_key(
     if let Some(label) = label {
         template.push(CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         });
     }
 
@@ -110,7 +110,7 @@ pub(crate) async fn derive_key(
     if let Some(label) = label {
         template.push(CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         });
     }
 
@@ -143,7 +143,7 @@ pub(crate) async fn generate_key(
     let mut template = vec![
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,
@@ -194,7 +194,7 @@ pub(crate) async fn generate_key_pair(
     let mut public_template = vec![
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label.clone())),
+            value: Some(CkAttributeValue::String(label.clone().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::VERIFY,
@@ -215,7 +215,7 @@ pub(crate) async fn generate_key_pair(
     let private_template = vec![
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         },
         CkAttribute { attr_type: CkAttributeType::SIGN, value: Some(CkAttributeValue::Bool(true)) },
         CkAttribute {

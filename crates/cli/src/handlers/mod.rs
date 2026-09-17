@@ -165,7 +165,7 @@ pub(crate) async fn find_key_by_label(
     let template = vec![
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(key_label.to_string())),
+            value: Some(CkAttributeValue::String(key_label.to_string().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::CLASS,

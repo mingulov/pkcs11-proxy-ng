@@ -61,7 +61,7 @@ async fn generate_rsa_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::PUBLIC_EXPONENT,
-            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01])),
+            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01].into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,
@@ -73,7 +73,7 @@ async fn generate_rsa_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(format!("{label_prefix}-pub"))),
+            value: Some(CkAttributeValue::String(format!("{label_prefix}-pub").into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::ENCRYPT,
@@ -103,7 +103,7 @@ async fn generate_rsa_key_pair(
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(format!("{label_prefix}-priv"))),
+            value: Some(CkAttributeValue::String(format!("{label_prefix}-priv").into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::DECRYPT,

@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,7 +74,7 @@ pub(super) async fn get_operation_state(
 
     Ok(Response::new(pkcs11_proxy_ng_proto::GetOperationStateResponse {
         ck_rv,
-        operation_state: operation_state.unwrap_or_default(),
+        operation_state: secret_to_plain(&operation_state.unwrap_or_default()),
     }))
 }
 

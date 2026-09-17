@@ -56,7 +56,7 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
         template: &[CkAttribute],
-    ) -> CkResult<(Vec<u8>, CkObjectHandle)> {
+    ) -> CkResult<(SecretBytes, CkObjectHandle)> {
         use super::ffi_conversion::FfiAttrs;
 
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
@@ -99,7 +99,7 @@ impl FfiBackend {
         })?;
         ciphertext.truncate(ciphertext_len as usize);
 
-        Ok((ciphertext, CkObjectHandle(key_handle as u64)))
+        Ok((ciphertext.into(), CkObjectHandle(key_handle as u64)))
     }
 
     pub(super) fn ffi_decapsulate_key(

@@ -247,11 +247,11 @@ async fn token_object_persists_across_sessions() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label.to_string())),
+            value: Some(CkAttributeValue::String(label.to_string().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(b"persistent payload".to_vec())),
+            value: Some(CkAttributeValue::Bytes(b"persistent payload".to_vec().into())),
         },
     ];
     client

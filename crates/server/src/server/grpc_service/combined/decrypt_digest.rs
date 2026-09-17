@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -51,7 +52,7 @@ pub(super) async fn decrypt_digest_update(
     let (ck_rv, part) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptDigestUpdateResponse {
         ck_rv,
-        part: part.unwrap_or_default(),
+        part: secret_to_plain(&part.unwrap_or_default()),
     }))
 }
 
@@ -82,6 +83,6 @@ pub(super) async fn decrypt_verify_update(
     let (ck_rv, part) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptVerifyUpdateResponse {
         ck_rv,
-        part: part.unwrap_or_default(),
+        part: secret_to_plain(&part.unwrap_or_default()),
     }))
 }

@@ -662,7 +662,9 @@ pub(crate) unsafe fn write_exact_message_output(
     if let Some(value) = output_result.value.as_ref()
         && !value.is_empty()
     {
-        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), p_output, value.len()) };
+        value.expose(|raw| unsafe {
+            std::ptr::copy_nonoverlapping(raw.as_ptr(), p_output, raw.len())
+        });
     }
     if let Some(returned_len) = returned_len {
         unsafe { pul_output_len.write(returned_len) };

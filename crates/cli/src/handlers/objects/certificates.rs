@@ -45,7 +45,7 @@ pub(crate) async fn import_certificate(
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label)),
+            value: Some(CkAttributeValue::String(label.into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::CERTIFICATE_TYPE,
@@ -53,11 +53,11 @@ pub(crate) async fn import_certificate(
         },
         CkAttribute {
             attr_type: CkAttributeType::SUBJECT,
-            value: Some(CkAttributeValue::Bytes(subject_der)),
+            value: Some(CkAttributeValue::Bytes(subject_der.into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(der)),
+            value: Some(CkAttributeValue::Bytes(der.into())),
         },
     ];
     let handle = client

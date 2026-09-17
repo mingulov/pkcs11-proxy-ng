@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -130,7 +131,7 @@ pub(crate) async fn sign(
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::SignResponse {
         ck_rv,
-        signature: signature.unwrap_or_default(),
+        signature: secret_to_plain(&signature.unwrap_or_default()),
     }))
 }
 
@@ -202,7 +203,7 @@ pub(crate) async fn sign_final(
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::SignFinalResponse {
         ck_rv,
-        signature: signature.unwrap_or_default(),
+        signature: secret_to_plain(&signature.unwrap_or_default()),
     }))
 }
 
@@ -314,7 +315,7 @@ pub(crate) async fn sign_recover(
     let (ck_rv, signature) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::SignRecoverResponse {
         ck_rv,
-        signature: signature.unwrap_or_default(),
+        signature: secret_to_plain(&signature.unwrap_or_default()),
     }))
 }
 

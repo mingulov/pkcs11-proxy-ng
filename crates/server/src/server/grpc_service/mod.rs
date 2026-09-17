@@ -4,6 +4,7 @@ use crate::config::{AuthConfig, TcpAuthMode, UnixAuthMode};
 use crate::mechanism_registry_source::MechanismRegistrySource;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::Pkcs11Proxy;
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::*;
 use tonic::{Request, Response, Status};
 
@@ -138,16 +139,16 @@ pub(super) fn convert_template(
 /// Encode a `CkAttributeValue` into the on-wire `bytes` representation
 /// the proto uses for `AttributeResult.value`.
 ///
-/// Consumes the value by move: the `Bytes` and `String` variants return
-/// their inner allocation directly (no clone). The two scalar variants
-/// (`Bool`, `Ulong`) construct a fresh small `Vec` because there's no
-/// owned buffer to move out of an integer.
+/// Consumes the value by move. The `Bytes`/`String` variants copy through
+/// the [`secret_to_plain`] ADR-0013 §5 boundary (the owned `SecretBytes`
+/// is dropped and wiped afterwards); the scalar variants (`Bool`, `Ulong`)
+/// construct a fresh small `Vec`.
 pub(super) fn attr_value_to_bytes(v: CkAttributeValue) -> Vec<u8> {
     match v {
         CkAttributeValue::Bool(b) => vec![u8::from(b)],
         CkAttributeValue::Ulong(u) => u.to_le_bytes().to_vec(),
-        CkAttributeValue::Bytes(b) => b,
-        CkAttributeValue::String(s) => s.into_bytes(),
+        CkAttributeValue::Bytes(b) => secret_to_plain(&b),
+        CkAttributeValue::String(s) => secret_to_plain(&s),
         // Nested templates never travel through AttributeResult's flat
         // bytes field — the exact path carries them structurally. Empty
         // rather than fabricated struct bytes.

@@ -533,7 +533,7 @@ async fn resolve_sp800_108_key_handle_data_param_list(
             continue;
         }
 
-        let (virtual_handle, width) = read_sp800_108_key_handle_value(&data_param.value)?;
+        let (virtual_handle, width) = data_param.value.expose(read_sp800_108_key_handle_value)?;
         let backend_handle = ctx
             .context_manager
             .get_context(ctx_id, |lci| lci.object_handles.resolve(VirtualHandle(virtual_handle)))
@@ -563,7 +563,7 @@ async fn resolve_sp800_108_key_handle_data_param_list(
         if virtual_handle != 0 && final_handle.0 == 0 {
             return Err(CkRv::OBJECT_HANDLE_INVALID);
         }
-        data_param.value = write_sp800_108_key_handle_value(final_handle.0, width)?;
+        data_param.value = write_sp800_108_key_handle_value(final_handle.0, width)?.into();
     }
     Ok(())
 }
@@ -662,7 +662,7 @@ mod tests {
             prf_type: CkMechanismType::SHA256.0,
             data_params: vec![PrfDataParam {
                 type_: CK_SP800_108_KEY_HANDLE,
-                value: virtual_key.0.to_ne_bytes().to_vec(),
+                value: virtual_key.0.to_ne_bytes().to_vec().into(),
             }],
             iv: vec![0xA5; 16],
             additional_derived_keys: Vec::new(),
@@ -677,7 +677,7 @@ mod tests {
         let CkMechanismParams::Sp800108FeedbackKdf(params) = params else {
             panic!("expected SP800-108 feedback KDF params");
         };
-        assert_eq!(params.data_params[0].value, backend_key.0.to_ne_bytes().to_vec());
+        assert_eq!(params.data_params[0].value, backend_key.0.to_ne_bytes().to_vec().into());
     }
 
     #[tokio::test]
@@ -689,7 +689,7 @@ mod tests {
             prf_type: CkMechanismType::SHA256.0,
             data_params: vec![PrfDataParam {
                 type_: CK_SP800_108_KEY_HANDLE,
-                value: vec![1, 2, 3],
+                value: vec![1, 2, 3].into(),
             }],
             additional_derived_keys: Vec::new(),
         });
@@ -721,7 +721,7 @@ mod tests {
             prf_type: cryptoki_sys::CKM_SHA256_HMAC as u64,
             data_params: vec![PrfDataParam {
                 type_: CK_SP800_108_KEY_HANDLE,
-                value: input.clone(),
+                value: input.clone().into(),
             }],
             additional_derived_keys: vec![],
         });
@@ -738,7 +738,8 @@ mod tests {
         );
         let CkMechanismParams::Sp800108Kdf(params) = params else { unreachable!() };
         assert_eq!(
-            params.data_params[0].value, input,
+            params.data_params[0].value,
+            input.into(),
             "failure must not serialize a truncated handle"
         );
     }

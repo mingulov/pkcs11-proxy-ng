@@ -108,14 +108,14 @@ unsafe fn ck_attrs_to_rust_at_depth(
                     backend_ulong_width,
                     pkcs11_proxy_ng_types::width::ByteOrder::Little,
                 ) {
-                    Ok(reencoded) => Some(CkAttributeValue::Bytes(reencoded)),
+                    Ok(reencoded) => Some(CkAttributeValue::Bytes(reencoded.into())),
                     // D4: an element exceeds the backend's CK_ULONG range.
                     Err(_) => return Err(CkRv::ATTRIBUTE_VALUE_INVALID),
                 }
             } else {
                 let bytes =
                     unsafe { std::slice::from_raw_parts(attr.pValue as *const u8, len) }.to_vec();
-                Some(CkAttributeValue::Bytes(bytes))
+                Some(CkAttributeValue::Bytes(bytes.into()))
             }
         };
         result.push(CkAttribute { attr_type: ck_type, value });

@@ -281,7 +281,7 @@ async fn encrypt_init_returns_gcm_output_params_through_grpc() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"aad".to_vec(),
+        aad: b"aad".to_vec().into(),
         tag_bits: 128,
     })));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
@@ -294,7 +294,7 @@ async fn encrypt_init_returns_gcm_output_params_through_grpc() {
             iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"aad".to_vec(),
+            aad: b"aad".to_vec().into(),
             tag_bits: 128,
         })),
     };
@@ -307,7 +307,7 @@ async fn encrypt_init_returns_gcm_output_params_through_grpc() {
             iv: generated_iv.clone(),
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"aad".to_vec(),
+            aad: b"aad".to_vec().into(),
             tag_bits: 128,
         }))
     );
@@ -321,7 +321,7 @@ async fn simple_encrypt_returns_cached_gcm_output_params_through_grpc() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"simple-aad".to_vec(),
+        aad: b"simple-aad".to_vec().into(),
         tag_bits: 128,
     })));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
@@ -334,7 +334,7 @@ async fn simple_encrypt_returns_cached_gcm_output_params_through_grpc() {
             iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"simple-aad".to_vec(),
+            aad: b"simple-aad".to_vec().into(),
             tag_bits: 128,
         })),
     };
@@ -353,7 +353,7 @@ async fn simple_encrypt_returns_cached_gcm_output_params_through_grpc() {
             iv: generated_iv,
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: b"simple-aad".to_vec(),
+            aad: b"simple-aad".to_vec().into(),
             tag_bits: 128,
         }))
     );
@@ -367,7 +367,7 @@ async fn simple_encrypt_returns_late_gcm_output_params_through_grpc() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"late-simple-aad".to_vec(),
+        aad: b"late-simple-aad".to_vec().into(),
         tag_bits: 128,
     });
     backend.set_encrypt_operation_output(Some(expected_output.clone()));
@@ -381,7 +381,7 @@ async fn simple_encrypt_returns_late_gcm_output_params_through_grpc() {
             iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"late-simple-aad".to_vec(),
+            aad: b"late-simple-aad".to_vec().into(),
             tag_bits: 128,
         })),
     };
@@ -404,7 +404,7 @@ async fn multipart_encrypt_returns_cached_gcm_output_params_through_grpc() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"multipart-aad".to_vec(),
+        aad: b"multipart-aad".to_vec().into(),
         tag_bits: 128,
     });
     backend.set_encrypt_init_output(Some(expected_output.clone()));
@@ -418,7 +418,7 @@ async fn multipart_encrypt_returns_cached_gcm_output_params_through_grpc() {
             iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"multipart-aad".to_vec(),
+            aad: b"multipart-aad".to_vec().into(),
             tag_bits: 128,
         })),
     };
@@ -446,7 +446,7 @@ async fn multipart_encrypt_returns_late_gcm_output_params_through_grpc() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"late-multipart-aad".to_vec(),
+        aad: b"late-multipart-aad".to_vec().into(),
         tag_bits: 128,
     });
     backend.set_encrypt_operation_output(Some(expected_output.clone()));
@@ -460,7 +460,7 @@ async fn multipart_encrypt_returns_late_gcm_output_params_through_grpc() {
             iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"late-multipart-aad".to_vec(),
+            aad: b"late-multipart-aad".to_vec().into(),
             tag_bits: 128,
         })),
     };
@@ -488,7 +488,7 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"aad".to_vec(),
+        aad: b"aad".to_vec().into(),
         tag_bits: 128,
     })));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
@@ -501,7 +501,7 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
             iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"aad".to_vec(),
+            aad: b"aad".to_vec().into(),
             tag_bits: 128,
         })),
     };
@@ -548,14 +548,14 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
     assert_eq!(data_result.ck_rv, CkRv::OK);
     assert_eq!(data_result.returned_len, Some(plaintext.len() as u64));
     let expected_ciphertext = plaintext.iter().map(|byte| byte ^ 0x42).collect::<Vec<_>>();
-    assert_eq!(data_result.value.as_deref(), Some(expected_ciphertext.as_slice()));
+    assert_eq!(data_result.value, Some(SecretBytes::copy_from_slice(&expected_ciphertext)));
     assert_eq!(
         data_mechanism_out,
         Some(CkMechanismParams::Gcm(GcmParams {
             iv: generated_iv.clone(),
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"aad".to_vec(),
+            aad: b"aad".to_vec().into(),
             tag_bits: 128,
         }))
     );
@@ -569,7 +569,7 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"wrap-aad".to_vec(),
+        aad: b"wrap-aad".to_vec().into(),
         tag_bits: 128,
     })));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
@@ -582,7 +582,7 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
             iv: vec![],
             iv_bits: 96,
             iv_buffer_len: generated_iv.len() as u64,
-            aad: b"wrap-aad".to_vec(),
+            aad: b"wrap-aad".to_vec().into(),
             tag_bits: 128,
         })),
     };
@@ -623,14 +623,14 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
 
     assert_eq!(wrap_result.ck_rv, CkRv::OK);
     assert_eq!(wrap_result.returned_len, Some(4));
-    assert_eq!(wrap_result.value, Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+    assert_eq!(wrap_result.value, Some(SecretBytes::new(vec![0xDE, 0xAD, 0xBE, 0xEF])));
     assert_eq!(
         mechanism_out,
         Some(CkMechanismParams::Gcm(GcmParams {
             iv: generated_iv,
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: b"wrap-aad".to_vec(),
+            aad: b"wrap-aad".to_vec().into(),
             tag_bits: 128,
         }))
     );
@@ -757,7 +757,7 @@ async fn sign_begin_empty_contract_rejects_positive_before_backend_and_acks_poin
         let empty = CkParameterRoundtripSpec { buffer_present, buffer_len: 0, value: None };
         let acknowledgement = client.sign_message_begin_contract(session, &empty).await.unwrap();
         assert_eq!(acknowledgement.returned_len, 0);
-        assert_eq!(acknowledgement.value, buffer_present.then(Vec::new));
+        assert_eq!(acknowledgement.value, buffer_present.then(Vec::new).map(SecretBytes::new));
     }
     assert_eq!(backend.message_parameter_call_count(), 2);
 }

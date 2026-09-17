@@ -624,7 +624,7 @@ fn teardown_returns_correct_backend_session_handles() {
 
 fn make_session_meta(uid: Vec<u8>) -> super::ObjectMetadata {
     super::ObjectMetadata {
-        unique_id: uid,
+        unique_id: uid.into(),
         class: Some(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY),
         is_token: false,
     }
@@ -632,7 +632,7 @@ fn make_session_meta(uid: Vec<u8>) -> super::ObjectMetadata {
 
 fn make_token_meta(uid: Vec<u8>) -> super::ObjectMetadata {
     super::ObjectMetadata {
-        unique_id: uid,
+        unique_id: uid.into(),
         class: Some(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY),
         is_token: true,
     }
@@ -657,7 +657,7 @@ async fn object_metadata_session_object_round_trip() {
     mgr.cache_object_metadata(&ctx_id, 7, make_session_meta(uid.clone())).await;
     assert_eq!(
         mgr.object_metadata(&ctx_id, 7).await.map(|m| m.unique_id),
-        Some(uid),
+        Some(SecretBytes::new(uid)),
         "a cached session-object metadata must be returned by object_metadata"
     );
 }

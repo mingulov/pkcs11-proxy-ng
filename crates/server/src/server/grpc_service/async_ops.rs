@@ -4,6 +4,7 @@
 //! - `C_AsyncGetID` — always returns `CKR_STATE_UNSAVEABLE`
 //! - `C_AsyncJoin` — always returns `CKR_SAVED_STATE_INVALID`
 
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -50,7 +51,7 @@ pub(crate) async fn async_complete(
                 ck_rv: CkRv::OK.0,
                 async_data: Some(pkcs11_proxy_ng_proto::AsyncData {
                     version,
-                    value,
+                    value: secret_to_plain(&value),
                     value_len,
                     object_handle: object_handle.0,
                     additional_object_handle: additional_object_handle.0,

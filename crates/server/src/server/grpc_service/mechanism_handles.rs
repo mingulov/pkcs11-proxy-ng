@@ -489,9 +489,9 @@ mod tests {
             expand: true,
             prf_hash_mechanism: 0,
             salt_type: 0,
-            salt: Vec::new(),
+            salt: Vec::new().into(),
             salt_key_handle: salt,
-            info: Vec::new(),
+            info: Vec::new().into(),
         })
     }
 
@@ -620,7 +620,7 @@ mod tests {
             mock.set_attribute(
                 backend_object,
                 CkAttributeType::UNIQUE_ID,
-                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid)),
+                MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.into())),
             );
         }
 
@@ -696,9 +696,9 @@ mod tests {
                 expand: true,
                 prf_hash_mechanism: 0,
                 salt_type: 0,
-                salt: Vec::new(),
+                salt: Vec::new().into(),
                 salt_key_handle: vo, // this virtual handle is denied (wrong uid)
-                info: Vec::new(),
+                info: Vec::new().into(),
             })),
         };
 
@@ -726,9 +726,9 @@ mod tests {
                 expand: true,
                 prf_hash_mechanism: 0,
                 salt_type: 0,
-                salt: Vec::new(),
+                salt: Vec::new().into(),
                 salt_key_handle: vo, // this virtual handle is allowed
-                info: Vec::new(),
+                info: Vec::new().into(),
             })),
         };
 

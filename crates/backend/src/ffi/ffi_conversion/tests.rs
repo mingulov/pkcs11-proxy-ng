@@ -13,8 +13,9 @@ mod mechanism_to_ffi_tests {
         CkRv, DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams, IvParams,
         KeyDerivationStringData, KmacParams, KyberParams, MuGenParams, ObjectHandleParam,
         PbeParams, Pkcs5Pbkd2Params, RawMechanismParams, RsaPkcsOaepParams, RsaPkcsPssParams,
-        SignAdditionalContext, Ssl3KeyMatParams, SslRandomData, VendorObjectExtractParams,
-        VendorObjectInsertParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsRandomData,
+        SecretBytes, SignAdditionalContext, Ssl3KeyMatParams, SslRandomData,
+        VendorObjectExtractParams, VendorObjectInsertParams, WtlsKeyMatParams,
+        WtlsMasterKeyDeriveParams, WtlsRandomData,
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
@@ -62,21 +63,21 @@ mod mechanism_to_ffi_tests {
     fn unsupported_mechanism_params_are_rejected_by_backend_ffi() {
         let parameterless = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
         let cases = [
-            ("Raw", CkMechanismParams::Raw(RawMechanismParams { data: vec![0x01, 0x02] })),
+            ("Raw", CkMechanismParams::Raw(RawMechanismParams { data: vec![0x01, 0x02].into() })),
             (
                 "Ecies",
                 CkMechanismParams::Ecies(EciesParams {
                     derivation_mechanism: Box::new(parameterless.clone()),
                     encryption_mechanism: Box::new(parameterless.clone()),
                     mac_mechanism: Box::new(parameterless.clone()),
-                    shared_data: vec![0x03],
+                    shared_data: vec![0x03].into(),
                 }),
             ),
             (
                 "AesCmacKeyDerivation",
                 CkMechanismParams::AesCmacKeyDerivation(AesCmacKeyDerivationParams {
-                    context: vec![0x04],
-                    label: vec![0x05],
+                    context: vec![0x04].into(),
+                    label: vec![0x05].into(),
                 }),
             ),
             ("Dilithium", CkMechanismParams::Dilithium(DilithiumParams { version: 1, mode: 2 })),
@@ -86,8 +87,8 @@ mod mechanism_to_ffi_tests {
                     version: 3,
                     mode: 4,
                     secret_handle: 5,
-                    shared_data: vec![0x06],
-                    blob: vec![0x07],
+                    shared_data: vec![0x06].into(),
+                    blob: vec![0x07].into(),
                 }),
             ),
             (
@@ -95,7 +96,7 @@ mod mechanism_to_ffi_tests {
                 CkMechanismParams::HdKeyDerive(HdKeyDeriveParams {
                     derive_type: 8,
                     child_key_index: 9,
-                    chain_code: vec![0x0A],
+                    chain_code: vec![0x0A].into(),
                     version: 10,
                 }),
             ),
@@ -103,15 +104,15 @@ mod mechanism_to_ffi_tests {
                 "VendorObjectExtract",
                 CkMechanismParams::VendorObjectExtract(VendorObjectExtractParams {
                     format: 11,
-                    context: vec![0x0C],
+                    context: vec![0x0C].into(),
                 }),
             ),
             (
                 "VendorObjectInsert",
                 CkMechanismParams::VendorObjectInsert(VendorObjectInsertParams {
                     format: 12,
-                    context: vec![0x0D],
-                    object_data: vec![0x0E],
+                    context: vec![0x0D].into(),
+                    object_data: vec![0x0E].into(),
                 }),
             ),
         ];
@@ -186,7 +187,7 @@ mod mechanism_to_ffi_tests {
                 hash_alg: CkMechanismType::SHA256,
                 mgf: 1,
                 source: 1,
-                source_data: vec![0xA0, 0xA1, 0xA2],
+                source_data: vec![0xA0, 0xA1, 0xA2].into(),
             }),
         );
 
@@ -219,7 +220,7 @@ mod mechanism_to_ffi_tests {
                 iv: vec![0x10; 12],
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: vec![0xAA, 0xBB, 0xCC],
+                aad: vec![0xAA, 0xBB, 0xCC].into(),
                 tag_bits: 128,
             }),
         );
@@ -260,7 +261,7 @@ mod mechanism_to_ffi_tests {
                     iv: vec![0x5A; iv_len],
                     iv_bits: 96,
                     iv_buffer_len: buffer_len as u64,
-                    aad: Vec::new(),
+                    aad: Vec::new().into(),
                     tag_bits: 128,
                 }),
             );
@@ -301,7 +302,7 @@ mod mechanism_to_ffi_tests {
                 iv: Vec::new(),
                 iv_bits: 96,
                 iv_buffer_len: u64::MAX,
-                aad: Vec::new(),
+                aad: Vec::new().into(),
                 tag_bits: 128,
             })),
         });
@@ -318,9 +319,9 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType(0x0000_03A1), // CKM_PBE_MD5_DES_CBC
             CkMechanismParams::Pbe(PbeParams {
-                init_vector: vec![0x01; 8],
-                password: password.clone(),
-                salt: vec![0x02; 4],
+                init_vector: vec![0x01; 8].into(),
+                password: password.clone().into(),
+                salt: vec![0x02; 4].into(),
                 iteration: 1000,
             }),
         );
@@ -341,11 +342,11 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x0000_03B0), // CKM_PKCS5_PBKD2
             CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
                 salt_source: 1,
-                salt_source_data: vec![0x09; 8],
+                salt_source_data: vec![0x09; 8].into(),
                 iterations: 2048,
                 prf: 2,
-                prf_data: vec![],
-                password: password.clone(),
+                prf_data: vec![].into(),
+                password: password.clone().into(),
             }),
         );
         let p = unsafe {
@@ -366,7 +367,7 @@ mod mechanism_to_ffi_tests {
                 iv: Vec::new(),
                 iv_bits: 96,
                 iv_buffer_len: 12,
-                aad: Vec::new(),
+                aad: Vec::new().into(),
                 tag_bits: 128,
             }),
         );
@@ -504,8 +505,8 @@ mod mechanism_to_ffi_tests {
                 server_mac_secret_handle: 0,
                 client_key_handle: 0,
                 server_key_handle: 0,
-                client_iv: Vec::new(),
-                server_iv: Vec::new(),
+                client_iv: Vec::new().into(),
+                server_iv: Vec::new().into(),
             }),
         );
 
@@ -543,8 +544,14 @@ mod mechanism_to_ffi_tests {
                 assert_eq!(params.server_mac_secret_handle, 102);
                 assert_eq!(params.client_key_handle, 201);
                 assert_eq!(params.server_key_handle, 202);
-                assert_eq!(params.client_iv, [0xA1, 0xA2, 0xA3, 0xA4]);
-                assert_eq!(params.server_iv, [0xB1, 0xB2, 0xB3, 0xB4]);
+                assert_eq!(
+                    params.client_iv,
+                    SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4])
+                );
+                assert_eq!(
+                    params.server_iv,
+                    SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3, 0xB4])
+                );
             }
             other => panic!("unexpected output params: {other:?}"),
         }
@@ -570,8 +577,8 @@ mod mechanism_to_ffi_tests {
                 server_mac_secret_handle: 0,
                 client_key_handle: 0,
                 server_key_handle: 0,
-                client_iv: Vec::new(),
-                server_iv: Vec::new(),
+                client_iv: Vec::new().into(),
+                server_iv: Vec::new().into(),
             }),
         );
 
@@ -605,8 +612,14 @@ mod mechanism_to_ffi_tests {
                 assert_eq!(params.server_mac_secret_handle, 112);
                 assert_eq!(params.client_key_handle, 211);
                 assert_eq!(params.server_key_handle, 212);
-                assert_eq!(params.client_iv, [0xC1, 0xC2, 0xC3, 0xC4]);
-                assert_eq!(params.server_iv, [0xD1, 0xD2, 0xD3, 0xD4]);
+                assert_eq!(
+                    params.client_iv,
+                    SecretBytes::copy_from_slice(&[0xC1, 0xC2, 0xC3, 0xC4])
+                );
+                assert_eq!(
+                    params.server_iv,
+                    SecretBytes::copy_from_slice(&[0xD1, 0xD2, 0xD3, 0xD4])
+                );
             }
             other => panic!("unexpected output params: {other:?}"),
         }
@@ -692,7 +705,7 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType(0x0000_0501),
             CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
-                data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                data: vec![0xDE, 0xAD, 0xBE, 0xEF].into(),
             }),
         );
 
@@ -718,7 +731,7 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x0000_0502),
             CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant: 1,
-                context: vec![0xA1, 0xA2, 0xA3],
+                context: vec![0xA1, 0xA2, 0xA3].into(),
                 hash: 0,
             }),
         );
@@ -747,7 +760,7 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x0000_001F), // CKM_HASH_ML_DSA
             CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant: 1,
-                context: vec![0xB1, 0xB2],
+                context: vec![0xB1, 0xB2].into(),
                 hash: 0x0000_0250, // CKM_SHA256
             }),
         );
@@ -778,7 +791,7 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::Kmac(KmacParams {
                 key_handle: 0xCAFE,
                 mac_length: 64,
-                customization_string: b"custom".to_vec(),
+                customization_string: b"custom".to_vec().into(),
             }),
         );
 
@@ -809,8 +822,8 @@ mod mechanism_to_ffi_tests {
             CkMechanismType(0x8000_0002),
             CkMechanismParams::MuGen(MuGenParams {
                 key_handle: 0xA11CE,
-                tr: b"precomputed-tr".to_vec(),
-                context: b"context".to_vec(),
+                tr: b"precomputed-tr".to_vec().into(),
+                context: b"context".to_vec().into(),
             }),
         );
 

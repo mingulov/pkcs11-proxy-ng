@@ -65,7 +65,7 @@ fn assert_backend_nested_class(abi: MockAbi, object: CK_OBJECT_HANDLE, expected:
     assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::OK);
     let result = &results[0].nested.as_ref().unwrap()[0];
     assert_eq!(result.attr_type, CkAttributeType::CLASS);
-    assert_eq!(result.value.as_ref().unwrap(), &abi.encode_ulong(expected as u64));
+    assert!(result.value.as_ref().unwrap().expose(|raw| raw == abi.encode_ulong(expected as u64)));
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn ulong_array_attribute_bridges_element_wise() {
         daemon.backend.set_attribute(
             backend_object,
             CkAttributeType::ALLOWED_MECHANISMS,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(backend_bytes)),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(backend_bytes.into())),
         );
 
         let mut attr = CK_ATTRIBUTE {

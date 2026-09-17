@@ -9,7 +9,7 @@ use pkcs11_proxy_ng_proto::convert::message_params::{
 use pkcs11_proxy_ng_proto::convert::output::parameter_output_function_from_i32;
 use pkcs11_proxy_ng_types::{
     CkFlags, CkInBuf, CkOutputBufferResult, CkOutputBufferSpec, CkParameterRoundtripResult,
-    CkParameterRoundtripSpec, CkResult, CkRv, ParameterOutputFunction,
+    CkParameterRoundtripSpec, CkResult, CkRv, ParameterOutputFunction, SecretBytes,
 };
 
 use super::super::context_manager::{
@@ -46,7 +46,7 @@ fn parameter_ack_matches(
 ) -> bool {
     result.ck_rv == expected_rv
         && result.returned_len == spec.buffer_len
-        && result.value == spec.buffer_present.then(Vec::new)
+        && result.value == spec.buffer_present.then(Vec::new).map(SecretBytes::new)
 }
 
 fn translate_parameter_ack(
@@ -56,7 +56,7 @@ fn translate_parameter_ack(
     CkParameterRoundtripResult {
         ck_rv: output.ck_rv,
         returned_len: caller_spec.buffer_len,
-        value: caller_spec.buffer_present.then(Vec::new),
+        value: caller_spec.buffer_present.then(Vec::new).map(SecretBytes::new),
     }
 }
 
@@ -124,7 +124,7 @@ pub(super) async fn parameter_output_exact(
         .map(|s| CkParameterRoundtripSpec {
             buffer_present: s.buffer_present,
             buffer_len: s.buffer_len,
-            value: s.value,
+            value: s.value.map(SecretBytes::new),
         })
         .unwrap_or(CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None });
 
@@ -1000,7 +1000,7 @@ mod ambiguity_tests {
         mock.set_next_message_parameter_ack(CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
             returned_len: provider_len + 1,
-            value: Some(Vec::new()),
+            value: Some(Vec::new().into()),
         });
         let calls_before = mock.message_parameter_call_count();
         let response = parameter_output_exact(

@@ -52,7 +52,7 @@ fn rsa_pub_template(label: &str, extra: &[CkAttribute]) -> Vec<CkAttribute> {
         },
         CkAttribute {
             attr_type: CkAttributeType::PUBLIC_EXPONENT,
-            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01])),
+            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01].into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,
@@ -60,7 +60,7 @@ fn rsa_pub_template(label: &str, extra: &[CkAttribute]) -> Vec<CkAttribute> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label.to_string())),
+            value: Some(CkAttributeValue::String(label.to_string().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::VERIFY,
@@ -87,7 +87,7 @@ fn rsa_priv_template(label: &str, extra: &[CkAttribute]) -> Vec<CkAttribute> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label.to_string())),
+            value: Some(CkAttributeValue::String(label.to_string().into())),
         },
         CkAttribute { attr_type: CkAttributeType::SIGN, value: Some(CkAttributeValue::Bool(true)) },
         CkAttribute {
@@ -118,7 +118,7 @@ async fn rsa_keygen_minimal_template() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::PUBLIC_EXPONENT,
-            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01])),
+            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01].into())),
         },
     ];
     let priv_t = vec![];
@@ -146,7 +146,7 @@ async fn rsa_keygen_with_id_attribute() -> Result<(), String> {
     let key_id = vec![0x01, 0x02, 0x03];
     let extra = [CkAttribute {
         attr_type: CkAttributeType::ID,
-        value: Some(CkAttributeValue::Bytes(key_id.clone())),
+        value: Some(CkAttributeValue::Bytes(key_id.clone().into())),
     }];
     let pub_t = rsa_pub_template(&label, &extra);
     let priv_t = rsa_priv_template(&label, &extra);
@@ -281,7 +281,7 @@ async fn aes_keygen_template_variants() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label128)),
+            value: Some(CkAttributeValue::String(label128.into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::ENCRYPT,
@@ -317,7 +317,7 @@ async fn aes_keygen_template_variants() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label256)),
+            value: Some(CkAttributeValue::String(label256.into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::ENCRYPT,
@@ -368,7 +368,7 @@ async fn ec_keygen_template_variants() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::EC_PARAMS,
-            value: Some(CkAttributeValue::Bytes(p256_oid.clone())),
+            value: Some(CkAttributeValue::Bytes(p256_oid.clone().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,
@@ -376,7 +376,7 @@ async fn ec_keygen_template_variants() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label.clone())),
+            value: Some(CkAttributeValue::String(label.clone().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::VERIFY,
@@ -390,7 +390,7 @@ async fn ec_keygen_template_variants() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label.clone())),
+            value: Some(CkAttributeValue::String(label.clone().into())),
         },
         CkAttribute { attr_type: CkAttributeType::SIGN, value: Some(CkAttributeValue::Bool(true)) },
         CkAttribute {
@@ -414,7 +414,7 @@ async fn ec_keygen_template_variants() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::EC_PARAMS,
-            value: Some(CkAttributeValue::Bytes(p384_oid)),
+            value: Some(CkAttributeValue::Bytes(p384_oid.into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,
@@ -422,7 +422,7 @@ async fn ec_keygen_template_variants() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label2.clone())),
+            value: Some(CkAttributeValue::String(label2.clone().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::VERIFY,
@@ -436,7 +436,7 @@ async fn ec_keygen_template_variants() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label2)),
+            value: Some(CkAttributeValue::String(label2.into())),
         },
         CkAttribute { attr_type: CkAttributeType::SIGN, value: Some(CkAttributeValue::Bool(true)) },
     ];
@@ -468,7 +468,7 @@ async fn data_object_template_variants() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(b"hello".to_vec())),
+            value: Some(CkAttributeValue::Bytes(b"hello".to_vec().into())),
         },
     ];
     let r1 = client.create_object(session, &t1).await;
@@ -487,11 +487,11 @@ async fn data_object_template_variants() -> Result<(), String> {
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label1)),
+            value: Some(CkAttributeValue::String(label1.into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(b"test data".to_vec())),
+            value: Some(CkAttributeValue::Bytes(b"test data".to_vec().into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::PRIVATE,
@@ -528,16 +528,16 @@ async fn token_object_attribute_required_for_persistence() -> Result<(), String>
         },
         CkAttribute {
             attr_type: CkAttributeType::PUBLIC_EXPONENT,
-            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01])),
+            value: Some(CkAttributeValue::Bytes(vec![0x01, 0x00, 0x01].into())),
         },
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
-            value: Some(CkAttributeValue::String(label1.clone())),
+            value: Some(CkAttributeValue::String(label1.clone().into())),
         },
     ];
     let priv_t = vec![CkAttribute {
         attr_type: CkAttributeType::LABEL,
-        value: Some(CkAttributeValue::String(label1)),
+        value: Some(CkAttributeValue::String(label1.into())),
     }];
     let r1 = try_rsa_keygen(&mut client, session, &pub_t, &priv_t).await;
     let msg = r1.as_ref().map_or_else(|e| format!("{e}"), |_| "OK (session object)".into());

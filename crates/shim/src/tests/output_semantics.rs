@@ -303,7 +303,7 @@ fn write_exact_output_rejects_value_larger_than_declared_buffer_without_copy() {
     let result = CkOutputBufferResult {
         ck_rv: CkRv::OK,
         returned_len: Some(4),
-        value: Some(vec![1, 2, 3, 4]),
+        value: Some(vec![1, 2, 3, 4].into()),
     };
 
     let rv = unsafe {
@@ -325,8 +325,11 @@ fn write_exact_output_validates_all_effects_before_any_store() {
     let mut backing = [0xa5; 8];
     let mut length = 8;
     let spec = unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut length) };
-    let result =
-        CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(7), value: Some(vec![1; 4]) };
+    let result = CkOutputBufferResult {
+        ck_rv: CkRv::OK,
+        returned_len: Some(7),
+        value: Some(vec![1; 4].into()),
+    };
     let rv = unsafe {
         dispatch::general::write_exact_output(&spec, &result, backing.as_mut_ptr(), &mut length)
     };
@@ -362,7 +365,7 @@ fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
     let result = CkOutputBufferResult {
         ck_rv: CkRv::BUFFER_TOO_SMALL,
         returned_len: Some(4),
-        value: Some(vec![1, 2, 3, 4]),
+        value: Some(vec![1, 2, 3, 4].into()),
     };
 
     let rv = unsafe {
@@ -712,7 +715,7 @@ fn raw_client_exact_fit_query_returns_backend_bytes() {
                 apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 3,
-                value: Some(b"key".to_vec()),
+                value: Some(b"key".to_vec().into()),
                 ck_rv: None,
                 nested: None,
             }]
@@ -1234,7 +1237,7 @@ fn malformed_post_provider_ack_returns_device_error_and_clears_shim_shape() {
     daemon.backend.set_next_message_parameter_ack(CkParameterRoundtripResult {
         ck_rv: CkRv::OK,
         returned_len: provider_len + 1,
-        value: Some(Vec::new()),
+        value: Some(Vec::new().into()),
     });
     let calls_before = daemon.backend.message_parameter_call_count();
     let input = [0x22_u8; 8];
@@ -2415,7 +2418,7 @@ fn gcm_generated_iv_round_trips_through_shim_client_and_server() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"aad".to_vec(),
+        aad: b"aad".to_vec().into(),
         tag_bits: 128,
     })));
 
@@ -2453,7 +2456,7 @@ fn gcm_delayed_iv_round_trips_after_encrypt_data_query() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"aad".to_vec(),
+        aad: b"aad".to_vec().into(),
         tag_bits: 128,
     })));
 
@@ -2506,7 +2509,7 @@ fn gcm_delayed_iv_size_query_does_not_consume_writeback() {
         iv: generated_iv.clone(),
         iv_bits: 96,
         iv_buffer_len: generated_iv.len() as u64,
-        aad: b"aad".to_vec(),
+        aad: b"aad".to_vec().into(),
         tag_bits: 128,
     })));
 
@@ -3102,7 +3105,7 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
         let param_out_spec = CkParameterRoundtripSpec {
             buffer_present: true,
             buffer_len: 16,
-            value: Some(vec![0xBB; 16]),
+            value: Some(vec![0xBB; 16].into()),
         };
 
         let mechanism = pkcs11_proxy_ng_types::CkMechanism {
@@ -3703,12 +3706,15 @@ fn raw_client_nested_template_data_query() {
         assert_eq!(nested[0].attr_type, CkAttributeType::CLASS);
         assert_eq!(nested[0].returned_len, ulong_size);
         let class_bytes = nested[0].value.as_ref().expect("CLASS value");
-        assert_eq!(class_bytes, &class_value.to_le_bytes()[..ulong_size as usize]);
+        assert!(class_bytes.expose(|raw| raw == &class_value.to_le_bytes()[..ulong_size as usize]));
 
         assert_eq!(nested[1].attr_type, CkAttributeType::KEY_TYPE);
         assert_eq!(nested[1].returned_len, ulong_size);
         let key_type_bytes = nested[1].value.as_ref().expect("KEY_TYPE value");
-        assert_eq!(key_type_bytes, &key_type_value.to_le_bytes()[..ulong_size as usize]);
+        assert!(
+            key_type_bytes
+                .expose(|raw| raw == &key_type_value.to_le_bytes()[..ulong_size as usize])
+        );
 
         client.close_session(session).await.expect("C_CloseSession");
         client.finalize().await.expect("C_Finalize");

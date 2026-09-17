@@ -141,7 +141,7 @@ async fn mapped_object(f: &MtlsFixture, c: &Client, class: CkObjectClass, uid: u
                 },
                 CkAttribute {
                     attr_type: CkAttributeType::UNIQUE_ID,
-                    value: Some(CkAttributeValue::Bytes(vec![uid])),
+                    value: Some(CkAttributeValue::Bytes(vec![uid].into())),
                 },
             ],
         )

@@ -72,14 +72,14 @@ fn mechanism_oaep_round_trip() {
             hash_alg: CkMechanismType::SHA256,
             mgf: 1,
             source: 1,
-            source_data: vec![1, 2, 3],
+            source_data: vec![1, 2, 3].into(),
         })),
     };
     let proto: v1_proto::Mechanism = (&original).into();
     let back = CkMechanism::try_from(&proto).unwrap();
     assert_eq!(back.mechanism_type, original.mechanism_type);
     match back.params.unwrap() {
-        CkMechanismParams::RsaPkcsOaep(p) => assert_eq!(p.source_data, vec![1, 2, 3]),
+        CkMechanismParams::RsaPkcsOaep(p) => assert_eq!(p.source_data, vec![1, 2, 3].into()),
         _ => panic!("wrong variant"),
     }
 }
@@ -92,7 +92,7 @@ fn mechanism_oaep_empty_source_data_round_trip() {
             hash_alg: CkMechanismType::SHA256,
             mgf: 0x00000002,
             source: 0x00000001,
-            source_data: vec![],
+            source_data: vec![].into(),
         })),
     };
     let proto: v1_proto::Mechanism = (&original).into();
@@ -111,7 +111,7 @@ fn mechanism_gcm_round_trip() {
             iv: vec![0u8; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![0xAA, 0xBB],
+            aad: vec![0xAA, 0xBB].into(),
             tag_bits: 128,
         })),
     };
@@ -123,7 +123,7 @@ fn mechanism_gcm_round_trip() {
             assert_eq!(p.iv, vec![0u8; 12]);
             assert_eq!(p.iv_bits, 96);
             assert_eq!(p.iv_buffer_len, 12);
-            assert_eq!(p.aad, vec![0xAA, 0xBB]);
+            assert_eq!(p.aad, vec![0xAA, 0xBB].into());
             assert_eq!(p.tag_bits, 128);
         }
         _ => panic!("wrong variant"),
@@ -138,7 +138,7 @@ fn mechanism_gcm_empty_aad_round_trip() {
             iv: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![],
+            aad: vec![].into(),
             tag_bits: 96,
         })),
     };
@@ -159,7 +159,7 @@ fn mechanism_ecdh1_derive_round_trip() {
         mechanism_type: CkMechanismType::ECDH1_DERIVE,
         params: Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
             kdf: 2,
-            shared_data: vec![0x01, 0x02, 0x03],
+            shared_data: vec![0x01, 0x02, 0x03].into(),
             public_data: vec![0x04; 65],
         })),
     };
@@ -169,7 +169,7 @@ fn mechanism_ecdh1_derive_round_trip() {
     match back.params.unwrap() {
         CkMechanismParams::Ecdh1Derive(p) => {
             assert_eq!(p.kdf, 2);
-            assert_eq!(p.shared_data, vec![0x01, 0x02, 0x03]);
+            assert_eq!(p.shared_data, vec![0x01, 0x02, 0x03].into());
             assert_eq!(p.public_data, vec![0x04; 65]);
         }
         _ => panic!("wrong variant"),
@@ -182,7 +182,7 @@ fn mechanism_ecdh1_derive_null_kdf_no_shared_data() {
         mechanism_type: CkMechanismType::ECDH1_DERIVE,
         params: Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
             kdf: 1,
-            shared_data: vec![],
+            shared_data: vec![].into(),
             public_data: vec![0x04; 65],
         })),
     };
@@ -303,7 +303,7 @@ fn mechanism_info_flags_zero_round_trip() {
 fn ecdh2_derive_round_trip() {
     let params = CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams {
         kdf: 2,
-        shared_data: vec![0x01, 0x02],
+        shared_data: vec![0x01, 0x02].into(),
         public_data: vec![0x04; 65],
         private_data_len: 32,
         private_data_handle: 0x1234,
@@ -312,7 +312,7 @@ fn ecdh2_derive_round_trip() {
     match round_trip(params) {
         CkMechanismParams::Ecdh2Derive(p) => {
             assert_eq!(p.kdf, 2);
-            assert_eq!(p.shared_data, vec![0x01, 0x02]);
+            assert_eq!(p.shared_data, vec![0x01, 0x02].into());
             assert_eq!(p.public_data.len(), 65);
             assert_eq!(p.private_data_len, 32);
             assert_eq!(p.private_data_handle, 0x1234);
@@ -326,7 +326,7 @@ fn ecdh2_derive_round_trip() {
 fn ecmqv_derive_round_trip() {
     let params = CkMechanismParams::EcmqvDerive(EcmqvDeriveParams {
         kdf: 3,
-        shared_data: vec![0xAA],
+        shared_data: vec![0xAA].into(),
         public_data: vec![0x04; 33],
         private_data_len: 16,
         private_data_handle: 0xABCD,
@@ -347,13 +347,13 @@ fn ecmqv_derive_round_trip() {
 fn x942_dh1_derive_round_trip() {
     let params = CkMechanismParams::X942Dh1Derive(X942Dh1DeriveParams {
         kdf: 1,
-        other_info: vec![0x10, 0x20],
+        other_info: vec![0x10, 0x20].into(),
         public_data: vec![0x55; 128],
     });
     match round_trip(params) {
         CkMechanismParams::X942Dh1Derive(p) => {
             assert_eq!(p.kdf, 1);
-            assert_eq!(p.other_info, vec![0x10, 0x20]);
+            assert_eq!(p.other_info, vec![0x10, 0x20].into());
             assert_eq!(p.public_data.len(), 128);
         }
         _ => panic!("wrong variant"),
@@ -364,7 +364,7 @@ fn x942_dh1_derive_round_trip() {
 fn x942_dh2_derive_round_trip() {
     let params = CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams {
         kdf: 2,
-        other_info: vec![],
+        other_info: vec![].into(),
         public_data: vec![0x55; 128],
         private_data_len: 64,
         private_data_handle: 42,
@@ -385,7 +385,7 @@ fn x942_dh2_derive_round_trip() {
 fn x942_mqv_derive_round_trip() {
     let params = CkMechanismParams::X942MqvDerive(X942MqvDeriveParams {
         kdf: 3,
-        other_info: vec![0xFF],
+        other_info: vec![0xFF].into(),
         public_data: vec![0x11; 64],
         private_data_len: 32,
         private_data_handle: 100,
@@ -409,9 +409,9 @@ fn hkdf_round_trip() {
         expand: true,
         prf_hash_mechanism: CkMechanismType::SHA256.0,
         salt_type: 1,
-        salt: vec![0xAA; 32],
+        salt: vec![0xAA; 32].into(),
         salt_key_handle: 0,
-        info: vec![0xBB; 16],
+        info: vec![0xBB; 16].into(),
     });
     match round_trip(params) {
         CkMechanismParams::Hkdf(p) => {
@@ -432,9 +432,9 @@ fn hkdf_extract_only_round_trip() {
         expand: false,
         prf_hash_mechanism: CkMechanismType::SHA384.0,
         salt_type: 2,
-        salt: vec![],
+        salt: vec![].into(),
         salt_key_handle: 0x42,
-        info: vec![],
+        info: vec![].into(),
     });
     match round_trip(params) {
         CkMechanismParams::Hkdf(p) => {
@@ -450,12 +450,12 @@ fn hkdf_extract_only_round_trip() {
 fn eddsa_round_trip() {
     let params = CkMechanismParams::Eddsa(EddsaParams {
         ph_flag: true,
-        context_data: vec![0x01, 0x02, 0x03],
+        context_data: vec![0x01, 0x02, 0x03].into(),
     });
     match round_trip(params) {
         CkMechanismParams::Eddsa(p) => {
             assert!(p.ph_flag);
-            assert_eq!(p.context_data, vec![0x01, 0x02, 0x03]);
+            assert_eq!(p.context_data, vec![0x01, 0x02, 0x03].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -463,7 +463,8 @@ fn eddsa_round_trip() {
 
 #[test]
 fn eddsa_no_context_round_trip() {
-    let params = CkMechanismParams::Eddsa(EddsaParams { ph_flag: false, context_data: vec![] });
+    let params =
+        CkMechanismParams::Eddsa(EddsaParams { ph_flag: false, context_data: vec![].into() });
     match round_trip(params) {
         CkMechanismParams::Eddsa(p) => {
             assert!(!p.ph_flag);
@@ -518,13 +519,13 @@ fn ecdh_aes_key_wrap_round_trip() {
     let params = CkMechanismParams::EcdhAesKeyWrap(EcdhAesKeyWrapParams {
         aes_key_bits: 256,
         kdf: 2,
-        shared_data: vec![0xAA, 0xBB],
+        shared_data: vec![0xAA, 0xBB].into(),
     });
     match round_trip(params) {
         CkMechanismParams::EcdhAesKeyWrap(p) => {
             assert_eq!(p.aes_key_bits, 256);
             assert_eq!(p.kdf, 2);
-            assert_eq!(p.shared_data, vec![0xAA, 0xBB]);
+            assert_eq!(p.shared_data, vec![0xAA, 0xBB].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -538,7 +539,7 @@ fn rsa_aes_key_wrap_round_trip() {
             hash_alg: CkMechanismType::SHA256,
             mgf: 1,
             source: 1,
-            source_data: vec![0x01, 0x02],
+            source_data: vec![0x01, 0x02].into(),
         },
     });
     match round_trip(params) {
@@ -547,7 +548,7 @@ fn rsa_aes_key_wrap_round_trip() {
             assert_eq!(p.oaep_params.hash_alg, CkMechanismType::SHA256);
             assert_eq!(p.oaep_params.mgf, 1);
             assert_eq!(p.oaep_params.source, 1);
-            assert_eq!(p.oaep_params.source_data, vec![0x01, 0x02]);
+            assert_eq!(p.oaep_params.source_data, vec![0x01, 0x02].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -585,11 +586,11 @@ fn gostr3410_key_wrap_round_trip() {
 #[test]
 fn key_wrap_set_oaep_round_trip() {
     let params =
-        CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams { bc: 42, x: vec![0xFF; 8] });
+        CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams { bc: 42, x: vec![0xFF; 8].into() });
     match round_trip(params) {
         CkMechanismParams::KeyWrapSetOaep(p) => {
             assert_eq!(p.bc, 42);
-            assert_eq!(p.x, vec![0xFF; 8]);
+            assert_eq!(p.x, vec![0xFF; 8].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -602,15 +603,15 @@ fn key_wrap_set_oaep_round_trip() {
 #[test]
 fn pbe_round_trip() {
     let params = CkMechanismParams::Pbe(PbeParams {
-        init_vector: vec![0x01; 16],
-        password: vec![0x70, 0x61, 0x73, 0x73], // "pass"
-        salt: vec![0xAA; 16],
+        init_vector: vec![0x01; 16].into(),
+        password: vec![0x70, 0x61, 0x73, 0x73].into(), // "pass"
+        salt: vec![0xAA; 16].into(),
         iteration: 10000,
     });
     match round_trip(params) {
         CkMechanismParams::Pbe(p) => {
             assert_eq!(p.init_vector.len(), 16);
-            assert_eq!(p.password, vec![0x70, 0x61, 0x73, 0x73]);
+            assert_eq!(p.password, vec![0x70, 0x61, 0x73, 0x73].into());
             assert_eq!(p.salt.len(), 16);
             assert_eq!(p.iteration, 10000);
         }
@@ -622,11 +623,11 @@ fn pbe_round_trip() {
 fn pkcs5_pbkd2_round_trip() {
     let params = CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
         salt_source: 1,
-        salt_source_data: vec![0xBB; 16],
+        salt_source_data: vec![0xBB; 16].into(),
         iterations: 600000,
         prf: 2,
-        prf_data: vec![],
-        password: vec![0x73, 0x65, 0x63, 0x72, 0x65, 0x74], // "secret"
+        prf_data: vec![].into(),
+        password: vec![0x73, 0x65, 0x63, 0x72, 0x65, 0x74].into(), // "secret"
     });
     match round_trip(params) {
         CkMechanismParams::Pkcs5Pbkd2(p) => {
@@ -789,12 +790,12 @@ fn rc5_cbc_params_round_trip() {
 fn aes_cbc_encrypt_data_params_round_trip() {
     let p = round_trip(CkMechanismParams::AesCbcEncryptData(AesCbcEncryptDataParams {
         iv: vec![0x01; 16],
-        data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        data: vec![0xDE, 0xAD, 0xBE, 0xEF].into(),
     }));
     match p {
         CkMechanismParams::AesCbcEncryptData(v) => {
             assert_eq!(v.iv, vec![0x01; 16]);
-            assert_eq!(v.data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+            assert_eq!(v.data, vec![0xDE, 0xAD, 0xBE, 0xEF].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -804,12 +805,12 @@ fn aes_cbc_encrypt_data_params_round_trip() {
 fn des_cbc_encrypt_data_params_round_trip() {
     let p = round_trip(CkMechanismParams::DesCbcEncryptData(DesCbcEncryptDataParams {
         iv: vec![0xAA; 8],
-        data: vec![0x01, 0x02, 0x03],
+        data: vec![0x01, 0x02, 0x03].into(),
     }));
     match p {
         CkMechanismParams::DesCbcEncryptData(v) => {
             assert_eq!(v.iv, vec![0xAA; 8]);
-            assert_eq!(v.data, vec![0x01, 0x02, 0x03]);
+            assert_eq!(v.data, vec![0x01, 0x02, 0x03].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -819,12 +820,12 @@ fn des_cbc_encrypt_data_params_round_trip() {
 fn aria_cbc_encrypt_data_params_round_trip() {
     let p = round_trip(CkMechanismParams::AriaCbcEncryptData(AriaCbcEncryptDataParams {
         iv: vec![0xBB; 16],
-        data: vec![0x10; 32],
+        data: vec![0x10; 32].into(),
     }));
     match p {
         CkMechanismParams::AriaCbcEncryptData(v) => {
             assert_eq!(v.iv, vec![0xBB; 16]);
-            assert_eq!(v.data, vec![0x10; 32]);
+            assert_eq!(v.data, vec![0x10; 32].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -834,12 +835,12 @@ fn aria_cbc_encrypt_data_params_round_trip() {
 fn camellia_cbc_encrypt_data_params_round_trip() {
     let p = round_trip(CkMechanismParams::CamelliaCbcEncryptData(CamelliaCbcEncryptDataParams {
         iv: vec![0xCC; 16],
-        data: vec![0x20; 48],
+        data: vec![0x20; 48].into(),
     }));
     match p {
         CkMechanismParams::CamelliaCbcEncryptData(v) => {
             assert_eq!(v.iv, vec![0xCC; 16]);
-            assert_eq!(v.data, vec![0x20; 48]);
+            assert_eq!(v.data, vec![0x20; 48].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -849,7 +850,7 @@ fn camellia_cbc_encrypt_data_params_round_trip() {
 fn seed_cbc_encrypt_data_params_round_trip() {
     let p = round_trip(CkMechanismParams::SeedCbcEncryptData(SeedCbcEncryptDataParams {
         iv: vec![0xDD; 16],
-        data: vec![],
+        data: vec![].into(),
     }));
     match p {
         CkMechanismParams::SeedCbcEncryptData(v) => {
@@ -869,14 +870,14 @@ fn ccm_params_round_trip() {
     let p = round_trip(CkMechanismParams::Ccm(CcmParams {
         data_len: 256,
         nonce: vec![0x01; 12],
-        aad: vec![0xAA, 0xBB],
+        aad: vec![0xAA, 0xBB].into(),
         mac_len: 16,
     }));
     match p {
         CkMechanismParams::Ccm(v) => {
             assert_eq!(v.data_len, 256);
             assert_eq!(v.nonce, vec![0x01; 12]);
-            assert_eq!(v.aad, vec![0xAA, 0xBB]);
+            assert_eq!(v.aad, vec![0xAA, 0xBB].into());
             assert_eq!(v.mac_len, 16);
         }
         _ => panic!("wrong variant"),
@@ -923,12 +924,12 @@ fn salsa20_params_round_trip() {
 fn salsa20_chacha20_poly1305_params_round_trip() {
     let p = round_trip(CkMechanismParams::Salsa20ChaCha20Poly1305(Salsa20ChaCha20Poly1305Params {
         nonce: vec![0x03; 12],
-        aad: vec![0x04; 20],
+        aad: vec![0x04; 20].into(),
     }));
     match p {
         CkMechanismParams::Salsa20ChaCha20Poly1305(v) => {
             assert_eq!(v.nonce, vec![0x03; 12]);
-            assert_eq!(v.aad, vec![0x04; 20]);
+            assert_eq!(v.aad, vec![0x04; 20].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -938,7 +939,7 @@ fn salsa20_chacha20_poly1305_params_round_trip() {
 fn salsa20_chacha20_poly1305_empty_aad_round_trip() {
     let p = round_trip(CkMechanismParams::Salsa20ChaCha20Poly1305(Salsa20ChaCha20Poly1305Params {
         nonce: vec![0x05; 12],
-        aad: vec![],
+        aad: vec![].into(),
     }));
     match p {
         CkMechanismParams::Salsa20ChaCha20Poly1305(v) => {
@@ -955,7 +956,7 @@ fn gcm_wrap_params_round_trip() {
         iv: vec![0x01; 12],
         iv_fixed_bits: 32,
         iv_generator: 1,
-        aad: vec![0xAA],
+        aad: vec![0xAA].into(),
         tag_bits: 128,
     }));
     match p {
@@ -963,7 +964,7 @@ fn gcm_wrap_params_round_trip() {
             assert_eq!(v.iv, vec![0x01; 12]);
             assert_eq!(v.iv_fixed_bits, 32);
             assert_eq!(v.iv_generator, 1);
-            assert_eq!(v.aad, vec![0xAA]);
+            assert_eq!(v.aad, vec![0xAA].into());
             assert_eq!(v.tag_bits, 128);
         }
         _ => panic!("wrong variant"),
@@ -977,7 +978,7 @@ fn ccm_wrap_params_round_trip() {
         nonce: vec![0x02; 7],
         nonce_fixed_bits: 24,
         nonce_generator: 2,
-        aad: vec![0xBB, 0xCC],
+        aad: vec![0xBB, 0xCC].into(),
         mac_len: 8,
     }));
     match p {
@@ -986,7 +987,7 @@ fn ccm_wrap_params_round_trip() {
             assert_eq!(v.nonce, vec![0x02; 7]);
             assert_eq!(v.nonce_fixed_bits, 24);
             assert_eq!(v.nonce_generator, 2);
-            assert_eq!(v.aad, vec![0xBB, 0xCC]);
+            assert_eq!(v.aad, vec![0xBB, 0xCC].into());
             assert_eq!(v.mac_len, 8);
         }
         _ => panic!("wrong variant"),
@@ -1000,14 +1001,14 @@ fn ccm_wrap_params_round_trip() {
 #[test]
 fn tls_prf_params_round_trip() {
     let p = round_trip(CkMechanismParams::TlsPrf(TlsPrfParams {
-        seed: vec![0x01; 32],
-        label: vec![0x6D, 0x61, 0x73, 0x74], // "mast"
+        seed: vec![0x01; 32].into(),
+        label: vec![0x6D, 0x61, 0x73, 0x74].into(), // "mast"
         output_len: 48,
     }));
     match p {
         CkMechanismParams::TlsPrf(v) => {
             assert_eq!(v.seed.len(), 32);
-            assert_eq!(v.label, vec![0x6D, 0x61, 0x73, 0x74]);
+            assert_eq!(v.label, vec![0x6D, 0x61, 0x73, 0x74].into());
             assert_eq!(v.output_len, 48);
         }
         _ => panic!("wrong variant"),
@@ -1018,14 +1019,14 @@ fn tls_prf_params_round_trip() {
 fn tls_kdf_params_round_trip() {
     let p = round_trip(CkMechanismParams::TlsKdf(TlsKdfParams {
         prf_mechanism: 0x250,
-        label: vec![0x6B, 0x65, 0x79], // "key"
+        label: vec![0x6B, 0x65, 0x79].into(), // "key"
         random_info: SslRandomData { client_random: vec![0xAA; 32], server_random: vec![0xBB; 32] },
-        context_data: vec![0xCC; 16],
+        context_data: vec![0xCC; 16].into(),
     }));
     match p {
         CkMechanismParams::TlsKdf(v) => {
             assert_eq!(v.prf_mechanism, 0x250);
-            assert_eq!(v.label, vec![0x6B, 0x65, 0x79]);
+            assert_eq!(v.label, vec![0x6B, 0x65, 0x79].into());
             assert_eq!(v.random_info.client_random, vec![0xAA; 32]);
             assert_eq!(v.random_info.server_random, vec![0xBB; 32]);
             assert_eq!(v.context_data.len(), 16);
@@ -1053,9 +1054,9 @@ fn tls_kdf_params_reject_missing_random_info() {
 fn tls_kdf_params_preserve_present_empty_random_info() {
     let p = round_trip(CkMechanismParams::TlsKdf(TlsKdfParams {
         prf_mechanism: CkMechanismType::SHA256.0,
-        label: vec![],
+        label: vec![].into(),
         random_info: SslRandomData { client_random: vec![], server_random: vec![] },
-        context_data: vec![],
+        context_data: vec![].into(),
     }));
 
     match p {
@@ -1139,8 +1140,8 @@ fn ssl3_key_mat_params_round_trip() {
         server_mac_secret_handle: 102,
         client_key_handle: 201,
         server_key_handle: 202,
-        client_iv: vec![0xA1; 16],
-        server_iv: vec![0xB1; 16],
+        client_iv: vec![0xA1; 16].into(),
+        server_iv: vec![0xB1; 16].into(),
     }));
     match p {
         CkMechanismParams::Ssl3KeyMat(v) => {
@@ -1153,8 +1154,8 @@ fn ssl3_key_mat_params_round_trip() {
             assert_eq!(v.server_mac_secret_handle, 102);
             assert_eq!(v.client_key_handle, 201);
             assert_eq!(v.server_key_handle, 202);
-            assert_eq!(v.client_iv, vec![0xA1; 16]);
-            assert_eq!(v.server_iv, vec![0xB1; 16]);
+            assert_eq!(v.client_iv, vec![0xA1; 16].into());
+            assert_eq!(v.server_iv, vec![0xB1; 16].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1200,8 +1201,8 @@ fn wtls_master_key_derive_rejects_missing_random_info() {
 fn wtls_prf_params_round_trip() {
     let p = round_trip(CkMechanismParams::WtlsPrf(WtlsPrfParams {
         digest_mechanism: 0x260,
-        seed: vec![0xAA; 20],
-        label: vec![0xBB; 10],
+        seed: vec![0xAA; 20].into(),
+        label: vec![0xBB; 10].into(),
         output_len: 32,
     }));
     match p {
@@ -1257,8 +1258,8 @@ fn ike_prf_derive_round_trip() {
         prf_mechanism: 0x250,
         data_as_key: true,
         rekey: false,
-        ni: vec![0x01; 32],
-        nr: vec![0x02; 32],
+        ni: vec![0x01; 32].into(),
+        nr: vec![0x02; 32].into(),
         new_key_handle: 0x1234,
     }));
     match p {
@@ -1281,8 +1282,8 @@ fn ike1_prf_derive_round_trip() {
         has_prev_key: true,
         keygxy_handle: 0xAAAA,
         prev_key_handle: 0xBBBB,
-        ckyi: vec![0x11; 8],
-        ckyr: vec![0x22; 8],
+        ckyi: vec![0x11; 8].into(),
+        ckyr: vec![0x22; 8].into(),
         key_number: 3,
     }));
     match p {
@@ -1304,7 +1305,7 @@ fn ike1_extended_derive_round_trip() {
         prf_mechanism: 0x270,
         has_keygxy: true,
         keygxy_handle: 0xCCCC,
-        extra_data: vec![0x33; 64],
+        extra_data: vec![0x33; 64].into(),
     }));
     match p {
         CkMechanismParams::Ike1ExtendedDerive(v) => {
@@ -1323,7 +1324,7 @@ fn ike2_prf_plus_derive_round_trip() {
         prf_mechanism: 0x250,
         has_seed_key: true,
         seed_key_handle: 0xDDDD,
-        seed_data: vec![0x44; 32],
+        seed_data: vec![0x44; 32].into(),
     }));
     match p {
         CkMechanismParams::Ike2PrfPlusDerive(v) => {
@@ -1345,14 +1346,14 @@ fn sp800_108_kdf_params_round_trip() {
     let p = round_trip(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
         prf_type: 0x250,
         data_params: vec![
-            PrfDataParam { type_: 1, value: vec![0xAA; 4] },
-            PrfDataParam { type_: 2, value: vec![0xBB; 8] },
+            PrfDataParam { type_: 1, value: vec![0xAA; 4].into() },
+            PrfDataParam { type_: 2, value: vec![0xBB; 8].into() },
         ],
         additional_derived_keys: vec![Sp800108DerivedKey {
             template: vec![
                 CkAttribute {
                     attr_type: CkAttributeType::LABEL,
-                    value: Some(CkAttributeValue::String("extra-a".to_string())),
+                    value: Some(CkAttributeValue::String("extra-a".to_string().into())),
                 },
                 CkAttribute {
                     attr_type: CkAttributeType::VALUE_LEN,
@@ -1367,9 +1368,9 @@ fn sp800_108_kdf_params_round_trip() {
             assert_eq!(v.prf_type, 0x250);
             assert_eq!(v.data_params.len(), 2);
             assert_eq!(v.data_params[0].type_, 1);
-            assert_eq!(v.data_params[0].value, vec![0xAA; 4]);
+            assert_eq!(v.data_params[0].value, vec![0xAA; 4].into());
             assert_eq!(v.data_params[1].type_, 2);
-            assert_eq!(v.data_params[1].value, vec![0xBB; 8]);
+            assert_eq!(v.data_params[1].value, vec![0xBB; 8].into());
             assert_eq!(v.additional_derived_keys.len(), 1);
             assert_eq!(v.additional_derived_keys[0].key_handle, 0xAA55);
             assert_eq!(v.additional_derived_keys[0].template.len(), 2);
@@ -1382,7 +1383,7 @@ fn sp800_108_kdf_params_round_trip() {
 fn sp800_108_feedback_kdf_params_round_trip() {
     let p = round_trip(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
         prf_type: 0x260,
-        data_params: vec![PrfDataParam { type_: 3, value: vec![0xCC; 16] }],
+        data_params: vec![PrfDataParam { type_: 3, value: vec![0xCC; 16].into() }],
         iv: vec![0xDD; 16],
         additional_derived_keys: vec![Sp800108DerivedKey {
             template: vec![CkAttribute {
@@ -1476,7 +1477,7 @@ fn x3dh_respond_round_trip() {
 #[test]
 fn x2_ratchet_initialize_round_trip() {
     let p = round_trip(CkMechanismParams::X2RatchetInitialize(X2RatchetInitializeParams {
-        sk: vec![0x01; 32],
+        sk: vec![0x01; 32].into(),
         peer_public_prekey_handle: 0x1111,
         peer_public_identity_handle: 0x2222,
         own_public_identity_handle: 0x3333,
@@ -1501,7 +1502,7 @@ fn x2_ratchet_initialize_round_trip() {
 #[test]
 fn x2_ratchet_respond_round_trip() {
     let p = round_trip(CkMechanismParams::X2RatchetRespond(X2RatchetRespondParams {
-        sk: vec![0x02; 32],
+        sk: vec![0x02; 32].into(),
         own_prekey_handle: 0xAAAA,
         initiator_identity_handle: 0xBBBB,
         own_identity_handle: 0xCCCC,
@@ -1529,17 +1530,17 @@ fn x2_ratchet_respond_round_trip() {
 fn otp_params_round_trip() {
     let p = round_trip(CkMechanismParams::Otp(OtpParams {
         params: vec![
-            OtpParam { type_: 1, value: vec![0x01; 6] },
-            OtpParam { type_: 2, value: vec![0x02; 4] },
+            OtpParam { type_: 1, value: vec![0x01; 6].into() },
+            OtpParam { type_: 2, value: vec![0x02; 4].into() },
         ],
     }));
     match p {
         CkMechanismParams::Otp(v) => {
             assert_eq!(v.params.len(), 2);
             assert_eq!(v.params[0].type_, 1);
-            assert_eq!(v.params[0].value, vec![0x01; 6]);
+            assert_eq!(v.params[0].value, vec![0x01; 6].into());
             assert_eq!(v.params[1].type_, 2);
-            assert_eq!(v.params[1].value, vec![0x02; 4]);
+            assert_eq!(v.params[1].value, vec![0x02; 4].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1560,14 +1561,14 @@ fn kip_params_round_trip() {
     let p = round_trip(CkMechanismParams::Kip(KipParams {
         mechanism: Box::new(nested),
         key_handle: 0xBEEF,
-        seed: vec![0xAA; 16],
+        seed: vec![0xAA; 16].into(),
     }));
     match p {
         CkMechanismParams::Kip(v) => {
             assert_eq!(v.mechanism.mechanism_type, CkMechanismType::SHA256);
             assert!(v.mechanism.params.is_none());
             assert_eq!(v.key_handle, 0xBEEF);
-            assert_eq!(v.seed, vec![0xAA; 16]);
+            assert_eq!(v.seed, vec![0xAA; 16].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1596,8 +1597,8 @@ fn cms_sig_params_round_trip() {
         signing_mechanism: Box::new(signing),
         digest_mechanism: Box::new(digest),
         content_type: "1.2.840.113549.1.7.1".to_string(),
-        requested_attributes: vec![0x30, 0x00],
-        required_attributes: vec![0x31, 0x00],
+        requested_attributes: vec![0x30, 0x00].into(),
+        required_attributes: vec![0x31, 0x00].into(),
     }));
     match p {
         CkMechanismParams::CmsSig(v) => {
@@ -1605,8 +1606,8 @@ fn cms_sig_params_round_trip() {
             assert_eq!(v.signing_mechanism.mechanism_type, CkMechanismType::RSA_PKCS);
             assert_eq!(v.digest_mechanism.mechanism_type, CkMechanismType::SHA256);
             assert_eq!(v.content_type, "1.2.840.113549.1.7.1");
-            assert_eq!(v.requested_attributes, vec![0x30, 0x00]);
-            assert_eq!(v.required_attributes, vec![0x31, 0x00]);
+            assert_eq!(v.requested_attributes, vec![0x30, 0x00].into());
+            assert_eq!(v.required_attributes, vec![0x31, 0x00].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1635,7 +1636,7 @@ fn cms_sig_params_reject_missing_digest_mechanism() {
 #[test]
 fn skipjack_private_wrap_round_trip() {
     let p = round_trip(CkMechanismParams::SkipjackPrivateWrap(SkipjackPrivateWrapParams {
-        password: vec![0x70, 0x61, 0x73, 0x73],
+        password: vec![0x70, 0x61, 0x73, 0x73].into(),
         public_data: vec![0x11; 128],
         password_length: 4,
         random_a: vec![0x22; 20],
@@ -1645,7 +1646,7 @@ fn skipjack_private_wrap_round_trip() {
     }));
     match p {
         CkMechanismParams::SkipjackPrivateWrap(v) => {
-            assert_eq!(v.password, vec![0x70, 0x61, 0x73, 0x73]);
+            assert_eq!(v.password, vec![0x70, 0x61, 0x73, 0x73].into());
             assert_eq!(v.public_data.len(), 128);
             assert_eq!(v.password_length, 4);
             assert_eq!(v.random_a.len(), 20);
@@ -1660,13 +1661,13 @@ fn skipjack_private_wrap_round_trip() {
 #[test]
 fn skipjack_relayx_round_trip() {
     let p = round_trip(CkMechanismParams::SkipjackRelayx(SkipjackRelayxParams {
-        old_wrapped_x: vec![0x01; 24],
-        old_password: vec![0x02; 8],
-        old_public_data: vec![0x03; 128],
-        old_random_a: vec![0x04; 20],
-        new_password: vec![0x05; 8],
-        new_public_data: vec![0x06; 128],
-        new_random_a: vec![0x07; 20],
+        old_wrapped_x: vec![0x01; 24].into(),
+        old_password: vec![0x02; 8].into(),
+        old_public_data: vec![0x03; 128].into(),
+        old_random_a: vec![0x04; 20].into(),
+        new_password: vec![0x05; 8].into(),
+        new_public_data: vec![0x06; 128].into(),
+        new_random_a: vec![0x07; 20].into(),
     }));
     match p {
         CkMechanismParams::SkipjackRelayx(v) => {
@@ -1722,11 +1723,11 @@ fn extract_params_round_trip() {
 #[test]
 fn key_derivation_string_data_round_trip() {
     let p = round_trip(CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
-        data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        data: vec![0xDE, 0xAD, 0xBE, 0xEF].into(),
     }));
     match p {
         CkMechanismParams::KeyDerivationString(v) => {
-            assert_eq!(v.data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+            assert_eq!(v.data, vec![0xDE, 0xAD, 0xBE, 0xEF].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1735,7 +1736,7 @@ fn key_derivation_string_data_round_trip() {
 #[test]
 fn key_derivation_string_data_empty_round_trip() {
     let p = round_trip(CkMechanismParams::KeyDerivationString(KeyDerivationStringData {
-        data: vec![],
+        data: vec![].into(),
     }));
     match p {
         CkMechanismParams::KeyDerivationString(v) => {
@@ -1748,11 +1749,11 @@ fn key_derivation_string_data_empty_round_trip() {
 #[test]
 fn raw_mechanism_params_round_trip() {
     let p = round_trip(CkMechanismParams::Raw(RawMechanismParams {
-        data: vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+        data: vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08].into(),
     }));
     match p {
         CkMechanismParams::Raw(v) => {
-            assert_eq!(v.data, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+            assert_eq!(v.data, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1760,7 +1761,7 @@ fn raw_mechanism_params_round_trip() {
 
 #[test]
 fn raw_mechanism_params_empty_round_trip() {
-    let p = round_trip(CkMechanismParams::Raw(RawMechanismParams { data: vec![] }));
+    let p = round_trip(CkMechanismParams::Raw(RawMechanismParams { data: vec![].into() }));
     match p {
         CkMechanismParams::Raw(v) => {
             assert!(v.data.is_empty());
@@ -1785,7 +1786,7 @@ fn ecies_params_round_trip() {
         derivation_mechanism: Box::new(derivation),
         encryption_mechanism: Box::new(encryption),
         mac_mechanism: Box::new(mac),
-        shared_data: vec![0x01, 0x02, 0x03],
+        shared_data: vec![0x01, 0x02, 0x03].into(),
     }));
     match p {
         CkMechanismParams::Ecies(v) => {
@@ -1797,7 +1798,7 @@ fn ecies_params_round_trip() {
                 _ => panic!("wrong nested variant"),
             }
             assert_eq!(v.mac_mechanism.mechanism_type, CkMechanismType::SHA256);
-            assert_eq!(v.shared_data, vec![0x01, 0x02, 0x03]);
+            assert_eq!(v.shared_data, vec![0x01, 0x02, 0x03].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1812,7 +1813,7 @@ fn ecies_params_empty_shared_data_round_trip() {
         derivation_mechanism: Box::new(derivation),
         encryption_mechanism: Box::new(encryption),
         mac_mechanism: Box::new(mac),
-        shared_data: vec![],
+        shared_data: vec![].into(),
     }));
     match p {
         CkMechanismParams::Ecies(v) => {
@@ -1846,13 +1847,13 @@ fn ecies_params_reject_missing_mac_mechanism() {
 #[test]
 fn aes_cmac_key_derivation_params_round_trip() {
     let p = round_trip(CkMechanismParams::AesCmacKeyDerivation(AesCmacKeyDerivationParams {
-        context: vec![0x10; 32],
-        label: vec![0x20; 16],
+        context: vec![0x10; 32].into(),
+        label: vec![0x20; 16].into(),
     }));
     match p {
         CkMechanismParams::AesCmacKeyDerivation(v) => {
-            assert_eq!(v.context, vec![0x10; 32]);
-            assert_eq!(v.label, vec![0x20; 16]);
+            assert_eq!(v.context, vec![0x10; 32].into());
+            assert_eq!(v.label, vec![0x20; 16].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1876,16 +1877,16 @@ fn kyber_params_round_trip() {
         version: 2,
         mode: 1,
         secret_handle: 0xDEAD,
-        shared_data: vec![0xAB; 32],
-        blob: vec![0xCD; 64],
+        shared_data: vec![0xAB; 32].into(),
+        blob: vec![0xCD; 64].into(),
     }));
     match p {
         CkMechanismParams::Kyber(v) => {
             assert_eq!(v.version, 2);
             assert_eq!(v.mode, 1);
             assert_eq!(v.secret_handle, 0xDEAD);
-            assert_eq!(v.shared_data, vec![0xAB; 32]);
-            assert_eq!(v.blob, vec![0xCD; 64]);
+            assert_eq!(v.shared_data, vec![0xAB; 32].into());
+            assert_eq!(v.blob, vec![0xCD; 64].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1897,8 +1898,8 @@ fn kyber_params_empty_optional_fields_round_trip() {
         version: 1,
         mode: 0,
         secret_handle: 0,
-        shared_data: vec![],
-        blob: vec![],
+        shared_data: vec![].into(),
+        blob: vec![].into(),
     }));
     match p {
         CkMechanismParams::Kyber(v) => {
@@ -1915,14 +1916,14 @@ fn hd_key_derive_params_round_trip() {
     let p = round_trip(CkMechanismParams::HdKeyDerive(HdKeyDeriveParams {
         derive_type: 32,              // BIP-32
         child_key_index: 0x8000_0000, // hardened
-        chain_code: vec![0xFF; 32],
+        chain_code: vec![0xFF; 32].into(),
         version: 1,
     }));
     match p {
         CkMechanismParams::HdKeyDerive(v) => {
             assert_eq!(v.derive_type, 32);
             assert_eq!(v.child_key_index, 0x8000_0000);
-            assert_eq!(v.chain_code, vec![0xFF; 32]);
+            assert_eq!(v.chain_code, vec![0xFF; 32].into());
             assert_eq!(v.version, 1);
         }
         _ => panic!("wrong variant"),
@@ -1933,12 +1934,12 @@ fn hd_key_derive_params_round_trip() {
 fn vendor_object_extract_params_round_trip() {
     let p = round_trip(CkMechanismParams::VendorObjectExtract(VendorObjectExtractParams {
         format: 1,
-        context: vec![0x42; 24],
+        context: vec![0x42; 24].into(),
     }));
     match p {
         CkMechanismParams::VendorObjectExtract(v) => {
             assert_eq!(v.format, 1);
-            assert_eq!(v.context, vec![0x42; 24]);
+            assert_eq!(v.context, vec![0x42; 24].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1948,14 +1949,14 @@ fn vendor_object_extract_params_round_trip() {
 fn vendor_object_insert_params_round_trip() {
     let p = round_trip(CkMechanismParams::VendorObjectInsert(VendorObjectInsertParams {
         format: 2,
-        context: vec![0x43; 24],
-        object_data: vec![0xBE, 0xEF, 0xCA, 0xFE],
+        context: vec![0x43; 24].into(),
+        object_data: vec![0xBE, 0xEF, 0xCA, 0xFE].into(),
     }));
     match p {
         CkMechanismParams::VendorObjectInsert(v) => {
             assert_eq!(v.format, 2);
-            assert_eq!(v.context, vec![0x43; 24]);
-            assert_eq!(v.object_data, vec![0xBE, 0xEF, 0xCA, 0xFE]);
+            assert_eq!(v.context, vec![0x43; 24].into());
+            assert_eq!(v.object_data, vec![0xBE, 0xEF, 0xCA, 0xFE].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1966,13 +1967,13 @@ fn kmac_params_round_trip() {
     let p = round_trip(CkMechanismParams::Kmac(KmacParams {
         key_handle: 0xCAFE,
         mac_length: 64,
-        customization_string: b"custom".to_vec(),
+        customization_string: b"custom".to_vec().into(),
     }));
     match p {
         CkMechanismParams::Kmac(v) => {
             assert_eq!(v.key_handle, 0xCAFE);
             assert_eq!(v.mac_length, 64);
-            assert_eq!(v.customization_string, b"custom");
+            assert_eq!(v.customization_string, SecretBytes::copy_from_slice(b"custom"));
         }
         other => panic!("expected Kmac params, got {other:?}"),
     }
@@ -1982,14 +1983,14 @@ fn kmac_params_round_trip() {
 fn mu_gen_params_round_trip() {
     let p = round_trip(CkMechanismParams::MuGen(MuGenParams {
         key_handle: 0xA11CE,
-        tr: b"precomputed-tr".to_vec(),
-        context: b"context".to_vec(),
+        tr: b"precomputed-tr".to_vec().into(),
+        context: b"context".to_vec().into(),
     }));
     match p {
         CkMechanismParams::MuGen(v) => {
             assert_eq!(v.key_handle, 0xA11CE);
-            assert_eq!(v.tr, b"precomputed-tr");
-            assert_eq!(v.context, b"context");
+            assert_eq!(v.tr, SecretBytes::copy_from_slice(b"precomputed-tr"));
+            assert_eq!(v.context, SecretBytes::copy_from_slice(b"context"));
         }
         other => panic!("expected MuGen params, got {other:?}"),
     }
@@ -2008,13 +2009,13 @@ fn object_handle_param_round_trip() {
 fn sign_additional_context_round_trip() {
     let p = round_trip(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
         hedge_variant: 1, // CKH_HEDGE_REQUIRED
-        context: vec![1, 2, 3],
+        context: vec![1, 2, 3].into(),
         hash: 0,
     }));
     match p {
         CkMechanismParams::SignAdditionalContext(v) => {
             assert_eq!(v.hedge_variant, 1);
-            assert_eq!(v.context, vec![1, 2, 3]);
+            assert_eq!(v.context, vec![1, 2, 3].into());
             assert_eq!(v.hash, 0);
         }
         other => panic!("expected SignAdditionalContext, got {other:?}"),
@@ -2026,13 +2027,13 @@ fn hash_sign_additional_context_round_trip() {
     // The generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA carry the hash mechanism.
     let p = round_trip(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
         hedge_variant: 1,
-        context: vec![4, 5],
+        context: vec![4, 5].into(),
         hash: 0x0000_0250, // CKM_SHA256
     }));
     match p {
         CkMechanismParams::SignAdditionalContext(v) => {
             assert_eq!(v.hedge_variant, 1);
-            assert_eq!(v.context, vec![4, 5]);
+            assert_eq!(v.context, vec![4, 5].into());
             assert_eq!(v.hash, 0x0000_0250);
         }
         other => panic!("expected SignAdditionalContext, got {other:?}"),

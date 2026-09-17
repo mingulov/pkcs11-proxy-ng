@@ -217,7 +217,7 @@ fn stateless_session_workflows_reject_invalid_session() {
     let param_spec = CkParameterRoundtripSpec {
         buffer_present: true,
         buffer_len: 16,
-        value: Some(vec![0xAA; 4]),
+        value: Some(vec![0xAA; 4].into()),
     };
 
     assert_eq!(

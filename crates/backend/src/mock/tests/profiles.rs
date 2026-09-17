@@ -245,7 +245,11 @@ fn ilp32_profile_emits_4_byte_ulongs() {
     }];
     let (rv, results) = backend.get_attribute_value_exact(session, object, &data_query).unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(results[0].value, Some(vec![3, 0, 0, 0]), "value bytes at emulated width");
+    assert_eq!(
+        results[0].value,
+        Some(SecretBytes::new(vec![3, 0, 0, 0])),
+        "value bytes at emulated width"
+    );
 }
 
 #[test]
@@ -297,8 +301,8 @@ fn llp64_profile_reports_16_byte_attribute_stride() {
     let (rv, results) = backend.get_attribute_value_exact(session, object, &data_query).unwrap();
     assert_eq!(rv, CkRv::OK);
     let nested = results[0].nested.as_ref().expect("nested results");
-    assert_eq!(nested[0].value, Some(vec![3, 0, 0, 0]));
-    assert_eq!(nested[1].value, Some(vec![31, 0, 0, 0]));
+    assert_eq!(nested[0].value, Some(SecretBytes::new(vec![3, 0, 0, 0])));
+    assert_eq!(nested[1].value, Some(SecretBytes::new(vec![31, 0, 0, 0])));
 }
 
 #[test]
@@ -356,7 +360,7 @@ fn registry_backed_mock_validates_mechanism_param_presence() {
             iv: vec![0; 12],
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad: vec![],
+            aad: vec![].into(),
             tag_bits: 128,
         })),
     };
@@ -388,7 +392,7 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
             iv: vec![0xA1, 0xA2, 0xA3, 0xA4, 0, 0, 0, 0, 0, 0, 0, 0],
             iv_fixed_bits: 32,
             iv_generator: 4, // CKG_GENERATE_RANDOM
-            aad: vec![],
+            aad: vec![].into(),
             tag_bits: 128,
         })),
     };
@@ -414,7 +418,7 @@ fn gcm_wrap_iv_generation_is_deterministic_and_preserves_fixed_prefix() {
             iv: vec![0; 12],
             iv_fixed_bits: 0,
             iv_generator: 1, // CKG_NO_GENERATE
-            aad: vec![],
+            aad: vec![].into(),
             tag_bits: 128,
         })),
     };
@@ -441,7 +445,7 @@ fn create_object_stores_template_attributes_for_read_back() {
         // Vendor attribute: opaque bytes, D7 passthrough at ANY width.
         CkAttribute {
             attr_type: CkAttributeType(VENDOR_ATTR),
-            value: Some(CkAttributeValue::Bytes(vec![9, 8, 7])),
+            value: Some(CkAttributeValue::Bytes(vec![9, 8, 7].into())),
         },
     ];
     let object = backend.create_object(session, &template).unwrap();
@@ -465,10 +469,18 @@ fn create_object_stores_template_attributes_for_read_back() {
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(results[0].value, Some(vec![4, 0, 0, 0]), "ulong at the emulated width");
-    assert_eq!(results[1].value, Some(vec![0]), "bool as one byte");
-    assert_eq!(results[2].value, Some(b"probe".to_vec()), "string bytes");
-    assert_eq!(results[3].value, Some(vec![9, 8, 7]), "vendor bytes pass through opaquely");
+    assert_eq!(
+        results[0].value,
+        Some(SecretBytes::new(vec![4, 0, 0, 0])),
+        "ulong at the emulated width"
+    );
+    assert_eq!(results[1].value, Some(SecretBytes::new(vec![0])), "bool as one byte");
+    assert_eq!(results[2].value, Some(SecretBytes::new(b"probe".to_vec())), "string bytes");
+    assert_eq!(
+        results[3].value,
+        Some(SecretBytes::new(vec![9, 8, 7])),
+        "vendor bytes pass through opaquely"
+    );
 }
 
 #[test]
@@ -515,7 +527,7 @@ fn explicit_value_wins_over_value_len_synthesis() {
         },
         CkAttribute {
             attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(vec![0xAB; 4])),
+            value: Some(CkAttributeValue::Bytes(vec![0xAB; 4].into())),
         },
     ];
     let key = backend.generate_key(session, &mech, &template).unwrap();
@@ -559,8 +571,16 @@ fn generate_key_synthesizes_class_and_key_type() {
         .unwrap();
     assert_eq!(rv, CkRv::OK);
     // CKO_SECRET_KEY = 4, CKK_AES = 0x1F, at the mock's emulated width.
-    assert_eq!(results[0].value, Some(MockAbi::host().encode_ulong(4)), "CKA_CLASS");
-    assert_eq!(results[1].value, Some(MockAbi::host().encode_ulong(0x1F)), "CKA_KEY_TYPE");
+    assert_eq!(
+        results[0].value,
+        Some(SecretBytes::new(MockAbi::host().encode_ulong(4))),
+        "CKA_CLASS"
+    );
+    assert_eq!(
+        results[1].value,
+        Some(SecretBytes::new(MockAbi::host().encode_ulong(0x1F))),
+        "CKA_KEY_TYPE"
+    );
 }
 
 #[test]
@@ -588,7 +608,7 @@ fn generate_key_template_overrides_synthesized_class() {
         .unwrap();
     assert_eq!(
         results[0].value,
-        Some(MockAbi::host().encode_ulong(0x99)),
+        Some(SecretBytes::new(MockAbi::host().encode_ulong(0x99))),
         "template CKA_CLASS wins"
     );
 }

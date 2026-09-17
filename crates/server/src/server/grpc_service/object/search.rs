@@ -163,12 +163,9 @@ pub(super) async fn find_objects(
             match meta {
                 Some(meta)
                     if !meta.unique_id.is_empty()
-                        && ctx.token_policy.allows_object_use(
-                            &identity,
-                            &label,
-                            &serial,
-                            &meta.unique_id,
-                        )
+                        && meta.unique_id.expose(|raw| {
+                            ctx.token_policy.allows_object_use(&identity, &label, &serial, raw)
+                        })
                         && (!ctx.token_policy.per_class_active()
                             || meta.class.is_some_and(|c| {
                                 ctx.token_policy.allows_class(&identity, &label, &serial, c)
@@ -325,7 +322,7 @@ mod tests {
         mock.set_attribute(
             obj_a,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec().into())),
         );
         let obj_b = mock.create_object(backend_session, &[]).unwrap();
         mock.set_attribute(
@@ -343,7 +340,7 @@ mod tests {
         mock.set_attribute(
             obj_b,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
         );
 
         // Prime the mock search state so find_objects_impl accepts the call.
@@ -553,7 +550,7 @@ mod tests {
         let cached = ctx.context_manager.object_metadata(&ctx_id, virtual_id).await;
         assert_eq!(
             cached.map(|m| m.unique_id),
-            Some(UID_A_BYTES.to_vec()),
+            Some(UID_A_BYTES.to_vec().into()),
             "kept object's uid must be pre-cached under its virtual handle"
         );
     }
@@ -596,7 +593,7 @@ mod tests {
         mock.set_attribute(
             obj_d1,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
         );
         let obj_d2 = mock.create_object(backend_session, &[]).unwrap();
         mock.set_attribute(
@@ -614,7 +611,7 @@ mod tests {
         mock.set_attribute(
             obj_d2,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
         );
         let obj_a = mock.create_object(backend_session, &[]).unwrap();
         mock.set_attribute(
@@ -632,7 +629,7 @@ mod tests {
         mock.set_attribute(
             obj_a,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec().into())),
         );
 
         // Prime the multi-part op and configure the cursor-based result list.
@@ -818,7 +815,7 @@ mod tests {
         mock.set_attribute(
             obj_sk,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec().into())),
         );
 
         // obj_pk: PUBLIC_KEY — denied class; must be invisible.
@@ -836,7 +833,7 @@ mod tests {
         mock.set_attribute(
             obj_pk,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec())),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
         );
 
         mock.find_objects_init(backend_session, &[]).unwrap();

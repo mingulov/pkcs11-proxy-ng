@@ -11,7 +11,8 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_proto::convert::authenticated::{
     decode_parameters, legacy_parameter_supported,
 };
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, SecretBytes};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
@@ -83,7 +84,7 @@ pub(crate) async fn wrap_key_authenticated(
                         p.key,
                         input_from_wire(&req.associated_data, req.associated_data_null_len),
                     )
-                    .map(|(bytes, raw)| (bytes, raw, None))
+                    .map(|(bytes, raw)| (bytes, secret_to_plain(&raw), None))
             }
         })
         .await
@@ -100,12 +101,12 @@ pub(crate) async fn wrap_key_authenticated(
     )?;
     let (ck_rv, wrapped_key, mechanism_parameter_out, authenticated_output) = match result {
         Ok((bytes, parameter, output)) => (CkRv::OK.0, bytes, parameter, output),
-        Err(rv) => (rv.0, Vec::new(), Vec::new(), None),
+        Err(rv) => (rv.0, SecretBytes::default(), Vec::new(), None),
     };
     Ok(Response::new(pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse {
         authenticated_output,
         ck_rv,
-        wrapped_key,
+        wrapped_key: secret_to_plain(&wrapped_key),
         mechanism_parameter_out,
     }))
 }
@@ -287,7 +288,7 @@ async fn unwrap_key_authenticated_impl(
                     &template,
                     input_from_wire(&aad, aad_null_len),
                 )
-                .map(|(key, raw)| (key, raw, None))
+                .map(|(key, raw)| (key, secret_to_plain(&raw), None))
         }
     })
     .await?;

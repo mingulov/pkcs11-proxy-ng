@@ -91,7 +91,7 @@ impl FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
         aad: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, AuthenticatedOutput)> {
+    ) -> CkResult<(SecretBytes, AuthenticatedOutput)> {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_WrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let (aad_ptr, aad_len) = aad.as_ptr_len();
@@ -129,7 +129,8 @@ impl FfiBackend {
                 )
             })?;
             bytes.truncate(len as usize);
-            Ok(bytes)
+            // ADR-0013 S5: adopt the provider-written buffer immediately.
+            Ok(SecretBytes::new(bytes))
         })
     }
 

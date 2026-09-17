@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -121,7 +122,7 @@ pub(crate) async fn digest(
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestResponse {
         ck_rv,
-        digest: digest.unwrap_or_default(),
+        digest: secret_to_plain(&digest.unwrap_or_default()),
     }))
 }
 
@@ -215,6 +216,6 @@ pub(crate) async fn digest_final(
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestFinalResponse {
         ck_rv,
-        digest: digest.unwrap_or_default(),
+        digest: secret_to_plain(&digest.unwrap_or_default()),
     }))
 }

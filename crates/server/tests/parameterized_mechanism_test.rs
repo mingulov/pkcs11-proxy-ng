@@ -424,7 +424,7 @@ async fn softhsm_aes_gcm_encrypt_decrypt() -> Result<(), String> {
             iv: iv.clone(),
             iv_bits: 96,
             iv_buffer_len: iv.len() as u64,
-            aad: aad.clone(),
+            aad: aad.clone().into(),
             tag_bits: 128,
         })),
     };
@@ -475,7 +475,7 @@ async fn softhsm_aes_gcm_encrypt_decrypt() -> Result<(), String> {
             iv,
             iv_bits: 96,
             iv_buffer_len: 12,
-            aad,
+            aad: aad.into(),
             tag_bits: 128,
         })),
     };

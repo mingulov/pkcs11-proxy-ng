@@ -138,7 +138,11 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
                 init_ack.returned_len, provider_spec.buffer_len,
                 "{shape} {direction} Init native length",
             );
-            assert_eq!(init_ack.value, Some(Vec::new()), "{shape} {direction} Init presence");
+            assert_eq!(
+                init_ack.value,
+                Some(SecretBytes::new(Vec::new())),
+                "{shape} {direction} Init presence"
+            );
             assert_eq!(
                 backend.last_message_init_contract(),
                 Some((parameter.clone(), provider_spec.clone())),
@@ -338,7 +342,7 @@ fn encapsulate_key_returns_live_key_with_template_attributes() {
             public_key,
             &[CkAttribute {
                 attr_type: CkAttributeType::LABEL,
-                value: Some(CkAttributeValue::String("kem-output".to_string())),
+                value: Some(CkAttributeValue::String("kem-output".to_string().into())),
             }],
         )
         .unwrap();
@@ -357,7 +361,7 @@ fn encapsulate_key_returns_live_key_with_template_attributes() {
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(results[0].value, Some(b"kem-output".to_vec()));
+    assert_eq!(results[0].value, Some(SecretBytes::new(b"kem-output".to_vec())));
 }
 
 #[test]
@@ -375,7 +379,7 @@ fn encapsulate_key_exact_data_query_returns_live_key_with_template_attributes() 
             public_key,
             &[CkAttribute {
                 attr_type: CkAttributeType::LABEL,
-                value: Some(CkAttributeValue::String("kem-exact".to_string())),
+                value: Some(CkAttributeValue::String("kem-exact".to_string().into())),
             }],
             &CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false },
         )
@@ -397,7 +401,7 @@ fn encapsulate_key_exact_data_query_returns_live_key_with_template_attributes() 
         )
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(results[0].value, Some(b"kem-exact".to_vec()));
+    assert_eq!(results[0].value, Some(SecretBytes::new(b"kem-exact".to_vec())));
 }
 
 #[test]
@@ -472,7 +476,7 @@ fn full_registry_mock_accepts_every_registered_mechanism_for_exact_wrap_workflow
         let data_result =
             backend.wrap_key_exact(session, &mechanism, wrapping_key, key, &data_spec).unwrap();
         assert_eq!(data_result.ck_rv, CkRv::OK);
-        assert_eq!(data_result.value, Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        assert_eq!(data_result.value, Some(SecretBytes::new(vec![0xDE, 0xAD, 0xBE, 0xEF])));
 
         backend.close_session(session).unwrap();
     }
@@ -803,18 +807,20 @@ fn verify_rejects_signature_that_does_not_match_sign_echo() {
 
     backend.sign_init(session, &mech, key).unwrap();
     let signature = backend.sign(session, CkInBuf::Bytes(b"the data")).unwrap();
+    let signature_bytes = signature.expose(|raw| raw.to_vec());
 
     // Correct signature over the same data verifies.
     backend.verify_init(session, &mech, key).unwrap();
-    backend.verify(session, CkInBuf::Bytes(b"the data"), CkInBuf::Bytes(&signature)).unwrap();
+    backend.verify(session, CkInBuf::Bytes(b"the data"), CkInBuf::Bytes(&signature_bytes)).unwrap();
 
     // One flipped signature byte is rejected.
     let mut tampered = signature.clone();
-    tampered[0] ^= 0x01;
+    tampered.expose_mut(|raw| raw[0] ^= 0x01);
+    let tampered_bytes = tampered.expose(|raw| raw.to_vec());
     backend.verify_init(session, &mech, key).unwrap();
     assert_eq!(
         backend
-            .verify(session, CkInBuf::Bytes(b"the data"), CkInBuf::Bytes(&tampered))
+            .verify(session, CkInBuf::Bytes(b"the data"), CkInBuf::Bytes(&tampered_bytes))
             .unwrap_err(),
         CkRv::SIGNATURE_INVALID,
     );
@@ -824,7 +830,7 @@ fn verify_rejects_signature_that_does_not_match_sign_echo() {
     backend.verify_init(session, &mech, key).unwrap();
     assert_eq!(
         backend
-            .verify(session, CkInBuf::Bytes(b"other data"), CkInBuf::Bytes(&signature))
+            .verify(session, CkInBuf::Bytes(b"other data"), CkInBuf::Bytes(&signature_bytes))
             .unwrap_err(),
         CkRv::SIGNATURE_INVALID,
     );

@@ -204,7 +204,7 @@ fn preload_objects(f: &MtlsFixture) -> [CkObjectHandle; 2] {
         f.backend.set_attribute(
             object,
             CkAttributeType::UNIQUE_ID,
-            MockAttributeSlot::Value(CkAttributeValue::Bytes(vec![uid])),
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(vec![uid].into())),
         );
         object
     });
