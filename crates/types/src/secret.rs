@@ -62,6 +62,42 @@ impl From<&[u8]> for SecretBytes {
     }
 }
 
+impl From<String> for SecretBytes {
+    /// Adopts the string's allocation without copying; the bytes keep their
+    /// UTF-8 content and are wiped when the owner drops. Callers needing the
+    /// text back must decode inside [`SecretBytes::expose`].
+    fn from(text: String) -> Self {
+        Self::new(text.into_bytes())
+    }
+}
+
+impl From<&str> for SecretBytes {
+    /// Copies the string's bytes into a new wiping owner.
+    fn from(text: &str) -> Self {
+        Self::copy_from_slice(text.as_bytes())
+    }
+}
+
+impl Clone for SecretBytes {
+    /// Copies the bytes into a new, independently wiping owner.
+    ///
+    /// Cloning is sound (every copy is wiped on drop) but multiplies live
+    /// secret allocations; conversion paths must consume or transfer where
+    /// possible instead of cloning (ADR-0013 §5).
+    fn clone(&self) -> Self {
+        self.expose(Self::copy_from_slice)
+    }
+}
+
+impl PartialEq for SecretBytes {
+    /// Byte equality only; reveals nothing beyond the comparison result.
+    fn eq(&self, other: &Self) -> bool {
+        self.expose(|left| other.expose(|right| left == right))
+    }
+}
+
+impl Eq for SecretBytes {}
+
 impl fmt::Debug for SecretBytes {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("SecretBytes").field("len", &self.len()).finish()
