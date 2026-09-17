@@ -7,12 +7,27 @@ use std::path::Path;
 ///
 /// Unit tests build `FfiBackend` values with hand-written function lists and
 /// need a placeholder `_lib` that is never used for symbol lookup. The unix
-/// arm is the historical `dlopen(NULL)` self handle; the Windows arm is the
+/// arm is the historical `dlopen(NULL)` self handle (null handle on static
+/// musl, where `dlopen` is unsupported — see below); the Windows arm is the
 /// process image handle (`GetModuleHandleExW(0, NULL, _)`, libloading 0.8.9).
 #[cfg(test)]
-#[cfg(unix)]
+#[cfg(all(unix, not(target_env = "musl")))]
 pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
     libloading::os::unix::Library::this().into()
+}
+
+/// Static-musl arm: `dlopen` (including `dlopen(NULL)`) is unsupported in
+/// static-pie musl binaries, so `Library::this()` panics. The placeholder is
+/// never used for symbol lookup (`_lib` is never read), so a null handle
+/// suffices; its `Drop` calls `dlclose(NULL)`, which musl answers with an
+/// error (no crash) that libloading ignores. Proven natively on both musl
+/// widths (C3M Task 4 fix).
+#[cfg(test)]
+#[cfg(all(unix, target_env = "musl"))]
+pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
+    // SAFETY: never used for lookup; dropping only calls `dlclose(NULL)`,
+    // which is error-returning, not fatal, on musl.
+    unsafe { libloading::os::unix::Library::from_raw(std::ptr::null_mut()) }.into()
 }
 
 /// Portable test-only stand-in for the provider-module handle (Windows arm).

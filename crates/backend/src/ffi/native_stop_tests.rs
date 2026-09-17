@@ -660,11 +660,16 @@ const N1_BPF_JMP_JEQ_K: u16 = 0x15;
 #[cfg(target_os = "linux")]
 const N1_BPF_RET_K: u16 = 0x06;
 
+// Manual `prctl(2)` decl: no `libc` dev-dep needed (like the M3 `atexit`
+// decl). Direct libc linkage means no `dlopen`, so N1 also works on
+// static musl. Raw syscalls would need ESI/EDI on i686, which LLVM
+// reserves for inline asm.
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn prctl(option: std::ffi::c_int, ...) -> std::ffi::c_int;
+}
+
 /// Install `BPF_DENY` on `__NR_exit_group`; exits 15/16 when refused.
-///
-/// Uses the already-loaded libc `prctl` via the self handle (no new
-/// dependency: `libloading` is already a backend dependency). Raw syscalls
-/// would need ESI/EDI on i686, which LLVM reserves for inline asm.
 #[cfg(target_os = "linux")]
 fn install_exit_group_errno_deny() {
     #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
@@ -684,15 +689,8 @@ fn install_exit_group_errno_deny() {
         N1SockFilter { code: N1_BPF_RET_K, jt: 0, jf: 0, k: N1_SECCOMP_RET_ALLOW },
     ];
     let prog = N1SockFprog { len: filter.len() as u16, filter: filter.as_ptr() };
-    let lib = libloading::os::unix::Library::this().into();
-    let lib: libloading::Library = lib;
-    type PrctlFn = unsafe extern "C" fn(i32, ...) -> i32;
-    let prctl = match unsafe { lib.get::<PrctlFn>(b"prctl") } {
-        Ok(prctl) => prctl,
-        Err(_) => std::process::exit(15),
-    };
-    // SAFETY: resolved libc `prctl` with C calling convention; the filter
-    // program outlives the installing call (kernel copies it).
+    // SAFETY: libc `prctl` with C calling convention; the filter program
+    // outlives the installing call (kernel copies it).
     let no_new_privs =
         unsafe { prctl(N1_PR_SET_NO_NEW_PRIVS as i32, 1usize, 0usize, 0usize, 0usize) };
     if no_new_privs != 0 {
@@ -898,7 +896,8 @@ fn native_stop_n1_seccomp_errno_denial_unsupported_environment() {
 // creates a fresh outcome dir per test (seeding count/order files with fresh
 // values) and passes it via OUTCOME_ENV. Marker children never panic on
 // setup: 30 = outcome dir missing/unusable, 31 = atexit registration
-// refused, 32 = control finalize failed (11/12/13/14/20 reused from STOP-C1).
+// refused, 32 = control finalize failed, 33 = raise failed, 34 = SIGABRT
+// handler did not fire (11/12/13/14/20 reused from STOP-C1).
 /// Marker scenario selector env var (STOP-C2 entry; separate from CHILD_ENV).
 const MARKER_ENV: &str = "PKCS11_PROXY_NATIVE_STOP_MARKER";
 /// Outcome dir env var: parent-seeded temp dir for marker files.
@@ -977,6 +976,7 @@ fn run_marker_child(scenario: &str) -> ! {
         "m4-elf-control" => run_m4_elf_control(),
         "m5-finalize-stop" => run_m5_finalize_stop(),
         "m5-finalize-control" => run_m5_finalize_control(),
+        "m6-sigabrt-control" => run_m6_sigabrt_control(),
         _ => std::process::exit(11),
     }
 }
@@ -1114,6 +1114,14 @@ fn native_stop_m2_panic_hook_control_present() {
         code != Some(0) && code != Some(70),
         "scenario m2-hook-control: nonzero-non-70 panic exit, got {:?}",
         output.status
+    );
+    // Intended-path guard (C3M Task 4 m2 concern): READY proves the child
+    // reached the deliberate post-construction panic, so the hook did not
+    // merely fire on an earlier setup panic (as the musl `dlopen` panic did).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("READY"),
+        "scenario m2-hook-control: READY line missing, stdout={stdout:?}"
     );
     assert_marker_bytes(&dir.join("panic_hook.marker"), b"panic-hook-fired", "m2-hook-control");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1406,6 +1414,75 @@ fn native_stop_m5_provider_finalize_control_present() {
         &dir.join("capdrop.order"),
         b"fresh\nfinalize\nguard\n",
         "m5-finalize-control",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Expected bytes of the M6 SIGABRT-handler marker.
+const M6_BYTES: &[u8] = b"sigabrt-handler-returned";
+
+// Manual `signal(2)`/`raise(3)` decls: no `libc` dev-dep needed (same as the
+// M3 `atexit` and N1 `prctl` decls).
+unsafe extern "C" {
+    fn signal(
+        signum: std::ffi::c_int,
+        handler: Option<unsafe extern "C" fn(std::ffi::c_int)>,
+    ) -> Option<unsafe extern "C" fn(std::ffi::c_int)>;
+    fn raise(sig: std::ffi::c_int) -> std::ffi::c_int;
+}
+
+/// SIGABRT number on Linux (both x86_64 and x86).
+const M6_SIGABRT: std::ffi::c_int = 6;
+
+/// Set by the M6 handler; its only side effect (async-signal-safe).
+static M6_FIRED: AtomicBool = AtomicBool::new(false);
+
+/// M6 SIGABRT handler: records firing, then returns (never panics/exits).
+unsafe extern "C" fn m6_sigabrt_handler(_sig: std::ffi::c_int) {
+    M6_FIRED.store(true, Ordering::Relaxed);
+}
+
+/// M6 control child: a returning SIGABRT handler (contract bullet "A
+/// returning SIGABRT-handler control …" in
+/// `doc/release/native-mechanism-ownership.md`). The marker proves the
+/// handler ran and returned; the normal exit-0 wait record proves the
+/// harness observes that as distinct from a real abort (signal death).
+fn run_m6_sigabrt_control() -> ! {
+    let dir = child_outcome_dir();
+    // If `signal` failed, `raise` below kills the child with SIGABRT and the
+    // parent's exit-0 assertion fails loudly; success needs no check here.
+    let _ = unsafe { signal(M6_SIGABRT, Some(m6_sigabrt_handler)) };
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
+    let _ = writeln!(std::io::stdout(), "READY m6-sigabrt-control");
+    // Read-only core-policy record (no sysctl changes, per the contract).
+    if let Ok(pattern) = std::fs::read_to_string("/proc/sys/kernel/core_pattern") {
+        let _ = writeln!(std::io::stdout(), "CORE_PATTERN {}", pattern.trim());
+    }
+    let _ = std::io::stdout().flush();
+    if unsafe { raise(M6_SIGABRT) } != 0 {
+        std::process::exit(33);
+    }
+    if !M6_FIRED.load(Ordering::Relaxed) {
+        std::process::exit(34);
+    }
+    let _ = std::fs::write(dir.join("sigabrt_handler.marker"), M6_BYTES);
+    drop(backend);
+    std::process::exit(0);
+}
+
+/// M6 positive control: the returning handler fires (marker present) and the
+/// child exits 0 with no signal/core — the wait-status channel distinguishes
+/// "handler ran and returned" from abort-death.
+#[test]
+fn native_stop_m6_sigabrt_handler_control_present() {
+    let dir = fresh_outcome_dir("m6-control");
+    let (child, _permit) = spawn_marker_child("m6-sigabrt-control", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_control_status(&output, "m6-sigabrt-control");
+    assert_marker_bytes(
+        &dir.join("sigabrt_handler.marker"),
+        b"sigabrt-handler-returned",
+        "m6-sigabrt-control",
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
