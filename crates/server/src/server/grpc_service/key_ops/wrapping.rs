@@ -5,7 +5,7 @@ use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_audit::EventClass;
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, SecretBytes};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
@@ -165,7 +165,7 @@ async fn unwrap_key_impl(
     // An unwrapped key is a session object unless CKA_TOKEN is set (B2).
     let is_token = template_declares_token_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
-    let wrapped_key = req.wrapped_key;
+    let wrapped_key = SecretBytes::new(req.wrapped_key);
     let wrapped_key_null_len = req.wrapped_key_null_len;
     // ADR-0010 sanitize_inputs: validate NULL wrapped_key pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, wrapped_key_null_len) {
@@ -176,13 +176,15 @@ async fn unwrap_key_impl(
     }
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.unwrap_key(
-            session,
-            &mechanism,
-            unwrapping_key,
-            input_from_wire(&wrapped_key, wrapped_key_null_len),
-            &template,
-        )
+        wrapped_key.expose(|raw| {
+            backend.unwrap_key(
+                session,
+                &mechanism,
+                unwrapping_key,
+                input_from_wire(raw, wrapped_key_null_len),
+                &template,
+            )
+        })
     })
     .await?;
 

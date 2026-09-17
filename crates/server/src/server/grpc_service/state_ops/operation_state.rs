@@ -5,7 +5,7 @@ use std::time::Duration;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, CkSessionHandle};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, CkSessionHandle, SecretBytes};
 
 use super::super::super::context_manager::{ClientContextId, ContextManager, MessageOperation};
 use super::super::super::handle_map::{BackendHandle, VirtualHandle};
@@ -141,7 +141,7 @@ async fn set_operation_state_with_timeout(
         }
     }
 
-    let operation_state = req.operation_state;
+    let operation_state = SecretBytes::new(req.operation_state);
     let operation_state_null_len = req.operation_state_null_len;
     // ADR-0010 sanitize_inputs: validate NULL operation_state pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, operation_state_null_len) {
@@ -172,12 +172,14 @@ async fn set_operation_state_with_timeout(
         for transition in &mut transitions {
             transition.mark_started();
         }
-        let result = backend.set_operation_state(
-            session,
-            input_from_wire(&operation_state, operation_state_null_len),
-            encryption_key,
-            authentication_key,
-        );
+        let result = operation_state.expose(|raw| {
+            backend.set_operation_state(
+                session,
+                input_from_wire(raw, operation_state_null_len),
+                encryption_key,
+                authentication_key,
+            )
+        });
         for transition in &mut transitions {
             transition.settle(&result, None);
         }

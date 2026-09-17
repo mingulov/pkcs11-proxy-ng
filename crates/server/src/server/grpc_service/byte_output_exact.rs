@@ -4,6 +4,7 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::output::byte_output_function_from_i32;
 use pkcs11_proxy_ng_types::{
     ByteOutputFunction, CkInBuf, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
+    SecretBytes,
 };
 
 use super::super::context_manager::ClientContextId;
@@ -57,7 +58,7 @@ pub(super) async fn byte_output_exact(
             length_pointer_null: false,
         });
 
-    let input_data = req.input_data;
+    let input_data = SecretBytes::new(req.input_data);
     let input_data_null_len = req.input_data_null_len;
 
     match function {
@@ -149,8 +150,12 @@ pub(super) async fn byte_output_exact(
             let backend = ctx.backend.clone();
             let (result, mechanism_out) = if function == ByteOutputFunction::Encrypt {
                 let result = spawn_backend_exact(move || {
-                    let buf = input_from_wire(&input_data, input_data_null_len);
-                    ExactCompletion::capture(backend.encrypt_exact_with_output(session, buf, &spec))
+                    input_data.expose(|raw| {
+                        let buf = input_from_wire(raw, input_data_null_len);
+                        ExactCompletion::capture(
+                            backend.encrypt_exact_with_output(session, buf, &spec),
+                        )
+                    })
                 })
                 .await?;
                 match result {
@@ -159,10 +164,12 @@ pub(super) async fn byte_output_exact(
                 }
             } else {
                 let result = spawn_backend_exact(move || {
-                    let buf = input_from_wire(&input_data, input_data_null_len);
-                    ExactCompletion::capture(dispatch_session_data(
-                        function, &*backend, session, buf, &spec,
-                    ))
+                    input_data.expose(|raw| {
+                        let buf = input_from_wire(raw, input_data_null_len);
+                        ExactCompletion::capture(dispatch_session_data(
+                            function, &*backend, session, buf, &spec,
+                        ))
+                    })
                 })
                 .await?;
                 (result, None)
