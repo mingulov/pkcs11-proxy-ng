@@ -1977,6 +1977,79 @@ async fn audit_generate_key_emits_key_mgmt_record() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Fail-closed-after-side-effect (ADR-0012): with a saturated audit sink, a
+/// `KeyMgmt` op that already committed on the backend must still report
+/// `CKR_FUNCTION_FAILED` with zeroed outputs rather than confirm an unaudited
+/// security action. Setup mirrors `audit_generate_key_emits_key_mgmt_record`;
+/// the saturated sink mirrors `sign_fail_open_saturated_sink`.
+#[tokio::test]
+async fn fail_closed_generate_key_saturated_sink_reports_function_failed() {
+    // Build a backend that advertises AES_KEY_GEN so the op commits.
+    let mock = pkcs11_proxy_ng_backend::MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![CkMechanismType::AES_KEY_GEN],
+    );
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+
+    // Saturated sink: every fail-closed emit is rejected immediately.
+    let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+    ctx.audit = Some(crate::server::audit::AuditSink::new_saturated_for_test());
+
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_handle = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // Resolve the backend session so the committed side effect is observed
+    // directly on the backend, independent of the (zeroed) handler response.
+    let backend_session = ctx_mgr
+        .get_context(&ctx_id, |ctx| ctx.session_handles.resolve(VirtualHandle(session_handle)))
+        .await
+        .unwrap()
+        .unwrap();
+    let backend_session = CkSessionHandle(backend_session.0 as u64);
+
+    // Negative control: a fresh MockBackend allocates object handles from 1
+    // and setup creates no objects, so handle 1 must be invalid before the call.
+    let generated = CkObjectHandle(1);
+    assert_eq!(
+        backend.get_object_size(backend_session, generated),
+        Err(CkRv::OBJECT_HANDLE_INVALID),
+        "no key must exist before the call"
+    );
+
+    use crate::server::grpc_service::key_ops::generate_key;
+    let resp = generate_key(
+        &ctx,
+        Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                mechanism_type: CkMechanismType::AES_KEY_GEN.0,
+                params: None,
+            }),
+            template: vec![],
+        }),
+    )
+    .await
+    .expect("handler must return Ok(Response), never a Status error")
+    .into_inner();
+    assert_eq!(
+        resp.ck_rv,
+        CkRv::FUNCTION_FAILED.0,
+        "saturated sink must fail the op closed with FUNCTION_FAILED"
+    );
+    assert_eq!(resp.key_handle, 0, "key handle must be zeroed on audit rejection");
+    assert!(resp.mechanism_out.is_none(), "mechanism_out must be dropped on audit rejection");
+
+    // Committed side effect persists: the backend op ran before emission, so
+    // the key exists on the backend even though the client saw FUNCTION_FAILED.
+    backend
+        .get_object_size(backend_session, generated)
+        .expect("fail-closed-after-side-effect: committed key must persist on the backend");
+}
+
 /// G1-PR3 audit-off: when `ctx.audit` is `None`, `generate_key` behaves
 /// byte-identically to the pre-audit path (no panic, correct ck_rv).
 #[tokio::test]
