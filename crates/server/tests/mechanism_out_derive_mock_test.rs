@@ -241,6 +241,9 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles()
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
+    // m-1: the virtualized additional keys are recorded private, so this
+    // virtualization test logs in before deriving + reading them.
+    client.login(session, CkUserType::User, Some(b"1234")).await.unwrap();
     let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CKM_SP800_108_COUNTER_KDF,
@@ -311,6 +314,9 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_addition
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
+    // m-1: the virtualized additional keys are recorded private, so this
+    // virtualization test logs in before deriving + reading them.
+    client.login(session, CkUserType::User, Some(b"1234")).await.unwrap();
     let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CKM_SP800_108_DOUBLE_PIPELINE_KDF,
@@ -427,6 +433,9 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
+    // m-1: the virtualized additional keys are recorded private, so this
+    // virtualization test logs in before deriving + reading them.
+    client.login(session, CkUserType::User, Some(b"1234")).await.unwrap();
     let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CKM_SP800_108_FEEDBACK_KDF,
