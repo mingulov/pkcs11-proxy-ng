@@ -156,7 +156,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CKR_USER_ALREADY_LOGGED_IN` faithfully and mints no logical login; the
   cached-PIN verifier is removed (ADR-0008 superseded by the ADR-0002
   rewrite). One-login-holder-per-slot is the mandated trade-off, bounded by
-  the last-context-out and refcounted-teardown release paths.
+  the last-context-out and refcounted-teardown release paths. Login also
+  self-heals a holderless-but-logged-in backend (F-01 reconcile: one logout
+  + single retry → `OK`).
 
 ### Removed
 

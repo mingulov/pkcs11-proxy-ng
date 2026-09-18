@@ -158,6 +158,10 @@ exception that licenses other synthesis:
   function-specific range codes (`CKR_DATA_LEN_RANGE`,
   `CKR_SIGNATURE_LEN_RANGE`) cannot be matched without forwarding the exact
   call, which requires the full buffer; those stay documented limits.
+  Tracking residual (Wave 3.5 smalls #5): attribute-query absurd lengths
+  still answer `CKR_HOST_MEMORY` (shim `object/exact.rs` capacity gate,
+  daemon `ffi_conversion/attrs.rs`); out of D7/F4 scope — follow-up
+  extends Limits-(d).
 
 ## NULL output-length pointers
 
@@ -197,7 +201,10 @@ exact-output request.
   templates (class 3), and embedded mechanism-parameter pointers (class 4)
   remain deferred. For class 5, the modelled GCM, CCM, and Salsa/ChaCha message
   shapes follow the bounded structural contract above; only unmodelled layouts
-  remain deferred.
+  remain deferred. Tracking residual (Wave 3.5 smalls #6, Scope-2 class-4):
+  SP800-108 embedded-template null conflation —
+  `read_sp800_108_derived_keys` folds `pTemplate` into a `Vec` with no
+  null bit, so (NULL,0)/(ptr,0) still conflate; out of D2 scope, follow-up.
 - `sanitize_inputs` (Scope 2, daemon config, default OFF): rejects NULL
   data pointers with `len > 0` and NULL mechanisms on classic init calls with
   `CKR_ARGUMENTS_BAD` before the module is called. MessageEncrypt/MessageDecrypt
