@@ -300,6 +300,11 @@ fn select_primary(
 /// modules (e.g. BouncyHSM) that only respond to the unnamed form — with
 /// the same §6a name rule on the unnamed result. Rejecting a hypothetical
 /// vendor-named answer here is soundness over coverage.
+///
+/// A downgraded answer (e.g. a 3.0 table for a 3.2 query, rv=0) is
+/// rejected and selection falls through to the next name/fallback: without
+/// this guard the daemon would OOB-read version-gated fields as zeros and
+/// publish phantom "3.2-with-NULLs" tables (F5).
 fn select_versioned(
     q: &mut InterfaceQuery<'_>,
     major: u8,
@@ -309,11 +314,22 @@ fn select_versioned(
     for name in [Some(STANDARD_NAME), None] {
         if let Some(ans) = q(name, Some(version))
             && accepts_standard(&ans)
+            && answer_version_at_least(&ans, major, minor)
         {
             return Some(ans.func_list);
         }
     }
     None
+}
+
+/// Leading-version guard for [`select_versioned`]: the answer's table must
+/// be at least the requested version. Reads only the leading `CK_VERSION`,
+/// the first field of every `CK_FUNCTION_LIST*` variant — the same reliance
+/// as [`FfiBackend::primary_interface_fallback`]. Callers ensure the
+/// pointer is non-null via [`accepts_standard`].
+fn answer_version_at_least(ans: &InterfaceAnswer, major: u8, minor: u8) -> bool {
+    let reported = unsafe { (*(ans.func_list as *const cryptoki_sys::CK_FUNCTION_LIST)).version };
+    reported.major > major || (reported.major == major && reported.minor >= minor)
 }
 
 /// FFI adapter: performs one real `C_GetInterface` query and copies the
@@ -562,10 +578,42 @@ mod tests {
         };
         assert!(select_versioned(&mut vendor_q, 3, 0).is_none());
 
+        // The version guard reads the table's leading CK_VERSION, so the
+        // accepted answer needs real version storage behind the pointer.
+        let v30 = Box::new(cryptoki_sys::CK_VERSION { major: 3, minor: 0 });
+        let v30_ptr = (&*v30 as *const cryptoki_sys::CK_VERSION).cast_mut().cast();
         let mut std_q = |name: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| match name {
             Some(_) => None,
-            None => Some(answer(b"PKCS 11")),
+            None => Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v30_ptr }),
         };
         assert!(select_versioned(&mut std_q, 3, 0).is_some());
+    }
+
+    /// F5: a module that answers a 3.2 query with a 3.0 table (rv=0) must
+    /// not produce a "3.2" list. The downgraded answer is rejected for 3.2
+    /// but still accepted when 3.0 is requested.
+    #[test]
+    fn versioned_downgraded_answer_is_rejected_for_newer_query() {
+        let v30 = Box::new(cryptoki_sys::CK_VERSION { major: 3, minor: 0 });
+        let v30_ptr = (&*v30 as *const cryptoki_sys::CK_VERSION).cast_mut().cast();
+        let mut downgrading = |_: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| {
+            Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v30_ptr })
+        };
+        assert!(
+            select_versioned(&mut downgrading, 3, 2).is_none(),
+            "3.0 table must not satisfy a 3.2 query"
+        );
+        assert!(
+            select_versioned(&mut downgrading, 3, 0).is_some(),
+            "3.0 table still satisfies a 3.0 query"
+        );
+
+        let v32 = Box::new(cryptoki_sys::CK_VERSION { major: 3, minor: 2 });
+        let v32_ptr = (&*v32 as *const cryptoki_sys::CK_VERSION).cast_mut().cast();
+        let mut current = |_: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| {
+            Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v32_ptr })
+        };
+        assert!(select_versioned(&mut current, 3, 2).is_some());
+        assert!(select_versioned(&mut current, 3, 0).is_some());
     }
 }
