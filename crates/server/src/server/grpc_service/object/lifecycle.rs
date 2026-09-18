@@ -361,4 +361,74 @@ mod tests {
             "attr_cache must be intact after a failed destroy_object"
         );
     }
+
+    /// T5-m1-followup: a session-bound private handle (the post-fix
+    /// virtualized OUT-handle state) destroyed from a fresh logged-out
+    /// session after the owner session closed reports
+    /// `CKR_OBJECT_HANDLE_INVALID` (130) — the backend verdict for the
+    /// evicted handle — not the stale mapping's `CKR_USER_NOT_LOGGED_IN`.
+    #[tokio::test]
+    async fn destroy_object_after_owner_session_close_reports_handle_invalid() {
+        use super::register_session_object_handle;
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        let owner_session = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(BackendHandle(backend_session.0), backend_slot)
+            })
+            .await
+            .unwrap();
+        // Session-bound + recorded private: the post-fix virtualized OUT
+        // state (never logged in).
+        let virtual_object = register_session_object_handle(
+            &ctx_mgr,
+            &ctx_id,
+            owner_session,
+            backend_object,
+            false,
+            Some(true),
+        )
+        .await;
+
+        // Owner session closes on both layers.
+        mock.close_session(backend_session).unwrap();
+        ctx_mgr.get_context(&ctx_id, |ctx| ctx.remove_session(owner_session)).await;
+
+        let fresh_backend = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let fresh_session = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(BackendHandle(fresh_backend.0), backend_slot)
+            })
+            .await
+            .unwrap();
+
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        let resp = super::destroy_object(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: fresh_session.0,
+                object_handle: virtual_object,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::OBJECT_HANDLE_INVALID.0,
+            "post-close destroy of an evicted session handle must report 130, not 257"
+        );
+    }
 }

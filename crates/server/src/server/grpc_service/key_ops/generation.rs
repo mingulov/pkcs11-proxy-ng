@@ -13,8 +13,8 @@ use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     ensure_private_mint_allowed, ensure_private_use_allowed, gate_object_handle, parse_mechanism,
-    register_object_handle, register_session_object_handle, register_session_object_pair,
-    resolve_session, resolve_session_and_object, spawn_backend, template_declares_private_object,
+    register_session_object_handle, register_session_object_pair, resolve_session,
+    resolve_session_and_object, spawn_backend, template_declares_private_object,
     template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
@@ -531,8 +531,10 @@ async fn derive_key_impl(
             if derive_result.rv.is_ok()
                 && let Some(ref mut params) = derive_result.mechanism_out
             {
-                virtualize_sp800_108_additional_handles(ctx_mgr, &ctx_id, params).await;
-                virtualize_key_mat_out_handles(ctx_mgr, &ctx_id, params).await;
+                virtualize_sp800_108_additional_handles(ctx_mgr, &ctx_id, virtual_session, params)
+                    .await;
+                virtualize_key_mat_out_handles(ctx_mgr, &ctx_id, virtual_session, is_token, params)
+                    .await;
             }
             let mechanism_out = derive_result.mechanism_out.map(|params| {
                 pkcs11_proxy_ng_proto::Mechanism::from(&pkcs11_proxy_ng_types::CkMechanism {
@@ -681,16 +683,27 @@ fn write_sp800_108_key_handle_value(handle: u64, width: usize) -> Result<Vec<u8>
 async fn virtualize_sp800_108_additional_handles(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
+    virtual_session: VirtualHandle,
     params: &mut CkMechanismParams,
 ) {
     match params {
         CkMechanismParams::Sp800108Kdf(params) => {
-            virtualize_derived_key_handles(ctx_mgr, ctx_id, &mut params.additional_derived_keys)
-                .await;
+            virtualize_derived_key_handles(
+                ctx_mgr,
+                ctx_id,
+                virtual_session,
+                &mut params.additional_derived_keys,
+            )
+            .await;
         }
         CkMechanismParams::Sp800108FeedbackKdf(params) => {
-            virtualize_derived_key_handles(ctx_mgr, ctx_id, &mut params.additional_derived_keys)
-                .await;
+            virtualize_derived_key_handles(
+                ctx_mgr,
+                ctx_id,
+                virtual_session,
+                &mut params.additional_derived_keys,
+            )
+            .await;
         }
         _ => {}
     }
@@ -699,15 +712,22 @@ async fn virtualize_sp800_108_additional_handles(
 async fn virtualize_derived_key_handles(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
+    virtual_session: VirtualHandle,
     derived_keys: &mut [Sp800108DerivedKey],
 ) {
     for derived_key in derived_keys {
         if derived_key.key_handle != 0 {
-            // m-1: derived keys are always private secret keys.
-            derived_key.key_handle = register_object_handle(
+            // m-1: derived keys are always private secret keys. Each key is
+            // bound to the derive session per its own template (B2), so a
+            // session additional key evicts — mapping and privacy bit — when
+            // the owner session closes instead of lingering as a stale
+            // mapping that over-refuses with CKR_USER_NOT_LOGGED_IN.
+            derived_key.key_handle = register_session_object_handle(
                 ctx_mgr,
                 ctx_id,
+                virtual_session,
                 CkObjectHandle(derived_key.key_handle as u64),
+                template_declares_token_object(&derived_key.template),
                 Some(true),
             )
             .await;
@@ -723,6 +743,8 @@ async fn virtualize_derived_key_handles(
 async fn virtualize_key_mat_out_handles(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
+    virtual_session: VirtualHandle,
+    is_token_object: bool,
     params: &mut CkMechanismParams,
 ) {
     let handles: &mut [&mut u64] = match params {
@@ -737,9 +759,20 @@ async fn virtualize_key_mat_out_handles(
     };
     for handle in handles {
         if **handle != 0 {
-            // m-1: key-mat OUT handles are always private secret keys.
-            **handle =
-                register_object_handle(ctx_mgr, ctx_id, CkObjectHandle(**handle), Some(true)).await;
+            // m-1: key-mat OUT handles are always private secret keys. Key-mat
+            // params carry no per-key template, so the outputs inherit the
+            // derive template's token classification (like the primary
+            // derived key) and bind to the derive session (B2): a session
+            // output's mapping and privacy bit evict on owner-session close.
+            **handle = register_session_object_handle(
+                ctx_mgr,
+                ctx_id,
+                virtual_session,
+                CkObjectHandle(**handle),
+                is_token_object,
+                Some(true),
+            )
+            .await;
         }
     }
 }
@@ -930,6 +963,15 @@ mod tests {
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 16));
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(
+                    BackendHandle(77),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
+            .await
+            .unwrap();
 
         let mut ssl3 = CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
             mac_size_bits: 128,
@@ -945,7 +987,7 @@ mod tests {
             client_iv: Vec::new().into(),
             server_iv: Vec::new().into(),
         });
-        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, &mut ssl3).await;
+        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut ssl3).await;
         let CkMechanismParams::Ssl3KeyMat(ssl3) = &ssl3 else { unreachable!() };
         assert_eq!(ssl3.server_mac_secret_handle, 0, "zero OUT handles stay zero");
         for (rewritten, backend) in [
@@ -975,7 +1017,7 @@ mod tests {
             key_handle: 0,
             iv: Vec::new(),
         });
-        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, &mut wtls).await;
+        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut wtls).await;
         let CkMechanismParams::WtlsKeyMat(wtls) = &wtls else { unreachable!() };
         assert_eq!(wtls.key_handle, 0);
         assert_ne!(wtls.mac_secret_handle, 0xB1);
@@ -994,7 +1036,7 @@ mod tests {
             data_params: Vec::new(),
             additional_derived_keys: Vec::new(),
         });
-        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, &mut other).await;
+        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut other).await;
         assert!(matches!(other, CkMechanismParams::Sp800108Kdf(_)));
     }
 
@@ -1034,7 +1076,7 @@ mod tests {
             client_iv: Vec::new().into(),
             server_iv: Vec::new().into(),
         });
-        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, &mut ssl3).await;
+        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut ssl3).await;
         let CkMechanismParams::Ssl3KeyMat(ssl3) = &ssl3 else { unreachable!() };
         let v_key_mat = ssl3.client_key_handle;
 
@@ -1047,7 +1089,7 @@ mod tests {
                 key_handle: 0xC1,
             }],
         });
-        virtualize_sp800_108_additional_handles(&ctx_mgr, &ctx_id, &mut kdf).await;
+        virtualize_sp800_108_additional_handles(&ctx_mgr, &ctx_id, virtual_session, &mut kdf).await;
         let CkMechanismParams::Sp800108Kdf(kdf) = &kdf else { unreachable!() };
         let v_kdf = kdf.additional_derived_keys[0].key_handle;
 
@@ -1081,5 +1123,138 @@ mod tests {
                 "{name}: logged-out USE with a failing backend probe must still refuse"
             );
         }
+    }
+
+    /// T5-m1-followup: virtualized SP800-108/key-mat OUT handles are bound
+    /// to the derive session (B2), so owner-session close evicts the mapping
+    /// AND the m-1 privacy bit. A post-close USE from a fresh logged-out
+    /// session then resolves unknown — skipping the privacy gate instead of
+    /// over-refusing 257 — and the backend verdict (130) decides. A
+    /// token-template SP800-108 additional key survives the close with its
+    /// privacy bit intact and still refuses logged-out USE.
+    #[tokio::test]
+    async fn virtualized_out_handles_evict_on_owner_session_close() {
+        use crate::server::slot_map::BackendSlotId;
+        use pkcs11_proxy_ng_types::{
+            CkAttribute, CkAttributeType, CkAttributeValue, Ssl3KeyMatParams, SslRandomData,
+        };
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 16));
+        let ctx = make_ctx(&ctx_mgr);
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let slot = BackendSlotId(CkSlotId(0));
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| c.register_session(BackendHandle(77), slot))
+            .await
+            .unwrap();
+
+        let mut kdf = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+            prf_type: CkMechanismType::SHA256.0,
+            data_params: Vec::new(),
+            additional_derived_keys: vec![
+                Sp800108DerivedKey { template: Vec::new(), key_handle: 0xC1 },
+                Sp800108DerivedKey {
+                    template: vec![CkAttribute {
+                        attr_type: CkAttributeType::TOKEN,
+                        value: Some(CkAttributeValue::Bool(true)),
+                    }],
+                    key_handle: 0xC2,
+                },
+            ],
+        });
+        virtualize_sp800_108_additional_handles(&ctx_mgr, &ctx_id, virtual_session, &mut kdf).await;
+        let CkMechanismParams::Sp800108Kdf(kdf) = &kdf else { unreachable!() };
+        let v_session_key = kdf.additional_derived_keys[0].key_handle;
+        let v_token_key = kdf.additional_derived_keys[1].key_handle;
+
+        let mut ssl3 = CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+            mac_size_bits: 128,
+            key_size_bits: 128,
+            iv_size_bits: 0,
+            is_export: false,
+            random_info: SslRandomData { client_random: vec![1; 32], server_random: vec![2; 32] },
+            prf_hash_mechanism: 0,
+            client_mac_secret_handle: 0,
+            server_mac_secret_handle: 0,
+            client_key_handle: 0xA2,
+            server_key_handle: 0,
+            client_iv: Vec::new().into(),
+            server_iv: Vec::new().into(),
+        });
+        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut ssl3).await;
+        let CkMechanismParams::Ssl3KeyMat(ssl3) = &ssl3 else { unreachable!() };
+        let v_key_mat = ssl3.client_key_handle;
+
+        // While the owner session lives, all three resolve and are recorded
+        // private (m-1).
+        for (name, virtual_handle) in [
+            ("session sp800-108", v_session_key),
+            ("token sp800-108", v_token_key),
+            ("key-mat", v_key_mat),
+        ] {
+            let (resolved, recorded) = ctx_mgr
+                .get_context(&ctx_id, |c| {
+                    (
+                        c.object_handles.resolve(VirtualHandle(virtual_handle)),
+                        c.object_private.get(&VirtualHandle(virtual_handle)).copied(),
+                    )
+                })
+                .await
+                .unwrap();
+            assert!(resolved.is_some(), "{name}: must resolve while the owner session lives");
+            assert_eq!(recorded, Some(true), "{name}: must be recorded private (m-1)");
+        }
+
+        // Owner session closes: session OUT handles evict, the token key
+        // survives with its privacy bit.
+        ctx_mgr.get_context(&ctx_id, |c| c.remove_session(virtual_session)).await;
+        for (name, virtual_handle, survives) in [
+            ("session sp800-108", v_session_key, false),
+            ("token sp800-108", v_token_key, true),
+            ("key-mat", v_key_mat, false),
+        ] {
+            let (resolved, recorded) = ctx_mgr
+                .get_context(&ctx_id, |c| {
+                    (
+                        c.object_handles.resolve(VirtualHandle(virtual_handle)),
+                        c.object_private.get(&VirtualHandle(virtual_handle)).copied(),
+                    )
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                resolved.is_some(),
+                survives,
+                "{name}: post-close mapping presence must follow token classification"
+            );
+            assert_eq!(
+                recorded,
+                survives.then_some(true),
+                "{name}: post-close privacy bit must evict with the mapping"
+            );
+        }
+
+        // Post-close USE from a fresh logged-out session: the evicted handle
+        // resolves unknown (forwarded as 0, so the backend verdict decides)
+        // instead of tripping the stale-mapping 257 gate ...
+        let fresh_session = ctx_mgr
+            .get_context(&ctx_id, |c| c.register_session(BackendHandle(78), slot))
+            .await
+            .unwrap();
+        let (_, backend_object) =
+            resolve_session_and_object(&ctx, &ctx_id, fresh_session.0, v_session_key)
+                .await
+                .unwrap();
+        assert_eq!(
+            backend_object,
+            CkObjectHandle(0),
+            "evicted OUT handle must resolve unknown so the backend verdict decides"
+        );
+        // ... while the surviving private token key still refuses.
+        assert_eq!(
+            resolve_session_and_object(&ctx, &ctx_id, fresh_session.0, v_token_key).await,
+            Err(CkRv::USER_NOT_LOGGED_IN),
+            "surviving private token key must still refuse logged-out USE"
+        );
     }
 }

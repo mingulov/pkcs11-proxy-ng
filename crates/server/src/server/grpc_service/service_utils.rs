@@ -949,33 +949,6 @@ pub(super) async fn resolve_session_and_two_objects(
     Ok((CkSessionHandle(backend_session.0 as u64), first_backend_object, second_backend_object))
 }
 
-/// Register a backend-minted object handle that arrives outside the normal
-/// minting paths (currently: SP800-108 additional derived keys and
-/// SSL3/TLS/WTLS key-material OUT handles).
-///
-/// `is_private` records the `CKA_PRIVATE` bit for the D6(1) logical-login
-/// enforcement, like [`register_session_object_handle`]. Both current call
-/// sites virtualize always-private secret keys and pass `Some(true)`;
-/// `None` leaves the bit unknown so logged-out USE probes the backend once
-/// per operation.
-pub(super) async fn register_object_handle(
-    ctx_mgr: &Arc<ContextManager>,
-    ctx_id: &ClientContextId,
-    backend_handle: CkObjectHandle,
-    is_private: Option<bool>,
-) -> u64 {
-    ctx_mgr
-        .get_context(ctx_id, |ctx| {
-            let virtual_object = ctx.object_handles.insert(BackendHandle(backend_handle.0));
-            if let Some(private) = is_private {
-                ctx.object_private.insert(virtual_object, private);
-            }
-            virtual_object.0
-        })
-        .await
-        .unwrap_or(0)
-}
-
 /// True when `template` declares `CKA_TOKEN` as a true value — i.e. a token
 /// object, whose handle persists across the application's sessions and must NOT
 /// be evicted on session close. The bool may arrive as a typed `Bool`, a raw
@@ -1177,11 +1150,13 @@ pub(super) async fn ensure_private_use_allowed(
 /// under `session` so it is evicted when that session closes (B2). Returns the
 /// virtual object handle (0 if the context is gone).
 ///
-/// This is a MINTING registration (generate/create/unwrap path). The new
-/// virtual handle is inserted into `created_objects` so the per-object gate
-/// (`gate_object_handle`) allows the creating context to use this key even
-/// when its backend-assigned `CKA_UNIQUE_ID` is not in the pre-configured
-/// `objects` grant (G3-PR3 Task 2).
+/// This is a MINTING registration (generate/create/unwrap/derive path,
+/// including SP800-108 additional derived keys and SSL3/TLS/WTLS key-mat
+/// OUT handles virtualized out of a successful derive's `mechanism_out`).
+/// The new virtual handle is inserted into `created_objects` so the
+/// per-object gate (`gate_object_handle`) allows the creating context to
+/// use this key even when its backend-assigned `CKA_UNIQUE_ID` is not in
+/// the pre-configured `objects` grant (G3-PR3 Task 2).
 ///
 /// `is_private` records the template-declared `CKA_PRIVATE` bit for the D6(1)
 /// logical-login enforcement. Production mint sites always pass
