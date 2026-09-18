@@ -93,7 +93,9 @@ fn exact_unrepresentable_or_over_limit_capacity_rejects_before_native_call() {
         observation.calls, 0,
         "a resource cap must reject rather than alter the native call"
     );
-    assert_eq!(result, Err(CkRv::HOST_MEMORY));
+    // F4/D7 (ADR-0010 Limits-(d)): an unforwardable capacity claim is a bad
+    // argument, not a failed allocation.
+    assert_eq!(result, Err(CkRv::ARGUMENTS_BAD));
 }
 
 #[test]

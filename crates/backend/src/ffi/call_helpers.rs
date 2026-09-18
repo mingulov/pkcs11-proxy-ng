@@ -500,7 +500,15 @@ impl FfiBackend {
         // must never change the caller's native capacity.
         let capacity = if spec.buffer_present && !spec.length_pointer_null {
             if spec.buffer_len > MAX_OUTPUT_BUFFER_BYTES {
-                return Err(CkRv::HOST_MEMORY);
+                // F4/D7: a claimed output capacity above the daemon's
+                // materialization ceiling is unforwardable (the exact
+                // provider call needs the full buffer to cross), so it is
+                // a bad argument, not a failed allocation: answer
+                // CKR_ARGUMENTS_BAD per ADR-0010 Limits-(d), mirroring
+                // Limits-(a) for absurd inputs and the parameter-roundtrip
+                // gate below. A genuine allocation failure under the cap
+                // still returns CKR_HOST_MEMORY.
+                return Err(CkRv::ARGUMENTS_BAD);
             }
             usize::try_from(spec.buffer_len).map_err(|_| CkRv::HOST_MEMORY)?
         } else {
@@ -939,6 +947,29 @@ mod output_cap_tests {
         .expect("data result");
         assert_eq!(data_calls, 1);
         assert_eq!(data.value, Some(SecretBytes::copy_from_slice(b"out")));
+    }
+
+    #[test]
+    fn absurd_output_capacity_is_arguments_bad_before_native_entry() {
+        // F4/D7 (ADR-0010 Limits-(d)): a claimed output capacity above the
+        // materialization ceiling is answered CKR_ARGUMENTS_BAD without
+        // touching the provider — never CKR_HOST_MEMORY, and never a
+        // multi-exabyte allocation attempt.
+        for buffer_len in [MAX_OUTPUT_BUFFER_BYTES + 1, isize::MAX as u64, u64::MAX] {
+            let spec =
+                CkOutputBufferSpec { buffer_present: true, buffer_len, length_pointer_null: false };
+            let mut calls = 0;
+            let err = FfiBackend::single_call_bytes_exact(
+                &spec,
+                |_: *mut cryptoki_sys::CK_BYTE, _: *mut cryptoki_sys::CK_ULONG| {
+                    calls += 1;
+                    CkRv::OK.0 as cryptoki_sys::CK_RV
+                },
+            )
+            .unwrap_err();
+            assert_eq!(err, CkRv::ARGUMENTS_BAD, "buffer_len = {buffer_len:#x}");
+            assert_eq!(calls, 0, "provider must not be entered for {buffer_len:#x}");
+        }
     }
 
     #[test]

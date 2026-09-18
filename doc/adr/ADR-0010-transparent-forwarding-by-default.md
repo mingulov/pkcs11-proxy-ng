@@ -131,6 +131,20 @@ exception that licenses other synthesis:
   `MAX_MECHANISM_PARAM_LEN`) bounds only parameter-STRUCT lengths; embedded
   data fields are bounded by `MAX_SERIALIZABLE_BYTES` (512 MiB). Legitimate
   AAD/seed/label/IV values larger than 64 KiB no longer hit the struct cap.
+- **(d) Unallocatable output capacities (Wave 3.5 D7):** a claimed
+  output-buffer capacity above `MAX_OUTPUT_BUFFER_BYTES` (512 MiB) on an
+  exact byte-output call. The daemon answers `CKR_ARGUMENTS_BAD` at the
+  allocation gate before native entry (stable; was: `CKR_HOST_MEMORY`).
+  The exact provider call needs the full buffer to cross, so the claim is
+  unforwardable — a bad argument, not a failed allocation. This mirrors
+  Limits-(a) for absurd inputs and the parameter-roundtrip gate, and matches
+  the `CKR_ARGUMENTS_BAD` member of the backend answer family for absurd
+  claims. A genuine allocation failure under the cap still returns
+  `CKR_HOST_MEMORY`. Residual divergences: backends that answer
+  huge-but-allocatable claims with `CKR_BUFFER_TOO_SMALL` or
+  function-specific range codes (`CKR_DATA_LEN_RANGE`,
+  `CKR_SIGNATURE_LEN_RANGE`) cannot be matched without forwarding the exact
+  call, which requires the full buffer; those stay documented limits.
 
 ## NULL output-length pointers
 
