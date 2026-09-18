@@ -269,15 +269,17 @@ pub(super) async fn get_attribute_value(
             //              (sensitive-denial or invalid-type — we can't tell which, so skip).
             //
             // M1 encoding note: this non-exact path encodes values via
-            // `attr_value_to_bytes` (e.g. CK_ULONG → 8-byte LE on LP64), while the
-            // exact path (get_attribute_value_exact) stores raw backend bytes (4-byte
-            // on an ILP32 backend). Both use the SAME attr_cache key space.  The two
-            // encodings are identical on LP64 (native platform) and diverge only on a
-            // cross-ABI ILP32 backend — which the shim does not use (the shim reaches
-            // the exact RPC exclusively).  This is therefore safe today and on all
-            // planned platforms.  If a non-LP64 backend is ever added, the non-exact
-            // path must be excluded from cache reads/writes to avoid serving an
-            // LP64-encoded value in response to an exact (raw-byte) query.
+            // `attr_value_to_bytes` (e.g. CK_ULONG → 8-byte native-order on LP64),
+            // while the exact path (get_attribute_value_exact) stores raw backend
+            // bytes (4-byte on an ILP32 backend). Both use the SAME attr_cache key
+            // space.  The two encodings are identical on LP64 (native platform) —
+            // native order on both sides keeps them identical on big-endian LP64
+            // too — and diverge only on a cross-ABI ILP32 backend, which the shim
+            // does not use (the shim reaches the exact RPC exclusively).  This is
+            // therefore safe today and on all planned platforms.  If a non-LP64
+            // backend is ever added, the non-exact path must be excluded from cache
+            // reads/writes to avoid serving an LP64-encoded value in response to
+            // an exact (raw-byte) query.
             if !is_value_bearing_secret(fetched_attr.attr_type)
                 && let Some(bytes) = &value_bytes
             {
@@ -463,10 +465,10 @@ pub(super) async fn get_attribute_value_exact(
                     //
                     // M1 encoding note: this exact path stores raw backend bytes (e.g.
                     // CK_ULONG → 4-byte on ILP32). The non-exact path (get_attribute_value)
-                    // uses `attr_value_to_bytes` (8-byte LE on LP64). The two encodings
-                    // are identical on LP64 (current and planned platform) and share
-                    // the same attr_cache key space — safe today (see full note at the
-                    // non-exact put site above).
+                    // uses `attr_value_to_bytes` (8-byte native-order on LP64). The two
+                    // encodings are identical on LP64 (current and planned platform,
+                    // either byte order) and share the same attr_cache key space — safe
+                    // today (see full note at the non-exact put site above).
                     if !is_value_bearing_secret(fetched_result.attr_type)
                         && fetched_result.ck_rv.is_none()
                         && let Some(bytes) = &fetched_result.value

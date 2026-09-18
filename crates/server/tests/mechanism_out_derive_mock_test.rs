@@ -301,7 +301,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles()
         .await
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(data_results[0].value, Some(SecretBytes::new(32_u64.to_le_bytes().to_vec())));
+    assert_eq!(data_results[0].value, Some(SecretBytes::new(32_u64.to_ne_bytes().to_vec())));
     client.destroy_object(session, additional_key).await.unwrap();
 }
 
@@ -479,7 +479,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_
         .await
         .unwrap();
     assert_eq!(rv, CkRv::OK);
-    assert_eq!(data_results[0].value, Some(SecretBytes::new(64_u64.to_le_bytes().to_vec())));
+    assert_eq!(data_results[0].value, Some(SecretBytes::new(64_u64.to_ne_bytes().to_vec())));
     client.destroy_object(session, additional_key).await.unwrap();
 }
 

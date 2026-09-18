@@ -66,11 +66,14 @@ pub(crate) fn attr_type_name(v: u64) -> String {
     name.to_string()
 }
 
-/// Interpret a little-endian byte slice as a u64 (handles 4-byte and 8-byte CK_ULONG).
+/// Interpret a native-order byte slice as a u64 (handles 4-byte and 8-byte CK_ULONG).
+///
+/// The bytes are raw backend bytes off the exact path; the daemon's order
+/// matches this host's (ADR-0011 D6), so native decoding is correct here.
 pub(crate) fn bytes_to_u64(b: &[u8]) -> Option<u64> {
     match b.len() {
-        4 => Some(u64::from(u32::from_le_bytes(b.try_into().ok()?))),
-        8 => Some(u64::from_le_bytes(b.try_into().ok()?)),
+        4 => Some(u64::from(u32::from_ne_bytes(b.try_into().ok()?))),
+        8 => Some(u64::from_ne_bytes(b.try_into().ok()?)),
         _ => None,
     }
 }
@@ -143,4 +146,21 @@ pub(crate) fn key_type_name(v: u64) -> String {
         _ => return format!("0x{v:08X}"),
     };
     name.to_string()
+}
+
+#[cfg(test)]
+mod bytes_to_u64_tests {
+    use super::*;
+
+    #[test]
+    fn decodes_native_order_at_both_widths() {
+        // 0x0102_0304 distinguishes LE from BE absolutely: native decoding
+        // must round-trip the native encoding on every host.
+        assert_eq!(bytes_to_u64(&0x0102_0304u32.to_ne_bytes()), Some(0x0102_0304));
+        assert_eq!(
+            bytes_to_u64(&0x0102_0304_0506_0708u64.to_ne_bytes()),
+            Some(0x0102_0304_0506_0708)
+        );
+        assert_eq!(bytes_to_u64(&[1, 2, 3]), None);
+    }
 }
