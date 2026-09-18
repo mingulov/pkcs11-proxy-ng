@@ -1,5 +1,7 @@
-//! Abnormal native-lifetime stop: raw `exit_group(70)` on qualified
-//! Linux, `TerminateProcess(70)` on qualified Windows.
+//! Abnormal native-lifetime stop: raw `exit_group(70)` on stop-qualified
+//! Linux, `TerminateProcess(70)` on stop-qualified Windows. macOS is
+//! load-qualified but has no stop arm yet: there the guard compiles out
+//! and the poison path applies.
 //!
 //! The final-owner guard (`Drop` in `ffi/loading.rs`) and the
 //! shutdown-deadline controller below are the only production callers. Both
@@ -34,7 +36,8 @@ pub(in crate::ffi) enum StopReason {
     /// Final owner cannot prove quiescence.
     ///
     /// Constructed only by the `Drop` guard, which is cfg-gated to the
-    /// qualified Linux and Windows arms.
+    /// Linux and Windows stop arms (macOS is load-qualified but has no
+    /// stop arm yet).
     UnprovenFinalOwner,
     /// Shutdown deadline expired with native work still outstanding.
     ShutdownDeadlineExpired,
@@ -157,15 +160,16 @@ mod arch {
     }
 }
 
-// Fallback: every target outside the v0.2 native-FFI qualification
-// boundary. Partition proof — each target lands on exactly one `arch`
-// arm: (1) Linux x86_64 GNU/musl 64-bit, (2) Linux x86 GNU/musl 32-bit,
-// (3) Windows MSVC x86_64 64-bit, (4) this fallback. Arms 1-3 are
-// pairwise disjoint (the linux-x86_64, linux-x86, and windows-msvc
-// predicates differ on target_os/target_arch), and arm 4 is the exact
-// `not(any(1, 2, 3))` complement, hence exhaustive and disjoint by
-// construction. Reachable only if a future guard arm calls it (today's
-// guard is cfg-gated to the qualified Linux and Windows arms, and the
+// Fallback: every target without a qualified stop arm — everything
+// outside the Linux/Windows stop boundary, including macOS (load-qualified
+// but with no stop stub yet). Partition proof — each target lands on
+// exactly one `arch` arm: (1) Linux x86_64 GNU/musl 64-bit, (2) Linux x86
+// GNU/musl 32-bit, (3) Windows MSVC x86_64 64-bit, (4) this fallback.
+// Arms 1-3 are pairwise disjoint (the linux-x86_64, linux-x86, and
+// windows-msvc predicates differ on target_os/target_arch), and arm 4 is
+// the exact `not(any(1, 2, 3))` complement, hence exhaustive and disjoint
+// by construction. Reachable only if a future guard arm calls it (today's
+// guard is cfg-gated to the Linux and Windows stop arms, and the
 // controller fires only past an armed deadline).
 #[cfg(not(any(
     all(
@@ -194,8 +198,8 @@ mod arch {
     ///
     /// # Safety
     ///
-    /// Never reached on the qualified Linux/Windows arms: the guard call
-    /// site is cfg-gated there, and the controller fires only past an
+    /// Never reached on the stop-qualified Linux/Windows arms: the guard
+    /// call site is cfg-gated there, and the controller fires only past an
     /// armed deadline.
     #[inline(never)]
     pub(in crate::ffi) unsafe fn raw_exit_group_70() -> RawStopAttempt {

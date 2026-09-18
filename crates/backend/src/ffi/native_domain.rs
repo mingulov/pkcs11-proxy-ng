@@ -267,7 +267,7 @@ pub(in crate::ffi) struct ConstructionPermit {
     /// no lock, no registry read — so the final-owner guard can scope itself
     /// to managed permits on the lock-free stop path.
     //
-    // The guard (cfg-gated to the qualified Linux and Windows arms) is
+    // The guard (cfg-gated to the Linux and Windows stop arms) is
     // the only non-test reader.
     managed: bool,
 }
@@ -317,7 +317,7 @@ impl ConstructionPermit {
     /// lock-free, so the final-owner guard may call it on the stop path.
     /// False only for the `cfg(test)` unmanaged sentinel.
     //
-    // The guard (cfg-gated to the qualified Linux and Windows arms) is
+    // The guard (cfg-gated to the Linux and Windows stop arms) is
     // the only non-test caller.
     pub(in crate::ffi) fn holds_registry_slot(&self) -> bool {
         self.managed

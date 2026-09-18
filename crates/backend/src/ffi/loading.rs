@@ -218,12 +218,13 @@ impl Drop for FfiBackend {
     fn drop(&mut self) {
         use super::native_domain::RetirementDecision::{Poison, Release};
         let decision = self.lifecycle.retirement_decision();
-        // Qualified targets only (Linux x86_64/x86 GNU/musl, Windows MSVC
-        // x86_64): abnormally stop the native lifetime when the managed
+        // Stop-qualified targets only (Linux x86_64/x86 GNU/musl, Windows
+        // MSVC x86_64): abnormally stop the native lifetime when the managed
         // final owner cannot prove quiescence. First statement and
         // lock-free (atomic-only decision plus a plain-bool slot check), so
         // it precedes the lock-taking poison path and all dependent field
-        // drops. Elsewhere this block cfg-compiles out and the arms below
+        // drops. Elsewhere — including load-qualified macOS, which has no
+        // stop arm yet — this block cfg-compiles out and the arms below
         // keep today's behavior bit-for-bit.
         #[cfg(any(
             all(
