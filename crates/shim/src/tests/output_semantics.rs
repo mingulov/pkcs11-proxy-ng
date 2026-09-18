@@ -28,7 +28,7 @@ use super::*;
 static TEST_DAEMON: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_ILP32: OnceLock<TestDaemon> = OnceLock::new();
 static TEST_DAEMON_LLP64: OnceLock<TestDaemon> = OnceLock::new();
-static TEST_DAEMON_BIG_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
+static TEST_DAEMON_FOREIGN_ENDIAN: OnceLock<TestDaemon> = OnceLock::new();
 
 pub(super) struct TestDaemon {
     runtime: Runtime,
@@ -53,16 +53,20 @@ impl TestDaemon {
         }
     }
 
-    /// A daemon whose backend ADVERTISES big-endian (D6 poison config).
-    pub(super) fn shared_big_endian() -> &'static Self {
-        TEST_DAEMON_BIG_ENDIAN.get_or_init(|| Self::start_configured(MockAbi::host(), true))
+    /// A daemon whose backend ADVERTISES the byte order foreign to this
+    /// host (D6 poison config): big-endian on LE hosts, little-endian on
+    /// BE hosts — either way the client must refuse at `C_Initialize`.
+    pub(super) fn shared_foreign_endian() -> &'static Self {
+        let foreign = if cfg!(target_endian = "little") { 2 } else { 1 };
+        TEST_DAEMON_FOREIGN_ENDIAN
+            .get_or_init(|| Self::start_configured(MockAbi::host(), Some(foreign)))
     }
 
     fn start(abi: MockAbi) -> Self {
-        Self::start_configured(abi, false)
+        Self::start_configured(abi, None)
     }
 
-    fn start_configured(abi: MockAbi, big_endian: bool) -> Self {
+    fn start_configured(abi: MockAbi, advertised_order: Option<u32>) -> Self {
         let runtime = Runtime::new().expect("test runtime");
         let (endpoint, backend, context_manager, shutdown) = runtime.block_on(async {
             let mut mock = MockBackend::new(
@@ -76,8 +80,11 @@ impl TestDaemon {
                 ],
             )
             .with_abi(abi);
-            if big_endian {
-                mock = mock.with_big_endian_advertisement();
+            match advertised_order {
+                None => {}
+                Some(2) => mock = mock.with_big_endian_advertisement(),
+                Some(1) => mock = mock.with_little_endian_advertisement(),
+                Some(other) => panic!("invalid test byte-order advertisement {other}"),
             }
             let backend = Arc::new(mock);
             backend.set_interface_capabilities(InterfaceCapabilities {
@@ -3462,8 +3469,8 @@ fn nested_template_attribute_data_query() {
     );
 
     // Verify sub-attribute values
-    let returned_class = CK_ULONG::from_le_bytes(class_buf[..ulong_size].try_into().unwrap());
-    let returned_key_type = CK_ULONG::from_le_bytes(key_type_buf[..ulong_size].try_into().unwrap());
+    let returned_class = CK_ULONG::from_ne_bytes(class_buf[..ulong_size].try_into().unwrap());
+    let returned_key_type = CK_ULONG::from_ne_bytes(key_type_buf[..ulong_size].try_into().unwrap());
     assert_eq!(returned_class, class_value as CK_ULONG, "CLASS value");
     assert_eq!(returned_key_type, key_type_value as CK_ULONG, "KEY_TYPE value");
 }
@@ -3577,7 +3584,7 @@ fn nested_template_attribute_sub_buffer_too_small_preserves_partial_outputs() {
     assert_eq!(sub0_type, CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE);
     assert_eq!(sub_attrs[0].ulValueLen as usize, ulong_size);
     assert_eq!(
-        CK_ULONG::from_le_bytes(class_buf[..ulong_size].try_into().unwrap()),
+        CK_ULONG::from_ne_bytes(class_buf[..ulong_size].try_into().unwrap()),
         class_value as CK_ULONG
     );
     let (sub1_type, sub1_len) = (sub_attrs[1].type_, sub_attrs[1].ulValueLen);
@@ -3715,15 +3722,20 @@ fn raw_client_nested_template_data_query() {
         assert_eq!(nested[0].attr_type, CkAttributeType::CLASS);
         assert_eq!(nested[0].returned_len, ulong_size);
         let class_bytes = nested[0].value.as_ref().expect("CLASS value");
-        assert!(class_bytes.expose(|raw| raw == &class_value.to_le_bytes()[..ulong_size as usize]));
+        assert!(class_bytes.expose(|raw| raw
+            == pkcs11_proxy_ng_types::width::encode_native_ulong(
+                class_value,
+                ulong_size as usize
+            )));
 
         assert_eq!(nested[1].attr_type, CkAttributeType::KEY_TYPE);
         assert_eq!(nested[1].returned_len, ulong_size);
         let key_type_bytes = nested[1].value.as_ref().expect("KEY_TYPE value");
-        assert!(
-            key_type_bytes
-                .expose(|raw| raw == &key_type_value.to_le_bytes()[..ulong_size as usize])
-        );
+        assert!(key_type_bytes.expose(|raw| raw
+            == pkcs11_proxy_ng_types::width::encode_native_ulong(
+                key_type_value,
+                ulong_size as usize
+            )));
 
         client.close_session(session).await.expect("C_CloseSession");
         client.finalize().await.expect("C_Finalize");

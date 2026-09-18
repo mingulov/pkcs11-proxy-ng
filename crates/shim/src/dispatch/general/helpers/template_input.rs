@@ -111,13 +111,14 @@ unsafe fn ck_attrs_to_rust_at_depth(
                 // differs from the backend's: re-encode each element to the
                 // backend width here, then send as opaque bytes the server writes
                 // verbatim (ADR-0011). Same-width arrays fall through to the
-                // raw-bytes path below, byte-identical to before.
+                // raw-bytes path below, byte-identical to before. D6 guarantees
+                // both edges share this client's native order.
                 let bytes = unsafe { std::slice::from_raw_parts(attr.pValue as *const u8, len) };
                 match pkcs11_proxy_ng_types::width::reencode_ulong(
                     bytes,
                     client_ulong_width,
                     backend_ulong_width,
-                    pkcs11_proxy_ng_types::width::ByteOrder::Little,
+                    pkcs11_proxy_ng_types::width::ByteOrder::native(),
                 ) {
                     Ok(reencoded) => Some(CkAttributeValue::Bytes(reencoded.into())),
                     // D4: an element exceeds the backend's CK_ULONG range.

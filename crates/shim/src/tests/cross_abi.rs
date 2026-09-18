@@ -122,7 +122,7 @@ fn scalar_ulong_attribute_bridges_both_directions() {
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} data query");
-        assert_eq!(CK_ULONG::from_le_bytes(buf), 3, "{abi:?}: value round-trip");
+        assert_eq!(CK_ULONG::from_ne_bytes(buf), 3, "{abi:?}: value round-trip");
 
         // Too-small buffer: verbatim CKR_BUFFER_TOO_SMALL and the D10
         // sentinel arrives at the CLIENT's width.
@@ -182,7 +182,7 @@ fn ulong_array_attribute_bridges_element_wise() {
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} array data query");
         for (i, expected) in mechs.iter().enumerate() {
             let w = std::mem::size_of::<CK_ULONG>();
-            let got = CK_ULONG::from_le_bytes(buf[i * w..(i + 1) * w].try_into().expect("element"));
+            let got = CK_ULONG::from_ne_bytes(buf[i * w..(i + 1) * w].try_into().expect("element"));
             assert_eq!(got as u64, *expected, "{abi:?}: array element {i}");
         }
     }
@@ -272,8 +272,8 @@ fn nested_template_data_query_bridges_sub_values() {
             class_buf.as_slice().try_into().expect("class width");
         let key_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
             key_type_buf.as_slice().try_into().expect("key width");
-        assert_eq!(CK_ULONG::from_le_bytes(class_bytes), 3, "{abi:?}: CLASS sub-value");
-        assert_eq!(CK_ULONG::from_le_bytes(key_bytes), 31, "{abi:?}: KEY_TYPE sub-value");
+        assert_eq!(CK_ULONG::from_ne_bytes(class_bytes), 3, "{abi:?}: CLASS sub-value");
+        assert_eq!(CK_ULONG::from_ne_bytes(key_bytes), 31, "{abi:?}: KEY_TYPE sub-value");
         assert_eq!(sub_attrs[0].ulValueLen as usize, w, "{abi:?}: sub length at client width");
     }
 }
@@ -326,7 +326,7 @@ fn nested_template_sub_too_small_yields_client_width_sentinel() {
         let ok_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
             ok_buf.as_slice().try_into().expect("width");
         assert_eq!(
-            CK_ULONG::from_le_bytes(ok_bytes),
+            CK_ULONG::from_ne_bytes(ok_bytes),
             31,
             "{abi:?}: the adequately-sized sub still round-trips"
         );
@@ -334,13 +334,14 @@ fn nested_template_sub_too_small_yields_client_width_sentinel() {
 }
 
 #[test]
-fn big_endian_backend_is_refused_at_initialize() {
+fn foreign_byte_order_backend_is_refused_at_initialize() {
     // D6: the wire carries backend-native ulong bytes, so a byte-order
     // mismatch would corrupt every multi-byte value. The shim must refuse
     // at C_Initialize — loudly, before any value can be parsed — with the
-    // lifecycle-class error, never connect-and-corrupt.
+    // lifecycle-class error, never connect-and-corrupt. The poison daemon
+    // advertises the order foreign to this host (BE on LE, LE on BE).
     let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::shared_big_endian();
+    let daemon = TestDaemon::shared_foreign_endian();
     unsafe {
         std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon.endpoint);
     }
@@ -398,7 +399,7 @@ fn create_with_template_round_trips_across_abis() {
         let rv =
             unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} CLASS read-back");
-        assert_eq!(CK_ULONG::from_le_bytes(class_buf), CKO_DATA, "{abi:?} CLASS value");
+        assert_eq!(CK_ULONG::from_ne_bytes(class_buf), CKO_DATA, "{abi:?} CLASS value");
 
         // The vendor attribute's bytes are untouched by any width bridge.
         let mut vendor_buf = [0u8; 3];
@@ -490,7 +491,7 @@ fn nested_template_input_round_trips_across_abis() {
         let class_bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
             class_buf.as_slice().try_into().expect("width");
         assert_eq!(
-            CK_ULONG::from_le_bytes(class_bytes),
+            CK_ULONG::from_ne_bytes(class_bytes),
             4,
             "{abi:?}: sub-value round-trips through input AND output bridging"
         );
@@ -532,7 +533,7 @@ fn assert_wrap_template_holds_class(
     let bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
         class_buf.as_slice().try_into().expect("width");
     assert_eq!(
-        CK_ULONG::from_le_bytes(bytes),
+        CK_ULONG::from_ne_bytes(bytes),
         expected_class,
         "{abi:?} {context}: sub-value at client width"
     );
@@ -757,6 +758,6 @@ fn generated_key_default_attributes_bridge_cross_abi() {
         assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} read CKA_CLASS");
         let bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
             class_buf.as_slice().try_into().expect("width");
-        assert_eq!(CK_ULONG::from_le_bytes(bytes), CKO_SECRET_KEY as CK_ULONG, "{abi:?} CKA_CLASS");
+        assert_eq!(CK_ULONG::from_ne_bytes(bytes), CKO_SECRET_KEY as CK_ULONG, "{abi:?} CKA_CLASS");
     }
 }

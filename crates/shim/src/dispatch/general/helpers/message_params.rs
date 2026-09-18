@@ -15,7 +15,11 @@ use super::*;
 // cryptoki-sys mirrors the platform ABI: LP64 Linux uses a 48-byte GCM
 // message envelope, i686 ILP32 uses 24, and Windows x64 LLP64 is packed to 32.
 // Structured transport must never reinterpret one of these sizes as another.
+// s390x is LP64 too, so it shares the 48-byte envelope (BE receipt: this
+// assertion compiles the s390x layout into the build).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const _: [(); 48] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
+#[cfg(all(target_os = "linux", target_arch = "s390x"))]
 const _: [(); 48] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
 #[cfg(all(target_os = "linux", target_arch = "x86"))]
 const _: [(); 24] = [(); std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>()];
