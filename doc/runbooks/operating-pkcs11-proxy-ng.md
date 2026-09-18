@@ -365,6 +365,37 @@ in the daemon deployment is mounted from a shared backend (PVC,
 hostPath that's actually shared, or a network HSM endpoint). NEVER
 use `emptyDir` for the backend tokens in a multi-replica setup.
 
+### CKR_USER_ALREADY_LOGGED_IN on a consumer that never logged in (0x100)
+
+**Expected behavior — one logical login holder per slot.** All logical
+clients of a daemon share one backend token per slot (ADR-0002 §6). While
+**any** live context holds the slot login, the backend token is logged in
+and would answer a second `C_Login` with `CKR_USER_ALREADY_LOGGED_IN`
+*without checking the PIN* — so the daemon cannot PIN-verify the new login
+and returns that answer faithfully instead of minting a login on an
+unverified PIN (Wave 3.5 D6(3); a different user type gets
+`CKR_USER_ANOTHER_ALREADY_LOGGED_IN`). The presented PIN is not evaluated
+at all on this path.
+
+**Triage.**
+
+1. This is contention, not corruption: another live consumer (or a previous
+   test case whose context lease has not expired yet) holds the slot login.
+   Find it via daemon logs (`Login succeeded` with a different context id).
+2. The window is bounded: `C_Logout`, last-session close, `C_Finalize`, and
+   lease expiry each release the backend login as soon as no live context
+   holds it (D6(2)/D9). Retry the login after the holder releases.
+3. If logins starve, the holder is leaking its login (never logs out and
+   holds sessions open past its useful life). Fix the holder; do not share
+   one daemon across tenants that need concurrent independent logins on the
+   same token — partition daemons per tenant (§4a).
+
+**Test-harness note.** Back-to-back cases sharing one daemon (e.g. the ncli
+suites) routinely hit this when a prior case's context is still within its
+lease: treat `ALREADY` after a prior login as "slot still held", rotate to a
+fresh daemon for pristine-state cases (see §9), and never work around it by
+retrying with a different PIN — the PIN is not the problem.
+
 ## 7. On-call flowchart
 
 ```
@@ -516,6 +547,38 @@ encounter; they are scope of follow-up rounds:
 | --- | --- | --- |
 | FOLLOWUP-fork-safety: forked children of a `C_Initialize`d shim must `C_Finalize`+`C_Initialize` to recover | Use fork-then-exec in consumer apps | Application code (not daemon-side) |
 | Backend crash blast radius: a vendor-`.so` SIGSEGV downs the whole daemon process (backend is in-process; A2/in-process-worker deferred) | Run **multiple instances + sticky routing** (§4a); consumers reconnect + re-open (§6) | Deployment + application code |
+| Multiplexed daemon vs pristine token: N logical clients share one backend instance per slot — no per-context pristine state (see below) | Rotate/restart the daemon for pristine-state cases; partition daemons per tenant (§4a) | Test harness / deployment |
+
+### Multiplexed daemon vs pristine token (in-memory backends)
+
+One daemon = one loaded backend module = **one token state per slot shared
+by every logical client** (ADR-0002 §6, ADR-0007). The proxy multiplexes
+handles, sessions, and login scoping, but it does **not** give each context a
+pristine token. In-memory backends (kryoptic, jcardsim, non-persistent
+SoftHSM) make this visible: token objects, backend login state, and
+find-enumeration all accumulate across tenants sharing the daemon.
+
+What the daemon does and does not reset between tenants:
+
+* **Per-context cleanup (always):** a departing context's backend sessions
+  are closed (only when unreferenced by live contexts), its virtual handles
+  invalidated, its session objects destroyed with their sessions.
+* **Shared state (by design, persists):** the backend login while any live
+  context holds it (released on last-context-out, D6(2)/D9); token objects
+  any tenant created; anything the backend itself remembers (jcardsim
+  key files, kryoptic in-memory tables).
+* **Consequences for assertions:** a case that logs in while a prior case's
+  context still lives gets `CKR_USER_ALREADY_LOGGED_IN` (§6) — correct
+  multiplexed behavior, not a bug. A case asserting an empty token, a
+  logged-out token, or a private-object population it did not create is
+  asserting **pristine** state and is invalid against a shared daemon.
+
+**Rule for harnesses:** cases needing pristine state must rotate to a fresh
+daemon (restart, or a per-case backend namespace/volume) — the D9-harness
+rotation option. Cases tolerant of multiplexing may share, but must treat
+`ALREADY` as "slot held" and must scope their assertions to objects they
+created. For strict tenant isolation in production, partition daemons per
+tenant exactly as for crash containment (§4a).
 
 Earlier follow-ups (DNS re-resolve, slow-backend test, per-RPC
 trace ID, gRPC health probe, rate-limiter) are closed.
