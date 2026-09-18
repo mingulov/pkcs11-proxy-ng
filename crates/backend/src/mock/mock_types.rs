@@ -8,15 +8,18 @@ use pkcs11_proxy_ng_types::*;
 /// LP64 Linux x86_64 (8-byte ulong, 24-byte stride), ILP32 Linux i686
 /// (4, 12), and LLP64 Windows x64 with `#pragma pack(1)` (4, 16 — the
 /// stride is NOT 3x the width, which is exactly why it must be modeled
-/// separately). 32-bit Windows (PE32) needs no fourth profile: with
-/// `#pragma pack(1)` over 4-byte `CK_ULONG`s and 4-byte pointers every
-/// cryptoki struct lays out exactly as its ILP32 natural layout
-/// (`CK_ATTRIBUTE` = 4+4+4 = 12), so `Ilp32` models win32 exactly.
+/// separately). 32-bit Windows (PE32) needs no fourth profile: the
+/// two numbers this profile models are identical on win32 — `CK_ULONG`
+/// width 4 and `CK_ATTRIBUTE` stride 12 (4+4+4, layout-identical) — so
+/// `Ilp32` models win32 exactly for these two numbers. This is NOT a
+/// general pack(1)≡ILP32 theorem, which is false: e.g. `CK_INFO` is 76
+/// bytes naturally vs 72 packed, and `CK_FUNCTION_LIST` fn fields shift
+/// by 2 (see task-t6b-review.md I1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockAbi {
     /// 64-bit Unix: `CK_ULONG` = 8, `CK_ATTRIBUTE` = 8+8+8.
     Lp64,
-    /// 32-bit Unix, and 32-bit Windows (packed win32 ≡ ILP32):
+    /// 32-bit Unix, and 32-bit Windows (win32 shares both modeled numbers):
     /// `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+4+4.
     Ilp32,
     /// Windows x64, packed(1): `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+8+4.
