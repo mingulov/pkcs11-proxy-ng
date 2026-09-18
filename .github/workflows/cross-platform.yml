@@ -2,9 +2,13 @@
 #
 # Runs the SAME pkcs11-check suite (from PyPI, version-pinned) twice per
 # platform -- once against SoftHSM2 directly, once through the proxy --
-# and fails on any divergence. The per-OS setup lives here; the shared
-# run-compare logic is scripts/ci-direct-vs-proxy.py (stdlib only, so the
-# identical gate runs on a developer box and on all three runner OSes).
+# and fails unless both runs exit 0 AND the deterministic-KAT verdicts
+# agree (``pkcs11-check differential`` default scope, NOT every node-id;
+# non-KAT exit-0-preserving outcome transitions are a known residual --
+# see scripts/ci-direct-vs-proxy.py, Review-A M-1). The per-OS setup
+# lives here; the shared run-compare logic is scripts/ci-direct-vs-proxy.py
+# (stdlib only, so the identical gate runs on a developer box and on all
+# three runner OSes).
 #
 # Cadence: daily schedule (staggered off the nightly provider matrix),
 # pushes to main, and manual dispatch (the way PRs opt in). NOT per-PR:

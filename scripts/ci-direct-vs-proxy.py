@@ -1,11 +1,32 @@
 #!/usr/bin/env python3
 """Direct-vs-proxied transparency gate (cross-platform CI core).
 
-Runs the SAME pkcs11-check suite (from PyPI) twice against a scratch
-SoftHSM2 token -- once against the SoftHSM module directly, once through
-the proxy shim + release daemon -- then compares the two reports with
-``pkcs11-check differential``. Any divergence is a proxy bug: the shim
-must be indistinguishable from the backend (AGENTS.md rule 2).
+Runs the SAME pkcs11-check suite (from PyPI) twice -- once against the
+SoftHSM module directly, once through the proxy shim + release daemon --
+then compares the two reports with ``pkcs11-check differential``. The
+shim must be indistinguishable from the backend (AGENTS.md rule 2); this
+gate checks that claim within the scope below.
+
+Scope (honest contract -- Review-A M-1): the gate is
+direct-exit-0 AND proxied-exit-0 AND deterministic-KAT-verdict agreement.
+The exit-0 legs catch every failure-class outcome (failed/crashed/error/
+timeout, strict-xpass failure) on EVERY suite, direct or proxied. The
+differential leg uses the framework default scope -- deterministic KAT
+node-ids only (wycheproof/ACVP/test_cctv_*; ``differential_cmd.py`` +
+``is_kat_nodeid`` in ``core/differential.py``) -- NOT every node-id.
+Known residual: non-KAT outcome transitions that keep exit 0 (pass <->
+skip, xfail <-> non-strict xpass) are not compared.
+
+Why not ``differential --all``: the framework offers no proxy-aware
+timing margins or flake allowance anywhere on the differential path
+(verified: no margin/F19/timing support in ``core/differential.py``,
+``cli/differential_cmd.py``, or ``core/compare_results.py``), so ``--all``
+would trade the documented residual above for undocumented flake risk on
+a daily gate -- and still would not see skip-class transitions (skips
+are excluded from attempted outcomes by construction:
+``_attempted_outcomes`` + ``comparable_nodeids(min_providers=2)``), so it
+cannot deliver a literal "any divergence" contract either. Revisit only
+with framework margin support plus a skip-transition story.
 
 Flow mirrors scripts/test-softhsm2-smoke.sh, generalized to Linux/macOS/
 Windows with stdlib only (no shell/PowerShell twin to keep in sync):
@@ -15,11 +36,17 @@ Windows with stdlib only (no shell/PowerShell twin to keep in sync):
   2. write a loopback-only daemon config (auth="none", CI-only -- same
      insecure-TCP shape the smoke script asserts, never a default);
   3. run pkcs11-check DIRECT against SoftHSM;
-  4. start the daemon, run pkcs11-check PROXIED against the shim;
-  5. run ``pkcs11-check differential`` on the two report.jsonl files.
+  4. wipe + re-init the scratch token with identical params (Review-A
+     M-2: framework testcases create CKA_TOKEN=True persistent objects,
+     so the PROXIED phase must start from identical -- not polluted --
+     token state);
+  5. start the daemon, run pkcs11-check PROXIED against the shim;
+  6. run ``pkcs11-check differential`` on the two report.jsonl files.
 
-Gate (strict): direct exit 0 AND proxied exit 0 AND differential exit 0.
-Extra pkcs11-check args (subset tuning) pass through EXTRA_P11CHECK_ARGS.
+Gate (strict within scope): direct exit 0 AND proxied exit 0 AND
+differential (KAT scope) exit 0.
+Extra pkcs11-check args (subset tuning) pass through EXTRA_P11CHECK_ARGS
+(shell-quoted; parsed with shlex.split).
 
 Usage (after ``cargo build --release``)::
 
@@ -29,6 +56,7 @@ Usage (after ``cargo build --release``)::
 import argparse
 import hashlib
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -61,6 +89,10 @@ SOFTHSM_UNIX_LIB_CANDIDATES = [
 DAEMON_LOG_TCP_WARN = "listening on tcp without authentication"
 DAEMON_LOG_REGISTRY = "mechanism registry ready"
 
+# Fail-loud network bound for the Windows SoftHSM fetch (Review-A m-6:
+# urlretrieve has no timeout parameter at all, hence urlopen below).
+DOWNLOAD_TIMEOUT_S = 60
+
 
 def log(msg):
     print(f"[ci-compare] {msg}", flush=True)
@@ -70,7 +102,7 @@ def run(cmd, env=None, cwd=None):
     merged = dict(os.environ)
     if env:
         merged.update(env)
-    log("+ " + " ".join(str(c) for c in cmd))
+    log("+ " + shlex.join(str(c) for c in cmd))
     return subprocess.run(cmd, env=merged, cwd=cwd)
 
 
@@ -103,7 +135,85 @@ def wait_for_port(port, proc, timeout_s=15):
 
 def extra_p11check_args():
     raw = os.environ.get("EXTRA_P11CHECK_ARGS", "").strip()
-    return raw.split() if raw else []
+    return shlex.split(raw) if raw else []
+
+
+def download_file(url, dest, timeout_s=DOWNLOAD_TIMEOUT_S):
+    """Fetch ``url`` to ``dest`` with a fail-loud timeout (Review-A m-6)."""
+    log(f"downloading {url} (timeout {timeout_s}s)")
+    with urllib.request.urlopen(url, timeout=timeout_s) as resp, open(
+        dest, "wb"
+    ) as out:
+        shutil.copyfileobj(resp, out)
+
+
+def safe_extractall(zip_path, dest):
+    """Unpack ``zip_path`` into ``dest``, refusing ZipSlip escapes (m-6).
+
+    The pinned-hash check upstream mitigates a hostile zip, but the guard
+    costs nothing and fails loud on absolute members or ``..`` escapes.
+    """
+    base = os.path.realpath(dest)
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.infolist():
+            target = os.path.realpath(os.path.join(dest, member.filename))
+            if target != base and not target.startswith(base + os.sep):
+                raise SystemExit(f"zip member escapes destination: {member.filename!r}")
+        zf.extractall(dest)
+
+
+def init_token_argv(softhsm_util):
+    """softhsm2-util argv that provisions the scratch token (Review-A M-2).
+
+    Single source of the init params (label/PINs): both phases call this
+    same helper, so identical provisioning holds by construction.
+    """
+    return [
+        softhsm_util,
+        "--init-token",
+        "--free",
+        "--label",
+        TOKEN_LABEL,
+        "--so-pin",
+        SO_PIN,
+        "--pin",
+        USER_PIN,
+    ]
+
+
+def init_scratch_token(softhsm_util):
+    r = run(init_token_argv(softhsm_util))
+    if r.returncode != 0:
+        raise SystemExit("softhsm2-util --init-token failed")
+
+
+def reset_token_state(token_dir, softhsm_util):
+    """Wipe ``token_dir`` and re-init an identical scratch token (M-2).
+
+    Called between the DIRECT and PROXIED phases so both runs start from
+    identical token state; DIRECT-phase CKA_TOKEN=True objects cannot leak
+    into the PROXIED run. Nothing holds the token open at this point (the
+    DIRECT pkcs11-check process has exited, the daemon starts later).
+    """
+    log("re-initializing scratch token for the PROXIED phase")
+    shutil.rmtree(token_dir, ignore_errors=True)
+    os.makedirs(token_dir, exist_ok=True)
+    init_scratch_token(softhsm_util)
+
+
+def differential_argv(direct_jsonl, proxied_jsonl):
+    """``pkcs11-check differential`` argv (Review-A M-1: KAT default scope).
+
+    Deliberately WITHOUT --all -- see the module docstring for the
+    recorded decision. Both report.jsonl inputs must exist with sibling
+    results.json provenance or the framework fails loud (exit 2).
+    """
+    return [
+        "pkcs11-check",
+        "differential",
+        f"direct={direct_jsonl}",
+        f"proxied={proxied_jsonl}",
+    ]
 
 
 def provision_softhsm_windows(workdir):
@@ -111,14 +221,12 @@ def provision_softhsm_windows(workdir):
     dl_dir = os.path.join(workdir, "dl")
     os.makedirs(dl_dir, exist_ok=True)
     zippath = os.path.join(dl_dir, "softhsm2.zip")
-    log(f"downloading {SOFTHSM_WIN_URL}")
-    urllib.request.urlretrieve(SOFTHSM_WIN_URL, zippath)
+    download_file(SOFTHSM_WIN_URL, zippath)
     digest = sha256_file(zippath)
     if digest != SOFTHSM_WIN_SHA256:
         raise SystemExit(f"SoftHSM zip hash mismatch: {digest}")
     log("hash verified, extracting")
-    with zipfile.ZipFile(zippath) as zf:
-        zf.extractall(os.path.join(workdir, "softhsm-win"))
+    safe_extractall(zippath, os.path.join(workdir, "softhsm-win"))
     root = os.path.join(workdir, "softhsm-win", "SoftHSM2")
     lib = os.path.join(root, "lib", "softhsm2-x64.dll")
     util = os.path.join(root, "bin", "softhsm2-util.exe")
@@ -185,22 +293,8 @@ def main():
         )
     os.environ["SOFTHSM2_CONF"] = softhsm_conf
 
-    log("[1/5] initializing scratch SoftHSM token")
-    r = run(
-        [
-            softhsm_util,
-            "--init-token",
-            "--free",
-            "--label",
-            TOKEN_LABEL,
-            "--so-pin",
-            SO_PIN,
-            "--pin",
-            USER_PIN,
-        ]
-    )
-    if r.returncode != 0:
-        raise SystemExit("softhsm2-util --init-token failed")
+    log("[1/6] initializing scratch SoftHSM token")
+    init_scratch_token(softhsm_util)
 
     port = free_port()
     endpoint = f"http://127.0.0.1:{port}"
@@ -235,7 +329,7 @@ def main():
 
     direct_dir = os.path.join(workdir, "direct")
     os.makedirs(direct_dir, exist_ok=True)
-    log("[2/5] pkcs11-check DIRECT against SoftHSM")
+    log("[2/6] pkcs11-check DIRECT against SoftHSM")
     direct = run(
         [
             "pkcs11-check",
@@ -249,8 +343,12 @@ def main():
     )
     log(f"direct exit: {direct.returncode}")
 
+    # M-2: both phases start from identically-provisioned token state.
+    log("[3/6] resetting scratch token to identical state")
+    reset_token_state(token_dir, softhsm_util)
+
     daemon_log = os.path.join(workdir, "daemon.log")
-    log(f"[3/5] starting daemon on {endpoint} (auth=none, loopback only)")
+    log(f"[4/6] starting daemon on {endpoint} (auth=none, loopback only)")
     with open(daemon_log, "wb") as logfh:
         daemon_env = dict(os.environ)
         daemon_env.setdefault("RUST_LOG", "pkcs11_proxy_ng=info")
@@ -272,7 +370,7 @@ def main():
 
         proxied_dir = os.path.join(workdir, "proxied")
         os.makedirs(proxied_dir, exist_ok=True)
-        log("[4/5] pkcs11-check PROXIED against the shim")
+        log("[5/6] pkcs11-check PROXIED against the shim")
         proxied = run(
             [
                 "pkcs11-check",
@@ -299,15 +397,8 @@ def main():
 
     direct_jsonl = os.path.join(direct_dir, "report.jsonl")
     proxied_jsonl = os.path.join(proxied_dir, "report.jsonl")
-    log("[5/5] differential comparison")
-    diff = run(
-        [
-            "pkcs11-check",
-            "differential",
-            f"direct={direct_jsonl}",
-            f"proxied={proxied_jsonl}",
-        ]
-    )
+    log("[6/6] differential comparison (deterministic-KAT scope)")
+    diff = run(differential_argv(direct_jsonl, proxied_jsonl))
     log(f"differential exit: {diff.returncode}")
 
     print(f"workdir: {workdir}")
@@ -323,9 +414,10 @@ def main():
         )
     if diff.returncode != 0:
         raise SystemExit(
-            f"differential found direct-vs-proxied divergence (exit {diff.returncode})"
+            "differential found direct-vs-proxied KAT-verdict divergence "
+            f"(exit {diff.returncode})"
         )
-    log("PASS: direct == proxied (strict transparency gate)")
+    log("PASS: both runs exit 0 and KAT verdicts agree (scoped gate)")
 
 
 if __name__ == "__main__":
