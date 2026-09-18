@@ -166,6 +166,34 @@ pub(super) async fn close_session_with_timeout(
     };
 
     let session = CkSessionHandle(transition.backend_handle().0);
+    // T5F: attempt the last-holder logout BEFORE the backend close, using
+    // the closing session as the preferred carrier (singular-path analogue
+    // of the m-5 close-all ordering, ADR-0002 §7: the logout rides a
+    // still-open session). Runs only when this close drops the context's
+    // last own session for a held-login slot; the excluding-self check
+    // observes only other live contexts. Own login stays held across the
+    // close so transient failures retain it (transition semantics). No
+    // routine WARN on the ordinary logged-in singular close.
+    let pre_close_logout_done = match held_login_slot {
+        Some(slot)
+            if ctx_mgr
+                .get_context(&ctx_id, |ctx| {
+                    !ctx.session_slots.iter().any(|(other, s)| *s == slot && *other != vh)
+                })
+                .await
+                .unwrap_or(false) =>
+        {
+            ctx_mgr
+                .backend_logout_if_last_holder_out_excluding(
+                    backend_ref,
+                    slot,
+                    Some(transition.backend_handle().0),
+                    &ctx_id,
+                )
+                .await
+        }
+        _ => false,
+    };
     let backend = backend_ref.clone();
     let operation = move || {
         transition.mark_started();
@@ -182,8 +210,12 @@ pub(super) async fn close_session_with_timeout(
     // D6(2): release the backend login when this close dropped the last
     // logical login for the slot. Best-effort and self-guarded: no-ops when
     // the close failed transiently (login retained), when sibling sessions
-    // keep the login, or when another live context holds it.
-    if let Some(slot) = held_login_slot {
+    // keep the login, or when another live context holds it. Skipped when
+    // the pre-close attempt already released the login — a second backend
+    // logout would answer USER_NOT_LOGGED_IN and WARN.
+    if let Some(slot) = held_login_slot
+        && !pre_close_logout_done
+    {
         ctx_mgr.backend_logout_if_last_holder_out(backend_ref, slot, None).await;
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }))

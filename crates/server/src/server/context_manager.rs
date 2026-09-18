@@ -1116,15 +1116,50 @@ impl ContextManager {
     /// session; with no open session at all the token may already have
     /// auto-logged-out. A carrier that raced shut is retried once via a live
     /// session; every other outcome ends the attempt.
+    ///
+    /// Returns `true` only when this call released the backend login, so a
+    /// caller that already logged out pre-close can skip a post-close retry
+    /// (which would answer `USER_NOT_LOGGED_IN` and warn).
     pub async fn backend_logout_if_last_holder_out(
         &self,
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
         slot: BackendSlotId,
         preferred_session: Option<u64>,
-    ) {
+    ) -> bool {
+        self.backend_logout_if_last_holder_out_inner(backend, slot, preferred_session, None).await
+    }
+
+    /// Same as [`Self::backend_logout_if_last_holder_out`], but the
+    /// last-holder check excludes `exclude`'s own logical login (T5F). Used
+    /// by the singular `close_session` pre-close attempt, where the closing
+    /// context still holds its login: it is dropped only when the close
+    /// settles terminal, so transient close failures retain it.
+    pub async fn backend_logout_if_last_holder_out_excluding(
+        &self,
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        slot: BackendSlotId,
+        preferred_session: Option<u64>,
+        exclude: &ClientContextId,
+    ) -> bool {
+        self.backend_logout_if_last_holder_out_inner(
+            backend,
+            slot,
+            preferred_session,
+            Some(exclude),
+        )
+        .await
+    }
+
+    async fn backend_logout_if_last_holder_out_inner(
+        &self,
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        slot: BackendSlotId,
+        preferred_session: Option<u64>,
+        exclude: Option<&ClientContextId>,
+    ) -> bool {
         // Fast path without the lock: observing any live holder means no logout.
-        if self.any_login_state_for_slot(slot) {
-            return;
+        if self.slot_login_held(slot, exclude) {
+            return false;
         }
         let lock = self.slot_login_lock(slot);
         let Ok(_guard) = lock.try_lock() else {
@@ -1132,13 +1167,13 @@ impl ContextManager {
                 slot = slot.0.0,
                 "last-holder backend logout skipped: slot login lock contended"
             );
-            return;
+            return false;
         };
         // Recheck under the lock: a fresh login may have landed since the fast
         // path. The lock serializes this recheck+logout against every login's
         // scan+insert, so a concurrent login is never stolen.
-        if self.any_login_state_for_slot(slot) {
-            return;
+        if self.slot_login_held(slot, exclude) {
+            return false;
         }
         let live = self.any_active_backend_session_for_slot(slot);
         let mut carriers = Vec::with_capacity(2);
@@ -1155,7 +1190,7 @@ impl ContextManager {
                 slot = slot.0.0,
                 "last-holder backend logout skipped: no open session to carry the call"
             );
-            return;
+            return false;
         }
         for via in carriers {
             let backend = backend.clone();
@@ -1164,7 +1199,7 @@ impl ContextManager {
             match result {
                 Ok(Ok(())) => {
                     tracing::debug!("last-holder backend logout succeeded");
-                    return;
+                    return true;
                 }
                 Ok(Err(rv)) if rv == CkRv::SESSION_HANDLE_INVALID || rv == CkRv::SESSION_CLOSED => {
                     continue; // carrier raced shut; try the next candidate
@@ -1175,7 +1210,7 @@ impl ContextManager {
                         rv = rv.0,
                         "last-holder backend logout failed; backend may stay logged in with no holder"
                     );
-                    return;
+                    return false;
                 }
                 Err(join_error) => {
                     tracing::warn!(
@@ -1183,7 +1218,7 @@ impl ContextManager {
                         error = %join_error,
                         "last-holder backend logout join failed; backend may stay logged in with no holder"
                     );
-                    return;
+                    return false;
                 }
             }
         }
@@ -1193,6 +1228,16 @@ impl ContextManager {
             slot = slot.0.0,
             "last-holder backend logout skipped: all carriers raced shut"
         );
+        false
+    }
+
+    /// Whether any live context holds logical login for `slot`, optionally
+    /// excluding one departing context's own login (T5F pre-close check).
+    fn slot_login_held(&self, slot: BackendSlotId, exclude: Option<&ClientContextId>) -> bool {
+        match exclude {
+            Some(id) => self.first_login_state_for_slot_excluding(slot, id).is_some(),
+            None => self.any_login_state_for_slot(slot),
+        }
     }
 
     /// Execute teardown plans: all last-holder logouts first (each rechecked
