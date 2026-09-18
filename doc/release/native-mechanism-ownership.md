@@ -353,9 +353,10 @@ new crate; see the macOS `mod arch` arm in
 a return is unrepresentable, so no spin loop is needed — the Windows
 arm's trailing `loop {}` exists only because `TerminateProcess` returns
 `BOOL`. This is the faithful `exit_group` analog macOS allows:
-whole-process, immediate, with no atexit handlers, stdio flush, ELF
-finalizers, or Rust destructors running, and it preserves status 70 for
-supervisor handling with identical receipt criteria. Raw macOS syscalls
+whole-process, immediate, with no atexit handlers, stdio flush,
+dyld-registered terminators, or Rust destructors running, and it
+preserves status 70 for supervisor handling with identical receipt
+criteria. Raw macOS syscalls
 were ruled out (no stable ABI — libSystem is the stable interface);
 `std::process::exit` was ruled out (runs atexit handlers and flushes
 stdio); `abort()` was ruled out (loses the 70 channel, same Q3 reasoning
@@ -386,8 +387,11 @@ proof — the cross-platform CI macOS leg (aarch64) building the backend
 and shim touched crates; (2) live-stop receipts — the STOP-C1/S8 child
 tests executing on that leg, which requires the leg to run the backend
 lib suite (it currently only builds plus runs the comparison script).
-The x86_64 macOS arch has no hosted CI runner, so its compile proof is a
-local cross-target check only, recorded — never claimed as CI evidence.
+The x86_64 arch rides a macos-15-intel leg if T2run adds one
+(GitHub-hosted Intel runner, at macOS-minute cost, supported until the
+macOS 15 image retires ~Fall 2027); otherwise its compile proof is a
+local cargo check --target x86_64-apple-darwin recorded — never claimed
+as CI evidence.
 
 Receipt criteria (supervisor side, no in-process observation): the
 process dies (reaped, no lingering threads); no hang (a supervisor

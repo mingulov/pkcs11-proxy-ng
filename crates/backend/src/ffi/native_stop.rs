@@ -215,7 +215,7 @@ mod arch {
     /// # Safety
     ///
     /// Ends the process on success with status 70; no C exit handlers,
-    /// stdio flush, ELF finalizers, or Rust destructors run.
+    /// stdio flush, dyld-registered terminators, or Rust destructors run.
     #[inline(never)]
     pub(in crate::ffi) unsafe fn raw_exit_group_70() -> super::RawStopAttempt {
         // SAFETY: whole-process immediate termination with status 70.
