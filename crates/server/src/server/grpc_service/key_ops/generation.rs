@@ -703,10 +703,12 @@ async fn virtualize_derived_key_handles(
 ) {
     for derived_key in derived_keys {
         if derived_key.key_handle != 0 {
+            // m-1: derived keys are always private secret keys.
             derived_key.key_handle = register_object_handle(
                 ctx_mgr,
                 ctx_id,
                 CkObjectHandle(derived_key.key_handle as u64),
+                Some(true),
             )
             .await;
         }
@@ -735,7 +737,9 @@ async fn virtualize_key_mat_out_handles(
     };
     for handle in handles {
         if **handle != 0 {
-            **handle = register_object_handle(ctx_mgr, ctx_id, CkObjectHandle(**handle)).await;
+            // m-1: key-mat OUT handles are always private secret keys.
+            **handle =
+                register_object_handle(ctx_mgr, ctx_id, CkObjectHandle(**handle), Some(true)).await;
         }
     }
 }
@@ -992,5 +996,90 @@ mod tests {
         });
         virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, &mut other).await;
         assert!(matches!(other, CkMechanismParams::Sp800108Kdf(_)));
+    }
+
+    /// m-1: virtualized key-mat / SP800-108 OUT handles are always private
+    /// secret keys, so registration records `object_private=true` and
+    /// logged-out USE refuses even when the backend `CKA_PRIVATE` probe
+    /// fails. (Pre-fix the bit was unknown and the probe failure failed
+    /// open to the backend verdict.)
+    #[tokio::test]
+    async fn virtualized_out_handles_recorded_private_refuse_logged_out_use() {
+        use crate::server::slot_map::BackendSlotId;
+        use pkcs11_proxy_ng_types::{CkSlotId, Ssl3KeyMatParams, SslRandomData};
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 16));
+        let ctx = make_ctx(&ctx_mgr);
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let slot = BackendSlotId(CkSlotId(0));
+        // Logged-out session (no login_state entry). Backend session 77 does
+        // not exist in the mock, so any CKA_PRIVATE probe fails.
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| c.register_session(BackendHandle(77), slot))
+            .await
+            .unwrap();
+
+        // Key-mat OUT handle unknown to the mock backend.
+        let mut ssl3 = CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+            mac_size_bits: 128,
+            key_size_bits: 128,
+            iv_size_bits: 0,
+            is_export: false,
+            random_info: SslRandomData { client_random: vec![1; 32], server_random: vec![2; 32] },
+            prf_hash_mechanism: 0,
+            client_mac_secret_handle: 0,
+            server_mac_secret_handle: 0,
+            client_key_handle: 0xA2,
+            server_key_handle: 0,
+            client_iv: Vec::new().into(),
+            server_iv: Vec::new().into(),
+        });
+        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, &mut ssl3).await;
+        let CkMechanismParams::Ssl3KeyMat(ssl3) = &ssl3 else { unreachable!() };
+        let v_key_mat = ssl3.client_key_handle;
+
+        // SP800-108 additional derived-key handle unknown to the mock backend.
+        let mut kdf = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+            prf_type: CkMechanismType::SHA256.0,
+            data_params: Vec::new(),
+            additional_derived_keys: vec![Sp800108DerivedKey {
+                template: Vec::new(),
+                key_handle: 0xC1,
+            }],
+        });
+        virtualize_sp800_108_additional_handles(&ctx_mgr, &ctx_id, &mut kdf).await;
+        let CkMechanismParams::Sp800108Kdf(kdf) = &kdf else { unreachable!() };
+        let v_kdf = kdf.additional_derived_keys[0].key_handle;
+
+        for (name, virtual_handle, backend_handle) in
+            [("key-mat", v_key_mat, 0xA2), ("sp800-108", v_kdf, 0xC1)]
+        {
+            let recorded = ctx_mgr
+                .get_context(&ctx_id, |c| {
+                    c.object_private
+                        .get(&crate::server::handle_map::VirtualHandle(virtual_handle))
+                        .copied()
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                recorded,
+                Some(true),
+                "{name}: virtualized OUT handle must be recorded private at registration"
+            );
+            assert_eq!(
+                ensure_private_use_allowed(
+                    &ctx,
+                    &ctx_id,
+                    virtual_session.0,
+                    virtual_handle,
+                    CkSessionHandle(77),
+                    CkObjectHandle(backend_handle),
+                )
+                .await,
+                Err(CkRv::USER_NOT_LOGGED_IN),
+                "{name}: logged-out USE with a failing backend probe must still refuse"
+            );
+        }
     }
 }

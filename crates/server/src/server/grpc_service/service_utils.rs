@@ -949,13 +949,29 @@ pub(super) async fn resolve_session_and_two_objects(
     Ok((CkSessionHandle(backend_session.0 as u64), first_backend_object, second_backend_object))
 }
 
+/// Register a backend-minted object handle that arrives outside the normal
+/// minting paths (currently: SP800-108 additional derived keys and
+/// SSL3/TLS/WTLS key-material OUT handles).
+///
+/// `is_private` records the `CKA_PRIVATE` bit for the D6(1) logical-login
+/// enforcement, like [`register_session_object_handle`]. Both current call
+/// sites virtualize always-private secret keys and pass `Some(true)`;
+/// `None` leaves the bit unknown so logged-out USE probes the backend once
+/// per operation.
 pub(super) async fn register_object_handle(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
     backend_handle: CkObjectHandle,
+    is_private: Option<bool>,
 ) -> u64 {
     ctx_mgr
-        .get_context(ctx_id, |ctx| ctx.object_handles.insert(BackendHandle(backend_handle.0)).0)
+        .get_context(ctx_id, |ctx| {
+            let virtual_object = ctx.object_handles.insert(BackendHandle(backend_handle.0));
+            if let Some(private) = is_private {
+                ctx.object_private.insert(virtual_object, private);
+            }
+            virtual_object.0
+        })
         .await
         .unwrap_or(0)
 }
