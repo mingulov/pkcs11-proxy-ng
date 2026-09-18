@@ -250,6 +250,18 @@ pub(super) async fn close_all_sessions(
         .await
         .unwrap_or_default();
 
+    // m-5: attempt the last-holder logout BEFORE the batch close, using one
+    // of the closing sessions as the preferred carrier (ADR-0002 §7: the
+    // logout rides a still-open session and runs before the departing
+    // context's backend sessions close). The logical login is already
+    // removed above, so the last-holder check observes only other live
+    // contexts. No routine WARN on the ordinary logged-in close-all.
+    if held_login && let Some(carrier) = backend_sessions.first() {
+        ctx_mgr
+            .backend_logout_if_last_holder_out(backend_ref, backend_slot, Some(carrier.0 as u64))
+            .await;
+    }
+
     let count = backend_sessions.len();
     let ck_rv = if backend_sessions.is_empty() {
         CkRv::OK.0
@@ -264,10 +276,11 @@ pub(super) async fn close_all_sessions(
             Err(rv) => rv.0,
         }
     };
-    // D6(2): release the backend login when this call dropped the last
-    // logical login for the slot (self-guarded: no-ops when another live
-    // context holds it).
-    if held_login {
+    // D6(2): post-close fallback for the race where a held login lost its
+    // last own session to a concurrent close between the snapshot and the
+    // removal above (login implies a session, so this is normally
+    // unreachable): retry via any live session, as before.
+    if held_login && backend_sessions.is_empty() {
         ctx_mgr.backend_logout_if_last_holder_out(backend_ref, backend_slot, None).await;
     }
 

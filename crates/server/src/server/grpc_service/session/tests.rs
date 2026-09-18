@@ -354,6 +354,61 @@ async fn close_all_sessions_clears_logical_login_state_for_slot() {
 }
 
 #[tokio::test]
+async fn close_all_sessions_releases_backend_login_before_close() {
+    // m-5: an ordinary logged-in close-all must attempt the last-holder
+    // backend logout BEFORE the batch close, using one of the closing
+    // sessions as the preferred carrier (ADR-0002 §7: "the logout rides a
+    // still-open session ... and runs before that context's backend
+    // sessions close"). Pre-fix the logout ran after the closes, found no
+    // carrier single-tenant, WARNed, and left the backend logged in.
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_id, session).await, CkRv::OK.0);
+
+    // A spare backend session held outside the context manager: it keeps the
+    // mock token from auto-logging-out on last close (so the test observes
+    // the daemon's own logout, not the mock's), while staying invisible to
+    // the daemon's carrier scan (which reads context maps only).
+    let spare = mock
+        .open_session(
+            CkSlotId(0),
+            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
+        )
+        .unwrap();
+
+    let close_all = close_all_sessions(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+            client_context_id: ctx_id.0.clone(),
+            slot_id: virtual_slot.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(close_all.ck_rv, CkRv::OK.0);
+
+    // The backend token must be logged out: a logout on the spare answers
+    // USER_NOT_LOGGED_IN. (Pre-fix the backend stayed logged in and this
+    // logout succeeded.) The success path emits no WARN, so the routine
+    // "logout skipped" warning is gone with it.
+    assert_eq!(
+        mock.logout(spare),
+        Err(CkRv::USER_NOT_LOGGED_IN),
+        "close-all must release the backend login via its own pre-close carrier"
+    );
+}
+
+#[tokio::test]
 async fn failed_physical_logout_preserves_logical_login_state() {
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
