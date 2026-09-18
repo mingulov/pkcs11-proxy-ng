@@ -219,8 +219,8 @@ impl Drop for FfiBackend {
         use super::native_domain::RetirementDecision::{Poison, Release};
         let decision = self.lifecycle.retirement_decision();
         // Stop-qualified targets only (Linux x86_64/x86 GNU/musl, Windows
-        // MSVC x86_64): abnormally stop the native lifetime when the managed
-        // final owner cannot prove quiescence. First statement and
+        // MSVC x86_64/x86): abnormally stop the native lifetime when the
+        // managed final owner cannot prove quiescence. First statement and
         // lock-free (atomic-only decision plus a plain-bool slot check), so
         // it precedes the lock-taking poison path and all dependent field
         // drops. Elsewhere — including load-qualified macOS, which has no
@@ -238,8 +238,10 @@ impl Drop for FfiBackend {
             all(
                 target_os = "windows",
                 target_env = "msvc",
-                target_arch = "x86_64",
-                target_pointer_width = "64"
+                any(
+                    all(target_arch = "x86_64", target_pointer_width = "64"),
+                    all(target_arch = "x86", target_pointer_width = "32")
+                )
             )
         ))]
         if stop_fire_condition(decision, self.construction.holds_registry_slot()) {

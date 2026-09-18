@@ -13,7 +13,7 @@
 //! Contract rows live in `doc/release/native-mechanism-ownership.md`
 //! (x86_64: `syscall` nr 231 with status 70 in RDI; i686: `int 0x80`
 //! nr 252 with status 70 via ECX into EBX and balanced push/pop;
-//! Windows MSVC x86_64: `TerminateProcess` with status 70). Both Linux
+//! Windows MSVC x86_64/x86: `TerminateProcess` with status 70). Both Linux
 //! stubs model a possible return; the outer loop retries on interception.
 
 use std::sync::OnceLock;
@@ -118,12 +118,18 @@ mod arch {
     }
 }
 
-// Windows MSVC x86_64: contract row 3 (reviewer Q3 ruling).
+// Windows MSVC x86_64/x86: contract row 3 (reviewer Q3 ruling). One arm
+// covers both widths: `extern "system"` is `__stdcall` on x86 (the
+// kernel32 convention) and the x64 convention on x86_64, and `HANDLE`
+// is pointer-sized on both, so the same two imports are correct for
+// PE32 and PE32+.
 #[cfg(all(
     target_os = "windows",
     target_env = "msvc",
-    target_arch = "x86_64",
-    target_pointer_width = "64"
+    any(
+        all(target_arch = "x86_64", target_pointer_width = "64"),
+        all(target_arch = "x86", target_pointer_width = "32")
+    )
 ))]
 mod arch {
     use std::ffi::{c_int, c_uint, c_void};
@@ -164,10 +170,10 @@ mod arch {
 // outside the Linux/Windows stop boundary, including macOS (load-qualified
 // but with no stop stub yet). Partition proof — each target lands on
 // exactly one `arch` arm: (1) Linux x86_64 GNU/musl 64-bit, (2) Linux x86
-// GNU/musl 32-bit, (3) Windows MSVC x86_64 64-bit, (4) this fallback.
-// Arms 1-3 are pairwise disjoint (the linux-x86_64, linux-x86, and
-// windows-msvc predicates differ on target_os/target_arch), and arm 4 is
-// the exact `not(any(1, 2, 3))` complement, hence exhaustive and disjoint
+// GNU/musl 32-bit, (3) Windows MSVC x86_64 64-bit / x86 32-bit, (4) this
+// fallback. Arms 1-3 are pairwise disjoint (the linux-x86_64, linux-x86,
+// and windows-msvc predicates differ on target_os/target_arch), and arm 4
+// is the exact `not(any(1, 2, 3))` complement, hence exhaustive and disjoint
 // by construction. Reachable only if a future guard arm calls it (today's
 // guard is cfg-gated to the Linux and Windows stop arms, and the
 // controller fires only past an armed deadline).
@@ -187,8 +193,10 @@ mod arch {
     all(
         target_os = "windows",
         target_env = "msvc",
-        target_arch = "x86_64",
-        target_pointer_width = "64"
+        any(
+            all(target_arch = "x86_64", target_pointer_width = "64"),
+            all(target_arch = "x86", target_pointer_width = "32")
+        )
     )
 )))]
 mod arch {
@@ -205,7 +213,7 @@ mod arch {
     pub(in crate::ffi) unsafe fn raw_exit_group_70() -> RawStopAttempt {
         unimplemented!(
             "native stop: no qualified stop arm for this target \
-             (Linux x86_64/x86 GNU/musl or Windows MSVC x86_64 required)"
+             (Linux x86_64/x86 GNU/musl or Windows MSVC x86_64/x86 required)"
         )
     }
 }

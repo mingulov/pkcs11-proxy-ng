@@ -304,8 +304,9 @@ placement and pre-entry publication are part of the implementation proof.
 
 ### Windows abnormal-stop contract
 
-On qualified Windows (MSVC, x86_64, 64-bit pointers — the Windows leg of
-`NATIVE_FFI_QUALIFIED`), the backstop's one raw attempt is
+On qualified Windows (MSVC, x86_64 with 64-bit pointers or x86 with
+32-bit pointers — the Windows leg of `NATIVE_FFI_QUALIFIED`), the
+backstop's one raw attempt is
 `TerminateProcess(GetCurrentProcess(), 70)` via a hand-declared
 `#[link(name = "kernel32")] unsafe extern "system"` block with
 `type HANDLE = *mut c_void` (no new crate; see the Windows `mod arch`
