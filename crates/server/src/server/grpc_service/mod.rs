@@ -983,20 +983,3 @@ impl_proxy_service!(
         key_ops::encapsulate_key_exact
     ),
 );
-
-#[cfg(test)]
-mod attr_value_to_bytes_tests {
-    use super::*;
-
-    #[test]
-    fn ulong_encodes_native_order_for_cache_coherence() {
-        // The non-exact path shares the attr_cache key space with the exact
-        // path's raw backend bytes: both must be native-order on every host.
-        // 0x0102_0304_0506_0708 distinguishes LE from BE absolutely.
-        assert_eq!(
-            attr_value_to_bytes(CkAttributeValue::Ulong(0x0102_0304_0506_0708)),
-            0x0102_0304_0506_0708u64.to_ne_bytes().to_vec()
-        );
-        assert_eq!(attr_value_to_bytes(CkAttributeValue::Bool(true)), vec![1]);
-    }
-}

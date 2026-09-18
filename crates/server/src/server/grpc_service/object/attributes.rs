@@ -603,6 +603,7 @@ mod tests {
     use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
     use pkcs11_proxy_ng_types::*;
 
+    use super::super::attr_value_to_bytes;
     use super::validate_exact_attribute_results;
     use crate::config::{
         AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig, TokenAccessSpec,
@@ -1407,5 +1408,20 @@ mod tests {
             u64::MAX,
             "M3(b): buffer-too-small cache hit must set returned_len to CK_UNAVAILABLE_INFORMATION"
         );
+    }
+
+    #[test]
+    fn ulong_encodes_native_order_for_cache_coherence() {
+        // The non-exact path shares the attr_cache key space with the exact
+        // path's raw backend bytes: both must be native-order on every host.
+        // 0x0102_0304_0506_0708 distinguishes LE from BE absolutely.
+        // (Lives here, not in grpc_service/mod.rs, because the consistency
+        // scanner parses every `(...)` after `impl_proxy_service!` there as
+        // a handler tuple.)
+        assert_eq!(
+            attr_value_to_bytes(CkAttributeValue::Ulong(0x0102_0304_0506_0708)),
+            0x0102_0304_0506_0708u64.to_ne_bytes().to_vec()
+        );
+        assert_eq!(attr_value_to_bytes(CkAttributeValue::Bool(true)), vec![1]);
     }
 }
