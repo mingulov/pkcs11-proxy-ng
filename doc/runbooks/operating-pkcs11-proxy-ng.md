@@ -389,6 +389,12 @@ at all on this path.
    holds sessions open past its useful life). Fix the holder; do not share
    one daemon across tenants that need concurrent independent logins on the
    same token — partition daemons per tenant (§4a).
+4. A `Login reconciling holderless-but-logged-in backend` warning means an
+   earlier best-effort last-holder logout was skipped or failed (find the
+   cause in the matching `last-holder backend logout` warning); the login
+   self-heals with one backend logout plus a single retry. Occasional
+   reconciles after teardown races are benign; repeated ones point at a
+   token that never auto-logs-out or a wedged logout path — investigate.
 
 **Test-harness note.** Back-to-back cases sharing one daemon (e.g. the ncli
 suites) routinely hit this when a prior case's context is still within its
@@ -572,6 +578,12 @@ What the daemon does and does not reset between tenants:
   multiplexed behavior, not a bug. A case asserting an empty token, a
   logged-out token, or a private-object population it did not create is
   asserting **pristine** state and is invalid against a shared daemon.
+* **Known residual — find-enumeration existence oracle (F-04):**
+  `C_FindObjects` results are not login-filtered, so a logged-out context can
+  observe bare (virtual) handles/counts of private objects while another
+  tenant holds the backend logged in. Only existence leaks: attribute reads
+  and every use path still refuse with `CKR_USER_NOT_LOGGED_IN`, and
+  create/copy/generate of private objects are refused the same way.
 
 **Rule for harnesses:** cases needing pristine state must rotate to a fresh
 daemon (restart, or a per-case backend namespace/volume) — the D9-harness

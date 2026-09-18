@@ -6,7 +6,10 @@ use crate::server::context_manager::{
 };
 use crate::server::grpc_service::{HandlerContext, Pkcs11ProxyService};
 use crate::server::handle_map::VirtualHandle;
-use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend, mock::MockMessageLifecycleAction};
+use pkcs11_proxy_ng_backend::{
+    MockBackend, Pkcs11Backend,
+    mock::{MockEmbeddedHandles, MockMechanismEntry, MockMessageLifecycleAction},
+};
 use pkcs11_proxy_ng_proto::Pkcs11Proxy;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::*;
@@ -1639,6 +1642,58 @@ async fn cross_client_login_while_slot_held_is_already_regardless_of_pin() {
     assert_eq!(b_login_state, None, "no logical login may be minted while the slot is held");
 }
 
+#[tokio::test]
+async fn login_reconciles_holderless_logged_in_backend() {
+    // F-01: a holderless-but-logged-in backend (every best-effort
+    // last-holder logout skipped or failed) must not brick slot logins: the
+    // first login reconciles with one backend logout plus a single retry, so
+    // the PIN verifies against a logged-out token. Pre-fix, the backend's
+    // ALREADY was returned as-is with no state minted — every future login
+    // on the slot bricked until daemon restart.
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // The backend token is logged in behind the proxy's back: no logical
+    // holder exists anywhere.
+    let backend_session = ctx_mgr
+        .get_context(&ctx_id, |ctx| ctx.session_handles.resolve(VirtualHandle(session)))
+        .await
+        .unwrap()
+        .unwrap();
+    mock.login(CkSessionHandle(backend_session.0), CkUserType::User, None).unwrap();
+    assert!(
+        !ctx_mgr.any_login_state_for_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))),
+        "setup: no logical holder may exist"
+    );
+
+    // The proxy login reconciles and succeeds, minting the logical login.
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_id, session).await,
+        CkRv::OK.0,
+        "login must reconcile a holderless-but-logged-in backend"
+    );
+    let state = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, Some(LoginState::User), "reconciled login must mint logical state");
+    // Exactly one retry: setup login + first attempt + reconcile retry.
+    assert_eq!(mock.login_call_count(), 3, "reconcile must retry the backend login exactly once");
+    // The backend is genuinely logged in again by the retried login.
+    assert_eq!(
+        mock.login(CkSessionHandle(backend_session.0), CkUserType::User, None).unwrap_err(),
+        CkRv::USER_ALREADY_LOGGED_IN,
+        "backend must be logged in after reconcile"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // D6(1): object-path logical-login enforcement
 // ---------------------------------------------------------------------------
@@ -1947,6 +2002,116 @@ async fn generate_private_key_while_logged_out_is_refused() {
         generate(session_out, &ctx_out, vec![]).await,
         CkRv::USER_NOT_LOGGED_IN.0,
         "public GenerateKey must pass the logical-login enforcement"
+    );
+}
+
+/// HKDF-DERIVE proto mechanism carrying `salt_key` as the embedded salt key.
+fn hkdf_derive_mechanism(salt_key: u64) -> pkcs11_proxy_ng_proto::Mechanism {
+    pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
+        mechanism_type: CkMechanismType::HKDF_DERIVE,
+        params: Some(CkMechanismParams::Hkdf(HkdfParams {
+            extract: true,
+            expand: true,
+            prf_hash_mechanism: CkMechanismType::SHA256.0,
+            salt_type: cryptoki_sys::CKF_HKDF_SALT_KEY as u64,
+            salt: Vec::new().into(),
+            salt_key_handle: salt_key,
+            info: Vec::new().into(),
+        })),
+    })
+}
+
+async fn derive_key_rv(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+    session: u64,
+    base_key: u64,
+    salt_key: u64,
+) -> u64 {
+    crate::server::grpc_service::key_ops::derive_key(
+        &HandlerContext::for_test(ctx_mgr, backend),
+        Request::new(pkcs11_proxy_ng_proto::DeriveKeyRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+            mechanism: Some(hkdf_derive_mechanism(salt_key)),
+            base_key_handle: base_key,
+            template: vec![],
+            template_null: false,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv
+}
+
+#[tokio::test]
+async fn derive_with_private_embedded_key_while_logged_out_is_refused() {
+    // F-02: D6(1) USE enforcement covers mechanism-embedded auxiliary
+    // handles (the HKDF salt key here): a logged-out context must not USE a
+    // private embedded key through a backend held logged-in by another
+    // tenant. Pre-fix, embedded handles were remapped with no login check
+    // and the derive reached the backend.
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_out = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_holder = ctx_mgr.create_context(None).await.unwrap();
+    let session_out = open_test_session(&ctx_mgr, &backend, &ctx_out).await;
+    let session_holder = open_test_session(&ctx_mgr, &backend, &ctx_holder).await;
+
+    // ctx_out mints a public base key and a private salt key while logged in.
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_out, session_out).await, CkRv::OK.0);
+    let (rv, base_key) =
+        create_object_outcome(&ctx_mgr, &backend, &ctx_out, session_out, vec![]).await;
+    assert_eq!(rv, CkRv::OK.0, "setup: public base key mint must succeed");
+    let (rv, salt_key) =
+        create_object_outcome(&ctx_mgr, &backend, &ctx_out, session_out, vec![private_true_attr()])
+            .await;
+    assert_eq!(rv, CkRv::OK.0, "setup: private salt key mint must succeed");
+    let native_salt = ctx_mgr
+        .get_context(&ctx_out, |ctx| ctx.object_handles.resolve(VirtualHandle(salt_key)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    assert_eq!(logout_response(&ctx_mgr, &backend, &ctx_out, session_out).await, CkRv::OK.0);
+
+    // The holder keeps the shared backend token logged in.
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_holder, session_holder).await,
+        CkRv::OK.0,
+        "setup: holder login must succeed"
+    );
+
+    // Logged-out derive USE-ing a private embedded salt key → refused, and
+    // the backend is never reached.
+    assert_eq!(
+        derive_key_rv(&ctx_mgr, &backend, &ctx_out, session_out, base_key, salt_key).await,
+        CkRv::USER_NOT_LOGGED_IN.0,
+        "derive USE-ing a private embedded key while logged out must be refused"
+    );
+    assert_eq!(
+        mock.mechanism_entry_count(MockMechanismEntry::DeriveKey),
+        0,
+        "refused derive must not reach the backend"
+    );
+
+    // Logged-in derive with the same keys → reaches the backend, salt remapped.
+    assert_eq!(logout_response(&ctx_mgr, &backend, &ctx_holder, session_holder).await, CkRv::OK.0);
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_out, session_out).await, CkRv::OK.0);
+    assert_ne!(
+        derive_key_rv(&ctx_mgr, &backend, &ctx_out, session_out, base_key, salt_key).await,
+        CkRv::USER_NOT_LOGGED_IN.0,
+        "derive while logged in must pass the logical-login enforcement"
+    );
+    assert_eq!(
+        mock.last_embedded_handles(MockMechanismEntry::DeriveKey),
+        Some(MockEmbeddedHandles::HkdfSalt(native_salt)),
+        "logged-in derive must reach the backend with the remapped salt handle"
     );
 }
 

@@ -1109,12 +1109,13 @@ impl ContextManager {
     ///
     /// Best-effort, never blocks: when the slot lock is contended its holder
     /// is actively establishing login consistency (a login inserting a holder,
-    /// a logout releasing one, or another teardown), so skipping is safe — at
-    /// worst the logout is deferred to the next release path, and a login
-    /// landing in the gap reconciles faithfully (D6(3)). `None` carrier falls
-    /// back to any live session; with no open session at all the token
-    /// already auto-logged-out. A carrier that raced shut is retried once via
-    /// a live session; every other outcome ends the attempt silently.
+    /// a logout releasing one, or another teardown). Every skip/failure warns
+    /// (F-01 observability): a skipped logout leaves the backend logged in
+    /// with no holder, which the next login reconciles (one backend logout +
+    /// a single retry — see `login`). `None` carrier falls back to any live
+    /// session; with no open session at all the token may already have
+    /// auto-logged-out. A carrier that raced shut is retried once via a live
+    /// session; every other outcome ends the attempt.
     pub async fn backend_logout_if_last_holder_out(
         &self,
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
@@ -1127,7 +1128,10 @@ impl ContextManager {
         }
         let lock = self.slot_login_lock(slot);
         let Ok(_guard) = lock.try_lock() else {
-            tracing::debug!("teardown logout skipped: slot login lock contended");
+            tracing::warn!(
+                slot = slot.0.0,
+                "last-holder backend logout skipped: slot login lock contended"
+            );
             return;
         };
         // Recheck under the lock: a fresh login may have landed since the fast
@@ -1146,6 +1150,13 @@ impl ContextManager {
         {
             carriers.push(via);
         }
+        if carriers.is_empty() {
+            tracing::warn!(
+                slot = slot.0.0,
+                "last-holder backend logout skipped: no open session to carry the call"
+            );
+            return;
+        }
         for via in carriers {
             let backend = backend.clone();
             let result =
@@ -1158,9 +1169,30 @@ impl ContextManager {
                 Ok(Err(rv)) if rv == CkRv::SESSION_HANDLE_INVALID || rv == CkRv::SESSION_CLOSED => {
                     continue; // carrier raced shut; try the next candidate
                 }
-                _ => return, // done (or join failure): teardown is best-effort
+                Ok(Err(rv)) => {
+                    tracing::warn!(
+                        slot = slot.0.0,
+                        rv = rv.0,
+                        "last-holder backend logout failed; backend may stay logged in with no holder"
+                    );
+                    return;
+                }
+                Err(join_error) => {
+                    tracing::warn!(
+                        slot = slot.0.0,
+                        error = %join_error,
+                        "last-holder backend logout join failed; backend may stay logged in with no holder"
+                    );
+                    return;
+                }
             }
         }
+        // Every carrier raced shut: same holderless-but-logged-in risk as a
+        // failed logout (some tokens do not auto-logout on last close).
+        tracing::warn!(
+            slot = slot.0.0,
+            "last-holder backend logout skipped: all carriers raced shut"
+        );
     }
 
     /// Execute teardown plans: all last-holder logouts first (each rechecked

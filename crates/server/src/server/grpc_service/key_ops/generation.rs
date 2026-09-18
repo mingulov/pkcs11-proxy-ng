@@ -12,9 +12,9 @@ use super::super::authorization::mechanism_permitted;
 use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    ensure_private_mint_allowed, gate_object_handle, parse_mechanism, register_object_handle,
-    register_session_object_handle, register_session_object_pair, resolve_session,
-    resolve_session_and_object, spawn_backend, template_declares_private_object,
+    ensure_private_mint_allowed, ensure_private_use_allowed, gate_object_handle, parse_mechanism,
+    register_object_handle, register_session_object_handle, register_session_object_pair,
+    resolve_session, resolve_session_and_object, spawn_backend, template_declares_private_object,
     template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
@@ -609,6 +609,21 @@ async fn resolve_sp800_108_key_handle_data_param_list(
             .and_then(|resolved| resolved)
             .ok_or(CkRv::OBJECT_HANDLE_INVALID)?;
 
+        // D6(1): the byte-encoded input key is a USE of the embedded key —
+        // refuse while the caller is logically logged out (before the
+        // per-object gate below, like the primary-handle chokepoints).
+        if backend_handle.0 != 0 {
+            ensure_private_use_allowed(
+                ctx,
+                ctx_id,
+                virtual_session_handle,
+                virtual_handle,
+                backend_session,
+                CkObjectHandle(backend_handle.0),
+            )
+            .await?;
+        }
+
         let final_handle = if (ctx.token_policy.per_object_active()
             || ctx.token_policy.per_class_active())
             && backend_handle.0 != 0
@@ -837,6 +852,67 @@ mod tests {
             input.into(),
             "failure must not serialize a truncated handle"
         );
+    }
+
+    /// F-02: the SP800-108 byte-encoded input key handle is a USE of the
+    /// embedded key — refused with `CKR_USER_NOT_LOGGED_IN` while the caller
+    /// is logically logged out, resolved normally once logged in.
+    #[tokio::test]
+    async fn sp800_108_private_embedded_key_use_while_logged_out_is_refused() {
+        use crate::server::context_manager::LoginState;
+        use crate::server::slot_map::BackendSlotId;
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 16));
+        let ctx = make_ctx(&ctx_mgr);
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let slot = BackendSlotId(CkSlotId(0));
+        let backend_key = BackendHandle(0xABCD_0102);
+        // A session on the slot (logged out: no login_state entry) plus a
+        // mint-recorded-private embedded key.
+        let (virtual_session, virtual_key) = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                let vs = c.register_session(BackendHandle(77), slot);
+                let vk = c.object_handles.insert(backend_key);
+                c.object_private.insert(vk, true);
+                (vs, vk)
+            })
+            .await
+            .unwrap();
+        let mut params = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+            prf_type: CkMechanismType::SHA256.0,
+            data_params: vec![PrfDataParam {
+                type_: CK_SP800_108_KEY_HANDLE,
+                value: virtual_key.0.to_ne_bytes().to_vec().into(),
+            }],
+            additional_derived_keys: Vec::new(),
+        });
+
+        // Logged out → refused.
+        assert_eq!(
+            resolve_sp800_108_key_handle_data_params(
+                &ctx,
+                &ctx_id,
+                virtual_session.0,
+                CkSessionHandle(77),
+                &mut params,
+            )
+            .await,
+            Err(CkRv::USER_NOT_LOGGED_IN)
+        );
+
+        // Logged in → resolves to the backend handle bytes.
+        ctx_mgr.get_context(&ctx_id, |c| c.login_state.insert(slot, LoginState::User)).await;
+        resolve_sp800_108_key_handle_data_params(
+            &ctx,
+            &ctx_id,
+            virtual_session.0,
+            CkSessionHandle(77),
+            &mut params,
+        )
+        .await
+        .unwrap();
+        let CkMechanismParams::Sp800108Kdf(params) = params else { unreachable!() };
+        assert_eq!(params.data_params[0].value, backend_key.0.to_ne_bytes().to_vec().into());
     }
 
     /// F6: key-mat OUT handles in a successful derive's `mechanism_out` must

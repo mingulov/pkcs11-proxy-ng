@@ -129,13 +129,6 @@ impl HandleMap {
         handles.into_iter()
     }
 
-    /// Backend handles of currently resolvable (non-suspended) entries. Used
-    /// to pick a live session for last-holder backend logout (D6(2)/D9):
-    /// suspended entries are mid-close and must not carry the logout call.
-    pub fn active_backend_handles(&self) -> impl Iterator<Item = BackendHandle> + '_ {
-        self.virtual_to_backend.values().copied()
-    }
-
     /// True when `backend` is retained by this map in any state (active or
     /// suspended). Used for the teardown refcount check (D9): a departing
     /// context's backend session is closed only when no live context still
