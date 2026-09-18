@@ -11,7 +11,10 @@ pub(super) struct AttributeCall {
 }
 
 /// Only initialized input fields are read. In particular NULL-value lengths
-/// and every nested `type` are output-only, so no whole-struct reference exists.
+/// are output-only, so no whole-struct reference exists. A nested `type` is
+/// caller input when preset (F7/D5): backends such as SoftHSM select the
+/// sub-query by it, so it is forwarded verbatim like a direct call instead
+/// of being forced to 0.
 pub(super) unsafe fn capture(
     pointer: CK_ATTRIBUTE_PTR,
     nested: bool,
@@ -20,11 +23,12 @@ pub(super) unsafe fn capture(
     backend_stride: usize,
 ) -> CkResult<AttributeCall> {
     let value = unsafe { std::ptr::addr_of!((*pointer).pValue).read_unaligned() };
-    let attr_type = if nested {
-        CkAttributeType(0)
-    } else {
-        CkAttributeType(unsafe { std::ptr::addr_of!((*pointer).type_).read_unaligned() } as u64)
-    };
+    // `type` is the leading field in the client's layout, which is the
+    // compiled layout on this edge (client_width is always size_of::<CK_ULONG>()
+    // here), so this read is width-correct cross-width as well; materialized
+    // cross-width nested values stay rejected by the gate below.
+    let attr_type =
+        CkAttributeType(unsafe { std::ptr::addr_of!((*pointer).type_).read_unaligned() } as u64);
     let capacity = if value.is_null() {
         0
     } else {
@@ -41,7 +45,8 @@ pub(super) unsafe fn capture(
         nested: None,
     };
     if nested {
-        // No type is available to bridge a nested output buffer before entry.
+        // A materialized nested value cannot be width-bridged without
+        // per-child value semantics; only size queries cross widths here.
         // Unknown/vendor top-level attributes never enter this standard path.
         if client_width != backend_width && !value.is_null() {
             return Err(CkRv::FUNCTION_NOT_SUPPORTED);
@@ -277,7 +282,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_standard_nested_uninitialized_type_is_never_read() {
+    fn exact_standard_nested_preset_type_is_forwarded() {
+        // F7/D5: a caller-preset nested `type` is query input (SoftHSM
+        // selects the sub-query by it) and must reach the daemon verbatim.
         let width = std::mem::size_of::<CK_ULONG>();
         for (backend_width, materialized) in
             [(width, true), (if width == 8 { 4 } else { 8 }, false)]
@@ -286,6 +293,7 @@ mod tests {
             let mut sub = std::mem::MaybeUninit::<CK_ATTRIBUTE>::uninit();
             let pointer = sub.as_mut_ptr();
             unsafe {
+                std::ptr::addr_of_mut!((*pointer).type_).write(CKA_SENSITIVE);
                 std::ptr::addr_of_mut!((*pointer).pValue).write(if materialized {
                     value.as_mut_ptr().cast()
                 } else {
@@ -312,7 +320,7 @@ mod tests {
             }
             .unwrap();
             let query = &captured.query.nested.as_ref().unwrap()[0];
-            assert_eq!(query.attr_type, CkAttributeType(0));
+            assert_eq!(query.attr_type, CkAttributeType::SENSITIVE);
             assert_eq!(query.buffer_len, if materialized { 4 } else { 0 });
         }
     }

@@ -1065,6 +1065,35 @@ mod attribute_query_tests {
     }
 
     #[test]
+    fn nested_preset_sub_query_type_is_reconstructed_verbatim() {
+        // F7/D5: a caller-preset nested query type (shim: sub CK_ATTRIBUTE
+        // with type_ set, e.g. CKA_SENSITIVE inside CKA_UNWRAP_TEMPLATE)
+        // must reach the backend verbatim — forcing type 0 rewrites the
+        // caller's query and SoftHSM answers CKR_GENERAL_ERROR.
+        let stride = std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>() as u64;
+        let ffi = FfiAttributeQueries::from_queries(&[CkAttributeQuery {
+            attr_type: CkAttributeType::UNWRAP_TEMPLATE,
+            buffer_present: true,
+            buffer_len: stride,
+            nested: Some(vec![CkAttributeQuery {
+                attr_type: CkAttributeType::SENSITIVE,
+                buffer_present: true,
+                buffer_len: 1,
+                nested: None,
+            }]),
+        }])
+        .expect("ffi queries");
+
+        assert_eq!(ffi.attrs.len(), 1);
+        // E0793: CK_ATTRIBUTE is packed on Windows; sub type by-value copy.
+        let sub_type = unsafe {
+            std::slice::from_raw_parts(ffi.attrs[0].pValue as *const cryptoki_sys::CK_ATTRIBUTE, 1)
+        }[0]
+        .type_;
+        assert_eq!(sub_type, CkAttributeType::SENSITIVE.0 as cryptoki_sys::CK_ATTRIBUTE_TYPE);
+    }
+
+    #[test]
     fn empty_nested_template_query_yields_null_parent_pvalue() {
         // T4-AUDIT site 5: a degenerate nested template query (shim: template
         // attr with non-null pValue + ulValueLen 0 → nested `Some(vec![])`,

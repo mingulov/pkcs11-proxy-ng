@@ -374,8 +374,10 @@ impl FfiAttributeQueries {
             };
 
             sub_attrs.push(cryptoki_sys::CK_ATTRIBUTE {
-                // Nested type is ignored on input, never a schema hint.
-                type_: 0,
+                // F7/D5: forward the caller-preset nested query type
+                // verbatim. Backends such as SoftHSM select the sub-query
+                // by it; forcing 0 rewrites the caller's query.
+                type_: narrow_wire_ulong(sub_query.attr_type.0)?,
                 pValue: sub_pvalue,
                 ulValueLen: sub_len,
             });
