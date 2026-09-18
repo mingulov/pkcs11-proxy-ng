@@ -945,11 +945,18 @@ mod ambiguity_tests {
             virtual_session,
             wrapping_key,
             false,
+            None,
         )
         .await;
-        let virtual_key =
-            register_session_object_handle(&manager, &context_id, virtual_session, key, false)
-                .await;
+        let virtual_key = register_session_object_handle(
+            &manager,
+            &context_id,
+            virtual_session,
+            key,
+            false,
+            None,
+        )
+        .await;
         let before = mock.data_op_call_count();
 
         let response = parameter_output_exact(

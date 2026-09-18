@@ -243,6 +243,21 @@ pub struct LogicalClientInstance {
     /// FIND results (`register_object_handles`) are intentionally NOT inserted
     /// here — only minting operations insert.
     pub created_objects: HashSet<VirtualHandle>,
+    /// Template-declared `CKA_PRIVATE` bit per virtual object handle, recorded
+    /// at mint time (create/copy/generate/derive/unwrap/encapsulate/decapsulate)
+    /// for the D6(1) logical-login enforcement. `true` = known-private (refuse
+    /// USE while logged out without a backend probe); `false` = known-public
+    /// (proceed without a probe). ABSENT = unknown (find results and
+    /// backend-minted mechanism-out handles, which carry no client template):
+    /// logged-out USE probes `CKA_PRIVATE` from the backend once per operation.
+    /// `CKA_PRIVATE` is immutable after creation, so a recorded bit never goes
+    /// stale within the handle's lifetime.
+    ///
+    /// Entries are evicted in the SAME removal hooks as `object_metadata` and
+    /// `created_objects` (per-handle removal on session close and on
+    /// `C_DestroyObject`, plus full teardown) so a recycled virtual handle
+    /// cannot inherit a stale privacy bit.
+    pub object_private: HashMap<VirtualHandle, bool>,
     /// Session-scoped attribute result cache (R2 coalescer).
     ///
     /// Keys are `(virtual object handle, attribute type)`. Entries are evicted
@@ -279,6 +294,7 @@ impl LogicalClientInstance {
             object_metadata: HashMap::new(),
             session_objects: HashMap::new(),
             created_objects: HashSet::new(),
+            object_private: HashMap::new(),
             attr_cache: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
@@ -320,6 +336,7 @@ impl LogicalClientInstance {
                     self.object_handles.remove(object);
                     self.object_metadata.remove(&object);
                     self.created_objects.remove(&object);
+                    self.object_private.remove(&object);
                     // Evict all cached attribute entries for this object (R2). Mirrors
                     // the object_metadata + created_objects eviction so a recycled
                     // virtual handle cannot return stale cached attributes.
@@ -356,6 +373,7 @@ impl LogicalClientInstance {
                 self.object_handles.remove(object);
                 self.object_metadata.remove(&object);
                 self.created_objects.remove(&object);
+                self.object_private.remove(&object);
                 // Evict all cached attribute entries for this object (R2). Mirrors
                 // the object_metadata + created_objects eviction so a recycled
                 // virtual handle cannot return stale cached attributes.
@@ -384,6 +402,7 @@ impl LogicalClientInstance {
         self.object_metadata.clear();
         self.session_objects.clear();
         self.created_objects.clear();
+        self.object_private.clear();
         self.attr_cache.clear();
         self.login_state.clear();
         self.message_operations.clear();

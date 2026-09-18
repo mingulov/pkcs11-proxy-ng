@@ -149,7 +149,12 @@ async fn mapped_object(f: &MtlsFixture, c: &Client, class: CkObjectClass, uid: u
     let virtual_key = f
         .context_manager
         .get_context(&ClientContextId(c.context.clone()), |ctx| {
-            ctx.object_handles.insert(BackendHandle(native.0)).0
+            let vh = ctx.object_handles.insert(BackendHandle(native.0));
+            // D6(1) fixture provisioning: the backend object carries no
+            // CKA_PRIVATE (public by default) — record what mint
+            // registration would record, so USE needs no backend probe.
+            ctx.object_private.insert(vh, false);
+            vh.0
         })
         .await
         .unwrap();

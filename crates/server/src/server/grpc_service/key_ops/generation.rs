@@ -12,8 +12,9 @@ use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    gate_object_handle, parse_mechanism, register_object_handle, register_session_object_handle,
-    register_session_object_pair, resolve_session, resolve_session_and_object, spawn_backend,
+    ensure_private_mint_allowed, gate_object_handle, parse_mechanism, register_object_handle,
+    register_session_object_handle, register_session_object_pair, resolve_session,
+    resolve_session_and_object, spawn_backend, template_declares_private_object,
     template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
@@ -146,10 +147,26 @@ async fn generate_key_pair_impl(
         }
     };
 
+    // D6(1): refuse minting a private object while logically logged out.
+    for template in [&public_key_template, &private_key_template] {
+        if let Err(rv) =
+            ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template).await
+        {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
+                ck_rv: rv.0,
+                public_key_handle: 0,
+                private_key_handle: 0,
+            }));
+        }
+    }
+
     // Each generated key is a session object unless its template marks
     // CKA_TOKEN; classify before the templates move into the backend call (B2).
+    // Privacy bits are recorded alongside for the D6(1) USE enforcement.
     let public_is_token = template_declares_token_object(&public_key_template);
     let private_is_token = template_declares_token_object(&private_key_template);
+    let public_is_private = template_declares_private_object(&public_key_template);
+    let private_is_private = template_declares_private_object(&private_key_template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
@@ -165,8 +182,10 @@ async fn generate_key_pair_impl(
                 virtual_session,
                 CkObjectHandle(public_key.0 as u64),
                 public_is_token,
+                public_is_private,
                 CkObjectHandle(private_key.0 as u64),
                 private_is_token,
+                private_is_private,
             )
             .await;
             match virtual_handles {
@@ -279,10 +298,23 @@ async fn generate_key_impl(
         }
     };
 
+    // D6(1): refuse minting a private object while logically logged out.
+    if let Err(rv) =
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, &template).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }));
+    }
+
     let mechanism_type = mechanism.mechanism_type;
     // A generated key is a session object unless its template marks CKA_TOKEN;
-    // classify before the template moves into the backend call (B2).
+    // classify before the template moves into the backend call (B2). The
+    // privacy bit is recorded for the D6(1) USE enforcement.
     let is_token = template_declares_token_object(&template);
+    let is_private = template_declares_private_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result =
@@ -297,6 +329,7 @@ async fn generate_key_impl(
                 virtual_session,
                 CkObjectHandle(object.0 as u64),
                 is_token,
+                Some(is_private),
             )
             .await;
             let mechanism_out = mechanism_out_params.map(|params| {
@@ -432,9 +465,24 @@ async fn derive_key_impl(
         }
     };
 
+    // D6(1): refuse minting a private object while logically logged out.
+    // (The private base key itself is refused by the USE check inside
+    // resolve_session_and_object above.)
+    if let Err(rv) =
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, &template).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }));
+    }
+
     let mechanism_type = mechanism.mechanism_type;
-    // A derived key is a session object unless CKA_TOKEN is set (B2).
+    // A derived key is a session object unless CKA_TOKEN is set (B2). The
+    // privacy bit is recorded for the D6(1) USE enforcement.
     let is_token = template_declares_token_object(&template);
+    let is_private = template_declares_private_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
@@ -453,6 +501,7 @@ async fn derive_key_impl(
                             virtual_session,
                             object,
                             is_token,
+                            Some(is_private),
                         )
                         .await
                     }

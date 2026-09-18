@@ -14,8 +14,8 @@ use super::super::super::context_manager::{ClientContextId, ContextManager, Mess
 use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::ck_result_to_rv;
 use super::super::service_utils::{
-    check_sanitize, ck_rv_only, gate_object_handle, input_from_wire, spawn_backend,
-    spawn_backend_with_optional_timeout,
+    check_sanitize, ck_rv_only, ensure_private_use_allowed, gate_object_handle, input_from_wire,
+    spawn_backend, spawn_backend_with_optional_timeout,
 };
 use crate::server::grpc_service::HandlerContext;
 
@@ -116,6 +116,29 @@ async fn set_operation_state_with_timeout(
             }));
         }
     };
+
+    // D6(1): the embedded keys are USEd here; refuse private keys while the
+    // caller is logically logged out (authn before the authz gate below).
+    for (virtual_key, backend_key) in [
+        (req.encryption_key_handle, encryption_key),
+        (req.authentication_key_handle, authentication_key),
+    ] {
+        if backend_key.0 != 0
+            && let Err(rv) = ensure_private_use_allowed(
+                ctx,
+                &ctx_id,
+                req.session_handle,
+                virtual_key,
+                session,
+                backend_key,
+            )
+            .await
+        {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::SetOperationStateResponse {
+                ck_rv: rv.0,
+            }));
+        }
+    }
 
     // Gate embedded key handles through per-object authz if active (C1).
     if ctx.token_policy.per_object_active() {

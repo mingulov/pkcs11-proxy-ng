@@ -127,6 +127,12 @@ async fn mechanism_grants_follow_session_backend_slot_with_warm_and_cold_cache()
     let f = fixture_with_grants([grants(false), grants(false)]).await;
     preload_objects(&f);
     let mut client = open(&f, false).await;
+    // D6(1): USE of find-registered (unknown-privacy) keys while logged out
+    // probes CKA_PRIVATE; log into both slots so this mechanism-precedence
+    // test keeps its zero-metadata-before-gate profile. Login performs no
+    // token-info fetch, so the cold/warm assertions below are unaffected.
+    assert_eq!(login(&mut client, 0, b"pin42").await, CkRv::OK.0);
+    assert_eq!(login(&mut client, 1, b"pin1").await, CkRv::OK.0);
     let keys = find(&mut client, 0).await;
     assert_eq!(keys.len(), 2);
     for cold in [false, true] {

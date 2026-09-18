@@ -607,7 +607,7 @@ mod tests {
     use crate::server::auth::policy::TokenPolicy;
     use crate::server::context_manager::{ClientContextId, ContextManager};
     use crate::server::grpc_service::HandlerContext;
-    use crate::server::handle_map::BackendHandle;
+    use crate::server::handle_map::{BackendHandle, VirtualHandle};
     use tonic::Code;
 
     // --- existing alignment tests ---
@@ -870,6 +870,10 @@ mod tests {
         ctx.context_manager
             .get_context(&ctx_id, |c| {
                 c.object_handles.insert(BackendHandle(1)); // virtual = 1
+                // D6(1) fixture provisioning: the mock object carries no
+                // CKA_PRIVATE (public by default), mirroring what mint
+                // registration records, so USE needs no backend probe.
+                c.object_private.insert(VirtualHandle(1), false);
             })
             .await;
         let object_handle = 1u64; // virtual handle
@@ -922,6 +926,10 @@ mod tests {
         ctx.context_manager
             .get_context(&ctx_id, |c| {
                 c.object_handles.insert(BackendHandle(1));
+                // D6(1) fixture provisioning: the mock object carries no
+                // CKA_PRIVATE (public by default), mirroring what mint
+                // registration records, so USE needs no backend probe.
+                c.object_private.insert(VirtualHandle(1), false);
             })
             .await;
         let object_handle = 1u64;
@@ -994,6 +1002,10 @@ mod tests {
         ctx.context_manager
             .get_context(&ctx_id, |c| {
                 c.object_handles.insert(BackendHandle(1));
+                // D6(1) fixture provisioning: the mock object carries no
+                // CKA_PRIVATE (public by default), mirroring what mint
+                // registration records, so USE needs no backend probe.
+                c.object_private.insert(VirtualHandle(1), false);
             })
             .await;
 
@@ -1027,6 +1039,10 @@ mod tests {
         ctx.context_manager
             .get_context(&ctx_id, |c| {
                 c.object_handles.insert(BackendHandle(1));
+                // D6(1) fixture provisioning: the mock object carries no
+                // CKA_PRIVATE (public by default), mirroring what mint
+                // registration records, so USE needs no backend probe.
+                c.object_private.insert(VirtualHandle(1), false);
             })
             .await;
 
@@ -1062,6 +1078,10 @@ mod tests {
         ctx.context_manager
             .get_context(&ctx_id, |c| {
                 c.object_handles.insert(BackendHandle(1));
+                // D6(1) fixture provisioning: the mock object carries no
+                // CKA_PRIVATE (public by default), mirroring what mint
+                // registration records, so USE needs no backend probe.
+                c.object_private.insert(VirtualHandle(1), false);
             })
             .await;
         let object_handle = 1u64;

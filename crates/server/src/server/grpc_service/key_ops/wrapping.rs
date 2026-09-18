@@ -15,8 +15,9 @@ use super::super::ck_result_to_rv;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
-    resolve_session_and_object, spawn_backend, template_declares_token_object,
+    check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
+    register_session_object_handle, resolve_session_and_object, spawn_backend,
+    template_declares_private_object, template_declares_token_object,
 };
 use crate::server::context_manager::ClientContextId;
 use crate::server::grpc_service::audit_events::emit_auth_event;
@@ -165,8 +166,22 @@ async fn unwrap_key_impl(
         }
     };
 
-    // An unwrapped key is a session object unless CKA_TOKEN is set (B2).
+    // D6(1): refuse minting a private object while logically logged out.
+    // (The private unwrapping key itself is refused by the USE check inside
+    // resolve_session_and_object above.)
+    if let Err(rv) =
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, &template).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+        }));
+    }
+
+    // An unwrapped key is a session object unless CKA_TOKEN is set (B2). The
+    // privacy bit is recorded for the D6(1) USE enforcement.
     let is_token = template_declares_token_object(&template);
+    let is_private = template_declares_private_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let wrapped_key = SecretBytes::new(req.wrapped_key);
     let wrapped_key_null_len = req.wrapped_key_null_len;
@@ -199,6 +214,7 @@ async fn unwrap_key_impl(
                 virtual_session,
                 CkObjectHandle(object.0 as u64),
                 is_token,
+                Some(is_private),
             )
             .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {

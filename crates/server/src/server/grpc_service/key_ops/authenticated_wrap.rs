@@ -21,8 +21,9 @@ use super::super::authorization::mechanism_permitted;
 use super::super::convert_template;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
-    spawn_backend, template_declares_token_object,
+    check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
+    register_session_object_handle, spawn_backend, template_declares_private_object,
+    template_declares_token_object,
 };
 use crate::server::context_manager::ClientContextId;
 use crate::server::grpc_service::audit_events::audit_key_outcome;
@@ -222,6 +223,18 @@ async fn unwrap_key_authenticated_impl(
         }
     };
 
+    // D6(1): refuse minting a private object while logically logged out.
+    if let Err(rv) =
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, &template).await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+            authenticated_output: None,
+            ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_parameter_out: Vec::new(),
+        }));
+    }
+
     let wrapped_key = SecretBytes::new(req.wrapped_key);
     let wrapped_key_null_len = req.wrapped_key_null_len;
     let aad = SecretBytes::new(req.associated_data);
@@ -263,6 +276,7 @@ async fn unwrap_key_authenticated_impl(
         }
     };
     let is_token = template_declares_token_object(&template);
+    let is_private = template_declares_private_object(&template);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let object_cleanup = Arc::clone(&ctx.object_cleanup);
@@ -319,6 +333,7 @@ async fn unwrap_key_authenticated_impl(
                 virtual_session,
                 CkObjectHandle(key.0 as u64),
                 is_token,
+                Some(is_private),
             )
             .await;
             Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
