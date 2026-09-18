@@ -8,12 +8,16 @@ use pkcs11_proxy_ng_types::*;
 /// LP64 Linux x86_64 (8-byte ulong, 24-byte stride), ILP32 Linux i686
 /// (4, 12), and LLP64 Windows x64 with `#pragma pack(1)` (4, 16 — the
 /// stride is NOT 3x the width, which is exactly why it must be modeled
-/// separately).
+/// separately). 32-bit Windows (PE32) needs no fourth profile: with
+/// `#pragma pack(1)` over 4-byte `CK_ULONG`s and 4-byte pointers every
+/// cryptoki struct lays out exactly as its ILP32 natural layout
+/// (`CK_ATTRIBUTE` = 4+4+4 = 12), so `Ilp32` models win32 exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockAbi {
     /// 64-bit Unix: `CK_ULONG` = 8, `CK_ATTRIBUTE` = 8+8+8.
     Lp64,
-    /// 32-bit Unix: `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+4+4.
+    /// 32-bit Unix, and 32-bit Windows (packed win32 ≡ ILP32):
+    /// `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+4+4.
     Ilp32,
     /// Windows x64, packed(1): `CK_ULONG` = 4, `CK_ATTRIBUTE` = 4+8+4.
     Llp64,
@@ -25,7 +29,7 @@ impl MockAbi {
     pub fn host() -> Self {
         match std::mem::size_of::<cryptoki_sys::CK_ULONG>() {
             8 => Self::Lp64,
-            _ if cfg!(windows) => Self::Llp64,
+            _ if cfg!(all(windows, target_pointer_width = "64")) => Self::Llp64,
             _ => Self::Ilp32,
         }
     }
