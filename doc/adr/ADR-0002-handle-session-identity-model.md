@@ -204,6 +204,19 @@ When all sessions a logical client instance holds with a token are closed
 (whether individually, via `C_CloseAllSessions`, or via context teardown), that
 instance's login state for that token reverts to public.
 
+**Last-context-out backend logout (D6(2)/D9-proxy).** The shared backend token
+is logged out exactly when the last logical holder releases it: explicit
+`C_Logout`, last-session close (individual or `C_CloseAllSessions`), and
+context teardown (`C_Finalize`, lease eviction) each perform a REAL backend
+`C_Logout` when — rechecked under the per-slot login lock — no live logical
+client instance still holds login for the slot. The logout rides a still-open
+session (the departing context's own when available, else any live session on
+the slot) and runs before that context's backend sessions close. It never
+blocks: lock contention defers to the holder, which is itself establishing
+login consistency. Together with backend-authoritative login (D6(3)), this
+bounds the backend-logged-in window to the live-holder lifetime, so every new
+login PIN-verifies against the token.
+
 ### 8. Multi-Part Operation State
 
 Active multi-part operation state (sign, verify, encrypt, decrypt, digest,
@@ -246,7 +259,9 @@ State teardown follows a clear precedence:
 1. **Explicit finalization:** Client calls `C_Finalize`. The daemon tears down
    the logical client instance immediately -- closes all sessions, invalidates
    all virtual handles, releases login state, decrements the backend reference
-   count.
+   count. Backend sessions are reaped only when unreferenced by any live
+   context (refcount check, D9-proxy), and the backend login is released only
+   on last-context-out (D6(2)) -- never disturbing live tenants.
 2. **Transport disconnect:** The daemon starts the lease timer. If the client
    reconnects and presents a valid `client_context_id` before expiry, state is
    preserved. If the lease expires, teardown proceeds as in (1).

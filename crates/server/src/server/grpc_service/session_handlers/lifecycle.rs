@@ -138,6 +138,15 @@ pub(super) async fn close_session_with_timeout(
     let ctx_id = ClientContextId(req.client_context_id);
 
     let vh = VirtualHandle(req.session_handle);
+    // D6(2) snapshot: when this close drops the context's last logical login
+    // for its slot, the backend login must be released too (last-context-out)
+    // so a later login PIN-verifies against a logged-out token.
+    let held_login_slot = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.session_slots.get(&vh).copied().filter(|slot| ctx.login_state.contains_key(slot))
+        })
+        .await
+        .flatten();
     let mut transition = match ctx_mgr.begin_close_session_with_guard(
         &ctx_id,
         vh,
@@ -169,6 +178,13 @@ pub(super) async fn close_session_with_timeout(
     let ck_rv = ck_rv_only(result);
     if ck_rv == CkRv::OK.0 {
         debug!(context_id = %ctx_id.0, virtual_handle = req.session_handle, "Session closed");
+    }
+    // D6(2): release the backend login when this close dropped the last
+    // logical login for the slot. Best-effort and self-guarded: no-ops when
+    // the close failed transiently (login retained), when sibling sessions
+    // keep the login, or when another live context holds it.
+    if let Some(slot) = held_login_slot {
+        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, slot, None).await;
     }
     Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse { ck_rv }))
 }
@@ -223,6 +239,12 @@ pub(super) async fn close_all_sessions(
     // ADR-0002 §7: close only THIS client's sessions for the target slot.
     // We MUST NOT call backend.close_all_sessions() — that would close
     // sessions belonging to other logical client instances.
+    // D6(2): snapshot the held login first — remove_sessions_for_slot drops
+    // it, and last-context-out must then release the backend login too.
+    let held_login = ctx_mgr
+        .get_context(&ctx_id, |ctx| ctx.login_state.contains_key(&backend_slot))
+        .await
+        .unwrap_or(false);
     let backend_sessions = ctx_mgr
         .get_context(&ctx_id, |ctx| ctx.remove_sessions_for_slot(backend_slot))
         .await
@@ -242,6 +264,12 @@ pub(super) async fn close_all_sessions(
             Err(rv) => rv.0,
         }
     };
+    // D6(2): release the backend login when this call dropped the last
+    // logical login for the slot (self-guarded: no-ops when another live
+    // context holds it).
+    if held_login {
+        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, backend_slot, None).await;
+    }
 
     debug!(
         context_id = %ctx_id.0,

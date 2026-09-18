@@ -1938,6 +1938,249 @@ async fn generate_private_key_while_logged_out_is_refused() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// D6(2)/D9-proxy: last-context-out backend logout + refcounted teardown
+// ---------------------------------------------------------------------------
+
+async fn finalize_rv(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+) -> u64 {
+    crate::server::grpc_service::general::finalize(
+        &HandlerContext::for_test(ctx_mgr, backend),
+        Request::new(pkcs11_proxy_ng_proto::FinalizeRequest {
+            client_context_id: ctx_id.0.clone(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv
+}
+
+async fn close_session_rv(
+    ctx_mgr: &Arc<ContextManager>,
+    backend: &Arc<dyn Pkcs11Backend>,
+    ctx_id: &ClientContextId,
+    session: u64,
+) -> u64 {
+    close_session(
+        &HandlerContext::for_test(ctx_mgr, backend),
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv
+}
+
+#[tokio::test]
+async fn finalize_while_holding_login_releases_backend_login() {
+    // D6(2): a context that tears down holding the last logical login must
+    // release the shared backend login, so the next login PIN-verifies
+    // against a logged-out token. Pre-fix, finalize closed sessions without
+    // logging out: with another tenant's session keeping the token alive,
+    // the backend stayed logged in and the next login got a spurious
+    // USER_ALREADY_LOGGED_IN.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    // B holds a bare session so the backend token would stay logged in on a
+    // logout-less teardown (no last-close auto-logout to mask the bug).
+    let _session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    let backend_session_a = ctx_mgr
+        .get_context(&ctx_a, |ctx| ctx.session_handles.resolve(VirtualHandle(session_a)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+
+    // A finalizes WITHOUT logging out.
+    assert_eq!(finalize_rv(&ctx_mgr, &backend, &ctx_a).await, CkRv::OK.0);
+
+    // A's backend session is reaped...
+    assert_eq!(
+        backend.get_session_info(CkSessionHandle(backend_session_a)).unwrap_err(),
+        CkRv::SESSION_HANDLE_INVALID,
+        "departed context's backend session must be closed"
+    );
+    // ...and the backend login is released: a fresh login succeeds.
+    let ctx_h = ctx_mgr.create_context(None).await.unwrap();
+    let session_h = open_test_session(&ctx_mgr, &backend, &ctx_h).await;
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_h, session_h).await,
+        CkRv::OK.0,
+        "last-context-out teardown must release the backend login"
+    );
+}
+
+#[tokio::test]
+async fn close_last_session_while_holding_login_releases_backend_login() {
+    // D6(2) via session close: closing the last session drops the context's
+    // logical login (existing semantics); last-context-out must then release
+    // the backend login too. B's bare session again blocks last-close
+    // auto-logout so the test discriminates the fix.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    let _session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    assert_eq!(close_session_rv(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+
+    let ctx_h = ctx_mgr.create_context(None).await.unwrap();
+    let session_h = open_test_session(&ctx_mgr, &backend, &ctx_h).await;
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_h, session_h).await,
+        CkRv::OK.0,
+        "closing the last logged-in session must release the backend login"
+    );
+}
+
+#[tokio::test]
+async fn close_session_without_login_does_not_release_backend_login() {
+    // Guard against over-eager logout: closing a session that holds no login
+    // must leave another tenant's backend login undisturbed.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    assert_eq!(close_session_rv(&ctx_mgr, &backend, &ctx_b, session_b).await, CkRv::OK.0);
+
+    let backend_session_a = ctx_mgr
+        .get_context(&ctx_a, |ctx| ctx.session_handles.resolve(VirtualHandle(session_a)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let info = backend.get_session_info(CkSessionHandle(backend_session_a)).unwrap();
+    assert_eq!(
+        info.state,
+        CkSessionState::RwUser,
+        "closing a logged-out session must not disturb the holder's backend login"
+    );
+}
+
+#[tokio::test]
+async fn evict_expired_context_holding_login_releases_backend_login() {
+    // D9 lease-expiry path through the same shared teardown: an expired
+    // context holding the last login releases the backend login on reap.
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_millis(20), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+
+    // Let A expire, then create B fresh (B stays live: its session blocks
+    // last-close auto-logout so the test discriminates the fix).
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let _session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    let evicted = ctx_mgr.evict_expired(&backend).await;
+    assert!(evicted.contains(&ctx_a), "the expired holder must be reaped");
+    assert!(!evicted.contains(&ctx_b), "the fresh context must survive");
+
+    let ctx_h = ctx_mgr.create_context(None).await.unwrap();
+    let session_h = open_test_session(&ctx_mgr, &backend, &ctx_h).await;
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_h, session_h).await,
+        CkRv::OK.0,
+        "reaping an expired holder must release the backend login"
+    );
+}
+
+#[tokio::test]
+async fn teardown_of_one_tenant_does_not_disturb_other_tenant() {
+    // D9 two-tenant test: A holds the slot login; B lives beside it with a
+    // session and objects but no login. A departs via finalize. B must
+    // observe no state change: its context, sessions, and objects stay
+    // intact, its backend sessions stay open, and it can take over the
+    // released backend login and keep operating. Pre-fix, the backend login
+    // leaked (B's fresh login got ALREADY).
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
+    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
+
+    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    let (rv, object_b) = create_object_outcome(&ctx_mgr, &backend, &ctx_b, session_b, vec![]).await;
+    assert_eq!(rv, CkRv::OK.0, "setup: B's public create must succeed");
+    let backend_session_a = ctx_mgr
+        .get_context(&ctx_a, |ctx| ctx.session_handles.resolve(VirtualHandle(session_a)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    let backend_session_b = ctx_mgr
+        .get_context(&ctx_b, |ctx| ctx.session_handles.resolve(VirtualHandle(session_b)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+
+    // A departs holding the login.
+    assert_eq!(finalize_rv(&ctx_mgr, &backend, &ctx_a).await, CkRv::OK.0);
+
+    // A's backend session is reaped; B's stays open and usable.
+    assert_eq!(
+        backend.get_session_info(CkSessionHandle(backend_session_a)).unwrap_err(),
+        CkRv::SESSION_HANDLE_INVALID,
+        "departed tenant's backend session must be closed"
+    );
+    backend
+        .get_session_info(CkSessionHandle(backend_session_b))
+        .expect("surviving tenant's backend session must stay open");
+    // B's logical state is untouched.
+    let b_intact = ctx_mgr
+        .get_context(&ctx_b, |ctx| {
+            ctx.session_handles.resolve(VirtualHandle(session_b)).is_some()
+                && ctx.object_handles.resolve(VirtualHandle(object_b)).is_some()
+        })
+        .await
+        .unwrap();
+    assert!(b_intact, "surviving tenant's sessions and objects must stay mapped");
+    // And B takes over the released backend login and keeps operating.
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
+        CkRv::OK.0,
+        "surviving tenant must be able to log in after the holder departs"
+    );
+    let (rv, _) = create_object_outcome(&ctx_mgr, &backend, &ctx_b, session_b, vec![]).await;
+    assert_eq!(rv, CkRv::OK.0, "surviving tenant must keep operating");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_first_login_serializes_to_one_backend_login() {
     // M5: two clients racing the FIRST login on the same shared token must not

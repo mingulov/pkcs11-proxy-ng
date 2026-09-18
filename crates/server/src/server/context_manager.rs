@@ -410,6 +410,32 @@ impl LogicalClientInstance {
     }
 }
 
+/// One slot needing a last-holder backend logout at teardown (D6(2)/D9).
+#[derive(Debug, Clone, Copy)]
+pub struct SlotLogout {
+    /// Slot whose shared backend login must be released.
+    pub slot: BackendSlotId,
+    /// A backend session on that slot, open at plan time, to carry the
+    /// `C_Logout` call. Best-effort: the executor substitutes a live session
+    /// when this one raced shut.
+    pub via_session: u64,
+}
+
+/// Backend actions required to tear down one departed context (D6(2)/D9
+/// shared tenancy model). Computed by
+/// [`ContextManager::plan_removed_context_teardown`] after the context leaves
+/// the live map, so every liveness probe inside observes only live tenants.
+#[derive(Debug, Default)]
+pub struct ContextTeardownPlan {
+    /// Departing context's backend sessions that are safe to close: each is
+    /// unreferenced by every live context (refcount check — sessions are
+    /// per-context owned, so this is normally all of them).
+    pub sessions_to_close: Vec<u64>,
+    /// Slots where the departing context held the last logical login: each
+    /// needs one real backend `C_Logout`, executed BEFORE the sessions close.
+    pub slot_logouts: Vec<SlotLogout>,
+}
+
 /// Manages all active logical client instances (ADR-0002 §3, §9, §10).
 ///
 /// The `contexts` map is a `DashMap` (sharded concurrent hashmap) rather
@@ -1012,16 +1038,185 @@ impl ContextManager {
         self.contexts.remove(id).map(|(_k, v)| v)
     }
 
-    /// Evict expired contexts (called periodically).
+    /// True when any live context holds logical login for `slot`.
+    pub fn any_login_state_for_slot(&self, slot: BackendSlotId) -> bool {
+        self.contexts.iter().any(|entry| entry.value().login_state.contains_key(&slot))
+    }
+
+    /// True when any live context's session map still references `handle`
+    /// (active or mid-close). The D9 refcount check: a departing context's
+    /// backend session is closed only when this returns false.
+    pub fn backend_session_referenced_by_live_context(&self, handle: BackendHandle) -> bool {
+        self.contexts.iter().any(|entry| entry.value().session_handles.references_backend(handle))
+    }
+
+    /// Any currently resolvable (non-suspended) backend session on `slot`
+    /// across all live contexts — a carrier for last-holder logout (D6(2)/D9).
+    pub fn any_active_backend_session_for_slot(&self, slot: BackendSlotId) -> Option<u64> {
+        self.contexts.iter().find_map(|entry| {
+            let ctx = entry.value();
+            ctx.session_slots
+                .iter()
+                .find(|(_, s)| **s == slot)
+                .and_then(|(vh, _)| ctx.session_handles.resolve(*vh).map(|b| b.0))
+        })
+    }
+
+    /// Compute the teardown plan for an already-removed context and clear its
+    /// maps. Every removal site (finalize, lease eviction) MUST route teardown
+    /// through here so backend sessions are reaped only when unreferenced by
+    /// live contexts and the backend login is released exactly on
+    /// last-context-out (D6(2)/D9 shared tenancy model).
+    pub fn plan_removed_context_teardown(
+        &self,
+        departed: &mut LogicalClientInstance,
+    ) -> ContextTeardownPlan {
+        let sessions_to_close: Vec<u64> = departed
+            .session_handles
+            .backend_handles()
+            .map(|b| b.0)
+            .filter(|h| !self.backend_session_referenced_by_live_context(BackendHandle(*h)))
+            .collect();
+        let mut slot_logouts = Vec::new();
+        for slot in departed.login_state.keys().copied().collect::<Vec<_>>() {
+            if self.first_login_state_for_slot_excluding(slot, &departed.id).is_some() {
+                continue;
+            }
+            // Last holder out: prefer one of the departed context's own still-
+            // open sessions on this slot as the logout carrier, else any live
+            // session. None at all means the token already auto-logged-out
+            // with its last session close — nothing to do.
+            let carrier = departed
+                .session_slots
+                .iter()
+                .filter(|(_, s)| **s == slot)
+                .filter_map(|(vh, _)| departed.session_handles.resolve(*vh))
+                .map(|b| b.0)
+                .next()
+                .or_else(|| self.any_active_backend_session_for_slot(slot));
+            if let Some(via_session) = carrier {
+                slot_logouts.push(SlotLogout { slot, via_session });
+            }
+        }
+        let _ = departed.teardown();
+        ContextTeardownPlan { sessions_to_close, slot_logouts }
+    }
+
+    /// Attempt one last-holder backend logout on `slot` (D6(2)/D9): when no
+    /// live context holds logical login — rechecked under the per-slot login
+    /// lock — release the shared backend login via a still-open session, so
+    /// the next login PIN-verifies against a logged-out token.
+    ///
+    /// Best-effort, never blocks: when the slot lock is contended its holder
+    /// is actively establishing login consistency (a login inserting a holder,
+    /// a logout releasing one, or another teardown), so skipping is safe — at
+    /// worst the logout is deferred to the next release path, and a login
+    /// landing in the gap reconciles faithfully (D6(3)). `None` carrier falls
+    /// back to any live session; with no open session at all the token
+    /// already auto-logged-out. A carrier that raced shut is retried once via
+    /// a live session; every other outcome ends the attempt silently.
+    pub async fn backend_logout_if_last_holder_out(
+        &self,
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        slot: BackendSlotId,
+        preferred_session: Option<u64>,
+    ) {
+        // Fast path without the lock: observing any live holder means no logout.
+        if self.any_login_state_for_slot(slot) {
+            return;
+        }
+        let lock = self.slot_login_lock(slot);
+        let Ok(_guard) = lock.try_lock() else {
+            tracing::debug!("teardown logout skipped: slot login lock contended");
+            return;
+        };
+        // Recheck under the lock: a fresh login may have landed since the fast
+        // path. The lock serializes this recheck+logout against every login's
+        // scan+insert, so a concurrent login is never stolen.
+        if self.any_login_state_for_slot(slot) {
+            return;
+        }
+        let live = self.any_active_backend_session_for_slot(slot);
+        let mut carriers = Vec::with_capacity(2);
+        if let Some(via) = preferred_session {
+            carriers.push(via);
+        }
+        if let Some(via) = live
+            && Some(via) != preferred_session
+        {
+            carriers.push(via);
+        }
+        for via in carriers {
+            let backend = backend.clone();
+            let result =
+                tokio::task::spawn_blocking(move || backend.logout(CkSessionHandle(via))).await;
+            match result {
+                Ok(Ok(())) => {
+                    tracing::debug!("last-holder backend logout succeeded");
+                    return;
+                }
+                Ok(Err(rv)) if rv == CkRv::SESSION_HANDLE_INVALID || rv == CkRv::SESSION_CLOSED => {
+                    continue; // carrier raced shut; try the next candidate
+                }
+                _ => return, // done (or join failure): teardown is best-effort
+            }
+        }
+    }
+
+    /// Execute teardown plans: all last-holder logouts first (each rechecked
+    /// under its slot lock, so no live tenant is disturbed), then all session
+    /// closes. Logouts are deduplicated by slot across plans.
+    pub async fn execute_teardown_plans(
+        &self,
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        plans: Vec<ContextTeardownPlan>,
+    ) {
+        let mut logouts: HashMap<BackendSlotId, u64> = HashMap::new();
+        let mut closes: Vec<u64> = Vec::new();
+        for plan in plans {
+            for logout in plan.slot_logouts {
+                logouts.entry(logout.slot).or_insert(logout.via_session);
+            }
+            closes.extend(plan.sessions_to_close);
+        }
+        for (slot, via_session) in logouts {
+            self.backend_logout_if_last_holder_out(backend, slot, Some(via_session)).await;
+        }
+        Self::close_backend_sessions(backend, closes).await;
+    }
+
+    /// Evict expired contexts (called periodically). Returns the contexts
+    /// actually removed (a candidate touched concurrently survives and is not
+    /// returned). Each removal is planned and executed through the shared
+    /// D6(2)/D9 teardown path: refcount-checked session reaping plus
+    /// last-holder backend logout.
     pub async fn evict_expired(
         &self,
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
     ) -> Vec<ClientContextId> {
         let now = Instant::now();
         let expired = self.collect_expired_context_ids(now);
-        let all_backend_sessions = self.drain_expired_contexts(&expired);
-        Self::close_backend_sessions(backend, all_backend_sessions).await;
-        expired
+        let mut evicted = Vec::with_capacity(expired.len());
+        let mut plans = Vec::with_capacity(expired.len());
+        for id in &expired {
+            // Re-check expiry and remove ATOMICALLY under the per-shard write
+            // lock: `remove_if` evaluates the predicate while holding the lock,
+            // so a context touched (last_active bumped) or that started an
+            // operation (in_flight incremented under the read lock) since the
+            // best-effort first scan is not evicted on stale data — closing the
+            // get-then-remove TOCTOU (L10). The first scan is just a cheap
+            // candidate filter. Sequential remove-then-plan keeps multi-expire
+            // login accounting exact: an earlier plan still sees a later
+            // candidate as a live holder.
+            if let Some((_, mut ctx)) =
+                self.contexts.remove_if(id, |_, ctx| self.is_reapable(ctx, now))
+            {
+                evicted.push(id.clone());
+                plans.push(self.plan_removed_context_teardown(&mut ctx));
+            }
+        }
+        self.execute_teardown_plans(backend, plans).await;
+        evicted
     }
 
     /// A context is reapable only when its lease has expired AND it has no
@@ -1038,25 +1233,6 @@ impl ContextManager {
             .filter(|entry| self.is_reapable(entry.value(), now))
             .map(|entry| entry.key().clone())
             .collect()
-    }
-
-    fn drain_expired_contexts(&self, expired: &[ClientContextId]) -> Vec<u64> {
-        // Re-check expiry and remove ATOMICALLY under the per-shard write lock:
-        // `remove_if` evaluates the predicate while holding the lock, so a
-        // context touched (last_active bumped) or that started an operation
-        // (in_flight incremented under the read lock) since the best-effort first
-        // scan is not evicted on stale data — closing the get-then-remove TOCTOU
-        // (L10). The first scan is just a cheap candidate filter.
-        let now = Instant::now();
-        let mut backend_sessions = Vec::new();
-        for id in expired {
-            if let Some((_, mut ctx)) =
-                self.contexts.remove_if(id, |_, ctx| self.is_reapable(ctx, now))
-            {
-                backend_sessions.extend(ctx.teardown());
-            }
-        }
-        backend_sessions
     }
 
     async fn close_backend_sessions(
