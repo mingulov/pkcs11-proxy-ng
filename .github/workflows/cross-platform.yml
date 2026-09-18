@@ -15,7 +15,9 @@
 # macos-arm64 (EXPERIMENTAL until the macOS compat prep lands -- M-1..M-3:
 # gate the Linux-only peer_cred module, settle macOS UDS-auth semantics,
 # extend the native FFI domain to macOS -- then promote by flipping
-# `experimental` to false), windows-x64.
+# `experimental` to false), windows-x64, plus the standalone `win32` job
+# below (i686-pc-windows-msvc build + WOW64 lib tests; T6b's proof vehicle,
+# first green expected at T2run).
 #
 # Auth posture: the daemon runs on loopback TCP with auth="none", the same
 # CI-only shape scripts/test-softhsm2-smoke.sh asserts. Never a default.
@@ -117,4 +119,61 @@ jobs:
             ${{ runner.temp }}/ci-compare-*/proxied/results.json
             ${{ runner.temp }}/ci-compare-*/proxied/report.jsonl
             ${{ runner.temp }}/ci-compare-*/daemon.log
+          retention-days: 14
+
+  # ── win32 (i686-pc-windows-msvc) ──────────────────────────────────────────
+  # T6b's proof vehicle: native 32-bit build plus the lib suites executed
+  # under WOW64 on windows-2022 (which runs 32-bit test binaries). This is
+  # build + unit/integration coverage only, NOT the direct-vs-proxied
+  # SoftHSM2 comparison: the pinned Windows SoftHSM2 module is 64-bit and
+  # cannot load into a 32-bit daemon, so a win32 provider comparison needs
+  # a 32-bit provider module (out of scope for T6b). First green run is
+  # expected at T2run, which then finishes the win32 doc move.
+  win32:
+    name: win32 build + WOW64 tests (i686-pc-windows-msvc)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable toolchain with i686 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-msvc
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: Windows-X86-cargo-win32-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            Windows-X86-cargo-win32-
+
+      - name: Build release daemon + shim (win32)
+        run: cargo build --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
+        shell: bash
+
+      - name: Lib test suites (win32, WOW64)
+        run: |
+          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-types
+          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-shim --lib
+          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib
+          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng --lib
+        shell: bash
+
+      - name: Upload win32 binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xplat-win32-${{ github.run_id }}
+          path: |
+            target/i686-pc-windows-msvc/release/pkcs11-proxy-ng.exe
+            target/i686-pc-windows-msvc/release/pkcs11_proxy_ng_shim.dll
           retention-days: 14
