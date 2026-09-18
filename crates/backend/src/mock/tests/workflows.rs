@@ -1034,7 +1034,7 @@ fn mock_backend_supports_provider_gap_3x_workflows() {
     let backend = MockBackend::with_official_mechanism_catalog_smoke(vec![CkSlotId(0)]);
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let key = backend.create_object(session, &[]).unwrap();
+    let key = backend.create_object(session, Some(&[])).unwrap();
     let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
 
     assert_eq!(backend.login_user(session, CkUserType::User, b"alice", b"1234"), Ok(()));
@@ -1042,12 +1042,12 @@ fn mock_backend_supports_provider_gap_3x_workflows() {
     assert_eq!(backend.get_session_validation_flags(session, 0), Ok(0));
 
     let (capsule, encapsulated_key) =
-        backend.encapsulate_key(session, &mechanism, key, &[]).unwrap();
+        backend.encapsulate_key(session, &mechanism, key, Some(&[])).unwrap();
     let capsule_bytes = capsule.expose(|raw| raw.to_vec());
     assert!(!capsule.is_empty());
     assert_ne!(encapsulated_key, CkObjectHandle(0));
     let decapsulated_key = backend
-        .decapsulate_key(session, &mechanism, key, &[], CkInBuf::Bytes(&capsule_bytes))
+        .decapsulate_key(session, &mechanism, key, Some(&[]), CkInBuf::Bytes(&capsule_bytes))
         .unwrap();
     assert_ne!(decapsulated_key, CkObjectHandle(0));
 
@@ -1116,7 +1116,7 @@ fn mock_backend_supports_provider_gap_3x_workflows() {
             &mechanism,
             key,
             CkInBuf::Bytes(&wrapped_bytes),
-            &[],
+            Some(&[]),
             CkInBuf::Bytes(b"aad"),
         )
         .unwrap();
@@ -1135,7 +1135,7 @@ fn official_source_grounded_mock_enforces_mechanism_workflow_flags() {
     let key = live_key(&backend, session);
 
     let aes_key_gen = CkMechanism { mechanism_type: CkMechanismType::AES_KEY_GEN, params: None };
-    assert_ne!(backend.generate_key(session, &aes_key_gen, &[]).unwrap(), CkObjectHandle(0));
+    assert_ne!(backend.generate_key(session, &aes_key_gen, Some(&[])).unwrap(), CkObjectHandle(0));
     assert_eq!(backend.sign_init(session, &aes_key_gen, key).unwrap_err(), CkRv::MECHANISM_INVALID);
     assert_eq!(
         backend.encrypt_init(session, &aes_key_gen, key).unwrap_err(),
@@ -1145,7 +1145,10 @@ fn official_source_grounded_mock_enforces_mechanism_workflow_flags() {
     let sha256 = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
     backend.digest_init(session, &sha256).unwrap();
     assert!(!backend.digest(session, CkInBuf::Bytes(b"payload")).unwrap().is_empty());
-    assert_eq!(backend.generate_key(session, &sha256, &[]).unwrap_err(), CkRv::MECHANISM_INVALID);
+    assert_eq!(
+        backend.generate_key(session, &sha256, Some(&[])).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
     assert_eq!(backend.encrypt_init(session, &sha256, key).unwrap_err(), CkRv::MECHANISM_INVALID);
 
     let md5 = CkMechanism { mechanism_type: CkMechanismType::MD5, params: None };
@@ -1166,21 +1169,27 @@ fn official_source_grounded_mock_enforces_mechanism_workflow_flags() {
     let wrapped_bytes = wrapped.expose(|raw| raw.to_vec());
     assert!(!wrapped.is_empty());
     assert_ne!(
-        backend.unwrap_key(session, &aes_gcm, key, CkInBuf::Bytes(&wrapped_bytes), &[]).unwrap(),
+        backend
+            .unwrap_key(session, &aes_gcm, key, CkInBuf::Bytes(&wrapped_bytes), Some(&[]))
+            .unwrap(),
         CkObjectHandle(0)
     );
     backend.message_encrypt_init(session, Some(&aes_gcm), None, key).unwrap();
     assert_eq!(backend.sign_init(session, &aes_gcm, key).unwrap_err(), CkRv::MECHANISM_INVALID);
-    assert_eq!(backend.generate_key(session, &aes_gcm, &[]).unwrap_err(), CkRv::MECHANISM_INVALID);
+    assert_eq!(
+        backend.generate_key(session, &aes_gcm, Some(&[])).unwrap_err(),
+        CkRv::MECHANISM_INVALID
+    );
 
     let ml_kem = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
-    let (capsule, encapsulated) = backend.encapsulate_key(session, &ml_kem, key, &[]).unwrap();
+    let (capsule, encapsulated) =
+        backend.encapsulate_key(session, &ml_kem, key, Some(&[])).unwrap();
     let capsule_bytes = capsule.expose(|raw| raw.to_vec());
     assert!(!capsule.is_empty());
     assert_ne!(encapsulated, CkObjectHandle(0));
     assert_ne!(
         backend
-            .decapsulate_key(session, &ml_kem, key, &[], CkInBuf::Bytes(&capsule_bytes))
+            .decapsulate_key(session, &ml_kem, key, Some(&[]), CkInBuf::Bytes(&capsule_bytes))
             .unwrap(),
         CkObjectHandle(0)
     );
@@ -1198,7 +1207,7 @@ fn official_source_grounded_mock_enforces_mechanism_workflow_flags() {
     );
 
     let tls_prf = CkMechanism { mechanism_type: CkMechanismType::TLS_PRF, params: None };
-    assert_ne!(backend.derive_key(session, &tls_prf, key, &[]).unwrap(), CkObjectHandle(0));
+    assert_ne!(backend.derive_key(session, &tls_prf, key, Some(&[])).unwrap(), CkObjectHandle(0));
     assert_eq!(backend.sign_init(session, &tls_prf, key).unwrap_err(), CkRv::MECHANISM_INVALID);
 
     let des_cbc_pad = CkMechanism { mechanism_type: CkMechanismType::DES_CBC_PAD, params: None };
@@ -1216,7 +1225,7 @@ fn official_source_grounded_mock_enforces_mechanism_workflow_flags() {
     );
 
     let des_key_gen = CkMechanism { mechanism_type: CkMechanismType::DES_KEY_GEN, params: None };
-    assert_ne!(backend.generate_key(session, &des_key_gen, &[]).unwrap(), CkObjectHandle(0));
+    assert_ne!(backend.generate_key(session, &des_key_gen, Some(&[])).unwrap(), CkObjectHandle(0));
     assert_eq!(
         backend.encrypt_init(session, &des_key_gen, key).unwrap_err(),
         CkRv::MECHANISM_INVALID
@@ -1236,7 +1245,7 @@ fn official_source_grounded_mock_enforces_mechanism_workflow_flags() {
     // (CKM_CAMELLIA_CTR) has no workflow flags, so every keyed op rejects it.
     let no_source = CkMechanism { mechanism_type: CkMechanismType(0x0000_0558), params: None };
     assert_eq!(
-        backend.generate_key(session, &no_source, &[]).unwrap_err(),
+        backend.generate_key(session, &no_source, Some(&[])).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
     assert_eq!(backend.digest_init(session, &no_source).unwrap_err(), CkRv::MECHANISM_INVALID);
@@ -1282,12 +1291,12 @@ fn official_source_grounded_mock_rejects_all_no_source_workflow_mechanisms() {
         assert_mechanism_invalid(
             "generate_key",
             mechanism_type,
-            backend.generate_key(session, &mechanism, &[]),
+            backend.generate_key(session, &mechanism, Some(&[])),
         );
         assert_mechanism_invalid(
             "generate_key_pair",
             mechanism_type,
-            backend.generate_key_pair(session, &mechanism, &[], &[]),
+            backend.generate_key_pair(session, &mechanism, Some(&[]), Some(&[])),
         );
         assert_mechanism_invalid(
             "digest_init",
@@ -1332,22 +1341,28 @@ fn official_source_grounded_mock_rejects_all_no_source_workflow_mechanisms() {
         assert_mechanism_invalid(
             "unwrap_key",
             mechanism_type,
-            backend.unwrap_key(session, &mechanism, key, CkInBuf::Bytes(b"wrapped"), &[]),
+            backend.unwrap_key(session, &mechanism, key, CkInBuf::Bytes(b"wrapped"), Some(&[])),
         );
         assert_mechanism_invalid(
             "derive_key",
             mechanism_type,
-            backend.derive_key(session, &mechanism, key, &[]),
+            backend.derive_key(session, &mechanism, key, Some(&[])),
         );
         assert_mechanism_invalid(
             "encapsulate_key",
             mechanism_type,
-            backend.encapsulate_key(session, &mechanism, key, &[]),
+            backend.encapsulate_key(session, &mechanism, key, Some(&[])),
         );
         assert_mechanism_invalid(
             "decapsulate_key",
             mechanism_type,
-            backend.decapsulate_key(session, &mechanism, key, &[], CkInBuf::Bytes(b"ciphertext")),
+            backend.decapsulate_key(
+                session,
+                &mechanism,
+                key,
+                Some(&[]),
+                CkInBuf::Bytes(b"ciphertext"),
+            ),
         );
         assert_mechanism_invalid(
             "message_encrypt_init",
@@ -1392,7 +1407,7 @@ fn official_source_grounded_mock_rejects_all_no_source_workflow_mechanisms() {
                 &mechanism,
                 key,
                 CkInBuf::Bytes(b"wrapped"),
-                &[],
+                Some(&[]),
                 CkInBuf::Bytes(b"aad"),
             ),
         );
@@ -1407,7 +1422,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_core_workflow
     for mechanism_type in pkcs11_3_2_official_mechanisms() {
         let mechanism = CkMechanism { mechanism_type: *mechanism_type, params: None };
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
 
         backend.sign_init(session, &mechanism, key).unwrap();
         let signature = backend.sign(session, CkInBuf::Bytes(b"data")).unwrap();
@@ -1488,27 +1503,39 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_core_workflow
         );
         backend.decrypt_final(session).unwrap();
 
-        assert!(backend.derive_key(session, &mechanism, key, &[]).is_ok());
-        assert!(backend.generate_key(session, &mechanism, &[]).is_ok());
-        assert!(backend.generate_key_pair(session, &mechanism, &[], &[]).is_ok());
-        let wrapping_key = backend.create_object(session, &[]).unwrap();
+        assert!(backend.derive_key(session, &mechanism, key, Some(&[])).is_ok());
+        assert!(backend.generate_key(session, &mechanism, Some(&[])).is_ok());
+        assert!(backend.generate_key_pair(session, &mechanism, Some(&[]), Some(&[])).is_ok());
+        let wrapping_key = backend.create_object(session, Some(&[])).unwrap();
         let wrapped = backend.wrap_key(session, &mechanism, wrapping_key, key).unwrap();
         let wrapped_bytes = wrapped.expose(|raw| raw.to_vec());
         assert!(!wrapped.is_empty(), "wrap output for 0x{:08X}", mechanism_type.0);
         assert!(
             backend
-                .unwrap_key(session, &mechanism, wrapping_key, CkInBuf::Bytes(&wrapped_bytes), &[])
+                .unwrap_key(
+                    session,
+                    &mechanism,
+                    wrapping_key,
+                    CkInBuf::Bytes(&wrapped_bytes),
+                    Some(&[])
+                )
                 .is_ok()
         );
 
         let (capsule, encapsulated_key) =
-            backend.encapsulate_key(session, &mechanism, key, &[]).unwrap();
+            backend.encapsulate_key(session, &mechanism, key, Some(&[])).unwrap();
         let capsule_bytes = capsule.expose(|raw| raw.to_vec());
         assert!(!capsule.is_empty(), "encapsulate output for 0x{:08X}", mechanism_type.0);
         assert_ne!(encapsulated_key, CkObjectHandle(0));
         assert_ne!(
             backend
-                .decapsulate_key(session, &mechanism, key, &[], CkInBuf::Bytes(&capsule_bytes))
+                .decapsulate_key(
+                    session,
+                    &mechanism,
+                    key,
+                    Some(&[]),
+                    CkInBuf::Bytes(&capsule_bytes)
+                )
                 .unwrap(),
             CkObjectHandle(0)
         );
@@ -1583,7 +1610,7 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_core_workflow
                 &mechanism,
                 wrapping_key,
                 CkInBuf::Bytes(&authenticated_wrapped_bytes),
-                &[],
+                Some(&[]),
                 CkInBuf::Bytes(b"aad"),
             )
             .unwrap();
@@ -1614,26 +1641,26 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
         let mechanism = CkMechanism { mechanism_type, params: None };
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
         backend.sign_init(session, &mechanism, key).unwrap();
         assert!(!backend.sign(session, CkInBuf::Bytes(b"data")).unwrap().is_empty());
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
         backend.sign_init(session, &mechanism, key).unwrap();
         backend.sign_update(session, CkInBuf::Bytes(b"part")).unwrap();
         assert!(!backend.sign_final(session).unwrap().is_empty());
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
         backend.sign_recover_init(session, &mechanism, key).unwrap();
         assert!(!backend.sign_recover(session, CkInBuf::Bytes(b"data")).unwrap().is_empty());
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
         backend.sign_init(session, &mechanism, key).unwrap();
         let signature = backend.sign(session, CkInBuf::Bytes(b"data")).unwrap();
         let signature_bytes = signature.expose(|raw| raw.to_vec());
@@ -1642,7 +1669,7 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
         backend.sign_init(session, &mechanism, key).unwrap();
         backend.sign_update(session, CkInBuf::Bytes(b"part")).unwrap();
         let multipart_signature = backend.sign_final(session).unwrap();
@@ -1653,7 +1680,7 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
         backend.verify_recover_init(session, &mechanism, key).unwrap();
         assert!(!backend.verify_recover(session, CkInBuf::Bytes(b"signature")).unwrap().is_empty());
         backend.close_session(session).unwrap();
@@ -1670,7 +1697,7 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
         backend.encrypt_init(session, &mechanism, key).unwrap();
         let ciphertext = backend.encrypt(session, CkInBuf::Bytes(b"plaintext")).unwrap();
         let ciphertext_bytes = ciphertext.expose(|raw| raw.to_vec());
@@ -1678,14 +1705,14 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
         backend.encrypt_init(session, &mechanism, key).unwrap();
         assert!(!backend.encrypt_update(session, CkInBuf::Bytes(b"part")).unwrap().is_empty());
         backend.encrypt_final(session).unwrap();
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
         backend.decrypt_init(session, &mechanism, key).unwrap();
         assert_eq!(
             backend.decrypt(session, CkInBuf::Bytes(&ciphertext_bytes)).unwrap(),
@@ -1694,7 +1721,7 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
         backend.decrypt_init(session, &mechanism, key).unwrap();
         assert!(
             !backend.decrypt_update(session, CkInBuf::Bytes(&ciphertext_bytes)).unwrap().is_empty()
@@ -1703,11 +1730,11 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
-        assert!(backend.derive_key(session, &mechanism, key, &[]).is_ok());
-        assert!(backend.generate_key(session, &mechanism, &[]).is_ok());
-        assert!(backend.generate_key_pair(session, &mechanism, &[], &[]).is_ok());
-        let wrapping_key = backend.create_object(session, &[]).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
+        assert!(backend.derive_key(session, &mechanism, key, Some(&[])).is_ok());
+        assert!(backend.generate_key(session, &mechanism, Some(&[])).is_ok());
+        assert!(backend.generate_key_pair(session, &mechanism, Some(&[]), Some(&[])).is_ok());
+        let wrapping_key = backend.create_object(session, Some(&[])).unwrap();
         let wrapped_key = backend.wrap_key(session, &mechanism, wrapping_key, key).unwrap();
         let wrapped_key_bytes = wrapped_key.expose(|raw| raw.to_vec());
         assert!(!wrapped_key.is_empty());
@@ -1718,7 +1745,7 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
                     &mechanism,
                     wrapping_key,
                     CkInBuf::Bytes(&wrapped_key_bytes),
-                    &[]
+                    Some(&[])
                 )
                 .is_ok()
         );
@@ -1743,13 +1770,14 @@ fn object_and_key_creation_workflows_preserve_template_attributes() {
     let mechanism =
         CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
 
-    let created = backend.create_object(session, &[label_attr("created")]).unwrap();
+    let created = backend.create_object(session, Some(&[label_attr("created")])).unwrap();
     assert_mock_label(&backend, session, created, "created");
 
-    let copied = backend.copy_object(session, created, &[label_attr("copied")]).unwrap();
+    let copied = backend.copy_object(session, created, Some(&[label_attr("copied")])).unwrap();
     assert_mock_label(&backend, session, copied, "copied");
 
-    let generated = backend.generate_key(session, &mechanism, &[label_attr("generated")]).unwrap();
+    let generated =
+        backend.generate_key(session, &mechanism, Some(&[label_attr("generated")])).unwrap();
     assert_mock_label(&backend, session, generated, "generated");
 
     let unwrapped = backend
@@ -1758,7 +1786,7 @@ fn object_and_key_creation_workflows_preserve_template_attributes() {
             &mechanism,
             generated,
             CkInBuf::Bytes(b"wrapped"),
-            &[label_attr("unwrapped")],
+            Some(&[label_attr("unwrapped")]),
         )
         .unwrap();
     assert_mock_label(&backend, session, unwrapped, "unwrapped");
@@ -1769,7 +1797,7 @@ fn object_and_key_creation_workflows_preserve_template_attributes() {
             &mechanism,
             generated,
             CkInBuf::Bytes(b"wrapped"),
-            &[label_attr("authenticated-unwrapped")],
+            Some(&[label_attr("authenticated-unwrapped")]),
             CkInBuf::Bytes(b"aad"),
         )
         .unwrap();
@@ -1781,14 +1809,19 @@ fn object_and_key_creation_workflows_preserve_template_attributes() {
             session,
             &mechanism,
             generated,
-            &[label_attr("decapsulated")],
+            Some(&[label_attr("decapsulated")]),
             CkInBuf::Bytes(b"capsule"),
         )
         .unwrap();
     assert_mock_label(&backend, session, decapsulated, "decapsulated");
 
     let (public, private) = backend
-        .generate_key_pair(session, &mechanism, &[label_attr("public")], &[label_attr("private")])
+        .generate_key_pair(
+            session,
+            &mechanism,
+            Some(&[label_attr("public")]),
+            Some(&[label_attr("private")]),
+        )
         .unwrap();
     assert_mock_label(&backend, session, public, "public");
     assert_mock_label(&backend, session, private, "private");
@@ -1844,7 +1877,9 @@ fn key_bearing_workflows_reject_invalid_object_handles() {
     backend.digest_final(session).unwrap();
 
     assert_eq!(
-        backend.derive_key(session, &mechanism, invalid_key, &[label_attr("derived")]).unwrap_err(),
+        backend
+            .derive_key(session, &mechanism, invalid_key, Some(&[label_attr("derived")]))
+            .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
     assert_eq!(
@@ -1858,7 +1893,7 @@ fn key_bearing_workflows_reject_invalid_object_handles() {
                 &mechanism,
                 invalid_key,
                 CkInBuf::Bytes(b"wrapped"),
-                &[label_attr("unwrapped")]
+                Some(&[label_attr("unwrapped")])
             )
             .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
@@ -1885,7 +1920,7 @@ fn key_bearing_workflows_reject_invalid_object_handles() {
     );
     assert_eq!(
         backend
-            .encapsulate_key(session, &mechanism, invalid_key, &[label_attr("encapsulated")])
+            .encapsulate_key(session, &mechanism, invalid_key, Some(&[label_attr("encapsulated")]))
             .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
@@ -1895,7 +1930,7 @@ fn key_bearing_workflows_reject_invalid_object_handles() {
                 session,
                 &mechanism,
                 invalid_key,
-                &[label_attr("encapsulated-exact")],
+                Some(&[label_attr("encapsulated-exact")]),
                 &output_spec,
             )
             .unwrap_err(),
@@ -1907,7 +1942,7 @@ fn key_bearing_workflows_reject_invalid_object_handles() {
                 session,
                 &mechanism,
                 invalid_key,
-                &[label_attr("decapsulated")],
+                Some(&[label_attr("decapsulated")]),
                 CkInBuf::Bytes(b"capsule")
             )
             .unwrap_err(),
@@ -1932,7 +1967,7 @@ fn key_bearing_workflows_reject_invalid_object_handles() {
                 &mechanism,
                 invalid_key,
                 CkInBuf::Bytes(b"wrapped"),
-                &[label_attr("authenticated-unwrapped")],
+                Some(&[label_attr("authenticated-unwrapped")]),
                 CkInBuf::Bytes(b"aad"),
             )
             .unwrap_err(),
@@ -2356,7 +2391,7 @@ fn historically_grounded_mechanisms_are_accepted_with_workflow_flags() {
     );
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let key = backend.create_object(session, &[]).unwrap();
+    let key = backend.create_object(session, Some(&[])).unwrap();
 
     // DES-CBC grounded with ENCRYPT/DECRYPT: encrypt_init is accepted.
     let des_cbc = CkMechanism { mechanism_type: CkMechanismType(0x0000_0122), params: None };
@@ -2365,7 +2400,7 @@ fn historically_grounded_mechanisms_are_accepted_with_workflow_flags() {
 
     // BATON_KEY_GEN grounded with GENERATE: generate_key is accepted.
     let baton_gen = CkMechanism { mechanism_type: CkMechanismType(0x0000_1030), params: None };
-    assert_ne!(backend.generate_key(session, &baton_gen, &[]).unwrap(), CkObjectHandle(0));
+    assert_ne!(backend.generate_key(session, &baton_gen, Some(&[])).unwrap(), CkObjectHandle(0));
 
     // Every advertised historical mechanism reports non-empty flags.
     for mech in [CkMechanismType(0x0000_0322), CkMechanismType(0x0000_1010)] {

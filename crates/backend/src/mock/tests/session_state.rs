@@ -48,30 +48,30 @@ fn mock_generate_key_pair_returns_unique_handles() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
-    let (pub_h, priv_h) = backend.generate_key_pair(session, &mech, &[], &[]).unwrap();
+    let (pub_h, priv_h) = backend.generate_key_pair(session, &mech, Some(&[]), Some(&[])).unwrap();
     assert_ne!(pub_h, priv_h);
 }
 
 #[test]
 fn object_and_key_creation_workflows_reject_invalid_session_without_allocating() {
     assert_invalid_session_does_not_allocate_object(|backend, session, _mechanism| {
-        backend.create_object(session, &[label_attr("created")])
+        backend.create_object(session, Some(&[label_attr("created")]))
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, _mechanism| {
-        backend.copy_object(session, CkObjectHandle(1), &[label_attr("copied")])
+        backend.copy_object(session, CkObjectHandle(1), Some(&[label_attr("copied")]))
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
-        backend.generate_key(session, mechanism, &[label_attr("generated")])
+        backend.generate_key(session, mechanism, Some(&[label_attr("generated")]))
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
-        backend.derive_key(session, mechanism, CkObjectHandle(1), &[label_attr("derived")])
+        backend.derive_key(session, mechanism, CkObjectHandle(1), Some(&[label_attr("derived")]))
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
         backend.derive_key_with_output(
             session,
             mechanism,
             CkObjectHandle(1),
-            &[label_attr("derived-output")],
+            Some(&[label_attr("derived-output")]),
         )
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
@@ -80,15 +80,15 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
             mechanism,
             CkObjectHandle(1),
             CkInBuf::Bytes(b"wrapped"),
-            &[label_attr("unwrapped")],
+            Some(&[label_attr("unwrapped")]),
         )
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
         backend.generate_key_pair(
             session,
             mechanism,
-            &[label_attr("public")],
-            &[label_attr("private")],
+            Some(&[label_attr("public")]),
+            Some(&[label_attr("private")]),
         )
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
@@ -96,7 +96,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
             session,
             mechanism,
             CkObjectHandle(1),
-            &[label_attr("encapsulated")],
+            Some(&[label_attr("encapsulated")]),
         )
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
@@ -104,7 +104,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
             session,
             mechanism,
             CkObjectHandle(1),
-            &[label_attr("encapsulated-exact")],
+            Some(&[label_attr("encapsulated-exact")]),
             &CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false },
         )
     });
@@ -113,7 +113,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
             session,
             mechanism,
             CkObjectHandle(1),
-            &[label_attr("decapsulated")],
+            Some(&[label_attr("decapsulated")]),
             CkInBuf::Bytes(b"capsule"),
         )
     });
@@ -123,7 +123,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
             mechanism,
             CkObjectHandle(1),
             CkInBuf::Bytes(b"wrapped"),
-            &[label_attr("authenticated-unwrapped")],
+            Some(&[label_attr("authenticated-unwrapped")]),
             CkInBuf::Bytes(b"aad"),
         )
     });
@@ -134,11 +134,11 @@ fn object_management_workflows_reject_invalid_session_without_mutating_objects()
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let object = backend.create_object(session, &[label_attr("live")]).unwrap();
+    let object = backend.create_object(session, Some(&[label_attr("live")])).unwrap();
     let invalid_session = CkSessionHandle(999);
 
     assert_eq!(
-        backend.find_objects_init(invalid_session, &[]).unwrap_err(),
+        backend.find_objects_init(invalid_session, Some(&[])).unwrap_err(),
         CkRv::SESSION_HANDLE_INVALID
     );
     assert_eq!(backend.find_objects(invalid_session, 1).unwrap_err(), CkRv::SESSION_HANDLE_INVALID);
@@ -172,7 +172,9 @@ fn object_management_workflows_reject_invalid_session_without_mutating_objects()
         CkRv::SESSION_HANDLE_INVALID
     );
     assert_eq!(
-        backend.set_attribute_value(invalid_session, object, &[label_attr("new")]).unwrap_err(),
+        backend
+            .set_attribute_value(invalid_session, object, Some(&[label_attr("new")]))
+            .unwrap_err(),
         CkRv::SESSION_HANDLE_INVALID
     );
     assert_eq!(
@@ -195,15 +197,15 @@ fn find_objects_tracks_active_search_operation() {
     assert_eq!(backend.find_objects(session, 1).unwrap_err(), CkRv::OPERATION_NOT_INITIALIZED);
     assert_eq!(backend.find_objects_final(session).unwrap_err(), CkRv::OPERATION_NOT_INITIALIZED);
 
-    backend.find_objects_init(session, &[]).unwrap();
-    assert_eq!(backend.find_objects_init(session, &[]).unwrap_err(), CkRv::OPERATION_ACTIVE);
+    backend.find_objects_init(session, Some(&[])).unwrap();
+    assert_eq!(backend.find_objects_init(session, Some(&[])).unwrap_err(), CkRv::OPERATION_ACTIVE);
     assert_eq!(backend.sign_init(session, &mechanism, key).unwrap_err(), CkRv::OPERATION_ACTIVE);
     assert_eq!(backend.find_objects(session, 0).unwrap(), Vec::<CkObjectHandle>::new());
     backend.find_objects_final(session).unwrap();
     assert_eq!(backend.find_objects_final(session).unwrap_err(), CkRv::OPERATION_NOT_INITIALIZED);
 
     backend.sign_init(session, &mechanism, key).unwrap();
-    assert_eq!(backend.find_objects_init(session, &[]).unwrap_err(), CkRv::OPERATION_ACTIVE);
+    assert_eq!(backend.find_objects_init(session, Some(&[])).unwrap_err(), CkRv::OPERATION_ACTIVE);
 }
 
 #[test]
@@ -347,7 +349,12 @@ fn generate_key_pair_does_not_partially_allocate_on_quota_failure() {
         CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
 
     let err = backend
-        .generate_key_pair(session, &mechanism, &[label_attr("public")], &[label_attr("private")])
+        .generate_key_pair(
+            session,
+            &mechanism,
+            Some(&[label_attr("public")]),
+            Some(&[label_attr("private")]),
+        )
         .unwrap_err();
 
     assert_eq!(err, CkRv::DEVICE_MEMORY);

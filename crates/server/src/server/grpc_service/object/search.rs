@@ -5,7 +5,7 @@ use pkcs11_proxy_ng_types::CkRv;
 use super::super::super::context_manager::ClientContextId;
 use super::super::super::context_manager::ObjectMetadata;
 use super::super::HandlerContext;
-use super::super::convert_template;
+use super::super::convert_template_opt;
 use super::super::service_utils::{
     ck_rv_only, register_object_handles, resolve_object_authz_context, resolve_session,
     spawn_backend,
@@ -27,7 +27,7 @@ pub(super) async fn find_objects_init(
         }
     };
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(error) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsInitResponse {
@@ -37,7 +37,8 @@ pub(super) async fn find_objects_init(
     };
 
     let backend = ctx.backend.clone();
-    let result = spawn_backend(move || backend.find_objects_init(session, &template)).await?;
+    let result =
+        spawn_backend(move || backend.find_objects_init(session, template.as_deref())).await?;
 
     Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsInitResponse { ck_rv: ck_rv_only(result) }))
 }
@@ -306,7 +307,7 @@ mod tests {
 
         // Create two objects and attach their UIDs. Also set CLASS and TOKEN so
         // fetch_object_metadata's 3-element template succeeds (conformant backend).
-        let obj_a = mock.create_object(backend_session, &[]).unwrap();
+        let obj_a = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_a,
             CkAttributeType::CLASS,
@@ -324,7 +325,7 @@ mod tests {
             CkAttributeType::UNIQUE_ID,
             MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_A_BYTES.to_vec().into())),
         );
-        let obj_b = mock.create_object(backend_session, &[]).unwrap();
+        let obj_b = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_b,
             CkAttributeType::CLASS,
@@ -344,7 +345,7 @@ mod tests {
         );
 
         // Prime the mock search state so find_objects_impl accepts the call.
-        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
         mock.set_find_objects_result(vec![obj_a, obj_b]);
 
         let backend: Arc<dyn Pkcs11Backend> = mock;
@@ -473,7 +474,7 @@ mod tests {
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         // Object created with CLASS and TOKEN but NO CKA_UNIQUE_ID.
-        let obj_no_uid = mock.create_object(backend_session, &[]).unwrap();
+        let obj_no_uid = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_no_uid,
             CkAttributeType::CLASS,
@@ -487,7 +488,7 @@ mod tests {
             MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
         );
 
-        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
         mock.set_find_objects_result(vec![obj_no_uid]);
 
         let backend: Arc<dyn Pkcs11Backend> = mock;
@@ -577,7 +578,7 @@ mod tests {
 
         // Two denied objects with uid_B, then the allowed object with uid_A.
         // Set CLASS and TOKEN on each (required by fetch_object_metadata).
-        let obj_d1 = mock.create_object(backend_session, &[]).unwrap();
+        let obj_d1 = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_d1,
             CkAttributeType::CLASS,
@@ -595,7 +596,7 @@ mod tests {
             CkAttributeType::UNIQUE_ID,
             MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
         );
-        let obj_d2 = mock.create_object(backend_session, &[]).unwrap();
+        let obj_d2 = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_d2,
             CkAttributeType::CLASS,
@@ -613,7 +614,7 @@ mod tests {
             CkAttributeType::UNIQUE_ID,
             MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
         );
-        let obj_a = mock.create_object(backend_session, &[]).unwrap();
+        let obj_a = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_a,
             CkAttributeType::CLASS,
@@ -634,7 +635,7 @@ mod tests {
 
         // Prime the multi-part op and configure the cursor-based result list.
         // With max_object_count=2: batch1=[obj_d1,obj_d2], batch2=[obj_a], then [].
-        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
         mock.set_find_objects_result(vec![obj_d1, obj_d2, obj_a]);
 
         let backend: Arc<dyn Pkcs11Backend> = mock;
@@ -709,7 +710,7 @@ mod tests {
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         // No set_find_objects_result → mock default returns [] immediately (exhausted).
-        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
 
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
@@ -801,7 +802,7 @@ mod tests {
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
 
         // obj_sk: SECRET_KEY — allowed class.
-        let obj_sk = mock.create_object(backend_session, &[]).unwrap();
+        let obj_sk = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_sk,
             CkAttributeType::CLASS,
@@ -819,7 +820,7 @@ mod tests {
         );
 
         // obj_pk: PUBLIC_KEY — denied class; must be invisible.
-        let obj_pk = mock.create_object(backend_session, &[]).unwrap();
+        let obj_pk = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
             obj_pk,
             CkAttributeType::CLASS,
@@ -836,7 +837,7 @@ mod tests {
             MockAttributeSlot::Value(CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
         );
 
-        mock.find_objects_init(backend_session, &[]).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
         mock.set_find_objects_result(vec![obj_sk, obj_pk]);
 
         let backend: Arc<dyn Pkcs11Backend> = mock;

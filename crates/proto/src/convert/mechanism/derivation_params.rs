@@ -288,6 +288,7 @@ impl From<&RsaAesKeyWrapParams> for v1_proto::RsaAesKeyWrapParams {
                 mgf: p.oaep_params.mgf,
                 source: p.oaep_params.source,
                 source_data: secret_to_plain(&p.oaep_params.source_data),
+                source_null: p.oaep_params.source_null,
             }),
         }
     }
@@ -305,6 +306,7 @@ impl TryFrom<&v1_proto::RsaAesKeyWrapParams> for RsaAesKeyWrapParams {
                 mgf: o.mgf,
                 source: o.source,
                 source_data: SecretBytes::copy_from_slice(&o.source_data),
+                source_null: o.source_null,
             },
         })
     }

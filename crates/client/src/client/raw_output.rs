@@ -332,13 +332,13 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         spec: &CkOutputBufferSpec,
     ) -> Result<CkOutputAndHandleResult, CkRv> {
         self.require_exact_output_effects().await?;
         let ctx = self.context_id()?;
         let proto_template: Vec<pkcs11_proxy_ng_proto::Attribute> =
-            template.iter().map(pkcs11_proxy_ng_proto::Attribute::from).collect();
+            template.unwrap_or(&[]).iter().map(pkcs11_proxy_ng_proto::Attribute::from).collect();
         let req = pkcs11_proxy_ng_proto::EncapsulateKeyExactRequest {
             exact_output_effects_version: 1,
             client_context_id: ctx,
@@ -346,6 +346,7 @@ impl Pkcs11Client {
             mechanism: Some(pkcs11_proxy_ng_proto::Mechanism::from(mechanism)),
             public_key_handle: public_key.0,
             template: proto_template,
+            template_null: template.is_none(),
             output_spec: Some(Self::proto_output_buffer_spec(spec)),
         };
         let resp = self

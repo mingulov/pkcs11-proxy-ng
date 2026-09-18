@@ -136,6 +136,24 @@ pub(super) fn convert_template(
     attrs.iter().map(|a| CkAttribute::try_from(a).map_err(|e| e.0)).collect()
 }
 
+/// `convert_template` with Wave 3.5 D2 NULL-template preservation: a set
+/// `template_null` bit yields `None` (the caller's NULL template pointer),
+/// which the FFI backend materializes as NULL instead of (ptr, 0). A NULL
+/// bit with a non-empty attribute list is a malformed request.
+pub(super) fn convert_template_opt(
+    attrs: &[pkcs11_proxy_ng_proto::Attribute],
+    template_null: bool,
+) -> Result<Option<Vec<CkAttribute>>, u64> {
+    if template_null {
+        if !attrs.is_empty() {
+            return Err(CkRv::ARGUMENTS_BAD.0);
+        }
+        Ok(None)
+    } else {
+        convert_template(attrs).map(Some)
+    }
+}
+
 /// Encode a `CkAttributeValue` into the on-wire `bytes` representation
 /// the proto uses for `AttributeResult.value`.
 ///

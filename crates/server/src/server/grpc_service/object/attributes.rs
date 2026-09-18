@@ -17,7 +17,7 @@ use super::super::service_utils::{
     ExactCompletion, ck_rv_only, resolve_session_and_object, spawn_backend, spawn_backend_exact,
     spawn_task,
 };
-use super::super::{attr_value_to_bytes, ck_result_to_rv, convert_template};
+use super::super::{attr_value_to_bytes, ck_result_to_rv, convert_template, convert_template_opt};
 use super::attribute_results;
 
 // ── R2 coalescer helpers ──────────────────────────────────────────────────────
@@ -533,7 +533,7 @@ pub(super) async fn set_attribute_value(
             }
         };
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(error) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::SetAttributeValueResponse {
@@ -544,7 +544,8 @@ pub(super) async fn set_attribute_value(
 
     let backend = ctx.backend.clone();
     let result =
-        spawn_backend(move || backend.set_attribute_value(session, object, &template)).await?;
+        spawn_backend(move || backend.set_attribute_value(session, object, template.as_deref()))
+            .await?;
     let ck_rv = ck_rv_only(result);
 
     // On a successful set, drop all cached attribute entries for this object so
@@ -833,7 +834,7 @@ mod tests {
         // Create backend session 1 and object 1 in the mock's live state.
         // `open_session_impl` doesn't require initialize(); session handle starts at 1.
         let session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        mock.create_object(session, &[]).unwrap(); // CkObjectHandle(1)
+        mock.create_object(session, Some(&[])).unwrap(); // CkObjectHandle(1)
 
         mock.set_attribute(
             CkObjectHandle(1),
@@ -1114,6 +1115,8 @@ mod tests {
                     attr_type: CkAttributeType::LABEL.0,
                     value: None,
                 }],
+
+                template_null: false,
             }),
         )
         .await

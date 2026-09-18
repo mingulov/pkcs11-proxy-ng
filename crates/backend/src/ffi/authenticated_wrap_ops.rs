@@ -41,7 +41,7 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, SecretBytes)> {
         require_legacy_parameter(mechanism)?;
@@ -206,7 +206,7 @@ mod tests {
                         &mechanism,
                         CkObjectHandle(2),
                         CkInBuf::Bytes(&[0]),
-                        &[],
+                        Some(&[]),
                         CkInBuf::Bytes(&[]),
                     )
                     .map(|(_, output)| output.is_empty()),
@@ -285,7 +285,7 @@ mod tests {
                         None,
                         CkObjectHandle(2),
                         CkInBuf::Bytes(&[0]),
-                        &[],
+                        Some(&[]),
                         CkInBuf::Bytes(&[]),
                     )
                     .map(|(_, out)| out),
@@ -486,7 +486,7 @@ mod tests {
             Some(&parameter),
             CkObjectHandle(2),
             CkInBuf::Bytes(&[0; 8]),
-            &[],
+            Some(&[]),
             CkInBuf::Bytes(&[]),
         );
         assert!(matches!(result, Err(CkRv::DEVICE_ERROR)));
@@ -518,7 +518,7 @@ mod tests {
                 Some(&parameter),
                 CkObjectHandle(2),
                 CkInBuf::Bytes(&[0; 8]),
-                &[],
+                Some(&[]),
                 CkInBuf::Bytes(&[]),
             );
             assert!(matches!(result, Err(CkRv::DEVICE_ERROR)));
@@ -547,7 +547,7 @@ mod tests {
             Some(&parameter),
             CkObjectHandle(2),
             CkInBuf::Bytes(&[0; 8]),
-            &[],
+            Some(&[]),
             CkInBuf::Bytes(&[]),
         );
         assert!(result.is_ok());
@@ -825,7 +825,7 @@ mod tests {
                 Some(&parameter),
                 CkObjectHandle(2),
                 CkInBuf::Bytes(&[0; 8]),
-                &[],
+                Some(&[]),
                 CkInBuf::Bytes(&[]),
             );
             assert!(

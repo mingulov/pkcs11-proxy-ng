@@ -105,7 +105,7 @@ fn reads_common_mechanism_parameter_structs() {
         ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
     };
     match unsafe { read_ck_mechanism(&mechanism) } {
-        CkMechanismParams::Gcm(GcmParams { iv, iv_bits, iv_buffer_len, aad, tag_bits }) => {
+        CkMechanismParams::Gcm(GcmParams { iv, iv_bits, iv_buffer_len, aad, tag_bits, .. }) => {
             assert_eq!(iv, [0x10; 12]);
             assert_eq!(iv_bits, 96);
             assert_eq!(iv_buffer_len, 12);
@@ -1893,7 +1893,7 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
     };
 
     match unsafe { read_ck_mechanism(&mechanism) } {
-        CkMechanismParams::Gcm(GcmParams { iv, iv_bits, iv_buffer_len, aad, tag_bits }) => {
+        CkMechanismParams::Gcm(GcmParams { iv, iv_bits, iv_buffer_len, aad, tag_bits, .. }) => {
             assert!(iv.is_empty());
             assert_eq!(iv_bits, 96);
             assert_eq!(iv_buffer_len, 12);
@@ -1913,6 +1913,9 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             }),
         );
     }
@@ -2377,5 +2380,68 @@ fn salsa20_nonce_unmaterializable_bits_rejected_not_wild_read() {
     match result.params.expect("params") {
         CkMechanismParams::Raw(_) => {} // expected: safe Raw fallback
         other => panic!("expected Raw fallback for unmaterializable nonce bits, got {other:?}"),
+    }
+}
+
+#[test]
+fn gcm_null_vs_empty_iv_aad_survive_the_read() {
+    // F3/D2: (NULL, 0) vs (ptr, 0) for pIv/pAAD must remain distinguishable
+    // after the shim read so the daemon can materialize the caller's shape.
+    for (p_iv, iv_null, p_aad, aad_null) in [
+        (std::ptr::null_mut(), true, std::ptr::null_mut(), true),
+        (std::ptr::null_mut(), true, std::ptr::dangling_mut(), false),
+        (std::ptr::dangling_mut(), false, std::ptr::null_mut(), true),
+        (std::ptr::dangling_mut(), false, std::ptr::dangling_mut(), false),
+    ] {
+        let mut gcm = CK_GCM_PARAMS {
+            pIv: p_iv,
+            ulIvLen: 0,
+            ulIvBits: 0,
+            pAAD: p_aad,
+            ulAADLen: 0,
+            ulTagBits: 128,
+        };
+        let mechanism = CK_MECHANISM {
+            mechanism: CkMechanismType::AES_GCM.0 as CK_MECHANISM_TYPE,
+            pParameter: &mut gcm as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+        };
+        match unsafe { read_ck_mechanism(&mechanism) } {
+            CkMechanismParams::Gcm(gcm) => {
+                assert!(gcm.iv.is_empty());
+                assert!(gcm.aad.expose(|b| b.is_empty()));
+                assert_eq!(gcm.iv_null, iv_null, "pIv nullness must survive");
+                assert_eq!(gcm.aad_null, aad_null, "pAAD nullness must survive");
+            }
+            other => panic!("unexpected GCM params: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn oaep_null_vs_empty_source_survives_the_read() {
+    // F3/D2: (NULL, 0) vs (ptr, 0) for pSourceData must remain
+    // distinguishable after the shim read.
+    for (p_source, source_null) in [(std::ptr::null_mut(), true), (std::ptr::dangling_mut(), false)]
+    {
+        let mut oaep = CK_RSA_PKCS_OAEP_PARAMS {
+            hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+            mgf: 1,
+            source: 1,
+            pSourceData: p_source,
+            ulSourceDataLen: 0,
+        };
+        let mechanism = CK_MECHANISM {
+            mechanism: CkMechanismType::RSA_PKCS_OAEP.0 as CK_MECHANISM_TYPE,
+            pParameter: &mut oaep as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
+        };
+        match unsafe { read_ck_mechanism(&mechanism) } {
+            CkMechanismParams::RsaPkcsOaep(oaep) => {
+                assert!(oaep.source_data.expose(|b| b.is_empty()));
+                assert_eq!(oaep.source_null, source_null, "pSourceData nullness must survive");
+            }
+            other => panic!("unexpected OAEP params: {other:?}"),
+        }
     }
 }

@@ -44,11 +44,13 @@ async fn derive_key_mechanism_out_surfaces_pbe_iv_through_mock_grpc_stack() {
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let base_key = client.create_object(session, &[]).await.unwrap();
+    let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism { mechanism_type: CKM_PBE_MD2_DES_CBC, params: None };
 
-    let (derived_key, mechanism_out) =
-        client.derive_key_with_mechanism_out(session, &mechanism, base_key, &[]).await.unwrap();
+    let (derived_key, mechanism_out) = client
+        .derive_key_with_mechanism_out(session, &mechanism, base_key, Some(&[]))
+        .await
+        .unwrap();
 
     assert_ne!(derived_key, CkObjectHandle(0));
     assert_eq!(mechanism_out, Some(expected_output));
@@ -71,7 +73,7 @@ async fn derive_key_mechanism_out_surfaces_wtls_version_through_mock_grpc_stack(
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let base_key = client.create_object(session, &[]).await.unwrap();
+    let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CKM_WTLS_MASTER_KEY_DERIVE,
         params: Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
@@ -84,8 +86,10 @@ async fn derive_key_mechanism_out_surfaces_wtls_version_through_mock_grpc_stack(
         })),
     };
 
-    let (derived_key, mechanism_out) =
-        client.derive_key_with_mechanism_out(session, &mechanism, base_key, &[]).await.unwrap();
+    let (derived_key, mechanism_out) = client
+        .derive_key_with_mechanism_out(session, &mechanism, base_key, Some(&[]))
+        .await
+        .unwrap();
 
     assert_ne!(derived_key, CkObjectHandle(0));
     assert_eq!(mechanism_out, Some(expected_output));
@@ -116,7 +120,7 @@ async fn derive_key_mechanism_out_surfaces_wtls_key_material_through_mock_grpc_s
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let base_key = client.create_object(session, &[]).await.unwrap();
+    let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE,
         params: Some(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
@@ -136,8 +140,10 @@ async fn derive_key_mechanism_out_surfaces_wtls_key_material_through_mock_grpc_s
         })),
     };
 
-    let (derived_key, mechanism_out) =
-        client.derive_key_with_mechanism_out(session, &mechanism, base_key, &[]).await.unwrap();
+    let (derived_key, mechanism_out) = client
+        .derive_key_with_mechanism_out(session, &mechanism, base_key, Some(&[]))
+        .await
+        .unwrap();
 
     assert_ne!(derived_key, CkObjectHandle(0));
     // F6/D4: key-mat OUT handles must come back virtualized (registered +
@@ -179,7 +185,7 @@ async fn derive_key_mechanism_out_surfaces_tls_key_material_through_mock_grpc_st
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let base_key = client.create_object(session, &[]).await.unwrap();
+    let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CKM_TLS12_KEY_AND_MAC_DERIVE,
         params: Some(CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
@@ -201,8 +207,10 @@ async fn derive_key_mechanism_out_surfaces_tls_key_material_through_mock_grpc_st
         })),
     };
 
-    let (derived_key, mechanism_out) =
-        client.derive_key_with_mechanism_out(session, &mechanism, base_key, &[]).await.unwrap();
+    let (derived_key, mechanism_out) = client
+        .derive_key_with_mechanism_out(session, &mechanism, base_key, Some(&[]))
+        .await
+        .unwrap();
 
     assert_ne!(derived_key, CkObjectHandle(0));
     // F6/D4: key-mat OUT handles must come back virtualized (registered +
@@ -233,7 +241,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles()
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let base_key = client.create_object(session, &[]).await.unwrap();
+    let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CKM_SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
@@ -249,8 +257,10 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles()
         })),
     };
 
-    let (primary_key, mechanism_out) =
-        client.derive_key_with_mechanism_out(session, &mechanism, base_key, &[]).await.unwrap();
+    let (primary_key, mechanism_out) = client
+        .derive_key_with_mechanism_out(session, &mechanism, base_key, Some(&[]))
+        .await
+        .unwrap();
     let Some(CkMechanismParams::Sp800108Kdf(output)) = mechanism_out else {
         panic!("expected SP800-108 mechanism_out");
     };
@@ -301,7 +311,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_addition
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let base_key = client.create_object(session, &[]).await.unwrap();
+    let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CKM_SP800_108_DOUBLE_PIPELINE_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
@@ -325,8 +335,10 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_addition
         })),
     };
 
-    let (primary_key, mechanism_out) =
-        client.derive_key_with_mechanism_out(session, &mechanism, base_key, &[]).await.unwrap();
+    let (primary_key, mechanism_out) = client
+        .derive_key_with_mechanism_out(session, &mechanism, base_key, Some(&[]))
+        .await
+        .unwrap();
     let Some(CkMechanismParams::Sp800108Kdf(output)) = mechanism_out else {
         panic!("expected SP800-108 double-pipeline mechanism_out");
     };
@@ -363,7 +375,7 @@ async fn derive_key_mechanism_out_surfaces_sp800_108_template_failure_handle() {
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let base_key = client.create_object(session, &[]).await.unwrap();
+    let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CKM_SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
@@ -389,7 +401,7 @@ async fn derive_key_mechanism_out_surfaces_sp800_108_template_failure_handle() {
     };
 
     let result = client
-        .derive_key_with_mechanism_out_result(session, &mechanism, base_key, &[])
+        .derive_key_with_mechanism_out_result(session, &mechanism, base_key, Some(&[]))
         .await
         .unwrap();
 
@@ -415,7 +427,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let base_key = client.create_object(session, &[]).await.unwrap();
+    let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
         mechanism_type: CKM_SP800_108_FEEDBACK_KDF,
         params: Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
@@ -432,8 +444,10 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_
         })),
     };
 
-    let (primary_key, mechanism_out) =
-        client.derive_key_with_mechanism_out(session, &mechanism, base_key, &[]).await.unwrap();
+    let (primary_key, mechanism_out) = client
+        .derive_key_with_mechanism_out(session, &mechanism, base_key, Some(&[]))
+        .await
+        .unwrap();
     let Some(CkMechanismParams::Sp800108FeedbackKdf(output)) = mechanism_out else {
         panic!("expected SP800-108 feedback mechanism_out");
     };
@@ -468,7 +482,7 @@ async fn derive_key_rejects_invalid_sp800_108_key_handle_data_param() {
 
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-    let base_key = client.create_object(session, &[]).await.unwrap();
+    let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let invalid_nested_key = CkObjectHandle(0xDEAD_BEEF);
     let mechanism = CkMechanism {
         mechanism_type: CKM_SP800_108_COUNTER_KDF,
@@ -485,7 +499,7 @@ async fn derive_key_rejects_invalid_sp800_108_key_handle_data_param() {
         })),
     };
 
-    let err = client.derive_key_with_mechanism_out(session, &mechanism, base_key, &[]).await;
+    let err = client.derive_key_with_mechanism_out(session, &mechanism, base_key, Some(&[])).await;
 
     assert_eq!(err.unwrap_err(), CkRv::OBJECT_HANDLE_INVALID);
 }

@@ -25,7 +25,7 @@ pub(crate) async fn find_objects(
     }
 
     client
-        .find_objects_init(session, &template)
+        .find_objects_init(session, Some(&template))
         .await
         .map_err(crate::handlers::cli_err("C_FindObjectsInit"))?;
     let objects = client
@@ -131,7 +131,7 @@ pub(crate) async fn create_object(
     }
 
     let handle = client
-        .create_object(session, &template)
+        .create_object(session, Some(&template))
         .await
         .map_err(crate::handlers::cli_err("C_CreateObject"))?;
     println!("Created object with handle: {}", handle.0);

@@ -22,7 +22,7 @@ async fn try_rsa_keygen(
 ) -> Result<(CkObjectHandle, CkObjectHandle), CkRv> {
     let mechanism =
         CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
-    client.generate_key_pair(session, &mechanism, pub_template, priv_template).await
+    client.generate_key_pair(session, &mechanism, Some(pub_template), Some(priv_template)).await
 }
 
 /// Helper: attempt to generate an AES key with the given template.
@@ -33,7 +33,7 @@ async fn try_aes_keygen(
 ) -> Result<CkObjectHandle, CkRv> {
     // CKM_AES_KEY_GEN = 0x00001080
     let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x00001080), params: None };
-    client.generate_key(session, &mechanism, template).await
+    client.generate_key(session, &mechanism, Some(template)).await
 }
 
 fn rsa_pub_template(label: &str, extra: &[CkAttribute]) -> Vec<CkAttribute> {
@@ -399,7 +399,7 @@ async fn ec_keygen_template_variants() -> Result<(), String> {
         },
     ];
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::EC_KEY_PAIR_GEN, params: None };
-    let result = client.generate_key_pair(session, &mechanism, &pub_t, &priv_t).await;
+    let result = client.generate_key_pair(session, &mechanism, Some(&pub_t), Some(&priv_t)).await;
     let msg = result.as_ref().map_or_else(|e| format!("{e}"), |_| "OK".into());
     eprintln!("[SoftHSM2] EC P-256 keygen: {msg}");
     assert!(result.is_ok(), "EC P-256 keygen should succeed");
@@ -440,7 +440,8 @@ async fn ec_keygen_template_variants() -> Result<(), String> {
         },
         CkAttribute { attr_type: CkAttributeType::SIGN, value: Some(CkAttributeValue::Bool(true)) },
     ];
-    let result2 = client.generate_key_pair(session, &mechanism, &pub_t2, &priv_t2).await;
+    let result2 =
+        client.generate_key_pair(session, &mechanism, Some(&pub_t2), Some(&priv_t2)).await;
     let msg2 = result2.as_ref().map_or_else(|e| format!("{e}"), |_| "OK".into());
     eprintln!("[SoftHSM2] EC P-384 keygen: {msg2}");
     assert!(result2.is_ok(), "EC P-384 keygen should succeed");
@@ -471,7 +472,7 @@ async fn data_object_template_variants() -> Result<(), String> {
             value: Some(CkAttributeValue::Bytes(b"hello".to_vec().into())),
         },
     ];
-    let r1 = client.create_object(session, &t1).await;
+    let r1 = client.create_object(session, Some(&t1)).await;
     let msg1 = r1.as_ref().map_or_else(|e| format!("{e}"), |_| "OK".into());
     eprintln!("[SoftHSM2] Data object (minimal): {msg1}");
 
@@ -498,7 +499,7 @@ async fn data_object_template_variants() -> Result<(), String> {
             value: Some(CkAttributeValue::Bool(false)),
         },
     ];
-    let r2 = client.create_object(session, &t2).await;
+    let r2 = client.create_object(session, Some(&t2)).await;
     let msg2 = r2.as_ref().map_or_else(|e| format!("{e}"), |_| "OK".into());
     eprintln!("[SoftHSM2] Data object (full): {msg2}");
 

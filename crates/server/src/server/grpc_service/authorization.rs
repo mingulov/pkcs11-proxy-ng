@@ -785,7 +785,7 @@ mod tests {
         mock.initialize().unwrap();
         let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // Make UNIQUE_ID ATTRIBUTE_SENSITIVE so uid resolution returns None.
         mock.set_attribute(
             backend_object,
@@ -982,7 +982,7 @@ mod tests {
             mock.initialize().unwrap();
             let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
             let session = mock.open_session(CkSlotId(0), flags).unwrap();
-            let object = mock.create_object(session, &[]).unwrap();
+            let object = mock.create_object(session, Some(&[])).unwrap();
             // CLASS and TOKEN are mandatory in conformant backends; set them so the
             // 3-element template does not fail with ATTRIBUTE_TYPE_INVALID.
             mock.set_attribute(

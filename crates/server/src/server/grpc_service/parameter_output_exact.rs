@@ -924,8 +924,8 @@ mod ambiguity_tests {
         mock.initialize().unwrap();
         let backend_session =
             mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let wrapping_key = mock.create_object(backend_session, &[]).unwrap();
-        let key = mock.create_object(backend_session, &[]).unwrap();
+        let wrapping_key = mock.create_object(backend_session, Some(&[])).unwrap();
+        let key = mock.create_object(backend_session, Some(&[])).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;

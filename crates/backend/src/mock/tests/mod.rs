@@ -33,7 +33,7 @@ fn label_attr(label: &str) -> CkAttribute {
 }
 
 fn live_key(backend: &MockBackend, session: CkSessionHandle) -> CkObjectHandle {
-    backend.create_object(session, &[label_attr("key")]).unwrap()
+    backend.create_object(session, Some(&[label_attr("key")])).unwrap()
 }
 
 fn exact_size_spec() -> CkOutputBufferSpec {
@@ -260,13 +260,15 @@ fn expect_signal_derive_param_invalid(
     let mechanism = CkMechanism { mechanism_type, params: Some(params) };
 
     assert_eq!(
-        backend.derive_key(session, &mechanism, base_key, &[label_attr("derived")]).unwrap_err(),
+        backend
+            .derive_key(session, &mechanism, base_key, Some(&[label_attr("derived")]))
+            .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID,
         "{label} should reject invalid source-defined handle fields"
     );
     assert_eq!(
         backend
-            .derive_key_with_output(session, &mechanism, base_key, &[label_attr("derived")])
+            .derive_key_with_output(session, &mechanism, base_key, Some(&[label_attr("derived")]))
             .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID,
         "{label} exact/output path should reject invalid source-defined handle fields"
@@ -318,13 +320,15 @@ fn expect_derive_param_handle_invalid(
     let mechanism = CkMechanism { mechanism_type, params: Some(params) };
 
     assert_eq!(
-        backend.derive_key(session, &mechanism, base_key, &[label_attr("derived")]).unwrap_err(),
+        backend
+            .derive_key(session, &mechanism, base_key, Some(&[label_attr("derived")]))
+            .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID,
         "{label} should reject an invalid source-defined handle"
     );
     assert_eq!(
         backend
-            .derive_key_with_output(session, &mechanism, base_key, &[label_attr("derived")])
+            .derive_key_with_output(session, &mechanism, base_key, Some(&[label_attr("derived")]))
             .unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID,
         "{label} exact/output path should reject an invalid source-defined handle"
@@ -338,6 +342,9 @@ fn gcm_mechanism_output() -> CkMechanismParams {
         iv_buffer_len: 12,
         aad: b"mock-aad".to_vec().into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     })
 }
 

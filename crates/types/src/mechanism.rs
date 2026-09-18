@@ -297,12 +297,16 @@ pub struct RsaPkcsPssParams {
 }
 
 /// CK_RSA_PKCS_OAEP_PARAMS
+///
+/// - `source_null`: the caller passed (NULL, 0) for `pSourceData` (Wave 3.5
+///   D2; preserved so the daemon materializes NULL instead of (ptr, 0)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RsaPkcsOaepParams {
     pub hash_alg: CkMechanismType,
     pub mgf: u64,
     pub source: u64,
     pub source_data: SecretBytes,
+    pub source_null: bool,
 }
 
 /// CK_GCM_PARAMS — parameters for CKM_AES_GCM.
@@ -312,6 +316,8 @@ pub struct RsaPkcsOaepParams {
 /// - `iv_buffer_len`: writable IV buffer capacity when `iv` is an output parameter
 /// - `aad`: additional authenticated data (may be empty)
 /// - `tag_bits`: authentication tag length in bits (96, 112, or 128)
+/// - `iv_null` / `aad_null`: the caller passed (NULL, 0) for `pIv` / `pAAD`
+///   (Wave 3.5 D2; preserved so the daemon materializes NULL).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcmParams {
     pub iv: Vec<u8>,
@@ -319,6 +325,8 @@ pub struct GcmParams {
     pub iv_buffer_len: u64,
     pub aad: SecretBytes,
     pub tag_bits: u64,
+    pub iv_null: bool,
+    pub aad_null: bool,
 }
 
 /// CK_ECDH1_DERIVE_PARAMS — parameters for CKM_ECDH1_DERIVE.

@@ -18,7 +18,7 @@ use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, SecretBytes};
 
 use super::super::authorization::mechanism_permitted;
-use super::super::convert_template;
+use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
@@ -211,7 +211,7 @@ async fn unwrap_key_authenticated_impl(
         }));
     }
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
@@ -223,9 +223,12 @@ async fn unwrap_key_authenticated_impl(
         }
     };
 
+    // A NULL template carries no attributes; classification treats it as empty.
+    let template_view = template.as_deref().unwrap_or(&[]);
+
     // D6(1): refuse minting a private object while logically logged out.
     if let Err(rv) =
-        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, &template).await
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
             authenticated_output: None,
@@ -275,8 +278,8 @@ async fn unwrap_key_authenticated_impl(
             }));
         }
     };
-    let is_token = template_declares_token_object(&template);
-    let is_private = template_declares_private_object(&template);
+    let is_token = template_declares_token_object(template_view);
+    let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let object_cleanup = Arc::clone(&ctx.object_cleanup);
@@ -291,7 +294,7 @@ async fn unwrap_key_authenticated_impl(
                         parameter.as_ref(),
                         unwrapping_key,
                         input_from_wire(wrapped_raw, wrapped_key_null_len),
-                        &template,
+                        template.as_deref(),
                         input_from_wire(aad_raw, aad_null_len),
                     )?;
                     let created = pkcs11_proxy_ng_backend::object_cleanup::PendingNativeObject::new(
@@ -312,7 +315,7 @@ async fn unwrap_key_authenticated_impl(
                             &mechanism,
                             unwrapping_key,
                             input_from_wire(wrapped_raw, wrapped_key_null_len),
-                            &template,
+                            template.as_deref(),
                             input_from_wire(aad_raw, aad_null_len),
                         )
                         // ADR-0013 §5 (per-site): converted inside the `expose` closure, so the

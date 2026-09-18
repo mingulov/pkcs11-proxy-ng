@@ -57,7 +57,7 @@ async fn build_signing_state(endpoint: &str) -> (Pkcs11Client, CkSessionHandle, 
     let slots = c.get_slot_list(false).await.unwrap();
     let session =
         c.open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await.unwrap();
-    let key = c.create_object(session, &[]).await.unwrap();
+    let key = c.create_object(session, Some(&[])).await.unwrap();
     (c, session, key)
 }
 

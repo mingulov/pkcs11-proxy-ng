@@ -5,7 +5,7 @@ use pkcs11_proxy_ng_types::CkRv;
 use super::super::super::context_manager::ClientContextId;
 use super::super::super::handle_map::VirtualHandle;
 use super::super::HandlerContext;
-use super::super::convert_template;
+use super::super::convert_template_opt;
 use super::super::service_utils::{
     ck_rv_only, ensure_private_mint_allowed, object_is_private, register_session_object_handle,
     resolve_session, resolve_session_and_object, spawn_backend, template_declares_private_object,
@@ -29,7 +29,7 @@ pub(super) async fn create_object(
         }
     };
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(error) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
@@ -39,10 +39,17 @@ pub(super) async fn create_object(
         }
     };
 
+    // A NULL template carries no attributes; classification treats it as empty.
+    let template_view = template.as_deref().unwrap_or(&[]);
+
     // D6(1): refuse minting a private object while logically logged out.
-    if let Err(rv) =
-        ensure_private_mint_allowed(&ctx.context_manager, &ctx_id, req.session_handle, &template)
-            .await
+    if let Err(rv) = ensure_private_mint_allowed(
+        &ctx.context_manager,
+        &ctx_id,
+        req.session_handle,
+        template_view,
+    )
+    .await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
             ck_rv: rv.0,
@@ -54,11 +61,11 @@ pub(super) async fn create_object(
     // object's handle is evicted when its session closes; a token object's
     // handle persists across sessions (B2). The privacy bit is recorded for
     // the D6(1) USE enforcement.
-    let is_token_object = template_declares_token_object(&template);
-    let is_private = template_declares_private_object(&template);
+    let is_token_object = template_declares_token_object(template_view);
+    let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = ctx.backend.clone();
-    let result = spawn_backend(move || backend.create_object(session, &template)).await?;
+    let result = spawn_backend(move || backend.create_object(session, template.as_deref())).await?;
 
     match result {
         Ok(object) => Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
@@ -99,7 +106,7 @@ pub(super) async fn copy_object(
             }
         };
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(error) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
@@ -109,12 +116,19 @@ pub(super) async fn copy_object(
         }
     };
 
+    // A NULL template carries no attributes; classification treats it as empty.
+    let template_view = template.as_deref().unwrap_or(&[]);
+
     // D6(1): refuse copying TO a private object while logically logged out.
     // (Copying FROM a private source is refused by the USE check inside
     // resolve_session_and_object above.)
-    if let Err(rv) =
-        ensure_private_mint_allowed(&ctx.context_manager, &ctx_id, req.session_handle, &template)
-            .await
+    if let Err(rv) = ensure_private_mint_allowed(
+        &ctx.context_manager,
+        &ctx_id,
+        req.session_handle,
+        template_view,
+    )
+    .await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
             ck_rv: rv.0,
@@ -123,20 +137,21 @@ pub(super) async fn copy_object(
     }
 
     // A copied object is a session object unless its template marks CKA_TOKEN (B2).
-    let is_token = template_declares_token_object(&template);
+    let is_token = template_declares_token_object(template_view);
     // The copy's privacy, computed before the template moves into the backend
     // call: template-declared when present (an explicit CKA_PRIVATE=False
     // makes a public copy even of a private source), else inherited from the
     // source object (our recorded bit, else one read-only backend probe) so
     // later USE of the copy needs no probe.
-    let new_is_private = if template_has_private_attr(&template) {
-        template_declares_private_object(&template)
+    let new_is_private = if template_has_private_attr(template_view) {
+        template_declares_private_object(template_view)
     } else {
         object_is_private(ctx, &ctx_id, req.object_handle, session, object).await
     };
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = ctx.backend.clone();
-    let result = spawn_backend(move || backend.copy_object(session, object, &template)).await?;
+    let result =
+        spawn_backend(move || backend.copy_object(session, object, template.as_deref())).await?;
 
     match result {
         Ok(new_object) => Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
@@ -230,7 +245,7 @@ mod tests {
 
         // Open a real backend session and create an object.
         let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let backend_object = mock.create_object(backend_session, &[]).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
 
         // Set up ContextManager with virtual slot, session, and object.
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));

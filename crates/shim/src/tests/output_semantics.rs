@@ -575,7 +575,7 @@ fn raw_client_size_query_returns_length_without_bytes() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -630,7 +630,7 @@ fn raw_client_too_small_query_preserves_backend_returned_length() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -685,7 +685,7 @@ fn raw_client_exact_fit_query_returns_backend_bytes() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -740,7 +740,7 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -841,7 +841,7 @@ fn legacy_client_size_query_does_not_synthesize_attribute_bytes() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -2420,6 +2420,9 @@ fn gcm_generated_iv_round_trips_through_shim_client_and_server() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"aad".to_vec().into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     })));
 
     let shim = ShimSession::new();
@@ -2458,6 +2461,9 @@ fn gcm_delayed_iv_round_trips_after_encrypt_data_query() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"aad".to_vec().into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     })));
 
     let shim = ShimSession::new();
@@ -2511,6 +2517,9 @@ fn gcm_delayed_iv_size_query_does_not_consume_writeback() {
         iv_buffer_len: generated_iv.len() as u64,
         aad: b"aad".to_vec().into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     })));
 
     let shim = ShimSession::new();
@@ -3027,7 +3036,7 @@ fn exact_encrypt_message_size_query_returns_length() {
             mechanism_type: CkMechanismType::AES_ECB,
             params: None,
         };
-        let key = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         client
             .message_encrypt_init(session, Some(&mechanism), None, key)
             .await
@@ -3097,8 +3106,8 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
             .await
             .expect("C_OpenSession");
 
-        let wrapping_key = client.create_object(session, &[]).await.expect("C_CreateObject");
-        let key = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let wrapping_key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
+        let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         let output_spec =
             CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
@@ -3168,8 +3177,8 @@ fn null_output_length_parameter_rpc_preserves_exact_provider_rv() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let wrapping_key = client.create_object(session, &[]).await.expect("C_CreateObject");
-        let key = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let wrapping_key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
+        let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
         let parameter_spec =
@@ -3592,7 +3601,7 @@ fn raw_client_nested_template_size_query() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
             object,
@@ -3645,7 +3654,7 @@ fn raw_client_nested_template_data_query() {
             .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
             .await
             .expect("C_OpenSession");
-        let object = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         let class_value: u64 = 3;
         let key_type_value: u64 = 31;

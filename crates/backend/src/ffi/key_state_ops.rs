@@ -17,9 +17,9 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
         Self::call_object_with_mechanism(
@@ -47,9 +47,9 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
         Self::call_object_with_mechanism_output(
@@ -73,9 +73,9 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<crate::traits::CkDeriveKeyOutputResult> {
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
         Self::call_object_with_mechanism_output_result(
@@ -165,9 +165,9 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let (wk_ptr, wk_len) = wrapped_key.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         let h_unwrapping_key = Self::object_handle(unwrapping_key)?;
@@ -193,9 +193,9 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         Self::call_object_with_mechanism(
             unsafe { (*self.func_list).C_GenerateKey },
@@ -218,9 +218,9 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
-        let ffi_attrs = FfiAttrs::from_slice(template)?;
+        let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         Self::call_object_with_mechanism_output(
             unsafe { (*self.func_list).C_GenerateKey },
@@ -241,11 +241,11 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        pub_template: &[CkAttribute],
-        priv_template: &[CkAttribute],
+        pub_template: Option<&[CkAttribute]>,
+        priv_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
-        let pub_ffi = FfiAttrs::from_slice(pub_template)?;
-        let priv_ffi = FfiAttrs::from_slice(priv_template)?;
+        let pub_ffi = FfiAttrs::from_opt_slice(pub_template)?;
+        let priv_ffi = FfiAttrs::from_opt_slice(priv_template)?;
         let h_session = Self::session_handle(session)?;
         Self::call_object_pair_with_mechanism(
             unsafe { (*self.func_list).C_GenerateKeyPair },

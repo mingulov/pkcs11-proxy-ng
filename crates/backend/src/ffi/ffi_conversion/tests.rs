@@ -188,6 +188,8 @@ mod mechanism_to_ffi_tests {
                 mgf: 1,
                 source: 1,
                 source_data: vec![0xA0, 0xA1, 0xA2].into(),
+
+                source_null: false,
             }),
         );
 
@@ -222,6 +224,9 @@ mod mechanism_to_ffi_tests {
                 iv_buffer_len: 12,
                 aad: vec![0xAA, 0xBB, 0xCC].into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             }),
         );
 
@@ -263,6 +268,9 @@ mod mechanism_to_ffi_tests {
                     iv_buffer_len: buffer_len as u64,
                     aad: Vec::new().into(),
                     tag_bits: 128,
+
+                    iv_null: false,
+                    aad_null: false,
                 }),
             );
             // SAFETY: the owner is alive and unchanged; snapshot once per
@@ -304,6 +312,9 @@ mod mechanism_to_ffi_tests {
                 iv_buffer_len: u64::MAX,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         });
         assert_eq!(result.err(), Some(CkRv::MECHANISM_PARAM_INVALID));
@@ -369,6 +380,9 @@ mod mechanism_to_ffi_tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             }),
         );
 
@@ -844,6 +858,64 @@ mod mechanism_to_ffi_tests {
         assert_eq!(tr, b"precomputed-tr");
         assert_eq!(context, b"context");
     }
+
+    #[test]
+    fn gcm_null_flags_materialize_null_pointers() {
+        // F3/D2: only caller-NULL fields materialize NULL; empty non-NULL
+        // fields keep a non-NULL pointer with len 0.
+        for (iv_null, aad_null) in [(true, true), (true, false), (false, true), (false, false)] {
+            let ffi = convert(
+                CkMechanismType::AES_GCM,
+                CkMechanismParams::Gcm(GcmParams {
+                    iv: Vec::new(),
+                    iv_bits: 0,
+                    iv_buffer_len: 0,
+                    aad: Vec::new().into(),
+                    tag_bits: 128,
+                    iv_null,
+                    aad_null,
+                }),
+            );
+            // E0793: CK structs are packed on Windows; assert on by-value copies.
+            let gcm = unsafe {
+                ffi.ck_mechanism().pParameter.cast::<cryptoki_sys::CK_GCM_PARAMS>().read_unaligned()
+            };
+            let (p_iv, ul_iv_len, p_aad, ul_aad_len) =
+                (gcm.pIv, gcm.ulIvLen, gcm.pAAD, gcm.ulAADLen);
+            assert_eq!(p_iv.is_null(), iv_null, "pIv nullness");
+            assert_eq!(ul_iv_len, 0);
+            assert_eq!(p_aad.is_null(), aad_null, "pAAD nullness");
+            assert_eq!(ul_aad_len, 0);
+        }
+    }
+
+    #[test]
+    fn oaep_source_null_materializes_null_pointer() {
+        // F3/D2: only a caller-NULL source materializes NULL; an empty
+        // non-NULL source keeps a non-NULL pointer with len 0.
+        for source_null in [true, false] {
+            let ffi = convert(
+                CkMechanismType::RSA_PKCS_OAEP,
+                CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
+                    hash_alg: CkMechanismType::SHA256,
+                    mgf: 1,
+                    source: 1,
+                    source_data: Vec::new().into(),
+                    source_null,
+                }),
+            );
+            // E0793: CK structs are packed on Windows; assert on by-value copies.
+            let oaep = unsafe {
+                ffi.ck_mechanism()
+                    .pParameter
+                    .cast::<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>()
+                    .read_unaligned()
+            };
+            let (p_source_data, ul_source_data_len) = (oaep.pSourceData, oaep.ulSourceDataLen);
+            assert_eq!(p_source_data.is_null(), source_null, "pSourceData nullness");
+            assert_eq!(ul_source_data_len, 0);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1143,5 +1215,22 @@ mod attribute_query_tests {
         };
 
         assert_eq!(err, CkRv::HOST_MEMORY);
+    }
+}
+
+#[cfg(test)]
+mod null_template_tests {
+    use super::FfiAttrs;
+
+    #[test]
+    fn opt_slice_none_flags_null_template() {
+        // F3/D2: a caller-NULL template is flagged so the FFI call
+        // receives NULL, not the empty array's address.
+        let none = FfiAttrs::from_opt_slice(None).expect("none template converts");
+        assert!(none.null_template);
+        assert!(none.attrs.is_empty());
+        let empty = FfiAttrs::from_opt_slice(Some(&[])).expect("empty template converts");
+        assert!(!empty.null_template);
+        assert!(empty.attrs.is_empty());
     }
 }

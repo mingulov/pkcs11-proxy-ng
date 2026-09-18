@@ -8,6 +8,9 @@ pub(in crate::ffi) struct FfiAttrs {
     /// The ready-to-pass attribute array. Pointers inside borrow from
     /// `_backing`/`_secret_backing`/`_nested_backing` (all owned by `self`).
     pub(in crate::ffi) attrs: Vec<cryptoki_sys::CK_ATTRIBUTE>,
+    /// True when the caller passed a NULL template pointer (Wave 3.5 D2):
+    /// the FFI call receives NULL, not the empty array's address.
+    pub(in crate::ffi) null_template: bool,
     /// Backing byte storage for `Ulong` values whose native size differs from `u64`.
     _backing: Vec<Vec<u8>>,
     /// Wiping backing for `Bytes`/`String` values (ADR-0013 §5). The
@@ -26,6 +29,23 @@ impl FfiAttrs {
     /// `None` values produce a null `pValue` / zero `ulValueLen` (size-query pattern).
     /// `Ulong` values are converted to the correct platform-native `CK_ULONG` width;
     /// a value the native width cannot hold is rejected (D4), never truncated.
+    ///
+    /// A `None` template is the caller's NULL template pointer (Wave 3.5 D2):
+    /// the materialized array is empty AND flagged, so `ffi_attr_ptr`
+    /// passes NULL to the provider instead of (ptr, 0).
+    pub(in crate::ffi) fn from_opt_slice(template: Option<&[CkAttribute]>) -> CkResult<Self> {
+        match template {
+            None => Ok(Self {
+                attrs: Vec::new(),
+                null_template: true,
+                _backing: Vec::new(),
+                _secret_backing: Vec::new(),
+                _nested_backing: Vec::new(),
+            }),
+            Some(attrs) => Self::from_slice(attrs),
+        }
+    }
+
     pub(in crate::ffi) fn from_slice(template: &[CkAttribute]) -> CkResult<Self> {
         let mut attrs = Vec::with_capacity(template.len());
         let mut backing: Vec<Vec<u8>> = Vec::new();
@@ -80,6 +100,7 @@ impl FfiAttrs {
 
         Ok(Self {
             attrs,
+            null_template: false,
             _backing: backing,
             _secret_backing: secret_backing,
             _nested_backing: nested_backing,

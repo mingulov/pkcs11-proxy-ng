@@ -722,6 +722,8 @@ async fn closing_a_session_evicts_session_objects_not_token_objects() {
                     client_context_id: ctx,
                     session_handle: session,
                     template,
+
+                    template_null: false,
                 }),
             )
             .await
@@ -789,6 +791,8 @@ async fn destroy_object_evicts_the_virtual_handle() {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
             template: vec![],
+
+            template_null: false,
         }),
     )
     .await
@@ -853,6 +857,8 @@ async fn object_handles_are_isolated_per_context() {
             client_context_id: ctx_a.0.clone(),
             session_handle: session_a,
             template: vec![],
+
+            template_null: false,
         }),
     )
     .await
@@ -1658,6 +1664,8 @@ async fn create_object_outcome(
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
             template,
+
+            template_null: false,
         }),
     )
     .await
@@ -1681,6 +1689,8 @@ async fn copy_object_outcome(
             session_handle: session,
             object_handle: object,
             template,
+
+            template_null: false,
         }),
     )
     .await
@@ -1915,6 +1925,8 @@ async fn generate_private_key_while_logged_out_is_refused() {
                         params: None,
                     }),
                     template,
+
+                    template_null: false,
                 }),
             )
             .await
@@ -2471,6 +2483,8 @@ async fn audit_generate_key_emits_key_mgmt_record() {
                 params: None,
             }),
             template: vec![],
+
+            template_null: false,
         }),
     )
     .await
@@ -2546,6 +2560,8 @@ async fn fail_closed_generate_key_saturated_sink_reports_function_failed() {
                 params: None,
             }),
             template: vec![],
+
+            template_null: false,
         }),
     )
     .await
@@ -2595,6 +2611,8 @@ async fn audit_off_generate_key_byte_identical() {
                 params: None,
             }),
             template: vec![],
+
+            template_null: false,
         }),
     )
     .await

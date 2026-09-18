@@ -12,7 +12,7 @@ use pkcs11_proxy_ng_types::{CkObjectHandle, CkRv, SecretBytes};
 
 use super::super::authorization::mechanism_permitted;
 use super::super::ck_result_to_rv;
-use super::super::convert_template;
+use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     check_sanitize, ensure_private_mint_allowed, input_from_wire, parse_mechanism,
@@ -156,7 +156,7 @@ async fn unwrap_key_impl(
         }));
     }
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
@@ -166,11 +166,14 @@ async fn unwrap_key_impl(
         }
     };
 
+    // A NULL template carries no attributes; classification treats it as empty.
+    let template_view = template.as_deref().unwrap_or(&[]);
+
     // D6(1): refuse minting a private object while logically logged out.
     // (The private unwrapping key itself is refused by the USE check inside
     // resolve_session_and_object above.)
     if let Err(rv) =
-        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, &template).await
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
             ck_rv: rv.0,
@@ -180,8 +183,8 @@ async fn unwrap_key_impl(
 
     // An unwrapped key is a session object unless CKA_TOKEN is set (B2). The
     // privacy bit is recorded for the D6(1) USE enforcement.
-    let is_token = template_declares_token_object(&template);
-    let is_private = template_declares_private_object(&template);
+    let is_token = template_declares_token_object(template_view);
+    let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let wrapped_key = SecretBytes::new(req.wrapped_key);
     let wrapped_key_null_len = req.wrapped_key_null_len;
@@ -200,7 +203,7 @@ async fn unwrap_key_impl(
                 &mechanism,
                 unwrapping_key,
                 input_from_wire(raw, wrapped_key_null_len),
-                &template,
+                template.as_deref(),
             )
         })
     })

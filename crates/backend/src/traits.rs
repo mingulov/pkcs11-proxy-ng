@@ -94,8 +94,11 @@ pub trait Pkcs11Backend: Send + Sync {
     ) -> CkResult<()>;
     fn logout(&self, session: CkSessionHandle) -> CkResult<()>;
 
-    fn find_objects_init(&self, session: CkSessionHandle, template: &[CkAttribute])
-    -> CkResult<()>;
+    fn find_objects_init(
+        &self,
+        session: CkSessionHandle,
+        template: Option<&[CkAttribute]>,
+    ) -> CkResult<()>;
     fn find_objects(
         &self,
         session: CkSessionHandle,
@@ -206,13 +209,13 @@ pub trait Pkcs11Backend: Send + Sync {
     fn create_object(
         &self,
         session: CkSessionHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
     fn copy_object(
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
     fn destroy_object(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<()>;
     fn get_object_size(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<u64>;
@@ -220,7 +223,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<()>;
 
     fn digest_init(&self, session: CkSessionHandle, mechanism: &CkMechanism) -> CkResult<()>;
@@ -271,7 +274,7 @@ pub trait Pkcs11Backend: Send + Sync {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
 
     /// `C_DeriveKey` returning both the derived key handle AND any
@@ -285,7 +288,7 @@ pub trait Pkcs11Backend: Send + Sync {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         self.derive_key(session, mechanism, base_key, template).map(|h| (h, None))
     }
@@ -299,7 +302,7 @@ pub trait Pkcs11Backend: Send + Sync {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkDeriveKeyOutputResult> {
         Ok(match self.derive_key_with_output(session, mechanism, base_key, template) {
             Ok((handle, mechanism_out)) => CkDeriveKeyOutputResult::ok(handle, mechanism_out),
@@ -319,13 +322,13 @@ pub trait Pkcs11Backend: Send + Sync {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
     fn generate_key(
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
 
     /// `C_GenerateKey` returning both the key handle AND any mechanism-param
@@ -337,7 +340,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         self.generate_key(session, mechanism, template).map(|h| (h, None))
     }
@@ -345,8 +348,8 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        pub_template: &[CkAttribute],
-        priv_template: &[CkAttribute],
+        pub_template: Option<&[CkAttribute]>,
+        priv_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)>;
     /// Wait for a slot event. `flags == 1` means non-blocking (CKF_DONT_BLOCK).
     /// Returns the slot ID where the event occurred.
@@ -806,7 +809,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _public_key: CkObjectHandle,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputAndHandleResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -817,7 +820,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _public_key: CkObjectHandle,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -827,7 +830,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _private_key: CkObjectHandle,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
         _ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -1167,7 +1170,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         _unwrapping_key: CkObjectHandle,
         _wrapped_key: CkInBuf<'_>,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
         _aad: CkInBuf<'_>,
     ) -> CkResult<(
         CkObjectHandle,
@@ -1195,7 +1198,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _mechanism: &CkMechanism,
         _unwrapping_key: CkObjectHandle,
         _wrapped_key: CkInBuf<'_>,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
         _aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, SecretBytes)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)

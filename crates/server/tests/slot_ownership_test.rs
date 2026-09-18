@@ -195,7 +195,7 @@ fn preload_objects(f: &MtlsFixture) -> [CkObjectHandle; 2] {
             .backend
             .create_object(
                 session,
-                &[
+                Some(&[
                     CkAttribute {
                         attr_type: CkAttributeType::TOKEN,
                         value: Some(CkAttributeValue::Bool(true)),
@@ -204,7 +204,7 @@ fn preload_objects(f: &MtlsFixture) -> [CkObjectHandle; 2] {
                         attr_type: CkAttributeType::CLASS,
                         value: Some(CkAttributeValue::Ulong(CkObjectClass::SECRET_KEY.0)),
                     },
-                ],
+                ]),
             )
             .unwrap();
         f.backend.set_attribute(
@@ -227,6 +227,7 @@ async fn find(client: &mut Client, index: usize) -> Vec<u64> {
             client_context_id: context.clone(),
             session_handle,
             template: vec![],
+            template_null: false,
         })
         .await
         .unwrap()

@@ -1540,7 +1540,11 @@ impl Pkcs11Backend for MockBackend {
     fn logout(&self, session: CkSessionHandle) -> CkResult<()> {
         self.logout_impl(session)
     }
-    fn find_objects_init(&self, session: CkSessionHandle, _t: &[CkAttribute]) -> CkResult<()> {
+    fn find_objects_init(
+        &self,
+        session: CkSessionHandle,
+        _t: Option<&[CkAttribute]>,
+    ) -> CkResult<()> {
         self.find_objects_init_impl(session)
     }
     fn find_objects(
@@ -1774,7 +1778,7 @@ impl Pkcs11Backend for MockBackend {
         session: CkSessionHandle,
         m: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.record_mechanism_entry(MockMechanismEntry::DeriveKey, Some(m));
         self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::DERIVE)?;
@@ -1782,7 +1786,7 @@ impl Pkcs11Backend for MockBackend {
         self.require_live_key(&state, session, base_key)?;
         self.validate_source_grounded_param_handles(&state, m)?;
         drop(state);
-        self.derive_key_impl(session, template)
+        self.derive_key_impl(session, template.unwrap_or(&[]))
     }
 
     fn derive_key_with_output(
@@ -1790,7 +1794,7 @@ impl Pkcs11Backend for MockBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         let result = self.derive_key_with_output_result(session, mechanism, base_key, template)?;
         if result.rv.is_ok() {
@@ -1805,7 +1809,7 @@ impl Pkcs11Backend for MockBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkDeriveKeyOutputResult> {
         self.record_mechanism_entry(MockMechanismEntry::DeriveKey, Some(mechanism));
         if let Err(rv) = self.require_mechanism_workflow_for_session(
@@ -1824,10 +1828,10 @@ impl Pkcs11Backend for MockBackend {
         }
         drop(state);
         if let Some(output) = self.derive_key_output.lock().unwrap().clone() {
-            let handle = self.derive_key_impl(session, template)?;
+            let handle = self.derive_key_impl(session, template.unwrap_or(&[]))?;
             return Ok(CkDeriveKeyOutputResult::ok(handle, Some(output)));
         }
-        self.derive_key_with_sp800_108_output_result(session, mechanism, template)
+        self.derive_key_with_sp800_108_output_result(session, mechanism, template.unwrap_or(&[]))
     }
 
     fn wrap_key(
@@ -1849,24 +1853,24 @@ impl Pkcs11Backend for MockBackend {
         m: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         let _ = self.resolve_input(wrapped_key)?;
         self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::UNWRAP)?;
         let state = self.state.lock().unwrap();
         self.require_live_key(&state, session, unwrapping_key)?;
         drop(state);
-        self.unwrap_key_impl(session, template)
+        self.unwrap_key_impl(session, template.unwrap_or(&[]))
     }
     fn generate_key(
         &self,
         session: CkSessionHandle,
         m: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.record_mechanism_entry(MockMechanismEntry::GenerateKey, Some(m));
         self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::GENERATE)?;
-        let handle = self.generate_key_impl(session, template)?;
+        let handle = self.generate_key_impl(session, template.unwrap_or(&[]))?;
         // CKO_SECRET_KEY, with the key type derived from the mechanism.
         self.synthesize_default_key_attributes(
             handle,
@@ -1878,17 +1882,17 @@ impl Pkcs11Backend for MockBackend {
     fn create_object(
         &self,
         session: CkSessionHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        self.create_object_impl(session, template)
+        self.create_object_impl(session, template.unwrap_or(&[]))
     }
     fn copy_object(
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
-        self.copy_object_impl(session, object, template)
+        self.copy_object_impl(session, object, template.unwrap_or(&[]))
     }
     fn destroy_object(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<()> {
         self.destroy_calls.fetch_add(1, Ordering::SeqCst);
@@ -1904,20 +1908,20 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
         self.set_attribute_value_impl(session, object)?;
         // The template was previously discarded: C_SetAttributeValue merges
         // into the stored attributes so set-then-read round-trips.
-        self.merge_object_template(object, template);
+        self.merge_object_template(object, template.unwrap_or(&[]));
         Ok(())
     }
     fn generate_key_pair(
         &self,
         session: CkSessionHandle,
         m: &CkMechanism,
-        public_template: &[CkAttribute],
-        private_template: &[CkAttribute],
+        public_template: Option<&[CkAttribute]>,
+        private_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
         self.record_mechanism_entry(MockMechanismEntry::GenerateKeyPair, Some(m));
         self.require_mechanism_workflow_for_session(
@@ -1925,8 +1929,11 @@ impl Pkcs11Backend for MockBackend {
             m,
             CkMechanismFlags::GENERATE_KEY_PAIR,
         )?;
-        let (public, private) =
-            self.generate_key_pair_impl(session, public_template, private_template)?;
+        let (public, private) = self.generate_key_pair_impl(
+            session,
+            public_template.unwrap_or(&[]),
+            private_template.unwrap_or(&[]),
+        )?;
         let key_type = session_ops::mock_pair_key_type(m.mechanism_type);
         self.synthesize_default_key_attributes(public, 0x0000_0002, key_type); // CKO_PUBLIC_KEY
         self.synthesize_default_key_attributes(private, 0x0000_0003, key_type); // CKO_PRIVATE_KEY
@@ -2181,7 +2188,7 @@ impl Pkcs11Backend for MockBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
         self.record_mechanism_entry(MockMechanismEntry::EncapsulateKey, Some(mechanism));
         self.require_mechanism_workflow_for_session(
@@ -2189,7 +2196,7 @@ impl Pkcs11Backend for MockBackend {
             mechanism,
             CkMechanismFlags::ENCAPSULATE,
         )?;
-        self.encapsulate_key_impl(session, mechanism, public_key, template)
+        self.encapsulate_key_impl(session, mechanism, public_key, template.unwrap_or(&[]))
     }
 
     // --- Track C Task 2: Exact KEM trait method ---
@@ -2199,7 +2206,7 @@ impl Pkcs11Backend for MockBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputAndHandleResult> {
         self.record_mechanism_entry(MockMechanismEntry::EncapsulateKeyExact, Some(mechanism));
@@ -2208,7 +2215,13 @@ impl Pkcs11Backend for MockBackend {
             mechanism,
             CkMechanismFlags::ENCAPSULATE,
         )?;
-        self.encapsulate_key_exact_impl(session, mechanism, public_key, template, spec)
+        self.encapsulate_key_exact_impl(
+            session,
+            mechanism,
+            public_key,
+            template.unwrap_or(&[]),
+            spec,
+        )
     }
 
     // --- Track C: Exact parameter-output trait methods ---
@@ -2698,7 +2711,7 @@ impl Pkcs11Backend for MockBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         self.record_mechanism_entry(MockMechanismEntry::DecapsulateKey, Some(mechanism));
@@ -2710,7 +2723,7 @@ impl Pkcs11Backend for MockBackend {
         )?;
         let mut state = self.state.lock().unwrap();
         self.require_live_key(&state, session, private_key)?;
-        self.allocate_session_object_with_template(&mut state, session, template)
+        self.allocate_session_object_with_template(&mut state, session, template.unwrap_or(&[]))
     }
 
     fn message_encrypt_init(
@@ -3338,7 +3351,7 @@ impl Pkcs11Backend for MockBackend {
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(
         CkObjectHandle,
@@ -3395,7 +3408,7 @@ impl Pkcs11Backend for MockBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, SecretBytes)> {
         self.record_wrap_entry(
@@ -3413,7 +3426,11 @@ impl Pkcs11Backend for MockBackend {
         let mut state = self.state.lock().unwrap();
         self.require_live_key(&state, session, unwrapping_key)?;
         Ok((
-            self.allocate_session_object_with_template(&mut state, session, template)?,
+            self.allocate_session_object_with_template(
+                &mut state,
+                session,
+                template.unwrap_or(&[]),
+            )?,
             vec![0xCC; 12].into(),
         ))
     }

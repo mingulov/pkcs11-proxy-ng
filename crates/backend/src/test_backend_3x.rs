@@ -133,7 +133,7 @@ impl Pkcs11Backend for TestBackend3x {
     fn logout(&self, session: CkSessionHandle) -> CkResult<()> {
         self.inner.logout(session)
     }
-    fn find_objects_init(&self, s: CkSessionHandle, t: &[CkAttribute]) -> CkResult<()> {
+    fn find_objects_init(&self, s: CkSessionHandle, t: Option<&[CkAttribute]>) -> CkResult<()> {
         self.inner.find_objects_init(s, t)
     }
     fn find_objects(&self, s: CkSessionHandle, m: u32) -> CkResult<Vec<CkObjectHandle>> {
@@ -262,7 +262,7 @@ impl Pkcs11Backend for TestBackend3x {
         s: CkSessionHandle,
         m: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.inner.derive_key(s, m, base_key, template)
     }
@@ -281,7 +281,7 @@ impl Pkcs11Backend for TestBackend3x {
         m: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.inner.unwrap_key(s, m, unwrapping_key, wrapped_key, template)
     }
@@ -289,14 +289,14 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         s: CkSessionHandle,
         m: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.inner.generate_key(s, m, template)
     }
     fn create_object(
         &self,
         s: CkSessionHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.inner.create_object(s, template)
     }
@@ -304,7 +304,7 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         s: CkSessionHandle,
         object: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.inner.copy_object(s, object, template)
     }
@@ -318,7 +318,7 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         s: CkSessionHandle,
         object: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
         self.inner.set_attribute_value(s, object, template)
     }
@@ -326,8 +326,8 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         s: CkSessionHandle,
         m: &CkMechanism,
-        pub_t: &[CkAttribute],
-        priv_t: &[CkAttribute],
+        pub_t: Option<&[CkAttribute]>,
+        priv_t: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
         self.inner.generate_key_pair(s, m, pub_t, priv_t)
     }
@@ -412,7 +412,7 @@ impl Pkcs11Backend for TestBackend3x {
         _session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _public_key: CkObjectHandle,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
         Ok((vec![0xCA; 32].into(), CkObjectHandle(9001)))
     }
@@ -422,7 +422,7 @@ impl Pkcs11Backend for TestBackend3x {
         _session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _private_key: CkObjectHandle,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         let _ = resolve_input(ciphertext)?;
@@ -691,7 +691,7 @@ impl Pkcs11Backend for TestBackend3x {
         _mechanism: &CkMechanism,
         _unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        _template: &[CkAttribute],
+        _template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, SecretBytes)> {
         let _ = resolve_input(wrapped_key)?;
@@ -764,8 +764,9 @@ mod tests {
     fn encapsulate_key_returns_synthetic() {
         let backend = TestBackend3x::default_test();
         let mech = CkMechanism { mechanism_type: CkMechanismType(1), params: None };
-        let (capsule, key) =
-            backend.encapsulate_key(CkSessionHandle(1), &mech, CkObjectHandle(1), &[]).unwrap();
+        let (capsule, key) = backend
+            .encapsulate_key(CkSessionHandle(1), &mech, CkObjectHandle(1), Some(&[]))
+            .unwrap();
         assert_eq!(capsule, vec![0xCA; 32].into());
         assert_eq!(key, CkObjectHandle(9001));
     }
@@ -779,7 +780,7 @@ mod tests {
                 CkSessionHandle(1),
                 &mech,
                 CkObjectHandle(1),
-                &[],
+                Some(&[]),
                 CkInBuf::Bytes(&[0xCA; 32]),
             )
             .unwrap();

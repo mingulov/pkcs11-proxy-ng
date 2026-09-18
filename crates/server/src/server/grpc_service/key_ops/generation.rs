@@ -9,7 +9,7 @@ use pkcs11_proxy_ng_types::{
 };
 
 use super::super::authorization::mechanism_permitted;
-use super::super::convert_template;
+use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     ensure_private_mint_allowed, gate_object_handle, parse_mechanism, register_object_handle,
@@ -125,30 +125,36 @@ async fn generate_key_pair_impl(
         }));
     }
 
-    let public_key_template = match convert_template(&req.public_key_template) {
-        Ok(template) => template,
-        Err(rv) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
-                ck_rv: rv,
-                public_key_handle: 0,
-                private_key_handle: 0,
-            }));
-        }
-    };
+    let public_key_template =
+        match convert_template_opt(&req.public_key_template, req.public_template_null) {
+            Ok(template) => template,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
+                    ck_rv: rv,
+                    public_key_handle: 0,
+                    private_key_handle: 0,
+                }));
+            }
+        };
 
-    let private_key_template = match convert_template(&req.private_key_template) {
-        Ok(template) => template,
-        Err(rv) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
-                ck_rv: rv,
-                public_key_handle: 0,
-                private_key_handle: 0,
-            }));
-        }
-    };
+    let private_key_template =
+        match convert_template_opt(&req.private_key_template, req.private_template_null) {
+            Ok(template) => template,
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
+                    ck_rv: rv,
+                    public_key_handle: 0,
+                    private_key_handle: 0,
+                }));
+            }
+        };
+
+    // NULL templates carry no attributes; classification treats them as empty.
+    let public_view = public_key_template.as_deref().unwrap_or(&[]);
+    let private_view = private_key_template.as_deref().unwrap_or(&[]);
 
     // D6(1): refuse minting a private object while logically logged out.
-    for template in [&public_key_template, &private_key_template] {
+    for template in [public_view, private_view] {
         if let Err(rv) =
             ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template).await
         {
@@ -163,14 +169,19 @@ async fn generate_key_pair_impl(
     // Each generated key is a session object unless its template marks
     // CKA_TOKEN; classify before the templates move into the backend call (B2).
     // Privacy bits are recorded alongside for the D6(1) USE enforcement.
-    let public_is_token = template_declares_token_object(&public_key_template);
-    let private_is_token = template_declares_token_object(&private_key_template);
-    let public_is_private = template_declares_private_object(&public_key_template);
-    let private_is_private = template_declares_private_object(&private_key_template);
+    let public_is_token = template_declares_token_object(public_view);
+    let private_is_token = template_declares_token_object(private_view);
+    let public_is_private = template_declares_private_object(public_view);
+    let private_is_private = template_declares_private_object(private_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.generate_key_pair(session, &mechanism, &public_key_template, &private_key_template)
+        backend.generate_key_pair(
+            session,
+            &mechanism,
+            public_key_template.as_deref(),
+            private_key_template.as_deref(),
+        )
     })
     .await?;
 
@@ -287,7 +298,7 @@ async fn generate_key_impl(
         }));
     }
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
@@ -298,9 +309,12 @@ async fn generate_key_impl(
         }
     };
 
+    // A NULL template carries no attributes; classification treats it as empty.
+    let template_view = template.as_deref().unwrap_or(&[]);
+
     // D6(1): refuse minting a private object while logically logged out.
     if let Err(rv) =
-        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, &template).await
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
             ck_rv: rv.0,
@@ -313,13 +327,14 @@ async fn generate_key_impl(
     // A generated key is a session object unless its template marks CKA_TOKEN;
     // classify before the template moves into the backend call (B2). The
     // privacy bit is recorded for the D6(1) USE enforcement.
-    let is_token = template_declares_token_object(&template);
-    let is_private = template_declares_private_object(&template);
+    let is_token = template_declares_token_object(template_view);
+    let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
-    let result =
-        spawn_backend(move || backend.generate_key_with_output(session, &mechanism, &template))
-            .await?;
+    let result = spawn_backend(move || {
+        backend.generate_key_with_output(session, &mechanism, template.as_deref())
+    })
+    .await?;
 
     match result {
         Ok((object, mechanism_out_params)) => {
@@ -454,7 +469,7 @@ async fn derive_key_impl(
         }));
     }
 
-    let template = match convert_template(&req.template) {
+    let template = match convert_template_opt(&req.template, req.template_null) {
         Ok(template) => template,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
@@ -465,11 +480,14 @@ async fn derive_key_impl(
         }
     };
 
+    // A NULL template carries no attributes; classification treats it as empty.
+    let template_view = template.as_deref().unwrap_or(&[]);
+
     // D6(1): refuse minting a private object while logically logged out.
     // (The private base key itself is refused by the USE check inside
     // resolve_session_and_object above.)
     if let Err(rv) =
-        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, &template).await
+        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
             ck_rv: rv.0,
@@ -481,12 +499,12 @@ async fn derive_key_impl(
     let mechanism_type = mechanism.mechanism_type;
     // A derived key is a session object unless CKA_TOKEN is set (B2). The
     // privacy bit is recorded for the D6(1) USE enforcement.
-    let is_token = template_declares_token_object(&template);
-    let is_private = template_declares_private_object(&template);
+    let is_token = template_declares_token_object(template_view);
+    let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
-        backend.derive_key_with_output_result(session, &mechanism, base_key, &template)
+        backend.derive_key_with_output_result(session, &mechanism, base_key, template.as_deref())
     })
     .await?;
 

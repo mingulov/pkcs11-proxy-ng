@@ -194,6 +194,10 @@ impl FfiMechanism {
                     iv_buffer_len: iv.len() as u64,
                     aad: aad[..aad_len].to_vec().into(),
                     tag_bits: gcm.ulTagBits as u64,
+                    // F3/D2: input pointers are provider-untouched, so the
+                    // post-call pointer class still reports the caller's.
+                    iv_null: gcm.pIv.is_null(),
+                    aad_null: gcm.pAAD.is_null(),
                 }))
             }
             FfiParamBacking::Tls12MasterKeyDerive(tls12, client_random, server_random, version) => {
@@ -879,8 +883,12 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         // -- RSA-OAEP: struct with pointer to source_data -------------------
         CkMechanismParams::RsaPkcsOaep(p) => {
             let mut source_data = p.source_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let (src_ptr, src_len) = if source_data.is_empty() {
+            // F3/D2: only a caller-NULL source materializes NULL; an empty
+            // non-NULL source keeps a (dangling) non-NULL pointer with len 0.
+            let (src_ptr, src_len) = if p.source_null {
                 (std::ptr::null_mut(), 0)
+            } else if source_data.is_empty() {
+                (std::ptr::NonNull::<u8>::dangling().as_ptr() as *mut std::ffi::c_void, 0)
             } else {
                 (source_data.as_mut_ptr() as *mut std::ffi::c_void, source_data.len())
             };
@@ -903,8 +911,12 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                 iv.resize(iv_capacity, 0);
             }
             let mut aad = p.aad.expose(|b| Zeroizing::new(b.to_vec()));
-            let iv_ptr = if iv.is_empty() { std::ptr::null_mut() } else { iv.as_mut_ptr() };
-            let aad_ptr = if aad.is_empty() { std::ptr::null_mut() } else { aad.as_mut_ptr() };
+            // F3/D2: only caller-NULL fields materialize NULL; empty non-NULL
+            // fields keep a (dangling) non-NULL pointer with len 0, mirroring
+            // message_ops::message_pointer. (After the capacity resize above,
+            // `as_mut_ptr` on an empty vec is exactly that dangling pointer.)
+            let iv_ptr = if p.iv_null { std::ptr::null_mut() } else { iv.as_mut_ptr() };
+            let aad_ptr = if p.aad_null { std::ptr::null_mut() } else { aad.as_mut_ptr() };
             let gcm = Box::new(cryptoki_sys::CK_GCM_PARAMS {
                 pIv: iv_ptr,
                 ulIvLen: input_iv_len as cryptoki_sys::CK_ULONG,

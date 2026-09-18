@@ -258,7 +258,13 @@ impl FfiBackend {
     const FUNCTION_NOT_SUPPORTED: CkRv = CkRv::FUNCTION_NOT_SUPPORTED;
 
     fn ffi_attr_ptr(ffi_attrs: &FfiAttrs) -> *mut cryptoki_sys::CK_ATTRIBUTE {
-        ffi_attrs.attrs.as_ptr() as *mut _
+        // Wave 3.5 D2: a caller-NULL template reaches the provider as NULL.
+        // An empty non-NULL template keeps the (dangling) non-NULL address.
+        if ffi_attrs.null_template {
+            std::ptr::null_mut()
+        } else {
+            ffi_attrs.attrs.as_ptr() as *mut _
+        }
     }
 
     fn ffi_attr_len(ffi_attrs: &FfiAttrs) -> cryptoki_sys::CK_ULONG {
@@ -423,7 +429,7 @@ impl Pkcs11Backend for FfiBackend {
     fn find_objects_init(
         &self,
         session: CkSessionHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
         self.ffi_find_objects_init(session, template)
     }
@@ -762,7 +768,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_derive_key(session, mechanism, base_key, template)
     }
@@ -772,7 +778,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         self.ffi_derive_key_with_output(session, mechanism, base_key, template)
     }
@@ -782,7 +788,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         base_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkDeriveKeyOutputResult> {
         self.ffi_derive_key_with_output_result(session, mechanism, base_key, template)
     }
@@ -825,7 +831,7 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_unwrap_key(session, mechanism, unwrapping_key, wrapped_key, template)
     }
@@ -834,7 +840,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_generate_key(session, mechanism, template)
     }
@@ -843,7 +849,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         self.ffi_generate_key_with_output(session, mechanism, template)
     }
@@ -851,7 +857,7 @@ impl Pkcs11Backend for FfiBackend {
     fn create_object(
         &self,
         session: CkSessionHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_create_object(session, template)
     }
@@ -860,7 +866,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_copy_object(session, object, template)
     }
@@ -877,7 +883,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
         self.ffi_set_attribute_value(session, object, template)
     }
@@ -886,8 +892,8 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        pub_template: &[CkAttribute],
-        priv_template: &[CkAttribute],
+        pub_template: Option<&[CkAttribute]>,
+        priv_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
         self.ffi_generate_key_pair(session, mechanism, pub_template, priv_template)
     }
@@ -1031,7 +1037,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputAndHandleResult> {
         self.ffi_encapsulate_key_exact(session, mechanism, public_key, template, spec)
@@ -1042,7 +1048,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         public_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
         self.ffi_encapsulate_key(session, mechanism, public_key, template)
     }
@@ -1052,7 +1058,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_decapsulate_key(session, mechanism, private_key, template, ciphertext)
@@ -1397,7 +1403,7 @@ impl Pkcs11Backend for FfiBackend {
         parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(
         CkObjectHandle,
@@ -1420,7 +1426,7 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
         wrapped_key: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, SecretBytes)> {
         self.ffi_unwrap_key_authenticated(
@@ -1788,6 +1794,16 @@ mod tests {
         backend.last_init_family.insert(7, OperationFamily::Sign);
         // Use the public path so the forward map and reverse index stay in sync.
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+    }
+
+    #[test]
+    fn ffi_attr_ptr_passes_null_for_null_templates() {
+        // F3/D2: a caller-NULL template reaches the provider as NULL; an
+        // empty non-NULL template keeps the (dangling) array address.
+        let none = FfiAttrs::from_opt_slice(None).unwrap();
+        assert!(FfiBackend::ffi_attr_ptr(&none).is_null());
+        let empty = FfiAttrs::from_opt_slice(Some(&[])).unwrap();
+        assert!(!FfiBackend::ffi_attr_ptr(&empty).is_null());
     }
 
     #[test]

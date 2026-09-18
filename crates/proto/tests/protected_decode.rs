@@ -58,6 +58,8 @@ fn valid_requests_validate() {
             Attribute { attr_type: 0x100, value: Some(AttributeValue::UlongValue(3)) },
             Attribute { attr_type: 0x101, value: Some(AttributeValue::BytesValue(vec![1, 2, 3])) },
         ],
+
+        template_null: false,
     };
     assert_eq!(validate_request_wire(FIND_PATH, &find.encode_to_vec()), Ok(()));
     assert_eq!(validate_request_wire(LOGIN_PATH, &[]), Ok(()));
@@ -100,6 +102,8 @@ fn nested_duplicate_rejected() {
         client_context_id: String::from("ctx"),
         session_handle: 7,
         template: Vec::new(),
+
+        template_null: false,
     }
     .encode_to_vec();
     payload.extend(len_delimited(3, &element));
@@ -120,6 +124,8 @@ fn oneof_second_member_rejected() {
         client_context_id: String::new(),
         session_handle: 0,
         template: Vec::new(),
+
+        template_null: false,
     }
     .encode_to_vec();
     request.extend(len_delimited(3, &payload));
@@ -151,6 +157,8 @@ fn repeated_fields_may_recur() {
             Attribute { attr_type: 2, value: None },
             Attribute { attr_type: 3, value: None },
         ],
+
+        template_null: false,
     };
     assert_eq!(validate_request_wire(FIND_PATH, &find.encode_to_vec()), Ok(()));
 }

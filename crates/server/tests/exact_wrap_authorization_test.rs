@@ -106,7 +106,7 @@ async fn open(f: &MtlsFixture, second: bool) -> Client {
         .unwrap();
     // Keep virtual handles, native objects, and native sessions noncolliding.
     for _ in 0..8 {
-        f.backend.create_object(CkSessionHandle(native_session), &[]).unwrap();
+        f.backend.create_object(CkSessionHandle(native_session), Some(&[])).unwrap();
     }
     let mut c = Client {
         rpc,
@@ -130,7 +130,7 @@ async fn mapped_object(f: &MtlsFixture, c: &Client, class: CkObjectClass, uid: u
         .backend
         .create_object(
             CkSessionHandle(c.native_session),
-            &[
+            Some(&[
                 CkAttribute {
                     attr_type: CkAttributeType::CLASS,
                     value: Some(CkAttributeValue::Ulong(class.0)),
@@ -143,7 +143,7 @@ async fn mapped_object(f: &MtlsFixture, c: &Client, class: CkObjectClass, uid: u
                     attr_type: CkAttributeType::UNIQUE_ID,
                     value: Some(CkAttributeValue::Bytes(vec![uid].into())),
                 },
-            ],
+            ]),
         )
         .unwrap();
     let virtual_key = f

@@ -49,7 +49,7 @@ fn create_object_returns_live_handle() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     assert!(backend.get_object_size(session, obj).is_ok());
 }
 
@@ -58,7 +58,7 @@ fn destroy_object_invalidates_handle() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     backend.destroy_object(session, obj).unwrap();
     assert_eq!(backend.destroy_object(session, obj).unwrap_err(), CkRv::OBJECT_HANDLE_INVALID);
     assert_eq!(backend.get_object_size(session, obj).unwrap_err(), CkRv::OBJECT_HANDLE_INVALID);
@@ -122,7 +122,7 @@ fn set_attribute_value_unknown_handle_returns_error() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     assert_eq!(
-        backend.set_attribute_value(session, CkObjectHandle(42), &[]).unwrap_err(),
+        backend.set_attribute_value(session, CkObjectHandle(42), Some(&[])).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
 }
@@ -132,8 +132,8 @@ fn set_attribute_value_on_live_handle_succeeds() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let obj = backend.create_object(session, &[]).unwrap();
-    assert!(backend.set_attribute_value(session, obj, &[]).is_ok());
+    let obj = backend.create_object(session, Some(&[])).unwrap();
+    assert!(backend.set_attribute_value(session, obj, Some(&[])).is_ok());
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn generate_key_pair_handles_are_live() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
-    let (pub_h, priv_h) = backend.generate_key_pair(session, &mech, &[], &[]).unwrap();
+    let (pub_h, priv_h) = backend.generate_key_pair(session, &mech, Some(&[]), Some(&[])).unwrap();
     assert!(backend.get_object_size(session, pub_h).is_ok());
     assert!(backend.get_object_size(session, priv_h).is_ok());
 }
@@ -152,7 +152,7 @@ fn finalize_invalidates_all_object_handles() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     backend.finalize().unwrap();
     backend.initialize().unwrap();
     let session2 = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
@@ -192,13 +192,13 @@ fn object_handles_are_unique_and_non_overlapping() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let o1 = backend.create_object(session, &[]).unwrap();
-    let o2 = backend.create_object(session, &[]).unwrap();
+    let o1 = backend.create_object(session, Some(&[])).unwrap();
+    let o2 = backend.create_object(session, Some(&[])).unwrap();
     let o3 = backend
         .generate_key(
             session,
             &CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None },
-            &[],
+            Some(&[]),
         )
         .unwrap();
     assert_ne!(o1, o2);
@@ -385,7 +385,7 @@ fn initialized_attribute_session(backend: &MockBackend) -> CkSessionHandle {
 fn attribute_store_value_returned() {
     let backend = MockBackend::default_test();
     let session = initialized_attribute_session(&backend);
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -400,7 +400,7 @@ fn attribute_store_value_returned() {
 fn attribute_store_sensitive_returns_none_and_error() {
     let backend = MockBackend::default_test();
     let session = initialized_attribute_session(&backend);
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     backend.set_attribute(obj, CkAttributeType::VALUE, MockAttributeSlot::Sensitive);
     let mut template = vec![CkAttribute { attr_type: CkAttributeType::VALUE, value: None }];
     let rv = backend.get_attribute_value(session, obj, &mut template).unwrap_err();
@@ -412,7 +412,7 @@ fn attribute_store_sensitive_returns_none_and_error() {
 fn attribute_store_invalid_type_returns_none_and_error() {
     let backend = MockBackend::default_test();
     let session = initialized_attribute_session(&backend);
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     backend.set_attribute(obj, CkAttributeType::LABEL, MockAttributeSlot::InvalidType);
     let mut template = vec![CkAttribute { attr_type: CkAttributeType::LABEL, value: None }];
     let rv = backend.get_attribute_value(session, obj, &mut template).unwrap_err();
@@ -424,7 +424,7 @@ fn attribute_store_invalid_type_returns_none_and_error() {
 fn attribute_store_mixed_template_partial_results() {
     let backend = MockBackend::default_test();
     let session = initialized_attribute_session(&backend);
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -448,7 +448,7 @@ fn attribute_store_mixed_template_partial_results() {
 fn attribute_store_absent_object_is_noop() {
     let backend = MockBackend::default_test();
     let session = initialized_attribute_session(&backend);
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     let mut template = vec![CkAttribute { attr_type: CkAttributeType::LABEL, value: None }];
     let result = backend.get_attribute_value(session, obj, &mut template);
     assert!(result.is_ok());
@@ -459,7 +459,7 @@ fn attribute_store_absent_object_is_noop() {
 fn attribute_store_only_invalid_type() {
     let backend = MockBackend::default_test();
     let session = initialized_attribute_session(&backend);
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -480,7 +480,7 @@ fn attribute_store_only_invalid_type() {
 fn get_attribute_value_exact_size_query_returns_length_without_bytes() {
     let backend = MockBackend::default_test();
     let session = initialized_attribute_session(&backend);
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -519,7 +519,7 @@ fn get_attribute_value_exact_size_query_returns_length_without_bytes() {
 fn get_attribute_value_exact_too_small_returns_backend_length() {
     let backend = MockBackend::default_test();
     let session = initialized_attribute_session(&backend);
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -558,7 +558,7 @@ fn get_attribute_value_exact_too_small_returns_backend_length() {
 fn get_attribute_value_exact_mixed_sensitive_and_invalid_preserves_statuses() {
     let backend = MockBackend::default_test();
     let session = initialized_attribute_session(&backend);
-    let obj = backend.create_object(session, &[]).unwrap();
+    let obj = backend.create_object(session, Some(&[])).unwrap();
     backend.set_attribute(
         obj,
         CkAttributeType::LABEL,
@@ -633,7 +633,7 @@ fn setup_with_session() -> (MockBackend, CkSessionHandle) {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let _key = backend.create_object(session, &[]).unwrap();
+    let _key = backend.create_object(session, Some(&[])).unwrap();
     (backend, session)
 }
 
@@ -656,7 +656,7 @@ fn get_op_state_sign_active_returns_blob() {
 #[test]
 fn get_op_state_find_objects_active_returns_operation_not_initialized() {
     let (backend, session) = setup_with_session();
-    backend.find_objects_init(session, &[]).unwrap();
+    backend.find_objects_init(session, Some(&[])).unwrap();
     let rv = backend.get_operation_state(session).unwrap_err();
     assert_eq!(rv, CkRv::OPERATION_NOT_INITIALIZED);
     backend.find_objects_final(session).unwrap();
@@ -861,9 +861,9 @@ fn create_object_enforces_max_objects_quota() {
     let backend = MockBackend::default_test().with_quotas(0, 2);
     backend.initialize().unwrap();
     let s = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    backend.create_object(s, &[]).unwrap();
-    backend.create_object(s, &[]).unwrap();
-    let rv = backend.create_object(s, &[]).unwrap_err();
+    backend.create_object(s, Some(&[])).unwrap();
+    backend.create_object(s, Some(&[])).unwrap();
+    let rv = backend.create_object(s, Some(&[])).unwrap_err();
     assert_eq!(rv, CkRv::DEVICE_MEMORY);
 }
 
@@ -872,10 +872,10 @@ fn create_object_quota_freed_after_destroy() {
     let backend = MockBackend::default_test().with_quotas(0, 1);
     backend.initialize().unwrap();
     let s = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let obj = backend.create_object(s, &[]).unwrap();
-    assert_eq!(backend.create_object(s, &[]).unwrap_err(), CkRv::DEVICE_MEMORY);
+    let obj = backend.create_object(s, Some(&[])).unwrap();
+    assert_eq!(backend.create_object(s, Some(&[])).unwrap_err(), CkRv::DEVICE_MEMORY);
     backend.destroy_object(s, obj).unwrap();
-    backend.create_object(s, &[]).unwrap();
+    backend.create_object(s, Some(&[])).unwrap();
 }
 
 #[test]
@@ -883,8 +883,8 @@ fn copy_object_also_enforces_max_objects_quota() {
     let backend = MockBackend::default_test().with_quotas(0, 1);
     backend.initialize().unwrap();
     let s = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let obj = backend.create_object(s, &[]).unwrap();
-    let rv = backend.copy_object(s, obj, &[]).unwrap_err();
+    let obj = backend.create_object(s, Some(&[])).unwrap();
+    let rv = backend.copy_object(s, obj, Some(&[])).unwrap_err();
     assert_eq!(rv, CkRv::DEVICE_MEMORY);
 }
 
@@ -895,7 +895,7 @@ fn copy_object_unknown_source_handle_returns_error() {
     let s = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
 
     assert_eq!(
-        backend.copy_object(s, CkObjectHandle(42), &[]).unwrap_err(),
+        backend.copy_object(s, CkObjectHandle(42), Some(&[])).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
 }
@@ -927,7 +927,7 @@ fn unlimited_quotas_do_not_restrict_sessions_or_objects() {
         backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     }
     for _ in 0..50 {
-        backend.create_object(s, &[]).unwrap();
+        backend.create_object(s, Some(&[])).unwrap();
     }
 }
 
@@ -997,7 +997,7 @@ fn injected_error_blocks_generate_key_pair() {
     let s = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     backend.inject_error(CkRv::DEVICE_REMOVED);
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
-    let err = backend.generate_key_pair(s, &mech, &[], &[]).unwrap_err();
+    let err = backend.generate_key_pair(s, &mech, Some(&[]), Some(&[])).unwrap_err();
     assert_eq!(err, CkRv::DEVICE_REMOVED);
 }
 

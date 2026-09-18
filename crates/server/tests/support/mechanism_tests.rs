@@ -108,7 +108,7 @@ pub async fn generate_aes_key(
         // Note: WRAP attribute is included for SoftHSM2 compatibility
         CkAttribute { attr_type: CkAttributeType::WRAP, value: Some(CkAttributeValue::Bool(true)) },
     ];
-    client.generate_key(session, &mechanism, &template).await
+    client.generate_key(session, &mechanism, Some(&template)).await
 }
 
 /// Generate a generic secret key for HKDF derivation tests.
@@ -138,7 +138,7 @@ pub async fn generate_generic_secret_key(
         },
         CkAttribute { attr_type: CKA_DERIVE, value: Some(CkAttributeValue::Bool(true)) },
     ];
-    client.generate_key(session, &mechanism, &template).await
+    client.generate_key(session, &mechanism, Some(&template)).await
 }
 
 /// Generate an EC P-256 key pair for ECDH derivation and ECDSA tests.
@@ -204,7 +204,7 @@ pub async fn generate_ec_key_pair(
 
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::EC_KEY_PAIR_GEN, params: None };
     client
-        .generate_key_pair(session, &mechanism, &pub_template, &priv_template)
+        .generate_key_pair(session, &mechanism, Some(&pub_template), Some(&priv_template))
         .await
         .map_err(|rv| format!("EC key pair generation failed: {rv}"))
 }
@@ -292,7 +292,7 @@ pub async fn generate_rsa_key_pair(
     let mechanism =
         CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
     client
-        .generate_key_pair(session, &mechanism, &public_template, &private_template)
+        .generate_key_pair(session, &mechanism, Some(&public_template), Some(&private_template))
         .await
         .map_err(|rv| format!("RSA key pair generation failed: {rv}"))
 }
@@ -542,6 +542,8 @@ pub async fn test_rsa_oaep_encrypt_decrypt(
         mgf: CKG_MGF1_SHA1,
         source: CKZ_DATA_SPECIFIED,
         source_data: Vec::new().into(),
+
+        source_null: false,
     };
     let oaep_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::RSA_PKCS_OAEP,
@@ -649,7 +651,7 @@ pub async fn test_ecdh1_derive(
     ];
 
     let alice_derived = client
-        .derive_key(session, &derive_mechanism, alice_priv, &derived_key_template)
+        .derive_key(session, &derive_mechanism, alice_priv, Some(&derived_key_template))
         .await
         .map_err(|rv| format!("C_DeriveKey(ECDH1, Alice) failed: {rv}"))?;
 
@@ -731,7 +733,7 @@ pub async fn test_hkdf_derive(
     ];
 
     let derived_key = client
-        .derive_key(session, &hkdf_mechanism, base_key, &derived_key_template)
+        .derive_key(session, &hkdf_mechanism, base_key, Some(&derived_key_template))
         .await
         .map_err(|rv| format!("C_DeriveKey(HKDF) failed: {rv}"))?;
 
@@ -808,7 +810,7 @@ pub async fn test_aes_cbc_encrypt_data_derive(
     ];
 
     let derived_key = client
-        .derive_key(session, &derive_mechanism, base_key, &derived_key_template)
+        .derive_key(session, &derive_mechanism, base_key, Some(&derived_key_template))
         .await
         .map_err(|rv| format!("C_DeriveKey(AES-CBC-ENCRYPT-DATA) failed: {rv}"))?;
 

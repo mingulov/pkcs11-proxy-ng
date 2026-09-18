@@ -35,6 +35,7 @@ impl From<&CkMechanism> for v1_proto::Mechanism {
                     mgf: p.mgf,
                     source: p.source,
                     source_data: secret_to_plain(&p.source_data),
+                    source_null: p.source_null,
                 }))
             }
             Some(CkMechanismParams::Gcm(p)) => {
@@ -44,6 +45,8 @@ impl From<&CkMechanism> for v1_proto::Mechanism {
                     aad: secret_to_plain(&p.aad),
                     tag_bits: p.tag_bits,
                     iv_buffer_len: p.iv_buffer_len,
+                    iv_null: p.iv_null,
+                    aad_null: p.aad_null,
                 }))
             }
             Some(CkMechanismParams::Ecdh1Derive(p)) => {
@@ -431,6 +434,7 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     mgf: p.mgf,
                     source: p.source,
                     source_data: SecretBytes::copy_from_slice(&p.source_data),
+                    source_null: p.source_null,
                 }))
             }
             Some(v1_proto::mechanism::Params::GcmParams(p)) => {
@@ -440,6 +444,8 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     iv_buffer_len: p.iv_buffer_len,
                     aad: SecretBytes::copy_from_slice(&p.aad),
                     tag_bits: p.tag_bits,
+                    iv_null: p.iv_null,
+                    aad_null: p.aad_null,
                 }))
             }
             Some(v1_proto::mechanism::Params::Ecdh1DeriveParams(p)) => {

@@ -340,10 +340,10 @@ fn encapsulate_key_returns_live_key_with_template_attributes() {
             session,
             &mechanism,
             public_key,
-            &[CkAttribute {
+            Some(&[CkAttribute {
                 attr_type: CkAttributeType::LABEL,
                 value: Some(CkAttributeValue::String("kem-output".to_string().into())),
-            }],
+            }]),
         )
         .unwrap();
 
@@ -377,10 +377,10 @@ fn encapsulate_key_exact_data_query_returns_live_key_with_template_attributes() 
             session,
             &mechanism,
             public_key,
-            &[CkAttribute {
+            Some(&[CkAttribute {
                 attr_type: CkAttributeType::LABEL,
                 value: Some(CkAttributeValue::String("kem-exact".to_string().into())),
-            }],
+            }]),
             &CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false },
         )
         .unwrap();
@@ -417,7 +417,7 @@ fn encapsulate_key_exact_non_data_queries_do_not_allocate_key() {
             session,
             &mechanism,
             public_key,
-            &[],
+            Some(&[]),
             &CkOutputBufferSpec {
                 buffer_present: false,
                 buffer_len: 0,
@@ -433,7 +433,7 @@ fn encapsulate_key_exact_non_data_queries_do_not_allocate_key() {
             session,
             &mechanism,
             public_key,
-            &[],
+            Some(&[]),
             &CkOutputBufferSpec { buffer_present: true, buffer_len: 1, length_pointer_null: false },
         )
         .unwrap();
@@ -460,8 +460,8 @@ fn full_registry_mock_accepts_every_registered_mechanism_for_exact_wrap_workflow
     for mechanism_type in mechanisms {
         let mechanism = CkMechanism { mechanism_type, params: None };
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-        let wrapping_key = backend.create_object(session, &[]).unwrap();
-        let key = backend.create_object(session, &[]).unwrap();
+        let wrapping_key = backend.create_object(session, Some(&[])).unwrap();
+        let key = backend.create_object(session, Some(&[])).unwrap();
 
         let size_spec =
             CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
@@ -647,8 +647,13 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         assert_exact_handle_size_and_data("encapsulate_key_exact", *mechanism_type, |spec| {
             let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
             let key = live_key(&backend, session);
-            let result =
-                backend.encapsulate_key_exact(session, &mechanism, key, &[label_attr("kem")], spec);
+            let result = backend.encapsulate_key_exact(
+                session,
+                &mechanism,
+                key,
+                Some(&[label_attr("kem")]),
+                spec,
+            );
             backend.close_session(session).unwrap();
             result
         });
@@ -802,7 +807,7 @@ fn verify_rejects_signature_that_does_not_match_sign_echo() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
-    let key = backend.create_object(session, &[]).unwrap();
+    let key = backend.create_object(session, Some(&[])).unwrap();
     let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
 
     backend.sign_init(session, &mech, key).unwrap();

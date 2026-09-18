@@ -161,13 +161,13 @@ async fn stale_token_mapping(
     // Keep the native object distinct from the native session, detecting use
     // of an object handle in place of the session during metadata lookup.
     for _ in 0..4 {
-        f.backend.create_object(session, &[]).unwrap();
+        f.backend.create_object(session, Some(&[])).unwrap();
     }
     let native = f
         .backend
         .create_object(
             session,
-            &[
+            Some(&[
                 CkAttribute {
                     attr_type: CkAttributeType::CLASS,
                     value: Some(CkAttributeValue::Ulong(class.0)),
@@ -180,7 +180,7 @@ async fn stale_token_mapping(
                     attr_type: CkAttributeType::UNIQUE_ID,
                     value: Some(CkAttributeValue::Bytes(vec![uid].into())),
                 },
-            ],
+            ]),
         )
         .unwrap();
     let virtual_handle = f

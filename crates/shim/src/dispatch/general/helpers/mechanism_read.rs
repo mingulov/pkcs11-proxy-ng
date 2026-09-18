@@ -184,6 +184,9 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         mgf: oaep.mgf as u64,
                         source: oaep.source as u64,
                         source_data: source_data.into(),
+                        // F3/D2: (NULL, 0) vs (ptr, 0) must survive the
+                        // crossing; (NULL, len > 0) took the Raw path above.
+                        source_null: oaep.pSourceData.is_null(),
                     }))
                 }
             }
@@ -222,6 +225,10 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         iv_buffer_len: gcm_iv_buffer_len(gcm),
                         aad: aad.into(),
                         tag_bits: gcm.ulTagBits as u64,
+                        // F3/D2: (NULL, 0) vs (ptr, 0) must survive the
+                        // crossing; (NULL, len > 0) took the Raw path above.
+                        iv_null: gcm.pIv.is_null(),
+                        aad_null: gcm.pAAD.is_null(),
                     }))
                 }
             }
@@ -955,6 +962,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                                 mgf: oaep.mgf as u64,
                                 source: oaep.source as u64,
                                 source_data: source_data.into(),
+                                source_null: oaep.pSourceData.is_null(),
                             },
                         }))
                     } // close inner else (source data ok)

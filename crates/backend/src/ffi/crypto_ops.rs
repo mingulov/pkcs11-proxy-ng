@@ -637,6 +637,9 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         backend.mech_cache.insert(
@@ -745,6 +748,9 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         let ffi_mech = super::super::ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
@@ -892,6 +898,9 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         let encrypt_out =
@@ -953,6 +962,9 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();
@@ -1006,6 +1018,9 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         // A failed FIRST Init on an empty slot publishes nothing: no cache
@@ -1053,6 +1068,9 @@ mod tests {
                 iv_buffer_len: 12,
                 aad: Vec::new().into(),
                 tag_bits: 128,
+
+                iv_null: false,
+                aad_null: false,
             })),
         };
         let first = backend.ffi_encrypt_init_with_output(session, &gcm, CkObjectHandle(1)).unwrap();

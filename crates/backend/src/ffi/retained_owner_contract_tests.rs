@@ -54,6 +54,9 @@ fn gcm_mechanism() -> CkMechanism {
             iv_buffer_len: 12,
             aad: Vec::new().into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     }
 }

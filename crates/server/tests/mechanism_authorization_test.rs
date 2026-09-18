@@ -91,6 +91,7 @@ async fn open(f: &MtlsFixture, second: bool) -> Client {
             .create_object(CreateObjectRequest {
                 client_context_id: context.clone(),
                 session_handle: session.session_handle,
+                template_null: false,
                 template: [
                     CkAttribute {
                         attr_type: CkAttributeType::CLASS,

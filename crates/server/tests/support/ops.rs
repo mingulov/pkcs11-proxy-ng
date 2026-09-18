@@ -171,7 +171,7 @@ pub async fn create_data_object(
         },
     ];
     client
-        .create_object(session, &template)
+        .create_object(session, Some(&template))
         .await
         .map_err(|rv| format!("C_CreateObject failed: {rv}"))
 }
@@ -186,7 +186,7 @@ pub async fn find_objects_by_label(
         value: Some(CkAttributeValue::String(label.to_string().into())),
     }];
     client
-        .find_objects_init(session, &template)
+        .find_objects_init(session, Some(&template))
         .await
         .map_err(|rv| format!("C_FindObjectsInit failed: {rv}"))?;
     let objects = client
@@ -210,7 +210,7 @@ pub async fn find_objects_by_id(
         value: Some(CkAttributeValue::Bytes(key_id.to_vec().into())),
     }];
     client
-        .find_objects_init(session, &template)
+        .find_objects_init(session, Some(&template))
         .await
         .map_err(|rv| format!("C_FindObjectsInit failed: {rv}"))?;
     let objects = client
@@ -367,7 +367,7 @@ pub async fn generate_named_rsa_key_pair(
     let mechanism =
         CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN, params: None };
     let (public_key, private_key) = client
-        .generate_key_pair(session, &mechanism, &public_template, &private_template)
+        .generate_key_pair(session, &mechanism, Some(&public_template), Some(&private_template))
         .await
         .map_err(|rv| format!("C_GenerateKeyPair failed: {rv}"))?;
     Ok(GeneratedRsaKeyPair { public_key, private_key, public_label, private_label, key_id })
@@ -475,6 +475,8 @@ pub async fn rsa_oaep_encrypt(
             mgf: 0x00000001,                       // CKG_MGF1_SHA1
             source: CKZ_DATA_SPECIFIED,
             source_data: Vec::new().into(),
+
+            source_null: false,
         })),
     };
     client

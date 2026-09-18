@@ -130,6 +130,9 @@ fn secret_response_and_mechanism_debug_renders_no_payload() {
         aad: PIN_CANARY.to_vec(),
         tag_bits: 128,
         iv_buffer_len: 0,
+
+        iv_null: false,
+        aad_null: false,
     };
     assert_eq!(format!("{gcm:?}"), "GcmParams([REDACTED])");
 }

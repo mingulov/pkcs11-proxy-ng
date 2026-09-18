@@ -102,6 +102,7 @@ pub unsafe extern "C" fn c_unwrap_key_authenticated(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
+        let template_opt = null_preserving_template(&template, p_template);
         let call = match unsafe {
             AuthenticatedCall::read(
                 p_mechanism,
@@ -137,7 +138,7 @@ pub unsafe extern "C" fn c_unwrap_key_authenticated(
             call.parameter(),
             CkObjectHandle(h_unwrapping_key as u64),
             wrapped_key,
-            &template,
+            template_opt,
             aad,
         )) {
             Ok((key_handle, output)) => {

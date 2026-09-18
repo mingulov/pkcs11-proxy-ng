@@ -55,7 +55,7 @@ async fn generate_des3_key(
             value: Some(CkAttributeValue::Bool(true)),
         },
     ];
-    client.generate_key(session, &mechanism, &template).await
+    client.generate_key(session, &mechanism, Some(&template)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +426,9 @@ async fn softhsm_aes_gcm_encrypt_decrypt() -> Result<(), String> {
             iv_buffer_len: iv.len() as u64,
             aad: aad.clone().into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
 
@@ -477,6 +480,9 @@ async fn softhsm_aes_gcm_encrypt_decrypt() -> Result<(), String> {
             iv_buffer_len: 12,
             aad: aad.into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
     client

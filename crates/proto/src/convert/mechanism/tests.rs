@@ -73,6 +73,8 @@ fn mechanism_oaep_round_trip() {
             mgf: 1,
             source: 1,
             source_data: vec![1, 2, 3].into(),
+
+            source_null: false,
         })),
     };
     let proto: v1_proto::Mechanism = (&original).into();
@@ -93,6 +95,8 @@ fn mechanism_oaep_empty_source_data_round_trip() {
             mgf: 0x00000002,
             source: 0x00000001,
             source_data: vec![].into(),
+
+            source_null: false,
         })),
     };
     let proto: v1_proto::Mechanism = (&original).into();
@@ -113,6 +117,9 @@ fn mechanism_gcm_round_trip() {
             iv_buffer_len: 12,
             aad: vec![0xAA, 0xBB].into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
     let proto: v1_proto::Mechanism = (&original).into();
@@ -140,6 +147,9 @@ fn mechanism_gcm_empty_aad_round_trip() {
             iv_buffer_len: 12,
             aad: vec![].into(),
             tag_bits: 96,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
     let proto: v1_proto::Mechanism = (&original).into();
@@ -540,6 +550,8 @@ fn rsa_aes_key_wrap_round_trip() {
             mgf: 1,
             source: 1,
             source_data: vec![0x01, 0x02].into(),
+
+            source_null: false,
         },
     });
     match round_trip(params) {
@@ -2037,5 +2049,48 @@ fn hash_sign_additional_context_round_trip() {
             assert_eq!(v.hash, 0x0000_0250);
         }
         other => panic!("expected SignAdditionalContext, got {other:?}"),
+    }
+}
+
+#[test]
+fn gcm_null_flags_round_trip() {
+    // F3/D2: iv_null/aad_null must survive the proto crossing.
+    for (iv_null, aad_null) in [(true, true), (true, false), (false, true), (false, false)] {
+        let p = round_trip(CkMechanismParams::Gcm(GcmParams {
+            iv: Vec::new(),
+            iv_bits: 0,
+            iv_buffer_len: 0,
+            aad: Vec::new().into(),
+            tag_bits: 128,
+            iv_null,
+            aad_null,
+        }));
+        match p {
+            CkMechanismParams::Gcm(v) => {
+                assert_eq!(v.iv_null, iv_null);
+                assert_eq!(v.aad_null, aad_null);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+}
+
+#[test]
+fn oaep_source_null_round_trip() {
+    // F3/D2: source_null must survive the proto crossing.
+    for source_null in [true, false] {
+        let p = round_trip(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
+            hash_alg: CkMechanismType::SHA256,
+            mgf: 1,
+            source: 1,
+            source_data: Vec::new().into(),
+            source_null,
+        }));
+        match p {
+            CkMechanismParams::RsaPkcsOaep(v) => {
+                assert_eq!(v.source_null, source_null);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

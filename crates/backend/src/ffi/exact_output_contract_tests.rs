@@ -259,7 +259,7 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
             CkSessionHandle(1),
             &CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None },
             CkObjectHandle(2),
-            &[],
+            Some(&[]),
             &CkOutputBufferSpec {
                 buffer_present: present,
                 buffer_len: 8,
@@ -471,6 +471,9 @@ fn classic_gcm_initialized_error_iv_effect() {
             iv_buffer_len: 12,
             aad: vec![].into(),
             tag_bits: 128,
+
+            iv_null: false,
+            aad_null: false,
         })),
     };
     let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
@@ -504,6 +507,9 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
         iv_buffer_len: 12,
         aad: vec![].into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     };
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,
@@ -610,6 +616,9 @@ fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
         iv_buffer_len: 12,
         aad: vec![].into(),
         tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
     };
     let mechanism = CkMechanism {
         mechanism_type: CkMechanismType::AES_GCM,

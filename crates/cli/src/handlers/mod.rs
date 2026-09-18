@@ -173,7 +173,7 @@ pub(crate) async fn find_key_by_label(
         },
     ];
     client
-        .find_objects_init(session, &template)
+        .find_objects_init(session, Some(&template))
         .await
         .map_err(crate::handlers::cli_err("C_FindObjectsInit"))?;
     let objects =

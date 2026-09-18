@@ -317,6 +317,8 @@ mod sanitize_inputs_tests {
                     params: None,
                 }),
                 template: vec![],
+
+                template_null: false,
             }),
         )
         .await

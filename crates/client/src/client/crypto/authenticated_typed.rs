@@ -141,7 +141,7 @@ impl Pkcs11Client {
         parameter: Option<&MessageParameter>,
         unwrapping_key: CkObjectHandle,
         wrapped: CkInBuf<'_>,
-        template: &[CkAttribute],
+        template: Option<&[CkAttribute]>,
         aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, AuthenticatedOutput)> {
         validate_input(mechanism, parameter)?;
@@ -151,7 +151,8 @@ impl Pkcs11Client {
             session_handle: session.0,
             mechanism: Some(mechanism.into()),
             unwrapping_key_handle: unwrapping_key.0,
-            template: Self::proto_template(template),
+            template: Self::proto_template(template.unwrap_or(&[])),
+            template_null: template.is_none(),
             authenticated_parameters: Some(wire::AuthenticatedParameters {
                 message_parameter: parameter.map(Into::into),
             }),
