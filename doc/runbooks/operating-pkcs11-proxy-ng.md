@@ -589,12 +589,13 @@ What the daemon does and does not reset between tenants:
   multiplexed behavior, not a bug. A case asserting an empty token, a
   logged-out token, or a private-object population it did not create is
   asserting **pristine** state and is invalid against a shared daemon.
-* **Known residual — find-enumeration existence oracle (F-04):**
-  `C_FindObjects` results are not login-filtered, so a logged-out context can
-  observe bare (virtual) handles/counts of private objects while another
-  tenant holds the backend logged in. Only existence leaks: attribute reads
-  and every use path still refuse with `CKR_USER_NOT_LOGGED_IN`, and
-  create/copy/generate of private objects are refused the same way.
+* **Find-enumeration login filtering (F-04, fixed):**
+  `C_FindObjects` results are filtered by the querying context's login
+  state: a logged-out context observes only known-public objects' bare
+  (virtual) handles/counts, even while another tenant holds the backend
+  logged in (unknown privacy hides fail-closed). Attribute reads, every
+  use path, and private-object create/copy/generate still refuse with
+  `CKR_USER_NOT_LOGGED_IN` as before.
 
 **Rule for harnesses:** cases needing pristine state must rotate to a fresh
 daemon (restart, or a per-case backend namespace/volume) — the D9-harness

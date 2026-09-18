@@ -53,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `shutdown_grace_secs = 30` controls graceful-shutdown drain on
     SIGTERM/SIGINT.
   - `backend_health_consecutive_failures = 3` gating threshold for
-    `tonic-health` (wiring follows in a separate commit).
+    `tonic-health`.
 - Daemon refuses to start when `backend.module` is still the shipped
   placeholder (`/CHANGE_ME/path/to/backend.so`).
 - Shim accepts the legacy `PKCS11_PROXY_SOCKET=tcp://host:port` env
@@ -234,6 +234,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of being forced to 0 (D5/F7).
 - Absurd output capacities answer `CKR_ARGUMENTS_BAD` at the output-spec
   boundary instead of `CKR_HOST_MEMORY` (D7/F4; ADR-0010 Limits-(d)).
+- Find-enumeration login filtering (tenancy F-04): `C_FindObjects` results
+  are filtered by the querying context's login state — a logged-out context
+  observes only known-public objects' handles and counts, closing the
+  existence oracle that leaked private objects' bare handles while another
+  tenant held the backend logged in. Unknown privacy hides fail-closed;
+  logged-in behavior is unchanged.
 
 ### Security
 
@@ -291,11 +297,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   crash (F9), opensc ECDH crash (F10), NSS ML-DSA short-signature accept with
   an open mechanism (F11 — no ML-DSA verify soundness claim shippable).
   Drafts live under `doc/vendors/upstream-drafts/` in the umbrella.
-- Find-enumeration existence oracle (tenancy F-04, deferred): a logged-out
-  context can enumerate private objects' bare handles via `C_FindObjects`
-  while another tenant holds the backend logged in; reads and use are still
-  refused, so only existence/count leaks. Recorded in the runbook asymmetry
-  table; login filtering deferred.
+- D2 null-fidelity scope (m-2/m-3): class-4 null-bit coverage is GCM/OAEP
+  only (classic GCM proven; CCM empty-field behavior untested — CCM/wrap
+  shapes still conflate (NULL,0)/(ptr,0) at daemon materialization).
+  `GetAttributeValue` query probes likewise still collapse (NULL,0) to
+  (ptr,0) (no `template_null` bit on the query path). Disclosure only; no
+  wire expansion.
 - Lifecycle read exclusion for retained native roots (C3M F-01, deferred to
   a post-v0.2.0 P-slice): the documented "native-operation guard" does not
   exist yet, so the P0 lifecycle-exclusion clause is unimplemented. No UB
