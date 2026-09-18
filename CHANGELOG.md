@@ -7,43 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Windows x64/MSVC native daemon consuming Windows provider DLLs, with the
-  Windows x64 PKCS#11 client shim, in both interoperation directions —
-  qualified on real Windows Server 2022 (T6 legs A/B/C receipts).
-- Per-PR Tier 0f `windows-client-llp64` Windows compile gate
-  (`cargo xwin build --target x86_64-pc-windows-msvc --all-targets`).
-- Deterministic Windows ZIP bundle via `scripts/release-windows.sh`
-  (`pkcs11-proxy-ng-v0.2.0-x86_64-pc-windows-msvc.zip` + `SHA256SUMS-windows`),
-  appended to the tag release by the `release-windows` job.
-- 32-bit NSS-i386 second-provider width leg
-  (`scripts/run-cross-width-nss32-live-test.sh`, nightly) alongside the four
-  Linux legs in `scripts/run-cross-width-live-test.sh`.
-- Windows abnormal-stop contract: `TerminateProcess(GetCurrentProcess(), 70)`
-  backstop arm on the qualified Windows host (see the native ownership
-  contract); `abort()` ruled out.
-
-### Changed
-
-- `pkcs11-module` is now consumed as a rev-pinned git dependency from
-  `https://github.com/mingulov/pkcs11-components` (which also provides the
-  `pkcs11-abi` layout catalog) instead of the nested `crates/module`; the
-  nested crate is removed. The backend keeps using the same
-  `pkcs11_module::{function_list, tables::{...}}` API via the upstream
-  re-export, so runtime behavior is unchanged. `pkcs11-proxy-ng-types` stays
-  nested: it carries proxy-specific exact-output contracts and registry
-  policy (effect validation, apply flags, operator exclusion, wiping secret
-  owners) that the generic upstream `pkcs11-types` does not provide.
-
-### Fixed
-
-- Daemon SIGSEGV on 0-length attribute buffers: empty exact-output buffers now
-  cross FFI as NULL `pValue`, and the daemon synthesizes
-  `CKR_BUFFER_TOO_SMALL` for lenient backends instead of crashing.
-- Remaining empty-buffer FFI conversion sites hardened to the same NULL
-  convention.
-
 ## [0.2.0] - 2026-09-15
 
 ### Added
@@ -122,6 +85,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   human-readable log lines (the README dev flow now works as
   documented); unset or any other value keeps the historical JSON
   default that the prod/staging examples set explicitly.
+- Windows x64/MSVC native daemon consuming Windows provider DLLs, with the
+  Windows x64 PKCS#11 client shim, in both interoperation directions —
+  qualified on real Windows Server 2022 (T6 legs A/B/C receipts).
+- Per-PR Tier 0f `windows-client-llp64` Windows compile gate
+  (`cargo xwin build --target x86_64-pc-windows-msvc --all-targets`).
+- Deterministic Windows ZIP bundle via `scripts/release-windows.sh`
+  (`pkcs11-proxy-ng-v0.2.0-x86_64-pc-windows-msvc.zip` + `SHA256SUMS-windows`),
+  appended to the tag release by the `release-windows` job.
+- 32-bit NSS-i386 second-provider width leg
+  (`scripts/run-cross-width-nss32-live-test.sh`, nightly) alongside the four
+  Linux legs in `scripts/run-cross-width-live-test.sh`.
+- Windows abnormal-stop contract: `TerminateProcess(GetCurrentProcess(), 70)`
+  backstop arm on the qualified Windows host (see the native ownership
+  contract); `abort()` ruled out.
+- Linux abnormal native-lifetime stop: raw `exit_group(70)` stubs (x86_64
+  syscall 231 / i686 int 0x80 252), a final-owner Drop guard, and a 30-second
+  shutdown-deadline controller, per the native ownership contract; qualified
+  by the stop-topology receipts (C3M Tasks 3-4, 32/32 on all four
+  x86_64/i686 x gnu/musl variants).
+- X3DH key-exchange mechanism support (`CKM_X3DH_INITIALIZE`/`RESPOND`),
+  with FFI conversion and proto round-trips; re-verified on x86_64 and i686
+  plus both Miri models (C3M Task 6, no waiver).
+- Mechanism-registry coverage for the Wave 3 gaps: single-DES CFB/OFB IV
+  shapes, SSL3/TLS keygen and MAC version/length shapes, CAMELLIA/ARIA/SEED
+  `ECB_ENCRYPT_DATA` derivation, and documented vendor overlays (BouncyHSM
+  BLAKE2B, opencryptoki ECDH-X/COF) as operator opt-ins.
+- Tenancy model: object-path logical-login enforcement, last-context-out
+  backend logout, faithful `ALREADY_LOGGED_IN` mapping, and refcounted
+  teardown reaping (ADR-0002 rewrite; ADR-0008 superseded).
+- Release evidence: 30-provider pooled transparency matrix (~3.39M tests
+  through the proxy at `bd95ffa`), verdict DONE_WITH_CONCERNS; see the
+  umbrella release-record pack `2026-09-16-v020-release-execution-plan`
+  (`c3m-wave3-report-final.md`, review, erratum, `c3m-35-reverification.md`).
 
 ### Changed
 
@@ -147,6 +143,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tonic features are now selected per-crate, so client-side artifacts
   no longer pull in the server stack.
 - Workspace builds clippy-clean under `-D warnings`.
+- `pkcs11-module` is now consumed as a rev-pinned git dependency from
+  `https://github.com/mingulov/pkcs11-components` (which also provides the
+  `pkcs11-abi` layout catalog) instead of the nested `crates/module`; the
+  nested crate is removed. The backend keeps using the same
+  `pkcs11_module::{function_list, tables::{...}}` API via the upstream
+  re-export, so runtime behavior is unchanged. `pkcs11-proxy-ng-types` stays
+  nested: it carries proxy-specific exact-output contracts and registry
+  policy (effect validation, apply flags, operator exclusion, wiping secret
+  owners) that the generic upstream `pkcs11-types` does not provide.
+- `C_Login` on a slot held by another live context returns
+  `CKR_USER_ALREADY_LOGGED_IN` faithfully and mints no logical login; the
+  cached-PIN verifier is removed (ADR-0008 superseded by the ADR-0002
+  rewrite). One-login-holder-per-slot is the mandated trade-off, bounded by
+  the last-context-out and refcounted-teardown release paths.
 
 ### Removed
 
@@ -200,6 +210,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently truncating (same fail-loud doctrine as the existing
   `narrow_wire_ulong` conversions). No behavior change on 64-bit
   hosts, where the checks are pass-throughs.
+- Daemon SIGSEGV on 0-length attribute buffers: empty exact-output buffers now
+  cross FFI as NULL `pValue`, and the daemon synthesizes
+  `CKR_BUFFER_TOO_SMALL` for lenient backends instead of crashing.
+- Remaining empty-buffer FFI conversion sites hardened to the same NULL
+  convention.
+- C3M review findings: `Retiring` occupancy across dependent retirement and
+  dlclose (F-02); failed `C_Initialize` poisons instead of recycling the
+  reservation (F-03); checked lifecycle generation plus refusal of re-init
+  after a failed `C_Finalize` (F-08); FIPS hard-excludes restored for the
+  missing ARIA/SEED/Camellia family members (F-09/F-10).
+- Caller-NULL templates and empty GCM IV/AAD and OAEP source pointers now
+  cross the wire with null bits and materialize as NULL on the daemon,
+  instead of conflating NULL with empty (D2/F3).
+- The daemon rejects downgraded `C_GetInterface` answers whose leading
+  `CK_VERSION` is below the requested version, instead of publishing a
+  phantom interface list (D3/F5).
+- SSL3/TLS/WTLS key-material OUT handles from derive operations are
+  virtualized like SP800-108 additional handles (D4/F6).
+- Caller-preset nested `GetAttributeValue` query types are forwarded instead
+  of being forced to 0 (D5/F7).
+- Absurd output capacities answer `CKR_ARGUMENTS_BAD` at the output-spec
+  boundary instead of `CKR_HOST_MEMORY` (D7/F4; ADR-0010 Limits-(d)).
 
 ### Security
 
@@ -220,6 +252,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and now also redact in `Debug`, so no current or future log line
   capturing a holder can leak secret bytes. The unused `zeroize`
   dependency was removed from the server crate.
+- ADR-0013 secret migration complete: all 162 manifest-secret fields travel
+  in wiping `SecretBytes` owners from the conversion boundary to the PKCS#11
+  ABI with 0 waivers; secret wire messages carry redacted `Debug`; and a
+  descriptor-aware pre-decode tower layer rejects duplicate fields, repeated
+  oneof members, groups, truncation, and depth bombs before prost allocates.
+  Independent 7.4 security review ACCEPT (0 Critical); all findings addressed.
+- Privacy verification evidence (C3M Task 8): audit suites, 6-canary 0-leak
+  checks, 5-drop sentinels, exit-70 honesty, and 34/34 + 32/32 static audits
+  re-derived by the reviewer, mapped in `privacy.md`; plus a handler-level
+  fail-closed-after-side-effect regression test.
+- Closed the Wave 3 F1 authorization hole: a logically logged-out context's
+  private-object create/copy/use is refused with `CKR_USER_NOT_LOGGED_IN`
+  even when another tenant holds the backend logged in (D6; re-verified live
+  on kryoptic, regressions 1→0).
+
+### Known limitations
+
+- Message-API AEAD Init shapes (§7.3) stay OPEN: the proxy strictly requires
+  message structs on `C_MessageEncrypt/DecryptInit` by documented fail-closed
+  design, while kryoptic/NSS leniently accept classic structs and the
+  pkcs11-check `ccm` recipe packs the classic struct — a framework-recipe bug
+  observed through deliberate proxy strictness (report erratum E1; framework
+  fix drafted upstream, and the strictness is now documented in ADR-0010
+  Limits-(c) and the runbook). No proxy-leniency diff in v0.2.0 (Ruling 3).
+- Windows guest re-validation at the freeze HEAD is a follow-up: v0.2.0 ships
+  on the Wave-1 T6 real-Windows receipts plus a green Windows-target compile
+  check at freeze (Ruling 4). Pooled pkcs11-check suites on Windows have no
+  plan-defined runner yet.
+- Static musl proxy binaries are unproven: the freeze-gate musl release build
+  failed on the missing `x86_64-linux-musl-gcc` toolchain, so the musl static
+  build is a v0.2.0 follow-up (needs musl-tools in the CI image); D8 stays
+  config-proven/live-unproven (Ruling 5).
+- Backend bugs found by the matrix are filed as upstream drafts, not sent:
+  opencryptoki AES-KWP heap overflow (F8, CVE-candidate), wolf curve-less EC
+  crash (F9), opensc ECDH crash (F10), NSS ML-DSA short-signature accept with
+  an open mechanism (F11 — no ML-DSA verify soundness claim shippable).
+  Drafts live under `doc/vendors/upstream-drafts/` in the umbrella.
+- Find-enumeration existence oracle (tenancy F-04, deferred): a logged-out
+  context can enumerate private objects' bare handles via `C_FindObjects`
+  while another tenant holds the backend logged in; reads and use are still
+  refused, so only existence/count leaks. Recorded in the runbook asymmetry
+  table; login filtering deferred.
+- Lifecycle read exclusion for retained native roots (C3M F-01, deferred to
+  a post-v0.2.0 P-slice): the documented "native-operation guard" does not
+  exist yet, so the P0 lifecycle-exclusion clause is unimplemented. No UB
+  demonstrated (shared reads of stable roots; exploitation needs a concurrent
+  evictor mid-provider-dereference). See the C3M re-review addendum §3/R1 for
+  the exact open-item text.
 
 ## [0.1.0] - 2026-05-15
 
