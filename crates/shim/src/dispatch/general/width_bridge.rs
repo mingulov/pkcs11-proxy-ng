@@ -42,7 +42,8 @@ pub fn bridge_request_buffer_len(
 /// Outer `CKA_*_TEMPLATE` buffer length, client layout -> backend layout.
 ///
 /// Template byte lengths count whole `CK_ATTRIBUTE` structs, whose size is
-/// an ABI property of each edge (24 LP64 / 12 ILP32 / 16 LLP64-packed).
+/// an ABI property of each edge (24 LP64 / 12 ILP32 / 16 LLP64-packed;
+/// 32-bit Windows packs to 12, sharing the ILP32 stride).
 /// Rescale by entry count; a zero stride (defensive) passes through.
 #[cfg(test)]
 pub fn bridge_template_request_len(
