@@ -176,7 +176,13 @@ async fn logout_response(
 }
 
 #[tokio::test]
-async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in() {
+async fn second_context_login_returns_backend_already_faithfully_without_minting_login() {
+    // D6(3): while one live context holds the slot login, the shared backend
+    // token is logged in and would answer a second backend C_Login with
+    // USER_ALREADY_LOGGED_IN without checking the PIN. The daemon cannot
+    // PIN-verify such a login, so it returns ALREADY faithfully and mints NO
+    // logical login for the second context — never a login on an unverified
+    // PIN (Wave 3.5 tenancy ruling; supersedes the ADR-0008 verifier).
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -192,32 +198,30 @@ async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in(
     assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
     assert_eq!(
         login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
-        CkRv::OK.0,
-        "a fresh logical client should not inherit backend USER_ALREADY_LOGGED_IN"
-    );
-    assert_eq!(
-        login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
         CkRv::USER_ALREADY_LOGGED_IN.0,
-        "repeat login in the same logical client should still report already logged in"
+        "a second live context must see the backend's ALREADY faithfully, even with the correct PIN"
     );
     assert_eq!(
         mock.login_call_count(),
-        2,
-        "repeat login after a logical login must be answered by the backend, not synthesized"
+        1,
+        "the refused second login must not reach the backend at all"
     );
 
-    let logout_b = logout(
-        &HandlerContext::for_test(&ctx_mgr, &backend),
-        Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
-            client_context_id: ctx_b.0.clone(),
-            session_handle: session_b,
-        }),
-    )
-    .await
-    .unwrap()
-    .into_inner();
-    assert_eq!(logout_b.ck_rv, CkRv::OK.0);
+    // No logical login may be minted for ctx_b.
+    let b_login_state = ctx_mgr
+        .get_context(&ctx_b, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
+        .await
+        .unwrap();
+    assert_eq!(b_login_state, None, "no logical login may be minted on an unverified PIN");
 
+    // ctx_b was never logged in, so its logout reports NOT_LOGGED_IN while
+    // ctx_a's backend login is undisturbed.
+    assert_eq!(
+        logout_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
+        CkRv::USER_NOT_LOGGED_IN.0
+    );
     let backend_session_a = ctx_mgr
         .get_context(&ctx_a, |ctx| ctx.session_handles.resolve(VirtualHandle(session_a)))
         .await
@@ -227,7 +231,16 @@ async fn login_state_is_logical_client_scoped_when_backend_is_already_logged_in(
     assert_eq!(
         info.state,
         CkSessionState::RwUser,
-        "logging out ctx_b must not physically log out ctx_a"
+        "refusing ctx_b must not disturb ctx_a's backend login"
+    );
+
+    // After ctx_a logs out (last holder → real backend logout), ctx_b can log
+    // in normally.
+    assert_eq!(logout_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
+    assert_eq!(
+        login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
+        CkRv::OK.0,
+        "after the holder releases the slot the next login must succeed"
     );
 }
 
@@ -1565,13 +1578,13 @@ async fn close_session_drops_mapping_for_every_terminal_already_gone_result() {
 }
 
 #[tokio::test]
-async fn cross_client_login_with_wrong_pin_is_rejected() {
-    // A1: when a fresh logical client logs in to a slot another client already
-    // holds, the shared backend token is logged in, so a second backend
-    // C_Login returns USER_ALREADY_LOGGED_IN without validating the PIN. The
-    // proxy must therefore validate the presented PIN against the verifier
-    // captured at the first successful login — never synthesize CKR_OK for an
-    // unvalidated/incorrect PIN.
+async fn cross_client_login_while_slot_held_is_already_regardless_of_pin() {
+    // D6(3): when a slot is held logged-in by another live context, the daemon
+    // cannot PIN-verify a new login (the token would just answer ALREADY), so
+    // the PIN is never evaluated: wrong and correct PINs alike get the
+    // faithful USER_ALREADY_LOGGED_IN, and no logical login is minted either
+    // way. (Supersedes the ADR-0008 verifier contract, which answered
+    // PIN_INCORRECT/OK from a cached hash.)
     let mock = MockBackend::default_test();
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
@@ -1585,7 +1598,7 @@ async fn cross_client_login_with_wrong_pin_is_rejected() {
     // ctx_a logs in with the correct PIN ("1234" per login_response).
     assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
 
-    // ctx_b attempts a logical login with a WRONG PIN.
+    // ctx_b attempts a login with a WRONG PIN.
     let wrong = login(
         &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::LoginRequest {
@@ -1601,30 +1614,38 @@ async fn cross_client_login_with_wrong_pin_is_rejected() {
     .ck_rv;
     assert_eq!(
         wrong,
-        CkRv::PIN_INCORRECT.0,
-        "cross-client login with a wrong PIN must be CKR_PIN_INCORRECT, not synthesized OK"
+        CkRv::USER_ALREADY_LOGGED_IN.0,
+        "a held slot must answer ALREADY without evaluating the PIN"
     );
 
-    // ctx_b with the CORRECT PIN still succeeds (feature preserved).
+    // ctx_b with the CORRECT PIN gets the same faithful answer — no minting.
     assert_eq!(
         login_response(&ctx_mgr, &backend, &ctx_b, session_b).await,
-        CkRv::OK.0,
-        "cross-client login with the correct PIN must still succeed"
+        CkRv::USER_ALREADY_LOGGED_IN.0,
+        "a held slot must answer ALREADY even for the correct PIN (no unverified logins)"
     );
+    let b_login_state = ctx_mgr
+        .get_context(&ctx_b, |ctx| {
+            ctx.login_state.get(&crate::server::slot_map::BackendSlotId(CkSlotId(0))).copied()
+        })
+        .await
+        .unwrap();
+    assert_eq!(b_login_state, None, "no logical login may be minted while the slot is held");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_first_login_serializes_to_one_backend_login() {
     // M5: two clients racing the FIRST login on the same shared token must not
     // both take the real-login path. Per-slot login serialization makes the
-    // first do the real C_Login (capturing the verifier) and the second take
-    // the logical path (verifier-validated OK) — exactly one backend C_Login.
+    // first do the real C_Login and the second — after blocking on the lock and
+    // seeing A's state — take the faithful-ALREADY path (D6(3)): exactly one
+    // backend C_Login.
     //
     // Deterministic harness: a login gate holds client A inside the backend
     // C_Login (still holding the per-slot lock) while client B starts, so B is
     // guaranteed to race. Without the lock, B would scan "no other login" before
     // A inserts its state and issue a SECOND backend login (count == 2); with it,
-    // B blocks on the lock, then sees A's state and takes the logical path.
+    // B blocks on the lock, then sees A's state and answers ALREADY faithfully.
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -1677,8 +1698,8 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
         })
     };
 
-    // Release A; it finishes the real login, captures the verifier, drops the
-    // lock; B then sees A's login state and takes the logical path.
+    // Release A; it finishes the real login, records its login state, and drops
+    // the lock; B then sees A's login state and answers ALREADY faithfully.
     {
         let (lock, cv) = &*proceed;
         *lock.lock().unwrap() = true;
@@ -1691,66 +1712,13 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
     assert_eq!(rv_a, CkRv::OK.0, "the first login should succeed");
     assert_eq!(
         rv_b,
-        CkRv::OK.0,
-        "the raced second login must be a logical OK, not USER_ALREADY_LOGGED_IN"
+        CkRv::USER_ALREADY_LOGGED_IN.0,
+        "the raced second login must be a faithful ALREADY (D6(3)), not a minted login"
     );
     assert_eq!(
         mock.login_call_count(),
         1,
         "per-slot serialization must yield exactly one real backend C_Login"
-    );
-}
-
-#[tokio::test]
-async fn set_pin_refreshes_the_cross_client_login_verifier() {
-    // A1 follow-up (ADR-0008): after a PIN change, a co-located logical login
-    // with the NEW PIN must be accepted — the verifier is refreshed, not left
-    // failing closed against the old PIN.
-    let mock = MockBackend::default_test();
-    mock.initialize().unwrap();
-    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
-    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
-    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
-    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
-    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
-    let session_a = open_test_session(&ctx_mgr, &backend, &ctx_a).await;
-    let session_b = open_test_session(&ctx_mgr, &backend, &ctx_b).await;
-
-    // ctx_a logs in with "1234" (verifier captured), then changes it to "5678".
-    assert_eq!(login_response(&ctx_mgr, &backend, &ctx_a, session_a).await, CkRv::OK.0);
-    let set_rv = set_pin(
-        &HandlerContext::for_test(&ctx_mgr, &backend),
-        Request::new(pkcs11_proxy_ng_proto::SetPinRequest {
-            client_context_id: ctx_a.0.clone(),
-            session_handle: session_a,
-            old_pin: Some(b"1234".to_vec()),
-            new_pin: Some(b"5678".to_vec()),
-        }),
-    )
-    .await
-    .unwrap()
-    .into_inner()
-    .ck_rv;
-    assert_eq!(set_rv, CkRv::OK.0, "SetPIN should succeed");
-
-    // ctx_b's logical login with the NEW PIN must now be accepted.
-    let rv = login(
-        &HandlerContext::for_test(&ctx_mgr, &backend),
-        Request::new(pkcs11_proxy_ng_proto::LoginRequest {
-            client_context_id: ctx_b.0.clone(),
-            session_handle: session_b,
-            user_type: CkUserType::User as u64,
-            pin: Some(b"5678".to_vec()),
-        }),
-    )
-    .await
-    .unwrap()
-    .into_inner()
-    .ck_rv;
-    assert_eq!(
-        rv,
-        CkRv::OK.0,
-        "a logical login with the new PIN must be accepted after SetPIN refreshes the verifier"
     );
 }
 

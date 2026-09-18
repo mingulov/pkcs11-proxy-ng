@@ -120,7 +120,7 @@ Phase 1 exposes **daemon-virtual slot IDs** to clients.
 
 The server distinguishes `VirtualSlotId` and `BackendSlotId` without implicit
 conversions. Session ownership, token metadata, logical login state, login
-serialization, PIN verifiers, and failed-login budgets use backend slots.
+serialization, and failed-login budgets use backend slots.
 Only wire-facing slot arguments/results use virtual slots; native provider
 calls receive the explicitly unwrapped backend identifier. This distinction
 also applies when a virtual slot number equals another native slot number.
@@ -162,21 +162,35 @@ Login state is scoped to **logical client instance + token**:
   instance's sessions, even if both are authenticated by the same mTLS
   certificate.
 
+**Backend-authoritative login (D6(3); supersedes ADR-0008).** When another
+live logical client already holds the slot login, the shared backend token is
+logged in and would answer a second backend `C_Login` with
+`CKR_USER_ALREADY_LOGGED_IN` *without* checking the PIN — so the daemon
+**cannot** PIN-verify the new login against the token. It therefore returns
+the backend's answer faithfully (`CKR_USER_ALREADY_LOGGED_IN`, or
+`CKR_USER_ANOTHER_ALREADY_LOGGED_IN` across user types) and mints **no**
+logical login: never a login on an unverified PIN, and the presented PIN is
+not evaluated at all on this path. At most one logical client holds the login
+for a slot at a time; the holder releases it via `C_Logout`, session close,
+or context teardown (last-context-out performs a real backend logout, D6(2) /
+D9-proxy), after which the next login PIN-verifies against the token
+normally. Operators and test harnesses must therefore treat a held slot login
+as exclusive and short-lived, and must not share one daemon across tenants
+that expect concurrent independent logins on the same token.
+
 **Per-slot login serialization (M5).** The cross-context check for an existing
 per-slot login, the backend `C_Login`/`C_Logout`, and the recording of the new
 login state are performed under a **per-slot login lock** (`ContextManager::
 slot_login_lock`, one `tokio::sync::Mutex` keyed by slot id). Without it, two
-logical clients logging into the *same* slot concurrently both observed "no
-other login", both took the real-login path, and the second was answered
-`CKR_USER_ALREADY_LOGGED_IN` by the already-logged-in shared token instead of
-the synthesised logical `CKR_OK` — a transparency defect in the multi-client
-model (each logical client expects its own login to succeed over the shared
-backend). The lock makes the first client perform the real `C_Login` (capturing
-the PIN verifier, ADR-0008) and the second take the logical, verifier-validated
-path, so exactly one backend `C_Login` occurs. The lock is held across the
-backend call but is per-slot, so logins on different slots proceed concurrently;
-the shared token already serialises same-slot logins internally, so no real
-concurrency is lost. Verified by a deterministic concurrency test
+logical clients logging into the *same* slot concurrently could both observe
+"no other login" and both take the real-login path, issuing two backend
+`C_Login` calls for one logical outcome. The lock makes the first client
+perform the real `C_Login` while the second blocks, then sees the first
+client's state and takes the faithful-`ALREADY` path (D6(3)), so exactly one
+backend `C_Login` occurs. The lock is held across the backend call but is
+per-slot, so logins on different slots proceed concurrently; the shared token
+already serialises same-slot logins internally, so no real concurrency is
+lost. Verified by a deterministic concurrency test
 (`concurrent_first_login_serializes_to_one_backend_login`) that gates the first
 client inside the backend `C_Login` while the second races in.
 
