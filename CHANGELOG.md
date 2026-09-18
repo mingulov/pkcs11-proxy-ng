@@ -291,10 +291,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the Wave-1 T6 real-Windows receipts plus a green Windows-target compile
   check at freeze (Ruling 4). Pooled pkcs11-check suites on Windows have no
   plan-defined runner yet.
-- Static musl proxy binaries are unproven: the freeze-gate musl release build
-  failed on the missing `x86_64-linux-musl-gcc` toolchain, so the musl static
-  build is a v0.2.0 follow-up (needs musl-tools in the CI image); D8 stays
-  config-proven/live-unproven (Ruling 5).
+- Static musl proxy binaries are proven: the musl release build runs in the
+  per-PR Tier 0g `musl-x86_64` CI job (musl target + `musl-gcc` linker; the
+  freeze-gate failure was the nonexistent `x86_64-linux-musl-gcc` name) and
+  the artifacts execute natively on Alpine — see
+  `doc/release/musl-tier.md`. Linkage split: daemon + CLI build fully
+  static, while the serving daemon and the shim stay musl-dynamic (a static
+  binary cannot `dlopen` — musl answers "Dynamic loading not supported" —
+  so the static daemon executes but cannot serve; the CLI never dlopens
+  and drives the live smoke). The static CLI, dynamic daemon, and shim
+  complete a live SoftHSM2-backed smoke on glibc-less Alpine; D8 is
+  live-proven (Ruling 5).
 - Backend bugs found by the matrix are filed as upstream drafts, not sent:
   opencryptoki AES-KWP heap overflow (F8, CVE-candidate), wolf curve-less EC
   crash (F9), opensc ECDH crash (F10), NSS ML-DSA short-signature accept with
