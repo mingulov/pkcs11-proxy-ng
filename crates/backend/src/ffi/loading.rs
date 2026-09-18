@@ -206,6 +206,36 @@ fn stop_fire_condition(
     matches!(decision, super::native_domain::RetirementDecision::Poison) && holds_slot
 }
 
+/// Test-only `cfg!` mirror of the `Drop`-guard predicate below (Linux
+/// x86_64/x86, Windows x86_64/x86, macOS aarch64/x86_64 — leg for leg with
+/// `NATIVE_STOP_QUALIFIED`). The `cfg` on the guard is the source of
+/// truth; this mirror lets the coherence test assert the guard arms
+/// exactly where stop arms exist.
+#[cfg(test)]
+pub(in crate::ffi) const DROP_GUARD_STOP_ARMED: bool = cfg!(any(
+    all(
+        target_os = "linux",
+        any(target_env = "gnu", target_env = "musl"),
+        any(
+            all(target_arch = "x86_64", target_pointer_width = "64"),
+            all(target_arch = "x86", target_pointer_width = "32")
+        )
+    ),
+    all(
+        target_os = "windows",
+        target_env = "msvc",
+        any(
+            all(target_arch = "x86_64", target_pointer_width = "64"),
+            all(target_arch = "x86", target_pointer_width = "32")
+        )
+    ),
+    all(
+        target_os = "macos",
+        any(target_arch = "aarch64", target_arch = "x86_64"),
+        target_pointer_width = "64"
+    )
+));
+
 impl Drop for FfiBackend {
     /// Retire the construction reservation honestly: enter `Retiring` for the
     /// exact epoch only when the instance lifecycle proves quiescence (never
@@ -219,13 +249,13 @@ impl Drop for FfiBackend {
         use super::native_domain::RetirementDecision::{Poison, Release};
         let decision = self.lifecycle.retirement_decision();
         // Stop-qualified targets only (Linux x86_64/x86 GNU/musl, Windows
-        // MSVC x86_64/x86): abnormally stop the native lifetime when the
-        // managed final owner cannot prove quiescence. First statement and
-        // lock-free (atomic-only decision plus a plain-bool slot check), so
-        // it precedes the lock-taking poison path and all dependent field
-        // drops. Elsewhere — including load-qualified macOS, which has no
-        // stop arm yet — this block cfg-compiles out and the arms below
-        // keep today's behavior bit-for-bit.
+        // MSVC x86_64/x86, macOS aarch64/x86_64 — exactly the
+        // `NATIVE_FFI_QUALIFIED` legs): abnormally stop the native lifetime
+        // when the managed final owner cannot prove quiescence. First
+        // statement and lock-free (atomic-only decision plus a plain-bool
+        // slot check), so it precedes the lock-taking poison path and all
+        // dependent field drops. Elsewhere this block cfg-compiles out and
+        // the arms below keep today's behavior bit-for-bit.
         #[cfg(any(
             all(
                 target_os = "linux",
@@ -242,6 +272,11 @@ impl Drop for FfiBackend {
                     all(target_arch = "x86_64", target_pointer_width = "64"),
                     all(target_arch = "x86", target_pointer_width = "32")
                 )
+            ),
+            all(
+                target_os = "macos",
+                any(target_arch = "aarch64", target_arch = "x86_64"),
+                target_pointer_width = "64"
             )
         ))]
         if stop_fire_condition(decision, self.construction.holds_registry_slot()) {
@@ -395,6 +430,17 @@ mod tests {
                 "decision={decision:?} holds_slot={holds_slot}"
             );
         }
+    }
+
+    #[test]
+    fn drop_guard_cfg_matches_stop_arms() {
+        // TC1: the `Drop` guard must fire exactly where stop arms exist;
+        // the guard predicate mirrors `NATIVE_STOP_QUALIFIED` leg for leg.
+        assert_eq!(
+            super::DROP_GUARD_STOP_ARMED,
+            crate::ffi::native_stop::NATIVE_STOP_QUALIFIED,
+            "Drop guard cfg must arm exactly where stop arms exist"
+        );
     }
 
     /// Verify that a backend constructed with `None` for the 3.x fields

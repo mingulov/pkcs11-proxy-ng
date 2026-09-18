@@ -1649,3 +1649,23 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
     assert_eq!(client_iv, [0xA1, 0xA2, 0xA3, 0xA4]);
     assert_eq!(server_iv, [0xB1, 0xB2, 0xB3, 0xB4]);
 }
+
+/// LP64 layout derivation behind the 48-byte GCM envelope pins (Linux
+/// x86_64/s390x, macOS aarch64/x86_64): `CK_ULONG`/`CK_GENERATOR_FUNCTION`
+/// are 8-byte `c_ulong`, pointers are 8 bytes, so the six fields sit at
+/// 0/8/16/24/32/40 with zero padding. Pins the derivation the macOS
+/// const asserts rely on; the asserts themselves compile on their targets.
+#[cfg(all(target_pointer_width = "64", any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn gcm_message_params_lp64_layout_derives_48() {
+    assert_eq!(std::mem::size_of::<CK_ULONG>(), 8, "LP64 CK_ULONG is 8 bytes");
+    assert_eq!(std::mem::size_of::<CK_GENERATOR_FUNCTION>(), 8, "generator fn is CK_ULONG");
+    assert_eq!(std::mem::size_of::<*mut CK_BYTE>(), 8, "64-bit pointers are 8 bytes");
+    assert_eq!(std::mem::offset_of!(CK_GCM_MESSAGE_PARAMS, pIv), 0);
+    assert_eq!(std::mem::offset_of!(CK_GCM_MESSAGE_PARAMS, ulIvLen), 8);
+    assert_eq!(std::mem::offset_of!(CK_GCM_MESSAGE_PARAMS, ulIvFixedBits), 16);
+    assert_eq!(std::mem::offset_of!(CK_GCM_MESSAGE_PARAMS, ivGenerator), 24);
+    assert_eq!(std::mem::offset_of!(CK_GCM_MESSAGE_PARAMS, pTag), 32);
+    assert_eq!(std::mem::offset_of!(CK_GCM_MESSAGE_PARAMS, ulTagBits), 40);
+    assert_eq!(std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>(), 48, "six 8-byte fields, no padding");
+}
