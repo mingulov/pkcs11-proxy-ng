@@ -240,6 +240,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existence oracle that leaked private objects' bare handles while another
   tenant held the backend logged in. Unknown privacy hides fail-closed;
   logged-in behavior is unchanged.
+- Logged-out USE of virtualized key-mat/SP800-108 handles now refuses: the handles are recorded private at registration, closing the fail-open hole on failing backend probes (review-A m-1).
+- `C_CloseAllSessions` releases the last-holder backend login before the batch close, silencing the routine operator WARN on ordinary logged-in close-all (review-A m-5).
 
 ### Security
 

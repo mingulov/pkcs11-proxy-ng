@@ -1303,7 +1303,7 @@ mod tests {
     #[tokio::test]
     async fn i2_transparent_when_neither_per_object_nor_per_class_active() {
         // Regression guard: when neither per_object_active() nor per_class_active(),
-        // the transparency path must still return all objects unchanged (no filter).
+        // the transparency path keeps both objects (login filter keeps both: fixtures are public).
         let policy = Arc::new(TokenPolicy::from_config(&AuthConfig::default()).unwrap());
         assert!(!policy.per_object_active());
         assert!(!policy.per_class_active());
