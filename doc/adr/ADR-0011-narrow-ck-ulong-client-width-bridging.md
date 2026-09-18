@@ -587,6 +587,8 @@ assumption.
 - **D6 — Endianness guard.** The D2 advertisement also carries backend byte
   order; the client refuses at probe on an LE/BE mismatch rather than silently
   corrupting. All supported targets are LE; this guards a future BE backend.
+  (BE since proven at the build+QEMU tier — see [be-qemu-tier.md](../release/be-qemu-tier.md);
+  live mixed-endian bridging remains refused by design.)
 - **D7 — Vendor / unknown attributes: opaque-bytes by default; operator-declared
   types later.** The proxy cannot infer a `CKA_VENDOR_DEFINED`/unknown
   attribute's value type, so it passes such attributes through as opaque bytes

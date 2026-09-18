@@ -16,6 +16,10 @@
 
 FROM debian:13.6
 
+# Pinned to the receipted toolchain (see task-t6a-report.md); override with
+# --build-arg RUST_TOOLCHAIN=<version> to re-validate against a newer rustc.
+ARG RUST_TOOLCHAIN=1.98.1
+
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates curl git pkg-config python3 \
@@ -24,7 +28,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal \
+    | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal \
         --target s390x-unknown-linux-gnu
 
 ENV PATH="/root/.cargo/bin:${PATH}"

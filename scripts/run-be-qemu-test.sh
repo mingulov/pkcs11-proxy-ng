@@ -152,11 +152,16 @@ if [[ "$RUN_MODE" == "docker" ]]; then
     SHIM_SO="/tmp/be-target/$TARGET/debug/libpkcs11_proxy_ng_shim.so"
 else
     export CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER="${CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER:-s390x-linux-gnu-gcc}"
+    # Same sysroot semantics as docker mode (Dockerfile.be-qemu): s390x test
+    # binaries are dynamically linked, so qemu needs -L for the loader/libc,
+    # plus QEMU_LD_PREFIX for test binaries that re-spawn themselves outside
+    # cargo's runner flag (e.g. native-stop children, daemon-UX tests).
+    export QEMU_LD_PREFIX="${QEMU_LD_PREFIX:-/usr/s390x-linux-gnu}"
     if [[ -z "${CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER:-}" ]]; then
         if command -v qemu-s390x-static >/dev/null 2>&1; then
-            export CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER="qemu-s390x-static"
+            export CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER="qemu-s390x-static -L /usr/s390x-linux-gnu"
         else
-            export CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER="qemu-s390x"
+            export CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER="qemu-s390x -L /usr/s390x-linux-gnu"
         fi
     fi
     be_cargo() {
