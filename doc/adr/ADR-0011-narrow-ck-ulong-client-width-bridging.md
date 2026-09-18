@@ -569,6 +569,11 @@ assumption.
   direction is evidenced by leg B. The client exclusions
   (`pc-windows-gnu`, 32-bit Windows, big-/mixed-endian) and the remaining
   native-host exclusions stand.]
+  [2026-09-18 T6b staging: the 32-bit Windows client exclusion is now
+  code-complete (width bridge, probe, `host_abi`, FFI paths, native-FFI
+  qualification) with local `i686-pc-windows-msvc` cross-compile/link
+  proof, and the win32 CI leg exists; the exclusion lifts only when
+  T2run's first green win32 run lands, which finishes this doc move.]
 - **D4 — Overflow: checked, value-preserving narrowing.** Convert the integer
   value with a checked `CK_ULONG::try_from`; reject (`CKR_FUNCTION_FAILED`) on a
   genuine `> u32::MAX` value rather than silently truncate. Guarantees `1 → 1`

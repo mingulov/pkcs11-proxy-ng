@@ -34,7 +34,10 @@ negative), and leg C (BouncyHsm-win second provider, full set green).
 Windows compile coverage is the per-PR Tier 0f `windows-client-llp64` job
 (`cargo xwin build --target x86_64-pc-windows-msvc --all-targets`).
 Still excluded: Windows GNU, 32-bit Windows (PE32), and macOS/ARM
-runtime claims. Big-endian is proven one tier below a runtime claim —
+runtime claims. (T6b staging: for PE32 the code and local
+`i686-pc-windows-msvc` cross-compile/link proof are done and the win32 CI
+leg exists; the exclusion lifts only with T2run's first green win32 run.)
+Big-endian is proven one tier below a runtime claim —
 s390x build plus the QEMU suites in
 [be-qemu-tier.md](be-qemu-tier.md) are green; live native FFI on BE
 hosts stays excluded (s390x is not native-FFI-qualified).
