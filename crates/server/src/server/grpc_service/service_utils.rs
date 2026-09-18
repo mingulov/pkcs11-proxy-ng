@@ -1041,6 +1041,47 @@ pub(super) async fn ensure_private_mint_allowed(
     Ok(())
 }
 
+/// Three-state `CKA_PRIVATE` probe for one backend object: `Some(true)` is
+/// known private, `Some(false)` is known public, `None` is probe failure
+/// (backend error, transport failure, absent/unparseable value). A read-only
+/// probe that never disturbs other tenants. Callers choose the failure
+/// polarity: USE fails open to the backend's own faithful verdict
+/// ([`backend_object_is_private`]); find-enumeration fails closed
+/// ([`backend_object_known_public`]).
+async fn probe_backend_object_private(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> Option<bool> {
+    let backend = ctx.backend.clone();
+    let fetched = spawn_backend(move || {
+        let mut template = [CkAttribute {
+            attr_type: CkAttributeType::PRIVATE,
+            value: Some(CkAttributeValue::Bool(false)),
+        }];
+        let privacy =
+            match backend.get_attribute_value(backend_session, backend_object, &mut template) {
+                Ok(()) => template.first().and_then(|attr| attr.value.as_ref()).and_then(|value| {
+                    match value {
+                        CkAttributeValue::Bool(b) => Some(*b),
+                        CkAttributeValue::Bytes(bytes) => {
+                            Some(bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0)))
+                        }
+                        CkAttributeValue::Ulong(u) => Some(*u != 0),
+                        _ => None,
+                    }
+                }),
+                Err(_) => None,
+            };
+        Ok(privacy)
+    })
+    .await;
+    match fetched {
+        Ok(Ok(privacy)) => privacy,
+        _ => None,
+    }
+}
+
 /// Read `CKA_PRIVATE` for one backend object. Returns `true` only on a
 /// positive True; any backend error, transport failure, or absent/unparseable
 /// value returns `false` so the caller falls through to the real operation
@@ -1051,32 +1092,19 @@ async fn backend_object_is_private(
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> bool {
-    let backend = ctx.backend.clone();
-    let fetched = spawn_backend(move || {
-        let mut template = [CkAttribute {
-            attr_type: CkAttributeType::PRIVATE,
-            value: Some(CkAttributeValue::Bool(false)),
-        }];
-        let is_private =
-            match backend.get_attribute_value(backend_session, backend_object, &mut template) {
-                Ok(()) => {
-                    template.first().and_then(|attr| attr.value.as_ref()).is_some_and(|value| {
-                        match value {
-                            CkAttributeValue::Bool(b) => *b,
-                            CkAttributeValue::Bytes(bytes) => {
-                                bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0))
-                            }
-                            CkAttributeValue::Ulong(u) => *u != 0,
-                            _ => false,
-                        }
-                    })
-                }
-                Err(_) => false,
-            };
-        Ok(is_private)
-    })
-    .await;
-    matches!(fetched, Ok(Ok(true)))
+    probe_backend_object_private(ctx, backend_session, backend_object).await == Some(true)
+}
+
+/// F-04: known-public probe for find-enumeration filtering. Returns `true`
+/// only when the probe positively reports public; unknown privacy hides the
+/// object (fail-closed — unlike USE there is no backend verdict to fall back
+/// to, and a logged-out context must not observe private objects).
+pub(super) async fn backend_object_known_public(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> bool {
+    probe_backend_object_private(ctx, backend_session, backend_object).await == Some(false)
 }
 
 /// D6(1) enforcement for object/key USE (sign/verify/encrypt/decrypt/digest

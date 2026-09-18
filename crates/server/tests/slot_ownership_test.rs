@@ -212,6 +212,14 @@ fn preload_objects(f: &MtlsFixture) -> [CkObjectHandle; 2] {
             CkAttributeType::UNIQUE_ID,
             MockAttributeSlot::Value(CkAttributeValue::Bytes(vec![uid].into())),
         );
+        // F-04: declare CKA_PRIVATE=false (the native default for objects
+        // created without it) so the logged-out login filter keeps these
+        // authz-policy fixtures visible.
+        f.backend.set_attribute(
+            object,
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
         object
     });
     f.backend.set_find_objects_result(objects.to_vec());
