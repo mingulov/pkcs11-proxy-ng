@@ -31,10 +31,17 @@ full matrix validates the new legs), with publication last:
    the single `softhsm2-i386` lane plus the four §9 ABI topologies.
 
 Still excluded from v0.2.0: Windows GNU, 32-bit Windows (PE32),
-macOS/ARM/big-endian runtime claims, and Wine as conformance evidence.
+macOS/ARM runtime claims, and Wine as conformance evidence.
 Message/VerifySignature/OneShot owner slots were never deferred — they are
 C3M plan scope. Tag/push/publication remain separately authorized actions,
 not scope items.
+
+Big-endian sits one tier below a runtime claim since T6a: the s390x
+workspace build and the QEMU suites in
+`scripts/run-be-qemu-test.sh` are green (see
+[be-qemu-tier.md](../release/be-qemu-tier.md)), while live native FFI on
+BE hosts stays excluded — s390x is not native-FFI-qualified (no stop
+arm, no provider hardware).
 
 ## Consequences
 
@@ -78,8 +85,10 @@ leg first):
 
 The Consequences interim rule is discharged: tail implementation has landed,
 so nonqualified-host refusal now applies only to the still-excluded hosts
-(Windows GNU, PE32, macOS/ARM/big-endian), and Windows compile CI continues
-via the per-PR Tier 0f `windows-client-llp64` job.
+(Windows GNU, PE32, macOS/ARM) plus big-endian for live FFI (BE is
+build-and-QEMU proven only — see [be-qemu-tier.md](../release/be-qemu-tier.md)),
+and Windows compile CI continues via the per-PR Tier 0f
+`windows-client-llp64` job.
 
 Note: the Context section's
 `doc/plans/2026-09-13-v0.2.0-release-program-design.md` reference is dangling
