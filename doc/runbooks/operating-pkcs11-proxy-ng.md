@@ -237,6 +237,23 @@ kubectl -n <ns> logs deploy/<daemon-deploy> | jq -c 'select(.fields.message=="me
 The `revision` field is a SHA-256-prefix of the loaded TOML. New
 contents produce a new revision.
 
+### Shipped vendor overlays
+
+`examples/vendors/` carries ready-to-layer overlays for mechanisms the
+proxy understands structurally but keeps operator opt-in rather than
+enabling by default:
+
+- `bouncyhsm-blake2b.toml` — BouncyHSM `BLAKE2B_*_HMAC_GENERAL`
+  (provider-assigned `0x400E/0x4013/0x4018/0x401D`, single-`CK_ULONG`
+  `mac_general` shape).
+- `opencryptoki-ecdh-x-cof.toml` — `CKM_ECDH_X_AES_KEY_WRAP` /
+  `CKM_ECDH_COF_AES_KEY_WRAP` (`0x4038/0x4039`, `ecdh_aes_key_wrap`
+  shape; kept opt-in pending dedicated X/COF shapes).
+
+Point `[mechanisms].config_path` (or `PKCS11_PROXY_MECHANISMS` for a
+local shim) at the overlay, or `include` it from the daemon's registry
+file, then reload per §5.
+
 ### ConfigMap `subPath` caveat
 
 K8s ConfigMaps mounted with `subPath` **do not auto-update** when the

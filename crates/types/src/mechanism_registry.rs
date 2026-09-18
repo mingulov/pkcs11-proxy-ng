@@ -1429,4 +1429,108 @@ mod tests {
         assert!(filtered.contains(&0x80000001));
         assert!(!filtered.contains(&0xDEAD_BEEF));
     }
+
+    /// Wave 3 F2/D1: previously unmapped mechanisms whose calls fail-closed
+    /// with CKR_MECHANISM_PARAM_INVALID before reaching the backend.
+    #[test]
+    fn wave3_f2_coverage_gaps_are_mapped() {
+        let reg = MechanismRegistry::load_with_override_str(None).unwrap();
+
+        // Single-DES OFB/CFB take a fixed 8-byte IV.
+        for mech in [
+            0x0150, // CKM_DES_OFB64
+            0x0151, // CKM_DES_OFB8
+            0x0152, // CKM_DES_CFB64
+            0x0153, // CKM_DES_CFB8
+        ] {
+            assert_eq!(reg.param_shape(mech), Some("iv"), "mechanism {mech:#06x}");
+            assert!(reg.check_operation(mech, true).is_ok());
+        }
+
+        // Pre-master keygen takes a 2-byte CK_VERSION (opaque bytes).
+        for mech in [
+            0x0370, // CKM_SSL3_PRE_MASTER_KEY_GEN
+            0x0374, // CKM_TLS_PRE_MASTER_KEY_GEN
+        ] {
+            assert_eq!(reg.param_shape(mech), Some("iv"), "mechanism {mech:#06x}");
+            assert!(reg.check_operation(mech, true).is_ok());
+            // Dual-listed: the no-param call stays parameterless-legal.
+            assert!(reg.is_parameterless(mech));
+        }
+
+        // SSL3 MACs take a CK_ULONG length; TLS master-key derive reuses
+        // the SSL3 RandomInfo struct.
+        for mech in [
+            0x0380, // CKM_SSL3_MD5_MAC
+            0x0381, // CKM_SSL3_SHA1_MAC
+        ] {
+            assert_eq!(reg.param_shape(mech), Some("mac_general"), "mechanism {mech:#06x}");
+            assert!(reg.check_operation(mech, true).is_ok());
+            assert!(reg.is_parameterless(mech));
+        }
+        assert_eq!(reg.param_shape(0x0375), Some("ssl3_master_key_derive")); // TLS_MASTER_KEY_DERIVE
+        assert!(reg.check_operation(0x0375, true).is_ok());
+
+        // ECB_ENCRYPT_DATA takes CK_KEY_DERIVATION_STRING_DATA.
+        for mech in [
+            0x0556, // CKM_CAMELLIA_ECB_ENCRYPT_DATA
+            0x0566, // CKM_ARIA_ECB_ENCRYPT_DATA
+            0x0656, // CKM_SEED_ECB_ENCRYPT_DATA
+        ] {
+            assert_eq!(reg.param_shape(mech), Some("key_derivation_string"));
+            assert!(reg.check_operation(mech, true).is_ok());
+        }
+    }
+
+    /// Wave 3 §7.3: AES-CCM and ChaCha20-Poly1305 resolve to
+    /// message-capable shapes, so the message path binds the
+    /// CK_CCM_MESSAGE_PARAMS / CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS
+    /// structs for them.
+    #[test]
+    fn message_capable_aead_shapes_resolve() {
+        let reg = MechanismRegistry::load_with_override_str(None).unwrap();
+        assert_eq!(reg.param_shape(0x1087), Some("gcm")); // CKM_AES_GCM
+        assert_eq!(reg.param_shape(0x1088), Some("ccm")); // CKM_AES_CCM
+        assert_eq!(reg.param_shape(0x4021), Some("salsa20_chacha20_poly1305")); // CHACHA20_POLY1305
+        assert_eq!(reg.param_shape(0x4022), Some("salsa20_chacha20_poly1305")); // SALSA20_POLY1305
+    }
+
+    /// Wave 3 F2/D1: the shipped BouncyHSM/opencryptoki vendor overlays
+    /// (examples/vendors/) merge onto the default registry. Inline the
+    /// content so the test does not depend on filesystem layout.
+    #[test]
+    fn wave3_f2_vendor_overlays_merge() {
+        let blake2b_toml = r#"
+            [[params]]
+            shape = "mac_general"
+            mechanisms = [0x400E, 0x4013, 0x4018, 0x401D]
+        "#;
+        let ecdh_toml = r#"
+            [[params]]
+            shape = "ecdh_aes_key_wrap"
+            mechanisms = [0x4038, 0x4039]
+        "#;
+
+        // Each overlay merges onto the defaults on its own...
+        for (overlay, shape, mechs) in [
+            (blake2b_toml, "mac_general", vec![0x400Eu64, 0x4013, 0x4018, 0x401D]),
+            (ecdh_toml, "ecdh_aes_key_wrap", vec![0x4038u64, 0x4039]),
+        ] {
+            let reg = MechanismRegistry::load_with_override_str(Some(overlay)).unwrap();
+            for mech in mechs {
+                assert_eq!(reg.param_shape(mech), Some(shape), "mechanism {mech:#06x}");
+                assert!(reg.check_operation(mech, true).is_ok());
+            }
+            // ...additively: defaults are untouched.
+            assert_eq!(reg.param_shape(CKM_AES_GCM), Some("gcm"));
+            assert!(reg.is_parameterless(CKM_RSA_PKCS));
+        }
+
+        // ...and neither overlay is in the defaults (operator opt-in).
+        let reg = MechanismRegistry::load_with_override_str(None).unwrap();
+        for mech in [0x400Eu64, 0x4013, 0x4018, 0x401D, 0x4038, 0x4039] {
+            assert_eq!(reg.param_shape(mech), None, "mechanism {mech:#06x} must stay opt-in");
+            assert_eq!(reg.check_operation(mech, true), Err(CkRv::MECHANISM_PARAM_INVALID));
+        }
+    }
 }
