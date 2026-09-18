@@ -246,9 +246,11 @@ pub struct MockBackend {
     /// The backend ABI this mock emulates on the wire (ADR-0011): ulong
     /// width for values/lengths, CK_ATTRIBUTE stride for nested templates.
     abi: MockAbi,
-    /// When set, the D2 byte-order advertisement claims big-endian so the
-    /// client's D6 refusal path can be exercised.
-    advertise_big_endian: bool,
+    /// Override for the D2 byte-order advertisement (`1` = little-endian,
+    /// `2` = big-endian) so the client's D6 refusal path can be exercised.
+    /// `None` (default) advertises the host's own byte order, consistent
+    /// with the same-endian values [`MockAbi::encode_ulong`] emits.
+    advertised_byte_order: Option<u32>,
     /// Mechanism-parameter presence rules captured from a registry at
     /// construction (`with_mechanism_registry`); `None` (plain `new`)
     /// keeps the mock permissive for existing suites.
@@ -346,7 +348,7 @@ impl MockBackend {
             attr_get_exact_calls: AtomicUsize::new(0),
             login_gate: Mutex::new(None),
             abi: MockAbi::host(),
-            advertise_big_endian: false,
+            advertised_byte_order: None,
             param_presence: None,
             cryptoki_version: (3, 0),
             find_objects_override: Mutex::new(None),
@@ -745,10 +747,18 @@ impl MockBackend {
     }
 
     /// Advertise big-endian byte order (D2) so tests can pin the client's
-    /// D6 refusal path. Values are still emitted little-endian: a correct
+    /// D6 refusal path. Values are still emitted in host order: a correct
     /// client must refuse before ever parsing one.
     pub fn with_big_endian_advertisement(mut self) -> Self {
-        self.advertise_big_endian = true;
+        self.advertised_byte_order = Some(2);
+        self
+    }
+
+    /// Advertise little-endian byte order (D2): the mirror knob for
+    /// big-endian hosts, where the big-endian advertisement matches the
+    /// client and it is the little-endian one the client must refuse.
+    pub fn with_little_endian_advertisement(mut self) -> Self {
+        self.advertised_byte_order = Some(1);
         self
     }
 
@@ -1422,7 +1432,7 @@ impl Pkcs11Backend for MockBackend {
     }
 
     fn abi_byte_order(&self) -> u32 {
-        if self.advertise_big_endian { 2 } else { 1 }
+        self.advertised_byte_order.unwrap_or_else(crate::host_abi::host_byte_order)
     }
 
     fn abi_attribute_stride(&self) -> u32 {

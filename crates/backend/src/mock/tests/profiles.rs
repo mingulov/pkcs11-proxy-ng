@@ -251,7 +251,7 @@ fn ilp32_profile_emits_4_byte_ulongs() {
     assert_eq!(rv, CkRv::OK);
     assert_eq!(
         results[0].value,
-        Some(SecretBytes::new(vec![3, 0, 0, 0])),
+        Some(SecretBytes::new(MockAbi::Ilp32.encode_ulong(3))),
         "value bytes at emulated width"
     );
 }
@@ -305,8 +305,8 @@ fn llp64_profile_reports_16_byte_attribute_stride() {
     let (rv, results) = backend.get_attribute_value_exact(session, object, &data_query).unwrap();
     assert_eq!(rv, CkRv::OK);
     let nested = results[0].nested.as_ref().expect("nested results");
-    assert_eq!(nested[0].value, Some(SecretBytes::new(vec![3, 0, 0, 0])));
-    assert_eq!(nested[1].value, Some(SecretBytes::new(vec![31, 0, 0, 0])));
+    assert_eq!(nested[0].value, Some(SecretBytes::new(MockAbi::Llp64.encode_ulong(3))));
+    assert_eq!(nested[1].value, Some(SecretBytes::new(MockAbi::Llp64.encode_ulong(31))));
 }
 
 #[test]
@@ -314,14 +314,20 @@ fn mock_advertises_its_profile_not_the_host() {
     let narrow = MockBackend::default_test().with_abi(MockAbi::Ilp32);
     assert_eq!(narrow.abi_ulong_size(), 4);
     assert_eq!(narrow.abi_attribute_stride(), 12);
-    assert_eq!(narrow.abi_byte_order(), 1, "advertises little-endian by default");
+    // Byte order has no profile dimension: the default advertisement is the
+    // host's own order, consistent with the same-endian encoded values.
+    let host_order = if cfg!(target_endian = "little") { 1 } else { 2 };
+    assert_eq!(narrow.abi_byte_order(), host_order, "advertises host order by default");
 
     let llp64 = MockBackend::default_test().with_abi(MockAbi::Llp64);
     assert_eq!(llp64.abi_ulong_size(), 4);
     assert_eq!(llp64.abi_attribute_stride(), 16);
+    assert_eq!(llp64.abi_byte_order(), host_order);
 
     let be = MockBackend::default_test().with_big_endian_advertisement();
     assert_eq!(be.abi_byte_order(), 2, "the D6-refusal knob claims big-endian");
+    let le = MockBackend::default_test().with_little_endian_advertisement();
+    assert_eq!(le.abi_byte_order(), 1, "the mirror knob claims little-endian");
 }
 
 #[test]
@@ -478,7 +484,7 @@ fn create_object_stores_template_attributes_for_read_back() {
     assert_eq!(rv, CkRv::OK);
     assert_eq!(
         results[0].value,
-        Some(SecretBytes::new(vec![4, 0, 0, 0])),
+        Some(SecretBytes::new(MockAbi::Ilp32.encode_ulong(4))),
         "ulong at the emulated width"
     );
     assert_eq!(results[1].value, Some(SecretBytes::new(vec![0])), "bool as one byte");

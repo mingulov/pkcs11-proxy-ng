@@ -47,7 +47,12 @@ impl MockAbi {
         }
     }
 
-    /// Encode a value as this ABI's native `CK_ULONG` bytes (LE).
+    /// Encode a value as this ABI's native `CK_ULONG` bytes.
+    ///
+    /// The byte order follows the host: the mock emulates a same-endian
+    /// backend (consistent with its default order advertisement), so a
+    /// big-endian host gets big-endian bytes. Cross-endian peers stay
+    /// covered by the D6-refusal advertisement knob, never by values.
     ///
     /// Mock fixture values are small by construction; a value that does
     /// not fit the emulated width is a fixture bug, not a runtime case.
@@ -57,7 +62,7 @@ impl MockAbi {
             width == 8 || v <= u32::MAX as u64,
             "mock fixture value {v:#x} does not fit a {width}-byte CK_ULONG"
         );
-        v.to_le_bytes()[..width].to_vec()
+        pkcs11_proxy_ng_types::width::encode_native_ulong(v, width)
     }
 }
 
@@ -104,9 +109,16 @@ mod mock_abi_tests {
 
     #[test]
     fn mock_abi_encode_ulong_matches_width() {
-        assert_eq!(MockAbi::Lp64.encode_ulong(3), vec![3, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(MockAbi::Ilp32.encode_ulong(3), vec![3, 0, 0, 0]);
-        assert_eq!(MockAbi::Llp64.encode_ulong(0x0102_0304), vec![4, 3, 2, 1]);
+        // Native-order pins: identical bytes on little-endian hosts, the
+        // byte-reversed form on big-endian ones.
+        let le = cfg!(target_endian = "little");
+        let wide3: Vec<u8> =
+            if le { vec![3, 0, 0, 0, 0, 0, 0, 0] } else { vec![0, 0, 0, 0, 0, 0, 0, 3] };
+        let narrow3: Vec<u8> = if le { vec![3, 0, 0, 0] } else { vec![0, 0, 0, 3] };
+        let word: Vec<u8> = if le { vec![4, 3, 2, 1] } else { vec![1, 2, 3, 4] };
+        assert_eq!(MockAbi::Lp64.encode_ulong(3), wide3);
+        assert_eq!(MockAbi::Ilp32.encode_ulong(3), narrow3);
+        assert_eq!(MockAbi::Llp64.encode_ulong(0x0102_0304), word);
     }
 }
 
