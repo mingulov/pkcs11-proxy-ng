@@ -1496,20 +1496,13 @@ mod tests {
     }
 
     /// Wave 3 F2/D1: the shipped BouncyHSM/opencryptoki vendor overlays
-    /// (examples/vendors/) merge onto the default registry. Inline the
-    /// content so the test does not depend on filesystem layout.
+    /// (examples/vendors/) merge onto the default registry. The shipped
+    /// files are read via `include_str!` so overlay drift or breakage
+    /// fails this test (Wave 3.5 smalls review Finding 4).
     #[test]
     fn wave3_f2_vendor_overlays_merge() {
-        let blake2b_toml = r#"
-            [[params]]
-            shape = "mac_general"
-            mechanisms = [0x400E, 0x4013, 0x4018, 0x401D]
-        "#;
-        let ecdh_toml = r#"
-            [[params]]
-            shape = "ecdh_aes_key_wrap"
-            mechanisms = [0x4038, 0x4039]
-        "#;
+        let blake2b_toml = include_str!("../../../examples/vendors/bouncyhsm-blake2b.toml");
+        let ecdh_toml = include_str!("../../../examples/vendors/opencryptoki-ecdh-x-cof.toml");
 
         // Each overlay merges onto the defaults on its own...
         for (overlay, shape, mechs) in [

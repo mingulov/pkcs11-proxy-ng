@@ -127,6 +127,19 @@ exception that licenses other synthesis:
   Unmodelled class-5 layouts, over-ceiling buffers, and writable-buffer aliasing
   therefore remain acknowledged transport limits rather than faithful raw
   forwarding paths.
+  Message-Init structs are required exactly: `C_MessageEncryptInit` /
+  `C_MessageDecryptInit` must carry the message struct for the active shape
+  (`CK_GCM_MESSAGE_PARAMS`, `CK_CCM_MESSAGE_PARAMS`,
+  `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`); a classic struct
+  (`CK_GCM_PARAMS`, `CK_CCM_PARAMS`) on message Init is a materialized
+  unmodelled parameter and fails closed with `CKR_MECHANISM_PARAM_INVALID`
+  by design (shim `dispatch/general/message_crypto.rs`: "materialized
+  unmodelled parameters fail closed rather than falling back"). Known
+  divergence (Wave 3 §7.3, Ruling 3): kryoptic and NSS accept classic
+  structs on message Init (backend leniency), so cases that pack the
+  classic struct pass direct and fail proxied. The proxy does NOT add
+  leniency to match (rejected by ruling); the framework `ccm` recipe is
+  the correct fix owner. §7.3 stays OPEN; see the Wave 3 report erratum.
 - The constant `MAX_MECHANISM_PARAM_STRUCT_LEN` (64 KiB, renamed from
   `MAX_MECHANISM_PARAM_LEN`) bounds only parameter-STRUCT lengths; embedded
   data fields are bounded by `MAX_SERIALIZABLE_BYTES` (512 MiB). Legitimate

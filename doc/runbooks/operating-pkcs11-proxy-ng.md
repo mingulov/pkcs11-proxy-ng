@@ -88,6 +88,15 @@ Service + `maxSurge: 1, maxUnavailable: 0` rollout strategy, the
 SRE/ops audit observed **zero application-visible failures** through
 a ~22-second rolling restart at 10 rps.
 
+**Shim/daemon lockstep.** The shim and daemon must be upgraded together
+(same release) — mixed-version peers are not supported. An old shim
+sends no `iv_null`/`aad_null`/`source_null` bits, so a new daemon
+materializes empty GCM/OAEP fields as non-NULL where the old daemon
+forced NULL (templates are unaffected — the default matches old
+behavior). Lockstep peers are exact; on backends that distinguish the
+shapes the skew only flips between two reject codes, never
+accept↔reject. (Wave 3.5 D2/F3 review Finding 2.)
+
 **If consumer reports unrecoverable errors during the rollout:**
 
 1. Check pod readiness: `kubectl -n <ns> get pods -l app=<daemon-deploy>`.
@@ -243,9 +252,10 @@ contents produce a new revision.
 proxy understands structurally but keeps operator opt-in rather than
 enabling by default:
 
-- `bouncyhsm-blake2b.toml` — BouncyHSM `BLAKE2B_*_HMAC_GENERAL`
-  (provider-assigned `0x400E/0x4013/0x4018/0x401D`, single-`CK_ULONG`
-  `mac_general` shape).
+- `bouncyhsm-blake2b.toml` — `BLAKE2B_*_HMAC_GENERAL`
+  (OASIS v3.2 standard `0x400E/0x4013/0x4018/0x401D`, single-`CK_ULONG`
+  `mac_general` shape; kept opt-in per the Wave 3 F2 sketch, promotion
+  to defaults is defensible follow-up).
 - `opencryptoki-ecdh-x-cof.toml` — `CKM_ECDH_X_AES_KEY_WRAP` /
   `CKM_ECDH_COF_AES_KEY_WRAP` (`0x4038/0x4039`, `ecdh_aes_key_wrap`
   shape; kept opt-in pending dedicated X/COF shapes).
@@ -554,6 +564,7 @@ encounter; they are scope of follow-up rounds:
 | FOLLOWUP-fork-safety: forked children of a `C_Initialize`d shim must `C_Finalize`+`C_Initialize` to recover | Use fork-then-exec in consumer apps | Application code (not daemon-side) |
 | Backend crash blast radius: a vendor-`.so` SIGSEGV downs the whole daemon process (backend is in-process; A2/in-process-worker deferred) | Run **multiple instances + sticky routing** (§4a); consumers reconnect + re-open (§6) | Deployment + application code |
 | Multiplexed daemon vs pristine token: N logical clients share one backend instance per slot — no per-context pristine state (see below) | Rotate/restart the daemon for pristine-state cases; partition daemons per tenant (§4a) | Test harness / deployment |
+| Message-Init struct strictness: classic param structs on message Init fail closed (`CKR_MECHANISM_PARAM_INVALID`); lenient backends accept them direct (see below) | Pack the `CK_*_MESSAGE_PARAMS` struct for the mechanism on message Init | Application code |
 
 ### Multiplexed daemon vs pristine token (in-memory backends)
 
@@ -591,6 +602,20 @@ rotation option. Cases tolerant of multiplexing may share, but must treat
 `ALREADY` as "slot held" and must scope their assertions to objects they
 created. For strict tenant isolation in production, partition daemons per
 tenant exactly as for crash containment (§4a).
+
+### Message-Init struct strictness (classic structs fail closed)
+
+`C_MessageEncryptInit` / `C_MessageDecryptInit` must carry the message
+parameter struct for the mechanism (`CK_GCM_MESSAGE_PARAMS`,
+`CK_CCM_MESSAGE_PARAMS`, `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`).
+Passing the classic struct (`CK_GCM_PARAMS`, `CK_CCM_PARAMS`) fails
+closed with `CKR_MECHANISM_PARAM_INVALID` by design (ADR-0010
+Limits-(c)) — the call never reaches the backend. kryoptic and NSS
+leniently accept classic structs on message Init, so such calls pass
+direct and fail proxied; that is a documented strictness divergence, not
+a proxy bug (Wave 3 §7.3, Ruling 3 — see the report erratum). If a
+consumer hits `CKR_MECHANISM_PARAM_INVALID` on message Init only through
+the proxy, check the packed struct first.
 
 Earlier follow-ups (DNS re-resolve, slow-backend test, per-RPC
 trace ID, gRPC health probe, rate-limiter) are closed.

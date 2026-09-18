@@ -4,11 +4,13 @@
 #
 # BouncyHSM advertises keyed BLAKE2B HMAC (_GENERAL) mechanisms that take
 # the truncated MAC length as a single CK_ULONG — the same layout as the
-# proxy's "mac_general" shape. They stay operator opt-in (not defaults):
-# the 0x40xx IDs are provider-assigned, not OASIS-standard, so enabling
-# them is a per-deployment decision. Wave 3 F2.
+# proxy's "mac_general" shape. The 0x40xx IDs ARE OASIS v3.2 standard
+# (CKM_BLAKE2B_160/256/384/512_HMAC_GENERAL, pkcs11t.h:1156/1161/1166/
+# 1171); they stay operator opt-in (not defaults) per the Wave 3 F2
+# sketch, which prescribed opt-in — promotion to defaults is defensible
+# follow-up. Wave 3 F2.
 #
-# Reference: BouncyHSM mechanism list (BLAKE2B_*_HMAC_GENERAL).
+# Reference: OASIS PKCS#11 v3.2 (BLAKE2B_*_HMAC_GENERAL).
 
 [[params]]
 shape = "mac_general"
