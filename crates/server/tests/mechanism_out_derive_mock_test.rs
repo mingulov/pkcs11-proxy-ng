@@ -140,7 +140,20 @@ async fn derive_key_mechanism_out_surfaces_wtls_key_material_through_mock_grpc_s
         client.derive_key_with_mechanism_out(session, &mechanism, base_key, &[]).await.unwrap();
 
     assert_ne!(derived_key, CkObjectHandle(0));
-    assert_eq!(mechanism_out, Some(expected_output));
+    // F6/D4: key-mat OUT handles must come back virtualized (registered +
+    // rewritten), never native — native handles are unresolvable to the
+    // caller (CKR_OBJECT_HANDLE_INVALID on readback).
+    let Some(CkMechanismParams::WtlsKeyMat(output)) = mechanism_out else {
+        panic!("expected WTLS key-mat mechanism_out");
+    };
+    assert_ne!(output.mac_secret_handle, 0);
+    assert_ne!(output.mac_secret_handle, 101);
+    assert_ne!(output.key_handle, 0);
+    assert_ne!(output.key_handle, 202);
+    assert_eq!(output.mac_size_bits, 160);
+    assert_eq!(output.key_size_bits, 128);
+    assert_eq!(output.sequence_number, 7);
+    assert!(output.is_export);
 }
 
 #[tokio::test]
@@ -192,7 +205,24 @@ async fn derive_key_mechanism_out_surfaces_tls_key_material_through_mock_grpc_st
         client.derive_key_with_mechanism_out(session, &mechanism, base_key, &[]).await.unwrap();
 
     assert_ne!(derived_key, CkObjectHandle(0));
-    assert_eq!(mechanism_out, Some(expected_output));
+    // F6/D4: key-mat OUT handles must come back virtualized (registered +
+    // rewritten), never native — native handles are unresolvable to the
+    // caller (CKR_OBJECT_HANDLE_INVALID on readback).
+    let Some(CkMechanismParams::Ssl3KeyMat(output)) = mechanism_out else {
+        panic!("expected TLS key-mat mechanism_out");
+    };
+    for (rewritten, native) in [
+        (output.client_mac_secret_handle, 101),
+        (output.server_mac_secret_handle, 102),
+        (output.client_key_handle, 201),
+        (output.server_key_handle, 202),
+    ] {
+        assert_ne!(rewritten, 0);
+        assert_ne!(rewritten, native);
+    }
+    assert_eq!(output.mac_size_bits, 160);
+    assert_eq!(output.key_size_bits, 128);
+    assert_eq!(output.prf_hash_mechanism, CkMechanismType::SHA256.0);
 }
 
 #[tokio::test]

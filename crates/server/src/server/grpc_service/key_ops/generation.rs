@@ -465,6 +465,7 @@ async fn derive_key_impl(
                 && let Some(ref mut params) = derive_result.mechanism_out
             {
                 virtualize_sp800_108_additional_handles(ctx_mgr, &ctx_id, params).await;
+                virtualize_key_mat_out_handles(ctx_mgr, &ctx_id, params).await;
             }
             let mechanism_out = derive_result.mechanism_out.map(|params| {
                 pkcs11_proxy_ng_proto::Mechanism::from(&pkcs11_proxy_ng_types::CkMechanism {
@@ -630,6 +631,33 @@ async fn virtualize_derived_key_handles(
     }
 }
 
+/// Register + rewrite each non-zero OUT handle in SSL3/TLS/WTLS key-material
+/// `mechanism_out` (F6/D4). Without this the key-mat handles flow back native
+/// and unresolvable (`CKR_OBJECT_HANDLE_INVALID` on readback). Mirrors
+/// [`virtualize_sp800_108_additional_handles`]; `Ssl3KeyMatParams` covers the
+/// TLS12 layout as well.
+async fn virtualize_key_mat_out_handles(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    params: &mut CkMechanismParams,
+) {
+    let handles: &mut [&mut u64] = match params {
+        CkMechanismParams::Ssl3KeyMat(p) => &mut [
+            &mut p.client_mac_secret_handle,
+            &mut p.server_mac_secret_handle,
+            &mut p.client_key_handle,
+            &mut p.server_key_handle,
+        ],
+        CkMechanismParams::WtlsKeyMat(p) => &mut [&mut p.mac_secret_handle, &mut p.key_handle],
+        _ => return,
+    };
+    for handle in handles {
+        if **handle != 0 {
+            **handle = register_object_handle(ctx_mgr, ctx_id, CkObjectHandle(**handle)).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -742,5 +770,84 @@ mod tests {
             input.into(),
             "failure must not serialize a truncated handle"
         );
+    }
+
+    /// F6: key-mat OUT handles in a successful derive's `mechanism_out` must
+    /// come back virtualized (registered + rewritten); zero handles are left
+    /// alone and non-key-mat params pass through untouched.
+    #[tokio::test]
+    async fn virtualizes_key_mat_out_handles_and_leaves_zeros_alone() {
+        use pkcs11_proxy_ng_types::{
+            Ssl3KeyMatParams, SslRandomData, WtlsKeyMatParams, WtlsRandomData,
+        };
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 16));
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        let mut ssl3 = CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+            mac_size_bits: 128,
+            key_size_bits: 128,
+            iv_size_bits: 0,
+            is_export: false,
+            random_info: SslRandomData { client_random: vec![1; 32], server_random: vec![2; 32] },
+            prf_hash_mechanism: 0,
+            client_mac_secret_handle: 0xA1,
+            server_mac_secret_handle: 0,
+            client_key_handle: 0xA2,
+            server_key_handle: 0xA3,
+            client_iv: Vec::new().into(),
+            server_iv: Vec::new().into(),
+        });
+        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, &mut ssl3).await;
+        let CkMechanismParams::Ssl3KeyMat(ssl3) = &ssl3 else { unreachable!() };
+        assert_eq!(ssl3.server_mac_secret_handle, 0, "zero OUT handles stay zero");
+        for (rewritten, backend) in [
+            (ssl3.client_mac_secret_handle, 0xA1),
+            (ssl3.client_key_handle, 0xA2),
+            (ssl3.server_key_handle, 0xA3),
+        ] {
+            assert_ne!(rewritten, backend, "non-zero OUT handle must be rewritten");
+            let resolved = ctx_mgr
+                .get_context(&ctx_id, |c| {
+                    c.object_handles.resolve(crate::server::handle_map::VirtualHandle(rewritten))
+                })
+                .await
+                .unwrap();
+            assert_eq!(resolved, Some(BackendHandle(backend)));
+        }
+
+        let mut wtls = CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
+            digest_mechanism: 0x220,
+            mac_size_bits: 128,
+            key_size_bits: 128,
+            iv_size_bits: 0,
+            sequence_number: 0,
+            is_export: false,
+            random_info: WtlsRandomData { client_random: vec![3; 16], server_random: vec![4; 16] },
+            mac_secret_handle: 0xB1,
+            key_handle: 0,
+            iv: Vec::new(),
+        });
+        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, &mut wtls).await;
+        let CkMechanismParams::WtlsKeyMat(wtls) = &wtls else { unreachable!() };
+        assert_eq!(wtls.key_handle, 0);
+        assert_ne!(wtls.mac_secret_handle, 0xB1);
+        let resolved = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.object_handles
+                    .resolve(crate::server::handle_map::VirtualHandle(wtls.mac_secret_handle))
+            })
+            .await
+            .unwrap();
+        assert_eq!(resolved, Some(BackendHandle(0xB1)));
+
+        // Non-key-mat params are untouched.
+        let mut other = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+            prf_type: CkMechanismType::SHA256.0,
+            data_params: Vec::new(),
+            additional_derived_keys: Vec::new(),
+        });
+        virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, &mut other).await;
+        assert!(matches!(other, CkMechanismParams::Sp800108Kdf(_)));
     }
 }
