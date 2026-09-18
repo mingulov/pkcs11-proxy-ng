@@ -1,0 +1,120 @@
+# Tier 1 — Cross-platform transparency gate
+#
+# Runs the SAME pkcs11-check suite (from PyPI, version-pinned) twice per
+# platform -- once against SoftHSM2 directly, once through the proxy --
+# and fails on any divergence. The per-OS setup lives here; the shared
+# run-compare logic is scripts/ci-direct-vs-proxy.py (stdlib only, so the
+# identical gate runs on a developer box and on all three runner OSes).
+#
+# Cadence: daily schedule (staggered off the nightly provider matrix),
+# pushes to main, and manual dispatch (the way PRs opt in). NOT per-PR:
+# hosted macOS/Windows minutes plus a full pkcs11-check double-run per leg
+# is too slow and expensive for every pull request.
+#
+# Legs: linux-x64, linux-arm64 (cheap aarch64 ABI signal on hosted ARM),
+# macos-arm64 (EXPERIMENTAL until the macOS compat prep lands -- M-1..M-3:
+# gate the Linux-only peer_cred module, settle macOS UDS-auth semantics,
+# extend the native FFI domain to macOS -- then promote by flipping
+# `experimental` to false), windows-x64.
+#
+# Auth posture: the daemon runs on loopback TCP with auth="none", the same
+# CI-only shape scripts/test-softhsm2-smoke.sh asserts. Never a default.
+
+name: Cross-platform
+
+on:
+  schedule:
+    # 04:30 UTC daily -- staggered off the nightly provider matrix (03:00).
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Deliberately pinned: bump only after the new pkcs11-check release has
+  # been qualified against the current proxy (its suite is the gate).
+  P11CHECK_VERSION: "0.2.0"
+
+jobs:
+  compare:
+    name: direct-vs-proxied (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            experimental: false
+          - os: ubuntu-24.04-arm
+            experimental: false
+          - os: macos-15
+            experimental: true
+          - os: windows-2022
+            experimental: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc (all OSes)
+        uses: arduino/setup-protoc@v3
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pkcs11-check (pinned)
+        run: pip install "pkcs11-check==${P11CHECK_VERSION}"
+        shell: bash
+
+      - name: Install SoftHSM2 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y softhsm2
+
+      - name: Install SoftHSM2 (macOS)
+        if: runner.os == 'macOS'
+        run: brew install softhsm
+
+      # Windows SoftHSM2 (pinned disig portable zip, hash-verified) is
+      # fetched by the compare script itself -- no runner setup needed.
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-xplat-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-xplat-
+
+      - name: Build release daemon + shim
+        run: cargo build --release -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
+        shell: bash
+
+      - name: Direct-vs-proxied comparison
+        run: python3 scripts/ci-direct-vs-proxy.py
+        shell: bash
+
+      - name: Upload comparison artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xplat-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/ci-compare-*/direct/results.json
+            ${{ runner.temp }}/ci-compare-*/direct/report.jsonl
+            ${{ runner.temp }}/ci-compare-*/proxied/results.json
+            ${{ runner.temp }}/ci-compare-*/proxied/report.jsonl
+            ${{ runner.temp }}/ci-compare-*/daemon.log
+          retention-days: 14
