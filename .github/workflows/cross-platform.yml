@@ -19,10 +19,10 @@
 # signal only -- the daemon fail-closes on Linux-aarch64 by design
 # (NATIVE_FFI_QUALIFIED excludes it), so no proxied comparison can run
 # there until a future aarch64 native-FFI qualification promotes it),
-# macos-arm64 (EXPERIMENTAL until the macOS compat prep lands -- M-1..M-3:
-# gate the Linux-only peer_cred module, settle macOS UDS-auth semantics,
-# extend the native FFI domain to macOS -- then promote by flipping
-# `experimental` to false), windows-x64, plus the standalone `win32` job
+# macos-arm64 (PROMOTED by T2run M-5: M-1..M-3 compat prep proven by the
+# first green macOS leg -- compare green plus backend/shim lib behavior
+# suites green, including the STOP child receipts), windows-x64, plus
+# the standalone `win32` job
 # below (i686-pc-windows-msvc build + WOW64 lib tests; T6b's proof vehicle,
 # first green expected at T2run).
 #
@@ -61,8 +61,11 @@ jobs:
           # design (see header); promote on aarch64 qualification.
           - os: ubuntu-24.04-arm
             experimental: true
+          # T2run M-5: promoted — first green macOS leg (compare +
+          # backend/shim lib behavior) proves the compat prep; failures
+          # now fail the workflow.
           - os: macos-15
-            experimental: true
+            experimental: false
           - os: windows-2022
             experimental: false
 
