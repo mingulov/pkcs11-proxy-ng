@@ -138,9 +138,12 @@ TCP and authenticated Unix sockets, represented PKCS#11 2.40/3.x function-list
 coverage, explicitly modeled mechanisms, exact-output semantics, SoftHSM2/NSS
 integration, and optional gateway/audit controls.
 
-**Out of scope:** Windows/macOS native-provider daemon targets, automatic support for future
-PKCS#11 versions or unmodeled parameter layouts, backend worker-process
-isolation, callbacks, and multi-module aggregation within a single daemon.
+**Out of scope:** macOS native-provider daemon targets (Windows x64/MSVC is
+covered via the implemented tail stretch,
+[ADR-0014](adr/ADR-0014-v020-tail-platform-stretch.md) — see below),
+automatic support for future PKCS#11 versions or unmodeled parameter
+layouts, backend worker-process isolation, callbacks, and multi-module
+aggregation within a single daemon.
 The proxy is a forwarding layer; provider conformance is validated externally.
 
 ### Selected v0.2 native contract (implementation/qualification pending)
