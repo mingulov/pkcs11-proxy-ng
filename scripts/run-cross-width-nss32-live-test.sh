@@ -55,15 +55,55 @@ cargo build -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim >/dev/null
 cargo build --target i686-unknown-linux-gnu \
     -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim >/dev/null
 
+expect_elf_width() {
+    local artifact="$1" want="$2" label="$3"
+    local desc
+    desc=$(file -b "$artifact")
+    if ! grep -q "ELF $want-bit" <<<"$desc"; then
+        echo "FAIL: $label: $artifact is not ELF $want-bit ($desc)" >&2
+        exit 1
+    fi
+    echo "  width receipt: $artifact -> $desc"
+}
+
+# Stale artifacts test nothing: every daemon binary must be newer than
+# every source that feeds it (see the row-12 runner for rationale).
+assert_fresh() {
+    local artifact="$1" label="$2"
+    local newer
+    newer=$(find crates Cargo.toml Cargo.lock -type f -newer "$artifact" 2>/dev/null | head -3)
+    if [[ -n "$newer" ]]; then
+        echo "FAIL: $label: $artifact predates changed sources (stale binary):" >&2
+        echo "$newer" >&2
+        exit 1
+    fi
+}
+
 run_leg() {
     local label="$1" backend_width="$2"; shift 2
     echo "--- live test: $label ---"
-    PKCS11_PROXY_CROSS_EXPECT_BACKEND_WIDTH="$backend_width" \
+    local output
+    if ! output=$(PKCS11_PROXY_CROSS_EXPECT_BACKEND_WIDTH="$backend_width" \
         cargo test "$@" -p pkcs11-proxy-ng-shim --lib \
-        tests::cross_width_live -- --ignored --test-threads=1
+        tests::cross_width_live -- --ignored --test-threads=1 --nocapture 2>&1); then
+        echo "$output" | tail -20
+        echo "FAIL: $label" >&2
+        exit 1
+    fi
+    # Execution proof: every passing test printed its marker, so a
+    # leg-gated early return (which also reports ok) cannot pass the gate.
+    local passed markers
+    passed=$(sed -n 's/.*test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' <<<"$output")
+    markers=$(grep -c "cross-width-executed=" <<<"$output" || true)
+    if [[ -z "$passed" || "$passed" == "0" || "$passed" != "$markers" ]]; then
+        echo "FAIL: $label executed $markers/$passed tests (vacuous ok)" >&2
+        exit 1
+    fi
+    echo "$output" | grep -E "test result|cross-width-executed" | head -8
 }
 
 export PKCS11_PROXY_CROSS_TEST=1
+export PKCS11_PROXY_CROSS_PROVIDER=nss
 # The i386 NSS closure lives beside the module (nightly extract or a
 # pre-exported copy); the i686 daemon resolves it via LD_LIBRARY_PATH.
 NSS_LIBDIR="$(dirname "$NSS_MODULE_32")"
@@ -72,8 +112,16 @@ export PKCS11_PROXY_BACKEND_ARGS="configDir='sql:$NSSDB' certPrefix='' keyPrefix
 
 PORT=$(harness_pick_port)
 export PKCS11_PROXY_ENDPOINT="http://127.0.0.1:$PORT"
-harness_start_daemon target/i686-unknown-linux-gnu/debug/pkcs11-proxy-ng \
-    "$NSS_MODULE_32" "$PORT"
+I686_DAEMON="target/i686-unknown-linux-gnu/debug/pkcs11-proxy-ng"
+harness_start_daemon "$I686_DAEMON" "$NSS_MODULE_32" "$PORT"
+assert_fresh "$I686_DAEMON" "i686 NSS daemon"
+expect_elf_width "$I686_DAEMON" 32 "i686 NSS daemon"
+if ! grep -q "libsoftokn3" "/proc/$DAEMON_PID/maps"; then
+    echo "FAIL: i386 NSS module not mapped in daemon pid $DAEMON_PID" >&2
+    harness_stop_daemon
+    exit 1
+fi
+echo "  maps receipt: i686 daemon maps libsoftokn3.so"
 
 run_leg "leg 1: x86_64 client (8) <-> i686 daemon (4) over i386 NSS — reverse bridge + D4" 4
 run_leg "leg 2: i686 client <-> i686 daemon (narrow-native control) over i386 NSS" 4 \
