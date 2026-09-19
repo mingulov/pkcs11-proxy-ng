@@ -36,8 +36,13 @@ on:
     # 04:30 UTC daily -- staggered off the nightly provider matrix (03:00).
     - cron: "30 4 * * *"
   workflow_dispatch:
+  # TEMP-ONLY T2run-fix1 proof: PR trigger fires the proof (the file is
+  # absent on main, so workflow_dispatch cannot see it); push trigger lets
+  # the branch re-run. NO tuning here — the subset under test is the
+  # LANDED dev env below. NEVER lands on dev — reverted after proof.
+  pull_request:
   push:
-    branches: ["main"]
+    branches: ["main", "t2run/*"]
 
 env:
   CARGO_TERM_COLOR: always
