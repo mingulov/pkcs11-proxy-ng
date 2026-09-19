@@ -356,9 +356,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         len: u32,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let len = checked_random_len(len)?;
         let h_session = Self::session_handle(session)?;
         Self::fill_bytes(
+            &admission,
             unsafe { (*self.func_list).C_GenerateRandom },
             len,
             |function, output, output_len| unsafe { function(h_session, output, output_len) },
@@ -538,6 +540,77 @@ mod generate_random_bound_tests {
     #[test]
     fn bound_is_512_mib() {
         assert_eq!(MAX_RANDOM_BYTES, 512 * 1024 * 1024);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lifecycle_random_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static RANDOM_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static RANDOM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn random_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        output: *mut cryptoki_sys::CK_BYTE,
+        len: cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        RANDOM_CALLS.fetch_add(1, Ordering::SeqCst);
+        if !output.is_null() {
+            unsafe { std::ptr::write_bytes(output, 0xAB, len as usize) };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_random() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_GenerateRandom = Some(random_ok);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        (backend, functions)
+    }
+
+    #[test]
+    fn generate_random_denied_before_lifecycle_open() {
+        // TF01b `fill_bytes` ordinary proof: no admission pre-Init.
+        let _guard = RANDOM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RANDOM_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_random();
+        assert_eq!(
+            backend.ffi_generate_random(CkSessionHandle(7), 16).unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+        assert_eq!(RANDOM_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn generate_random_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let _guard = RANDOM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RANDOM_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_random();
+        backend.lifecycle_domain.open_for_tests();
+        let bytes = backend.ffi_generate_random(CkSessionHandle(7), 16).unwrap();
+        assert_eq!(RANDOM_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(bytes.expose(|raw| raw.to_vec()), vec![0xAB; 16]);
     }
 }
 

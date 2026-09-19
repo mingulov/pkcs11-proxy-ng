@@ -135,18 +135,22 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: &mut [CkAttribute],
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let mut ffi_attrs = FfiAttrs::from_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
-        let rv =
-            Self::call_raw(unsafe { (*self.func_list).C_GetAttributeValue }, |function| unsafe {
+        let rv = Self::call_raw(
+            &admission,
+            unsafe { (*self.func_list).C_GetAttributeValue },
+            |function| unsafe {
                 function(
                     h_session,
                     h_object,
                     ffi_attrs.attrs.as_mut_ptr(),
                     Self::ulong_len(ffi_attrs.attrs.len()),
                 )
-            })?;
+            },
+        )?;
         update_template_from_ffi(template, &ffi_attrs.attrs);
         Self::ck_result(rv)
     }
@@ -157,18 +161,22 @@ impl FfiBackend {
         object: CkObjectHandle,
         queries: &[CkAttributeQuery],
     ) -> CkResult<(CkRv, Vec<CkAttributeQueryResult>)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let mut ffi_queries = FfiAttributeQueries::from_queries(queries)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
-        let rv =
-            Self::call_raw(unsafe { (*self.func_list).C_GetAttributeValue }, |function| unsafe {
+        let rv = Self::call_raw(
+            &admission,
+            unsafe { (*self.func_list).C_GetAttributeValue },
+            |function| unsafe {
                 function(
                     h_session,
                     h_object,
                     ffi_queries.attrs.as_mut_ptr(),
                     Self::ulong_len(ffi_queries.attrs.len()),
                 )
-            })?;
+            },
+        )?;
         let backend_rv = CkRv(rv as u64);
         let mut results = ffi_queries.readback(queries, backend_rv);
         let overall_rv = promote_overall_rv(backend_rv, &results);
@@ -372,6 +380,45 @@ mod lifecycle_output_tests {
         let (backend, _functions) = backend_with_object_stubs();
         backend.lifecycle_domain.open_for_tests();
         assert_eq!(backend.ffi_get_object_size(CkSessionHandle(7), CkObjectHandle(9)).unwrap(), 17);
+    }
+
+    unsafe extern "C" fn get_attr_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+        _template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _count: cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_get_attr() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let (backend, functions) = backend_with_object_stubs();
+        unsafe { (*backend.func_list).C_GetAttributeValue = Some(get_attr_ok) };
+        (backend, functions)
+    }
+
+    #[test]
+    fn get_attribute_value_denied_before_lifecycle_open() {
+        // TF01b `call_raw` ordinary proof: no admission pre-Init.
+        let (backend, _functions) = backend_with_get_attr();
+        let mut template = [];
+        assert_eq!(
+            backend
+                .ffi_get_attribute_value(CkSessionHandle(7), CkObjectHandle(9), &mut template)
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn get_attribute_value_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _functions) = backend_with_get_attr();
+        backend.lifecycle_domain.open_for_tests();
+        let mut template = [];
+        backend
+            .ffi_get_attribute_value(CkSessionHandle(7), CkObjectHandle(9), &mut template)
+            .unwrap();
     }
 
     // Blocked-stub exclusion shape (`call_object_output` family): a parked

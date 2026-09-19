@@ -13,9 +13,11 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_get_slot_list(&self, token_present: bool) -> CkResult<Vec<CkSlotId>> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let token_present_flag =
             if token_present { cryptoki_sys::CK_TRUE } else { cryptoki_sys::CK_FALSE };
         let slots = Self::call_array::<_, cryptoki_sys::CK_SLOT_ID, _>(
+            &admission,
             unsafe { (*self.func_list).C_GetSlotList },
             |function, slots, count| unsafe { function(token_present_flag, slots, count) },
         )?;
@@ -50,8 +52,10 @@ impl FfiBackend {
         &self,
         slot_id: CkSlotId,
     ) -> CkResult<Vec<CkMechanismType>> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_slot = Self::slot_id(slot_id)?;
         let mechanisms = Self::call_array::<_, cryptoki_sys::CK_MECHANISM_TYPE, _>(
+            &admission,
             unsafe { (*self.func_list).C_GetMechanismList },
             |function, mechanisms, count| unsafe { function(h_slot, mechanisms, count) },
         )?;
@@ -512,6 +516,127 @@ mod tests {
                 .unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
+    }
+
+    unsafe extern "C" fn slot_list_ok(
+        _token_present: cryptoki_sys::CK_BBOOL,
+        slots: *mut cryptoki_sys::CK_SLOT_ID,
+        count: *mut cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        if count.is_null() {
+            return cryptoki_sys::CKR_ARGUMENTS_BAD;
+        }
+        if slots.is_null() {
+            unsafe { *count = 2 };
+            return cryptoki_sys::CKR_OK;
+        }
+        let n = unsafe { *count }.min(2) as usize;
+        unsafe { std::ptr::copy_nonoverlapping([3, 5].as_ptr(), slots, n) };
+        unsafe { *count = n as cryptoki_sys::CK_ULONG };
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_slot_list() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_GetSlotList = Some(slot_list_ok);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        (backend, functions)
+    }
+
+    #[test]
+    fn slot_list_denied_before_lifecycle_open() {
+        // TF01b `call_array` ordinary proof: no admission pre-Init.
+        let (backend, _functions) = backend_with_slot_list();
+        assert_eq!(backend.ffi_get_slot_list(false).unwrap_err(), CkRv::CRYPTOKI_NOT_INITIALIZED);
+    }
+
+    #[test]
+    fn slot_list_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _functions) = backend_with_slot_list();
+        backend.lifecycle_domain.open_for_tests();
+        assert_eq!(backend.ffi_get_slot_list(false).unwrap(), vec![CkSlotId(3), CkSlotId(5)]);
+    }
+
+    // Blocked-stub exclusion shape (`call_array` family): a parked ordinary
+    // call blocks control settlement until release.
+    static SLOT_PARK_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
+
+    unsafe extern "C" fn slot_list_parkable(
+        _token_present: cryptoki_sys::CK_BBOOL,
+        slots: *mut cryptoki_sys::CK_SLOT_ID,
+        count: *mut cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        if count.is_null() {
+            return cryptoki_sys::CKR_ARGUMENTS_BAD;
+        }
+        if slots.is_null() {
+            unsafe { *count = 1 };
+            return cryptoki_sys::CKR_OK;
+        }
+        let gate = SLOT_PARK_GATE.lock().unwrap().take();
+        match gate {
+            Some((entered, release)) => {
+                let _ = entered.send(());
+                match release.recv_timeout(Duration::from_secs(10)) {
+                    Ok(()) => {
+                        unsafe { *slots = 9 };
+                        unsafe { *count = 1 };
+                        cryptoki_sys::CKR_OK
+                    }
+                    // Test bug (release never came): fail loudly, never hang.
+                    Err(_) => cryptoki_sys::CKR_FUNCTION_FAILED,
+                }
+            }
+            None => cryptoki_sys::CKR_FUNCTION_FAILED,
+        }
+    }
+
+    #[test]
+    fn parked_slot_list_blocks_control_until_release() {
+        let (backend, _functions) = backend_with_slot_list();
+        backend.lifecycle_domain.open_for_tests();
+        unsafe { (*backend.func_list).C_GetSlotList = Some(slot_list_parkable) };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *SLOT_PARK_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| backend.ffi_get_slot_list(false));
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker parks inside the stub holding its guard");
+            scope.spawn(|| {
+                let ticket = backend.lifecycle_domain.begin_initialize().expect("control proceeds");
+                done_tx.send(()).expect("report control settlement");
+                backend.lifecycle_domain.abandon_initialize(ticket);
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "control must not settle while an ordinary call is parked"
+            );
+            release_tx.send(()).expect("release the parked stub");
+            done_rx.recv_timeout(Duration::from_secs(5)).expect("control proceeds after release");
+            worker.join().expect("worker joins").expect("parked call succeeds");
+        });
     }
 
     #[test]

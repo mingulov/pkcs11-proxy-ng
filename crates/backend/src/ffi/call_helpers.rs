@@ -71,7 +71,11 @@ impl FfiBackend {
     }
 
     #[inline]
-    pub(super) fn call_raw<T, F>(function: Option<T>, call: F) -> CkResult<cryptoki_sys::CK_RV>
+    pub(super) fn call_raw<T, F>(
+        _admission: &OrdinaryGuard,
+        function: Option<T>,
+        call: F,
+    ) -> CkResult<cryptoki_sys::CK_RV>
     where
         T: Copy,
         F: FnOnce(T) -> cryptoki_sys::CK_RV,
@@ -91,7 +95,7 @@ impl FfiBackend {
         T: Copy,
         F: FnOnce(T) -> cryptoki_sys::CK_RV,
     {
-        Self::ck_result(Self::call_raw(function, call)?)
+        Self::ck_result(Self::call_raw(_admission, function, call)?)
     }
 
     /// Control choke: native entries that must NOT prove ordinary admission
@@ -107,7 +111,22 @@ impl FfiBackend {
         T: Copy,
         F: FnOnce(T) -> cryptoki_sys::CK_RV,
     {
-        Self::ck_result(Self::call_raw(function, call)?)
+        Self::ck_result(Self::call_control_raw(function, call)?)
+    }
+
+    /// Raw control leaf: the unguarded counterpart of [`Self::call_raw`]
+    /// for control paths that must not admit. Taking no guard is structural
+    /// (see [`Self::call_control_unit`]).
+    #[inline]
+    pub(super) fn call_control_raw<T, F>(
+        function: Option<T>,
+        call: F,
+    ) -> CkResult<cryptoki_sys::CK_RV>
+    where
+        T: Copy,
+        F: FnOnce(T) -> cryptoki_sys::CK_RV,
+    {
+        Ok(call(Self::require_fn(function)?))
     }
 
     /// Shared PKCS#11 "size query, then fill" pattern for variable-length arrays.
@@ -160,6 +179,7 @@ impl FfiBackend {
     }
 
     pub(super) fn call_array<TFunction, TItem, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mut call: F,
     ) -> CkResult<Vec<TItem>>
@@ -195,6 +215,7 @@ impl FfiBackend {
     }
 
     pub(super) fn fill_bytes<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         len: usize,
         call: F,
