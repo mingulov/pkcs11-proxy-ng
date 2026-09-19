@@ -625,10 +625,10 @@ mod ffi_attrs_narrowing_tests {
             },
         ];
         let attrs = FfiAttrs::from_slice(&template).expect("bool values convert");
-        assert_ne!(
-            attrs.attrs[0].pValue, attrs.attrs[1].pValue,
-            "identical bools must not share one backing byte"
-        );
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on by-value copies.
+        let first = attrs.attrs[0].pValue;
+        let second = attrs.attrs[1].pValue;
+        assert_ne!(first, second, "identical bools must not share one backing byte");
         for attr in &attrs.attrs {
             // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
             let ul_value_len = attr.ulValueLen;
