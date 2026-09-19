@@ -53,6 +53,9 @@ jobs:
           fi
           echo "tag $GITHUB_REF_NAME validated"
 
+      - name: Verify release subject
+        run: scripts/verify-release-subject.sh "$GITHUB_REF_NAME"
+
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
