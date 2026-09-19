@@ -296,23 +296,44 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_wait_for_slot_event(&self, flags: u64) -> CkResult<CkSlotId> {
-        // C3M.4 ordered boundary: checked width first, then mode. Flags the
+        // Ownership ordered boundary: lifecycle first, then checked width,
+        // then mode, then waiter contention ("lifecycle precedes width,
+        // width precedes mode, and mode precedes contention"). Flags the
         // native CK_FLAGS cannot represent fail loudly (FUNCTION_FAILED) —
         // a native module could not have been handed that value either —
         // and blocking mode is refused locally (FUNCTION_NOT_SUPPORTED) so
-        // no native wait can block the daemon worker. Neither refusal makes
-        // a native attempt; the sole supported DONT_BLOCK call preserves
-        // every original bit, including representable unknown ones.
-        let admission = self.lifecycle_domain.admit_ordinary()?;
+        // no native wait can block the daemon worker. Every refusal is
+        // local with zero native attempts; the sole supported DONT_BLOCK
+        // reservation preserves every original bit, including
+        // representable unknown ones.
+        let admission = match self.lifecycle_domain.admit_ordinary() {
+            Ok(guard) => guard,
+            Err(error) => {
+                // Wait-table row: an Uncertain domain refuses DEVICE_ERROR.
+                // Admission itself reports GENERAL_ERROR for every ordinary
+                // path, so the wait boundary maps it here; the peek races
+                // benignly (both outcomes are local zero-native refusals).
+                if self.lifecycle_domain.is_uncertain() {
+                    return Err(CkRv::DEVICE_ERROR);
+                }
+                return Err(error);
+            }
+        };
         let native_flags = narrow_wire_ulong(flags)?;
         if native_flags & cryptoki_sys::CKF_DONT_BLOCK == 0 {
             return Err(CkRv::FUNCTION_NOT_SUPPORTED);
         }
-        Self::call_slot_output(
-            &admission,
-            unsafe { (*self.func_list).C_WaitForSlotEvent },
-            |function, slot| unsafe { function(native_flags, slot, std::ptr::null_mut()) },
-        )
+        let mut waiter = self.lifecycle_domain.reserve_waiter(&admission, flags)?;
+        let function = Self::require_fn(unsafe { (*self.func_list).C_WaitForSlotEvent })?;
+        waiter.commit_native()?;
+        let result = Self::call_slot_output(&admission, Some(function), |function, slot| unsafe {
+            function(native_flags, slot, std::ptr::null_mut())
+        });
+        match &result {
+            Ok(_) => waiter.note_returned(0, true),
+            Err(error) => waiter.note_returned(error.0, false),
+        }
+        result
     }
 
     pub(super) fn ffi_get_operation_state(
@@ -1126,11 +1147,37 @@ mod lifecycle_random_tests {
 #[cfg(all(test, unix))]
 mod slot_wait_tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     static SLOT_WAIT_CALLS: AtomicUsize = AtomicUsize::new(0);
     static SLOT_WAIT_FLAGS: AtomicU64 = AtomicU64::new(0);
+    /// Scripted native RV (default `CKR_OK`).
+    static SLOT_WAIT_RV: AtomicU64 = AtomicU64::new(0);
+    /// Scripted native slot cell (default 7).
+    static SLOT_WAIT_SLOT: AtomicU64 = AtomicU64::new(7);
     static SLOT_WAIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Gate controls for the blocking stub (TO26b group 2): the stub
+    /// records entry, parks until the gate opens, then answers with the
+    /// scripted RV/slot. The park is bounded — a stuck test fails its RV
+    /// loudly instead of hanging the suite.
+    static GATED_WAIT_ENTERED: AtomicBool = AtomicBool::new(false);
+    static GATED_WAIT_OPEN: AtomicBool = AtomicBool::new(false);
+    /// Ordering flags for the no-Finalize-overlap test.
+    static WAIT_RETURNED: AtomicBool = AtomicBool::new(false);
+    static FINALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static FINALIZE_ENTERED_AFTER_WAIT_RETURN: AtomicBool = AtomicBool::new(false);
+
+    fn reset_wait_fixture() {
+        SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
+        SLOT_WAIT_FLAGS.store(0, Ordering::SeqCst);
+        SLOT_WAIT_RV.store(0, Ordering::SeqCst);
+        SLOT_WAIT_SLOT.store(7, Ordering::SeqCst);
+        GATED_WAIT_ENTERED.store(false, Ordering::SeqCst);
+        GATED_WAIT_OPEN.store(false, Ordering::SeqCst);
+        WAIT_RETURNED.store(false, Ordering::SeqCst);
+        FINALIZE_CALLS.store(0, Ordering::SeqCst);
+        FINALIZE_ENTERED_AFTER_WAIT_RETURN.store(false, Ordering::SeqCst);
+    }
 
     unsafe extern "C" fn recording_wait(
         flags: cryptoki_sys::CK_FLAGS,
@@ -1140,14 +1187,57 @@ mod slot_wait_tests {
         SLOT_WAIT_CALLS.fetch_add(1, Ordering::SeqCst);
         SLOT_WAIT_FLAGS.store(flags as u64, Ordering::SeqCst);
         if !slot.is_null() {
-            unsafe { *slot = 7 };
+            unsafe { *slot = SLOT_WAIT_SLOT.load(Ordering::SeqCst) as cryptoki_sys::CK_SLOT_ID };
         }
+        SLOT_WAIT_RV.load(Ordering::SeqCst) as cryptoki_sys::CK_RV
+    }
+
+    unsafe extern "C" fn gated_wait(
+        flags: cryptoki_sys::CK_FLAGS,
+        slot: *mut cryptoki_sys::CK_SLOT_ID,
+        _reserved: *mut std::ffi::c_void,
+    ) -> cryptoki_sys::CK_RV {
+        SLOT_WAIT_CALLS.fetch_add(1, Ordering::SeqCst);
+        SLOT_WAIT_FLAGS.store(flags as u64, Ordering::SeqCst);
+        GATED_WAIT_ENTERED.store(true, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        while !GATED_WAIT_OPEN.load(Ordering::SeqCst) {
+            if start.elapsed() > std::time::Duration::from_secs(10) {
+                return cryptoki_sys::CKR_DEVICE_ERROR;
+            }
+            std::thread::yield_now();
+        }
+        if !slot.is_null() {
+            unsafe { *slot = SLOT_WAIT_SLOT.load(Ordering::SeqCst) as cryptoki_sys::CK_SLOT_ID };
+        }
+        WAIT_RETURNED.store(true, Ordering::SeqCst);
+        SLOT_WAIT_RV.load(Ordering::SeqCst) as cryptoki_sys::CK_RV
+    }
+
+    unsafe extern "C" fn wait_fixture_initialize_ok(
+        _: *mut std::ffi::c_void,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn wait_fixture_finalize_ok(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+        FINALIZE_CALLS.fetch_add(1, Ordering::SeqCst);
+        FINALIZE_ENTERED_AFTER_WAIT_RETURN
+            .store(WAIT_RETURNED.load(Ordering::SeqCst), Ordering::SeqCst);
         cryptoki_sys::CKR_OK
     }
 
     fn backend_with_wait() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        backend_with_wait_fn(Some(recording_wait))
+    }
+
+    fn backend_with_wait_fn(
+        wait: cryptoki_sys::CK_C_WaitForSlotEvent,
+    ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
-        functions.C_WaitForSlotEvent = Some(recording_wait);
+        functions.C_Initialize = Some(wait_fixture_initialize_ok);
+        functions.C_Finalize = Some(wait_fixture_finalize_ok);
+        functions.C_WaitForSlotEvent = wait;
         let backend = FfiBackend {
             _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
@@ -1175,7 +1265,7 @@ mod slot_wait_tests {
     fn wait_for_slot_denied_before_lifecycle_open() {
         // TF01b `call_slot_output` ordinary proof: no admission pre-Init.
         let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
+        reset_wait_fixture();
         let (backend, _functions) = backend_with_wait();
         let flags = cryptoki_sys::CKF_DONT_BLOCK as u64;
         assert_eq!(
@@ -1188,7 +1278,7 @@ mod slot_wait_tests {
     #[test]
     fn slot_wait_blocking_rejected_without_native_entry() {
         let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
+        reset_wait_fixture();
         let (backend, _functions) = backend_with_wait();
         // Ordinary path: establish post-Initialize state (admission precedes
         // the local mode refusal at the boundary).
@@ -1203,7 +1293,7 @@ mod slot_wait_tests {
     #[test]
     fn slot_wait_nonblocking_preserves_native_result_and_flags() {
         let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
+        reset_wait_fixture();
         let (backend, _functions) = backend_with_wait();
         // Ordinary path: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
@@ -1220,7 +1310,7 @@ mod slot_wait_tests {
     #[cfg(target_pointer_width = "32")]
     fn slot_wait_checked_width_and_precedence() {
         let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
+        reset_wait_fixture();
         let (backend, _functions) = backend_with_wait();
         // Ordinary path: establish post-Initialize state (admission precedes
         // checked narrowing at the boundary).
@@ -1231,5 +1321,348 @@ mod slot_wait_tests {
         let flags = 1u64 << 32 | cryptoki_sys::CKF_DONT_BLOCK as u64;
         assert_eq!(backend.ffi_wait_for_slot_event(flags).unwrap_err(), CkRv::FUNCTION_FAILED);
         assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    /// TO26b group 2: every sealed state refuses every flag shape before
+    /// width, mode, contention and native entry (lifecycle precedes all).
+    #[test]
+    fn slot_wait_sealed_states_refuse_before_everything() {
+        use crate::ffi::native_domain::ModuleState::*;
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait();
+        let dont_block = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        let flag_shapes =
+            [0, dont_block, dont_block | 0x8000_0000, 1u64 << 32, 1u64 << 32 | dont_block];
+        for state in [LoadedUninitialized, Initializing, Draining, Finalizing, Finalized] {
+            backend.lifecycle_domain.set_state_for_tests(state, 3);
+            for flags in flag_shapes {
+                assert_eq!(
+                    backend.ffi_wait_for_slot_event(flags).unwrap_err(),
+                    CkRv::CRYPTOKI_NOT_INITIALIZED,
+                    "sealed {state:?} must refuse flags {flags:#x} first"
+                );
+            }
+            assert_eq!(
+                SLOT_WAIT_CALLS.load(Ordering::SeqCst),
+                0,
+                "sealed {state:?} must make zero native attempts"
+            );
+        }
+    }
+
+    /// TO26b group 2: an Uncertain domain refuses DEVICE_ERROR (wait-table
+    /// row) for every flag shape, with zero native attempts.
+    #[test]
+    fn slot_wait_uncertain_refuses_device_error() {
+        use crate::ffi::native_domain::ModuleState;
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait();
+        backend.lifecycle_domain.set_state_for_tests(ModuleState::Uncertain, 3);
+        let dont_block = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        for flags in [0, dont_block, dont_block | 0x8000_0000, 1u64 << 32, 1u64 << 32 | dont_block]
+        {
+            assert_eq!(
+                backend.ffi_wait_for_slot_event(flags).unwrap_err(),
+                CkRv::DEVICE_ERROR,
+                "Uncertain must refuse flags {flags:#x} with DEVICE_ERROR"
+            );
+        }
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    /// TO26b group 2: mode precedes contention — blocking flags refuse
+    /// NOT_SUPPORTED even while a genuine waiter holds the reservation.
+    #[test]
+    fn slot_wait_blocking_refused_despite_busy_waiter() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait_fn(Some(gated_wait));
+        backend.lifecycle_domain.open_for_tests();
+        std::thread::scope(|scope| {
+            // The gate stays closed until both rivals are checked, so the
+            // spawned waiter deterministically holds the reservation
+            // through native entry while they race it.
+            let holder = scope
+                .spawn(|| backend.ffi_wait_for_slot_event(cryptoki_sys::CKF_DONT_BLOCK as u64));
+            let start = std::time::Instant::now();
+            while !GATED_WAIT_ENTERED.load(Ordering::SeqCst) {
+                assert!(start.elapsed() < std::time::Duration::from_secs(10), "waiter must enter");
+                std::thread::yield_now();
+            }
+            assert_eq!(
+                backend.ffi_wait_for_slot_event(0).unwrap_err(),
+                CkRv::FUNCTION_NOT_SUPPORTED,
+                "mode precedes contention"
+            );
+            assert_eq!(
+                backend.ffi_wait_for_slot_event(cryptoki_sys::CKF_DONT_BLOCK as u64).unwrap_err(),
+                CkRv::FUNCTION_FAILED,
+                "concurrent waiter refused while one is in native"
+            );
+            GATED_WAIT_OPEN.store(true, Ordering::SeqCst);
+            assert_eq!(holder.join().expect("holder joins").unwrap(), CkSlotId(7));
+        });
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1, "rivals make no native attempt");
+    }
+
+    /// TO26b group 2: the second concurrent waiter is refused (contention)
+    /// and the slot frees on settlement — a later waiter succeeds.
+    #[test]
+    fn slot_wait_contention_refused_then_slot_reusable() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait_fn(Some(gated_wait));
+        backend.lifecycle_domain.open_for_tests();
+        let dont_block = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        std::thread::scope(|scope| {
+            let holder = scope.spawn(|| backend.ffi_wait_for_slot_event(dont_block));
+            let start = std::time::Instant::now();
+            while !GATED_WAIT_ENTERED.load(Ordering::SeqCst) {
+                assert!(start.elapsed() < std::time::Duration::from_secs(10), "waiter must enter");
+                std::thread::yield_now();
+            }
+            assert_eq!(
+                backend.ffi_wait_for_slot_event(dont_block).unwrap_err(),
+                CkRv::FUNCTION_FAILED,
+                "concurrent waiter must refuse while one is in native"
+            );
+            assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1);
+            GATED_WAIT_OPEN.store(true, Ordering::SeqCst);
+            assert_eq!(holder.join().expect("holder joins").unwrap(), CkSlotId(7));
+        });
+        // Settlement freed the slot: the next waiter succeeds with a fresh ID.
+        assert_eq!(backend.ffi_wait_for_slot_event(dont_block).unwrap(), CkSlotId(7));
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 2);
+        let observed = backend
+            .lifecycle_domain
+            .last_waiter_observation_for_tests()
+            .expect("settlement publishes the observation");
+        assert_eq!(observed.id, 1, "second settlement advances the wait ID");
+        assert_eq!(observed.native_rv, Some(0));
+        assert!(observed.slot_written);
+    }
+
+    /// TO26b group 2: plain DONT_BLOCK succeeds with exact flags, one
+    /// native call, and a published completion observation.
+    #[test]
+    fn slot_wait_plain_dont_block_ok_with_observation() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait();
+        backend.lifecycle_domain.open_for_tests();
+        let flags = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        assert_eq!(backend.ffi_wait_for_slot_event(flags).unwrap(), CkSlotId(7));
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(SLOT_WAIT_FLAGS.load(Ordering::SeqCst), flags);
+        let observed = backend
+            .lifecycle_domain
+            .last_waiter_observation_for_tests()
+            .expect("settlement publishes the observation");
+        assert_eq!(observed.id, 0);
+        assert_eq!(observed.flags, flags);
+        assert_eq!(observed.native_rv, Some(0));
+        assert!(observed.slot_written);
+    }
+
+    /// TO26b group 2: slot zero is a valid successful result, not an error.
+    #[test]
+    fn slot_wait_slot_zero_delivered() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        SLOT_WAIT_SLOT.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_wait();
+        backend.lifecycle_domain.open_for_tests();
+        assert_eq!(
+            backend.ffi_wait_for_slot_event(cryptoki_sys::CKF_DONT_BLOCK as u64).unwrap(),
+            CkSlotId(0)
+        );
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    /// TO26b group 2: NO_EVENT with a dirtied native output cell surfaces
+    /// exactly NO_EVENT; the observation records no slot write (the cell
+    /// is never read on error — the shim canary test pins the caller side).
+    #[test]
+    fn slot_wait_no_event_with_modified_native_output() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        SLOT_WAIT_RV.store(cryptoki_sys::CKR_NO_EVENT as u64, Ordering::SeqCst);
+        SLOT_WAIT_SLOT.store(0xDEAD, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_wait();
+        backend.lifecycle_domain.open_for_tests();
+        assert_eq!(
+            backend.ffi_wait_for_slot_event(cryptoki_sys::CKF_DONT_BLOCK as u64).unwrap_err(),
+            CkRv::NO_EVENT
+        );
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1);
+        let observed = backend
+            .lifecycle_domain
+            .last_waiter_observation_for_tests()
+            .expect("settlement publishes the observation");
+        assert_eq!(observed.native_rv, Some(cryptoki_sys::CKR_NO_EVENT as u64));
+        assert!(!observed.slot_written, "error return writes no slot");
+    }
+
+    /// TO26b group 2: a sentinel provider error passes through unchanged
+    /// and verbatim into the completion observation.
+    #[test]
+    fn slot_wait_sentinel_provider_error_passes_through() {
+        const SENTINEL: u64 = 0xDEAD_BEEF;
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        SLOT_WAIT_RV.store(SENTINEL, Ordering::SeqCst);
+        SLOT_WAIT_SLOT.store(0xBEEF, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_wait();
+        backend.lifecycle_domain.open_for_tests();
+        assert_eq!(
+            backend.ffi_wait_for_slot_event(cryptoki_sys::CKF_DONT_BLOCK as u64).unwrap_err(),
+            CkRv(SENTINEL)
+        );
+        let observed = backend
+            .lifecycle_domain
+            .last_waiter_observation_for_tests()
+            .expect("settlement publishes the observation");
+        assert_eq!(observed.native_rv, Some(SENTINEL), "original RV preserved verbatim");
+        assert!(!observed.slot_written);
+    }
+
+    /// TO26b group 2: a missing provider entry refuses locally with no
+    /// native attempt and no completed observation; the slot stays usable.
+    #[test]
+    fn slot_wait_missing_function_refused_without_native_entry() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait_fn(None);
+        backend.lifecycle_domain.open_for_tests();
+        let flags = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        assert_eq!(
+            backend.ffi_wait_for_slot_event(flags).unwrap_err(),
+            CkRv::FUNCTION_NOT_SUPPORTED
+        );
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 0);
+        let observed = backend
+            .lifecycle_domain
+            .last_waiter_observation_for_tests()
+            .expect("refusal still publishes an observation");
+        assert_eq!(observed.native_rv, None, "no native return was reached");
+        assert!(!observed.slot_written);
+        // The dropped reservation freed the slot: a repeat behaves identically.
+        assert_eq!(
+            backend.ffi_wait_for_slot_event(flags).unwrap_err(),
+            CkRv::FUNCTION_NOT_SUPPORTED
+        );
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    /// TO26b group 2: local refusals (lifecycle/width/mode/contention)
+    /// never reserve, so they publish no observation at all.
+    #[test]
+    fn slot_wait_local_refusals_publish_no_observation() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait();
+        let dont_block = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        // Lifecycle refusal (fresh backend is LoadedUninitialized).
+        let _ = backend.ffi_wait_for_slot_event(dont_block).unwrap_err();
+        backend.lifecycle_domain.open_for_tests();
+        // Mode refusal.
+        let _ = backend.ffi_wait_for_slot_event(0).unwrap_err();
+        // Width refusal (infallible on 64-bit for this value — the mode
+        // arm takes it; the assertion below holds regardless).
+        let _ = backend.ffi_wait_for_slot_event(1u64 << 32).unwrap_err();
+        assert_eq!(
+            backend.lifecycle_domain.last_waiter_observation_for_tests(),
+            None,
+            "refusals never reserve, so nothing is observed"
+        );
+    }
+
+    /// TO26b group 2, width matrix: `2^32` and `2^32 | DONT_BLOCK` fail
+    /// checked narrowing on a 32-bit backend; on a 64-bit backend both are
+    /// representable, so mode/contention decide instead.
+    #[test]
+    fn slot_wait_wide_flags_width_matrix() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait();
+        backend.lifecycle_domain.open_for_tests();
+        let dont_block = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        #[cfg(target_pointer_width = "32")]
+        {
+            assert_eq!(
+                backend.ffi_wait_for_slot_event(1u64 << 32).unwrap_err(),
+                CkRv::FUNCTION_FAILED,
+                "width precedes mode on narrow backends"
+            );
+            assert_eq!(
+                backend.ffi_wait_for_slot_event(1u64 << 32 | dont_block).unwrap_err(),
+                CkRv::FUNCTION_FAILED,
+                "width precedes contention on narrow backends"
+            );
+            assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 0);
+        }
+        #[cfg(target_pointer_width = "64")]
+        {
+            // Representable on wide backends: `2^32` (DONT_BLOCK clear) is
+            // a mode refusal, and `2^32 | DONT_BLOCK` rides to native with
+            // every original bit preserved.
+            assert_eq!(
+                backend.ffi_wait_for_slot_event(1u64 << 32).unwrap_err(),
+                CkRv::FUNCTION_NOT_SUPPORTED
+            );
+            assert_eq!(
+                backend.ffi_wait_for_slot_event(1u64 << 32 | dont_block).unwrap(),
+                CkSlotId(7)
+            );
+            assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1);
+            assert_eq!(SLOT_WAIT_FLAGS.load(Ordering::SeqCst), 1u64 << 32 | dont_block);
+        }
+    }
+
+    /// TO26b group 2: no native wait overlaps native Finalize — a Finalize
+    /// racing an in-flight gated wait drains (it cannot overtake), the
+    /// waiter settles first, and exactly one native call of each ran.
+    #[test]
+    fn slot_wait_finalize_cannot_overlap_native_wait() {
+        use std::sync::mpsc::channel;
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait_fn(Some(gated_wait));
+        backend.initialize().expect("honest control cycle publishes Open");
+        let dont_block = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        std::thread::scope(|scope| {
+            let waiter_done = scope.spawn(|| backend.ffi_wait_for_slot_event(dont_block));
+            let start = std::time::Instant::now();
+            while !GATED_WAIT_ENTERED.load(Ordering::SeqCst) {
+                assert!(start.elapsed() < std::time::Duration::from_secs(10), "waiter must enter");
+                std::thread::yield_now();
+            }
+            // Finalize seals admission immediately (a rival wait now
+            // refuses) but its native call must wait for the waiter.
+            let (final_tx, final_rx) = channel();
+            let backend_ref = &backend;
+            scope.spawn(move || final_tx.send(backend_ref.finalize()).expect("report finalize"));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert_eq!(
+                FINALIZE_CALLS.load(Ordering::SeqCst),
+                0,
+                "native Finalize must not enter while the wait is in flight"
+            );
+            assert!(final_rx.try_recv().is_err(), "Finalize must still be draining, not completed");
+            GATED_WAIT_OPEN.store(true, Ordering::SeqCst);
+            assert_eq!(waiter_done.join().expect("waiter joins").unwrap(), CkSlotId(7));
+            final_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("Finalize completes after the waiter settles")
+                .expect("Finalize succeeds");
+        });
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(FINALIZE_CALLS.load(Ordering::SeqCst), 1);
+        assert!(
+            FINALIZE_ENTERED_AFTER_WAIT_RETURN.load(Ordering::SeqCst),
+            "native wait returned before native Finalize entered"
+        );
     }
 }

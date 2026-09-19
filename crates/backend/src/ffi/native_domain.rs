@@ -781,6 +781,7 @@ struct LifecycleInner {
 #[derive(Debug, Default)]
 pub(in crate::ffi) struct LifecycleDomain {
     inner: RwLock<LifecycleInner>,
+    waiter: WaiterDomain,
 }
 
 /// Proof of ordinary admission: holds lifecycle read exclusion. Dropping
@@ -863,6 +864,7 @@ impl LifecycleDomain {
                 state: ModuleState::LoadedUninitialized,
                 epoch: 0,
             }),
+            waiter: WaiterDomain::default(),
         }
     }
 
@@ -1149,6 +1151,225 @@ impl Drop for OrdinaryGuard<'_> {
     /// the flag tripped for later admissions on this thread.
     fn drop(&mut self) {
         ADMITTED_ON_THREAD.set(false);
+    }
+}
+
+/// Domain-owned sole slot-event waiter record (§"Slot-event scope,
+/// precedence and output"). One reservation per domain: ordinary lifecycle
+/// access is acquired before reservation and retained through settlement,
+/// and the reservation itself is held until settlement too — including
+/// after RPC cancellation/timeout, which never releases either early.
+/// The record mutex is a leaf (never held across native calls, waits or
+/// lifecycle transitions), so short blocking sections cannot deadlock.
+#[derive(Debug, Default)]
+pub(in crate::ffi) struct WaiterDomain {
+    inner: Mutex<WaiterInner>,
+}
+
+#[derive(Debug, Default)]
+struct WaiterInner {
+    held: Option<WaiterRecord>,
+    next_id: u64,
+    last_observation: Option<WaiterObservation>,
+}
+
+/// The occupancy half of a live reservation: the checked wait ID plus
+/// the domain epoch it was reserved under (compared on release, so a
+/// never-repeating ID plus its epoch jointly identify the holder).
+#[derive(Debug)]
+struct WaiterRecord {
+    id: u64,
+    epoch: u64,
+}
+
+/// Live waiter lifecycle phases (§"Slot-event scope": Reserved,
+/// NativeCallCommitted, Returned). The doc's fourth state, Settled, is the
+/// release transition itself — dropping a [`WaiterReservation`] frees the
+/// slot and publishes the completion observation atomically under the
+/// record mutex — so no live reservation is ever `Settled` and no thread
+/// can observe one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::ffi) enum WaiterPhase {
+    Reserved,
+    NativeCallCommitted,
+    Returned,
+}
+
+/// Completion observation published at settlement: the original provider
+/// RV is preserved verbatim (never truncated), alongside the wait ID,
+/// epoch and original flag bits the reservation carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::ffi) struct WaiterObservation {
+    pub id: u64,
+    pub epoch: u64,
+    pub flags: u64,
+    /// The raw native RV (`Some`), or `None` when the reservation never
+    /// reached native return (commit refusal, missing function, unwind).
+    pub native_rv: Option<u64>,
+    pub slot_written: bool,
+}
+
+/// Live sole waiter reservation. Borrows the admitting
+/// [`OrdinaryGuard`], so the reservation can neither outlive ordinary
+/// exclusion nor migrate threads (`!Send` via the guard). Dropping frees
+/// the slot and publishes the completion observation.
+#[derive(Debug)]
+pub(in crate::ffi) struct WaiterReservation<'a> {
+    domain: &'a LifecycleDomain,
+    _admission: &'a OrdinaryGuard<'a>,
+    id: u64,
+    epoch: u64,
+    flags: u64,
+    phase: WaiterPhase,
+    native_rv: Option<u64>,
+    slot_written: bool,
+}
+
+/// Pure commit gate: the admission/seal linearization point re-checked
+/// between reservation and native entry. A stale epoch or sealed state
+/// bars native entry; `Uncertain` fails closed with `DEVICE_ERROR` per the
+/// wait table (the admission path maps it the same way).
+pub(in crate::ffi) fn waiter_commit_allowed(
+    state: ModuleState,
+    current_epoch: u64,
+    record_epoch: u64,
+) -> CkResult<()> {
+    if state == ModuleState::Open && current_epoch == record_epoch {
+        return Ok(());
+    }
+    if state == ModuleState::Uncertain {
+        return Err(CkRv::DEVICE_ERROR);
+    }
+    Err(CkRv::CRYPTOKI_NOT_INITIALIZED)
+}
+
+impl LifecycleDomain {
+    /// Reserve the sole waiter slot for an admitted DONT_BLOCK wait.
+    /// Contention refuses locally (`FUNCTION_FAILED`, zero native
+    /// attempts) — waiters are never queued. Wait IDs are checked and
+    /// never wrap or repeat; exhaustion fails closed.
+    pub(in crate::ffi) fn reserve_waiter<'a>(
+        &'a self,
+        admission: &'a OrdinaryGuard<'a>,
+        flags: u64,
+    ) -> CkResult<WaiterReservation<'a>> {
+        let mut inner = self.waiter.inner.lock().map_err(|_| CkRv::GENERAL_ERROR)?;
+        if inner.held.is_some() {
+            return Err(CkRv::FUNCTION_FAILED);
+        }
+        let id = inner.next_id;
+        inner.next_id = inner.next_id.checked_add(1).ok_or(CkRv::GENERAL_ERROR)?;
+        inner.held = Some(WaiterRecord { id, epoch: admission.epoch });
+        Ok(WaiterReservation {
+            domain: self,
+            _admission: admission,
+            id,
+            epoch: admission.epoch,
+            flags,
+            phase: WaiterPhase::Reserved,
+            native_rv: None,
+            slot_written: false,
+        })
+    }
+
+    /// Short state peek for the wait admission mapping: `true` only when
+    /// the domain currently reads `Uncertain`. Poison reads `false` (the
+    /// admission error itself already fails closed).
+    pub(in crate::ffi) fn is_uncertain(&self) -> bool {
+        matches!(self.inner.read().map(|guard| guard.state), Ok(ModuleState::Uncertain))
+    }
+
+    #[cfg(test)]
+    pub(in crate::ffi) fn waiter_held_for_tests(&self) -> bool {
+        self.waiter.inner.lock().expect("test setup on unpoisoned domain").held.is_some()
+    }
+
+    #[cfg(test)]
+    pub(in crate::ffi) fn last_waiter_observation_for_tests(&self) -> Option<WaiterObservation> {
+        self.waiter.inner.lock().expect("test setup on unpoisoned domain").last_observation
+    }
+}
+
+impl WaiterReservation<'_> {
+    /// Re-validate the reservation against the live domain immediately
+    /// before native entry. Seal-win releases the slot and refuses with
+    /// zero native entry; success advances to `NativeCallCommitted`. Held
+    /// ordinary exclusion makes seal-win unreachable through the public
+    /// path (the sealer drains instead of overtaking), so this is the
+    /// fail-closed backstop behind the structural guarantee.
+    pub(in crate::ffi) fn commit_native(&mut self) -> CkResult<()> {
+        let (state, current_epoch) = match self.domain.inner.read() {
+            Ok(guard) => (guard.state, guard.epoch),
+            Err(_) => {
+                self.release_uncompleted();
+                return Err(CkRv::GENERAL_ERROR);
+            }
+        };
+        if let Err(error) = waiter_commit_allowed(state, current_epoch, self.epoch) {
+            self.release_uncompleted();
+            return Err(error);
+        }
+        self.phase = WaiterPhase::NativeCallCommitted;
+        Ok(())
+    }
+
+    /// Record native return: the original provider RV plus whether a slot
+    /// value was produced. Infallible by construction (stack-local only).
+    pub(in crate::ffi) fn note_returned(&mut self, native_rv: u64, slot_written: bool) {
+        self.phase = WaiterPhase::Returned;
+        self.native_rv = Some(native_rv);
+        self.slot_written = slot_written;
+    }
+
+    /// Early release without native return (commit refusal, poison):
+    /// frees the slot and publishes an uncompleted observation. Never
+    /// panics: poison ⇒ fail-closed in place (the slot stays held, so
+    /// later reservations fail closed too). Drop re-checks occupancy, so
+    /// no double publish is possible.
+    fn release_uncompleted(&mut self) {
+        if let Ok(mut inner) = self.domain.waiter.inner.lock() {
+            let still_held = matches!(&inner.held, Some(record) if record.id == self.id && record.epoch == self.epoch);
+            if still_held {
+                inner.held = None;
+                inner.last_observation = Some(WaiterObservation {
+                    id: self.id,
+                    epoch: self.epoch,
+                    flags: self.flags,
+                    native_rv: None,
+                    slot_written: false,
+                });
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::ffi) fn phase_for_tests(&self) -> WaiterPhase {
+        self.phase
+    }
+}
+
+impl Drop for WaiterReservation<'_> {
+    /// Settlement end: free the slot and publish the completion
+    /// observation. Runs on unwind too, so a settlement panic never
+    /// strands the reservation. Never panics: poison ⇒ fail-closed in
+    /// place (later reservations fail closed on the held slot).
+    fn drop(&mut self) {
+        let Ok(mut inner) = self.domain.waiter.inner.lock() else {
+            return;
+        };
+        // A commit-refused reservation already released and published;
+        // only clear the slot when this reservation still holds it.
+        let still_held = matches!(&inner.held, Some(record) if record.id == self.id && record.epoch == self.epoch);
+        if still_held {
+            inner.held = None;
+            inner.last_observation = Some(WaiterObservation {
+                id: self.id,
+                epoch: self.epoch,
+                flags: self.flags,
+                native_rv: self.native_rv,
+                slot_written: self.slot_written,
+            });
+        }
     }
 }
 

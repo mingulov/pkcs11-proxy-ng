@@ -11,6 +11,7 @@
 
 use super::FfiBackend;
 use super::native_domain::*;
+use pkcs11_proxy_ng_types::CkRv;
 
 fn fresh() -> DomainRegistry {
     DomainRegistry::fresh_for_tests()
@@ -592,6 +593,122 @@ fn native_domain_unsupported_platform_display_names_macos_hosts() {
         "Display must name macOS hosts, got: {msg}"
     );
     assert!(msg.contains("test-detail"), "Display must carry the detail, got: {msg}");
+}
+
+/// TO26b group 2: the domain holds exactly one waiter reservation — a
+/// second admission's reservation fails locally (FUNCTION_FAILED) while
+/// the first is outstanding, and the slot frees on settlement.
+#[test]
+fn native_domain_waiter_second_reservation_refused_until_settled() {
+    use std::sync::mpsc::channel;
+    let domain = LifecycleDomain::default();
+    domain.open_for_tests();
+    assert!(!domain.waiter_held_for_tests(), "no waiter outstanding initially");
+
+    // Contention is cross-thread in production (one thread cannot hold
+    // two admissions — the conc-M2 tripwire — so the holder lives on a
+    // scoped worker while this thread races it).
+    std::thread::scope(|scope| {
+        let (reserved_tx, reserved_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let domain_ref = &domain;
+        scope.spawn(move || {
+            let first = domain_ref.admit_ordinary().expect("first admission");
+            let waiter = domain_ref.reserve_waiter(&first, 1).expect("sole reservation granted");
+            assert_eq!(waiter.phase_for_tests(), WaiterPhase::Reserved);
+            reserved_tx.send(()).expect("signal reservation held");
+            release_rx.recv().expect("wait for release");
+            drop(waiter);
+        });
+        reserved_rx.recv().expect("holder reserved");
+        assert!(domain.waiter_held_for_tests(), "reservation held through settlement");
+
+        // A second waiter is refused locally — never queued, never a
+        // second native wait.
+        let second = domain.admit_ordinary().expect("second admission");
+        assert_eq!(
+            domain.reserve_waiter(&second, 1).unwrap_err(),
+            CkRv::FUNCTION_FAILED,
+            "waiter contention must refuse locally"
+        );
+        assert!(domain.waiter_held_for_tests(), "refusal keeps the first waiter");
+        release_tx.send(()).expect("release holder");
+    });
+    assert!(!domain.waiter_held_for_tests(), "settlement frees the slot");
+    let third = domain.admit_ordinary().expect("third admission");
+    let _reuse = domain.reserve_waiter(&third, 1).expect("slot reusable after settlement");
+}
+
+/// TO26b group 2: the commit check bars stale epochs and sealed states —
+/// the linearization point between admission and native entry. Held
+/// ordinary exclusion makes seal-win-after-admission unreachable through
+/// the public path (the sealer drains instead of overtaking), so the
+/// stale/sealed arms are pinned directly on the pure helper.
+#[test]
+fn native_domain_waiter_commit_bars_stale_and_sealed() {
+    use ModuleState::*;
+    assert!(waiter_commit_allowed(Open, 5, 5).is_ok(), "fresh Open reservation commits");
+    assert_eq!(
+        waiter_commit_allowed(Open, 6, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "stale epoch cannot enter native"
+    );
+    assert_eq!(
+        waiter_commit_allowed(Draining, 5, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed state cannot enter native"
+    );
+    assert_eq!(
+        waiter_commit_allowed(Finalizing, 5, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed state cannot enter native"
+    );
+    assert_eq!(
+        waiter_commit_allowed(Finalized, 5, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed state cannot enter native"
+    );
+    assert_eq!(
+        waiter_commit_allowed(Uncertain, 5, 5).unwrap_err(),
+        CkRv::DEVICE_ERROR,
+        "uncertain domain fails closed with DEVICE_ERROR"
+    );
+}
+
+/// TO26b group 2: settlement publishes the completion observation —
+/// wait ID, epoch, original flags, original provider RV — and IDs never
+/// wrap or repeat.
+#[test]
+fn native_domain_waiter_settlement_publishes_observation() {
+    let domain = LifecycleDomain::default();
+    domain.open_for_tests();
+    assert_eq!(domain.last_waiter_observation_for_tests(), None);
+
+    let first = domain.admit_ordinary().expect("admission");
+    let epoch = first.epoch_for_tests();
+    let mut waiter = domain.reserve_waiter(&first, 0x8000_0001).expect("reservation");
+    waiter.commit_native().expect("fresh Open reservation commits");
+    waiter.note_returned(0x12, false);
+    assert_eq!(waiter.phase_for_tests(), WaiterPhase::Returned);
+    drop(waiter);
+
+    let observed =
+        domain.last_waiter_observation_for_tests().expect("settlement publishes the observation");
+    assert_eq!(observed.id, 0, "wait IDs start at zero");
+    assert_eq!(observed.epoch, epoch);
+    assert_eq!(observed.flags, 0x8000_0001, "original flag bits preserved");
+    assert_eq!(observed.native_rv, Some(0x12), "original provider RV preserved");
+    assert!(!observed.slot_written, "error return writes no slot");
+
+    // A second cycle advances the ID and overwrites the observation.
+    let mut second = domain.reserve_waiter(&first, 1).expect("slot reusable");
+    second.commit_native().expect("commit");
+    second.note_returned(0, true);
+    drop(second);
+    let observed = domain.last_waiter_observation_for_tests().expect("second observation");
+    assert_eq!(observed.id, 1, "wait IDs advance monotonically");
+    assert_eq!(observed.native_rv, Some(0));
+    assert!(observed.slot_written);
 }
 
 #[test]
