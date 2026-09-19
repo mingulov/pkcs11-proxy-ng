@@ -79,8 +79,29 @@ impl FfiBackend {
         Ok(call(Self::require_fn(function)?))
     }
 
+    /// F-01 B2 proof token (see `call_bytes`): the caller proves ordinary
+    /// admission at compile time and holds read exclusion across the call.
     #[inline]
-    pub(super) fn call_unit<T, F>(function: Option<T>, call: F) -> CkResult<()>
+    pub(super) fn call_unit<T, F>(
+        _admission: &OrdinaryGuard,
+        function: Option<T>,
+        call: F,
+    ) -> CkResult<()>
+    where
+        T: Copy,
+        F: FnOnce(T) -> cryptoki_sys::CK_RV,
+    {
+        Self::ck_result(Self::call_raw(function, call)?)
+    }
+
+    /// Control choke: native entries that must NOT prove ordinary admission
+    /// — `Initialize`/`Finalize` (exclusive state changers under the write
+    /// lock, never holding read) and the pre-Initialize-legal info queries
+    /// (`C_GetInfo`, `C_GetSlotInfo`: stateless, retain nothing). Taking no
+    /// guard is structural: a control path cannot smuggle read exclusion
+    /// into a write section through this choke.
+    #[inline]
+    pub(super) fn call_control_unit<T, F>(function: Option<T>, call: F) -> CkResult<()>
     where
         T: Copy,
         F: FnOnce(T) -> cryptoki_sys::CK_RV,

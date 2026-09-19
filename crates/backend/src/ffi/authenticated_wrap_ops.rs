@@ -883,6 +883,8 @@ mod tests {
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Wrap/unwrap/destroy are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         (backend, base, functions)
     }
 

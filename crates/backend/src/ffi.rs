@@ -324,8 +324,10 @@ impl Pkcs11Backend for FfiBackend {
         // a failed `C_Initialize` ran provider code, so the reservation
         // must poison instead of recycling.
         self.lifecycle.note_init_attempted();
+        // Control choke: Initialize takes the write lock (above) while
+        // holding no read — the choke takes no guard, structurally.
         let outcome =
-            Self::call_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
+            Self::call_control_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
                 function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
             });
         if outcome.is_err() {
@@ -357,9 +359,12 @@ impl Pkcs11Backend for FfiBackend {
 
     fn finalize(&self) -> CkResult<()> {
         let _deadline = native_stop::arm_shutdown_deadline(native_stop::shutdown_grace());
-        let outcome = Self::call_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
-            function(std::ptr::null_mut())
-        });
+        // Control choke: Finalize holds no read (TF01b adds the seal/drain
+        // write section here; until then the domain transition is unwired).
+        let outcome =
+            Self::call_control_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
+                function(std::ptr::null_mut())
+            });
         if outcome.is_err() {
             // The failure proves nothing about provider state, so every
             // binding stays — but the incarnation is now uncertain, and a
@@ -1811,6 +1816,40 @@ mod tests {
         };
 
         (backend, functions)
+    }
+
+    #[test]
+    fn initialize_publishes_open_admitting_ordinary() {
+        // TF01a control wiring: a fresh backend denies ordinary work; a
+        // successful native C_Initialize publishes Open, which admits.
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
+        assert_eq!(
+            backend.lifecycle_domain.admit_ordinary().unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+        backend.initialize().expect("initialize succeeds");
+        backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
+    }
+
+    #[test]
+    fn failed_initialize_restores_prior_domain_state() {
+        // Behavior parity: native failure restores the prior state — a
+        // failed first attempt keeps denying, a failed re-attempt keeps a
+        // live incarnation usable — and the native RV propagates exactly.
+        let (backend, mut functions) =
+            backend_with_init_and_finalize(Some(initialize_fails), Some(finalize_ok));
+        assert_eq!(backend.initialize().unwrap_err(), CkRv::GENERAL_ERROR);
+        assert_eq!(
+            backend.lifecycle_domain.admit_ordinary().unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+        functions.C_Initialize = Some(initialize_ok);
+        backend.initialize().expect("retry succeeds");
+        backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
+        functions.C_Initialize = Some(initialize_fails);
+        assert_eq!(backend.initialize().unwrap_err(), CkRv::GENERAL_ERROR);
+        backend.lifecycle_domain.admit_ordinary().expect("live incarnation still admits");
     }
 
     fn seed_cache(backend: &FfiBackend) {

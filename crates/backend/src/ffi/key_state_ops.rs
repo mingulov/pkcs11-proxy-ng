@@ -316,19 +316,24 @@ impl FfiBackend {
         enc_key: CkObjectHandle,
         auth_key: CkObjectHandle,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (state_ptr, state_len) = state.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         let h_enc_key = Self::object_handle(enc_key)?;
         let h_auth_key = Self::object_handle(auth_key)?;
-        Self::call_unit(unsafe { (*self.func_list).C_SetOperationState }, |function| unsafe {
-            function(
-                h_session,
-                state_ptr as *mut _,
-                Self::ulong_len_u64(state_len),
-                h_enc_key,
-                h_auth_key,
-            )
-        })
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_SetOperationState },
+            |function| unsafe {
+                function(
+                    h_session,
+                    state_ptr as *mut _,
+                    Self::ulong_len_u64(state_len),
+                    h_enc_key,
+                    h_auth_key,
+                )
+            },
+        )
     }
 
     pub(super) fn ffi_seed_random(
@@ -336,9 +341,10 @@ impl FfiBackend {
         session: CkSessionHandle,
         seed: CkInBuf<'_>,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (seed_ptr, seed_len) = seed.as_ptr_len();
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_SeedRandom }, |function| unsafe {
+        Self::call_unit(&admission, unsafe { (*self.func_list).C_SeedRandom }, |function| unsafe {
             function(h_session, seed_ptr as *mut _, Self::ulong_len_u64(seed_len))
         })
     }

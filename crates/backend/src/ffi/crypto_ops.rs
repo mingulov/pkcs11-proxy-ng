@@ -22,8 +22,9 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_sign_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_SignInit }, |function| unsafe {
+        Self::call_unit(&admission, unsafe { (*self.func_list).C_SignInit }, |function| unsafe {
             function(h_session, std::ptr::null_mut(), 0)
         })?;
         self.drop_mech_cache_family(session, OperationFamily::Sign);
@@ -50,7 +51,8 @@ impl FfiBackend {
         session: CkSessionHandle,
         part: CkInBuf<'_>,
     ) -> CkResult<()> {
-        Self::call_unit(unsafe { (*self.func_list).C_SignUpdate }, |function| {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        Self::call_unit(&admission, unsafe { (*self.func_list).C_SignUpdate }, |function| {
             session_unit_input!(session, part, function)
         })
     }
@@ -80,10 +82,13 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_sign_recover_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_SignRecoverInit }, |function| unsafe {
-            function(h_session, std::ptr::null_mut(), 0)
-        })?;
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_SignRecoverInit },
+            |function| unsafe { function(h_session, std::ptr::null_mut(), 0) },
+        )?;
         self.drop_mech_cache_family(session, OperationFamily::SignRecover);
         Ok(())
     }
@@ -176,10 +181,13 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_verify_recover_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_VerifyRecoverInit }, |function| unsafe {
-            function(h_session, std::ptr::null_mut(), 0)
-        })?;
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_VerifyRecoverInit },
+            |function| unsafe { function(h_session, std::ptr::null_mut(), 0) },
+        )?;
         self.drop_mech_cache_family(session, OperationFamily::VerifyRecover);
         Ok(())
     }
@@ -215,14 +223,17 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_verify_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         // Forward C_VerifyInit(NULL mechanism) verbatim, like the five sibling
         // init-cancel paths, so the module's native RV reaches the client
         // (ADR-0010 transparent forwarding). A module that SEGVs on it crashes
         // the daemon — its direct-load behavior, accepted by ADR-0010.
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_VerifyInit }, |function| unsafe {
-            function(h_session, std::ptr::null_mut(), 0)
-        })?;
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_VerifyInit },
+            |function| unsafe { function(h_session, std::ptr::null_mut(), 0) },
+        )?;
         self.drop_mech_cache_family(session, OperationFamily::Verify);
         Ok(())
     }
@@ -233,10 +244,11 @@ impl FfiBackend {
         data: CkInBuf<'_>,
         signature: CkInBuf<'_>,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (data_ptr, data_len) = data.as_ptr_len();
         let (sig_ptr, sig_len) = signature.as_ptr_len();
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_Verify }, |function| unsafe {
+        Self::call_unit(&admission, unsafe { (*self.func_list).C_Verify }, |function| unsafe {
             function(
                 h_session,
                 data_ptr as *mut _,
@@ -252,7 +264,8 @@ impl FfiBackend {
         session: CkSessionHandle,
         part: CkInBuf<'_>,
     ) -> CkResult<()> {
-        Self::call_unit(unsafe { (*self.func_list).C_VerifyUpdate }, |function| {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        Self::call_unit(&admission, unsafe { (*self.func_list).C_VerifyUpdate }, |function| {
             session_unit_input!(session, part, function)
         })
     }
@@ -262,7 +275,8 @@ impl FfiBackend {
         session: CkSessionHandle,
         signature: CkInBuf<'_>,
     ) -> CkResult<()> {
-        Self::call_unit(unsafe { (*self.func_list).C_VerifyFinal }, |function| {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        Self::call_unit(&admission, unsafe { (*self.func_list).C_VerifyFinal }, |function| {
             session_unit_input!(session, signature, function)
         })
     }
@@ -287,10 +301,13 @@ impl FfiBackend {
         // decides — softhsm2/kryoptic cancel the active digest, others reject.
         // NSS softokn SEGVs on it; that is its direct-load behavior and an
         // accepted shared-daemon trade-off per ADR-0010.
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_DigestInit }, |function| unsafe {
-            function(h_session, std::ptr::null_mut())
-        })?;
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_DigestInit },
+            |function| unsafe { function(h_session, std::ptr::null_mut()) },
+        )?;
         self.drop_mech_cache_family(session, OperationFamily::Digest);
         Ok(())
     }
@@ -330,7 +347,8 @@ impl FfiBackend {
         session: CkSessionHandle,
         part: CkInBuf<'_>,
     ) -> CkResult<()> {
-        Self::call_unit(unsafe { (*self.func_list).C_DigestUpdate }, |function| {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        Self::call_unit(&admission, unsafe { (*self.func_list).C_DigestUpdate }, |function| {
             session_unit_input!(session, part, function)
         })
     }
@@ -340,7 +358,8 @@ impl FfiBackend {
         session: CkSessionHandle,
         key: CkObjectHandle,
     ) -> CkResult<()> {
-        Self::call_unit(unsafe { (*self.func_list).C_DigestKey }, |function| {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        Self::call_unit(&admission, unsafe { (*self.func_list).C_DigestKey }, |function| {
             session_object_unit!(session, key, function)
         })
     }
@@ -386,10 +405,13 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_encrypt_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_EncryptInit }, |function| unsafe {
-            function(h_session, std::ptr::null_mut(), 0)
-        })?;
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_EncryptInit },
+            |function| unsafe { function(h_session, std::ptr::null_mut(), 0) },
+        )?;
         self.drop_mech_cache_family(session, OperationFamily::Encrypt);
         Ok(())
     }
@@ -451,10 +473,13 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_decrypt_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_DecryptInit }, |function| unsafe {
-            function(h_session, std::ptr::null_mut(), 0)
-        })?;
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_DecryptInit },
+            |function| unsafe { function(h_session, std::ptr::null_mut(), 0) },
+        )?;
         self.drop_mech_cache_family(session, OperationFamily::Decrypt);
         Ok(())
     }
@@ -927,6 +952,8 @@ mod tests {
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Cancel paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(11);
         let gcm = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,

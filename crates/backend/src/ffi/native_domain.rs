@@ -13,6 +13,18 @@
 //! is reusable. Proof of session quiescence and successful native `Finalize`
 //! before retirement lands with the lifecycle slice (`native_session`); until
 //! then, post-`dlopen` load failures poison the slot instead of recycling it.
+//!
+//! TF01a slice note (partial enforcement — the F-01 clause is NOT satisfied):
+//! `LifecycleDomain` admission is compile-time-enforced (B2) on exactly two
+//! choke families — `call_bytes` (read path: 17 dependent-op entries) and
+//! `call_unit` (32 ordinary entries) plus the `call_control_unit` split for
+//! `Initialize`/`Finalize` and the pre-Initialize-legal info queries. Every
+//! other native entry (`call_bytes_exact*`, `call_*_with_mechanism*`,
+//! `call_raw`, `call_array`, `call_*_output`, `fill_bytes`, 3.x paths) is
+//! NOT yet admission-gated, `Finalize` performs no seal/drain (the domain
+//! stays `Open` across it, exactly as before this slice), and there are no
+//! session fences or `Drop` integration yet — all TF01b. The ownership-doc
+//! clause stays as-is and the CHANGELOG F-01 entry stays open until TF01b.
 
 use std::fmt;
 use std::marker::PhantomData;

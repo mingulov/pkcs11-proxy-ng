@@ -83,12 +83,17 @@ impl FfiBackend {
         session: CkSessionHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let ck_attrs = &ffi_attrs.attrs;
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_FindObjectsInit }, |function| unsafe {
-            function(h_session, Self::ffi_attr_ptr(&ffi_attrs), Self::ulong_len(ck_attrs.len()))
-        })
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_FindObjectsInit },
+            |function| unsafe {
+                function(h_session, Self::ffi_attr_ptr(&ffi_attrs), Self::ulong_len(ck_attrs.len()))
+            },
+        )
     }
 
     pub(super) fn ffi_find_objects(
@@ -96,13 +101,18 @@ impl FfiBackend {
         session: CkSessionHandle,
         max_count: u32,
     ) -> CkResult<Vec<CkObjectHandle>> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let cap = cap_find_objects_count(max_count);
         let mut handles = vec![0 as cryptoki_sys::CK_OBJECT_HANDLE; cap];
         let mut found: cryptoki_sys::CK_ULONG = 0;
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_FindObjects }, |function| unsafe {
-            function(h_session, handles.as_mut_ptr(), cap as cryptoki_sys::CK_ULONG, &mut found)
-        })?;
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_FindObjects },
+            |function| unsafe {
+                function(h_session, handles.as_mut_ptr(), cap as cryptoki_sys::CK_ULONG, &mut found)
+            },
+        )?;
         // A conformant backend writes at most `cap` handles; clamp `found`
         // defensively so a buggy backend cannot drive an out-of-bounds slice.
         let n = (found as usize).min(cap);
@@ -110,10 +120,13 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_find_objects_final(&self, session: CkSessionHandle) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(unsafe { (*self.func_list).C_FindObjectsFinal }, |function| unsafe {
-            function(h_session)
-        })
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_FindObjectsFinal },
+            |function| unsafe { function(h_session) },
+        )
     }
 
     pub(super) fn ffi_get_attribute_value(
@@ -213,11 +226,14 @@ impl FfiBackend {
         session: CkSessionHandle,
         object: CkObjectHandle,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
-        Self::call_unit(unsafe { (*self.func_list).C_DestroyObject }, |function| unsafe {
-            function(h_session, h_object)
-        })
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_DestroyObject },
+            |function| unsafe { function(h_session, h_object) },
+        )
     }
 
     pub(super) fn ffi_get_object_size(
@@ -239,17 +255,22 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
-        Self::call_unit(unsafe { (*self.func_list).C_SetAttributeValue }, |function| unsafe {
-            function(
-                h_session,
-                h_object,
-                Self::ffi_attr_ptr(&ffi_attrs),
-                Self::ffi_attr_len(&ffi_attrs),
-            )
-        })
+        Self::call_unit(
+            &admission,
+            unsafe { (*self.func_list).C_SetAttributeValue },
+            |function| unsafe {
+                function(
+                    h_session,
+                    h_object,
+                    Self::ffi_attr_ptr(&ffi_attrs),
+                    Self::ffi_attr_len(&ffi_attrs),
+                )
+            },
+        )
     }
 }
 
