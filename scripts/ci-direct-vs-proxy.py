@@ -271,17 +271,22 @@ def provision_softhsm_windows(workdir):
         raise SystemExit(f"expected {lib} after extraction")
     if not os.path.isfile(util):
         raise SystemExit(f"expected {util} after extraction")
+    # T2run: the portable README requires the lib/ dir on PATH --
+    # softhsm2-util.exe LoadLibrary()s "softhsm2.dll" by bare name
+    # (run-5 win64: 0x7E without it, despite a correct desktop CRT).
+    os.environ["PATH"] = os.path.join(root, "lib") + os.pathsep + os.environ.get("PATH", "")
     return lib, util
 
 
 def _resolve_brew_softhsm():
     """Locate the brew SoftHSM module without hard-coding its layout.
 
-    T2run: brew's softhsm layout varies by version (2.7.0: flat
-    lib/*.so link; older: lib/softhsm/*.dylib) and the flat link can
-    dangle across upgrades (run-4 macOS: the name shows in ls while
-    isfile rejects it), so glob the live prefixes and the versioned
-    Cellar instead of trusting one path. Returns the first
+    T2run: brew's softhsm layout varies by version (2.7.0 keeps the
+    module under lib/softhsm/ reached via the lib/softhsm symlink;
+    older layouts used lib/softhsm/*.dylib), so glob the live
+    prefixes and the versioned Cellar instead of trusting one path.
+    Static archives (.a) are never loadable modules and are skipped
+    (run-5 macOS picked libsofthsm2.a first). Returns the first
     loadable-looking module or None.
     """
     prefixes = ["/opt/homebrew", "/usr/local"]
@@ -307,6 +312,8 @@ def _resolve_brew_softhsm():
         patterns.append(os.path.join(cellar, "*", "lib", "softhsm", "libsofthsm2.*"))
     for pattern in patterns:
         for hit in sorted(glob.glob(pattern)):
+            if hit.lower().endswith(".a"):
+                continue  # static archive: never dlopenable
             if os.path.isfile(hit):  # follows links; drops dangling ones
                 return hit
     return None
