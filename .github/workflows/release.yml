@@ -87,7 +87,9 @@ jobs:
                 ;;
             esac
           done
+          DELTA_PATHS="$(git diff --name-only "$SUBJECT_COMMIT" "$TAG_COMMIT")"
           while IFS= read -r path; do
+            if [[ -z "$path" ]]; then continue; fi
             case "$path" in
               doc/release/v0.2.0-quality-receipt.md|CHANGELOG.md) ;;
               *)
@@ -95,7 +97,7 @@ jobs:
                 exit 1
                 ;;
             esac
-          done < <(git diff --name-only "$SUBJECT_COMMIT" "$TAG_COMMIT")
+          done <<<"$DELTA_PATHS"
           echo "quality receipt verified for subject $SUBJECT_COMMIT at tag commit $TAG_COMMIT"
 
       - name: Install system dependencies

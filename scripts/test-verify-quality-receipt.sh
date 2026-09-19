@@ -9,14 +9,29 @@
 #   real-topology  current worktree passes (valid only at a tag candidate:
 #                  receipt subject_sha == HEAD~1, top diff receipt/CHANGELOG-only)
 #   synthetic-pass HEAD names HEAD~1, all gates pass, receipt-only top diff -> 0
+#   changelog-in-delta top diff touches receipt + CHANGELOG.md -> 0
 #   stale-subject  receipt names HEAD~2 -> 1 (SHA mismatch refusal)
+#   malformed-receipt receipt present but no subject_sha line -> 1 (SHA refusal)
 #   non-pass-gate  one gate not pass-prefixed -> 1 (gate refusal)
 #   code-in-delta  top diff touches a code file -> 1 (delta refusal)
 #   missing-receipt no receipt file -> 1 (missing refusal)
 #
 # Every synthetic case runs in a fresh temp git repo; the worktree is never
-# modified. Exit 0 only if every case behaves as specified.
+# modified. Fixture repos are removed on exit via a trap. Exit 0 only if
+# every case behaves as specified.
 set -euo pipefail
+
+# Fixture-repo cleanup: new_repo() runs inside command substitution (a
+# subshell), so an in-memory list would not propagate to the parent — track
+# the temp dirs in a file instead and remove them on EXIT.
+FIXTURE_LIST="$(mktemp)"
+cleanup_fixtures() {
+  if [[ -s "$FIXTURE_LIST" ]]; then
+    xargs -r rm -rf <"$FIXTURE_LIST"
+  fi
+  rm -f "$FIXTURE_LIST"
+}
+trap cleanup_fixtures EXIT
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="$REPO/.github/workflows/release.yml"
@@ -49,6 +64,7 @@ g() {
 new_repo() {
   local dir
   dir="$(mktemp -d)"
+  echo "$dir" >>"$FIXTURE_LIST"
   g -C "$dir" init -q
   echo "$dir"
 }
@@ -119,6 +135,19 @@ write_receipt "$D" "$C1"
 g -C "$D" add "$RECEIPT_REL" && g -C "$D" commit -qm "refresh"
 expect "synthetic-pass" 0 "quality receipt verified for subject" "$D"
 
+# Case: CHANGELOG in the tag-commit delta — exercises the CHANGELOG arm of
+# the receipt/CHANGELOG allowlist; must pass.
+D="$(new_repo)"
+mkdir -p "$D/doc/release"
+echo "v1" >"$D/src.rs"
+echo "# changelog" >"$D/CHANGELOG.md"
+g -C "$D" add src.rs CHANGELOG.md && g -C "$D" commit -qm "content"
+C1="$(g -C "$D" rev-parse HEAD)"
+write_receipt "$D" "$C1"
+echo "more" >>"$D/CHANGELOG.md"
+g -C "$D" add "$RECEIPT_REL" CHANGELOG.md && g -C "$D" commit -qm "refresh+changelog"
+expect "changelog-in-delta" 0 "quality receipt verified for subject" "$D"
+
 # Case: stale subject — receipt names HEAD~2 instead of HEAD~1.
 D="$(new_repo)"
 mkdir -p "$D/doc/release"
@@ -130,6 +159,18 @@ g -C "$D" commit -qam "content 2"
 write_receipt "$D" "$STALE"
 g -C "$D" add "$RECEIPT_REL" && g -C "$D" commit -qm "refresh"
 expect "stale-subject" 1 "does not equal frozen subject" "$D"
+
+# Case: malformed receipt — file present but no subject_sha line, so the
+# extracted SHA is empty and must mismatch the frozen subject.
+D="$(new_repo)"
+mkdir -p "$D/doc/release"
+echo "v1" >"$D/src.rs"
+g -C "$D" add src.rs && g -C "$D" commit -qm "content"
+C1="$(g -C "$D" rev-parse HEAD)"
+write_receipt "$D" "$C1"
+sed -i '/^subject_sha: /d' "$D/$RECEIPT_REL"
+g -C "$D" add "$RECEIPT_REL" && g -C "$D" commit -qm "refresh"
+expect "malformed-receipt" 1 "does not equal frozen subject" "$D"
 
 # Case: non-pass gate — top diff and SHA are fine, one gate fails.
 D="$(new_repo)"
