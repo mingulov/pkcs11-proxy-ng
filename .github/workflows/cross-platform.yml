@@ -58,20 +58,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # TEMP-ONLY T2run narrow (run 3): macOS diagnostic + win32 proof
+        # only; x64/windows/ARM return in run 4. REVERTED after.
         include:
-          - os: ubuntu-24.04
-            experimental: false
+          # - os: ubuntu-24.04
+          #   experimental: false
           # T2run: experimental -- native FFI fail-closes on this host by
           # design (see header); promote on aarch64 qualification.
-          - os: ubuntu-24.04-arm
-            experimental: true
+          # - os: ubuntu-24.04-arm
+          #   experimental: true
           # T2run M-5: promoted — first green macOS leg (compare +
           # backend/shim lib behavior) proves the compat prep; failures
           # now fail the workflow.
           - os: macos-15
             experimental: false
-          - os: windows-2022
-            experimental: false
+          # - os: windows-2022
+          #   experimental: false
 
     steps:
       - uses: actions/checkout@v6
@@ -105,6 +107,19 @@ jobs:
       - name: Install SoftHSM2 (macOS)
         if: runner.os == 'macOS'
         run: brew install softhsm
+
+      # TEMP-ONLY T2run diagnostic (run 3): run 35446950034's macOS leg
+      # found no SoftHSM2 module at any candidate path. Never fails;
+      # reverted once the true path lands in the candidate list.
+      - name: Locate SoftHSM2 module (TEMP macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew --prefix softhsm || true
+          find "$(brew --prefix softhsm 2>/dev/null || echo /opt/homebrew/Cellar/softhsm)" -name "*.dylib" -o -name "*.so*" 2>/dev/null | head -20 || true
+          ls /opt/homebrew/lib/softhsm* 2>/dev/null || echo "no /opt/homebrew/lib/softhsm*"
+          ls /opt/homebrew/lib/ 2>/dev/null | grep -i soft || echo "no soft* in /opt/homebrew/lib"
+          which softhsm2-util || echo "no softhsm2-util on PATH"
+        shell: bash
 
       # Windows SoftHSM2 (pinned disig portable zip, hash-verified) is
       # fetched by the compare script itself -- but its DLLs link the MSVC
