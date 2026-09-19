@@ -105,7 +105,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-          VSDIR=$("$VSWHERE" -latest -property installationPath)
+          VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
           REDIST=$(ls -d "$VSDIR"/VC/Redist/MSVC/*/x64 | head -1)
           test -f "$REDIST/vcruntime140.dll" || { echo "no x64 redist under $VSDIR"; exit 1; }
           echo "$REDIST" >> "$GITHUB_PATH"
@@ -213,7 +213,7 @@ jobs:
       - name: Expose MSVC x86 runtime
         run: |
           VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-          VSDIR=$("$VSWHERE" -latest -property installationPath)
+          VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
           REDIST=$(ls -d "$VSDIR"/VC/Redist/MSVC/*/x86 | head -1)
           test -f "$REDIST/vcruntime140.dll" || { echo "no x86 redist under $VSDIR"; exit 1; }
           echo "$REDIST" >> "$GITHUB_PATH"
