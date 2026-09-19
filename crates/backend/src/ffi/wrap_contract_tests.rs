@@ -66,12 +66,31 @@ unsafe extern "C" fn authenticated(
     unsafe { output(out, len) }
 }
 
+unsafe extern "C" fn unwrap_authenticated(
+    _: cryptoki_sys::CK_SESSION_HANDLE,
+    _: cryptoki_sys::CK_MECHANISM_PTR,
+    _: cryptoki_sys::CK_OBJECT_HANDLE,
+    _: cryptoki_sys::CK_BYTE_PTR,
+    _: cryptoki_sys::CK_ULONG,
+    _: cryptoki_sys::CK_ATTRIBUTE_PTR,
+    _: cryptoki_sys::CK_ULONG,
+    _: cryptoki_sys::CK_BYTE_PTR,
+    _: cryptoki_sys::CK_ULONG,
+    handle: cryptoki_sys::CK_OBJECT_HANDLE_PTR,
+) -> cryptoki_sys::CK_RV {
+    if !handle.is_null() {
+        unsafe { *handle = 77 };
+    }
+    cryptoki_sys::CKR_OK
+}
+
 fn backend()
 -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_2>) {
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     base.C_WrapKey = Some(wrap);
     let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
     functions.C_WrapKeyAuthenticated = Some(authenticated);
+    functions.C_UnwrapKeyAuthenticated = Some(unwrap_authenticated);
     let backend = FfiBackend {
         _lib: crate::ffi::loading::test_library_handle(),
         func_list: base.as_mut(),
@@ -323,7 +342,7 @@ fn ordinary_wrap_error_iv_effect_matches_one_shot_rule() {
 fn wrap_authenticated_exact_typed_denied_before_lifecycle_open() {
     // TF01b `single_call_bytes_exact` (3.x typed) ordinary proof: no
     // admission pre-Init.
-    let _guard = LOCK.lock().unwrap();
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (b, _base, _functions) = backend();
     let spec =
         CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false };
@@ -345,7 +364,7 @@ fn wrap_authenticated_exact_typed_denied_before_lifecycle_open() {
 #[test]
 fn wrap_authenticated_exact_typed_admitted_after_lifecycle_open() {
     // Control: the same call reaches the stub once the domain is open.
-    let _guard = LOCK.lock().unwrap();
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (b, _base, _functions) = backend();
     b.lifecycle_domain.open_for_tests();
     let spec =
@@ -362,4 +381,88 @@ fn wrap_authenticated_exact_typed_admitted_after_lifecycle_open() {
         )
         .unwrap();
     assert_eq!(output.ck_rv, CkRv::OK);
+}
+
+#[test]
+fn wrap_authenticated_typed_denied_before_lifecycle_open() {
+    // TF01b wrap convenience (no-retry two-call) ordinary proof: no admission
+    // pre-Init.
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    FAIL_SIZING.store(false, Ordering::SeqCst);
+    MUTATE_SIZING_INPUTS.store(false, Ordering::SeqCst);
+    let (b, _base, _functions) = backend();
+    assert_eq!(
+        b.ffi_wrap_authenticated_typed(
+            CkSessionHandle(4),
+            &mechanism(),
+            None,
+            CkObjectHandle(8),
+            CkObjectHandle(9),
+            CkInBuf::Bytes(&[]),
+        )
+        .unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED
+    );
+}
+
+#[test]
+fn wrap_authenticated_typed_admitted_after_lifecycle_open() {
+    // Control: the same call reaches the stub once the domain is open.
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    FAIL_SIZING.store(false, Ordering::SeqCst);
+    MUTATE_SIZING_INPUTS.store(false, Ordering::SeqCst);
+    let (b, _base, _functions) = backend();
+    b.lifecycle_domain.open_for_tests();
+    let (wrapped, _effects) = b
+        .ffi_wrap_authenticated_typed(
+            CkSessionHandle(4),
+            &mechanism(),
+            None,
+            CkObjectHandle(8),
+            CkObjectHandle(9),
+            CkInBuf::Bytes(&[]),
+        )
+        .unwrap();
+    assert_eq!(wrapped.expose(|raw| raw.len()), 8);
+}
+
+#[test]
+fn unwrap_authenticated_typed_denied_before_lifecycle_open() {
+    // TF01b unwrap (single direct, routed via `call_object_output`) ordinary
+    // proof: no admission pre-Init.
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (b, _base, _functions) = backend();
+    assert_eq!(
+        b.ffi_unwrap_authenticated_typed(
+            CkSessionHandle(4),
+            &mechanism(),
+            None,
+            CkObjectHandle(8),
+            CkInBuf::Bytes(&[0u8; 8]),
+            None,
+            CkInBuf::Bytes(&[]),
+        )
+        .unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED
+    );
+}
+
+#[test]
+fn unwrap_authenticated_typed_admitted_after_lifecycle_open() {
+    // Control: the same call reaches the stub once the domain is open.
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (b, _base, _functions) = backend();
+    b.lifecycle_domain.open_for_tests();
+    let (handle, _effects) = b
+        .ffi_unwrap_authenticated_typed(
+            CkSessionHandle(4),
+            &mechanism(),
+            None,
+            CkObjectHandle(8),
+            CkInBuf::Bytes(&[0u8; 8]),
+            None,
+            CkInBuf::Bytes(&[]),
+        )
+        .unwrap();
+    assert_eq!(handle, CkObjectHandle(77));
 }

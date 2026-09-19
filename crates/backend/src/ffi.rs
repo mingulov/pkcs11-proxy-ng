@@ -164,7 +164,14 @@ pub(crate) use session_object_unit;
 // backend trait methods (added in subsequent tasks).
 #[allow(unused_macros)]
 macro_rules! call_3x_fn {
-    ($self:expr, $list_field:ident, $fn_name:ident $(, $arg:expr)*) => {{
+    ($admission:expr, $self:expr, $list_field:ident, $fn_name:ident $(, $arg:expr)*) => {{
+        // B2 admission proof (TF01b): the ascription pins at compile time
+        // that the caller's ordinary guard reaches this native entry; the
+        // guard local stays alive across the call and settlement. A macro
+        // (not a choke fn) because call sites evaluate fallible (`?`)
+        // argument expressions after table resolution — routing through
+        // `call_unit` would force hoisting and change refusal precedence.
+        let _admission: &crate::ffi::native_domain::OrdinaryGuard = $admission;
         let fl = match $self.$list_field {
             Some(fl) => fl,
             None => return Err(CkRv::FUNCTION_NOT_SUPPORTED),
@@ -918,6 +925,13 @@ impl Pkcs11Backend for FfiBackend {
 
     fn destroy_object(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<()> {
         self.ffi_destroy_object(session, object)
+    }
+    fn destroy_quarantined_object(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+    ) -> CkResult<()> {
+        self.ffi_destroy_object_unadmitted(session, object)
     }
 
     fn get_object_size(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<u64> {

@@ -256,6 +256,25 @@ impl FfiBackend {
         )
     }
 
+    /// Drop-path destroy: rides the enclosing op's exclusion via the control
+    /// choke instead of admitting (a nested `admit_ordinary` under the live
+    /// guard would deadlock behind a queued Finalize writer). Debug-pins the
+    /// enclosing guard via `debug_assert_admitted`, and skips fence-enter:
+    /// the destroy runs on the enclosing op's own session whose fence-read
+    /// it already holds.
+    pub(super) fn ffi_destroy_object_unadmitted(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+    ) -> CkResult<()> {
+        super::native_domain::debug_assert_admitted();
+        let h_session = Self::session_handle(session)?;
+        let h_object = Self::object_handle(object)?;
+        Self::call_control_unit(unsafe { (*self.func_list).C_DestroyObject }, |function| unsafe {
+            function(h_session, h_object)
+        })
+    }
+
     pub(super) fn ffi_get_object_size(
         &self,
         session: CkSessionHandle,
@@ -327,10 +346,18 @@ mod lifecycle_output_tests {
         cryptoki_sys::CKR_OK
     }
 
+    unsafe extern "C" fn destroy_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
     fn backend_with_object_stubs() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_CreateObject = Some(create_object_ok);
         functions.C_GetObjectSize = Some(object_size_ok);
+        functions.C_DestroyObject = Some(destroy_ok);
         let backend = FfiBackend {
             _lib: crate::ffi::loading::test_library_handle(),
             func_list: functions.as_mut(),
@@ -489,6 +516,34 @@ mod lifecycle_output_tests {
             done_rx.recv_timeout(Duration::from_secs(5)).expect("control proceeds after release");
             worker.join().expect("worker joins").expect("parked call succeeds");
         });
+    }
+
+    // TF01b Drop audit: destructor cleanup must ride the enclosing op's
+    // exclusion via the control choke, never admit (a nested admit under
+    // the live guard trips the tripwire in debug and deadlocks behind a
+    // queued writer in release). First the hazard, pinned as a tripwire
+    // self-test: the full-admit path under a live guard must panic.
+    #[test]
+    #[should_panic(expected = "nested ordinary admission")]
+    fn drop_destroy_via_full_admit_path_nests_and_trips() {
+        use crate::traits::Pkcs11Backend;
+        let (backend, _functions) = backend_with_object_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        let _enclosing = backend.lifecycle_domain.admit_ordinary().unwrap();
+        let _ = backend.destroy_object(CkSessionHandle(7), CkObjectHandle(9));
+    }
+
+    // ... then the Drop-safe path: same setup, no panic, stub reached.
+    #[test]
+    fn drop_destroy_rides_enclosing_guard_without_nesting() {
+        use crate::traits::Pkcs11Backend;
+        let (backend, _functions) = backend_with_object_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        let enclosing = backend.lifecycle_domain.admit_ordinary().unwrap();
+        backend
+            .destroy_quarantined_object(CkSessionHandle(7), CkObjectHandle(9))
+            .expect("Drop-path destroy rides the enclosing guard");
+        drop(enclosing);
     }
 }
 

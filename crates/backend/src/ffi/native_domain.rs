@@ -777,6 +777,19 @@ thread_local! {
     static ADMITTED_ON_THREAD: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Debug-only: asserts the calling thread holds a live [`OrdinaryGuard`].
+/// Destructor paths that ride enclosing exclusion instead of admitting
+/// (Drop-may-never-admit) call this to pin the contract: in a debug build
+/// a `Drop` that reaches native without an enclosing guard fails loudly
+/// instead of running unexcluded. Compiles to nothing in release.
+pub(in crate::ffi) fn debug_assert_admitted() {
+    debug_assert!(
+        ADMITTED_ON_THREAD.get(),
+        "native call from Drop without an enclosing OrdinaryGuard: destructors must ride \
+         enclosing exclusion or quarantine, never admit, never run bare"
+    );
+}
+
 impl LifecycleDomain {
     /// Fresh domain: `LoadedUninitialized` at epoch 0. Ordinary work is
     /// denied until the first `C_Initialize` publishes `Open`.

@@ -218,6 +218,19 @@ pub trait Pkcs11Backend: Send + Sync {
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle>;
     fn destroy_object(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<()>;
+    /// Destroy a quarantined native object from `Drop` (`PendingNativeObject`
+    /// cleanup) WITHOUT ordinary admission. The `FfiBackend` override rides
+    /// the enclosing op's exclusion via the control choke (admitting would
+    /// nest under the live guard and deadlock behind a queued writer —
+    /// Drop-may-never-admit, pinned by the nesting tripwire). Backends
+    /// without a lifecycle domain (mocks) destroy normally.
+    fn destroy_quarantined_object(
+        &self,
+        session: CkSessionHandle,
+        object: CkObjectHandle,
+    ) -> CkResult<()> {
+        self.destroy_object(session, object)
+    }
     fn get_object_size(&self, session: CkSessionHandle, object: CkObjectHandle) -> CkResult<u64>;
     fn set_attribute_value(
         &self,

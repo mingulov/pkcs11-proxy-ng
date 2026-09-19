@@ -61,20 +61,27 @@ impl FfiBackend {
     ) -> CkResult<(SecretBytes, CkObjectHandle)> {
         use super::ffi_conversion::FfiAttrs;
 
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
+        let h_session = Self::session_handle(session)?;
+        let h_pubkey = Self::object_handle(public_key)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
 
         // Two-call pattern: first call with pCiphertext=null to get size.
+        // Each leg routes through the unit choke (single call, no retry —
+        // a retry would re-drive key creation); narrowing hoists verbatim
+        // (pure, evaluated once instead of twice with identical outcome).
         let mut ciphertext_len: cryptoki_sys::CK_ULONG = 0;
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
-        Self::ck_result(unsafe {
+        Self::call_unit(&admission, Some(function), |function| unsafe {
             function(
-                Self::session_handle(session)?,
+                h_session,
                 ffi_mech.ck_mechanism_mut(),
-                Self::object_handle(public_key)?,
+                h_pubkey,
                 Self::ffi_attr_ptr(&ffi_attrs),
                 Self::ffi_attr_len(&ffi_attrs),
                 std::ptr::null_mut(),
@@ -87,11 +94,11 @@ impl FfiBackend {
         let capped_len = (ciphertext_len as u64).min(super::call_helpers::MAX_OUTPUT_BUFFER_BYTES);
         ciphertext_len = capped_len as cryptoki_sys::CK_ULONG;
         let mut ciphertext = vec![0u8; capped_len as usize];
-        Self::ck_result(unsafe {
+        Self::call_unit(&admission, Some(function), |function| unsafe {
             function(
-                Self::session_handle(session)?,
+                h_session,
                 ffi_mech.ck_mechanism_mut(),
-                Self::object_handle(public_key)?,
+                h_pubkey,
                 Self::ffi_attr_ptr(&ffi_attrs),
                 Self::ffi_attr_len(&ffi_attrs),
                 ciphertext.as_mut_ptr(),
@@ -112,6 +119,7 @@ impl FfiBackend {
         template: Option<&[CkAttribute]>,
         ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         use super::ffi_conversion::FfiAttrs;
 
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
@@ -119,7 +127,9 @@ impl FfiBackend {
         let (ct_ptr, ct_len) = ciphertext.as_ptr_len();
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
 
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         call_3x_fn!(
+            &admission,
             self,
             func_list_3_2,
             C_DecapsulateKey,
@@ -237,6 +247,34 @@ mod tests {
             )
             .expect("provider result envelope");
         assert_eq!(result.ck_rv, CkRv::OK);
+    }
+
+    #[test]
+    fn encapsulate_key_denied_before_lifecycle_open() {
+        // TF01b KEM convenience (no-retry two-call) ordinary proof: no
+        // admission pre-Init.
+        let _guard = TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+        assert_eq!(
+            backend
+                .ffi_encapsulate_key(CkSessionHandle(1), &mechanism, CkObjectHandle(2), None)
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn encapsulate_key_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let _guard = TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
+        backend.lifecycle_domain.open_for_tests();
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+        let (_ciphertext, handle) = backend
+            .ffi_encapsulate_key(CkSessionHandle(1), &mechanism, CkObjectHandle(2), None)
+            .unwrap();
+        assert_eq!(handle, CkObjectHandle(0x44));
     }
 
     #[test]
