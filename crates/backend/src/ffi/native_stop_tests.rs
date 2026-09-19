@@ -689,8 +689,12 @@ fn run_s14_proof_invalidated() -> ! {
     std::process::exit(20);
 }
 
+/// Counts S15 Finalize entries: exactly one native entry, error RV.
+static S15_FINALIZE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Failing Finalize stub for S15: native entered, error RV.
 unsafe extern "C" fn child_finalize_fails(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+    S15_FINALIZE_CALLS.fetch_add(1, Ordering::SeqCst);
     cryptoki_sys::CKR_GENERAL_ERROR
 }
 
@@ -704,6 +708,11 @@ fn run_s15_failed_finalize() -> ! {
     }
     if backend.finalize().is_ok() {
         std::process::exit(25);
+    }
+    // TO26b Fidelity-M2: the failed Finalize entered native exactly
+    // once — the uncertainty is observed, not simulated.
+    if S15_FINALIZE_CALLS.load(Ordering::SeqCst) != 1 {
+        std::process::exit(26);
     }
     let barrier = Arc::new(Barrier::new(4));
     for index in 0..3 {

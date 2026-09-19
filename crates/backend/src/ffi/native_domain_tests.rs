@@ -234,20 +234,25 @@ fn native_domain_global_serial_constructor_race_exactly_one_wins() {
         for handle in handles {
             outcomes.push(handle.join().expect("racer joins"));
         }
-        let mut winner_epoch = None;
+        let mut winner_epochs = Vec::new();
+        let mut loser_epochs = Vec::new();
         for outcome in outcomes {
             match outcome {
                 Ok(permit) => {
                     winners += 1;
-                    winner_epoch = Some(permit.epoch);
+                    winner_epochs.push(permit.epoch);
                     permit.rollback_before_native();
                 }
-                Err(DomainError::AlreadyReserved { epoch }) => {
-                    assert_eq!(Some(epoch), winner_epoch.or(Some(epoch)), "losers name one epoch");
-                    winner_epoch.get_or_insert(epoch);
-                }
+                Err(DomainError::AlreadyReserved { epoch }) => loser_epochs.push(epoch),
                 Err(other) => panic!("losers must report AlreadyReserved, got {other:?}"),
             }
+        }
+        // TO26b Integrity-Minor-1: every loser names the winner's epoch,
+        // pinned independently of join order (even when the winner
+        // sorts last — unreachable by construction, pinned anyway).
+        assert_eq!(winner_epochs.len(), 1, "exactly one winner epoch recorded");
+        for epoch in &loser_epochs {
+            assert_eq!(*epoch, winner_epochs[0], "losers name the winner's epoch");
         }
     });
     assert_eq!(winners, 1, "exactly one racing constructor wins");
