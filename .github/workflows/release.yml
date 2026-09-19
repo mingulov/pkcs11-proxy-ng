@@ -119,11 +119,14 @@ jobs:
           TARGET="$(rustc -vV | awk '/^host:/ {print $2}')"
           BUNDLE="pkcs11-proxy-ng-${GITHUB_REF_NAME}-${TARGET}"
 
-          mkdir -p "dist/${BUNDLE}/bin" "dist/${BUNDLE}/lib/pkcs11"
+          mkdir -p "dist/${BUNDLE}/bin" "dist/${BUNDLE}/lib/pkcs11" "dist/${BUNDLE}/doc"
           cp target/release/pkcs11-proxy-ng           "dist/${BUNDLE}/bin/"
           cp target/release/pkcs11-proxy-ng-cli       "dist/${BUNDLE}/bin/"
           cp target/release/libpkcs11_proxy_ng_shim.so "dist/${BUNDLE}/lib/pkcs11/"
           cp README.md CHANGELOG.md LICENSE-APACHE LICENSE-MIT "dist/${BUNDLE}/"
+          cp doc/release/beta-support-matrix.md doc/release/mtls-setup.md \
+             doc/release/parity-validation.md doc/release/v0.2.0-release-notes.md \
+             "dist/${BUNDLE}/doc/"
 
           strip "dist/${BUNDLE}/bin/"* "dist/${BUNDLE}/lib/pkcs11/"*.so
 
