@@ -36,8 +36,12 @@ on:
     # 04:30 UTC daily -- staggered off the nightly provider matrix (03:00).
     - cron: "30 4 * * *"
   workflow_dispatch:
+  # TEMP-ONLY T2run: PR trigger fires the first-dispatch proof (the file is
+  # absent on main, so workflow_dispatch cannot see it); push trigger lets
+  # temp-branch iteration re-run. NEVER lands on dev — reverted after proof.
+  pull_request:
   push:
-    branches: ["main"]
+    branches: ["main", "t2run/*"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -157,6 +161,18 @@ jobs:
         run: |
           cargo test -p pkcs11-proxy-ng-backend --lib
           cargo test -p pkcs11-proxy-ng-shim --lib
+        shell: bash
+
+      # TEMP-ONLY T2run probe (M-2/UCred confirm): runs the macOS-only
+      # tokio peer_cred probe and asserts the pass count plus the marker.
+      # NEVER lands on dev — reverted after proof.
+      - name: UCred probe (TEMP macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -o pipefail
+          cargo test -p pkcs11-proxy-ng --lib t2run_tmp_macos_tokio_ucred_yields_uid -- --nocapture 2>&1 | tee ucred-proof.log
+          grep -q "1 passed" ucred-proof.log
+          grep -q "t2run-ucred-probe: ok" ucred-proof.log
         shell: bash
 
       - name: Direct-vs-proxied comparison

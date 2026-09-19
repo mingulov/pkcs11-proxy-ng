@@ -114,6 +114,29 @@ mod tests {
         assert_eq!(identity.to_string(), "unauthenticated");
     }
 
+    /// TEMP-ONLY T2run probe (M-2/UCred confirm): tokio `peer_cred()` must
+    /// yield `Some(UCred)` with the process's own uid/gid on macOS
+    /// (getpeereid + LOCAL_PEEREPID). Reverted after the first-dispatch
+    /// proof; NEVER lands on dev.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn t2run_tmp_macos_tokio_ucred_yields_uid() {
+        let sock = std::env::temp_dir().join(format!("t2run-ucred-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = tokio::net::UnixListener::bind(&sock).expect("bind unix socket");
+        let (server, client) =
+            tokio::join!(listener.accept(), tokio::net::UnixStream::connect(&sock));
+        let (_server_stream, _) = server.expect("accept");
+        let client = client.expect("connect");
+        let cred = client.peer_cred().expect("tokio peer_cred must succeed on macOS");
+        let uid = nix::unistd::getuid().as_raw();
+        let gid = nix::unistd::getgid().as_raw();
+        assert_eq!(cred.uid(), uid, "UCred uid must match getuid()");
+        assert_eq!(cred.gid(), gid, "UCred gid must match getgid()");
+        eprintln!("t2run-ucred-probe: ok uid={uid} gid={gid} pid={:?}", cred.pid());
+        let _ = std::fs::remove_file(&sock);
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_peer_cred_without_credentials_fails_closed() {
