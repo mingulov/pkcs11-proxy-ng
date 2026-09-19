@@ -74,6 +74,11 @@ jobs:
 
       - name: Install protoc (all OSes)
         uses: arduino/setup-protoc@v3
+        with:
+          # T2run: unauthenticated version-resolution hits the shared
+          # GitHub API rate limit (run-8 macOS red); the default token
+          # raises the quota.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -195,6 +200,9 @@ jobs:
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
+        with:
+          # T2run: same rate-limit hardening as the compare legs.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v5
