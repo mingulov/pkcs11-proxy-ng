@@ -15,7 +15,10 @@
 # hosted macOS/Windows minutes plus a full pkcs11-check double-run per leg
 # is too slow and expensive for every pull request.
 #
-# Legs: linux-x64, linux-arm64 (cheap aarch64 ABI signal on hosted ARM),
+# Legs: linux-x64, linux-arm64 (EXPERIMENTAL: aarch64 build + direct-baseline
+# signal only -- the daemon fail-closes on Linux-aarch64 by design
+# (NATIVE_FFI_QUALIFIED excludes it), so no proxied comparison can run
+# there until a future aarch64 native-FFI qualification promotes it),
 # macos-arm64 (EXPERIMENTAL until the macOS compat prep lands -- M-1..M-3:
 # gate the Linux-only peer_cred module, settle macOS UDS-auth semantics,
 # extend the native FFI domain to macOS -- then promote by flipping
@@ -54,8 +57,10 @@ jobs:
         include:
           - os: ubuntu-24.04
             experimental: false
+          # T2run: experimental -- native FFI fail-closes on this host by
+          # design (see header); promote on aarch64 qualification.
           - os: ubuntu-24.04-arm
-            experimental: false
+            experimental: true
           - os: macos-15
             experimental: true
           - os: windows-2022
