@@ -204,6 +204,9 @@ jobs:
       # T2-1 tuning record once green proves it.
       - name: Direct-vs-proxied comparison
         env:
+          # TEMP-T2-3-NEGATIVE-CONTROL (revert with the shim break): arms
+          # the zero-count find break for the compare step only.
+          T2RUN_NEGATIVE_CONTROL_BREAK_FIND: "1"
           EXTRA_P11CHECK_ARGS: '--match "(not test_aead or test_aead_short_ciphertext or test_aead_wrap_outputs) and (not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability) and (not test_access_levels) and (not (test_ckr_decrypt and test_key_type_inconsistent)) and (not (test_ckr_encrypt and test_key_size_range)) and (not test_bad_mechanism_with_bad_key_size) and (not (test_null_template_nonzero_count and C_GenerateKey)) and (not test_dh_rejects_tiny_prime)"'
         run: python3 scripts/ci-direct-vs-proxy.py
         shell: bash
