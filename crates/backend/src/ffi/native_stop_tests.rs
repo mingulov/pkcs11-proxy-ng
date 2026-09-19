@@ -1237,7 +1237,11 @@ fn native_stop_marker_child_entry() {
     run_marker_child(&scenario);
 }
 
-/// Marker child dispatch (never returns).
+/// Marker child dispatch (never returns). Marker-child setup codes: 30
+/// outcome dir missing/unusable, 31 atexit/on-exit registration refused,
+/// 32 control finalize failed, 33 raise failed, 34 SIGABRT handler did
+/// not fire, 35 unexpected provider-callback enrollment or session setup
+/// failure (11/12/13/14/20 reused from STOP-C1).
 fn run_marker_child(scenario: &str) -> ! {
     match scenario {
         "m1-drop-stop" => run_m1_drop_stop(),
@@ -1253,6 +1257,16 @@ fn run_marker_child(scenario: &str) -> ! {
         "m6-sigabrt-control" => run_m6_sigabrt_control(),
         "m7-poisoned-domain-stop" => run_m7_poisoned_domain_stop(),
         "m7-poisoned-domain-control" => run_m7_poisoned_domain_control(),
+        "m8-tls-stop" => run_m8_tls_stop(),
+        "m8-tls-control" => run_m8_tls_control(),
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        "m9-onexit-stop" => run_m9_onexit_stop(),
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        "m9-onexit-control" => run_m9_onexit_control(),
+        "m10-callback-stop" => run_m10_callback_stop(),
+        "m10-callback-control" => run_m10_callback_control(),
+        "m11-domain-stop" => run_m11_domain_stop(),
+        "m11-domain-control" => run_m11_domain_control(),
         _ => std::process::exit(11),
     }
 }
@@ -1827,5 +1841,429 @@ fn native_stop_m7_poisoned_domain_drop_control_clean() {
     let (child, _permit) = spawn_marker_child("m7-poisoned-domain-control", &dir);
     let output = child.wait_with_output().expect("reap marker child");
     assert_control_status(&output, "m7-poisoned-domain-control");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Expected bytes of the M8 TLS-Drop marker.
+const M8_BYTES: &[u8] = b"tls-drop-fired";
+
+/// M8 TLS sentinel: its `Drop` would write the marker. Lives in
+/// thread-local storage; the stop must preempt it with the thread.
+struct M8TlsGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for M8TlsGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.path, M8_BYTES);
+    }
+}
+
+std::thread_local! {
+    static M8_TLS: std::cell::RefCell<Option<M8TlsGuard>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// M8 stop child: TLS sentinel armed on the main thread across a
+/// dirty-owner drop (the stop). Thread-local destructors never run.
+fn run_m8_tls_stop() -> ! {
+    let dir = child_outcome_dir();
+    M8_TLS.with(|cell| {
+        *cell.borrow_mut() = Some(M8TlsGuard { path: dir.join("tls_drop.marker") });
+    });
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    let _ = writeln!(std::io::stdout(), "READY m8-tls-stop");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    // No stop fired: disarm without running the sentinel, then fail loudly.
+    M8_TLS.with(|cell| std::mem::forget(cell.take()));
+    std::process::exit(20);
+}
+
+/// M8 control child: a worker thread arms its own TLS sentinel and
+/// returns — thread exit runs the destructor — proving the marker works;
+/// the main backend drops normally (never initialized) and exits 0.
+fn run_m8_tls_control() -> ! {
+    let dir = child_outcome_dir();
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
+    std::thread::scope(|scope| {
+        let path = dir.join("tls_drop.marker");
+        let joined = scope
+            .spawn(move || {
+                M8_TLS.with(|cell| *cell.borrow_mut() = Some(M8TlsGuard { path }));
+            })
+            .join();
+        if joined.is_err() {
+            std::process::exit(17);
+        }
+    });
+    let _ = writeln!(std::io::stdout(), "READY m8-tls-control");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    std::process::exit(0);
+}
+
+/// M8: thread-local destructors must NOT run when the stop fires.
+#[test]
+fn native_stop_m8_tls_drop_absent_on_stop() {
+    let dir = fresh_outcome_dir("m8-stop");
+    let (child, _permit) = spawn_marker_child("m8-tls-stop", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_stop_status(&output, "m8-tls-stop");
+    assert_marker_absent(&dir.join("tls_drop.marker"), "m8-tls-stop");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M8 positive control: worker-thread exit runs the TLS sentinel.
+#[test]
+fn native_stop_m8_tls_drop_control_present() {
+    let dir = fresh_outcome_dir("m8-control");
+    let (child, _permit) = spawn_marker_child("m8-tls-control", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_control_status(&output, "m8-tls-control");
+    assert_marker_bytes(&dir.join("tls_drop.marker"), b"tls-drop-fired", "m8-tls-control");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Expected bytes of the M9 `on_exit` marker.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const M9_BYTES: &[u8] = b"c-onexit-fired";
+
+// Manual `on_exit(3)` declaration (glibc-only, hence the whole M9 family
+// is `cfg(all(linux, gnu))` — "where available" per the battery): no
+// `libc` dev-dep needed, same as the M3 `atexit` decl.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+unsafe extern "C" {
+    fn on_exit(
+        callback: Option<unsafe extern "C" fn(std::ffi::c_int, *mut std::ffi::c_void)>,
+        arg: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int;
+}
+
+/// Outcome dir for the M9 `on_exit` callback (C callbacks capture nothing).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+static M9_OUTCOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// M9 `on_exit` callback: writes the marker. Never panics.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+unsafe extern "C" fn m9_onexit_callback(_status: std::ffi::c_int, _arg: *mut std::ffi::c_void) {
+    if let Some(dir) = M9_OUTCOME.get() {
+        let _ = std::fs::write(dir.join("c_onexit.marker"), M9_BYTES);
+    }
+}
+
+/// Register the M9 `on_exit` callback (exits 31 when libc refuses).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn install_m9_onexit(dir: &std::path::Path) {
+    let _ = M9_OUTCOME.set(dir.to_path_buf());
+    let registered = unsafe { on_exit(Some(m9_onexit_callback), std::ptr::null_mut()) };
+    if registered != 0 {
+        std::process::exit(31);
+    }
+}
+
+/// M9 stop child: `on_exit` registered, then a dirty-owner drop (the
+/// stop). `exit_group` preempts the exit-handler chain.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn run_m9_onexit_stop() -> ! {
+    let dir = child_outcome_dir();
+    install_m9_onexit(&dir);
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    let _ = writeln!(std::io::stdout(), "READY m9-onexit-stop");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    std::process::exit(20);
+}
+
+/// M9 control child: `on_exit` registered, then `process::exit(0)` —
+/// which runs the exit chain — so the marker is present.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn run_m9_onexit_control() -> ! {
+    let dir = child_outcome_dir();
+    install_m9_onexit(&dir);
+    let _ = writeln!(std::io::stdout(), "READY m9-onexit-control");
+    let _ = std::io::stdout().flush();
+    std::process::exit(0);
+}
+
+/// M9: the C `on_exit` handler must NOT run when the stop fires.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn native_stop_m9_c_onexit_absent_on_stop() {
+    let dir = fresh_outcome_dir("m9-stop");
+    let (child, _permit) = spawn_marker_child("m9-onexit-stop", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_stop_status(&output, "m9-onexit-stop");
+    assert_marker_absent(&dir.join("c_onexit.marker"), "m9-onexit-stop");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M9 positive control: `process::exit(0)` runs `on_exit`, so the marker
+/// is present.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn native_stop_m9_c_onexit_control_present() {
+    let dir = fresh_outcome_dir("m9-control");
+    let (child, _permit) = spawn_marker_child("m9-onexit-control", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_control_status(&output, "m9-onexit-control");
+    assert_marker_bytes(&dir.join("c_onexit.marker"), b"c-onexit-fired", "m9-onexit-control");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Expected bytes of the M10 provider-entry marker.
+const M10_BYTES: &[u8] = b"provider-entry-ran";
+
+/// Outcome dir for the M10 stubs (C stubs capture nothing).
+static M10_OUTCOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// M10 Initialize stub: records the received callback enrollment — the
+/// backend must pass no mutex callbacks (exit 35 if one is ever
+/// enrolled) — and succeeds.
+unsafe extern "C" fn m10_initialize_stub(args: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+    if !args.is_null() {
+        let init = unsafe { &*(args as *const cryptoki_sys::CK_C_INITIALIZE_ARGS) };
+        if init.CreateMutex.is_some()
+            || init.DestroyMutex.is_some()
+            || init.LockMutex.is_some()
+            || init.UnlockMutex.is_some()
+        {
+            std::process::exit(35);
+        }
+    }
+    cryptoki_sys::CKR_OK
+}
+
+/// M10 OpenSession stub: the backend must pass no Notify callback (exit
+/// 35 if one is ever enrolled); opens session 41.
+unsafe extern "C" fn m10_open_session_stub(
+    _slot: cryptoki_sys::CK_SLOT_ID,
+    _flags: cryptoki_sys::CK_FLAGS,
+    _application: cryptoki_sys::CK_VOID_PTR,
+    notify: cryptoki_sys::CK_NOTIFY,
+    session: *mut cryptoki_sys::CK_SESSION_HANDLE,
+) -> cryptoki_sys::CK_RV {
+    if notify.is_some() {
+        std::process::exit(35);
+    }
+    if !session.is_null() {
+        unsafe { *session = 41 };
+    }
+    cryptoki_sys::CKR_OK
+}
+
+/// M10 CloseSession stub: writes the marker and sets the counter to 1.
+/// Must never run on the stop path (no provider entry may run there).
+unsafe extern "C" fn m10_close_session_stub(
+    _session: cryptoki_sys::CK_SESSION_HANDLE,
+) -> cryptoki_sys::CK_RV {
+    if let Some(dir) = M10_OUTCOME.get() {
+        let _ = std::fs::write(dir.join("provider_entry.marker"), M10_BYTES);
+        let _ = std::fs::write(dir.join("close_session.count"), b"1");
+    }
+    cryptoki_sys::CKR_OK
+}
+
+/// Build a managed backend with the M10 callback-recording stubs.
+fn child_backend_m10() -> FfiBackend {
+    let backend = child_backend_managed(Some(m10_initialize_stub), Some(child_finalize_ok));
+    unsafe { (*backend.func_list).C_OpenSession = Some(m10_open_session_stub) };
+    unsafe { (*backend.func_list).C_CloseSession = Some(m10_close_session_stub) };
+    backend
+}
+
+/// M10 stop child: init (no mutex callbacks enrolled) + open session (no
+/// Notify enrolled, open count held high) across a dirty-owner drop (the
+/// stop). No host callback exists to fire, and no provider entry
+/// (CloseSession) may run on the stop path either.
+fn run_m10_callback_stop() -> ! {
+    let dir = child_outcome_dir();
+    let _ = M10_OUTCOME.set(dir);
+    let backend = child_backend_m10();
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    let opened = backend.ffi_open_session(
+        pkcs11_proxy_ng_types::CkSlotId(11),
+        pkcs11_proxy_ng_types::CkSessionFlags(
+            pkcs11_proxy_ng_types::CkSessionFlags::SERIAL_SESSION,
+        ),
+    );
+    if opened.is_err() {
+        std::process::exit(35);
+    }
+    let _ = writeln!(std::io::stdout(), "READY m10-callback-stop");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    std::process::exit(20);
+}
+
+/// M10 control child: the same stubs, but the session is closed
+/// explicitly (entry runs: marker + counter) before Finalize and the
+/// normal backend drop — proving the marker mechanism works.
+fn run_m10_callback_control() -> ! {
+    let dir = child_outcome_dir();
+    let _ = M10_OUTCOME.set(dir);
+    let backend = child_backend_m10();
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    let session = match backend.ffi_open_session(
+        pkcs11_proxy_ng_types::CkSlotId(11),
+        pkcs11_proxy_ng_types::CkSessionFlags(
+            pkcs11_proxy_ng_types::CkSessionFlags::SERIAL_SESSION,
+        ),
+    ) {
+        Ok(session) => session,
+        Err(_) => std::process::exit(35),
+    };
+    if backend.ffi_close_session(session).is_err() {
+        std::process::exit(35);
+    }
+    if backend.finalize().is_err() {
+        std::process::exit(32);
+    }
+    let _ = writeln!(std::io::stdout(), "READY m10-callback-control");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    std::process::exit(0);
+}
+
+/// Seed the M10 fresh value: close-session counter `0`.
+fn seed_m10_fresh(dir: &std::path::Path) {
+    std::fs::write(dir.join("close_session.count"), b"0").expect("seed count");
+}
+
+/// M10: no host callback is ever enrolled (the stubs exit 35 if one is),
+/// and no provider entry (CloseSession) runs on the stop path (marker
+/// absent, counter stays 0).
+#[test]
+fn native_stop_m10_callback_absent_on_stop() {
+    let dir = fresh_outcome_dir("m10-stop");
+    seed_m10_fresh(&dir);
+    let (child, _permit) = spawn_marker_child("m10-callback-stop", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_stop_status(&output, "m10-callback-stop");
+    assert_marker_absent(&dir.join("provider_entry.marker"), "m10-callback-stop");
+    assert_marker_bytes(&dir.join("close_session.count"), b"0", "m10-callback-stop");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M10 positive control: the explicit close runs the provider entry
+/// (marker present, counter exactly 1), then Finalize + normal drop.
+#[test]
+fn native_stop_m10_callback_control_present() {
+    let dir = fresh_outcome_dir("m10-control");
+    seed_m10_fresh(&dir);
+    let (child, _permit) = spawn_marker_child("m10-callback-control", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_control_status(&output, "m10-callback-control");
+    assert_marker_bytes(
+        &dir.join("provider_entry.marker"),
+        b"provider-entry-ran",
+        "m10-callback-control",
+    );
+    assert_marker_bytes(&dir.join("close_session.count"), b"1", "m10-callback-control");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Expected bytes of the M11 domain-holder marker.
+const M11_BYTES: &[u8] = b"domain-drop-fired";
+
+/// M11 guard: its `Drop` would write the marker. Held in the same
+/// enclosing scope as the backend — domain-owned storage drops only on
+/// the normal path; the stop preempts it with everything else.
+struct M11Guard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for M11Guard {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.path, M11_BYTES);
+    }
+}
+
+/// Enclosing domain holder: field order drops the backend first (the
+/// stop fires there) and the domain guard second (preempted on stop,
+/// runs on the normal path).
+struct M11DomainHolder {
+    backend: FfiBackend,
+    guard: M11Guard,
+}
+
+/// M11 stop child: the holder owns an initialized backend; dropping the
+/// holder stops at the backend before the domain guard can drop.
+fn run_m11_domain_stop() -> ! {
+    let dir = child_outcome_dir();
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    let holder =
+        M11DomainHolder { backend, guard: M11Guard { path: dir.join("domain_drop.marker") } };
+    assert!(
+        matches!(
+            holder.backend.lifecycle.retirement_decision(),
+            super::native_domain::RetirementDecision::Poison
+        ),
+        "M11 stop child must drop for the Poison reason"
+    );
+    assert!(!holder.guard.path.exists(), "M11 marker starts absent");
+    let _ = writeln!(std::io::stdout(), "READY m11-domain-stop");
+    let _ = std::io::stdout().flush();
+    drop(holder);
+    std::process::exit(20);
+}
+
+/// M11 control child: the holder owns a never-initialized backend, so
+/// both drops run normally and the marker is present.
+fn run_m11_domain_control() -> ! {
+    let dir = child_outcome_dir();
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
+    let holder =
+        M11DomainHolder { backend, guard: M11Guard { path: dir.join("domain_drop.marker") } };
+    assert!(
+        matches!(
+            holder.backend.lifecycle.retirement_decision(),
+            super::native_domain::RetirementDecision::Release
+        ),
+        "M11 control child must drop for the Release reason"
+    );
+    assert!(!holder.guard.path.exists(), "M11 marker starts absent");
+    let _ = writeln!(std::io::stdout(), "READY m11-domain-control");
+    let _ = std::io::stdout().flush();
+    drop(holder);
+    std::process::exit(0);
+}
+
+/// M11: domain-enclosing drops must NOT run when the stop fires.
+#[test]
+fn native_stop_m11_domain_drop_absent_on_stop() {
+    let dir = fresh_outcome_dir("m11-stop");
+    let (child, _permit) = spawn_marker_child("m11-domain-stop", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_stop_status(&output, "m11-domain-stop");
+    assert_marker_absent(&dir.join("domain_drop.marker"), "m11-domain-stop");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M11 positive control: the normal path drops the domain guard.
+#[test]
+fn native_stop_m11_domain_drop_control_present() {
+    let dir = fresh_outcome_dir("m11-control");
+    let (child, _permit) = spawn_marker_child("m11-domain-control", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_control_status(&output, "m11-domain-control");
+    assert_marker_bytes(
+        &dir.join("domain_drop.marker"),
+        b"domain-drop-fired",
+        "m11-domain-control",
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
