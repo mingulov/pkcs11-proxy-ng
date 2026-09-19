@@ -273,11 +273,13 @@ impl FfiBackend {
         // no native wait can block the daemon worker. Neither refusal makes
         // a native attempt; the sole supported DONT_BLOCK call preserves
         // every original bit, including representable unknown ones.
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let native_flags = narrow_wire_ulong(flags)?;
         if native_flags & cryptoki_sys::CKF_DONT_BLOCK == 0 {
             return Err(CkRv::FUNCTION_NOT_SUPPORTED);
         }
         Self::call_slot_output(
+            &admission,
             unsafe { (*self.func_list).C_WaitForSlotEvent },
             |function, slot| unsafe { function(native_flags, slot, std::ptr::null_mut()) },
         )
@@ -587,10 +589,27 @@ mod slot_wait_tests {
     }
 
     #[test]
+    fn wait_for_slot_denied_before_lifecycle_open() {
+        // TF01b `call_slot_output` ordinary proof: no admission pre-Init.
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_wait();
+        let flags = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        assert_eq!(
+            backend.ffi_wait_for_slot_event(flags).unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn slot_wait_blocking_rejected_without_native_entry() {
         let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
         let (backend, _functions) = backend_with_wait();
+        // Ordinary path: establish post-Initialize state (admission precedes
+        // the local mode refusal at the boundary).
+        backend.lifecycle_domain.open_for_tests();
 
         // C3M.4: blocking mode is refused locally; the provider is never
         // entered, so no native wait can block the daemon worker.
@@ -603,6 +622,8 @@ mod slot_wait_tests {
         let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
         let (backend, _functions) = backend_with_wait();
+        // Ordinary path: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
 
         // Representable unknown bits ride along untouched (C3M.4): the sole
         // supported waiter makes one native call with every original bit.
@@ -618,6 +639,9 @@ mod slot_wait_tests {
         let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         SLOT_WAIT_CALLS.store(0, Ordering::SeqCst);
         let (backend, _functions) = backend_with_wait();
+        // Ordinary path: establish post-Initialize state (admission precedes
+        // checked narrowing at the boundary).
+        backend.lifecycle_domain.open_for_tests();
 
         // C3M.4: flags the native CK_FLAGS cannot represent fail checked
         // narrowing (FUNCTION_FAILED) before any mode check or native entry.

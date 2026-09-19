@@ -224,6 +224,7 @@ impl FfiBackend {
     }
 
     pub(super) fn call_session_output<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mut call: F,
     ) -> CkResult<CkSessionHandle>
@@ -245,6 +246,7 @@ impl FfiBackend {
     }
 
     pub(super) fn call_object_output<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mut call: F,
     ) -> CkResult<CkObjectHandle>
@@ -279,6 +281,7 @@ impl FfiBackend {
     }
 
     pub(super) fn call_slot_output<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mut call: F,
     ) -> CkResult<CkSlotId>
@@ -300,6 +303,7 @@ impl FfiBackend {
     }
 
     pub(super) fn call_ulong_output<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mut call: F,
     ) -> CkResult<u64>

@@ -135,8 +135,10 @@ impl FfiBackend {
         slot_id: CkSlotId,
         flags: CkSessionFlags,
     ) -> CkResult<CkSessionHandle> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_slot = Self::slot_id(slot_id)?;
         let handle = Self::call_session_output(
+            &admission,
             unsafe { (*self.func_list).C_OpenSession },
             |function, handle| unsafe {
                 function(
@@ -460,6 +462,69 @@ mod tests {
         let (backend, _functions) = backend_with_info_stubs();
         backend.lifecycle_domain.open_for_tests();
         backend.ffi_get_token_info(CkSlotId(11)).unwrap();
+    }
+
+    unsafe extern "C" fn open_session_ok(
+        _slot: cryptoki_sys::CK_SLOT_ID,
+        _flags: cryptoki_sys::CK_FLAGS,
+        _application: cryptoki_sys::CK_VOID_PTR,
+        _notify: cryptoki_sys::CK_NOTIFY,
+        session: *mut cryptoki_sys::CK_SESSION_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        if !session.is_null() {
+            unsafe { *session = 41 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_open_session() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_OpenSession = Some(open_session_ok);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        (backend, functions)
+    }
+
+    #[test]
+    fn open_session_denied_before_lifecycle_open() {
+        // TF01b `call_session_output` ordinary proof: no admission pre-Init.
+        let (backend, _functions) = backend_with_open_session();
+        assert_eq!(
+            backend
+                .ffi_open_session(CkSlotId(11), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn open_session_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _functions) = backend_with_open_session();
+        backend.lifecycle_domain.open_for_tests();
+        assert_eq!(
+            backend
+                .ffi_open_session(CkSlotId(11), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
+                .unwrap(),
+            CkSessionHandle(41)
+        );
     }
 
     #[test]

@@ -183,9 +183,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         Self::call_object_output(
+            &admission,
             unsafe { (*self.func_list).C_CreateObject },
             |function, handle| unsafe {
                 function(
@@ -204,10 +206,12 @@ impl FfiBackend {
         object: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
         Self::call_object_output(
+            &admission,
             unsafe { (*self.func_list).C_CopyObject },
             |function, new_handle| unsafe {
                 function(
@@ -241,9 +245,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         object: CkObjectHandle,
     ) -> CkResult<u64> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
         Self::call_ulong_output(
+            &admission,
             unsafe { (*self.func_list).C_GetObjectSize },
             |function, size| unsafe { function(h_session, h_object, size) },
         )
@@ -271,6 +277,160 @@ impl FfiBackend {
                 )
             },
         )
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lifecycle_output_tests {
+    use super::*;
+    use std::sync::{Mutex, mpsc};
+    use std::time::Duration;
+
+    unsafe extern "C" fn create_object_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _count: cryptoki_sys::CK_ULONG,
+        handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        if !handle.is_null() {
+            unsafe { *handle = 43 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn object_size_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _object: cryptoki_sys::CK_OBJECT_HANDLE,
+        size: *mut cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        if !size.is_null() {
+            unsafe { *size = 17 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_object_stubs() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_CreateObject = Some(create_object_ok);
+        functions.C_GetObjectSize = Some(object_size_ok);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        (backend, functions)
+    }
+
+    #[test]
+    fn create_object_denied_before_lifecycle_open() {
+        // TF01b `call_object_output` ordinary proof: no admission pre-Init.
+        let (backend, _functions) = backend_with_object_stubs();
+        assert_eq!(
+            backend.ffi_create_object(CkSessionHandle(7), None).unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn create_object_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _functions) = backend_with_object_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        assert_eq!(
+            backend.ffi_create_object(CkSessionHandle(7), None).unwrap(),
+            CkObjectHandle(43)
+        );
+    }
+
+    #[test]
+    fn object_size_denied_before_lifecycle_open() {
+        // TF01b `call_ulong_output` ordinary proof: no admission pre-Init.
+        let (backend, _functions) = backend_with_object_stubs();
+        assert_eq!(
+            backend.ffi_get_object_size(CkSessionHandle(7), CkObjectHandle(9)).unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn object_size_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _functions) = backend_with_object_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        assert_eq!(backend.ffi_get_object_size(CkSessionHandle(7), CkObjectHandle(9)).unwrap(), 17);
+    }
+
+    // Blocked-stub exclusion shape (`call_object_output` family): a parked
+    // ordinary call blocks control settlement until release.
+    static CREATE_PARK_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> =
+        Mutex::new(None);
+
+    unsafe extern "C" fn create_object_parkable(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _count: cryptoki_sys::CK_ULONG,
+        handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        let gate = CREATE_PARK_GATE.lock().unwrap().take();
+        match gate {
+            Some((entered, release)) => {
+                let _ = entered.send(());
+                match release.recv_timeout(Duration::from_secs(10)) {
+                    Ok(()) => {
+                        if !handle.is_null() {
+                            unsafe { *handle = 43 };
+                        }
+                        cryptoki_sys::CKR_OK
+                    }
+                    // Test bug (release never came): fail loudly, never hang.
+                    Err(_) => cryptoki_sys::CKR_FUNCTION_FAILED,
+                }
+            }
+            None => cryptoki_sys::CKR_FUNCTION_FAILED,
+        }
+    }
+
+    #[test]
+    fn parked_create_object_blocks_control_until_release() {
+        let (backend, _functions) = backend_with_object_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        unsafe { (*backend.func_list).C_CreateObject = Some(create_object_parkable) };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *CREATE_PARK_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| backend.ffi_create_object(CkSessionHandle(7), None));
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker parks inside the stub holding its guard");
+            scope.spawn(|| {
+                let ticket = backend.lifecycle_domain.begin_initialize().expect("control proceeds");
+                done_tx.send(()).expect("report control settlement");
+                backend.lifecycle_domain.abandon_initialize(ticket);
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "control must not settle while an ordinary call is parked"
+            );
+            release_tx.send(()).expect("release the parked stub");
+            done_rx.recv_timeout(Duration::from_secs(5)).expect("control proceeds after release");
+            worker.join().expect("worker joins").expect("parked call succeeds");
+        });
     }
 }
 
