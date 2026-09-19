@@ -224,10 +224,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install protobuf + LLVM (clang/lld) + nasm
+      - name: Install protobuf + LLVM (clang/lld/llvm-lib) + nasm
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y protobuf-compiler clang lld nasm
+          # llvm: cc-rs needs llvm-lib (MSVC librarian) to cross-build
+          # ring for windows-msvc (T2run: xwin red without it).
+          sudo apt-get install -y protobuf-compiler clang lld llvm nasm
 
       - name: Install stable toolchain with Windows MSVC target
         uses: dtolnay/rust-toolchain@stable

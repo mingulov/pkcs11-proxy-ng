@@ -106,8 +106,16 @@ jobs:
         run: |
           VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
           VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
-          REDIST=$(ls -d "$VSDIR"/VC/Redist/MSVC/*/x64 | head -1)
-          test -f "$REDIST/vcruntime140.dll" || { echo "no x64 redist under $VSDIR"; exit 1; }
+          # T2run: the DLLs live under Microsoft.VC*.CRT/, not directly in
+          # the arch dir — find the DLL and expose its directory (run-3
+          # win32 proved the direct-arch assumption wrong).
+          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*x64*' -name 'vcruntime140.dll' 2>/dev/null | head -1)
+          if [ -z "$REDIST_DLL" ]; then
+            echo "no x64 vcruntime140.dll under $VSDIR/VC/Redist/MSVC"
+            ls "$VSDIR/VC/Redist/MSVC" 2>/dev/null || echo "(no Redist/MSVC dir)"
+            exit 1
+          fi
+          REDIST=$(dirname "$REDIST_DLL")
           echo "$REDIST" >> "$GITHUB_PATH"
           echo "MSVC x64 redist: $REDIST"
         shell: bash
@@ -214,8 +222,16 @@ jobs:
         run: |
           VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
           VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
-          REDIST=$(ls -d "$VSDIR"/VC/Redist/MSVC/*/x86 | head -1)
-          test -f "$REDIST/vcruntime140.dll" || { echo "no x86 redist under $VSDIR"; exit 1; }
+          # T2run: the DLLs live under Microsoft.VC*.CRT/, not directly in
+          # the arch dir — find the DLL and expose its directory (run-3
+          # win32 proved the direct-arch assumption wrong).
+          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*x86*' -name 'vcruntime140.dll' 2>/dev/null | head -1)
+          if [ -z "$REDIST_DLL" ]; then
+            echo "no x86 vcruntime140.dll under $VSDIR/VC/Redist/MSVC"
+            ls "$VSDIR/VC/Redist/MSVC" 2>/dev/null || echo "(no Redist/MSVC dir)"
+            exit 1
+          fi
+          REDIST=$(dirname "$REDIST_DLL")
           echo "$REDIST" >> "$GITHUB_PATH"
           echo "MSVC x86 redist: $REDIST"
         shell: bash
