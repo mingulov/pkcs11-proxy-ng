@@ -127,16 +127,21 @@ jobs:
 
   # ── win32 (i686-pc-windows-msvc) ──────────────────────────────────────────
   # T6b's proof vehicle: native 32-bit build plus the lib suites executed
-  # under WOW64 on windows-2022 (which runs 32-bit test binaries). This is
-  # build + unit/integration coverage only, NOT the direct-vs-proxied
-  # SoftHSM2 comparison: the pinned Windows SoftHSM2 module is 64-bit and
-  # cannot load into a 32-bit daemon, so a win32 provider comparison needs
-  # a 32-bit provider module (out of scope for T6b). First green run is
-  # expected at T2run, which then finishes the win32 doc move.
+  # under WOW64 on windows-2022 (which runs 32-bit test binaries). T2run
+  # extends it with a live PE32 loader proof: a minimal 32-bit C stub
+  # provider (tests/win32-stub/) compiled with x86 cl.exe, loaded via an
+  # env-gated backend test (LoadLibrary + C_GetFunctionList + C_GetInfo).
+  # Still NOT the direct-vs-proxied SoftHSM2 comparison: the pinned
+  # Windows SoftHSM2 module is 64-bit and cannot load into a 32-bit
+  # daemon, so a win32 provider comparison needs a full 32-bit provider
+  # module (out of scope). First green run lands at T2run, which then
+  # finishes the win32 doc move.
   win32:
     name: win32 build + WOW64 tests (i686-pc-windows-msvc)
     runs-on: windows-2022
     timeout-minutes: 60
+    env:
+      PKCS11_PROXY_NG_WIN32_STUB_MODULE: ${{ github.workspace }}/target/win32-stub/p11win32stub.dll
     steps:
       - uses: actions/checkout@v6
 
@@ -164,12 +169,41 @@ jobs:
         run: cargo build --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
         shell: bash
 
+      - name: Set up x86 MSVC toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      # Minimal 32-bit C stub provider (see tests/win32-stub/): /MT links
+      # the CRT statically so the DLL has no runtime dependency beyond
+      # kernel32. The dumpbin check fails loud unless the export table
+      # carries the UNDECORATED name (x86 __cdecl decorates the object
+      # symbol with a leading underscore, which GetProcAddress would miss).
+      - name: Build win32 stub provider DLL
+        shell: cmd
+        run: |
+          if not exist target\win32-stub mkdir target\win32-stub
+          cl /nologo /MT /LD tests\win32-stub\p11win32stub.c /Fo:target\win32-stub\p11win32stub.obj /link /DEF:tests\win32-stub\p11win32stub.def /OUT:target\win32-stub\p11win32stub.dll
+          dumpbin /exports target\win32-stub\p11win32stub.dll | findstr /R /C:"[^_]C_GetFunctionList"
+
       - name: Lib test suites (win32, WOW64)
         run: |
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-types
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-shim --lib
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng --lib
+        shell: bash
+
+      # Explicit receipt: the stub test also runs inside the backend suite
+      # above, but that suite's pass would not distinguish "ran green" from
+      # "silently skipped". This step re-runs exactly that test and asserts
+      # both the pass count and the test's own marker line.
+      - name: Win32 stub live-load proof
+        run: |
+          set -o pipefail
+          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib ffi::loading::tests::win32_stub_live_load -- --nocapture 2>&1 | tee stub-proof.log
+          grep -q "1 passed" stub-proof.log
+          grep -q "win32-stub-live-load: ok" stub-proof.log
         shell: bash
 
       - name: Upload win32 binaries
@@ -180,4 +214,5 @@ jobs:
           path: |
             target/i686-pc-windows-msvc/release/pkcs11-proxy-ng.exe
             target/i686-pc-windows-msvc/release/pkcs11_proxy_ng_shim.dll
+            target/win32-stub/p11win32stub.dll
           retention-days: 14
