@@ -552,6 +552,7 @@ impl FfiBackend {
     ///
     /// Returns `CkOutputBufferResult` with the exact CK_RV, length, and data.
     pub(super) fn single_call_bytes_exact<F>(
+        _admission: &OrdinaryGuard,
         spec: &CkOutputBufferSpec,
         call: F,
     ) -> CkResult<CkOutputBufferResult>
@@ -609,6 +610,7 @@ impl FfiBackend {
 
     /// Resolve a function pointer then call `single_call_bytes_exact`.
     pub(super) fn call_bytes_exact<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         spec: &CkOutputBufferSpec,
         mut call: F,
@@ -622,7 +624,9 @@ impl FfiBackend {
         ) -> cryptoki_sys::CK_RV,
     {
         let function = Self::require_fn(function)?;
-        Self::single_call_bytes_exact(spec, |output, output_len| call(function, output, output_len))
+        Self::single_call_bytes_exact(_admission, spec, |output, output_len| {
+            call(function, output, output_len)
+        })
     }
 
     /// Like `call_bytes_exact` but builds a CK_MECHANISM first.
@@ -644,7 +648,7 @@ impl FfiBackend {
     {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
-        Self::single_call_bytes_exact(spec, |output, output_len| {
+        Self::single_call_bytes_exact(_admission, spec, |output, output_len| {
             call(function, ffi_mech.ck_mechanism_mut(), output, output_len)
         })
     }
@@ -740,7 +744,7 @@ impl FfiBackend {
         let function = Self::require_fn(function)?;
         let mut ffi_mech = mechanism_to_ffi(mechanism)?;
         let before = ffi_mech.output_params();
-        let result = Self::single_call_bytes_exact(spec, |output, output_len| {
+        let result = Self::single_call_bytes_exact(_admission, spec, |output, output_len| {
             call(function, ffi_mech.ck_mechanism_mut(), output, output_len)
         })?;
         // Surface post-call params on data and genuine missing-length calls:
@@ -772,6 +776,7 @@ impl FfiBackend {
     /// where `param_ptr`/`param_len` are the prepared parameter buffer, and
     /// `output_ptr`/`output_len` are the main output buffer.
     pub(super) fn single_call_parameter_output_exact<F>(
+        _admission: &OrdinaryGuard,
         output_spec: &CkOutputBufferSpec,
         parameter_input: &[u8],
         param_out_spec: &CkParameterRoundtripSpec,
@@ -811,7 +816,7 @@ impl FfiBackend {
         let param_ck_len = cryptoki_sys::CK_ULONG::try_from(param_out_spec.buffer_len)
             .map_err(|_| CkRv::ARGUMENTS_BAD)?;
 
-        let output = Self::single_call_bytes_exact(output_spec, |buffer, length| {
+        let output = Self::single_call_bytes_exact(_admission, output_spec, |buffer, length| {
             call(param_ptr, param_ck_len, buffer, length)
         })?;
         let defined = output.ck_rv == CkRv::OK || parameter_input.len() == param_buf_len;
@@ -959,10 +964,15 @@ mod output_cap_tests {
 
     #[test]
     fn null_output_length_shared_helper_preserves_all_three_native_shapes() {
+        // Direct-leaf unit test: admit on a throwaway test domain.
+        let choke_domain = super::super::native_domain::LifecycleDomain::new();
+        choke_domain.open_for_tests();
+        let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
         let missing_len_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
         let mut missing_calls = 0;
         let missing = FfiBackend::single_call_bytes_exact(
+            &choke_admission,
             &missing_len_spec,
             |output, output_len: *mut cryptoki_sys::CK_ULONG| {
                 missing_calls += 1;
@@ -981,6 +991,7 @@ mod output_cap_tests {
             CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
         let mut size_calls = 0;
         let size = FfiBackend::single_call_bytes_exact(
+            &choke_admission,
             &size_spec,
             |output, output_len: *mut cryptoki_sys::CK_ULONG| {
                 size_calls += 1;
@@ -999,6 +1010,7 @@ mod output_cap_tests {
             CkOutputBufferSpec { buffer_present: true, buffer_len: 3, length_pointer_null: false };
         let mut data_calls = 0;
         let data = FfiBackend::single_call_bytes_exact(
+            &choke_admission,
             &data_spec,
             |output, output_len: *mut cryptoki_sys::CK_ULONG| {
                 data_calls += 1;
@@ -1018,6 +1030,10 @@ mod output_cap_tests {
 
     #[test]
     fn absurd_output_capacity_is_arguments_bad_before_native_entry() {
+        // Direct-leaf unit test: admit on a throwaway test domain.
+        let choke_domain = super::super::native_domain::LifecycleDomain::new();
+        choke_domain.open_for_tests();
+        let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
         // F4/D7 (ADR-0010 Limits-(d)): a claimed output capacity above the
         // materialization ceiling is answered CKR_ARGUMENTS_BAD without
         // touching the provider — never CKR_HOST_MEMORY, and never a
@@ -1027,6 +1043,7 @@ mod output_cap_tests {
                 CkOutputBufferSpec { buffer_present: true, buffer_len, length_pointer_null: false };
             let mut calls = 0;
             let err = FfiBackend::single_call_bytes_exact(
+                &choke_admission,
                 &spec,
                 |_: *mut cryptoki_sys::CK_BYTE, _: *mut cryptoki_sys::CK_ULONG| {
                     calls += 1;
@@ -1041,6 +1058,10 @@ mod output_cap_tests {
 
     #[test]
     fn null_output_length_parameter_helper_preserves_provider_parameter_output() {
+        // Direct-leaf unit test: admit on a throwaway test domain.
+        let choke_domain = super::super::native_domain::LifecycleDomain::new();
+        choke_domain.open_for_tests();
+        let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
         let parameter_spec = CkParameterRoundtripSpec {
@@ -1056,6 +1077,7 @@ mod output_cap_tests {
             .unwrap()
             .expose(|raw| {
                 FfiBackend::single_call_parameter_output_exact(
+                    &choke_admission,
                     &output_spec,
                     raw,
                     &parameter_spec,
@@ -1086,6 +1108,10 @@ mod output_cap_tests {
 
     #[test]
     fn null_output_length_parameter_helper_preserves_buffer_too_small_and_parameter_output() {
+        // Direct-leaf unit test: admit on a throwaway test domain.
+        let choke_domain = super::super::native_domain::LifecycleDomain::new();
+        choke_domain.open_for_tests();
+        let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
         let parameter_spec = CkParameterRoundtripSpec {
@@ -1101,6 +1127,7 @@ mod output_cap_tests {
             .unwrap()
             .expose(|raw| {
                 FfiBackend::single_call_parameter_output_exact(
+                    &choke_admission,
                     &output_spec,
                     raw,
                     &parameter_spec,
@@ -1130,6 +1157,10 @@ mod output_cap_tests {
 
     #[test]
     fn parameter_exact_preserves_null_positive_envelope() {
+        // Direct-leaf unit test: admit on a throwaway test domain.
+        let choke_domain = super::super::native_domain::LifecycleDomain::new();
+        choke_domain.open_for_tests();
+        let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
         let output_spec =
             CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
         let parameter_spec =
@@ -1137,6 +1168,7 @@ mod output_cap_tests {
         let mut calls = 0;
 
         let (_, result) = FfiBackend::single_call_parameter_output_exact(
+            &choke_admission,
             &output_spec,
             &[],
             &parameter_spec,
@@ -1159,6 +1191,10 @@ mod output_cap_tests {
 
     #[test]
     fn parameter_exact_preserves_null_zero_envelope() {
+        // Direct-leaf unit test: admit on a throwaway test domain.
+        let choke_domain = super::super::native_domain::LifecycleDomain::new();
+        choke_domain.open_for_tests();
+        let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
         let output_spec =
             CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
         let parameter_spec =
@@ -1166,6 +1202,7 @@ mod output_cap_tests {
         let mut calls = 0;
 
         let (_, result) = FfiBackend::single_call_parameter_output_exact(
+            &choke_admission,
             &output_spec,
             &[],
             &parameter_spec,
@@ -1186,6 +1223,10 @@ mod output_cap_tests {
 
     #[test]
     fn parameter_exact_preserves_nonnull_zero_envelope() {
+        // Direct-leaf unit test: admit on a throwaway test domain.
+        let choke_domain = super::super::native_domain::LifecycleDomain::new();
+        choke_domain.open_for_tests();
+        let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
         let output_spec =
             CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
         let parameter_spec =
@@ -1193,6 +1234,7 @@ mod output_cap_tests {
         let mut calls = 0;
 
         let (_, result) = FfiBackend::single_call_parameter_output_exact(
+            &choke_admission,
             &output_spec,
             &[],
             &parameter_spec,

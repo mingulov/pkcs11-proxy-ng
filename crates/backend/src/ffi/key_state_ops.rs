@@ -334,8 +334,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_GetOperationState },
             spec,
             |function, state, state_len| unsafe { function(h_session, state, state_len) },
@@ -431,7 +434,10 @@ impl FfiBackend {
         part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_DigestEncryptUpdate },
             spec,
             |function, output, output_len| {
@@ -470,7 +476,10 @@ impl FfiBackend {
         encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_DecryptDigestUpdate },
             spec,
             |function, output, output_len| {
@@ -509,7 +518,10 @@ impl FfiBackend {
         part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_SignEncryptUpdate },
             spec,
             |function, output, output_len| {
@@ -548,7 +560,10 @@ impl FfiBackend {
         encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_DecryptVerifyUpdate },
             spec,
             |function, output, output_len| {
@@ -960,6 +975,79 @@ mod lifecycle_mech_tests {
             done_rx.recv_timeout(Duration::from_secs(5)).expect("control proceeds after release");
             worker.join().expect("worker joins").expect("parked call succeeds");
         });
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lifecycle_op_state_tests {
+    use super::*;
+
+    unsafe extern "C" fn op_state_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        output: *mut cryptoki_sys::CK_BYTE,
+        output_len: *mut cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        if output_len.is_null() {
+            return cryptoki_sys::CKR_ARGUMENTS_BAD;
+        }
+        if output.is_null() {
+            unsafe { *output_len = 6 };
+            return cryptoki_sys::CKR_OK;
+        }
+        let n = unsafe { *output_len }.min(6) as usize;
+        unsafe { std::ptr::write_bytes(output, 0x5A, n) };
+        unsafe { *output_len = n as cryptoki_sys::CK_ULONG };
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_op_state() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_GetOperationState = Some(op_state_ok);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        (backend, functions)
+    }
+
+    #[test]
+    fn get_operation_state_exact_denied_before_lifecycle_open() {
+        // TF01b `call_bytes_exact` ordinary proof (second site): no admission
+        // pre-Init.
+        let (backend, _functions) = backend_with_op_state();
+        let spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false };
+        assert_eq!(
+            backend.ffi_get_operation_state_exact(CkSessionHandle(7), &spec).unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn get_operation_state_exact_admitted_after_lifecycle_open() {
+        let (backend, _functions) = backend_with_op_state();
+        backend.lifecycle_domain.open_for_tests();
+        let spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false };
+        let result = backend.ffi_get_operation_state_exact(CkSessionHandle(7), &spec).unwrap();
+        assert_eq!(result.ck_rv, CkRv::OK);
+        assert_eq!(result.returned_len, Some(6));
     }
 }
 

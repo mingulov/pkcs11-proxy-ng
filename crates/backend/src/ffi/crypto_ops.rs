@@ -126,7 +126,10 @@ impl FfiBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_Sign },
             spec,
             |function, signature, signature_len| {
@@ -140,7 +143,10 @@ impl FfiBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_SignFinal },
             spec,
             |function, signature, signature_len| {
@@ -155,7 +161,10 @@ impl FfiBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_SignRecover },
             spec,
             |function, signature, signature_len| {
@@ -170,7 +179,10 @@ impl FfiBackend {
         signature: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_VerifyRecover },
             spec,
             |function, data, data_len| {
@@ -362,7 +374,10 @@ impl FfiBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_Digest },
             spec,
             |function, digest, digest_len| {
@@ -412,7 +427,10 @@ impl FfiBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_DigestFinal },
             spec,
             |function, digest, digest_len| {
@@ -577,7 +595,10 @@ impl FfiBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_Encrypt },
             spec,
             |function, output, output_len| {
@@ -592,8 +613,11 @@ impl FfiBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let before = self.cached_mechanism_output_params_for(session, OperationFamily::Encrypt);
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         let result = Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_Encrypt },
             spec,
             |function, output, output_len| {
@@ -620,7 +644,10 @@ impl FfiBackend {
         part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_EncryptUpdate },
             spec,
             |function, output, output_len| {
@@ -634,7 +661,10 @@ impl FfiBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_EncryptFinal },
             spec,
             |function, output, output_len| {
@@ -649,7 +679,10 @@ impl FfiBackend {
         encrypted_data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_Decrypt },
             spec,
             |function, output, output_len| {
@@ -664,7 +697,10 @@ impl FfiBackend {
         encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_DecryptUpdate },
             spec,
             |function, output, output_len| {
@@ -678,7 +714,10 @@ impl FfiBackend {
         session: CkSessionHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact(
+            &admission,
             unsafe { (*self.func_list).C_DecryptFinal },
             spec,
             |function, output, output_len| {
@@ -736,6 +775,8 @@ mod tests {
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Exact paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(7);
         let mechanism = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
@@ -846,6 +887,8 @@ mod tests {
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Exact paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         (backend, functions)
     }
 
@@ -1459,6 +1502,98 @@ mod tests {
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| {
                 backend.ffi_sign_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker parks inside the stub holding its guard");
+            scope.spawn(|| {
+                let ticket = backend.lifecycle_domain.begin_initialize().expect("control proceeds");
+                done_tx.send(()).expect("report control settlement");
+                backend.lifecycle_domain.abandon_initialize(ticket);
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "control must not settle while an ordinary call is parked"
+            );
+            release_tx.send(()).expect("release the parked stub");
+            done_rx.recv_timeout(Duration::from_secs(5)).expect("control proceeds after release");
+            worker.join().expect("worker joins").expect("parked call succeeds");
+        });
+    }
+
+    #[test]
+    fn sign_exact_denied_before_lifecycle_open() {
+        // TF01b `call_bytes_exact` ordinary proof: no admission pre-Init.
+        let (backend, _functions) = backend_with_sign_stub();
+        let spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false };
+        assert_eq!(
+            backend.ffi_sign_exact(CkSessionHandle(7), CkInBuf::Bytes(b"data"), &spec).unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn sign_exact_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _functions) = backend_with_sign_stub();
+        backend.lifecycle_domain.open_for_tests();
+        let spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false };
+        let result =
+            backend.ffi_sign_exact(CkSessionHandle(7), CkInBuf::Bytes(b"data"), &spec).unwrap();
+        assert_eq!(result.ck_rv, CkRv::OK);
+        assert_eq!(result.returned_len, Some(4));
+    }
+
+    // Blocked-stub exclusion shape (`call_bytes_exact` family): a parked
+    // ordinary call blocks control settlement until release.
+    static SIGN_EXACT_PARK_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> =
+        Mutex::new(None);
+
+    unsafe extern "C" fn sign_exact_parkable(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _data: cryptoki_sys::CK_BYTE_PTR,
+        _data_len: cryptoki_sys::CK_ULONG,
+        signature: cryptoki_sys::CK_BYTE_PTR,
+        signature_len: cryptoki_sys::CK_ULONG_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        let gate = SIGN_EXACT_PARK_GATE.lock().unwrap().take();
+        match gate {
+            Some((entered, release)) => {
+                let _ = entered.send(());
+                match release.recv_timeout(Duration::from_secs(10)) {
+                    Ok(()) => {
+                        if !signature.is_null() && !signature_len.is_null() {
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(b"sig!".as_ptr(), signature, 4);
+                                *signature_len = 4;
+                            }
+                        }
+                        cryptoki_sys::CKR_OK
+                    }
+                    // Test bug (release never came): fail loudly, never hang.
+                    Err(_) => cryptoki_sys::CKR_FUNCTION_FAILED,
+                }
+            }
+            None => cryptoki_sys::CKR_FUNCTION_FAILED,
+        }
+    }
+
+    #[test]
+    fn parked_sign_exact_blocks_control_until_release() {
+        let (backend, _functions) = backend_with_sign_stub();
+        backend.lifecycle_domain.open_for_tests();
+        unsafe { (*backend.func_list).C_Sign = Some(sign_exact_parkable) };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *SIGN_EXACT_PARK_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+        let (done_tx, done_rx) = mpsc::channel();
+        let spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false };
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                backend.ffi_sign_exact(CkSessionHandle(7), CkInBuf::Bytes(b"data"), &spec)
             });
             entered_rx
                 .recv_timeout(Duration::from_secs(5))

@@ -19,7 +19,11 @@ fn invoke(
         });
     }
     ExactOracle_ResetObservation();
-    let result = FfiBackend::single_call_bytes_exact(spec, |out, len| unsafe {
+    // Direct-leaf oracle: admit on a throwaway test domain.
+    let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
+    choke_domain.open_for_tests();
+    let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
+    let result = FfiBackend::single_call_bytes_exact(&choke_admission, spec, |out, len| unsafe {
         ExactOracle_ByteOutput(out, len)
     });
     let mut observation = ExactOracleObservation::default();
@@ -247,6 +251,8 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
         session_fences: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
+    // Exact paths are ordinary: establish post-Initialize state.
+    backend.lifecycle_domain.open_for_tests();
     for (present, missing) in [(true, false), (false, false), (true, true), (false, true)] {
         unsafe {
             ExactOracle_SetScenario(&ExactOracleScenario {
@@ -324,6 +330,8 @@ fn exact_parameter_error_preserves_only_defined_initialized_effects() {
         session_fences: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
+    // Exact paths are ordinary: establish post-Initialize state.
+    backend.lifecycle_domain.open_for_tests();
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x11; 12],
         iv_null_len: None,
@@ -414,6 +422,8 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
         session_fences: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
+    // Exact paths are ordinary: establish post-Initialize state.
+    backend.lifecycle_domain.open_for_tests();
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
         iv: vec![0x11; 12],
         iv_null_len: None,

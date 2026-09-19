@@ -1,6 +1,6 @@
 use super::ffi_conversion::{mechanism_to_ffi, narrow_wire_ulong};
 use super::native_allocation::NativeAllocation;
-use super::{FfiBackend, call_3x_fn};
+use super::{FfiBackend, call_3x_fn, native_domain::OrdinaryGuard};
 use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
 use pkcs11_proxy_ng_proto::convert::message_params::{
@@ -765,9 +765,12 @@ impl FfiBackend {
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<CkParameterRoundtripResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         self.ffi_message_begin_empty_exact(
+            &admission,
             session,
             aad,
             provider_spec,
@@ -864,9 +867,12 @@ impl FfiBackend {
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<CkParameterRoundtripResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         self.ffi_message_begin_empty_exact(
+            &admission,
             session,
             aad,
             provider_spec,
@@ -1202,13 +1208,16 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let (pt_ptr, pt_len) = native_message_input(plaintext)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::single_call_parameter_output_exact(
+            &admission,
             output_spec,
             parameter,
             param_out_spec,
@@ -1237,13 +1246,16 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let (ct_ptr, ct_len) = native_message_input(ciphertext)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::single_call_parameter_output_exact(
+            &admission,
             output_spec,
             parameter,
             param_out_spec,
@@ -1271,6 +1283,7 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         if !parameter.is_empty() {
             return Err(CkRv::MECHANISM_PARAM_INVALID);
         }
@@ -1280,7 +1293,9 @@ impl FfiBackend {
 
         let (data_ptr, data_len) = native_message_input(data)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::single_call_parameter_output_exact(
+            &admission,
             output_spec,
             parameter,
             param_out_spec,
@@ -1307,13 +1322,16 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let (pt_ptr, pt_len) = native_message_input(plaintext_part)?;
         let flags = native_message_flags(flags)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::single_call_parameter_output_exact(
+            &admission,
             output_spec,
             parameter,
             param_out_spec,
@@ -1341,13 +1359,16 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let (ct_ptr, ct_len) = native_message_input(ciphertext_part)?;
         let flags = native_message_flags(flags)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::single_call_parameter_output_exact(
+            &admission,
             output_spec,
             parameter,
             param_out_spec,
@@ -1374,6 +1395,7 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         if !parameter.is_empty() {
             return Err(CkRv::MECHANISM_PARAM_INVALID);
         }
@@ -1383,7 +1405,9 @@ impl FfiBackend {
 
         let (dp_ptr, dp_len) = native_message_input(data_part)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::single_call_parameter_output_exact(
+            &admission,
             output_spec,
             parameter,
             param_out_spec,
@@ -1411,6 +1435,7 @@ impl FfiBackend {
 
     fn ffi_message_begin_empty_exact<F>(
         &self,
+        _admission: &OrdinaryGuard,
         session: CkSessionHandle,
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
@@ -1445,6 +1470,7 @@ impl FfiBackend {
     /// and tag data.
     fn call_with_gcm_message_param<F>(
         &self,
+        _admission: &OrdinaryGuard,
         gcm: &GcmMessageParams,
         output_spec: &CkOutputBufferSpec,
         mut call: F,
@@ -1579,6 +1605,7 @@ impl FfiBackend {
     /// [`Self::call_with_gcm_message_param`].
     fn call_with_ccm_message_param<F>(
         &self,
+        _admission: &OrdinaryGuard,
         ccm: &CcmMessageParams,
         output_spec: &CkOutputBufferSpec,
         mut call: F,
@@ -1690,6 +1717,7 @@ impl FfiBackend {
     /// the nonce, HSM populates the tag.
     fn call_with_salsa20_chacha20_poly1305_message_param<F>(
         &self,
+        _admission: &OrdinaryGuard,
         params: &Salsa20ChaCha20Poly1305MessageParams,
         output_spec: &CkOutputBufferSpec,
         mut call: F,
@@ -1785,6 +1813,7 @@ impl FfiBackend {
 
     fn ffi_message_begin_msg_impl<F>(
         &self,
+        _admission: &OrdinaryGuard,
         msg_param: &MessageParameter,
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
@@ -1834,10 +1863,13 @@ impl FfiBackend {
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkParameterRoundtripResult, MessageEffects)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         self.ffi_message_begin_msg_impl(
+            &admission,
             msg_param,
             aad,
             provider_spec,
@@ -1853,10 +1885,13 @@ impl FfiBackend {
         aad: CkInBuf<'_>,
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkParameterRoundtripResult, MessageEffects)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageBegin }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         self.ffi_message_begin_msg_impl(
+            &admission,
             msg_param,
             aad,
             provider_spec,
@@ -1875,6 +1910,7 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageEffects)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
@@ -1882,19 +1918,21 @@ impl FfiBackend {
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let native = build_message_init_mechanism(0, msg_param)?;
         let h_session = Self::session_handle(session)?;
-        let output = Self::single_call_bytes_exact(output_spec, |buffer, length| unsafe {
-            f(
-                h_session,
-                native.ck_mechanism.pParameter,
-                native.ck_mechanism.ulParameterLen,
-                aad_ptr.cast_mut(),
-                aad_len,
-                input_ptr.cast_mut(),
-                input_len,
-                buffer,
-                length,
-            )
-        })?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let output =
+            Self::single_call_bytes_exact(&admission, output_spec, |buffer, length| unsafe {
+                f(
+                    h_session,
+                    native.ck_mechanism.pParameter,
+                    native.ck_mechanism.ulParameterLen,
+                    aad_ptr.cast_mut(),
+                    aad_len,
+                    input_ptr.cast_mut(),
+                    input_len,
+                    buffer,
+                    length,
+                )
+            })?;
         let context = MessageEffectContext {
             mode: ParameterEffectCallMode::from_output_spec(output_spec),
             encrypt: true,
@@ -1921,6 +1959,7 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageEffects)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
@@ -1928,19 +1967,21 @@ impl FfiBackend {
         let (aad_ptr, aad_len) = native_message_input(aad)?;
         let native = build_message_init_mechanism(0, msg_param)?;
         let h_session = Self::session_handle(session)?;
-        let output = Self::single_call_bytes_exact(output_spec, |buffer, length| unsafe {
-            f(
-                h_session,
-                native.ck_mechanism.pParameter,
-                native.ck_mechanism.ulParameterLen,
-                aad_ptr.cast_mut(),
-                aad_len,
-                input_ptr.cast_mut(),
-                input_len,
-                buffer,
-                length,
-            )
-        })?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let output =
+            Self::single_call_bytes_exact(&admission, output_spec, |buffer, length| unsafe {
+                f(
+                    h_session,
+                    native.ck_mechanism.pParameter,
+                    native.ck_mechanism.ulParameterLen,
+                    aad_ptr.cast_mut(),
+                    aad_len,
+                    input_ptr.cast_mut(),
+                    input_len,
+                    buffer,
+                    length,
+                )
+            })?;
         let context = MessageEffectContext {
             mode: ParameterEffectCallMode::from_output_spec(output_spec),
             encrypt: false,
@@ -1965,13 +2006,16 @@ impl FfiBackend {
         data: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_SignMessage }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let (data_ptr, data_len) = native_message_input(data)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         match msg_param {
             MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
+                &admission,
                 gcm,
                 output_spec,
                 |params, output, output_len| unsafe {
@@ -1988,6 +2032,7 @@ impl FfiBackend {
                 },
             ),
             MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
+                &admission,
                 ccm,
                 output_spec,
                 |params, output, output_len| unsafe {
@@ -2005,6 +2050,7 @@ impl FfiBackend {
             ),
             MessageParameter::SalaChacha(params_in) => self
                 .call_with_salsa20_chacha20_poly1305_message_param(
+                    &admission,
                     params_in,
                     output_spec,
                     |params, output, output_len| unsafe {
@@ -2034,6 +2080,7 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageEffects)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_EncryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
@@ -2041,18 +2088,20 @@ impl FfiBackend {
         let flags = native_message_flags(flags)?;
         let native = build_message_init_mechanism(0, msg_param)?;
         let h_session = Self::session_handle(session)?;
-        let output = Self::single_call_bytes_exact(output_spec, |buffer, length| unsafe {
-            f(
-                h_session,
-                native.ck_mechanism.pParameter,
-                native.ck_mechanism.ulParameterLen,
-                input_ptr.cast_mut(),
-                input_len,
-                buffer,
-                length,
-                flags,
-            )
-        })?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let output =
+            Self::single_call_bytes_exact(&admission, output_spec, |buffer, length| unsafe {
+                f(
+                    h_session,
+                    native.ck_mechanism.pParameter,
+                    native.ck_mechanism.ulParameterLen,
+                    input_ptr.cast_mut(),
+                    input_len,
+                    buffer,
+                    length,
+                    flags,
+                )
+            })?;
         let context = MessageEffectContext {
             mode: ParameterEffectCallMode::from_output_spec(output_spec),
             encrypt: true,
@@ -2079,6 +2128,7 @@ impl FfiBackend {
         output_spec: &CkOutputBufferSpec,
         provider_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult, MessageEffects)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_DecryptMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let acknowledgement = structured_parameter_ack(msg_param, provider_spec, CkRv::OK)?;
@@ -2086,18 +2136,20 @@ impl FfiBackend {
         let flags = native_message_flags(flags)?;
         let native = build_message_init_mechanism(0, msg_param)?;
         let h_session = Self::session_handle(session)?;
-        let output = Self::single_call_bytes_exact(output_spec, |buffer, length| unsafe {
-            f(
-                h_session,
-                native.ck_mechanism.pParameter,
-                native.ck_mechanism.ulParameterLen,
-                input_ptr.cast_mut(),
-                input_len,
-                buffer,
-                length,
-                flags,
-            )
-        })?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let output =
+            Self::single_call_bytes_exact(&admission, output_spec, |buffer, length| unsafe {
+                f(
+                    h_session,
+                    native.ck_mechanism.pParameter,
+                    native.ck_mechanism.ulParameterLen,
+                    input_ptr.cast_mut(),
+                    input_len,
+                    buffer,
+                    length,
+                    flags,
+                )
+            })?;
         let context = MessageEffectContext {
             mode: ParameterEffectCallMode::from_output_spec(output_spec),
             encrypt: false,
@@ -2122,13 +2174,16 @@ impl FfiBackend {
         data_part: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, MessageParameter)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_0.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_SignMessageNext }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
         let (dp_ptr, dp_len) = native_message_input(data_part)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         match msg_param {
             MessageParameter::GcmMessage(gcm) => self.call_with_gcm_message_param(
+                &admission,
                 gcm,
                 output_spec,
                 |params, output, output_len| unsafe {
@@ -2145,6 +2200,7 @@ impl FfiBackend {
                 },
             ),
             MessageParameter::CcmMessage(ccm) => self.call_with_ccm_message_param(
+                &admission,
                 ccm,
                 output_spec,
                 |params, output, output_len| unsafe {
@@ -2162,6 +2218,7 @@ impl FfiBackend {
             ),
             MessageParameter::SalaChacha(params_in) => self
                 .call_with_salsa20_chacha20_poly1305_message_param(
+                    &admission,
                     params_in,
                     output_spec,
                     |params, output, output_len| unsafe {
@@ -2627,6 +2684,8 @@ mod tests {
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Message paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         (backend, base, functions)
     }
 
@@ -2699,6 +2758,8 @@ mod tests {
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Message paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         (backend, base, functions)
     }
 
@@ -2730,6 +2791,8 @@ mod tests {
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Message paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         (backend, base, functions)
     }
 
@@ -2751,8 +2814,12 @@ mod tests {
             tag_null_len: None,
             tag_bits: 128,
         };
+        // Helper under test takes the admission (threaded, never re-admitted;
+        // admitted once: a second open would deadlock under the held read).
+        let test_admission = backend.lifecycle_domain.admit_ordinary().expect("test domain admits");
         let (output, returned) = backend
             .call_with_gcm_message_param(
+                &test_admission,
                 &gcm,
                 &output_spec,
                 |params, main_output, main_output_len: *mut cryptoki_sys::CK_ULONG| {
@@ -2784,6 +2851,7 @@ mod tests {
         };
         let (output, returned) = backend
             .call_with_ccm_message_param(
+                &test_admission,
                 &ccm,
                 &output_spec,
                 |params, main_output, main_output_len: *mut cryptoki_sys::CK_ULONG| {
@@ -2812,6 +2880,7 @@ mod tests {
         };
         let (output, returned) = backend
             .call_with_salsa20_chacha20_poly1305_message_param(
+                &test_admission,
                 &salsa,
                 &output_spec,
                 |params, main_output, main_output_len: *mut cryptoki_sys::CK_ULONG| {
@@ -2851,13 +2920,21 @@ mod tests {
             tag_null_len: None,
             tag_bits: 128,
         };
+        // Helper under test takes the admission (threaded, never re-admitted;
+        // admitted once: a second open would deadlock under the held read).
+        let test_admission = backend.lifecycle_domain.admit_ordinary().expect("test domain admits");
         let (output, returned) = backend
-            .call_with_gcm_message_param(&gcm, &output_spec, |params, _, output_len| {
-                calls += 1;
-                assert!(output_len.is_null());
-                unsafe { *(*params).pIv = 0xA1 };
-                cryptoki_sys::CKR_BUFFER_TOO_SMALL
-            })
+            .call_with_gcm_message_param(
+                &test_admission,
+                &gcm,
+                &output_spec,
+                |params, _, output_len| {
+                    calls += 1;
+                    assert!(output_len.is_null());
+                    unsafe { *(*params).pIv = 0xA1 };
+                    cryptoki_sys::CKR_BUFFER_TOO_SMALL
+                },
+            )
             .expect("GCM provider result envelope");
         assert_eq!(output.ck_rv, CkRv::BUFFER_TOO_SMALL);
         let mut expected_gcm = gcm.clone();
@@ -2875,12 +2952,17 @@ mod tests {
             mac_len: 16,
         };
         let (output, returned) = backend
-            .call_with_ccm_message_param(&ccm, &output_spec, |params, _, output_len| {
-                calls += 1;
-                assert!(output_len.is_null());
-                unsafe { *(*params).pNonce = 0xA2 };
-                cryptoki_sys::CKR_BUFFER_TOO_SMALL
-            })
+            .call_with_ccm_message_param(
+                &test_admission,
+                &ccm,
+                &output_spec,
+                |params, _, output_len| {
+                    calls += 1;
+                    assert!(output_len.is_null());
+                    unsafe { *(*params).pNonce = 0xA2 };
+                    cryptoki_sys::CKR_BUFFER_TOO_SMALL
+                },
+            )
             .expect("CCM provider result envelope");
         assert_eq!(output.ck_rv, CkRv::BUFFER_TOO_SMALL);
         let mut expected_ccm = ccm.clone();
@@ -2896,6 +2978,7 @@ mod tests {
         };
         let (output, returned) = backend
             .call_with_salsa20_chacha20_poly1305_message_param(
+                &test_admission,
                 &salsa,
                 &output_spec,
                 |params, _, output_len| {
@@ -3462,6 +3545,8 @@ mod tests {
         let _guard = SIGN_VERIFY_TEST_LOCK.lock().unwrap();
         SIGN_VERIFY_PROVIDER_CALLS.store(0, Ordering::SeqCst);
         let (backend, _base, _functions) = backend_with_sign_verify_message_functions();
+        // Message paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 1, length_pointer_null: false };
         let session = CkSessionHandle(7);
@@ -3856,5 +3941,54 @@ mod tests {
             backend.last_init_family.is_empty(),
             "message Inits must not plant a last-Init marker"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sign_message_exact_denied_before_lifecycle_open() {
+        // TF01b `single_call_parameter_output_exact` ordinary proof: no
+        // admission pre-Init.
+        let _guard = SIGN_VERIFY_TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_sign_verify_message_functions();
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 64, length_pointer_null: false };
+        let param_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
+        assert_eq!(
+            backend
+                .ffi_sign_message_exact(
+                    CkSessionHandle(7),
+                    &[],
+                    CkInBuf::Bytes(b"data"),
+                    &output_spec,
+                    &param_spec,
+                )
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sign_message_exact_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let _guard = SIGN_VERIFY_TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_sign_verify_message_functions();
+        backend.lifecycle_domain.open_for_tests();
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 64, length_pointer_null: false };
+        let param_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
+        let (output, _parameter) = backend
+            .ffi_sign_message_exact(
+                CkSessionHandle(7),
+                &[],
+                CkInBuf::Bytes(b"data"),
+                &output_spec,
+                &param_spec,
+            )
+            .unwrap();
+        assert_eq!(output.ck_rv, CkRv::OK);
+        assert_eq!(output.returned_len, Some(1));
     }
 }

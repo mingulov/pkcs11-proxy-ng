@@ -144,6 +144,7 @@ impl FfiBackend {
         aad: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, AuthenticatedOutput)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_WrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let (aad_ptr, aad_len) = aad.as_ptr_len();
@@ -152,7 +153,8 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
-        let output = Self::single_call_bytes_exact(spec, |output, length| unsafe {
+        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let output = Self::single_call_bytes_exact(&admission, spec, |output, length| unsafe {
             f(
                 h_session,
                 native.pointer(),

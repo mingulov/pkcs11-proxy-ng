@@ -20,6 +20,7 @@ impl FfiBackend {
     ) -> CkResult<CkOutputAndHandleResult> {
         use super::ffi_conversion::FfiAttrs;
 
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let function = unsafe { (*fl).C_EncapsulateKey }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
@@ -29,7 +30,8 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_public_key = Self::object_handle(public_key)?;
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
-        let output = Self::single_call_bytes_exact(spec, |buffer, length| unsafe {
+        let _session_fence = self.session_fences.enter(&admission, session)?;
+        let output = Self::single_call_bytes_exact(&admission, spec, |buffer, length| unsafe {
             function(
                 h_session,
                 ffi_mech.ck_mechanism_mut(),
@@ -194,12 +196,58 @@ mod tests {
     }
 
     #[test]
+    fn encapsulate_exact_denied_before_lifecycle_open() {
+        // TF01b `single_call_bytes_exact` (3.x direct) ordinary proof: no
+        // admission pre-Init.
+        let _guard = TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        assert_eq!(
+            backend
+                .ffi_encapsulate_key_exact(
+                    CkSessionHandle(1),
+                    &mechanism,
+                    CkObjectHandle(2),
+                    Some(&[]),
+                    &output_spec,
+                )
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn encapsulate_exact_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let _guard = TEST_LOCK.lock().unwrap();
+        let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
+        backend.lifecycle_domain.open_for_tests();
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let result = backend
+            .ffi_encapsulate_key_exact(
+                CkSessionHandle(1),
+                &mechanism,
+                CkObjectHandle(2),
+                Some(&[]),
+                &output_spec,
+            )
+            .expect("provider result envelope");
+        assert_eq!(result.ck_rv, CkRv::OK);
+    }
+
+    #[test]
     fn null_output_length_kem_forwards_once_and_preserves_provider_handle() {
         let _guard = TEST_LOCK.lock().unwrap();
         CALLS.store(0, Ordering::SeqCst);
         OUTPUT_PRESENT.store(0, Ordering::SeqCst);
         LENGTH_NULL.store(0, Ordering::SeqCst);
         let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
+        // Exact paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
