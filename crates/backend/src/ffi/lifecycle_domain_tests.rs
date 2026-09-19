@@ -392,6 +392,21 @@ fn queued_writer_stalls_new_admissions() {
     domain.admit_ordinary().expect("abandoned domain admits again");
 }
 
+/// conc-M2 tripwire self-test: nested admission must fail loudly, never
+/// deadlock silently behind a queued writer. `cfg(debug_assertions)`-gated:
+/// the tripwire is a debug-only mechanism (release keeps today's nested-read
+/// behavior, and no production path nests — audited).
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "nested ordinary admission")]
+fn tripwire_fires_on_nested_admit() {
+    let domain = open_domain();
+    let _outer = domain.admit_ordinary().expect("outer admits");
+    // Must panic via the tripwire, never return (and never hang: the assert
+    // runs before the read acquisition).
+    let _inner = domain.admit_ordinary();
+}
+
 #[test]
 fn control_write_blocks_while_ordinary_parked_then_proceeds() {
     // Blocked-stub exclusion shape at domain level: a parked ordinary

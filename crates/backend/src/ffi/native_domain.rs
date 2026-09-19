@@ -28,6 +28,7 @@
 //! session fences or `Drop` integration yet — all TF01b. The ownership-doc
 //! clause stays as-is and the CHANGELOG F-01 entry stays open until TF01b.
 
+use std::cell::Cell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering::SeqCst;
@@ -673,6 +674,13 @@ impl LifecycleTracker {
 // Destructors are in scope for this rule (see Drop-may-never-admit above):
 // no `Drop` may admit or acquire.
 //
+// conc-M2 nesting tripwire (debug only): a thread-local "admitted" flag,
+// set on admission and cleared by `OrdinaryGuard::drop`. `admit_ordinary`
+// `debug_assert`s the flag is clear FIRST (before the read acquisition,
+// so a violation panics instead of deadlocking behind a queued writer),
+// and the self-test pins it — any nesting a future edit introduces fails
+// the suite loudly instead of wedging under load.
+//
 // Poison policy: `std::sync::RwLock` poison is sticky and maps to
 // fail-closed denial everywhere (precedent: `DomainError::MutexPoisoned`
 // denies new loads until restart). Only a WRITER panic poisons (`std`
@@ -763,6 +771,13 @@ pub(in crate::ffi) struct InitTicket<'a> {
     settled: bool,
 }
 
+thread_local! {
+    /// conc-M2 nesting tripwire: true while an `OrdinaryGuard` is alive on
+    /// this thread. Guards are `!Send`, so a plain thread-local (never read
+    /// cross-thread) is the whole mechanism.
+    static ADMITTED_ON_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
 impl LifecycleDomain {
     /// Fresh domain: `LoadedUninitialized` at epoch 0. Ordinary work is
     /// denied until the first `C_Initialize` publishes `Open`.
@@ -788,10 +803,22 @@ impl LifecycleDomain {
     ///   compliant provider reports for ordinary calls outside a live
     ///   incarnation, so pre-Initialize callers observe no new RV).
     pub(in crate::ffi) fn admit_ordinary(&self) -> CkResult<OrdinaryGuard<'_>> {
+        // Tripwire FIRST: a nested admission must panic, never hang behind
+        // a queued writer (and never silently nest in debug).
+        debug_assert!(
+            !ADMITTED_ON_THREAD.get(),
+            "nested ordinary admission: a second admit under a live OrdinaryGuard \
+             deadlocks behind a queued writer; thread the guard down instead"
+        );
         let read = self.inner.read().map_err(|_| CkRv::GENERAL_ERROR)?;
         let (state, epoch) = (read.state, read.epoch);
         match state {
-            ModuleState::Open => Ok(OrdinaryGuard { _read: read, epoch, _confine: PhantomData }),
+            ModuleState::Open => {
+                // Denial arms return WITHOUT setting the flag: only a live
+                // guard trips, and its Drop clears.
+                ADMITTED_ON_THREAD.set(true);
+                Ok(OrdinaryGuard { _read: read, epoch, _confine: PhantomData })
+            }
             ModuleState::Uncertain => Err(CkRv::GENERAL_ERROR),
             _ => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
         }
@@ -901,6 +928,15 @@ impl OrdinaryGuard<'_> {
     #[cfg(test)]
     pub(in crate::ffi) fn epoch_for_tests(&self) -> u64 {
         self.epoch
+    }
+}
+
+impl Drop for OrdinaryGuard<'_> {
+    /// Settlement end: releasing read exclusion also clears the thread's
+    /// tripwire flag. Runs on unwind too, so a settlement panic never leaves
+    /// the flag tripped for later admissions on this thread.
+    fn drop(&mut self) {
+        ADMITTED_ON_THREAD.set(false);
     }
 }
 
