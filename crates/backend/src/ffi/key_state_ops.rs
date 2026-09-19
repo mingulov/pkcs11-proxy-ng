@@ -19,10 +19,12 @@ impl FfiBackend {
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
         Self::call_object_with_mechanism(
+            &admission,
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
             |function, mech, handle| unsafe {
@@ -49,10 +51,12 @@ impl FfiBackend {
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
         Self::call_object_with_mechanism_output(
+            &admission,
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
             |function, mech, handle| unsafe {
@@ -75,10 +79,12 @@ impl FfiBackend {
         base_key: CkObjectHandle,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<crate::traits::CkDeriveKeyOutputResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
         Self::call_object_with_mechanism_output_result(
+            &admission,
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
             |function, mech, handle| unsafe {
@@ -101,10 +107,12 @@ impl FfiBackend {
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
         Self::call_bytes_with_mechanism(
+            &admission,
             unsafe { (*self.func_list).C_WrapKey },
             mechanism,
             |function, mech, output, output_len| unsafe {
@@ -121,10 +129,12 @@ impl FfiBackend {
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
         Self::call_bytes_exact_with_mechanism(
+            &admission,
             unsafe { (*self.func_list).C_WrapKey },
             mechanism,
             spec,
@@ -146,10 +156,12 @@ impl FfiBackend {
         key: CkObjectHandle,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
         Self::call_bytes_exact_with_mechanism_output(
+            &admission,
             unsafe { (*self.func_list).C_WrapKey },
             mechanism,
             spec,
@@ -167,11 +179,13 @@ impl FfiBackend {
         wrapped_key: CkInBuf<'_>,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let (wk_ptr, wk_len) = wrapped_key.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         let h_unwrapping_key = Self::object_handle(unwrapping_key)?;
         Self::call_object_with_mechanism(
+            &admission,
             unsafe { (*self.func_list).C_UnwrapKey },
             mechanism,
             |function, mech, handle| unsafe {
@@ -195,9 +209,11 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<CkObjectHandle> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         Self::call_object_with_mechanism(
+            &admission,
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
             |function, mech, handle| unsafe {
@@ -220,9 +236,11 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         Self::call_object_with_mechanism_output(
+            &admission,
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
             |function, mech, handle| unsafe {
@@ -244,10 +262,12 @@ impl FfiBackend {
         pub_template: Option<&[CkAttribute]>,
         priv_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let pub_ffi = FfiAttrs::from_opt_slice(pub_template)?;
         let priv_ffi = FfiAttrs::from_opt_slice(priv_template)?;
         let h_session = Self::session_handle(session)?;
         Self::call_object_pair_with_mechanism(
+            &admission,
             unsafe { (*self.func_list).C_GenerateKeyPair },
             mechanism,
             |function, mech, public_handle, private_handle| unsafe {
@@ -540,6 +560,387 @@ mod generate_random_bound_tests {
     #[test]
     fn bound_is_512_mib() {
         assert_eq!(MAX_RANDOM_BYTES, 512 * 1024 * 1024);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lifecycle_mech_tests {
+    use super::*;
+    use std::sync::{Mutex, mpsc};
+    use std::time::Duration;
+
+    unsafe extern "C" fn derive_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _base_key: cryptoki_sys::CK_OBJECT_HANDLE,
+        _template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _count: cryptoki_sys::CK_ULONG,
+        handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        if !handle.is_null() {
+            unsafe { *handle = 51 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn wrap_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _wrapping_key: cryptoki_sys::CK_OBJECT_HANDLE,
+        _key: cryptoki_sys::CK_OBJECT_HANDLE,
+        output: *mut cryptoki_sys::CK_BYTE,
+        output_len: *mut cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        if output_len.is_null() {
+            return cryptoki_sys::CKR_ARGUMENTS_BAD;
+        }
+        if output.is_null() {
+            unsafe { *output_len = 8 };
+            return cryptoki_sys::CKR_OK;
+        }
+        let n = unsafe { *output_len }.min(8) as usize;
+        unsafe { std::ptr::write_bytes(output, 0xC3, n) };
+        unsafe { *output_len = n as cryptoki_sys::CK_ULONG };
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn keypair_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _pub_template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _pub_count: cryptoki_sys::CK_ULONG,
+        _priv_template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _priv_count: cryptoki_sys::CK_ULONG,
+        pub_handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+        priv_handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        if !pub_handle.is_null() {
+            unsafe { *pub_handle = 61 };
+        }
+        if !priv_handle.is_null() {
+            unsafe { *priv_handle = 62 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_mech_stubs() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_DeriveKey = Some(derive_ok);
+        functions.C_WrapKey = Some(wrap_ok);
+        functions.C_GenerateKeyPair = Some(keypair_ok);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        (backend, functions)
+    }
+
+    fn cbc_mechanism() -> CkMechanism {
+        CkMechanism {
+            mechanism_type: CkMechanismType::AES_CBC,
+            params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0x11; 16] })),
+        }
+    }
+
+    fn data_spec() -> CkOutputBufferSpec {
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false }
+    }
+
+    #[test]
+    fn derive_key_denied_before_lifecycle_open() {
+        // TF01b `call_object_with_mechanism` ordinary proof: no admission
+        // pre-Init.
+        let (backend, _functions) = backend_with_mech_stubs();
+        assert_eq!(
+            backend
+                .ffi_derive_key(CkSessionHandle(7), &cbc_mechanism(), CkObjectHandle(9), None)
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn derive_key_admitted_after_lifecycle_open() {
+        let (backend, _functions) = backend_with_mech_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        assert_eq!(
+            backend
+                .ffi_derive_key(CkSessionHandle(7), &cbc_mechanism(), CkObjectHandle(9), None)
+                .unwrap(),
+            CkObjectHandle(51)
+        );
+    }
+
+    #[test]
+    fn derive_key_with_output_denied_before_lifecycle_open() {
+        // TF01b `call_object_with_mechanism_output` ordinary proof.
+        let (backend, _functions) = backend_with_mech_stubs();
+        assert_eq!(
+            backend
+                .ffi_derive_key_with_output(
+                    CkSessionHandle(7),
+                    &cbc_mechanism(),
+                    CkObjectHandle(9),
+                    None
+                )
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn derive_key_with_output_admitted_after_lifecycle_open() {
+        let (backend, _functions) = backend_with_mech_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        let (handle, _) = backend
+            .ffi_derive_key_with_output(
+                CkSessionHandle(7),
+                &cbc_mechanism(),
+                CkObjectHandle(9),
+                None,
+            )
+            .unwrap();
+        assert_eq!(handle, CkObjectHandle(51));
+    }
+
+    #[test]
+    fn derive_key_with_output_result_denied_before_lifecycle_open() {
+        // TF01b `call_object_with_mechanism_output_result` ordinary proof.
+        let (backend, _functions) = backend_with_mech_stubs();
+        assert_eq!(
+            backend
+                .ffi_derive_key_with_output_result(
+                    CkSessionHandle(7),
+                    &cbc_mechanism(),
+                    CkObjectHandle(9),
+                    None
+                )
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn derive_key_with_output_result_admitted_after_lifecycle_open() {
+        let (backend, _functions) = backend_with_mech_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        let result = backend
+            .ffi_derive_key_with_output_result(
+                CkSessionHandle(7),
+                &cbc_mechanism(),
+                CkObjectHandle(9),
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.rv, CkRv::OK);
+        assert_eq!(result.key_handle, Some(CkObjectHandle(51)));
+    }
+
+    #[test]
+    fn wrap_key_denied_before_lifecycle_open() {
+        // TF01b `call_bytes_with_mechanism` ordinary proof.
+        let (backend, _functions) = backend_with_mech_stubs();
+        assert_eq!(
+            backend
+                .ffi_wrap_key(
+                    CkSessionHandle(7),
+                    &cbc_mechanism(),
+                    CkObjectHandle(8),
+                    CkObjectHandle(9)
+                )
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn wrap_key_admitted_after_lifecycle_open() {
+        let (backend, _functions) = backend_with_mech_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        let bytes = backend
+            .ffi_wrap_key(
+                CkSessionHandle(7),
+                &cbc_mechanism(),
+                CkObjectHandle(8),
+                CkObjectHandle(9),
+            )
+            .unwrap();
+        assert_eq!(bytes.expose(|raw| raw.to_vec()), vec![0xC3; 8]);
+    }
+
+    #[test]
+    fn wrap_key_exact_denied_before_lifecycle_open() {
+        // TF01b `call_bytes_exact_with_mechanism` ordinary proof.
+        let (backend, _functions) = backend_with_mech_stubs();
+        assert_eq!(
+            backend
+                .ffi_wrap_key_exact(
+                    CkSessionHandle(7),
+                    &cbc_mechanism(),
+                    CkObjectHandle(8),
+                    CkObjectHandle(9),
+                    &data_spec(),
+                )
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn wrap_key_exact_admitted_after_lifecycle_open() {
+        let (backend, _functions) = backend_with_mech_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        let result = backend
+            .ffi_wrap_key_exact(
+                CkSessionHandle(7),
+                &cbc_mechanism(),
+                CkObjectHandle(8),
+                CkObjectHandle(9),
+                &data_spec(),
+            )
+            .unwrap();
+        assert_eq!(result.ck_rv, CkRv::OK);
+    }
+
+    #[test]
+    fn wrap_key_exact_with_output_denied_before_lifecycle_open() {
+        // TF01b `call_bytes_exact_with_mechanism_output` ordinary proof.
+        let (backend, _functions) = backend_with_mech_stubs();
+        assert_eq!(
+            backend
+                .ffi_wrap_key_exact_with_output(
+                    CkSessionHandle(7),
+                    &cbc_mechanism(),
+                    CkObjectHandle(8),
+                    CkObjectHandle(9),
+                    &data_spec(),
+                )
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn wrap_key_exact_with_output_admitted_after_lifecycle_open() {
+        let (backend, _functions) = backend_with_mech_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        let (result, _) = backend
+            .ffi_wrap_key_exact_with_output(
+                CkSessionHandle(7),
+                &cbc_mechanism(),
+                CkObjectHandle(8),
+                CkObjectHandle(9),
+                &data_spec(),
+            )
+            .unwrap();
+        assert_eq!(result.ck_rv, CkRv::OK);
+    }
+
+    #[test]
+    fn generate_key_pair_denied_before_lifecycle_open() {
+        // TF01b `call_object_pair_with_mechanism` ordinary proof.
+        let (backend, _functions) = backend_with_mech_stubs();
+        assert_eq!(
+            backend
+                .ffi_generate_key_pair(CkSessionHandle(7), &cbc_mechanism(), None, None)
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn generate_key_pair_admitted_after_lifecycle_open() {
+        let (backend, _functions) = backend_with_mech_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        assert_eq!(
+            backend
+                .ffi_generate_key_pair(CkSessionHandle(7), &cbc_mechanism(), None, None)
+                .unwrap(),
+            (CkObjectHandle(61), CkObjectHandle(62))
+        );
+    }
+
+    // Blocked-stub exclusion shape (object-with-mechanism family): a parked
+    // ordinary call blocks control settlement until release.
+    static DERIVE_PARK_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> =
+        Mutex::new(None);
+
+    unsafe extern "C" fn derive_parkable(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _base_key: cryptoki_sys::CK_OBJECT_HANDLE,
+        _template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _count: cryptoki_sys::CK_ULONG,
+        handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        let gate = DERIVE_PARK_GATE.lock().unwrap().take();
+        match gate {
+            Some((entered, release)) => {
+                let _ = entered.send(());
+                match release.recv_timeout(Duration::from_secs(10)) {
+                    Ok(()) => {
+                        if !handle.is_null() {
+                            unsafe { *handle = 51 };
+                        }
+                        cryptoki_sys::CKR_OK
+                    }
+                    // Test bug (release never came): fail loudly, never hang.
+                    Err(_) => cryptoki_sys::CKR_FUNCTION_FAILED,
+                }
+            }
+            None => cryptoki_sys::CKR_FUNCTION_FAILED,
+        }
+    }
+
+    #[test]
+    fn parked_derive_key_blocks_control_until_release() {
+        let (backend, _functions) = backend_with_mech_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        unsafe { (*backend.func_list).C_DeriveKey = Some(derive_parkable) };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *DERIVE_PARK_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                backend.ffi_derive_key(
+                    CkSessionHandle(7),
+                    &cbc_mechanism(),
+                    CkObjectHandle(9),
+                    None,
+                )
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker parks inside the stub holding its guard");
+            scope.spawn(|| {
+                let ticket = backend.lifecycle_domain.begin_initialize().expect("control proceeds");
+                done_tx.send(()).expect("report control settlement");
+                backend.lifecycle_domain.abandon_initialize(ticket);
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "control must not settle while an ordinary call is parked"
+            );
+            release_tx.send(()).expect("release the parked stub");
+            done_rx.recv_timeout(Duration::from_secs(5)).expect("control proceeds after release");
+            worker.join().expect("worker joins").expect("parked call succeeds");
+        });
     }
 }
 

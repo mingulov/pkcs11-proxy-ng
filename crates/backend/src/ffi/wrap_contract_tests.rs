@@ -90,6 +90,8 @@ fn backend()
         lifecycle_domain: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
+    // Wrap paths are ordinary: establish post-Initialize state.
+    backend.lifecycle_domain.open_for_tests();
     (backend, base, functions)
 }
 fn mechanism() -> CkMechanism {
@@ -256,6 +258,8 @@ fn gcm_error_backend() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         lifecycle_domain: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
+    // Wrap paths are ordinary: establish post-Initialize state.
+    backend.lifecycle_domain.open_for_tests();
     (backend, base)
 }
 

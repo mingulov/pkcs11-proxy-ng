@@ -499,6 +499,7 @@ impl FfiBackend {
     }
 
     pub(super) fn call_bytes_with_mechanism<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &CkMechanism,
         mut call: F,
@@ -520,6 +521,7 @@ impl FfiBackend {
     }
 
     pub(super) fn call_object_with_mechanism<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &CkMechanism,
         mut call: F,
@@ -622,6 +624,7 @@ impl FfiBackend {
 
     /// Like `call_bytes_exact` but builds a CK_MECHANISM first.
     pub(super) fn call_bytes_exact_with_mechanism<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &CkMechanism,
         spec: &CkOutputBufferSpec,
@@ -649,6 +652,7 @@ impl FfiBackend {
     /// derive).  Mirrors [`Self::call_object_with_mechanism`] but
     /// surfaces `output_params()` for callers that need it.
     pub(super) fn call_object_with_mechanism_output<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &CkMechanism,
         mut call: F,
@@ -671,6 +675,7 @@ impl FfiBackend {
     /// `C_DeriveKey`-style call with mechanism-param write-back, preserving
     /// post-call output params even when the PKCS#11 return value is not OK.
     pub(super) fn call_object_with_mechanism_output_result<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &CkMechanism,
         mut call: F,
@@ -714,6 +719,7 @@ impl FfiBackend {
     /// route through the cached `*Init` path instead. Error effects surface
     /// only on data/missing-length calls whose params changed.
     pub(super) fn call_bytes_exact_with_mechanism_output<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &CkMechanism,
         spec: &CkOutputBufferSpec,
@@ -815,6 +821,7 @@ impl FfiBackend {
     }
 
     pub(super) fn call_object_pair_with_mechanism<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &CkMechanism,
         mut call: F,

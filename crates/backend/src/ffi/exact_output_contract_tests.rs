@@ -479,7 +479,12 @@ fn classic_gcm_initialized_error_iv_effect() {
             aad_null: false,
         })),
     };
+    // Direct-choke unit test: admit on a throwaway test domain.
+    let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
+    choke_domain.open_for_tests();
+    let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
     let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
+        &choke_admission,
         Some(()),
         &mechanism,
         &CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
@@ -548,7 +553,12 @@ fn classic_gcm_error_effect_matrix_data_query_and_missing_length() {
         for (rv, native_rv) in &rvs {
             for write in [true, false] {
                 let cell = format!("{mode_name} {rv:?} write={write}");
+                // Direct-choke unit test: admit on a throwaway test domain.
+                let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
+                choke_domain.open_for_tests();
+                let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
                 let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
+                    &choke_admission,
                     Some(()),
                     &mechanism,
                     spec,
@@ -650,7 +660,12 @@ fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
         ),
     ];
     for (mode_name, spec, expect_echo) in &modes {
+        // Direct-choke unit test: admit on a throwaway test domain.
+        let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
+        choke_domain.open_for_tests();
+        let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
         let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
+            &choke_admission,
             Some(()),
             &mechanism,
             spec,
