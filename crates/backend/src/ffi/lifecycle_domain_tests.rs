@@ -428,3 +428,167 @@ fn control_write_blocks_while_ordinary_parked_then_proceeds() {
         done_rx.recv_timeout(Duration::from_secs(5)).expect("control proceeds after release");
     });
 }
+
+// --- TF01b Finalize seal/drain (I3) ---
+//
+// Drain-then-seal: the begin acquisition IS the drain (no in-flight
+// reader survives it); the Draining flip under that write is the seal.
+// `enter_finalizing` marks the exclusive native call in flight, and
+// publish lands `Finalized`. Every step denies new admission.
+
+#[test]
+fn finalize_begin_enter_publish_cycle_seals_and_denies() {
+    let domain = open_domain();
+    let seal = domain.begin_finalize().expect("begin from Open");
+    assert_eq!(domain.state_for_tests(), ModuleState::Draining);
+    assert_eq!(
+        domain.admit_ordinary().unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed admission denies from Draining"
+    );
+    seal.enter_finalizing().expect("enter exclusive phase");
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalizing);
+    assert_eq!(
+        domain.admit_ordinary().unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed admission denies from Finalizing"
+    );
+    domain.publish_finalized_with_purge(seal, || {}).expect("publish succeeds");
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
+    assert_eq!(
+        domain.admit_ordinary().unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed admission denies from Finalized"
+    );
+    assert_eq!(
+        domain.epoch_for_tests(),
+        4,
+        "begin + publish advance; enter reuses the begin cycle"
+    );
+}
+
+#[test]
+fn finalize_begin_denied_from_non_open_states() {
+    let domain = LifecycleDomain::new();
+    for state in [
+        ModuleState::LoadedUninitialized,
+        ModuleState::Initializing,
+        ModuleState::Draining,
+        ModuleState::Finalizing,
+        ModuleState::Finalized,
+        ModuleState::Uncertain,
+    ] {
+        domain.set_state_for_tests(state, 7);
+        let expected = match state {
+            ModuleState::Uncertain => CkRv::GENERAL_ERROR,
+            _ => CkRv::CRYPTOKI_NOT_INITIALIZED,
+        };
+        assert_eq!(domain.begin_finalize().unwrap_err(), expected, "denial RV from {state:?}");
+        assert_eq!(domain.state_for_tests(), state, "denied begin changes nothing");
+        assert_eq!(domain.epoch_for_tests(), 7, "denied begin consumes no epoch");
+    }
+}
+
+#[test]
+fn finalize_abandon_restores_open_and_admits() {
+    let domain = open_domain();
+    let seal = domain.begin_finalize().expect("begin from Open");
+    seal.enter_finalizing().expect("enter exclusive phase");
+    domain.abandon_finalize(seal);
+    assert_eq!(domain.state_for_tests(), ModuleState::Open);
+    domain.admit_ordinary().expect("restored Open admits again");
+    assert!(domain.epoch_for_tests() > 2, "control transitions always advance the epoch");
+}
+
+#[test]
+fn finalize_ticket_drop_abandons_unsettled_seal() {
+    let domain = open_domain();
+    {
+        let _seal = domain.begin_finalize().expect("begin succeeds");
+        // Dropped without publish: the backstop must restore, never wedge.
+    }
+    assert_eq!(domain.state_for_tests(), ModuleState::Open);
+    domain.admit_ordinary().expect("backstop restores admission");
+}
+
+#[test]
+fn finalize_stale_abandon_is_noop_epoch_mismatch() {
+    // A later control cycle moved the domain past the ticket's epoch: the
+    // stale abandon must not clobber the newer outcome. (Unreachable
+    // without injection — every other begin is denied from a sealed
+    // domain — so the newer cycle is simulated; the guard itself is real.)
+    let domain = open_domain();
+    let seal = domain.begin_finalize().expect("begin succeeds");
+    let seal_epoch = seal.epoch_for_tests();
+    domain.set_state_for_tests(ModuleState::Draining, seal_epoch + 1);
+    domain.abandon_finalize(seal);
+    assert_eq!(domain.state_for_tests(), ModuleState::Draining, "stale abandon is a no-op");
+    assert_eq!(domain.epoch_for_tests(), seal_epoch + 1, "stale abandon consumes nothing");
+}
+
+#[test]
+fn finalize_begin_denied_at_epoch_exhaustion() {
+    let domain = open_domain();
+    domain.set_state_for_tests(ModuleState::Open, u64::MAX);
+    assert_eq!(domain.begin_finalize().unwrap_err(), CkRv::GENERAL_ERROR);
+    assert_eq!(domain.state_for_tests(), ModuleState::Open, "denied begin changes nothing");
+    assert_eq!(domain.epoch_for_tests(), u64::MAX, "denied begin consumes no epoch");
+    domain.admit_ordinary().expect("unmoved Open still admits");
+}
+
+#[test]
+fn finalize_publish_with_purge_runs_purge_and_lands_finalized() {
+    // Purge/publish ordering (I2 mirror): the purge runs exactly once,
+    // inside the publish write section, and the domain lands Finalized.
+    let domain = open_domain();
+    let seal = domain.begin_finalize().expect("begin succeeds");
+    seal.enter_finalizing().expect("enter exclusive phase");
+    let purged = std::sync::atomic::AtomicBool::new(false);
+    domain
+        .publish_finalized_with_purge(seal, || {
+            purged.store(true, std::sync::atomic::Ordering::SeqCst)
+        })
+        .expect("publish succeeds");
+    assert!(purged.load(std::sync::atomic::Ordering::SeqCst), "purge must run");
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
+}
+
+#[test]
+fn finalize_publish_at_exhaustion_skips_purge_fail_closed() {
+    // Exhaustion path: no next identity means no publish and NO purge —
+    // a refused cycle purges nothing; the domain fails closed to Uncertain.
+    let domain = open_domain();
+    domain.set_state_for_tests(ModuleState::Open, u64::MAX - 1);
+    let seal = domain.begin_finalize().expect("begin consumes the last epoch");
+    seal.enter_finalizing().expect("enter exclusive phase");
+    let purged = std::sync::atomic::AtomicBool::new(false);
+    assert_eq!(
+        domain
+            .publish_finalized_with_purge(seal, || purged
+                .store(true, std::sync::atomic::Ordering::SeqCst))
+            .unwrap_err(),
+        CkRv::GENERAL_ERROR
+    );
+    assert!(!purged.load(std::sync::atomic::Ordering::SeqCst), "exhausted publish must not purge");
+    assert_eq!(domain.state_for_tests(), ModuleState::Uncertain);
+    assert_eq!(domain.admit_ordinary().unwrap_err(), CkRv::GENERAL_ERROR);
+}
+
+#[test]
+fn finalize_poisoned_domain_denies_begin_fail_closed() {
+    // Mirror of the Initialize poison pin: only a writer panic poisons;
+    // the sealer denies without touching the provider, and the unsettled
+    // ticket's Drop backstop stays panic-free.
+    let domain = open_domain();
+    let seal = domain.begin_finalize().expect("begin succeeds");
+    std::thread::scope(|scope| {
+        let parked = scope.spawn(|| {
+            domain.hold_write_across_for_tests(|| panic!("intentional LifecycleDomain poison"))
+        });
+        assert!(parked.join().is_err(), "poisoning thread must panic");
+    });
+    assert_eq!(domain.begin_finalize().unwrap_err(), CkRv::GENERAL_ERROR);
+    assert!(seal.enter_finalizing().is_err(), "enter on poison fails closed");
+    drop(seal);
+    assert_eq!(domain.admit_ordinary().unwrap_err(), CkRv::GENERAL_ERROR);
+}

@@ -1617,6 +1617,11 @@ mod tests {
     // mid-call holds its ordinary guard, so control settlement cannot
     // complete until release; it proceeds after. Bounded waits throughout.
     static SIGN_PARK_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
+    // The park gate is process-wide while tests run on parallel threads:
+    // both gate users hold this lock from gate install through worker
+    // join, so neither test can steal (or void) the other's gate
+    // (repo-wide TEST_LOCK convention).
+    static SIGN_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     unsafe extern "C" fn sign_parkable(
         _session: cryptoki_sys::CK_SESSION_HANDLE,
@@ -1663,6 +1668,7 @@ mod tests {
         // ordinary call — it must neither fail fast under contention nor
         // wedge past release. Bounded waits throughout: 200ms of provable
         // block, then prompt completion after release.
+        let _lock = SIGN_TEST_LOCK.lock().unwrap();
         let (backend, _functions) = backend_with_sign_stub();
         unsafe { (*backend.func_list).C_Initialize = Some(initialize_ok) };
         backend.initialize().expect("setup initialize opens the incarnation");
@@ -1700,6 +1706,7 @@ mod tests {
 
     #[test]
     fn parked_sign_blocks_control_until_release() {
+        let _lock = SIGN_TEST_LOCK.lock().unwrap();
         let (backend, _functions) = backend_with_sign_stub();
         backend.lifecycle_domain.open_for_tests();
         // Swap in the parking stub for this test only.

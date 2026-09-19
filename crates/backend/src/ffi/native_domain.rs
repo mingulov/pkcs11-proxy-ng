@@ -31,10 +31,14 @@
 use std::cell::Cell;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::TryLockError;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Instant;
 
 use pkcs11_proxy_ng_types::{CkResult, CkRv};
+
+use super::native_stop::{StopReason, abnormal_stop_native_lifetime, shutdown_grace};
 
 /// Build-time native-FFI qualifier for v0.2: Linux GNU/musl on x86_64 with
 /// 64-bit pointers or x86 with 32-bit pointers, macOS on aarch64 or x86_64
@@ -706,10 +710,6 @@ impl LifecycleTracker {
 // ---------------------------------------------------------------------------
 
 /// Private module states (§"Module lifecycle and native storage").
-#[allow(dead_code)]
-// TF01b-removes: Draining/Finalizing/Finalized gain
-// production constructors with the Finalize seal/drain; until then only
-// test injection builds them, so the non-test build would warn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(in crate::ffi) enum ModuleState {
     /// Freshly loaded, no `C_Initialize` cycle published yet.
@@ -769,6 +769,30 @@ pub(in crate::ffi) struct InitTicket<'a> {
     epoch: u64,
     settled: bool,
 }
+
+/// Detached seal for the Finalize control transition (I3 mirror of
+/// [`InitTicket`]): stamped with the prior state and the epoch observed
+/// under the sealing write acquisition. `enter_finalizing` marks the
+/// exclusive native call in flight; exactly one of
+/// `publish_finalized_with_purge` / `abandon_finalize` settles it; `Drop`
+/// abandons an unsettled ticket, so early returns and panics restore
+/// instead of wedging the domain in a sealed state.
+#[derive(Debug)]
+pub(in crate::ffi) struct FinalizeTicket<'a> {
+    domain: &'a LifecycleDomain,
+    prior: ModuleState,
+    epoch: u64,
+    settled: bool,
+}
+
+/// Arm-1 optimism budget: `try_write` misses before the sealer falls
+/// through to the single blocking acquisition. Each miss is nanoseconds
+/// plus a yield, so this covers only transient contention — the quiet
+/// fast path seals on the first attempt, and sustained contention moves
+/// to arm 2 (queued writer stalls new admissions; the armed shutdown
+/// deadline owns the bound) within about a millisecond instead of
+/// spinning against live traffic the seal has not yet fenced.
+const FINALIZE_SEAL_SPIN_MISSES: u32 = 1_000;
 
 thread_local! {
     /// conc-M2 nesting tripwire: true while an `OrdinaryGuard` is alive on
@@ -891,6 +915,93 @@ impl LifecycleDomain {
     /// epoch mismatch a later control op already moved the domain, so the
     /// stale ticket is a silent no-op. Poison ⇒ no-op (already fail-closed).
     pub(in crate::ffi) fn abandon_initialize(&self, ticket: InitTicket<'_>) {
+        ticket.settle_abandon();
+    }
+
+    /// Start the Finalize control transition (I3 drain-then-seal): the
+    /// sealing write acquisition IS the drain — no in-flight reader
+    /// survives it — and the `Draining` flip under that write is the
+    /// seal. Two arms, exactly per the design block: (1) a `try_write`
+    /// loop for the quiet fast path, each miss re-checking the local
+    /// view of the shutdown deadline (suicide on expiry — the sealer
+    /// never returns failure, never proceeds unsealed; the local check
+    /// also covers a failed controller spawn, which leaves the external
+    /// deadline unenforced); (2) past [`FINALIZE_SEAL_SPIN_MISSES`]
+    /// misses, ONE blocking acquisition under the already-armed
+    /// shutdown deadline (queued writer stalls new admissions, so the
+    /// drain terminates modulo a truly stuck provider; the external arm
+    /// owns the bound). The ticket is detached — write is NOT held
+    /// across the native call; settlement re-acquires short.
+    ///
+    /// Proceeds only from `Open` (an `Initialize` owns the domain from
+    /// `Initializing`; a concurrent Finalize from `Draining`/`Finalizing`;
+    /// there is no live incarnation to seal from `LoadedUninitialized`/
+    /// `Finalized` — the denial RV matches what a compliant provider
+    /// reports there, so out-of-incarnation callers observe no new RV).
+    /// Poison or epoch exhaustion denies fail-closed WITHOUT native
+    /// entry (the provider stays initialized; shutdown still exits).
+    pub(in crate::ffi) fn begin_finalize(&self) -> CkResult<FinalizeTicket<'_>> {
+        let deadline = Instant::now() + shutdown_grace();
+        let mut misses = 0u32;
+        let mut write = loop {
+            match self.inner.try_write() {
+                Ok(write) => break write,
+                Err(TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        // Overrun: process death, never an unsealed return.
+                        abnormal_stop_native_lifetime(StopReason::ShutdownDeadlineExpired);
+                    }
+                    misses += 1;
+                    if misses > FINALIZE_SEAL_SPIN_MISSES {
+                        // Arm 2: one blocking acquisition; the armed
+                        // shutdown deadline bounds it externally.
+                        break self.lock_write()?;
+                    }
+                    std::thread::yield_now();
+                }
+                // Poisoned before the seal: fail closed without sealing
+                // and without native entry (mirrors every poison mapping;
+                // post-poison no reader can exist, so denying the cycle
+                // cannot strand in-flight work).
+                Err(TryLockError::Poisoned(_)) => return Err(CkRv::GENERAL_ERROR),
+            }
+        };
+        match write.state {
+            ModuleState::Open => {
+                let epoch = write.epoch.checked_add(1).ok_or(CkRv::GENERAL_ERROR)?;
+                let prior = write.state;
+                write.epoch = epoch;
+                write.state = ModuleState::Draining;
+                Ok(FinalizeTicket { domain: self, prior, epoch, settled: false })
+            }
+            ModuleState::Uncertain => Err(CkRv::GENERAL_ERROR),
+            _ => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
+        }
+    }
+
+    /// Publish a successful native Finalize, running `purge` INSIDE the
+    /// same write section after the state flips to `Finalized` (purge/
+    /// publish ordering: the I2 mirror — `Finalized` implies purged, so
+    /// no racing re-Initialize cycle can observe the dead incarnation's
+    /// bindings). Same closure contract as
+    /// [`publish_open_with_purge`](Self::publish_open_with_purge): inner
+    /// leaves only, never admit/begin/native. On exhaustion the purge
+    /// does NOT run: fail closed to `Uncertain`, like a refused cycle.
+    pub(in crate::ffi) fn publish_finalized_with_purge(
+        &self,
+        ticket: FinalizeTicket<'_>,
+        purge: impl FnOnce(),
+    ) -> CkResult<()> {
+        ticket.settle_publish(purge)
+    }
+
+    /// Abandon a failed Finalize cycle (best-effort cleanup, no failure
+    /// mode of its own): if the ticket epoch still matches, restore the
+    /// prior stable state (`Open` — begin proceeds only from there) or
+    /// `Uncertain` when the prior was transient. On epoch mismatch a
+    /// later control op already moved the domain, so the stale ticket is
+    /// a silent no-op. Poison ⇒ no-op (already fail-closed).
+    pub(in crate::ffi) fn abandon_finalize(&self, ticket: FinalizeTicket<'_>) {
         ticket.settle_abandon();
     }
 
@@ -1022,6 +1133,93 @@ impl InitTicket<'_> {
 impl Drop for InitTicket<'_> {
     /// Backstop: an unsettled ticket (early return, panic) abandons so the
     /// domain never wedges in `Initializing`. Never panics: poison ⇒ no-op.
+    fn drop(&mut self) {
+        if !self.settled {
+            Self::abandon_raw(self.domain, self.prior, self.epoch);
+        }
+    }
+}
+
+impl FinalizeTicket<'_> {
+    /// Mark the exclusive native call in flight: `Draining` → `Finalizing`
+    /// under one short write, immediately before native entry. Consumes no
+    /// epoch — the flip belongs to the begin cycle, so the ticket epoch
+    /// stays authoritative for abandon. The acquisition is uncontended in
+    /// practice (`Draining` denies every new admission; only microsecond
+    /// denying reads can interleave), so plain blocking matches every
+    /// other control section. Fails closed on poison or an unexpected
+    /// state (unreachable without a concurrent control op, which the
+    /// sealed domain denies — defense in depth).
+    pub(in crate::ffi) fn enter_finalizing(&self) -> CkResult<()> {
+        let mut write = self.domain.lock_write()?;
+        if write.state != ModuleState::Draining {
+            return Err(CkRv::GENERAL_ERROR);
+        }
+        write.state = ModuleState::Finalizing;
+        Ok(())
+    }
+
+    fn settle_publish(mut self, purge: impl FnOnce()) -> CkResult<()> {
+        self.settled = true;
+        let mut write = self.domain.lock_write()?;
+        match write.epoch.checked_add(1) {
+            Some(epoch) => {
+                write.epoch = epoch;
+                write.state = ModuleState::Finalized;
+                // Still under write: the purge is atomic with the
+                // `Finalized` it retires (I2 mirror — see
+                // `InitTicket::settle_publish` for the NLL note).
+                purge();
+                drop(write);
+                Ok(())
+            }
+            None => {
+                // No next identity: fail closed without consuming an epoch
+                // and without purging (a refused cycle purges nothing).
+                write.state = ModuleState::Uncertain;
+                Err(CkRv::GENERAL_ERROR)
+            }
+        }
+    }
+
+    fn settle_abandon(mut self) {
+        self.settled = true;
+        Self::abandon_raw(self.domain, self.prior, self.epoch);
+    }
+
+    fn abandon_raw(domain: &LifecycleDomain, prior: ModuleState, epoch: u64) {
+        let Ok(mut write) = domain.inner.write() else {
+            return;
+        };
+        if write.epoch != epoch {
+            // Stale ticket: a later control op owns the outcome.
+            return;
+        }
+        // The only live ticket at u64::MAX is this one (begin is denied
+        // there), so restoring without a bump is confusion-free; control
+        // frozen from here on, incarnation pinned (a restored `Open` keeps
+        // admitting — only new control cycles are denied).
+        if let Some(next) = write.epoch.checked_add(1) {
+            write.epoch = next;
+        }
+        write.state = match prior {
+            // Transient prior: nothing stable to restore — fail closed.
+            ModuleState::Initializing | ModuleState::Draining | ModuleState::Finalizing => {
+                ModuleState::Uncertain
+            }
+            stable => stable,
+        };
+    }
+
+    #[cfg(test)]
+    pub(in crate::ffi) fn epoch_for_tests(&self) -> u64 {
+        self.epoch
+    }
+}
+
+impl Drop for FinalizeTicket<'_> {
+    /// Backstop: an unsettled ticket (early return, panic) abandons so the
+    /// domain never wedges in a sealed state. Never panics: poison ⇒ no-op.
     fn drop(&mut self) {
         if !self.settled {
             Self::abandon_raw(self.domain, self.prior, self.epoch);
