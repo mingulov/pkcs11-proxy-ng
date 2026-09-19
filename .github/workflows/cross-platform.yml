@@ -90,7 +90,17 @@ jobs:
         run: brew install softhsm
 
       # Windows SoftHSM2 (pinned disig portable zip, hash-verified) is
-      # fetched by the compare script itself -- no runner setup needed.
+      # fetched by the compare script itself -- but its DLLs link the MSVC
+      # 2015-2022 x64 runtime, which the runner image does not register
+      # (without it every module load dies with 0x7E; win-ctr documents
+      # the same requirement). 3010 (reboot required) still means the
+      # runtime installed, so it passes too.
+      - name: Install MSVC x64 runtime (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/vc_redist.x64.exe" https://aka.ms/vs/17/release/vc_redist.x64.exe
+          "$RUNNER_TEMP/vc_redist.x64.exe" /quiet /norestart || [ $? -eq 3010 ]
+        shell: bash
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v5
@@ -186,6 +196,14 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x86
+
+      # x86 runtime for the WOW64 test binaries (same 0x7E class as the
+      # x64 leg; the stub DLL itself is /MT-static and needs none).
+      - name: Install MSVC x86 runtime
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/vc_redist.x86.exe" https://aka.ms/vs/17/release/vc_redist.x86.exe
+          "$RUNNER_TEMP/vc_redist.x86.exe" /quiet /norestart || [ $? -eq 3010 ]
+        shell: bash
 
       # Minimal 32-bit C stub provider (see tests/win32-stub/): /std:c11
       # for _Static_assert (rejected in cl's default legacy-C mode), /MT
