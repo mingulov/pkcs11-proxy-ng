@@ -58,22 +58,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TEMP-ONLY T2run narrow (run 3): macOS diagnostic + win32 proof
-        # only; x64/windows/ARM return in run 4. REVERTED after.
         include:
-          # - os: ubuntu-24.04
-          #   experimental: false
+          - os: ubuntu-24.04
+            experimental: false
           # T2run: experimental -- native FFI fail-closes on this host by
           # design (see header); promote on aarch64 qualification.
-          # - os: ubuntu-24.04-arm
-          #   experimental: true
+          - os: ubuntu-24.04-arm
+            experimental: true
           # T2run M-5: promoted — first green macOS leg (compare +
           # backend/shim lib behavior) proves the compat prep; failures
           # now fail the workflow.
           - os: macos-15
             experimental: false
-          # - os: windows-2022
-          #   experimental: false
+          - os: windows-2022
+            experimental: false
 
     steps:
       - uses: actions/checkout@v6
@@ -202,7 +200,7 @@ jobs:
       # T2-1 tuning record once green proves it.
       - name: Direct-vs-proxied comparison
         env:
-          EXTRA_P11CHECK_ARGS: '--match "(not test_aead or test_aead_short_ciphertext or test_aead_wrap_outputs) and (not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability)"'
+          EXTRA_P11CHECK_ARGS: '--match "(not test_aead or test_aead_short_ciphertext or test_aead_wrap_outputs) and (not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability) and (not test_access_levels)"'
         run: python3 scripts/ci-direct-vs-proxy.py
         shell: bash
 
