@@ -1621,6 +1621,28 @@ mod slot_wait_tests {
         }
     }
 
+    /// TO26b group 2: the gRPC policy follow-up (`get_token_info`) on a
+    /// sealed domain is refused at admission with zero native attempts —
+    /// no policy query crosses the seal. The fixture installs no
+    /// `C_GetTokenInfo` stub, so any post-admission path would answer
+    /// NOT_SUPPORTED; observing NOT_INIT proves admission refused first.
+    /// (The handler maps this refusal to local NOT_INITIALIZED.)
+    #[test]
+    fn slot_wait_policy_query_after_seal_makes_no_native_attempt() {
+        use crate::ffi::native_domain::ModuleState::*;
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait();
+        for state in [Draining, Finalizing, Finalized, Initializing, LoadedUninitialized] {
+            backend.lifecycle_domain.set_state_for_tests(state, 3);
+            assert_eq!(
+                backend.ffi_get_token_info(CkSlotId(0)).unwrap_err(),
+                CkRv::CRYPTOKI_NOT_INITIALIZED,
+                "sealed {state:?} must refuse the policy query at admission"
+            );
+        }
+    }
+
     /// TO26b group 2: no native wait overlaps native Finalize — a Finalize
     /// racing an in-flight gated wait drains (it cannot overtake), the
     /// waiter settles first, and exactly one native call of each ran.
