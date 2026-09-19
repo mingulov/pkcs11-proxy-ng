@@ -244,6 +244,7 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
         lifecycle_domain: Default::default(),
+        session_fences: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
     for (present, missing) in [(true, false), (false, false), (true, true), (false, true)] {
@@ -320,6 +321,7 @@ fn exact_parameter_error_preserves_only_defined_initialized_effects() {
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
         lifecycle_domain: Default::default(),
+        session_fences: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
@@ -409,6 +411,7 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
         lifecycle_domain: Default::default(),
+        session_fences: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {

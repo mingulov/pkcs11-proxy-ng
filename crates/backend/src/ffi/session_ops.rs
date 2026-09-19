@@ -108,6 +108,7 @@ impl FfiBackend {
             None => (std::ptr::null_mut(), 0),
         };
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(&admission, unsafe { (*self.func_list).C_InitPIN }, |function| unsafe {
             function(h_session, pin_ptr, pin_len)
         })
@@ -129,6 +130,7 @@ impl FfiBackend {
             None => (std::ptr::null_mut(), 0),
         };
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(&admission, unsafe { (*self.func_list).C_SetPIN }, |function| unsafe {
             function(h_session, old_ptr, old_len, new_ptr, new_len)
         })
@@ -162,9 +164,9 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_close_session(&self, session: CkSessionHandle) -> CkResult<()> {
-        // TF01b re-homes closes under session fences; until then ordinary
-        // admission holds read exclusion across the native close and the
-        // settlement (cache eviction) below.
+        // Session-fenced close (TF01b/I4): ordinary admission plus close
+        // ownership of S's fence, excluding in-flight ops on S across the
+        // native close and the settlement (cache eviction) below.
         let admission = self.lifecycle_domain.admit_ordinary()?;
         // Enter with owners live: retire the family's retained graphs and the
         // slot mapping only after the native close proves terminal cleanup
@@ -173,42 +175,75 @@ impl FfiBackend {
         // remains usable; the open count likewise stays high (fail-closed
         // toward slot poisoning on Drop).
         let h_session = Self::session_handle(session)?;
-        Self::call_unit(
+        // Nothing fallible between fence entry and settlement: both outcome
+        // arms settle the fence explicitly (commit on success, reopen on
+        // failure — including `FUNCTION_NOT_SUPPORTED` for a missing entry
+        // point, which likewise proves nothing about the session).
+        let close_fence = self.session_fences.enter_write(&admission, session)?;
+        let outcome = Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_CloseSession },
             |function| unsafe { function(h_session) },
-        )?;
-        self.drop_mech_cache_session(session);
-        self.forget_session_slot(session);
-        // Count only provider-confirmed closes.
-        self.lifecycle.note_sessions_closed(1);
-        Ok(())
+        );
+        match outcome {
+            Ok(()) => {
+                self.session_fences.commit_close(&close_fence);
+                self.drop_mech_cache_session(session);
+                self.forget_session_slot(session);
+                // Count only provider-confirmed closes.
+                self.lifecycle.note_sessions_closed(1);
+                Ok(())
+            }
+            Err(rv) => {
+                self.session_fences.reopen(&close_fence);
+                Err(rv)
+            }
+        }
     }
 
     pub(super) fn ffi_close_all_sessions(&self, slot_id: CkSlotId) -> CkResult<()> {
-        // TF01b re-homes closes under session fences; until then ordinary
-        // admission (see `ffi_close_session`).
+        // Session-fenced close-all (TF01b/I4): close ownership over every
+        // known session on the slot in ascending handle order (enforced
+        // inside `enter_write_all`), excluding their in-flight ops across
+        // the one native call and the per-slot settlement below.
         let admission = self.lifecycle_domain.admit_ordinary()?;
-        let known_open =
-            self.slot_sessions.get(&slot_id.0).map(|sessions| sessions.len()).unwrap_or(0);
+        let known: Vec<u64> = self
+            .slot_sessions
+            .get(&slot_id.0)
+            .map(|sessions| sessions.iter().copied().collect())
+            .unwrap_or_default();
+        let known_open = known.len();
         // Keep all target-slot owners through the one native call and clear
         // only after CKR_OK (C3M.4). A failed close preserves target-slot
         // ownership/index, and other slots remain untouched either way.
         let h_slot = Self::slot_id(slot_id)?;
-        Self::call_unit(
+        // Nothing fallible between fence entry and settlement (see
+        // `ffi_close_session`).
+        let close_fences = self.session_fences.enter_write_all(&admission, &known);
+        let outcome = Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_CloseAllSessions },
             |function| unsafe { function(h_slot) },
-        )?;
-        self.drop_mech_cache_for_slot(slot_id);
-        self.lifecycle.note_sessions_closed(known_open);
-        Ok(())
+        );
+        match outcome {
+            Ok(()) => {
+                self.session_fences.commit_close_all(&close_fences);
+                self.drop_mech_cache_for_slot(slot_id);
+                self.lifecycle.note_sessions_closed(known_open);
+                Ok(())
+            }
+            Err(rv) => {
+                self.session_fences.reopen_all(&close_fences);
+                Err(rv)
+            }
+        }
     }
 
     pub(super) fn ffi_get_session_info(&self, session: CkSessionHandle) -> CkResult<CkSessionInfo> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let mut info = cryptoki_sys::CK_SESSION_INFO::default();
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_GetSessionInfo },
@@ -229,6 +264,7 @@ impl FfiBackend {
             None => (std::ptr::null_mut(), 0),
         };
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(&admission, unsafe { (*self.func_list).C_Login }, |function| unsafe {
             function(h_session, user_type as cryptoki_sys::CK_USER_TYPE, pin_ptr, pin_len)
         })
@@ -237,6 +273,7 @@ impl FfiBackend {
     pub(super) fn ffi_logout(&self, session: CkSessionHandle) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(&admission, unsafe { (*self.func_list).C_Logout }, |function| unsafe {
             function(h_session)
         })
@@ -245,6 +282,7 @@ impl FfiBackend {
     pub(super) fn ffi_get_function_status(&self, session: CkSessionHandle) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_GetFunctionStatus },
@@ -255,6 +293,7 @@ impl FfiBackend {
     pub(super) fn ffi_cancel_function(&self, session: CkSessionHandle) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_CancelFunction },
@@ -308,6 +347,7 @@ mod tests {
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
             lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
@@ -361,6 +401,7 @@ mod tests {
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
             lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
@@ -444,6 +485,7 @@ mod tests {
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
             lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
@@ -500,6 +542,7 @@ mod tests {
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
             lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
@@ -555,6 +598,7 @@ mod tests {
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
             lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
@@ -687,6 +731,200 @@ mod tests {
             }
             None => cryptoki_sys::CKR_FUNCTION_FAILED,
         }
+    }
+
+    // Session-fence integration (TF01b/I4): close-vs-op exclusion, fail-fast
+    // entrants during a close, and reopen-after-failed-close.
+    static FENCE_INFO_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static FENCE_CLOSE_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    static FENCE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn fence_session_info_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        info: cryptoki_sys::CK_SESSION_INFO_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        FENCE_INFO_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !info.is_null() {
+            unsafe { *info = cryptoki_sys::CK_SESSION_INFO::default() };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn fence_close_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        FENCE_CLOSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_fence_stubs() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_GetSessionInfo = Some(fence_session_info_ok);
+        functions.C_CloseSession = Some(fence_close_ok);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        backend.lifecycle_domain.open_for_tests();
+        (backend, functions)
+    }
+
+    static FENCE_INFO_PARK_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> =
+        Mutex::new(None);
+
+    unsafe extern "C" fn fence_session_info_parkable(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        info: cryptoki_sys::CK_SESSION_INFO_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        FENCE_INFO_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let gate = FENCE_INFO_PARK_GATE.lock().unwrap().take();
+        match gate {
+            Some((entered, release)) => {
+                let _ = entered.send(());
+                match release.recv_timeout(Duration::from_secs(10)) {
+                    Ok(()) => {
+                        if !info.is_null() {
+                            unsafe { *info = cryptoki_sys::CK_SESSION_INFO::default() };
+                        }
+                        cryptoki_sys::CKR_OK
+                    }
+                    // Test bug (release never came): fail loudly, never hang.
+                    Err(_) => cryptoki_sys::CKR_FUNCTION_FAILED,
+                }
+            }
+            None => cryptoki_sys::CKR_FUNCTION_FAILED,
+        }
+    }
+
+    static FENCE_CLOSE_PARK_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> =
+        Mutex::new(None);
+
+    unsafe extern "C" fn fence_close_parkable(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        FENCE_CLOSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let gate = FENCE_CLOSE_PARK_GATE.lock().unwrap().take();
+        match gate {
+            Some((entered, release)) => {
+                let _ = entered.send(());
+                match release.recv_timeout(Duration::from_secs(10)) {
+                    Ok(()) => cryptoki_sys::CKR_OK,
+                    // Test bug (release never came): fail loudly, never hang.
+                    Err(_) => cryptoki_sys::CKR_FUNCTION_FAILED,
+                }
+            }
+            None => cryptoki_sys::CKR_FUNCTION_FAILED,
+        }
+    }
+
+    #[test]
+    fn parked_session_op_blocks_close_until_release() {
+        // I4 close-vs-op exclusion: a parked op on S holds S's fence, so
+        // close(S) cannot settle until release; it proceeds after.
+        let _serial = FENCE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (backend, _functions) = backend_with_fence_stubs();
+        unsafe { (*backend.func_list).C_GetSessionInfo = Some(fence_session_info_parkable) };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *FENCE_INFO_PARK_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| backend.ffi_get_session_info(CkSessionHandle(7)));
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker parks inside the stub holding op + fence");
+            scope.spawn(|| {
+                done_tx
+                    .send(backend.ffi_close_session(CkSessionHandle(7)))
+                    .expect("report close outcome");
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "close must not settle while an op on the session is parked"
+            );
+            release_tx.send(()).expect("release the parked op");
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("close proceeds after release")
+                .expect("close succeeds");
+            worker.join().expect("worker joins").expect("parked op succeeds");
+        });
+    }
+
+    #[test]
+    fn op_during_close_fails_fast_without_native_entry() {
+        // I4 fail-fast entrants: an op arriving while close(S) owns the fence
+        // is refused without native entry; the close itself proceeds.
+        let _serial = FENCE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        FENCE_INFO_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let (backend, _functions) = backend_with_fence_stubs();
+        unsafe { (*backend.func_list).C_CloseSession = Some(fence_close_parkable) };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *FENCE_CLOSE_PARK_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                done_tx
+                    .send(backend.ffi_close_session(CkSessionHandle(7)))
+                    .expect("report close outcome");
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("closer parks inside the close stub holding the fence");
+            assert_eq!(
+                backend.ffi_get_session_info(CkSessionHandle(7)).unwrap_err(),
+                CkRv::SESSION_HANDLE_INVALID,
+                "op during close fails fast"
+            );
+            assert_eq!(
+                FENCE_INFO_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "failed-fast op must not reach the provider"
+            );
+            release_tx.send(()).expect("release the parked close");
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("close proceeds after release")
+                .expect("close succeeds");
+        });
+    }
+
+    #[test]
+    fn failed_close_reopens_session_usable() {
+        // A failed close proves nothing: the fence reopens and the session
+        // stays live and fenced.
+        let _serial = FENCE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (backend, _functions) = backend_with_fence_stubs();
+        unsafe { (*backend.func_list).C_CloseSession = Some(close_session_fails) };
+        assert_eq!(
+            backend.ffi_close_session(CkSessionHandle(7)).unwrap_err(),
+            CkRv::FUNCTION_FAILED
+        );
+        backend
+            .ffi_get_session_info(CkSessionHandle(7))
+            .expect("session usable after failed close");
+        // And a later close still goes through (fence healthy, entry live).
+        unsafe { (*backend.func_list).C_CloseSession = Some(fence_close_ok) };
+        backend.ffi_close_session(CkSessionHandle(7)).expect("close succeeds after reopen");
     }
 
     #[test]

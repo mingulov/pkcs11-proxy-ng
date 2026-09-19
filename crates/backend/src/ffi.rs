@@ -47,6 +47,8 @@ mod native_stop_tests;
 mod object_ops;
 #[path = "ffi/session_3x_ops.rs"]
 mod session_3x_ops;
+#[path = "ffi/session_fence.rs"]
+mod session_fence;
 #[path = "ffi/session_ops.rs"]
 mod session_ops;
 #[path = "ffi/verify_signature_ops.rs"]
@@ -244,6 +246,9 @@ pub struct FfiBackend {
     /// (TF01a). Starts `LoadedUninitialized`; the first successful
     /// `C_Initialize` publishes `Open`, which admits ordinary work.
     lifecycle_domain: native_domain::LifecycleDomain,
+    /// Per-session generation fences (TF01b/I4): every session-bearing
+    /// ordinary path enters its fence under its admission; closes mark.
+    session_fences: session_fence::SessionFenceTable,
     /// Last-field retirement sentinel (C3M step 7). MUST stay the last
     /// field: field drops run in declaration order, so its `Drop`
     /// publishes the next `Vacant` only after every other field —
@@ -1821,6 +1826,7 @@ mod tests {
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
             lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };

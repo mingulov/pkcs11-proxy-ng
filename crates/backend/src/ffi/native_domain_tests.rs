@@ -346,6 +346,7 @@ fn native_domain_global_serial_release_drop_recycles_after_full_retirement() {
             construction: permit,
             lifecycle: Default::default(),
             lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
         };
         drop(backend);
     }

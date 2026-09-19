@@ -750,9 +750,8 @@ pub(in crate::ffi) struct LifecycleDomain {
 #[derive(Debug)]
 pub(in crate::ffi) struct OrdinaryGuard<'a> {
     _read: RwLockReadGuard<'a, LifecycleInner>,
-    // TF01b-removes: TF01b session fences correlate on guard epochs; until
-    // then only tests read the stamp, so the non-test build would warn.
-    #[allow(dead_code)]
+    // Read by the session-fence correlation (TF01b): closes record the
+    // closing epoch as the fence's terminal state.
     epoch: u64,
     _confine: PhantomData<*const ()>,
 }
@@ -925,6 +924,13 @@ impl LifecycleDomain {
 }
 
 impl OrdinaryGuard<'_> {
+    /// The domain epoch stamped at the admission that sealed it. Session
+    /// fences correlate on it (close-ownership records the closing epoch);
+    /// valid only while the guard is alive (it pins the epoch).
+    pub(in crate::ffi) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     #[cfg(test)]
     pub(in crate::ffi) fn epoch_for_tests(&self) -> u64 {
         self.epoch

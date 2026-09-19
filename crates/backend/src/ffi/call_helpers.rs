@@ -480,11 +480,14 @@ impl FfiBackend {
     /// released even when the caller doesn't close sessions individually first.
     /// Also used when a successful `C_Initialize` opens a new incarnation:
     /// bindings cached under the dead generation must not survive it.
+    /// Session fences clear with the same purge (no guard — hence no fence
+    /// holder — can exist under the publish write that runs this).
     pub(super) fn drop_all_mech_cache(&self) {
         self.mech_cache.clear();
         self.last_init_family.clear();
         self.session_slot_map.clear();
         self.slot_sessions.clear();
+        self.session_fences.clear();
     }
 
     /// Read one family's retained `output_params()`. Returns None when the

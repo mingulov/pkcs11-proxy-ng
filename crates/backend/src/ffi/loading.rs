@@ -149,6 +149,7 @@ impl FfiBackend {
             construction: permit,
             lifecycle: super::native_domain::LifecycleTracker::default(),
             lifecycle_domain: super::native_domain::LifecycleDomain::new(),
+            session_fences: super::session_fence::SessionFenceTable::default(),
         })
     }
 

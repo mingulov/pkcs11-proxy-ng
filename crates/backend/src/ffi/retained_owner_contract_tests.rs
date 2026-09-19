@@ -41,6 +41,7 @@ fn backend_with_oracle_provider() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_
         construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
         lifecycle_domain: Default::default(),
+        session_fences: Default::default(),
         retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
     };
     (backend, functions)
