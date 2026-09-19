@@ -180,6 +180,20 @@ impl FfiBackend {
         // failure — including `FUNCTION_NOT_SUPPORTED` for a missing entry
         // point, which likewise proves nothing about the session).
         let close_fence = self.session_fences.enter_write(&admission, session)?;
+        // Hook-gated fault injection (TO26b group 3; compiled out of
+        // normal builds): an armed injector fails this close WITHOUT
+        // native entry, settling the fence exactly like a native close
+        // failure (reopen — owners, marker and mapping kept, session
+        // remains usable). FUNCTION_FAILED is the codebase's transient
+        // close failure (server keeps the mapping for retry; the shim
+        // keeps authoritative state), mirroring the mock's
+        // `inject_close_error` precedent. One-shot; the control plane
+        // arms it per close.
+        #[cfg(feature = "native-owner-test-hooks")]
+        if crate::test_hooks::take_fail_next_close() {
+            self.session_fences.reopen(&close_fence);
+            return Err(CkRv::FUNCTION_FAILED);
+        }
         let outcome = Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_CloseSession },
@@ -362,6 +376,41 @@ mod tests {
         backend.mech_cache.insert((session.0, OperationFamily::Sign), ffi_mechanism);
         backend.last_init_family.insert(session.0, OperationFamily::Sign);
         backend.remember_session_slot(session, slot);
+    }
+
+    #[cfg(feature = "native-owner-test-hooks")]
+    static INJECTED_CLOSE_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    #[cfg(feature = "native-owner-test-hooks")]
+    unsafe extern "C" fn close_session_counting_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        INJECTED_CLOSE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    /// TO26b group 3: the armed close injector fails WITHOUT native entry
+    /// and settles like a native failure (owners kept); one-shot — the
+    /// next close reaches native and succeeds. Hook builds only.
+    #[test]
+    #[cfg(feature = "native-owner-test-hooks")]
+    fn hook_injected_close_failure_skips_native_and_keeps_owners() {
+        use std::sync::atomic::Ordering;
+        INJECTED_CLOSE_CALLS.store(0, Ordering::SeqCst);
+        crate::test_hooks::set_fail_next_close(false);
+        let (backend, _functions) = backend_with_close(Some(close_session_counting_ok));
+        let session = CkSessionHandle(21);
+        seed_sign_slot(&backend, session, CkSlotId(11));
+
+        crate::test_hooks::set_fail_next_close(true);
+        assert_eq!(backend.ffi_close_session(session).unwrap_err(), CkRv::FUNCTION_FAILED);
+        assert_eq!(INJECTED_CLOSE_CALLS.load(Ordering::SeqCst), 0, "no native entry");
+        assert!(backend.mech_cache.contains_key(&(session.0, OperationFamily::Sign)));
+        assert_eq!(backend.session_slot_map.get(&session.0).as_deref(), Some(&11));
+
+        assert!(backend.ffi_close_session(session).is_ok(), "one-shot: next close proceeds");
+        assert_eq!(INJECTED_CLOSE_CALLS.load(Ordering::SeqCst), 1);
     }
 
     #[test]

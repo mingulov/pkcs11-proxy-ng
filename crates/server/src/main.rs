@@ -422,6 +422,12 @@ fn main() -> Result<(), BoxError> {
 
     let config = config::DaemonConfig::load(&args.config)?;
     validate_runtime_listener_support(&config)?;
+    // Hook-gated control plane (C3M.6 row 18): fail closed BEFORE backend
+    // load. Validating after the load (TO26b negative-leg finding) drops
+    // a live backend on the error path, so the final-owner guard
+    // stop-fires 70 and swallows this message; refusing here exits 1 with
+    // the message intact and never touches provider code.
+    server::validate_test_hooks_config(&config).map_err(std::io::Error::other)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -474,9 +480,8 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         tracing::info!(path = %sock.display(), "resilience metrics endpoint bound");
     }
 
-    // Hook-gated control plane (C3M.6 row 18): fail closed when configured
-    // without a hook-enabled build, otherwise bind the control socket.
-    server::validate_test_hooks_config(&config).map_err(std::io::Error::other)?;
+    // Hook-gated control plane (C3M.6 row 18): the fail-closed check ran
+    // in `main` before backend load; bind the control socket here.
     #[cfg(feature = "native-owner-test-hooks")]
     if let Some(ref sock) = config.test_hooks.control_socket {
         server::control::spawn_control_endpoint(sock.clone())
