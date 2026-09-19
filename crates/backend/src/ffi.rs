@@ -22,6 +22,9 @@ mod interface_caps;
 mod kem_ops;
 #[path = "ffi/key_state_ops.rs"]
 mod key_state_ops;
+#[cfg(test)]
+#[path = "ffi/lifecycle_domain_tests.rs"]
+mod lifecycle_domain_tests;
 #[path = "ffi/loading.rs"]
 mod loading;
 #[path = "ffi/mapping.rs"]
@@ -237,6 +240,10 @@ pub struct FfiBackend {
     /// Locally observed init/finalize/session lifecycle driving the honest
     /// retirement decision in `Drop` (C3M.4).
     lifecycle: native_domain::LifecycleTracker,
+    /// F-01 lifecycle domain: module state machine + ordinary admission
+    /// (TF01a). Starts `LoadedUninitialized`; the first successful
+    /// `C_Initialize` publishes `Open`, which admits ordinary work.
+    lifecycle_domain: native_domain::LifecycleDomain,
     /// Last-field retirement sentinel (C3M step 7). MUST stay the last
     /// field: field drops run in declaration order, so its `Drop`
     /// publishes the next `Vacant` only after every other field —
@@ -308,13 +315,26 @@ impl Pkcs11Backend for FfiBackend {
         // provider and records nothing — not even the attempt marker — so
         // the retained-session evidence stays intact.
         self.lifecycle.check_reinitialize().map_err(lifecycle_refusal_rv)?;
+        // F-01 control transition (TF01a): short write entering
+        // `Initializing`. Never holds read (this path admits nothing), and
+        // the ticket is detached — the write is not held across the native
+        // call below, so in-flight ordinary work cannot wedge Initialize.
+        let init_control = self.lifecycle_domain.begin_initialize()?;
         // Fail-closed attempt marker BEFORE native entry (C3M steps 4-5):
         // a failed `C_Initialize` ran provider code, so the reservation
         // must poison instead of recycling.
         self.lifecycle.note_init_attempted();
-        Self::call_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
-            function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
-        })?;
+        let outcome =
+            Self::call_unit(unsafe { (*self.func_list).C_Initialize }, |function| unsafe {
+                function(&mut args as *mut _ as cryptoki_sys::CK_VOID_PTR)
+            });
+        if outcome.is_err() {
+            // Native failure restores the prior domain state (behavior
+            // parity: a failed re-Initialize leaves a live incarnation
+            // usable, exactly as before the domain existed).
+            self.lifecycle_domain.abandon_initialize(init_control);
+            return outcome;
+        }
         // A new initialization cycle starts a clean incarnation (C3M.4/row
         // 10): session bindings cached under a dead generation must not
         // survive, or a reused numeric handle would alias stale owners.
@@ -322,8 +342,13 @@ impl Pkcs11Backend for FfiBackend {
         let generation_before = self.lifecycle.current_generation();
         // Checked record: the residual refusal (a Finalize failed, or the
         // last generation was claimed, after the gate passed) propagates
-        // before the purge, so a refused cycle purges nothing.
+        // before the purge, so a refused cycle purges nothing. (The `?`
+        // also drops the control ticket, abandoning the domain transition.)
         self.lifecycle.note_initialized().map_err(lifecycle_refusal_rv)?;
+        // Publish `Open`: ordinary work admits from here on. Failure here
+        // (poison/epoch exhaustion — practically unreachable) fails closed
+        // without purging, like a refused cycle.
+        self.lifecycle_domain.publish_open(init_control)?;
         if self.lifecycle.current_generation() != generation_before {
             self.drop_all_mech_cache();
         }
@@ -1780,6 +1805,7 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };

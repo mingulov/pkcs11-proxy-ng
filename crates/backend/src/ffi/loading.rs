@@ -148,6 +148,7 @@ impl FfiBackend {
             retirement_sentinel: super::native_domain::RetirementSentinel::for_permit(&permit),
             construction: permit,
             lifecycle: super::native_domain::LifecycleTracker::default(),
+            lifecycle_domain: super::native_domain::LifecycleDomain::new(),
         })
     }
 

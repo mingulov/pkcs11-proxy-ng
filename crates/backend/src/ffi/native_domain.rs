@@ -15,8 +15,11 @@
 //! then, post-`dlopen` load failures poison the slot instead of recycling it.
 
 use std::fmt;
-use std::sync::Mutex;
+use std::marker::PhantomData;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+use pkcs11_proxy_ng_types::{CkResult, CkRv};
 
 /// Build-time native-FFI qualifier for v0.2: Linux GNU/musl on x86_64 with
 /// 64-bit pointers or x86 with 32-bit pointers, macOS on aarch64 or x86_64
@@ -555,6 +558,305 @@ impl LifecycleTracker {
         let never_exposed = !self.init_attempted.load(SeqCst) && !self.initialized.load(SeqCst);
         let quiescent = never_exposed || self.finalized_ok.load(SeqCst);
         if quiescent && self.open_sessions.load(SeqCst) == 0 { Release } else { Poison }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LifecycleDomain: F-01 lifecycle read exclusion (TF01a core).
+//
+// Every admitted ordinary invocation holds lifecycle read exclusion through
+// actual native return, validation and settlement. Admission is checked
+// under the read acquisition that seals it, and the proof is threaded
+// through the `Self::call_*` choke family as `&OrdinaryGuard` (B2 shape),
+// so every native entry proves admission at COMPILE TIME — never advisory.
+//
+// Whole-subsystem lock order (TF01a + TF01b; reviewed design TF01b follows):
+//   lifecycle-domain RwLock (outer) -> DashMap shard locks (inner, leaf).
+// Ordinary guards are held across unbounded provider calls — the first
+// lock ever held there — so everything taken under a guard must be a
+// short leaf: DashMap shard ops qualify (per-op, never held across native
+// calls themselves). The order is never inverted: eviction helpers take
+// no lifecycle lock in TF01a (TF01b session fences stay leaf-scoped), and
+// the constructor-registry mutex is never acquired under lifecycle.
+// TF01a control sections (begin/publish/abandon) are SHORT write holds
+// that never span a native call, so ordinary traffic cannot wedge
+// Initialize. TF01b's Finalize seal is the one deliberate exception: it
+// holds write across a BOUNDED drain (existing `native_stop` overrun path),
+// and the drain terminates because in-flight readers only ever take short
+// shard leaves — modulo a truly stuck provider, which the bound covers.
+//
+// Re-entrancy (load-bearing with `std` locks): a thread holding read that
+// takes write deadlocks, as does nested read behind a waiting writer. So:
+// ordinary paths admit EXACTLY ONCE at the `ffi_*` boundary and thread
+// `&OrdinaryGuard` down — helpers take the guard as a parameter and never
+// re-admit; control paths (Initialize/Finalize) NEVER admit (audited — the
+// `call_control_*` chokes take no guard, and no control path calls
+// `admit_ordinary`). While an `OrdinaryGuard` is alive on a thread, that
+// thread must not call any domain method that acquires the lock.
+//
+// Poison policy: `std::sync::RwLock` poison is sticky and maps to
+// fail-closed denial everywhere (precedent: `DomainError::MutexPoisoned`
+// denies new loads until restart). Only a WRITER panic poisons (`std`
+// semantics: panicking readers never poison — a settlement bug unwinds
+// through the guard and releases read WITHOUT wedging the domain).
+// Short control sections contain no user code, so write-side poison
+// needs a panic inside the section itself (practically unreachable);
+// the mapping is defense-in-depth. `Drop` paths ignore poison instead
+// of panicking.
+//
+// Epoch: monotonic under the write lock, stamped into every guard and
+// control ticket at the acquisition that seals it. `abandon_initialize`
+// verifies the ticket epoch: a mismatch means a later control op already
+// moved the domain, so the stale ticket is a no-op (the later op owns the
+// outcome). TF01b session fences correlate on guard epochs.
+//
+// TF01a partial scope (clause NOT satisfied): the domain, admission and
+// the Initialize-side control transitions are live; B2 threading covers
+// `call_bytes` (read path) and `call_unit` + `call_control_unit` (control
+// split) only. TF01b remainder: remaining choke families, Finalize
+// seal/drain (`Draining`/`Finalizing`/`Finalized` production transitions),
+// session fences, `Drop` integration, ownership-doc flip, CHANGELOG.
+// ---------------------------------------------------------------------------
+
+/// Private module states (§"Module lifecycle and native storage").
+#[allow(dead_code)]
+// TF01b-removes: Draining/Finalizing/Finalized gain
+// production constructors with the Finalize seal/drain; until then only
+// test injection builds them, so the non-test build would warn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(in crate::ffi) enum ModuleState {
+    /// Freshly loaded, no `C_Initialize` cycle published yet.
+    #[default]
+    LoadedUninitialized,
+    /// A control thread is inside the Initialize transition; ordinary
+    /// admission is denied until it publishes or abandons.
+    Initializing,
+    /// The only state that admits ordinary work.
+    Open,
+    /// TF01b: Finalize sealed admission and is draining in-flight guards.
+    Draining,
+    /// TF01b: drained; the exclusive Finalize native call is in flight.
+    Finalizing,
+    /// TF01b: cleanly finalized; ordinary work denied until re-Initialize.
+    Finalized,
+    /// Provider state unknown (concurrent-control collision at abandon, or
+    /// epoch exhaustion); fail-closed until a later control cycle heals it.
+    Uncertain,
+}
+
+#[derive(Debug, Default)]
+struct LifecycleInner {
+    state: ModuleState,
+    epoch: u64,
+}
+
+/// F-01 lifecycle domain: module state machine + admission control.
+#[derive(Debug, Default)]
+pub(in crate::ffi) struct LifecycleDomain {
+    inner: RwLock<LifecycleInner>,
+}
+
+/// Proof of ordinary admission: holds lifecycle read exclusion. Dropping
+/// the guard ends settlement. `!Send + !Sync` via the raw-pointer marker:
+/// the guarded native call, validation and settlement all stay on the
+/// admitting thread (FIX-D §5 item 1: explicitly mapped confinement).
+#[derive(Debug)]
+pub(in crate::ffi) struct OrdinaryGuard<'a> {
+    _read: RwLockReadGuard<'a, LifecycleInner>,
+    // TF01b-removes: TF01b session fences correlate on guard epochs; until
+    // then only tests read the stamp, so the non-test build would warn.
+    #[allow(dead_code)]
+    epoch: u64,
+    _confine: PhantomData<*const ()>,
+}
+
+/// Outstanding Initialize control attempt: detached ticket (no lock held)
+/// stamped with the prior state and the epoch observed under the write
+/// acquisition that sealed `begin_initialize`. Exactly one of
+/// `publish_open` / `abandon_initialize` settles it; `Drop` abandons an
+/// unsettled ticket, so early returns and panics restore instead of
+/// wedging the domain in `Initializing`.
+#[derive(Debug)]
+pub(in crate::ffi) struct InitTicket<'a> {
+    domain: &'a LifecycleDomain,
+    prior: ModuleState,
+    epoch: u64,
+    settled: bool,
+}
+
+impl LifecycleDomain {
+    /// Fresh domain: `LoadedUninitialized` at epoch 0. Ordinary work is
+    /// denied until the first `C_Initialize` publishes `Open`.
+    pub(in crate::ffi) fn new() -> Self {
+        Self {
+            inner: RwLock::new(LifecycleInner {
+                state: ModuleState::LoadedUninitialized,
+                epoch: 0,
+            }),
+        }
+    }
+
+    /// Admit one ordinary invocation, checking state+epoch under the read
+    /// acquisition that seals them. The returned guard holds read
+    /// exclusion across native return, validation and settlement; it must
+    /// stay alive until the `ffi_*` boundary returns.
+    ///
+    /// Denial map (local refusals, no provider contact):
+    /// - poisoned lock ⇒ `GENERAL_ERROR` (fail-closed);
+    /// - `Open` ⇒ admitted;
+    /// - `Uncertain` ⇒ `GENERAL_ERROR` (unknown provider state);
+    /// - any other state ⇒ `CRYPTOKI_NOT_INITIALIZED` (matches what a
+    ///   compliant provider reports for ordinary calls outside a live
+    ///   incarnation, so pre-Initialize callers observe no new RV).
+    #[allow(dead_code)] // TF01a-step: wired by the choke-threading commit.
+    pub(in crate::ffi) fn admit_ordinary(&self) -> CkResult<OrdinaryGuard<'_>> {
+        let read = self.inner.read().map_err(|_| CkRv::GENERAL_ERROR)?;
+        let (state, epoch) = (read.state, read.epoch);
+        match state {
+            ModuleState::Open => Ok(OrdinaryGuard { _read: read, epoch, _confine: PhantomData }),
+            ModuleState::Uncertain => Err(CkRv::GENERAL_ERROR),
+            _ => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
+        }
+    }
+
+    /// Start the Initialize control transition under one short write: deny
+    /// from sealed states (`Draining`/`Finalizing`: a TF01b Finalize owns
+    /// the domain), consume an epoch, record the prior state in the
+    /// ticket, enter `Initializing`. The write is NOT held across the
+    /// native call — the ticket is detached — so in-flight ordinary work
+    /// cannot wedge Initialize; settlement re-acquires short.
+    pub(in crate::ffi) fn begin_initialize(&self) -> CkResult<InitTicket<'_>> {
+        let mut write = self.lock_write()?;
+        match write.state {
+            ModuleState::Draining | ModuleState::Finalizing => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
+            _ => {
+                let epoch = write.epoch.checked_add(1).ok_or(CkRv::GENERAL_ERROR)?;
+                let prior = write.state;
+                write.epoch = epoch;
+                write.state = ModuleState::Initializing;
+                Ok(InitTicket { domain: self, prior, epoch, settled: false })
+            }
+        }
+    }
+
+    /// Publish a successful native `C_Initialize`: last-writer-wins `Open`
+    /// (concurrent successes are idempotent-safe), consuming an epoch. At
+    /// epoch exhaustion there is no next identity: fail closed to
+    /// `Uncertain` (precedent: `GenerationExhausted` ⇒ `GENERAL_ERROR`).
+    pub(in crate::ffi) fn publish_open(&self, ticket: InitTicket<'_>) -> CkResult<()> {
+        ticket.settle_publish()
+    }
+
+    /// Abandon a failed/refused Initialize cycle (best-effort cleanup, no
+    /// failure mode of its own): if the ticket epoch still matches, restore
+    /// the prior stable state — or `Uncertain` when the prior was the
+    /// transient `Initializing` (a concurrent control op began first). On
+    /// epoch mismatch a later control op already moved the domain, so the
+    /// stale ticket is a silent no-op. Poison ⇒ no-op (already fail-closed).
+    pub(in crate::ffi) fn abandon_initialize(&self, ticket: InitTicket<'_>) {
+        ticket.settle_abandon();
+    }
+
+    fn lock_write(&self) -> CkResult<RwLockWriteGuard<'_, LifecycleInner>> {
+        self.inner.write().map_err(|_| CkRv::GENERAL_ERROR)
+    }
+
+    /// Test-only state injection for TF01b-state denial coverage.
+    /// Production reaches these states only through control transitions.
+    #[cfg(test)]
+    pub(in crate::ffi) fn set_state_for_tests(&self, state: ModuleState, epoch: u64) {
+        let mut write = self.inner.write().expect("test setup on unpoisoned domain");
+        write.state = state;
+        write.epoch = epoch;
+    }
+
+    #[cfg(test)]
+    pub(in crate::ffi) fn state_for_tests(&self) -> ModuleState {
+        self.inner.read().expect("test setup on unpoisoned domain").state
+    }
+
+    #[cfg(test)]
+    pub(in crate::ffi) fn epoch_for_tests(&self) -> u64 {
+        self.inner.read().expect("test setup on unpoisoned domain").epoch
+    }
+
+    /// Test-only: hold the write lock across `f`, so a panicking `f`
+    /// poisons the domain the way a panic inside a control section would.
+    /// Production control sections run no caller code, so this shape is
+    /// reachable only here; the poison mapping itself is defense-in-depth.
+    #[cfg(test)]
+    pub(in crate::ffi) fn hold_write_across_for_tests(&self, f: impl FnOnce()) {
+        let _write = self.inner.write().expect("test setup on unpoisoned domain");
+        f();
+    }
+}
+
+impl OrdinaryGuard<'_> {
+    #[cfg(test)]
+    pub(in crate::ffi) fn epoch_for_tests(&self) -> u64 {
+        self.epoch
+    }
+}
+
+impl InitTicket<'_> {
+    fn settle_publish(mut self) -> CkResult<()> {
+        self.settled = true;
+        let mut write = self.domain.lock_write()?;
+        match write.epoch.checked_add(1) {
+            Some(epoch) => {
+                write.epoch = epoch;
+                write.state = ModuleState::Open;
+                Ok(())
+            }
+            None => {
+                // No next identity: fail closed without consuming an epoch.
+                write.state = ModuleState::Uncertain;
+                Err(CkRv::GENERAL_ERROR)
+            }
+        }
+    }
+
+    fn settle_abandon(mut self) {
+        self.settled = true;
+        Self::abandon_raw(self.domain, self.prior, self.epoch);
+    }
+
+    fn abandon_raw(domain: &LifecycleDomain, prior: ModuleState, epoch: u64) {
+        let Ok(mut write) = domain.inner.write() else {
+            return;
+        };
+        if write.epoch != epoch {
+            // Stale ticket: a later control op owns the outcome.
+            return;
+        }
+        // The only live ticket at u64::MAX is this one (begin is denied
+        // there), so restoring without a bump is confusion-free; every
+        // later begin is denied, fail-closed going forward.
+        if let Some(next) = write.epoch.checked_add(1) {
+            write.epoch = next;
+        }
+        write.state = match prior {
+            // Transient prior: nothing stable to restore — fail closed.
+            ModuleState::Initializing | ModuleState::Draining | ModuleState::Finalizing => {
+                ModuleState::Uncertain
+            }
+            stable => stable,
+        };
+    }
+
+    #[cfg(test)]
+    pub(in crate::ffi) fn epoch_for_tests(&self) -> u64 {
+        self.epoch
+    }
+}
+
+impl Drop for InitTicket<'_> {
+    /// Backstop: an unsettled ticket (early return, panic) abandons so the
+    /// domain never wedges in `Initializing`. Never panics: poison ⇒ no-op.
+    fn drop(&mut self) {
+        if !self.settled {
+            Self::abandon_raw(self.domain, self.prior, self.epoch);
+        }
     }
 }
 

@@ -345,6 +345,7 @@ fn native_domain_global_serial_release_drop_recycles_after_full_retirement() {
             retirement_sentinel: RetirementSentinel::for_permit(&permit),
             construction: permit,
             lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
         };
         drop(backend);
     }

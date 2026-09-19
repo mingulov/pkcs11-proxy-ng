@@ -191,6 +191,7 @@ fn child_backend_managed(
         retirement_sentinel: super::native_domain::RetirementSentinel::for_permit(&permit),
         construction: permit,
         lifecycle: Default::default(),
+        lifecycle_domain: Default::default(),
     }
 }
 
@@ -597,6 +598,7 @@ fn child_backend_unmanaged(
         object_cleanup: Default::default(),
         construction: super::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
+        lifecycle_domain: Default::default(),
         retirement_sentinel: super::native_domain::RetirementSentinel::unmanaged_test_only(),
     }
 }
