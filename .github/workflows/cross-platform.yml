@@ -108,6 +108,19 @@ jobs:
         run: cargo build --release -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
         shell: bash
 
+      # macOS behavior proof (T2-2/TC1 carry): the leg otherwise only
+      # builds + runs the comparison script, so the backend/shim unit
+      # suites — including the macOS stop-arm coherence tests — would
+      # never execute. Linux legs have per-PR lib coverage via ci.yml and
+      # win32 executes its suites in the job below; macOS has neither,
+      # hence the gate.
+      - name: Lib tests (macOS behavior proof)
+        if: runner.os == 'macOS'
+        run: |
+          cargo test -p pkcs11-proxy-ng-backend --lib
+          cargo test -p pkcs11-proxy-ng-shim --lib
+        shell: bash
+
       - name: Direct-vs-proxied comparison
         run: python3 scripts/ci-direct-vs-proxy.py
         shell: bash
