@@ -155,12 +155,20 @@ input/output/RV widths and the specified local-refusal order are mandatory.
 Logical clients compete for shared native pending flags; logical Initialize
 creates no independent bitmap or full native per-application event equivalence.
 
-Live FFI qualification is Linux GNU/musl x86_64/64-bit and x86/32-bit only.
-This supersedes ADR-0011/0006's Windows native-provider daemon scope for v0.2.
+Live FFI qualification covers Linux GNU/musl x86_64/64-bit and x86/32-bit, and
+— via the implemented tail stretch
+([ADR-0014](adr/ADR-0014-v020-tail-platform-stretch.md)) — Windows x64 MSVC.
 Portable Windows client/shim/proto/types, mock-only backend/server builds and
-Windows-client/Linux-daemon interoperation remain. Native Windows is deferred,
-lower priority/stretch. Nonqualified hosts must refuse construction before
-loading; all four Linux width pairs need native loaded-shim receipts.
+Windows-client/Linux-daemon interoperation remain. Nonqualified hosts must
+refuse construction before loading; all four Linux width pairs need native
+loaded-shim receipts.
+
+[Tail-stretch closure, 2026-09-17: the Linux-only qualification line, the
+supersession of ADR-0011/0006's Windows native-provider daemon scope, and the
+Native-Windows-deferred line here were the 2026-09-13 P0 amendment posture —
+ADR-0014 is Implemented, with real-Windows daemon-host receipts in
+workspace-root `artifacts/v020-tail-windows-2026-09-16/` legs A and C, and
+shim-direction receipts in leg B.]
 
 Unresolved shutdown or final-domain Drop without private quiescence proof
 selects return-aware raw Linux `exit_group(70)` for the whole embedding thread
