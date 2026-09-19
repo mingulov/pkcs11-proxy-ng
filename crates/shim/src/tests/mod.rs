@@ -29,6 +29,7 @@ mod output_semantics;
 mod regression;
 mod resource_limits;
 mod retained_oracle_live;
+mod wait_matrix;
 
 fn empty_interface() -> CK_INTERFACE {
     CK_INTERFACE {
