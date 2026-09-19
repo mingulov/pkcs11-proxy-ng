@@ -117,6 +117,10 @@ jobs:
           ls /opt/homebrew/lib/softhsm* 2>/dev/null || echo "no /opt/homebrew/lib/softhsm*"
           ls /opt/homebrew/lib/ 2>/dev/null | grep -i soft || echo "no soft* in /opt/homebrew/lib"
           which softhsm2-util || echo "no softhsm2-util on PATH"
+          ls -la /opt/homebrew/lib/ 2>/dev/null | grep -i soft || true
+          readlink /opt/homebrew/lib/libsofthsm2.so || echo "flat .so is not a link"
+          ls /opt/homebrew/Cellar/softhsm/ 2>/dev/null || echo "no Cellar/softhsm"
+          ls /opt/homebrew/lib/softhsm/ 2>/dev/null || echo "no lib/softhsm dir"
         shell: bash
 
       # Windows SoftHSM2 (pinned disig portable zip, hash-verified) is
