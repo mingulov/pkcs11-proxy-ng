@@ -55,11 +55,17 @@ impl FfiAttrs {
         for attr in template {
             let (pvalue, len): (*mut _, cryptoki_sys::CK_ULONG) = match &attr.value {
                 None => (std::ptr::null_mut(), 0),
+                // T2run: owned writable backing, never a shared
+                // read-only static. This seam also feeds
+                // `C_GetAttributeValue` (e.g. the known-public probe),
+                // which WRITES one byte through `pValue`; a static
+                // byte segfaults the backend write (observed daemon
+                // SIGSEGV inside SoftHSM).
                 Some(CkAttributeValue::Bool(b)) => {
-                    static TRUE_BYTE: u8 = 1;
-                    static FALSE_BYTE: u8 = 0;
-                    let ptr = if *b { &TRUE_BYTE as *const u8 } else { &FALSE_BYTE as *const u8 };
-                    (ptr as *mut _, 1)
+                    let bytes = vec![u8::from(*b)];
+                    let ptr = bytes.as_ptr() as *mut _;
+                    backing.push(bytes);
+                    (ptr, 1)
                 }
                 Some(CkAttributeValue::Ulong(u)) => {
                     let bytes = narrow_wire_ulong(*u)?.to_ne_bytes().to_vec();
@@ -599,6 +605,39 @@ mod ffi_attrs_narrowing_tests {
         // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
         let ul_value_len = attrs.attrs[0].ulValueLen;
         assert_eq!(ul_value_len, 0);
+    }
+
+    #[test]
+    fn bool_attribute_materializes_owned_writable_backing() {
+        // T2run: `FfiAttrs` feeds `C_GetAttributeValue` (e.g. the
+        // known-public probe), which WRITES one byte through `pValue`.
+        // A shared read-only static byte segfaults the backend write
+        // (daemon SIGSEGV inside SoftHSM). Each bool must materialize
+        // its own writable byte with the value preserved.
+        let template = [
+            CkAttribute {
+                attr_type: CkAttributeType::PRIVATE,
+                value: Some(CkAttributeValue::Bool(false)),
+            },
+            CkAttribute {
+                attr_type: CkAttributeType::TOKEN,
+                value: Some(CkAttributeValue::Bool(false)),
+            },
+        ];
+        let attrs = FfiAttrs::from_slice(&template).expect("bool values convert");
+        assert_ne!(
+            attrs.attrs[0].pValue, attrs.attrs[1].pValue,
+            "identical bools must not share one backing byte"
+        );
+        for attr in &attrs.attrs {
+            // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
+            let ul_value_len = attr.ulValueLen;
+            assert_eq!(ul_value_len, 1);
+            assert_eq!(unsafe { *(attr.pValue as *const u8) }, 0);
+            // The backend writes through this pointer; prove it is writable.
+            unsafe { std::ptr::write_volatile(attr.pValue as *mut u8, 1) };
+            assert_eq!(unsafe { *(attr.pValue as *const u8) }, 1);
+        }
     }
 
     #[test]
