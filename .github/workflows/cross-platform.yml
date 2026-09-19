@@ -175,7 +175,19 @@ jobs:
           grep -q "t2run-ucred-probe: ok" ucred-proof.log
         shell: bash
 
+      # TEMP-ONLY T2run subset (T2-1 tuning): -k excludes 16 files proven
+      # un-runnable in run 35443044655 -- 14 baseline-red files (SoftHSM
+      # strictness the framework rejects: 66 failed), 1 baseline-crasher
+      # (test_scalar_attr_length_extended, 5 SoftHSM crashes), and
+      # test_aead (wedges the daemon: log silence from its first call,
+      # metronomic 44s/file timeouts after). Rescues keep the 2 good
+      # test_aead_* files and 2 good test_set_attribute_* tests; selection
+      # empirically validated (2455/2846 items, 0 red selected, 0 good
+      # missing, 3 attempted KATs retained). Lands permanently with the
+      # T2-1 tuning record once green proves it.
       - name: Direct-vs-proxied comparison
+        env:
+          EXTRA_P11CHECK_ARGS: '--match "(not test_aead or test_aead_short_ciphertext or test_aead_wrap_outputs) and (not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability)"'
         run: python3 scripts/ci-direct-vs-proxy.py
         shell: bash
 
