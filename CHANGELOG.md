@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-15
+## [0.2.0] - 2026-09-20
 
 ### Added
 
@@ -143,6 +143,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tonic features are now selected per-crate, so client-side artifacts
   no longer pull in the server stack.
 - Workspace builds clippy-clean under `-D warnings`.
+- `C_Login` on a slot held by another live context returns
+  `CKR_USER_ALREADY_LOGGED_IN` faithfully and mints no logical login; the
+  cached-PIN verifier is removed (ADR-0008 superseded by the ADR-0002
+  rewrite). One-login-holder-per-slot is the mandated trade-off, bounded by
+  the last-context-out and refcounted-teardown release paths. Login also
+  self-heals a holderless-but-logged-in backend (F-01 reconcile: one logout
+  + single retry → `OK`).
 - `pkcs11-module` is now consumed as a rev-pinned git dependency from
   `https://github.com/mingulov/pkcs11-components` (which also provides the
   `pkcs11-abi` layout catalog) instead of the nested `crates/module`; the
@@ -152,13 +159,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nested: it carries proxy-specific exact-output contracts and registry
   policy (effect validation, apply flags, operator exclusion, wiping secret
   owners) that the generic upstream `pkcs11-types` does not provide.
-- `C_Login` on a slot held by another live context returns
-  `CKR_USER_ALREADY_LOGGED_IN` faithfully and mints no logical login; the
-  cached-PIN verifier is removed (ADR-0008 superseded by the ADR-0002
-  rewrite). One-login-holder-per-slot is the mandated trade-off, bounded by
-  the last-context-out and refcounted-teardown release paths. Login also
-  self-heals a holderless-but-logged-in backend (F-01 reconcile: one logout
-  + single retry → `OK`).
 
 ### Removed
 
