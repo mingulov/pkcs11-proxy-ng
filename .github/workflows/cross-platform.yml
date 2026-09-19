@@ -252,6 +252,10 @@ jobs:
 
       - name: Lib test suites (win32, WOW64)
         run: |
+          # T2run: git-bash prepends /usr/bin (GNU link.exe) ahead of the
+          # dev-cmd MSVC dirs, and rustc trusts PATH inside a dev prompt —
+          # force the MSVC bindir first or rustc links GNU link (run-4 red).
+          export PATH="$(dirname "$(which cl)"):$PATH"
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-types
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-shim --lib
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib
@@ -265,6 +269,8 @@ jobs:
       - name: Win32 stub live-load proof
         run: |
           set -o pipefail
+          # T2run: same GNU-link.exe shadowing as the lib suites above.
+          export PATH="$(dirname "$(which cl)"):$PATH"
           cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib ffi::loading::tests::win32_stub_live_load -- --nocapture 2>&1 | tee stub-proof.log
           grep -q "1 passed" stub-proof.log
           grep -q "win32-stub-live-load: ok" stub-proof.log
