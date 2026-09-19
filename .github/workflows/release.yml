@@ -45,6 +45,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # The receipt step compares against HEAD~1 and diffs HEAD~1..HEAD,
+          # so the checkout must contain at least the tag commit and its parent.
+          fetch-depth: 2
 
       - name: Validate tag format
         run: |
@@ -67,9 +71,10 @@ jobs:
             exit 1
           fi
           SUBJECT_SHA="$(sed -nE 's/^subject_sha: ([0-9a-fA-F]+)$/\1/p' "$RECEIPT")"
-          HEAD_SHA="$(git rev-parse HEAD)"
-          if [[ "$SUBJECT_SHA" != "$HEAD_SHA" ]]; then
-            echo "::error::quality receipt subject_sha '$SUBJECT_SHA' does not equal tag checkout '$HEAD_SHA'; refusing to release."
+          SUBJECT_COMMIT="$(git rev-parse HEAD~1)"
+          TAG_COMMIT="$(git rev-parse HEAD)"
+          if [[ "$SUBJECT_SHA" != "$SUBJECT_COMMIT" ]]; then
+            echo "::error::quality receipt subject_sha '$SUBJECT_SHA' does not equal frozen subject '$SUBJECT_COMMIT' (HEAD~1 of tag commit '$TAG_COMMIT'); refusing to release."
             exit 1
           fi
           for gate in fmt check test clippy msrv audit deny release_dry_run; do
@@ -82,7 +87,16 @@ jobs:
                 ;;
             esac
           done
-          echo "quality receipt verified for $HEAD_SHA"
+          while IFS= read -r path; do
+            case "$path" in
+              doc/release/v0.2.0-quality-receipt.md|CHANGELOG.md) ;;
+              *)
+                echo "::error::tag commit '$TAG_COMMIT' changes '$path', outside the receipt/CHANGELOG bookkeeping delta; refusing to release."
+                exit 1
+                ;;
+            esac
+          done < <(git diff --name-only "$SUBJECT_COMMIT" "$TAG_COMMIT")
+          echo "quality receipt verified for subject $SUBJECT_COMMIT at tag commit $TAG_COMMIT"
 
       - name: Install system dependencies
         run: |
