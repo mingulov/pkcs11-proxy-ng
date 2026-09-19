@@ -23,6 +23,7 @@ impl FfiBackend {
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
@@ -55,6 +56,7 @@ impl FfiBackend {
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_object_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
@@ -83,6 +85,7 @@ impl FfiBackend {
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_base_key = Self::object_handle(base_key)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_object_with_mechanism_output_result(
             &admission,
             unsafe { (*self.func_list).C_DeriveKey },
@@ -111,6 +114,7 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_WrapKey },
@@ -133,6 +137,7 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_WrapKey },
@@ -160,6 +165,7 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_wrapping_key = Self::object_handle(wrapping_key)?;
         let h_key = Self::object_handle(key)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes_exact_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_WrapKey },
@@ -184,6 +190,7 @@ impl FfiBackend {
         let (wk_ptr, wk_len) = wrapped_key.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         let h_unwrapping_key = Self::object_handle(unwrapping_key)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_UnwrapKey },
@@ -212,6 +219,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_object_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
@@ -239,6 +247,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_object_with_mechanism_output(
             &admission,
             unsafe { (*self.func_list).C_GenerateKey },
@@ -266,6 +275,7 @@ impl FfiBackend {
         let pub_ffi = FfiAttrs::from_opt_slice(pub_template)?;
         let priv_ffi = FfiAttrs::from_opt_slice(priv_template)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_object_pair_with_mechanism(
             &admission,
             unsafe { (*self.func_list).C_GenerateKeyPair },
@@ -311,6 +321,7 @@ impl FfiBackend {
     ) -> CkResult<SecretBytes> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_GetOperationState },
@@ -343,6 +354,7 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_enc_key = Self::object_handle(enc_key)?;
         let h_auth_key = Self::object_handle(auth_key)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_SetOperationState },
@@ -366,6 +378,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (seed_ptr, seed_len) = seed.as_ptr_len();
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(&admission, unsafe { (*self.func_list).C_SeedRandom }, |function| unsafe {
             function(h_session, seed_ptr as *mut _, Self::ulong_len_u64(seed_len))
         })
@@ -379,6 +392,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let len = checked_random_len(len)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::fill_bytes(
             &admission,
             unsafe { (*self.func_list).C_GenerateRandom },
@@ -395,6 +409,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (part_ptr, part_len) = part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_DigestEncryptUpdate },
@@ -433,6 +448,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_DecryptDigestUpdate },
@@ -471,6 +487,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (part_ptr, part_len) = part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_SignEncryptUpdate },
@@ -509,6 +526,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_bytes(
             &admission,
             unsafe { (*self.func_list).C_DecryptVerifyUpdate },

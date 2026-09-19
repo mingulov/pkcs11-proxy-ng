@@ -87,6 +87,7 @@ impl FfiBackend {
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let ck_attrs = &ffi_attrs.attrs;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_FindObjectsInit },
@@ -106,6 +107,7 @@ impl FfiBackend {
         let mut handles = vec![0 as cryptoki_sys::CK_OBJECT_HANDLE; cap];
         let mut found: cryptoki_sys::CK_ULONG = 0;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_FindObjects },
@@ -122,6 +124,7 @@ impl FfiBackend {
     pub(super) fn ffi_find_objects_final(&self, session: CkSessionHandle) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_FindObjectsFinal },
@@ -139,6 +142,7 @@ impl FfiBackend {
         let mut ffi_attrs = FfiAttrs::from_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         let rv = Self::call_raw(
             &admission,
             unsafe { (*self.func_list).C_GetAttributeValue },
@@ -165,6 +169,7 @@ impl FfiBackend {
         let mut ffi_queries = FfiAttributeQueries::from_queries(queries)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         let rv = Self::call_raw(
             &admission,
             unsafe { (*self.func_list).C_GetAttributeValue },
@@ -194,6 +199,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_object_output(
             &admission,
             unsafe { (*self.func_list).C_CreateObject },
@@ -218,6 +224,7 @@ impl FfiBackend {
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_object_output(
             &admission,
             unsafe { (*self.func_list).C_CopyObject },
@@ -241,6 +248,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_DestroyObject },
@@ -256,6 +264,7 @@ impl FfiBackend {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_ulong_output(
             &admission,
             unsafe { (*self.func_list).C_GetObjectSize },
@@ -273,6 +282,7 @@ impl FfiBackend {
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
+        let _session_fence = self.session_fences.enter(&admission, session)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_SetAttributeValue },
