@@ -2450,8 +2450,11 @@ mod tests {
             // descheduled spinner runs once on a quiet box. Loop until 6
             // seals AND 5000 spinner admissions overlap them, so both the
             // seal count and the genuine-load overlap hold on any
-            // scheduler. The 60 s watchdog converts a true finalize stall
-            // into a loud failure instead of hanging the suite.
+            // scheduler. The 60 s assert bounds the loop between
+            // iterations only — a hang inside finalize() itself never
+            // reaches it and dies at the shutdown deadline instead
+            // (see the test header), so either way a true stall fails
+            // loud instead of hanging the suite.
             let start = std::time::Instant::now();
             let mut seals = 0usize;
             while seals < 6
