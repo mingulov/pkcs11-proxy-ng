@@ -287,8 +287,10 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_GetOperationState },
             |function, state, state_len| unsafe { function(h_session, state, state_len) },
         )
@@ -360,9 +362,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         part: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (part_ptr, part_len) = part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_DigestEncryptUpdate },
             |function, output, output_len| unsafe {
                 function(
@@ -396,9 +400,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_DecryptDigestUpdate },
             |function, output, output_len| unsafe {
                 function(
@@ -432,9 +438,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         part: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (part_ptr, part_len) = part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_SignEncryptUpdate },
             |function, output, output_len| unsafe {
                 function(
@@ -468,9 +476,11 @@ impl FfiBackend {
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let (ep_ptr, ep_len) = encrypted_part.as_ptr_len();
         let h_session = Self::session_handle(session)?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_DecryptVerifyUpdate },
             |function, output, output_len| unsafe {
                 function(

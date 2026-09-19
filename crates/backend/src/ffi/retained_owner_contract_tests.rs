@@ -112,6 +112,9 @@ fn assert_retention(observation: &RetainedOracleObservation) {
 fn oracle_retains_init_root_across_native_calls() {
     let _guard = oracle::acquire_test_serial();
     let (backend, _functions) = backend_with_oracle_provider();
+    // Mirror production: Initialize (opens the lifecycle domain) before
+    // ordinary work.
+    backend.initialize().expect("oracle initialize");
     let session = CkSessionHandle(31);
     let controls = OracleControls {
         set_scenario: RetainedOracle_SetScenario,
@@ -269,6 +272,9 @@ fn oracle_gate_holds_native_entry_until_released() {
 fn native_owner_call_readback_is_one_transaction() {
     let _guard = oracle::acquire_test_serial();
     let (backend, _functions) = backend_with_oracle_provider();
+    // Mirror production: Initialize (opens the lifecycle domain) before
+    // ordinary work.
+    backend.initialize().expect("oracle initialize");
     let controls = OracleControls {
         set_scenario: RetainedOracle_SetScenario,
         reset_observation: RetainedOracle_ResetObservation,

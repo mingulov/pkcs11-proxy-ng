@@ -1,6 +1,7 @@
 use super::{
     FfiBackend, OperationFamily,
     ffi_conversion::{mechanism_to_ffi, narrow_wire_ulong},
+    native_domain::OrdinaryGuard,
 };
 use crate::traits::CkDeriveKeyOutputResult;
 use pkcs11_proxy_ng_types::*;
@@ -149,7 +150,13 @@ impl FfiBackend {
         Self::two_call_array(|values, count| call(function, values, count))
     }
 
+    /// F-01 B2 proof token: `&OrdinaryGuard` is never read — its presence
+    /// proves at compile time that the caller admitted this invocation and
+    /// holds lifecycle read exclusion across the native call below and the
+    /// owned-copy settlement above. Callers admit exactly once at the
+    /// `ffi_*` boundary and keep the guard alive until they return.
     pub(super) fn call_bytes<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mut call: F,
     ) -> CkResult<SecretBytes>

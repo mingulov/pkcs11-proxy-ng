@@ -708,7 +708,6 @@ impl LifecycleDomain {
     /// - any other state ⇒ `CRYPTOKI_NOT_INITIALIZED` (matches what a
     ///   compliant provider reports for ordinary calls outside a live
     ///   incarnation, so pre-Initialize callers observe no new RV).
-    #[allow(dead_code)] // TF01a-step: wired by the choke-threading commit.
     pub(in crate::ffi) fn admit_ordinary(&self) -> CkResult<OrdinaryGuard<'_>> {
         let read = self.inner.read().map_err(|_| CkRv::GENERAL_ERROR)?;
         let (state, epoch) = (read.state, read.epoch);
@@ -778,6 +777,14 @@ impl LifecycleDomain {
     #[cfg(test)]
     pub(in crate::ffi) fn epoch_for_tests(&self) -> u64 {
         self.inner.read().expect("test setup on unpoisoned domain").epoch
+    }
+
+    /// Test-only: drive the honest begin/publish cycle so tests exercise
+    /// ordinary paths in the post-Initialize state production guarantees.
+    #[cfg(test)]
+    pub(in crate::ffi) fn open_for_tests(&self) {
+        let init = self.begin_initialize().expect("test setup: begin on unsealed domain");
+        self.publish_open(init).expect("test setup: publish on unsealed domain");
     }
 
     /// Test-only: hold the write lock across `f`, so a panicking `f`

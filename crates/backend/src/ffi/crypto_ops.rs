@@ -35,7 +35,9 @@ impl FfiBackend {
         session: CkSessionHandle,
         data: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_Sign },
             |function, signature, signature_len| {
                 session_bytes_input!(session, data, function, signature, signature_len)
@@ -54,7 +56,9 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_sign_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_SignFinal },
             |function, signature, signature_len| {
                 session_bytes_final!(session, function, signature, signature_len)
@@ -89,7 +93,9 @@ impl FfiBackend {
         session: CkSessionHandle,
         data: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_SignRecover },
             |function, signature, signature_len| {
                 session_bytes_input!(session, data, function, signature, signature_len)
@@ -183,7 +189,9 @@ impl FfiBackend {
         session: CkSessionHandle,
         signature: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_VerifyRecover },
             |function, data, data_len| {
                 session_bytes_input!(session, signature, function, data, data_len)
@@ -292,9 +300,14 @@ impl FfiBackend {
         session: CkSessionHandle,
         data: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
-        Self::call_bytes(unsafe { (*self.func_list).C_Digest }, |function, digest, digest_len| {
-            session_bytes_input!(session, data, function, digest, digest_len)
-        })
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        Self::call_bytes(
+            &admission,
+            unsafe { (*self.func_list).C_Digest },
+            |function, digest, digest_len| {
+                session_bytes_input!(session, data, function, digest, digest_len)
+            },
+        )
     }
 
     pub(super) fn ffi_digest_exact(
@@ -333,7 +346,9 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_digest_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_DigestFinal },
             |function, digest, digest_len| {
                 session_bytes_final!(session, function, digest, digest_len)
@@ -384,9 +399,14 @@ impl FfiBackend {
         session: CkSessionHandle,
         data: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
-        Self::call_bytes(unsafe { (*self.func_list).C_Encrypt }, |function, output, output_len| {
-            session_bytes_input!(session, data, function, output, output_len)
-        })
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        Self::call_bytes(
+            &admission,
+            unsafe { (*self.func_list).C_Encrypt },
+            |function, output, output_len| {
+                session_bytes_input!(session, data, function, output, output_len)
+            },
+        )
     }
 
     pub(super) fn ffi_encrypt_update(
@@ -394,7 +414,9 @@ impl FfiBackend {
         session: CkSessionHandle,
         part: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_EncryptUpdate },
             |function, output, output_len| {
                 session_bytes_input!(session, part, function, output, output_len)
@@ -403,7 +425,9 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_encrypt_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_EncryptFinal },
             |function, output, output_len| {
                 session_bytes_final!(session, function, output, output_len)
@@ -440,9 +464,14 @@ impl FfiBackend {
         session: CkSessionHandle,
         encrypted_data: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
-        Self::call_bytes(unsafe { (*self.func_list).C_Decrypt }, |function, output, output_len| {
-            session_bytes_input!(session, encrypted_data, function, output, output_len)
-        })
+        let admission = self.lifecycle_domain.admit_ordinary()?;
+        Self::call_bytes(
+            &admission,
+            unsafe { (*self.func_list).C_Decrypt },
+            |function, output, output_len| {
+                session_bytes_input!(session, encrypted_data, function, output, output_len)
+            },
+        )
     }
 
     pub(super) fn ffi_decrypt_update(
@@ -450,7 +479,9 @@ impl FfiBackend {
         session: CkSessionHandle,
         encrypted_part: CkInBuf<'_>,
     ) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_DecryptUpdate },
             |function, output, output_len| {
                 session_bytes_input!(session, encrypted_part, function, output, output_len)
@@ -459,7 +490,9 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_decrypt_final(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_bytes(
+            &admission,
             unsafe { (*self.func_list).C_DecryptFinal },
             |function, output, output_len| {
                 session_bytes_final!(session, function, output, output_len)
@@ -589,6 +622,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicPtr, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     static LOCK: Mutex<()> = Mutex::new(());
     static ENCRYPT_ERROR_IV_TARGET: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
@@ -1100,5 +1135,134 @@ mod tests {
             backend.last_init_family.get(&session.0).as_deref(),
             Some(&OperationFamily::Encrypt)
         );
+    }
+
+    unsafe extern "C" fn sign_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _data: cryptoki_sys::CK_BYTE_PTR,
+        _data_len: cryptoki_sys::CK_ULONG,
+        _signature: cryptoki_sys::CK_BYTE_PTR,
+        signature_len: cryptoki_sys::CK_ULONG_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        if !signature_len.is_null() {
+            unsafe { *signature_len = 4 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_sign_stub() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_Sign = Some(sign_ok);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        (backend, functions)
+    }
+
+    #[test]
+    fn sign_denied_before_lifecycle_open() {
+        // TF01a read-path proof (`call_bytes` family): no admission before
+        // Initialize — the stub provider is never reached.
+        let (backend, _functions) = backend_with_sign_stub();
+        assert_eq!(
+            backend.ffi_sign(CkSessionHandle(7), CkInBuf::Bytes(b"data")).unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn sign_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _functions) = backend_with_sign_stub();
+        backend.lifecycle_domain.open_for_tests();
+        let signature = backend.ffi_sign(CkSessionHandle(7), CkInBuf::Bytes(b"data")).unwrap();
+        assert_eq!(signature.len(), 4);
+    }
+
+    // Blocked-stub exclusion shape (`call_bytes` family): a provider parked
+    // mid-call holds its ordinary guard, so control settlement cannot
+    // complete until release; it proceeds after. Bounded waits throughout.
+    static SIGN_PARK_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
+
+    unsafe extern "C" fn sign_parkable(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _data: cryptoki_sys::CK_BYTE_PTR,
+        _data_len: cryptoki_sys::CK_ULONG,
+        signature: cryptoki_sys::CK_BYTE_PTR,
+        signature_len: cryptoki_sys::CK_ULONG_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        // Two-call helper queries with NULL output first: park only there;
+        // the fill call completes immediately (the guard spans both).
+        if !signature.is_null() {
+            if !signature_len.is_null() {
+                unsafe { *signature_len = 4 };
+            }
+            return cryptoki_sys::CKR_OK;
+        }
+        let gate = SIGN_PARK_GATE.lock().unwrap().take();
+        match gate {
+            Some((entered, release)) => {
+                let _ = entered.send(());
+                match release.recv_timeout(Duration::from_secs(10)) {
+                    Ok(()) => {
+                        if !signature_len.is_null() {
+                            unsafe { *signature_len = 4 };
+                        }
+                        cryptoki_sys::CKR_OK
+                    }
+                    // Test bug (release never came): fail loudly, never hang.
+                    Err(_) => cryptoki_sys::CKR_FUNCTION_FAILED,
+                }
+            }
+            None => cryptoki_sys::CKR_FUNCTION_FAILED,
+        }
+    }
+
+    #[test]
+    fn parked_sign_blocks_control_until_release() {
+        let (backend, _functions) = backend_with_sign_stub();
+        backend.lifecycle_domain.open_for_tests();
+        // Swap in the parking stub for this test only.
+        unsafe { (*backend.func_list).C_Sign = Some(sign_parkable) };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *SIGN_PARK_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker =
+                scope.spawn(|| backend.ffi_sign(CkSessionHandle(7), CkInBuf::Bytes(b"data")));
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker parks inside the stub holding its guard");
+            scope.spawn(|| {
+                let ticket = backend.lifecycle_domain.begin_initialize().expect("control proceeds");
+                done_tx.send(()).expect("report control settlement");
+                backend.lifecycle_domain.abandon_initialize(ticket);
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "control must not settle while an ordinary call is parked"
+            );
+            release_tx.send(()).expect("release the parked stub");
+            done_rx.recv_timeout(Duration::from_secs(5)).expect("control proceeds after release");
+            let signature = worker.join().expect("worker joins").expect("parked call succeeds");
+            assert_eq!(signature.len(), 4);
+        });
     }
 }
