@@ -113,6 +113,32 @@ def run(cmd, env=None, cwd=None):
     return subprocess.run(cmd, env=merged, cwd=cwd)
 
 
+def p11check_cwd():
+    # T2run: on Windows, pytest emits EMPTY node-id paths when the CWD and
+    # the collected tree sit on different drives (workflow checkout on D:,
+    # installed package on C:) — and the KAT-scope differential matches on
+    # the path portion, so it finds 0 comparable KATs (exit 2) even though
+    # both phases pass. Run from the installed package dir (same drive as
+    # the collected tree, located via this same interpreter) so node-ids
+    # carry testcases/... paths. Unix untouched: green legs stay
+    # bit-identical. Selection is unaffected (pytest -k matches names,
+    # not node-id paths).
+    if os.name != "nt":
+        return None
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, pkcs11_check; "
+            "print(os.path.dirname(os.path.abspath(pkcs11_check.__file__)))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
 def sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -417,6 +443,9 @@ def main():
 
     direct_dir = os.path.join(workdir, "direct")
     os.makedirs(direct_dir, exist_ok=True)
+    p11_cwd = p11check_cwd()
+    if p11_cwd:
+        log(f"pkcs11-check cwd (Windows node-id paths): {p11_cwd}")
     log("[2/6] pkcs11-check DIRECT against SoftHSM")
     direct = run(
         [
@@ -427,7 +456,8 @@ def main():
             "--output-file",
             os.path.join(direct_dir, "results.json"),
         ]
-        + common_p11
+        + common_p11,
+        cwd=p11_cwd,
     )
     log(f"direct exit: {direct.returncode}")
 
@@ -473,6 +503,7 @@ def main():
                 "PKCS11_PROXY_ENDPOINT": endpoint,
                 "PKCS11_PROXY_CONNECT_TIMEOUT": "10",
             },
+            cwd=p11_cwd,
         )
         log(f"proxied exit: {proxied.returncode}")
     finally:
