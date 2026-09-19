@@ -333,6 +333,31 @@ fn native_domain_lifecycle_init_attempt_without_success_poisons() {
     assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
 }
 
+/// TO26a group 4 (proof invalidation): a new Initialize attempt after a
+/// clean Finalize invalidates the destruction proof FIRST — even when the
+/// attempt then fails natively, the reservation never recycles (ownership
+/// step 5: failed/unknown initialization never recycles; new native
+/// exposure invalidates the proof first).
+#[test]
+fn native_domain_lifecycle_init_attempt_after_finalize_invalidates_proof() {
+    let tracker = LifecycleTracker::default();
+    tracker.note_initialized().expect("cycle opens");
+    tracker.note_finalized();
+    assert_eq!(tracker.retirement_decision(), RetirementDecision::Release);
+    tracker.note_init_attempted();
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Poison,
+        "new native exposure invalidates the finalized proof first"
+    );
+    tracker.note_finalized();
+    assert_eq!(
+        tracker.retirement_decision(),
+        RetirementDecision::Release,
+        "a later successful Finalize re-earns release"
+    );
+}
+
 #[test]
 fn native_domain_lifecycle_initialized_without_finalize_poisons() {
     let tracker = LifecycleTracker::default();

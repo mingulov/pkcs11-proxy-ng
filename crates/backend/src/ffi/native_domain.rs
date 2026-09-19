@@ -423,6 +423,14 @@ pub(in crate::ffi) struct LifecycleTracker {
     /// poisons instead of recycling (C3M steps 4-5). Monotonic: never
     /// cleared, so failed/unknown initialization retains ownership.
     init_attempted: std::sync::atomic::AtomicBool,
+    /// A `C_Initialize` attempt postdates the latest successful
+    /// `C_Finalize` (set in [`LifecycleTracker::note_init_attempted`],
+    /// cleared in [`LifecycleTracker::note_finalized`]). A stale
+    /// `finalized_ok` from an earlier cycle proves nothing once new
+    /// native exposure exists, so the retirement decision requires this
+    /// to be clear before honoring `finalized_ok` (TO26a proof
+    /// invalidation: init→finalize→failed re-init never recycles).
+    init_attempted_since_finalize: std::sync::atomic::AtomicBool,
     initialized: std::sync::atomic::AtomicBool,
     finalized_ok: std::sync::atomic::AtomicBool,
     open_sessions: std::sync::atomic::AtomicUsize,
@@ -472,8 +480,13 @@ impl LifecycleTracker {
     /// Record a `C_Initialize` attempt BEFORE native entry. Callers must
     /// set this before invoking the provider so a failed attempt (native
     /// code ran, error RV) poisons instead of recycling the reservation.
+    /// New native exposure invalidates the destruction proof first: the
+    /// attempt postdates any earlier `finalized_ok`, so the retirement
+    /// decision treats a stale finalized proof as invalid until a later
+    /// successful `C_Finalize` (TO26a proof-invalidation battery case).
     pub(in crate::ffi) fn note_init_attempted(&self) {
         self.init_attempted.store(true, SeqCst);
+        self.init_attempted_since_finalize.store(true, SeqCst);
     }
 
     /// Pre-native gate for (re-)initialization: refuse cycles the contract
@@ -555,6 +568,7 @@ impl LifecycleTracker {
     pub(in crate::ffi) fn note_finalized(&self) {
         self.finalized_ok.store(true, SeqCst);
         self.finalize_failed.store(false, SeqCst);
+        self.init_attempted_since_finalize.store(false, SeqCst);
         self.open_sessions.store(0, SeqCst);
     }
 
@@ -586,11 +600,15 @@ impl LifecycleTracker {
     /// Decide backend `Drop`: release only when quiescent with no open
     /// sessions; poison on every uncertain state. A recorded Initialize
     /// attempt without a later successful Finalize is uncertain (native
-    /// code may have run), even when initialization never succeeded.
+    /// code may have run), even when initialization never succeeded; a
+    /// stale `finalized_ok` likewise proves nothing once a newer attempt
+    /// postdates it.
     pub(in crate::ffi) fn retirement_decision(&self) -> RetirementDecision {
         use RetirementDecision::{Poison, Release};
         let never_exposed = !self.init_attempted.load(SeqCst) && !self.initialized.load(SeqCst);
-        let quiescent = never_exposed || self.finalized_ok.load(SeqCst);
+        let fresh_finalize =
+            self.finalized_ok.load(SeqCst) && !self.init_attempted_since_finalize.load(SeqCst);
+        let quiescent = never_exposed || fresh_finalize;
         if quiescent && self.open_sessions.load(SeqCst) == 0 { Release } else { Poison }
     }
 }
