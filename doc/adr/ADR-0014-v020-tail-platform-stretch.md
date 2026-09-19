@@ -30,13 +30,17 @@ full matrix validates the new legs), with publication last:
 4. **32-bit/mixed support claim**: Linux i686 runtime qualification beyond
    the single `softhsm2-i386` lane plus the four §9 ABI topologies.
 
-Still excluded from v0.2.0: Windows GNU, 32-bit Windows (PE32),
-macOS/ARM runtime claims, and Wine as conformance evidence.
-[2026-09-18 T6b staging: the win32 code (native-FFI qualification, stop
-arm, ABI profiles) and local `i686-pc-windows-msvc` cross-compile/link
-proof are done and the win32 CI leg exists in
-`.github/workflows/cross-platform.yml`; the PE32 exclusion lifts only
-when T2run's first green win32 run lands, which finishes this doc move.]
+Still excluded from v0.2.0: Windows GNU, Linux ARM64 runtime claims
+(native FFI fail-closes on aarch64 by design; the cross-platform leg
+stays experimental there), and Wine as conformance evidence. 32-bit
+Windows (PE32) is qualified at the win32 CI tier: `i686-pc-windows-msvc`
+build, lib suites executed on WOW64, and a stub C provider compiled
+with x86 `cl.exe` live-loaded through `FfiBackend::load`
+(`C_GetFunctionList` resolution plus a `C_GetInfo` call) — the stub
+boundary: no production 32-bit provider runs in CI. macOS aarch64 is
+runtime-qualified by T2run's first green macOS leg (compare green plus
+backend/shim lib suites, STOP child receipts included); macOS x86_64
+stays load-qualified only (no CI runtime leg).
 Message/VerifySignature/OneShot owner slots were never deferred — they are
 C3M plan scope. Tag/push/publication remain separately authorized actions,
 not scope items.
@@ -90,13 +94,14 @@ leg first):
 
 The Consequences interim rule is discharged: tail implementation has landed,
 so nonqualified-host refusal now applies only to the still-excluded hosts
-(Windows GNU, macOS/ARM) plus big-endian for live FFI (BE is
+(Windows GNU, Linux ARM64) plus big-endian for live FFI (BE is
 build-and-QEMU proven only — see [be-qemu-tier.md](../release/be-qemu-tier.md)),
 and Windows compile CI continues via the per-PR Tier 0f
-`windows-client-llp64` job. [2026-09-18 T6b: PE32 left the refusal set —
-`NATIVE_FFI_QUALIFIED` now admits MSVC x86/32-bit with the same
-`TerminateProcess` stop arm as x64 — with local cross-compile/link proof
-only; runtime qualification still needs T2run's first green win32 run.]
+`windows-client-llp64` job. PE32 left the refusal set —
+`NATIVE_FFI_QUALIFIED` admits MSVC x86/32-bit with the same
+`TerminateProcess` stop arm as x64 — and T2run's first green win32 run
+landed the runtime qualification at the win32 CI tier stated in the
+Decision section above.
 
 Note: the Context section's
 `doc/plans/2026-09-13-v0.2.0-release-program-design.md` reference is dangling
