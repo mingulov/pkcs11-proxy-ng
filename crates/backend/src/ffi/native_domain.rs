@@ -247,6 +247,19 @@ fn with_registry<R>(op: impl FnOnce(&mut DomainRegistry) -> R) -> Result<R, Doma
     }
 }
 
+/// Test-only registry-mutex poison: panics while holding the registry
+/// lock (caught inside), so the mutex is poisoned exactly as a production
+/// panic-under-lock would poison it. Subprocess-only: mutex poison is
+/// permanent for the process. The child then observes `MutexPoisoned`
+/// denial on every constructor, never Vacant treatment.
+#[cfg(test)]
+pub(in crate::ffi) fn poison_registry_mutex_for_tests() {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = CONSTRUCTOR_REGISTRY.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        panic!("intentional TO26a registry-mutex poison");
+    }));
+}
+
 #[cfg(test)]
 pub(in crate::ffi) fn serial_domain_test_guard() -> std::sync::MutexGuard<'static, ()> {
     static SERIAL_DOMAIN_TESTS: Mutex<()> = Mutex::new(());

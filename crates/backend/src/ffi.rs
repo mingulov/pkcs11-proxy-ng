@@ -12,6 +12,9 @@ mod authenticated_typed_ops;
 mod authenticated_wrap_ops;
 #[path = "ffi/call_helpers.rs"]
 mod call_helpers;
+#[cfg(all(test, unix))]
+#[path = "ffi/constructor_child_tests.rs"]
+mod constructor_child_tests;
 #[path = "ffi/crypto_ops.rs"]
 mod crypto_ops;
 #[path = "ffi/ffi_conversion/mod.rs"]
