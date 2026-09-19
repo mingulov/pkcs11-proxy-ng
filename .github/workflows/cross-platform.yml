@@ -108,8 +108,10 @@ jobs:
           VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
           # T2run: the DLLs live under Microsoft.VC*.CRT/, not directly in
           # the arch dir — find the DLL and expose its directory (run-3
-          # win32 proved the direct-arch assumption wrong).
-          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*x64*' -name 'vcruntime140.dll' 2>/dev/null | head -1)
+          # win32 proved the direct-arch assumption wrong; run-4 win64
+          # proved head -1 can grab the onecore variant, so exclude it
+          # and take the latest desktop CRT).
+          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*x64*' -name 'vcruntime140.dll' -not -path '*onecore*' 2>/dev/null | sort -V | tail -1)
           if [ -z "$REDIST_DLL" ]; then
             echo "no x64 vcruntime140.dll under $VSDIR/VC/Redist/MSVC"
             ls "$VSDIR/VC/Redist/MSVC" 2>/dev/null || echo "(no Redist/MSVC dir)"
@@ -224,8 +226,10 @@ jobs:
           VSDIR=$("$VSWHERE" -latest -property installationPath | tr -d '\r')
           # T2run: the DLLs live under Microsoft.VC*.CRT/, not directly in
           # the arch dir — find the DLL and expose its directory (run-3
-          # win32 proved the direct-arch assumption wrong).
-          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*x86*' -name 'vcruntime140.dll' 2>/dev/null | head -1)
+          # win32 proved the direct-arch assumption wrong; run-4 win64
+          # proved head -1 can grab the onecore variant, so exclude it
+          # and take the latest desktop CRT).
+          REDIST_DLL=$(find "$VSDIR/VC/Redist/MSVC" -path '*x86*' -name 'vcruntime140.dll' -not -path '*onecore*' 2>/dev/null | sort -V | tail -1)
           if [ -z "$REDIST_DLL" ]; then
             echo "no x86 vcruntime140.dll under $VSDIR/VC/Redist/MSVC"
             ls "$VSDIR/VC/Redist/MSVC" 2>/dev/null || echo "(no Redist/MSVC dir)"

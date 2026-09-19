@@ -55,6 +55,8 @@ Usage (after ``cargo build --release``)::
 
 import argparse
 import hashlib
+import glob
+import json
 import os
 import shlex
 import shutil
@@ -221,6 +223,36 @@ def differential_argv(direct_jsonl, proxied_jsonl):
     ]
 
 
+def differential_jsonl(report_jsonl):
+    """Sibling copy of ``report.jsonl`` the framework differential parses.
+
+    T2run: pkcs11-check 0.2.0's own report writer emits per-unit
+    session-collection ``CollectReport`` records with a blank nodeid,
+    which its differential reader rejects ("invalid CollectReport",
+    exit 2 -- run-4 ubuntu proved exit-0x2 plus identical summaries
+    while the differential died on line 239). Those records carry no
+    test verdicts (the KAT scope compares TestReport node-ids only),
+    so drop exactly them into a same-directory copy (sibling
+    results.json provenance still resolves) and compare the copies.
+    Verdict scope is unchanged; the count is logged for the record.
+    """
+    out = os.path.join(os.path.dirname(report_jsonl), "report.differential.jsonl")
+    dropped = 0
+    with open(report_jsonl, encoding="utf-8") as src, open(out, "w", encoding="utf-8") as dst:
+        for line in src:
+            record = json.loads(line) if line.strip() else None
+            if (
+                isinstance(record, dict)
+                and record.get("$report_type") == "CollectReport"
+                and not str(record.get("nodeid") or "").strip()
+            ):
+                dropped += 1
+                continue
+            dst.write(line)
+    log(f"differential input {os.path.basename(report_jsonl)}: dropped {dropped} blank CollectReports")
+    return out
+
+
 def provision_softhsm_windows(workdir):
     """Fetch the pinned disig portable zip (hash-verified) and unpack it."""
     dl_dir = os.path.join(workdir, "dl")
@@ -242,8 +274,48 @@ def provision_softhsm_windows(workdir):
     return lib, util
 
 
+def _resolve_brew_softhsm():
+    """Locate the brew SoftHSM module without hard-coding its layout.
+
+    T2run: brew's softhsm layout varies by version (2.7.0: flat
+    lib/*.so link; older: lib/softhsm/*.dylib) and the flat link can
+    dangle across upgrades (run-4 macOS: the name shows in ls while
+    isfile rejects it), so glob the live prefixes and the versioned
+    Cellar instead of trusting one path. Returns the first
+    loadable-looking module or None.
+    """
+    prefixes = ["/opt/homebrew", "/usr/local"]
+    brew = shutil.which("brew")
+    if brew is not None:
+        try:
+            out = subprocess.run(
+                [brew, "--prefix", "softhsm"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                prefixes.insert(0, out.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    patterns = []
+    for prefix in prefixes:
+        patterns.append(os.path.join(prefix, "lib", "libsofthsm2.*"))
+        patterns.append(os.path.join(prefix, "lib", "softhsm", "libsofthsm2.*"))
+    for cellar in ("/opt/homebrew/Cellar/softhsm", "/usr/local/Cellar/softhsm"):
+        patterns.append(os.path.join(cellar, "*", "lib", "libsofthsm2.*"))
+        patterns.append(os.path.join(cellar, "*", "lib", "softhsm", "libsofthsm2.*"))
+    for pattern in patterns:
+        for hit in sorted(glob.glob(pattern)):
+            if os.path.isfile(hit):  # follows links; drops dangling ones
+                return hit
+    return None
+
+
 def provision_softhsm_unix():
     lib = next((c for c in SOFTHSM_UNIX_LIB_CANDIDATES if os.path.isfile(c)), None)
+    if lib is None and sys.platform == "darwin":
+        lib = _resolve_brew_softhsm()
     if lib is None:
         raise SystemExit("SoftHSM2 module not found; install softhsm2 first")
     util = shutil.which("softhsm2-util")
@@ -403,7 +475,11 @@ def main():
     direct_jsonl = os.path.join(direct_dir, "report.jsonl")
     proxied_jsonl = os.path.join(proxied_dir, "report.jsonl")
     log("[6/6] differential comparison (deterministic-KAT scope)")
-    diff = run(differential_argv(direct_jsonl, proxied_jsonl))
+    diff = run(
+        differential_argv(
+            differential_jsonl(direct_jsonl), differential_jsonl(proxied_jsonl)
+        )
+    )
     log(f"differential exit: {diff.returncode}")
 
     print(f"workdir: {workdir}")
