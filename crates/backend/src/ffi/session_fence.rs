@@ -34,6 +34,20 @@
 //! its incarnation. Entrants treat any non-`OPEN` state as closed; the
 //! value itself is the correlation record, read back by tests and defined
 //! for audit (production enforcement is state-based).
+//!
+//! Residual (accepted): `enter`/`enter_write`/`enter_write_all` create a
+//! fence entry for ANY well-formed handle, including ones that never
+//! existed — every op on a bogus handle leaves a small permanent `OPEN`
+//! entry (one `Arc` + two atomics, tens of bytes) until the re-Initialize
+//! purge clears the table (`clear`, under lifecycle write). Growth is
+//! therefore bounded by distinct bogus handles per incarnation and is
+//! provider-truth-convergent (correctness unaffected: unknown handles
+//! still fail at the provider). Daemon-flow-unreachable: the server
+//! resolves virtual→backend handles before backend contact, so only a
+//! direct embedder passing bogus handles grows the table. Opportunistic
+//! pruning is deliberately NOT done: a naive remove-if-idle would detach
+//! in-flight entrants holding a cloned `Arc` and break exclusion — any
+//! future pruning must be `strong_count`-guarded.
 
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -211,6 +225,11 @@ impl SessionFenceTable {
     ) -> Vec<SessionFenceGuard<'g>> {
         let mut ordered: Vec<u64> = sessions.to_vec();
         ordered.sort_unstable();
+        // Dedup: a duplicate ID's second pass would park on self-owned
+        // `CLOSING` forever, holding lifecycle read (the sole caller
+        // passes unique IDs today, but the table must not self-deadlock
+        // on duplicates).
+        ordered.dedup();
         // Mark-all before drain-any: no op can slip between the marks, and
         // new arrivals fail fast on every affected session immediately.
         let mut fences = Vec::with_capacity(ordered.len());
@@ -276,7 +295,12 @@ impl SessionFenceTable {
     pub(in crate::ffi) fn commit_close(&self, guard: &SessionFenceGuard<'_>) {
         debug_assert_eq!(guard.mode, FenceMode::Write);
         debug_assert!(!guard.settled.get());
-        guard.fence.lifecycle.store(guard.epoch, SeqCst);
+        // Clamp the terminal epoch below the sentinels: raw epochs
+        // `u64::MAX-1`/`u64::MAX` equal `FENCE_CLOSING`/`FENCE_OPEN`
+        // (physically unreachable — ~2^64 control cycles — but the clamp
+        // matches the codebase's own `checked_add` standard).
+        let terminal = guard.epoch.min(FENCE_CLOSING - 1);
+        guard.fence.lifecycle.store(terminal, SeqCst);
         self.fences.remove(&guard.session);
         guard.settled.set(true);
     }
@@ -579,5 +603,36 @@ mod tests {
         assert_eq!(table.lifecycle_for_tests(7), Some(FENCE_OPEN));
         let admission = domain.admit_ordinary().expect("admits after panic");
         table.enter(&admission, CkSessionHandle(7)).expect("fence usable after panic");
+    }
+
+    #[test]
+    fn close_all_with_duplicate_ids_completes() {
+        // A duplicate ID's second pass would park on self-owned `CLOSING`
+        // forever, holding lifecycle read (pre-fix self-deadlock); the
+        // dedup after the ascending sort makes the input unique. Run
+        // off-thread and join via `recv_timeout` so a regression trips the
+        // 10s bound promptly (the scope join then hangs on the wedged
+        // worker — hangs pre-fix, matching the established close-all test
+        // pattern).
+        let domain = open_domain();
+        let table = SessionFenceTable::default();
+        // Share borrows: the `move` worker below must capture `&domain` /
+        // `&table` (both `Copy`), not move the owned values.
+        let domain = &domain;
+        let table = &table;
+        std::thread::scope(|scope| {
+            let (done_tx, done_rx) = mpsc::channel();
+            scope.spawn(move || {
+                let admission = domain.admit_ordinary().expect("admits");
+                let guards = table.enter_write_all(&admission, &[10, 20, 10, 30, 20]);
+                assert_eq!(guards.len(), 3, "duplicates enter once");
+                table.commit_close_all(&guards);
+                done_tx.send(()).expect("report completion");
+            });
+            done_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("duplicate-ID close-all completes");
+        });
+        assert_eq!(table.len_for_tests(), 0);
     }
 }

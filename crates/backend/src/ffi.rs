@@ -390,9 +390,9 @@ impl Pkcs11Backend for FfiBackend {
         // a live incarnation, so out-of-incarnation callers observe no
         // new RV.
         let seal = self.lifecycle_domain.begin_finalize()?;
-        // Exclusive native call on the deadline-tracked worker (this
-        // thread holds the armed `DeadlineGuard`; the ticket is detached
-        // — write is NOT held across native entry, mirroring Initialize).
+        // Exclusive native call on this thread, which holds the armed
+        // `DeadlineGuard` (no spawned worker; the ticket is detached —
+        // write is NOT held across native entry, mirroring Initialize).
         // An `enter_finalizing` failure drops the seal through the Drop
         // backstop, abandoning the seal before the error propagates.
         seal.enter_finalizing()?;

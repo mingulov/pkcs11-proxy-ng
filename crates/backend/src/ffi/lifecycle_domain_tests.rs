@@ -407,6 +407,20 @@ fn tripwire_fires_on_nested_admit() {
     let _inner = domain.admit_ordinary();
 }
 
+/// Tripwire extension (conc-M1): a control write under a live guard
+/// self-deadlocks (write behind own read) in debug AND release, so the
+/// `begin_*` entries assert the flag is clear. Mirror of
+/// `tripwire_fires_on_nested_admit`; same `cfg(debug_assertions)` gate.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "under a live OrdinaryGuard")]
+fn tripwire_fires_on_begin_under_live_guard() {
+    let domain = open_domain();
+    let _outer = domain.admit_ordinary().expect("outer admits");
+    // Must panic via the tripwire, never block on the write acquisition.
+    let _ticket = domain.begin_initialize();
+}
+
 #[test]
 fn control_write_blocks_while_ordinary_parked_then_proceeds() {
     // Blocked-stub exclusion shape at domain level: a parked ordinary

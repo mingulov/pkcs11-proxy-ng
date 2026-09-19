@@ -590,7 +590,8 @@ impl LifecycleTracker {
 // under the read acquisition that seals it, and the proof is threaded
 // through the `Self::call_*` choke family as `&OrdinaryGuard` (B2 shape),
 // so every threaded native entry proves admission at COMPILE TIME — never
-// advisory (TF01a: two families; see partial scope below).
+// advisory (landed TF01b: every choke family threaded — see the TF01b
+// completion note above).
 //
 // Whole-subsystem lock order (TF01a + TF01b; reviewed design TF01b follows):
 //   lifecycle-domain RwLock (outer) -> session fence(s) (TF01b, middle)
@@ -641,13 +642,17 @@ impl LifecycleTracker {
 // (`exit_group(70)`; `native_stop.rs`) — acceptable ONLY because
 // `backend.finalize()` runs at post-traffic shutdown
 // (`crates/server/src/main.rs:658`), after the last ordinary call has
-// drained. TF01b test (for the TF01b brief): Finalize under continuous
-// ordinary load completes without hitting the death deadline (pins
-// writer-preferring drain termination).
+// drained. Landed TF01b test
+// `finalize_under_continuous_ordinary_load_completes_and_seals`: Finalize
+// under continuous ordinary load completes without hitting the death
+// deadline (pins writer-preferring drain termination).
 //
-// TF01b session fences (I4 — normative; TF01b builds from this text). For
-// close(S) to exclude in-flight ordinary ops on S, ORDINARY PATHS MUST
-// acquire S's fence — a second lock held across unbounded native calls.
+// TF01b session fences (I4 — landed per this text, with one recorded
+// mechanism deviation). For close(S) to exclude in-flight ordinary ops on
+// S, ORDINARY PATHS MUST acquire S's fence — an atomic generation fence
+// entered across unbounded native calls (not the I4 sketch's "second
+// lock"; see `session_fence.rs:10-24` for the recorded deviation with
+// rationale, sanctioned by the parent brief).
 // Order: lifecycle-domain (outer) -> session fence (middle) -> DashMap
 // shard (inner, leaf); fences are per-session siblings, never nested
 // except by close-all, which acquires the affected fences in ascending
@@ -658,11 +663,12 @@ impl LifecycleTracker {
 // with them. Drop-may-never-admit: destructors MUST NOT call
 // `admit_ordinary` or any domain method that acquires the lock — a Drop
 // firing under a live guard would nest read behind a waiting writer and
-// deadlock (today's `PendingNativeObject::drop` → `destroy_object` edge is
-// safe only because no admitted path reaches it yet). Destroy-via-Drop MUST
-// therefore ride a control path that takes no lifecycle lock, or carry a
-// pre-admitted token threaded from the admitting scope; auditing every
-// `Drop` that can reach a native call is a TF01b exit gate.
+// deadlock (the `PendingNativeObject::drop` → `destroy_object` edge rides
+// `destroy_quarantined_object` through the control choke — audited).
+// Destroy-via-Drop MUST therefore ride a control path that takes no
+// lifecycle lock, or carry a pre-admitted token threaded from the
+// admitting scope; every `Drop` that can reach a native call was audited
+// (landed TF01b).
 //
 // TF01b `Drop` integration: the backend `Drop` quiescence check over the
 // lifecycle domain MUST use non-blocking `try_write` (never block in
@@ -872,6 +878,14 @@ impl LifecycleDomain {
     /// the design block above; a queued writer also stalls new admissions).
     /// Settlement re-acquires short.
     pub(in crate::ffi) fn begin_initialize(&self) -> CkResult<InitTicket<'_>> {
+        // Tripwire: a control write under a live guard self-deadlocks
+        // (write behind own read) in debug AND release — control paths
+        // must never admit.
+        debug_assert!(
+            !ADMITTED_ON_THREAD.get(),
+            "control begin under a live OrdinaryGuard: write behind own read \
+             self-deadlocks; control paths must never admit"
+        );
         let mut write = self.lock_write()?;
         match write.state {
             ModuleState::Draining | ModuleState::Finalizing => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
@@ -928,8 +942,13 @@ impl LifecycleDomain {
     /// loop for the quiet fast path, each miss re-checking the local
     /// view of the shutdown deadline (suicide on expiry — the sealer
     /// never returns failure, never proceeds unsealed; the local check
-    /// also covers a failed controller spawn, which leaves the external
-    /// deadline unenforced); (2) past [`FINALIZE_SEAL_SPIN_MISSES`]
+    /// also covers a failed controller spawn, but ONLY for arm 1 (~1ms
+    /// of `try_write` misses: past that, the blocking acquisition relies
+    /// solely on the best-effort controller thread, and a spawn failure
+    /// there leaves the deadline unenforced — practically unreachable,
+    /// needing spawn failure plus sustained contention, and inherent to
+    /// the recorded "one blocking acquisition" design); (2) past
+    /// [`FINALIZE_SEAL_SPIN_MISSES`]
     /// misses, ONE blocking acquisition under the already-armed
     /// shutdown deadline (queued writer stalls new admissions, so the
     /// drain terminates modulo a truly stuck provider; the external arm
@@ -944,6 +963,13 @@ impl LifecycleDomain {
     /// Poison or epoch exhaustion denies fail-closed WITHOUT native
     /// entry (the provider stays initialized; shutdown still exits).
     pub(in crate::ffi) fn begin_finalize(&self) -> CkResult<FinalizeTicket<'_>> {
+        // Tripwire: same write-behind-own-read hazard as begin_initialize
+        // (a control write under a live guard self-deadlocks silently).
+        debug_assert!(
+            !ADMITTED_ON_THREAD.get(),
+            "control begin under a live OrdinaryGuard: write behind own read \
+             self-deadlocks; control paths must never admit"
+        );
         let deadline = Instant::now() + shutdown_grace();
         let mut misses = 0u32;
         let mut write = loop {
@@ -1024,6 +1050,13 @@ impl LifecycleDomain {
     }
 
     fn lock_write(&self) -> CkResult<RwLockWriteGuard<'_, LifecycleInner>> {
+        // Tripwire backstop for direct callers (ticket settlement): a
+        // write under a live guard self-deadlocks — see begin_initialize.
+        debug_assert!(
+            !ADMITTED_ON_THREAD.get(),
+            "lifecycle write under a live OrdinaryGuard: write behind own read \
+             self-deadlocks; settle outside admitted scopes"
+        );
         self.inner.write().map_err(|_| CkRv::GENERAL_ERROR)
     }
 
