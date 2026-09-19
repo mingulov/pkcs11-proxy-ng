@@ -383,10 +383,14 @@ def main():
     port = free_port()
     endpoint = f"http://127.0.0.1:{port}"
     proxy_toml = os.path.join(workdir, "proxy.toml")
+    # T2run: escape backslashes for the TOML basic string — a raw Windows
+    # path (D:\a\...) fails to parse (`\a` is an invalid escape) and the
+    # daemon never binds. No-op on Unix (no backslashes in the path).
+    module_toml = softhsm_lib.replace("\\", "\\\\")
     with open(proxy_toml, "w", encoding="utf-8") as f:
         f.write(
             "[backend]\n"
-            f'module = "{softhsm_lib}"\n'
+            f'module = "{module_toml}"\n'
             "\n[proxy]\n"
             "request_timeout_secs = 30\n"
             "startup_timeout_secs = 30\n"
