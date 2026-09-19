@@ -84,6 +84,11 @@ SOFTHSM_UNIX_LIB_CANDIDATES = [
     "/usr/local/lib/softhsm/libsofthsm2.so",
     "/opt/homebrew/lib/softhsm/libsofthsm2.dylib",
     "/usr/local/lib/softhsm/libsofthsm2.dylib",
+    # T2run: brew softhsm 2.7.0 installs the module flat in lib/ as .so
+    # (upstream .so naming on all platforms; proven by run-3 macOS
+    # diagnostic -- lib/softhsm/ carries no loadable module there).
+    "/opt/homebrew/lib/libsofthsm2.so",
+    "/usr/local/lib/libsofthsm2.so",
 ]
 
 DAEMON_LOG_TCP_WARN = "listening on tcp without authentication"
