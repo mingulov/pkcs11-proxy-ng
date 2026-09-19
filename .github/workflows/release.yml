@@ -56,6 +56,32 @@ jobs:
       - name: Verify release subject
         run: scripts/verify-release-subject.sh "$GITHUB_REF_NAME"
 
+      - name: Verify quality receipt
+        run: |
+          set -euo pipefail
+          RECEIPT="doc/release/v0.2.0-quality-receipt.md"
+          if [[ ! -f "$RECEIPT" ]]; then
+            echo "::error::quality receipt $RECEIPT is missing; refusing to release."
+            exit 1
+          fi
+          SUBJECT_SHA="$(sed -nE 's/^subject_sha: ([0-9a-fA-F]+)$/\1/p' "$RECEIPT")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [[ "$SUBJECT_SHA" != "$HEAD_SHA" ]]; then
+            echo "::error::quality receipt subject_sha '$SUBJECT_SHA' does not equal tag checkout '$HEAD_SHA'; refusing to release."
+            exit 1
+          fi
+          for gate in fmt check test clippy msrv audit deny release_dry_run; do
+            value="$(sed -nE "s/^${gate}: (.*)$/\1/p" "$RECEIPT")"
+            case "$value" in
+              pass*) ;;
+              *)
+                echo "::error::quality receipt gate '$gate' is not pass-prefixed (got '$value'); refusing to release."
+                exit 1
+                ;;
+            esac
+          done
+          echo "quality receipt verified for $HEAD_SHA"
+
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
