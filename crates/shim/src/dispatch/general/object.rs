@@ -41,16 +41,6 @@ pub unsafe extern "C" fn c_find_objects(
             ul_max_object_count as u32,
         )) {
             Ok(handles) => {
-                // TEMP-T2-3-NEGATIVE-CONTROL (revert immediately after the
-                // red run): prove the compare gate bites by reporting zero
-                // objects found. Env-gated so lib suites (no env) stay
-                // green and only the compare step goes red.
-                if std::env::var("T2RUN_NEGATIVE_CONTROL_BREAK_FIND").is_ok() {
-                    unsafe {
-                        *pul_object_count = 0;
-                    }
-                    return rv_ok();
-                }
                 let count = handles.len().min(ul_max_object_count as usize);
                 unsafe {
                     for (i, h) in handles.iter().take(count).enumerate() {
