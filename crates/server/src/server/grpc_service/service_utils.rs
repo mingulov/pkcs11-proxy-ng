@@ -1148,6 +1148,12 @@ pub(super) async fn backend_object_known_token(
 /// CROSS-PROC-001: true when `backend_object` already maps in the calling
 /// context — minted here, or admitted by an earlier vetted find. Such
 /// handles skip the token probe (their visibility was already decided).
+///
+/// Residual (T2run-fix1 prod M3, flagged 2026-09-19): handle-recycling ABA —
+/// if the provider deletes an object out-of-band and recycles its handle for
+/// a foreign session object, a stale mapping shows it without re-probing.
+/// Narrow (destroy paths remove mappings, so staleness needs provider-side
+/// deletion + handle reuse) and fail-closed everywhere else — accepted.
 pub(super) async fn context_maps_backend_object(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,

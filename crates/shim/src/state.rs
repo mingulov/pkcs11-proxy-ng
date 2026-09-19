@@ -104,6 +104,13 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// via the reconnect flag) instead of inheriting the parent's dead
 /// I/O driver and sockets. No-op fast path: one atomic load when the
 /// pid already matches.
+///
+/// Residual (T2run-fix1 prod M2, flagged 2026-09-19): the child keeps the
+/// parent's SESSION_SLOTS/message-state entries (`c_initialize` never
+/// clears them; only `c_finalize` does), so a recycled server-side handle
+/// could collide with a stale entry. Narrow (needs open parent sessions
+/// at fork + handle collision + slot mismatch), pre-existing class, within
+/// this file's documented liveness bar — accepted, not fixed.
 fn reclaim_after_fork() {
     let pid = std::process::id();
     if SHIM_PID.load(Ordering::Relaxed) == pid {
