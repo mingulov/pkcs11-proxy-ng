@@ -131,6 +131,13 @@ jobs:
       - name: cargo test --workspace
         run: cargo test --workspace
 
+      # T2run-fix1 (prod M1): the fork-after-init regression tests are
+      # #[ignore]-gated (harness-fork convention), so the suite above
+      # never runs them — this step re-pins them explicitly. Unix-only
+      # file (#![cfg(unix)]); no daemon needed (pre-init paths only).
+      - name: Fork regression pin (shim --ignored)
+        run: cargo test -p pkcs11-proxy-ng-shim --test fork_after_init -- --ignored
+
       - name: cargo clippy --workspace --all-targets --all-features -- -D warnings
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
