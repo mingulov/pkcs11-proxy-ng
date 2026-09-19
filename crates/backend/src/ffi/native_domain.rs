@@ -1129,6 +1129,14 @@ impl LifecycleDomain {
         let _write = self.inner.write().expect("test setup on unpoisoned domain");
         f();
     }
+
+    /// Test-only non-blocking state peek: `None` while a writer holds
+    /// or queues (the fail-closed shape of the commit re-check). Lets a
+    /// test prove a sealer is queued without blocking behind it.
+    #[cfg(test)]
+    pub(in crate::ffi) fn try_state_for_tests(&self) -> Option<ModuleState> {
+        self.inner.try_read().map(|guard| guard.state).ok()
+    }
 }
 
 impl OrdinaryGuard<'_> {
@@ -1296,9 +1304,13 @@ impl WaiterReservation<'_> {
     /// zero native entry; success advances to `NativeCallCommitted`. Held
     /// ordinary exclusion makes seal-win unreachable through the public
     /// path (the sealer drains instead of overtaking), so this is the
-    /// fail-closed backstop behind the structural guarantee.
+    /// fail-closed backstop behind the structural guarantee. The re-check
+    /// is `try_read`, never blocking `read`: this thread already holds
+    /// the admission read, so a blocking re-acquisition would self-deadlock
+    /// behind a queued Finalize writer (the tripwire hazard documented on
+    /// `admit_ordinary`) — a missed re-check fails closed instead.
     pub(in crate::ffi) fn commit_native(&mut self) -> CkResult<()> {
-        let (state, current_epoch) = match self.domain.inner.read() {
+        let (state, current_epoch) = match self.domain.inner.try_read() {
             Ok(guard) => (guard.state, guard.epoch),
             Err(_) => {
                 self.release_uncompleted();

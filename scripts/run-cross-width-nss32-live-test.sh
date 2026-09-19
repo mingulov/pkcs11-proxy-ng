@@ -43,6 +43,12 @@ fi
 WORK="$(mktemp -d "/tmp/pkcs11-nss32-harness.XXXXXX")"
 trap _harness_cleanup EXIT
 
+# Skip honesty (same tally as the sibling runners; this script's skips
+# all exit before the first leg, so a reached final line implies
+# skipped=0 — stated explicitly for the receipt).
+LEGS_RUN=0
+LEGS_SKIPPED=0
+
 # NSS sql-DB fixture (Fixture 1 shape): fresh empty-password DB.
 NSSDB="$WORK/nssdb"
 mkdir -p "$NSSDB"
@@ -100,6 +106,7 @@ run_leg() {
         exit 1
     fi
     echo "$output" | grep -E "test result|cross-width-executed" | head -8
+    LEGS_RUN=$((LEGS_RUN + 1))
 }
 
 export PKCS11_PROXY_CROSS_TEST=1
@@ -128,4 +135,9 @@ run_leg "leg 2: i686 client <-> i686 daemon (narrow-native control) over i386 NS
     --target i686-unknown-linux-gnu
 harness_stop_daemon
 
-echo "PASS: cross-width NSS32 live test complete"
+echo "legs: run=$LEGS_RUN skipped=$LEGS_SKIPPED"
+if [[ $LEGS_SKIPPED -gt 0 ]]; then
+    echo "PASS-WITH-SKIPS: cross-width NSS32 live test complete ($LEGS_SKIPPED legs skipped)"
+else
+    echo "PASS: cross-width NSS32 live test complete"
+fi

@@ -1407,6 +1407,43 @@ mod slot_wait_tests {
         assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1, "rivals make no native attempt");
     }
 
+    /// TO26b-fix1 F3: width precedes contention under a live waiter — on
+    /// a 32-bit backend `2^32 | DONT_BLOCK` fails checked narrowing
+    /// (`FUNCTION_FAILED`) even while a genuine waiter holds the
+    /// reservation inside native entry. The `cfg` gate is load-bearing:
+    /// on 64-bit hosts the flags are representable (contention would
+    /// refuse identically), so only the narrow backend pins this shape.
+    #[test]
+    #[cfg(target_pointer_width = "32")]
+    fn slot_wait_wide_flags_refused_despite_busy_waiter() {
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait_fn(Some(gated_wait));
+        backend.lifecycle_domain.open_for_tests();
+        std::thread::scope(|scope| {
+            // The gate stays closed until the wide rival is checked, so
+            // the spawned waiter deterministically holds the reservation
+            // through native entry while it races.
+            let holder = scope
+                .spawn(|| backend.ffi_wait_for_slot_event(cryptoki_sys::CKF_DONT_BLOCK as u64));
+            let start = std::time::Instant::now();
+            while !GATED_WAIT_ENTERED.load(Ordering::SeqCst) {
+                assert!(start.elapsed() < std::time::Duration::from_secs(10), "waiter must enter");
+                std::thread::yield_now();
+            }
+            assert_eq!(
+                backend
+                    .ffi_wait_for_slot_event(1u64 << 32 | cryptoki_sys::CKF_DONT_BLOCK as u64)
+                    .unwrap_err(),
+                CkRv::FUNCTION_FAILED,
+                "width precedes contention"
+            );
+            GATED_WAIT_OPEN.store(true, Ordering::SeqCst);
+            assert_eq!(holder.join().expect("holder joins").unwrap(), CkSlotId(7));
+        });
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1, "wide rival makes no native attempt");
+    }
+
     /// TO26b group 2: the second concurrent waiter is refused (contention)
     /// and the slot frees on settlement — a later waiter succeeds.
     #[test]

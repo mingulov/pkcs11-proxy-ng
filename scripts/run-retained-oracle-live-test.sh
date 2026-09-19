@@ -53,6 +53,10 @@ trap _harness_cleanup EXIT
 HOOK_TARGET_DIR="$WORK/hook-target"
 INSTANCE_IDS="$WORK/instance-ids.txt"
 : >"$INSTANCE_IDS"
+# Skip honesty: a SKIP must never read as PASS. Every scenario leg is
+# counted as run or skipped, and the final line reflects the tally.
+LEGS_RUN=0
+LEGS_SKIPPED=0
 
 echo "--- building oracle cdylib + daemons + shim (native$( [[ $HAVE_I686 -eq 1 ]] && echo ' + i686')) ---"
 cargo build --locked --offline --manifest-path "$ORACLE_DIR/Cargo.toml"
@@ -162,6 +166,7 @@ run_leg() {
     echo "$output" | grep -E "test result|executed=" | head -4
     harness_stop_daemon
     unset PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET
+    LEGS_RUN=$((LEGS_RUN + 1))
 }
 
 DAEMON_64="$HOOK_TARGET_DIR/debug/pkcs11-proxy-ng"
@@ -184,6 +189,7 @@ if [[ $HAVE_I686 -eq 1 ]]; then
         --target i686-unknown-linux-gnu
 else
     echo "SKIP legs 1/1e/1c: i686-unknown-linux-gnu target not installed"
+    LEGS_SKIPPED=$((LEGS_SKIPPED + 3))
 fi
 run_leg "leg 2: x86_64 client <-> x86_64 oracle daemon" \
     "$DAEMON_64" "$ORACLE_SO_64" roundtrip roundtrip \
@@ -220,6 +226,7 @@ if [[ $HAVE_I686 -eq 1 && -f "$ORACLE_SO_32" ]]; then
         --target i686-unknown-linux-gnu
 else
     echo "SKIP legs 3/3e/3c/4/4e/4c: need the i686 Rust target and an i686 oracle cdylib"
+    LEGS_SKIPPED=$((LEGS_SKIPPED + 6))
 fi
 
 # Control-channel restart proof: every leg saw a distinct daemon instance
@@ -255,4 +262,11 @@ fi
 echo "  negative receipt: $(grep -o 'test_hooks.control_socket[^"]*' "$WORK/negative.log" | head -1)"
 unset PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET
 
-echo "PASS: retained-oracle live test complete"
+echo "legs: run=$LEGS_RUN skipped=$LEGS_SKIPPED"
+if [[ $LEGS_SKIPPED -gt 0 ]]; then
+    # Skips are environmental (missing i686 toolchain/extracts), so the
+    # exit stays 0 — but the final line must not read as a full PASS.
+    echo "PASS-WITH-SKIPS: retained-oracle live test complete ($LEGS_SKIPPED legs skipped)"
+else
+    echo "PASS: retained-oracle live test complete"
+fi

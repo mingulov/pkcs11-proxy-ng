@@ -33,6 +33,7 @@ struct Harness {
     server: Option<tokio::task::JoinHandle<()>>,
     backend: Arc<dyn Pkcs11Backend>,
     previous_endpoint: Option<std::ffi::OsString>,
+    teardown_done: bool,
 }
 impl Harness {
     async fn start() -> Self {
@@ -101,6 +102,7 @@ impl Harness {
             server: Some(server),
             backend,
             previous_endpoint,
+            teardown_done: false,
         }
     }
 
@@ -125,8 +127,14 @@ impl Harness {
 
     /// Synchronous teardown half, shared with `Drop` (panic-path
     /// best-effort: sends stop but cannot wait — a mid-test panic still
-    /// ends 70 via runtime cancel, which stays loud).
+    /// ends 70 via runtime cancel, which stays loud). Runs once: the
+    /// explicit `shutdown()` consumes the flag so the trailing `Drop`
+    /// does not re-issue close/finalize RPCs.
     fn teardown_sync(&mut self) {
+        if self.teardown_done {
+            return;
+        }
+        self.teardown_done = true;
         unsafe {
             (self.functions.C_CloseSession.unwrap())(self.session);
             (self.functions.C_Finalize.unwrap())(ptr::null_mut());

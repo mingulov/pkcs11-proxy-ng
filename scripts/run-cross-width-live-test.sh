@@ -34,6 +34,11 @@ fi
 
 harness_init_workspace cross-width
 
+# Skip honesty: a SKIP must never read as PASS. Every leg is counted
+# as run or skipped, and the final line reflects the tally.
+LEGS_RUN=0
+LEGS_SKIPPED=0
+
 # Explicit cdylib/daemon builds — an `--example`-only build does NOT
 # refresh the shim library, and stale artifacts test nothing.
 echo "--- building daemons + shim (native$( [[ $HAVE_I686 -eq 1 ]] && echo ' + i686')) ---"
@@ -104,6 +109,7 @@ run_leg() {
         exit 1
     fi
     echo "$output" | grep -E "test result|cross-width-executed" | head -8
+    LEGS_RUN=$((LEGS_RUN + 1))
 }
 
 export PKCS11_PROXY_CROSS_TEST=1
@@ -120,6 +126,7 @@ if [[ $HAVE_I686 -eq 1 ]]; then
         --target i686-unknown-linux-gnu
 else
     echo "SKIP leg 1: i686-unknown-linux-gnu target not installed"
+    LEGS_SKIPPED=$((LEGS_SKIPPED + 1))
 fi
 run_leg "leg 2: x86_64 client <-> x86_64 daemon (same-width control)" 8
 harness_stop_daemon
@@ -150,6 +157,14 @@ if [[ $HAVE_I686 -eq 1 && -n "$SOFTHSM_MODULE_32" ]]; then
     fi
 else
     echo "SKIP legs 3-4: need the i686 Rust target and an i386 libsofthsm2"
+    LEGS_SKIPPED=$((LEGS_SKIPPED + 2))
 fi
 
-echo "PASS: cross-width live test complete"
+echo "legs: run=$LEGS_RUN skipped=$LEGS_SKIPPED"
+if [[ $LEGS_SKIPPED -gt 0 ]]; then
+    # Skips are environmental (missing i686 toolchain/extracts), so the
+    # exit stays 0 — but the final line must not read as a full PASS.
+    echo "PASS-WITH-SKIPS: cross-width live test complete ($LEGS_SKIPPED legs skipped)"
+else
+    echo "PASS: cross-width live test complete"
+fi

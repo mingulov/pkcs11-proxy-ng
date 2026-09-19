@@ -199,7 +199,8 @@ fn live_wait_nonblocking_event_path() {
     // not a status echo. Per-provider classification (ownership §7 rule):
     // SoftHSM2 serves NO_EVENT when idle (event path qualified); NSS
     // softokn natively answers FUNCTION_NOT_SUPPORTED (its own
-    // unsupported Wait proves no event path — verified by direct probe).
+    // unsupported Wait proves no event path — inferred from end-to-end
+    // passthrough + mapped-module receipt).
     // Either way the caller cell keeps its canary. The runner declares
     // the provider via PKCS11_PROXY_CROSS_PROVIDER; anything else fails
     // loudly (no silent default — an unclassified provider proves nothing).

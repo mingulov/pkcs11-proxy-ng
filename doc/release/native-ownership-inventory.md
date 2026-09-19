@@ -44,7 +44,7 @@ or a provider's own unsupported Wait proves no event path."
 | Provider | Blocking Wait | Nonblocking events |
 |---|---|---|
 | SoftHSM2 (x86_64 + i386) | Excluded (contract limit; local `FUNCTION_NOT_SUPPORTED`) | QUALIFIED: live `NO_EVENT` + canary roundtrip at all four width pairs |
-| NSS softokn (i386) | Excluded (same) | NO EVENT PATH: provider-natively `FUNCTION_NOT_SUPPORTED` (direct probe + end-to-end passthrough, canary intact) |
+| NSS softokn (i386) | Excluded (same) | NO EVENT PATH: provider-natively `FUNCTION_NOT_SUPPORTED` (inferred from end-to-end passthrough + mapped-module receipt, canary intact) |
 | Retained oracle / exact oracle | Excluded (same) | N/A: no `C_WaitForSlotEvent` entry (mechanism/output oracles by design) |
 | MockBackend | Fault model only | Parks/hangs scripted for abort/timeout coverage; never the deployed backend |
 

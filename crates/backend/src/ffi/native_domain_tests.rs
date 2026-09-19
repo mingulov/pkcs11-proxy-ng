@@ -673,6 +673,64 @@ fn native_domain_waiter_commit_bars_stale_and_sealed() {
         CkRv::DEVICE_ERROR,
         "uncertain domain fails closed with DEVICE_ERROR"
     );
+    assert_eq!(
+        waiter_commit_allowed(LoadedUninitialized, 5, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed state cannot enter native"
+    );
+    assert_eq!(
+        waiter_commit_allowed(Initializing, 5, 5).unwrap_err(),
+        CkRv::CRYPTOKI_NOT_INITIALIZED,
+        "sealed state cannot enter native"
+    );
+}
+
+/// TO26b-fix1 F1: the commit re-check fails closed behind a queued
+/// sealer write instead of self-deadlocking (the blocking `read` it
+/// replaced would hang here: this thread holds the admission read, and
+/// the queued writer cannot drain until that same read releases).
+/// Deterministic with no timing assumption: the poll proves the sealer
+/// is queued (a queued writer blocks new readers, so the failed
+/// `try_read` IS the proof), and the writer cannot drain until the
+/// explicit drops below, so the commit races a queued writer.
+/// Linux-only: the proof rests on writer-preference; the fix itself
+/// (`try_read`, never blocking `read`) is unconditional.
+#[test]
+#[cfg(target_os = "linux")]
+fn native_domain_waiter_commit_queued_writer_fails_closed() {
+    let domain = LifecycleDomain::default();
+    domain.open_for_tests();
+    std::thread::scope(|scope| {
+        let admission = domain.admit_ordinary().expect("admission");
+        let mut waiter = domain.reserve_waiter(&admission, 1).expect("reservation");
+        // A sealer queuing its blocking write behind the live admission
+        // (the Finalize arm-2 shape); it drains once the test releases.
+        scope.spawn(|| {
+            domain.set_state_for_tests(ModuleState::Finalized, 9);
+        });
+        let start = std::time::Instant::now();
+        while domain.try_state_for_tests().is_some() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "sealer must queue behind the live admission"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            waiter.commit_native().unwrap_err(),
+            CkRv::GENERAL_ERROR,
+            "a commit racing a queued writer must fail closed, never block"
+        );
+        assert!(!domain.waiter_held_for_tests(), "refusal frees the reservation");
+        let observed =
+            domain.last_waiter_observation_for_tests().expect("refusal publishes an observation");
+        assert_eq!(observed.native_rv, None, "no native return happened");
+        assert!(!observed.slot_written, "no slot value was produced");
+        drop(waiter);
+        drop(admission);
+    });
+    // The sealer drained on scope exit: the write it queued landed.
+    assert_eq!(domain.state_for_tests(), ModuleState::Finalized);
 }
 
 /// TO26b group 2: settlement publishes the completion observation —
