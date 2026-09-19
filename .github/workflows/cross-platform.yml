@@ -187,16 +187,18 @@ jobs:
         with:
           arch: x86
 
-      # Minimal 32-bit C stub provider (see tests/win32-stub/): /MT links
-      # the CRT statically so the DLL has no runtime dependency beyond
-      # kernel32. The dumpbin check fails loud unless the export table
-      # carries the UNDECORATED name (x86 __cdecl decorates the object
-      # symbol with a leading underscore, which GetProcAddress would miss).
+      # Minimal 32-bit C stub provider (see tests/win32-stub/): /std:c11
+      # for _Static_assert (rejected in cl's default legacy-C mode), /MT
+      # links the CRT statically so the DLL has no runtime dependency
+      # beyond kernel32. The dumpbin check fails loud unless the export
+      # table carries the UNDECORATED name (x86 __cdecl decorates the
+      # object symbol with a leading underscore, which GetProcAddress
+      # would miss).
       - name: Build win32 stub provider DLL
         shell: cmd
         run: |
           if not exist target\win32-stub mkdir target\win32-stub
-          cl /nologo /MT /LD tests\win32-stub\p11win32stub.c /Fo:target\win32-stub\p11win32stub.obj /link /DEF:tests\win32-stub\p11win32stub.def /OUT:target\win32-stub\p11win32stub.dll
+          cl /nologo /std:c11 /MT /LD tests\win32-stub\p11win32stub.c /Fo:target\win32-stub\p11win32stub.obj /link /DEF:tests\win32-stub\p11win32stub.def /OUT:target\win32-stub\p11win32stub.dll
           dumpbin /exports target\win32-stub\p11win32stub.dll | findstr /R /C:"[^_]C_GetFunctionList"
 
       - name: Lib test suites (win32, WOW64)
