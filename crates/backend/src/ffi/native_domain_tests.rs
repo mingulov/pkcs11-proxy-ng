@@ -102,6 +102,202 @@ fn native_domain_global_serial_second_load_rejected_and_rollback() {
     );
 }
 
+/// TO26a group 1: every pathname spelling of a second load — identical,
+/// relative, symlink, hardlink and genuinely different paths — fails with
+/// the local AlreadyReserved refusal BEFORE any loader attempt. Proof is by
+/// error identity: a loader attempt on these (mostly nonexistent or
+/// non-ELF) paths would fail as "native module load failed", and the
+/// loadable-lib control (libc, refused identically) proves refusal
+/// precedes even a `dlopen` that would succeed. Discovery is unreachable
+/// past this refusal for the same reason: any discovery attempt would
+/// surface its own error, never AlreadyReserved.
+#[test]
+fn native_domain_global_serial_path_variants_refused_before_loader() {
+    let _serial = serial_domain_test_guard();
+    let first = reserve_for_construction().expect("first reservation succeeds");
+    let missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-test-module.so");
+    let other_missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-other-module.so");
+    let relative = std::path::Path::new("relative-pkcs11-proxy-ng-test-module.so");
+    let mut variants: Vec<std::path::PathBuf> =
+        vec![missing.into(), missing.into(), relative.into(), other_missing.into()];
+    // A loadable library is refused identically: refusal precedes `dlopen`.
+    #[cfg(all(unix, target_env = "gnu"))]
+    variants.push(std::path::PathBuf::from("libc.so.6"));
+    #[cfg(all(unix, target_env = "musl"))]
+    variants.push(std::path::PathBuf::from("libc.musl-x86_64.so.1"));
+    // Unix link spellings: a symlink to a missing target and a hardlink to
+    // a (non-ELF) temp file. Both would fail differently past the refusal
+    // (missing target / ELF error), so AlreadyReserved proves pre-loader
+    // denial for every spelling.
+    #[cfg(unix)]
+    let link_dir = {
+        let dir = std::env::temp_dir().join(format!(
+            "pkcs11-path-variants-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("wall clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create link dir");
+        let target = dir.join("target.txt");
+        std::fs::write(&target, b"not an elf module").expect("write link target");
+        let hardlink = dir.join("hardlink.so");
+        std::fs::hard_link(&target, &hardlink).expect("create hardlink");
+        variants.push(hardlink);
+        let symlink = dir.join("symlink.so");
+        std::os::unix::fs::symlink(dir.join("missing-target.so"), &symlink)
+            .expect("create symlink");
+        variants.push(symlink);
+        dir
+    };
+    for path in &variants {
+        let err = FfiBackend::load(path).map(|_| ()).expect_err("held slot rejects every spelling");
+        assert!(
+            err.contains("already reserved"),
+            "path {} must be refused before any loader attempt, got: {err}",
+            path.display()
+        );
+    }
+    first.rollback_before_native();
+    #[cfg(unix)]
+    let _ = std::fs::remove_dir_all(&link_dir);
+    let retry_err =
+        FfiBackend::load(missing).map(|_| ()).expect_err("retry after rollback still fails");
+    assert!(
+        retry_err.contains("native module load failed"),
+        "rolled-back registry must attempt loading again, got: {retry_err}"
+    );
+}
+
+/// TO26a group 1: an Active slot refuses a second constructor before any
+/// loader attempt. Restores Vacant afterwards so later serial tests start
+/// clean (Retiring window, then exact-epoch release).
+#[test]
+fn native_domain_global_serial_active_contention_denies_load() {
+    let _serial = serial_domain_test_guard();
+    let first = reserve_for_construction().expect("first reservation succeeds");
+    first.activate().expect("owner activates");
+    let missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-test-module.so");
+    let err = FfiBackend::load(missing).map(|_| ()).expect_err("Active slot rejects load");
+    assert!(
+        err.contains("already reserved"),
+        "Active contention must refuse before any loader attempt, got: {err}"
+    );
+    assert!(first.begin_retirement(), "owner enters Retiring");
+    assert!(ConstructionPermit::release_if_owner(first.epoch), "completed unload publishes Vacant");
+    first.rollback_before_native();
+    reserve_for_construction().expect("slot reusable").rollback_before_native();
+}
+
+/// TO26a group 1: a Retiring slot (dependent retirement / library close
+/// window) still refuses a second constructor before any loader attempt.
+/// Restores Vacant afterwards.
+#[test]
+fn native_domain_global_serial_retiring_contention_denies_load() {
+    let _serial = serial_domain_test_guard();
+    let first = reserve_for_construction().expect("first reservation succeeds");
+    first.activate().expect("owner activates");
+    assert!(first.begin_retirement(), "owner enters Retiring");
+    let missing = std::path::Path::new("/nonexistent-pkcs11-proxy-ng-test-module.so");
+    let err = FfiBackend::load(missing).map(|_| ()).expect_err("Retiring slot rejects load");
+    assert!(
+        err.contains("already reserved"),
+        "Retiring contention must refuse before any loader attempt, got: {err}"
+    );
+    assert!(ConstructionPermit::release_if_owner(first.epoch), "completed unload publishes Vacant");
+    first.rollback_before_native();
+    reserve_for_construction().expect("slot reusable").rollback_before_native();
+}
+
+/// TO26a group 1: racing constructors admit exactly one winner; every
+/// loser reports AlreadyReserved for the live epoch (never a second
+/// reservation, never a loader attempt — losers never reach `dlopen`
+/// because `reserve_for_construction` is the gate `load` checks first).
+#[test]
+fn native_domain_global_serial_constructor_race_exactly_one_wins() {
+    let _serial = serial_domain_test_guard();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let mut winners = 0u32;
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let gate = barrier.clone();
+            handles.push(scope.spawn(move || {
+                gate.wait();
+                reserve_for_construction()
+            }));
+        }
+        // Join every racer BEFORE rolling the winner back: an early
+        // rollback would reopen Vacant and admit a second winner.
+        let mut outcomes = Vec::new();
+        for handle in handles {
+            outcomes.push(handle.join().expect("racer joins"));
+        }
+        let mut winner_epoch = None;
+        for outcome in outcomes {
+            match outcome {
+                Ok(permit) => {
+                    winners += 1;
+                    winner_epoch = Some(permit.epoch);
+                    permit.rollback_before_native();
+                }
+                Err(DomainError::AlreadyReserved { epoch }) => {
+                    assert_eq!(Some(epoch), winner_epoch.or(Some(epoch)), "losers name one epoch");
+                    winner_epoch.get_or_insert(epoch);
+                }
+                Err(other) => panic!("losers must report AlreadyReserved, got {other:?}"),
+            }
+        }
+    });
+    assert_eq!(winners, 1, "exactly one racing constructor wins");
+    reserve_for_construction().expect("slot reusable after race").rollback_before_native();
+}
+
+/// TO26a group 1: `Arc` clones share the one native domain — the same
+/// lifecycle state, session count and generation are visible through every
+/// handle (multiple logical clients, one native domain/epoch).
+#[test]
+fn native_domain_arc_clones_share_one_lifecycle_domain() {
+    let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+    let backend = FfiBackend {
+        _lib: super::loading::test_library_handle(),
+        func_list: functions.as_mut() as *mut cryptoki_sys::CK_FUNCTION_LIST,
+        func_list_3_0: None,
+        func_list_3_2: None,
+        initialize_args: None,
+        mech_cache: dashmap::DashMap::new(),
+        last_init_family: dashmap::DashMap::new(),
+        session_slot_map: dashmap::DashMap::new(),
+        slot_sessions: dashmap::DashMap::new(),
+        object_cleanup: Default::default(),
+        retirement_sentinel: RetirementSentinel::unmanaged_test_only(),
+        construction: ConstructionPermit::unmanaged_test_only(),
+        lifecycle: Default::default(),
+        lifecycle_domain: Default::default(),
+        session_fences: Default::default(),
+    };
+    let first = std::sync::Arc::new(backend);
+    let second = std::sync::Arc::clone(&first);
+    assert!(std::sync::Arc::ptr_eq(&first, &second), "clones share one allocation");
+    first.lifecycle.note_initialized().expect("cycle opens through the first clone");
+    first.lifecycle.note_session_opened();
+    assert_eq!(second.lifecycle.current_generation(), 1, "generation shared across clones");
+    assert_eq!(second.lifecycle.open_session_count_for_tests(), 1, "session count shared");
+    assert_eq!(
+        second.lifecycle.retirement_decision(),
+        RetirementDecision::Poison,
+        "retirement view shared across clones"
+    );
+    second.lifecycle.note_sessions_closed(1);
+    second.lifecycle.note_finalized();
+    assert_eq!(
+        first.lifecycle.retirement_decision(),
+        RetirementDecision::Release,
+        "settlement through one clone visible through the other"
+    );
+}
+
 #[test]
 fn native_domain_holds_registry_slot_scopes_guard_to_managed() {
     let mut registry = fresh();
