@@ -136,6 +136,7 @@ fn run_stop_child(scenario: &str) -> ! {
         "s14-proof-invalidated" => run_s14_proof_invalidated(),
         "s15-failed-finalize" => run_s15_failed_finalize(),
         "s16-handler-installed" => run_s16_handler_installed(),
+        "s17-genuine-waiter" => run_s17_genuine_waiter(),
         "c1-never-init" => run_c1_never_init(),
         "c2-unmanaged" => run_c2_unmanaged(),
         "n1-seccomp" => run_n1_seccomp(),
@@ -562,6 +563,66 @@ fn run_s11_gated() -> ! {
     let _ = std::io::stdout().flush();
     drop(backend);
     std::process::exit(20);
+}
+
+/// Set by the S17 gated wait stub on native entry: the waiter holds a
+/// genuine reservation plus ordinary admission inside C when the drop
+/// fires (TO26b I1 — S11's parked thread holds neither).
+static S17_ENTERED: AtomicBool = AtomicBool::new(false);
+
+/// Never-returning wait stub for S17: signals native entry, then parks
+/// forever holding the waiter's reservation and ordinary guard. Touches
+/// only a process-static flag — no backend state after entry.
+unsafe extern "C" fn child_wait_gated(
+    _flags: cryptoki_sys::CK_FLAGS,
+    _slot: *mut cryptoki_sys::CK_SLOT_ID,
+    _reserved: *mut std::ffi::c_void,
+) -> cryptoki_sys::CK_RV {
+    S17_ENTERED.store(true, Ordering::SeqCst);
+    loop {
+        std::thread::park();
+    }
+}
+
+/// S17 child: a GENUINE gated DONT_BLOCK waiter (real reservation, real
+/// admission, parked inside native C) outstanding when the sole owner
+/// drops — the group stops at 70. Main becomes the waiter; an
+/// independent controller thread drops the sole `Box` owner once native
+/// entry is proven. The waiter performs no backend access after parking
+/// and main's drop stop-fires lock-free at its first statement
+/// (initialized-never-finalized ⇒ Poison), so no access can recur before
+/// `exit_group` ends every thread — the documented direct-embedder shape
+/// (whole-process stop with borrowed-reference workers).
+fn run_s17_genuine_waiter() -> ! {
+    let backend =
+        Box::new(child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok)));
+    unsafe { (*backend.func_list).C_WaitForSlotEvent = Some(child_wait_gated) };
+    let leaked: &'static FfiBackend = Box::leak(backend);
+    if leaked.initialize().is_err() {
+        std::process::exit(14);
+    }
+    {
+        let spawned = std::thread::Builder::new().name("stop-controller".to_owned()).spawn(|| {
+            wait_flag_5s(&S17_ENTERED);
+            let _ = writeln!(std::io::stdout(), "READY s17-genuine-waiter");
+            let _ = std::io::stdout().flush();
+            let owned = unsafe { Box::from_raw(leaked as *const FfiBackend as *mut FfiBackend) };
+            drop(owned);
+            // Unreachable: the drop stops the group at 70.
+            std::process::exit(20);
+        });
+        if spawned.is_err() {
+            std::process::exit(17);
+        }
+    }
+    let barrier = Arc::new(Barrier::new(3));
+    for index in 0..2 {
+        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
+    }
+    barrier.wait();
+    // Main becomes the genuine waiter. Never returns: the gate never opens.
+    let _ = leaked.ffi_wait_for_slot_event(cryptoki_sys::CKF_DONT_BLOCK as u64);
+    std::process::exit(21);
 }
 
 /// S12 child: failed Initialize (native entered, error RV) on a managed
@@ -1096,6 +1157,17 @@ fn native_stop_s16_sigabrt_handler_installed_stop() {
     let (child, _permit) = spawn_stop_child("s16-handler-installed");
     let output = child.wait_with_output().expect("reap stop child");
     assert_stop_status(&output, "s16-handler-installed");
+}
+
+/// S17 (TO26b I1): a GENUINE gated DONT_BLOCK waiter — real reservation,
+/// real admission, parked inside native C (proven by native entry before
+/// READY) — outstanding when the sole owner drops: the group exits 70.
+/// This replaces S11's parked-thread analog as waiter coverage.
+#[test]
+fn native_stop_s17_genuine_waiter_stop() {
+    let (child, _permit) = spawn_stop_child("s17-genuine-waiter");
+    let output = child.wait_with_output().expect("reap stop child");
+    assert_stop_status(&output, "s17-genuine-waiter");
 }
 
 /// C1: never-initialized control (normal Drop, child exit 0, no stop).
