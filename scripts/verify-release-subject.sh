@@ -34,9 +34,14 @@ BASE="${BASE%%-*}"
 
 if ! command -v cargo >/dev/null 2>&1; then
     echo "::error::required command not found: cargo" >&2
+    echo "expected cargo on PATH" >&2
     exit 1
 fi
-CARGO_VERSION="$(cargo pkgid -p pkcs11-proxy-ng | sed -E 's/.*@//')"
+if ! CARGO_VERSION="$(cargo pkgid -p pkcs11-proxy-ng | sed -E 's/.*@//')"; then
+    echo "::error::failed to read Cargo workspace version (cargo pkgid pipeline failed); refusing to release." >&2
+    echo "expected Cargo version $BASE" >&2
+    exit 1
+fi
 
 if [[ "$CARGO_VERSION" != "$BASE" ]]; then
     echo "::error::tag '$TAG' names version $BASE but Cargo workspace is $CARGO_VERSION; refusing to release." >&2
@@ -44,7 +49,8 @@ if [[ "$CARGO_VERSION" != "$BASE" ]]; then
     exit 1
 fi
 
-if ! grep -Eq "^## \\[${BASE}\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+BASE_ESCAPED="${BASE//./\\.}"
+if ! grep -Eq "^## \\[${BASE_ESCAPED}\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
     echo "::error::CHANGELOG.md has no dated section for version ${BASE}; refusing to release." >&2
     echo "expected a heading like: ## [${BASE}] - YYYY-MM-DD" >&2
     exit 1
