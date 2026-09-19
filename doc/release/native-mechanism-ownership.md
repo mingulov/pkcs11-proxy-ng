@@ -124,6 +124,8 @@ settlement; session calls also hold their generation-qualified session guard.
 Finalize seals admission, drains ordinary workers, then uses exclusive native
 access. Its own native call runs in a tracked worker.
 
+Status: IMPLEMENTED (TF01b; enforcement-complete 52f9796, 2026-09-19).
+
 Retain all project-owned native graphs, actual nested/attribute buffers,
 input/output cells, library and control contexts through their termination
 receipts. A pointer may not be retained to a local stack cell. Park complete

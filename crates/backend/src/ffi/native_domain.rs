@@ -14,19 +14,21 @@
 //! before retirement lands with the lifecycle slice (`native_session`); until
 //! then, post-`dlopen` load failures poison the slot instead of recycling it.
 //!
-//! TF01a slice note (partial enforcement — the F-01 clause is NOT satisfied):
-//! `LifecycleDomain` admission is compile-time-enforced (B2) on exactly two
-//! choke families — `call_bytes` (read path: 17 dependent-op entries) and
-//! `call_unit` (32 ordinary entries) plus the `call_control_unit` split for
-//! `Initialize`/`Finalize` and the stateless probe info queries (forwarded
-//! regardless of domain state; providers may still return
-//! `CKR_CRYPTOKI_NOT_INITIALIZED`). Every
-//! other native entry (`call_bytes_exact*`, `call_*_with_mechanism*`,
-//! `call_raw`, `call_array`, `call_*_output`, `fill_bytes`, 3.x paths) is
-//! NOT yet admission-gated, `Finalize` performs no seal/drain (the domain
-//! stays `Open` across it, exactly as before this slice), and there are no
-//! session fences or `Drop` integration yet — all TF01b. The ownership-doc
-//! clause stays as-is and the CHANGELOG F-01 entry stays open until TF01b.
+//! TF01b completion note (the F-01 clause holds structurally):
+//! `LifecycleDomain` admission is compile-time-enforced (B2) on EVERY
+//! ordinary native entry — all choke families (`call_bytes*`,
+//! `call_unit`, `call_raw`, `call_array`, `call_*_output`, `fill_bytes`,
+//! `call_*_with_mechanism*`, exact leaves, `call_3x_fn!` 3.x entries)
+//! prove admission via `&OrdinaryGuard`, admitted once per `ffi_*`
+//! boundary and never nested (conc-M2 tripwire). `Initialize`/`Finalize`
+//! and the stateless probe info queries (forwarded regardless of domain
+//! state; providers may still return `CKR_CRYPTOKI_NOT_INITIALIZED`) use
+//! the guard-less `call_control_*` split. `Finalize` runs the I3
+//! seal/drain (`Draining`/`Finalizing`/`Finalized`); closes/cancels ride
+//! I4 session fences; destructor cleanup rides the enclosing exclusion
+//! (Drop-may-never-admit) and backend `Drop` probes domain quiescence.
+//! The ownership-doc clause is IMPLEMENTED and the CHANGELOG F-01 entry
+//! is retired (TF01b).
 
 use std::cell::Cell;
 use std::fmt;
@@ -614,8 +616,10 @@ impl LifecycleTracker {
 // it — this mitigation is LOAD-BEARING; (b) blocking preserves
 // initialize-eventually-succeeds for direct embedders, while fail-fast
 // would invent spurious `GENERAL_ERROR` under load; (c) a truly stuck
-// provider wedges every design equally (the in-flight call never returns),
-// so fail-fast buys nothing there. Pinned by
+// provider denies Initialize success under every design, while only
+// blocking additionally wedges the calling thread — that residual
+// caller-wedge for direct embedders is accepted (daemon-unreachable:
+// init-once-at-startup, per-client Initialize backend-free). Pinned by
 // `initialize_blocks_on_parked_ordinary_then_proceeds_after_release`
 // (Initialize waits behind parked ordinary work, then proceeds promptly
 // after release — it never fails fast under contention).
@@ -701,12 +705,11 @@ impl LifecycleTracker {
 // moved the domain, so the stale ticket is a no-op (the later op owns the
 // outcome). TF01b session fences correlate on guard epochs.
 //
-// TF01a partial scope (clause NOT satisfied): the domain, admission and
-// the Initialize-side control transitions are live; B2 threading covers
-// `call_bytes` (read path) and `call_unit` + `call_control_unit` (control
-// split) only. TF01b remainder: remaining choke families, Finalize
-// seal/drain (`Draining`/`Finalizing`/`Finalized` production transitions),
-// session fences, `Drop` integration, ownership-doc flip, CHANGELOG.
+// TF01b completion: the TF01a remainder is fully landed — every choke
+// family threaded, Finalize seal/drain (`Draining`/`Finalizing`/
+// `Finalized` production transitions), I4 session fences, `Drop`
+// integration (destructor ride-through + backend quiescence probe),
+// ownership-doc flip, CHANGELOG. The F-01 clause holds structurally.
 // ---------------------------------------------------------------------------
 
 /// Private module states (§"Module lifecycle and native storage").

@@ -54,9 +54,9 @@ impl FfiMechanism {
     /// pre/post-call fixups (e.g. the message fallback NULL/empty
     /// acknowledgement).
     ///
-    /// Like [`NativeAllocation::root`], the caller must hold the
-    /// native-operation guard. The borrow is live across the provider
-    /// call itself — it is the native-call argument at the migrated
+    /// Like [`NativeAllocation::root`], the caller must hold the lifecycle
+    /// read exclusion (`OrdinaryGuard`). The borrow is live across the
+    /// provider call itself — it is the native-call argument at the migrated
     /// entry sites (e.g. `call_helpers::call_unit_with_mechanism`,
     /// `call_init_with_mechanism`, `kem_ops::ffi_encapsulate_key`) — but
     /// no borrow is retained afterwards: the heap address stays stable
