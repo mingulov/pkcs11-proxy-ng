@@ -18,7 +18,10 @@ mod state;
 /// of the shim's public API; do NOT depend on it from consumers.
 #[doc(hidden)]
 pub mod __test_api {
-    pub use crate::state::{mechanism_registry, replace_mechanism_registry};
+    pub use crate::state::{
+        is_initialized, mark_finalized, mark_initialized, mechanism_registry,
+        replace_mechanism_registry, runtime,
+    };
 }
 
 use crate::dispatch::general::catch_panics;
