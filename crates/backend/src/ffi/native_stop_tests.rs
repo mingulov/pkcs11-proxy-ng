@@ -115,7 +115,8 @@ fn native_stop_child_entry() {
 /// failed, 15 no-new-privs failed, 16 seccomp failed, 17 thread spawn failed,
 /// 18 handoff failed, 19 sync timeout, 20 stop did not fire, 21 unexpected
 /// worker completion, 22 mech failed, 23 controller did not fire, 24
-/// initialize unexpectedly succeeded, 99 fell through the denied stop).
+/// initialize unexpectedly succeeded, 25 finalize unexpectedly succeeded,
+/// 99 fell through the denied stop).
 fn run_stop_child(scenario: &str) -> ! {
     match scenario {
         "s1-main" => run_s1_main(),
@@ -131,9 +132,14 @@ fn run_stop_child(scenario: &str) -> ! {
         "s10-unsettled" => run_s10_unsettled(),
         "s11-gated" => run_s11_gated(),
         "s12-failed-init" => run_s12_failed_init(),
+        "s13-stuck-call" => run_s13_stuck_call(),
+        "s14-proof-invalidated" => run_s14_proof_invalidated(),
+        "s15-failed-finalize" => run_s15_failed_finalize(),
+        "s16-handler-installed" => run_s16_handler_installed(),
         "c1-never-init" => run_c1_never_init(),
         "c2-unmanaged" => run_c2_unmanaged(),
         "n1-seccomp" => run_n1_seccomp(),
+        "n1-worker" => run_n1_worker(),
         _ => std::process::exit(11),
     }
 }
@@ -577,6 +583,168 @@ fn run_s12_failed_init() -> ! {
     std::process::exit(20);
 }
 
+/// Set by the S13 stuck slot-list stub on native entry (worker is inside C
+/// holding ordinary admission when main starts Finalize).
+static S13_ENTERED: AtomicBool = AtomicBool::new(false);
+
+/// Never-returning ordinary stub for S13: signals entry, then parks
+/// forever holding the worker's ordinary guard (no locks held).
+unsafe extern "C" fn child_slot_list_stuck(
+    _token_present: cryptoki_sys::CK_BBOOL,
+    _slots: *mut cryptoki_sys::CK_SLOT_ID,
+    _count: *mut cryptoki_sys::CK_ULONG,
+) -> cryptoki_sys::CK_RV {
+    S13_ENTERED.store(true, Ordering::SeqCst);
+    loop {
+        std::thread::park();
+    }
+}
+
+/// S13 child: a stuck ordinary native call cannot block the independent
+/// stop. The worker parks inside C holding its guard; main Finalizes with
+/// the 200 ms grace (parent env) and the sealer suicides at the deadline
+/// past the stuck call. A 5 s watchdog exits 23 if nothing fires.
+fn run_s13_stuck_call() -> ! {
+    let backend =
+        Arc::new(child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok)));
+    unsafe { (*backend.func_list).C_GetSlotList = Some(child_slot_list_stuck) };
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    {
+        let spawned = std::thread::Builder::new().name("stop-watchdog".to_owned()).spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::process::exit(23);
+        });
+        if spawned.is_err() {
+            std::process::exit(17);
+        }
+    }
+    let barrier = Arc::new(Barrier::new(4));
+    {
+        let owned = backend.clone();
+        let gate = barrier.clone();
+        let spawned =
+            std::thread::Builder::new().name("stop-stuck-call".to_owned()).spawn(move || {
+                gate.wait();
+                let _ = owned.ffi_get_slot_list(false);
+                // The stuck call must never return.
+                std::process::exit(21);
+            });
+        if spawned.is_err() {
+            std::process::exit(17);
+        }
+    }
+    for index in 0..2 {
+        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
+    }
+    barrier.wait();
+    wait_flag_5s(&S13_ENTERED);
+    let _ = writeln!(std::io::stdout(), "READY s13-stuck-call");
+    let _ = std::io::stdout().flush();
+    // The seal cannot drain the stuck reader: the 200 ms deadline stops
+    // the group at 70. Any return means nothing fired.
+    let _ = backend.finalize();
+    std::process::exit(23);
+}
+
+/// Counts S14 Initialize entries: the first succeeds, every later one
+/// fails natively (the failed re-Initialize after a clean Finalize).
+static S14_INIT_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Succeed-once Initialize stub for S14 (proof invalidation).
+unsafe extern "C" fn child_initialize_once_then_fails(
+    _: *mut std::ffi::c_void,
+) -> cryptoki_sys::CK_RV {
+    if S14_INIT_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+        cryptoki_sys::CKR_OK
+    } else {
+        cryptoki_sys::CKR_GENERAL_ERROR
+    }
+}
+
+/// S14 child: init→finalize→failed re-init invalidates the destruction
+/// proof — the drop stops the group at 70 instead of recycling the
+/// reservation (TO26a proof-invalidation fix at stop level).
+fn run_s14_proof_invalidated() -> ! {
+    let backend =
+        child_backend_managed(Some(child_initialize_once_then_fails), Some(child_finalize_ok));
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    if backend.finalize().is_err() {
+        std::process::exit(32);
+    }
+    if backend.initialize().is_ok() {
+        std::process::exit(24);
+    }
+    let barrier = Arc::new(Barrier::new(4));
+    for index in 0..3 {
+        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
+    }
+    barrier.wait();
+    let _ = writeln!(std::io::stdout(), "READY s14-proof-invalidated");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    std::process::exit(20);
+}
+
+/// Failing Finalize stub for S15: native entered, error RV.
+unsafe extern "C" fn child_finalize_fails(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+    cryptoki_sys::CKR_GENERAL_ERROR
+}
+
+/// S15 child: a native Finalize error (not a simulated marker) leaves the
+/// incarnation uncertain with retained bindings, so the drop stops the
+/// group at 70 instead of recycling.
+fn run_s15_failed_finalize() -> ! {
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_fails));
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    if backend.finalize().is_ok() {
+        std::process::exit(25);
+    }
+    let barrier = Arc::new(Barrier::new(4));
+    for index in 0..3 {
+        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
+    }
+    barrier.wait();
+    let _ = writeln!(std::io::stdout(), "READY s15-failed-finalize");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    std::process::exit(20);
+}
+
+/// S16 child: a returning SIGABRT handler is installed, proven functional
+/// (raise → fires → returns), and still installed when the dirty-owner
+/// drop stops the group at 70 — the handler neither diverts nor blocks
+/// the stop. Reuses the M6 handler decls (separate process, no state
+/// shared with the M6 control child).
+fn run_s16_handler_installed() -> ! {
+    let _ = unsafe { signal(M6_SIGABRT, Some(m6_sigabrt_handler)) };
+    if unsafe { raise(M6_SIGABRT) } != 0 {
+        std::process::exit(33);
+    }
+    if !M6_FIRED.load(Ordering::Relaxed) {
+        std::process::exit(34);
+    }
+    M6_FIRED.store(false, Ordering::Relaxed);
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    let barrier = Arc::new(Barrier::new(4));
+    for index in 0..3 {
+        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
+    }
+    barrier.wait();
+    let _ = writeln!(std::io::stdout(), "READY s16-handler-installed");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    std::process::exit(20);
+}
+
 /// Build an unmanaged backend (test-only sentinel, no registry reservation).
 fn child_backend_unmanaged(
     initialize: cryptoki_sys::CK_C_Initialize,
@@ -729,6 +897,51 @@ fn run_n1_seccomp() -> ! {
     std::process::exit(16);
 }
 
+/// N1-worker child: the denied stop must spin (never fall through) from a
+/// nonleader worker too — seccomp filters are per-thread, so the
+/// worker-thread denial is its own case. Mirrors S2's handoff shape.
+#[cfg(target_os = "linux")]
+fn run_n1_worker() -> ! {
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    install_exit_group_errno_deny();
+    let (tx, rx) = std::sync::mpsc::channel::<FfiBackend>();
+    let main_parked = Arc::new(AtomicBool::new(false));
+    {
+        let flag = main_parked.clone();
+        let spawned =
+            std::thread::Builder::new().name("stop-worker-0".to_owned()).spawn(move || {
+                let owner = match rx.recv() {
+                    Ok(owner) => owner,
+                    Err(_) => std::process::exit(18),
+                };
+                wait_flag_5s(&flag);
+                let _ = writeln!(std::io::stdout(), "READY n1-worker");
+                let _ = std::io::stdout().flush();
+                drop(owner);
+                // Fallthrough: the denied stop returned (or Release) — parent kills.
+                std::process::exit(99);
+            });
+        if spawned.is_err() {
+            std::process::exit(17);
+        }
+    }
+    if tx.send(backend).is_err() {
+        std::process::exit(18);
+    }
+    main_parked.store(true, Ordering::SeqCst);
+    loop {
+        std::thread::park();
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_n1_worker() -> ! {
+    std::process::exit(16);
+}
+
 /// S1: main-thread stop with parked workers (minimal dirty).
 #[test]
 fn native_stop_s1_main_thread_stop() {
@@ -837,6 +1050,45 @@ fn native_stop_s12_failed_initialize_stop() {
     assert_stop_status(&output, "s12-failed-init");
 }
 
+/// S13: a stuck ordinary native call cannot block the independent stop —
+/// the Finalize sealer suicides at the 200 ms grace past the stuck call.
+#[test]
+fn native_stop_s13_stuck_ordinary_call_deadline_stop() {
+    let (child, _permit) = spawn_stop_child_with_env(
+        "s13-stuck-call",
+        &[("PKCS11_PROXY_NATIVE_STOP_GRACE_MS", "200")],
+    );
+    let output = child.wait_with_output().expect("reap stop child");
+    assert_stop_status(&output, "s13-stuck-call");
+}
+
+/// S14: init→finalize→failed re-init invalidates the proof — the drop
+/// stops instead of recycling (stop-level proof of the TO26a fix).
+#[test]
+fn native_stop_s14_proof_invalidation_stop() {
+    let (child, _permit) = spawn_stop_child("s14-proof-invalidated");
+    let output = child.wait_with_output().expect("reap stop child");
+    assert_stop_status(&output, "s14-proof-invalidated");
+}
+
+/// S15: a native Finalize error (not simulated) leaves uncertainty — the
+/// drop stops instead of recycling.
+#[test]
+fn native_stop_s15_failed_finalize_stop() {
+    let (child, _permit) = spawn_stop_child("s15-failed-finalize");
+    let output = child.wait_with_output().expect("reap stop child");
+    assert_stop_status(&output, "s15-failed-finalize");
+}
+
+/// S16: an installed, proven-functional returning SIGABRT handler neither
+/// diverts nor blocks the stop — the group still exits 70.
+#[test]
+fn native_stop_s16_sigabrt_handler_installed_stop() {
+    let (child, _permit) = spawn_stop_child("s16-handler-installed");
+    let output = child.wait_with_output().expect("reap stop child");
+    assert_stop_status(&output, "s16-handler-installed");
+}
+
 /// C1: never-initialized control (normal Drop, child exit 0, no stop).
 #[test]
 fn native_stop_c1_never_initialized_normal_drop() {
@@ -853,14 +1105,12 @@ fn native_stop_c2_poisoned_unmanaged_normal_drop() {
     assert_control_status(&output, "c2-unmanaged");
 }
 
-/// N1: seccomp errno-denial on `exit_group` — child must NOT fall through.
-/// Unsupported-environment: with `exit_group` denied (`BPF_DENY`), the stop
-/// retry loop spins forever (never 70, never fallthrough exit 99); the parent
-/// observes 5 s of aliveness, then SIGKILLs and reaps. Linux-only (seccomp).
+/// Assert a seccomp-denied child spins (never falls through): the parent
+/// observes 5 s of aliveness, then SIGKILLs (external-parent termination)
+/// and reaps. Shared by the main-thread and worker-thread denials.
 #[cfg(target_os = "linux")]
-#[test]
-fn native_stop_n1_seccomp_errno_denial_unsupported_environment() {
-    let (mut child, _permit) = spawn_stop_child("n1-seccomp");
+fn assert_denied_child_spins(scenario: &str) {
+    let (mut child, _permit) = spawn_stop_child(scenario);
     // 5 s budget: the denied child must stay alive (spinning, not exiting).
     let start = std::time::Instant::now();
     let budget = std::time::Duration::from_secs(5);
@@ -873,23 +1123,43 @@ fn native_stop_n1_seccomp_errno_denial_unsupported_environment() {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Some(status) => {
-                panic!("n1-seccomp: child must NOT exit (fell through?), got {status:?}");
+                panic!("{scenario}: child must NOT exit (fell through?), got {status:?}");
             }
         }
     }
     match child.try_wait().expect("confirm child alive") {
         None => {}
         Some(status) => {
-            panic!("n1-seccomp: child exited during kill window, got {status:?}");
+            panic!("{scenario}: child exited during kill window, got {status:?}");
         }
     }
     child.kill().expect("SIGKILL denied child");
     let output = child.wait_with_output().expect("reap denied child");
     // 9 is SIGKILL: killed, never exited 70/0/99 (no fallthrough).
-    assert_eq!(output.status.signal(), Some(9), "n1-seccomp: SIGKILL, got {:?}", output.status);
-    assert_eq!(output.status.code(), None, "n1-seccomp: no exit code when killed");
+    assert_eq!(output.status.signal(), Some(9), "{scenario}: SIGKILL, got {:?}", output.status);
+    assert_eq!(output.status.code(), None, "{scenario}: no exit code when killed");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("READY"), "n1-seccomp: READY missing, stdout={stdout:?}");
+    assert!(stdout.contains("READY"), "{scenario}: READY missing, stdout={stdout:?}");
+}
+
+/// N1: seccomp errno-denial on `exit_group` — child must NOT fall through.
+/// Unsupported-environment: with `exit_group` denied (`BPF_DENY`), the stop
+/// retry loop spins forever (never 70, never fallthrough exit 99); the parent
+/// observes 5 s of aliveness, then SIGKILLs and reaps. Linux-only (seccomp).
+#[cfg(target_os = "linux")]
+#[test]
+fn native_stop_n1_seccomp_errno_denial_unsupported_environment() {
+    assert_denied_child_spins("n1-seccomp");
+}
+
+/// N1-worker: the same errno-denial from a nonleader worker — seccomp
+/// filters are per-thread, so the worker-thread denial spins too (never
+/// falls through to Drop), needing the same external-parent termination.
+/// Linux-only (seccomp).
+#[cfg(target_os = "linux")]
+#[test]
+fn native_stop_n1_worker_seccomp_errno_denial_unsupported_environment() {
+    assert_denied_child_spins("n1-worker");
 }
 
 // STOP-C2 marker tests + positive controls (file-based).
