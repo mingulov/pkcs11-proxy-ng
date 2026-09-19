@@ -1261,6 +1261,52 @@ mod tests {
         }
     }
 
+    unsafe extern "C" fn initialize_ok(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
+    #[test]
+    fn initialize_blocks_on_parked_ordinary_then_proceeds_after_release() {
+        // I1 contention pin (blocking chosen; see `begin_initialize` docs):
+        // a full `initialize()` cycle waits behind a provider-parked
+        // ordinary call — it must neither fail fast under contention nor
+        // wedge past release. Bounded waits throughout: 200ms of provable
+        // block, then prompt completion after release.
+        let (backend, _functions) = backend_with_sign_stub();
+        unsafe { (*backend.func_list).C_Initialize = Some(initialize_ok) };
+        backend.initialize().expect("setup initialize opens the incarnation");
+        // Swap in the parking stub for this test only.
+        unsafe { (*backend.func_list).C_Sign = Some(sign_parkable) };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *SIGN_PARK_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker =
+                scope.spawn(|| backend.ffi_sign(CkSessionHandle(7), CkInBuf::Bytes(b"data")));
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker parks inside the stub holding its guard");
+            scope.spawn(|| {
+                let outcome = backend.initialize();
+                done_tx.send(outcome.is_ok()).expect("report initialize completion");
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "initialize must wait while an ordinary call is parked, not fail fast"
+            );
+            release_tx.send(()).expect("release the parked stub");
+            assert!(
+                done_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("initialize proceeds after release"),
+                "initialize succeeds after release"
+            );
+            let signature = worker.join().expect("worker joins").expect("parked call succeeds");
+            assert_eq!(signature.len(), 4);
+        });
+    }
+
     #[test]
     fn parked_sign_blocks_control_until_release() {
         let (backend, _functions) = backend_with_sign_stub();

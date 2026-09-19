@@ -11,6 +11,7 @@
 
 use super::native_domain::*;
 use pkcs11_proxy_ng_types::CkRv;
+use std::sync::mpsc;
 use std::time::Duration;
 
 fn open_domain() -> LifecycleDomain {
@@ -163,6 +164,78 @@ fn publish_last_writer_wins() {
 }
 
 #[test]
+fn publish_with_purge_runs_purge_and_advances_epoch() {
+    // I2 success path: the purge closure runs exactly once, the domain
+    // opens, and the epoch advances exactly as a plain publish would.
+    let domain = LifecycleDomain::new();
+    let init = domain.begin_initialize().expect("begin succeeds");
+    let purged = std::sync::atomic::AtomicBool::new(false);
+    domain
+        .publish_open_with_purge(init, || purged.store(true, std::sync::atomic::Ordering::SeqCst))
+        .expect("publish succeeds");
+    assert!(purged.load(std::sync::atomic::Ordering::SeqCst), "purge must run");
+    assert_eq!(domain.state_for_tests(), ModuleState::Open);
+    let guard = domain.admit_ordinary().expect("open domain admits");
+    assert_eq!(guard.epoch_for_tests(), 2, "begin + publish each advance the epoch");
+}
+
+#[test]
+fn publish_purge_runs_inside_write_exclusion() {
+    // I2 exclusion pin: a gated purge holds the publish write lock, so no
+    // admission — the post-publish kind the old code raced — can complete
+    // until the purge finishes.
+    let domain = open_domain();
+    let init = domain.begin_initialize().expect("begin succeeds");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (admit_tx, admit_rx) = mpsc::channel();
+    let domain = &domain;
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            domain
+                .publish_open_with_purge(init, || {
+                    entered_tx.send(()).expect("report purge entered");
+                    release_rx.recv_timeout(Duration::from_secs(5)).expect("wait for release");
+                })
+                .expect("publish succeeds");
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).expect("purge entered under write");
+        scope.spawn(|| {
+            admit_tx.send(domain.admit_ordinary().is_ok()).expect("report admission");
+        });
+        assert!(
+            admit_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "no admission may complete while the purge holds publish write"
+        );
+        release_tx.send(()).expect("release the purge");
+        assert!(
+            admit_rx.recv_timeout(Duration::from_secs(5)).expect("admission resolves"),
+            "post-purge admission succeeds against Open"
+        );
+    });
+}
+
+#[test]
+fn publish_with_purge_at_exhaustion_skips_purge_fail_closed() {
+    // I2 exhaustion path: no next identity means no publish and NO purge —
+    // a refused cycle purges nothing; the domain fails closed to Uncertain.
+    let domain = LifecycleDomain::new();
+    domain.set_state_for_tests(ModuleState::LoadedUninitialized, u64::MAX - 1);
+    let init = domain.begin_initialize().expect("begin consumes the last epoch");
+    let purged = std::sync::atomic::AtomicBool::new(false);
+    assert_eq!(
+        domain
+            .publish_open_with_purge(init, || purged
+                .store(true, std::sync::atomic::Ordering::SeqCst))
+            .unwrap_err(),
+        CkRv::GENERAL_ERROR
+    );
+    assert!(!purged.load(std::sync::atomic::Ordering::SeqCst), "exhausted publish must not purge");
+    assert_eq!(domain.state_for_tests(), ModuleState::Uncertain);
+    assert_eq!(domain.admit_ordinary().unwrap_err(), CkRv::GENERAL_ERROR);
+}
+
+#[test]
 fn admission_epoch_advances_across_control_cycles() {
     let domain = open_domain();
     let first = domain.admit_ordinary().expect("admits at epoch 2");
@@ -262,6 +335,61 @@ fn unsettled_ticket_drops_safely_when_poisoned() {
     });
     drop(init);
     assert_eq!(domain.admit_ordinary().unwrap_err(), CkRv::GENERAL_ERROR);
+}
+
+#[test]
+fn queued_writer_stalls_new_admissions() {
+    // I1 fairness pin: `std::sync::RwLock` is writer-preferring — while a
+    // control write is queued behind a parked reader, NEW ordinary
+    // admissions stall behind it instead of barging ahead. TF01b's Finalize
+    // drain relies on this for termination (see the Finalize paragraph in
+    // the design block); if a platform ever stops preferring writers, this
+    // test fails loudly instead of the drain hanging silently.
+    let domain = open_domain();
+    let guard = domain.admit_ordinary().expect("admits while open");
+    let (began_tx, began_rx) = mpsc::channel();
+    let (abandon_tx, abandon_rx) = mpsc::channel();
+    let (admit_tx, admit_rx) = mpsc::channel();
+    // Share a borrow: the writer closure below is `move` (the abandon
+    // `Receiver` is !Sync), so it must capture `&LifecycleDomain`.
+    let domain = &domain;
+    std::thread::scope(|scope| {
+        // Queued writer: blocks in begin behind the parked guard, then
+        // waits for the test to release it so the state it publishes
+        // (`Initializing`) stays put while the late reader resolves.
+        scope.spawn(move || {
+            let ticket = domain.begin_initialize().expect("control proceeds after release");
+            began_tx.send(()).expect("report control begin");
+            abandon_rx.recv_timeout(Duration::from_secs(5)).expect("wait for abandon signal");
+            domain.abandon_initialize(ticket);
+        });
+        // The writer cannot be observed queuing; 200ms of parked-guard
+        // block guarantees it is queued before the late reader attempts.
+        std::thread::sleep(Duration::from_millis(200));
+        scope.spawn(|| {
+            let outcome = domain.admit_ordinary().map(|admitted| admitted.epoch_for_tests());
+            admit_tx.send(outcome).expect("report late admission");
+        });
+        // The attempt itself must be in flight before the guard drops, or a
+        // slow spawn could resolve post-begin and mask a fairness regression.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            admit_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "new admission must stall behind the queued writer, not barge ahead"
+        );
+        drop(guard);
+        began_rx.recv_timeout(Duration::from_secs(5)).expect("writer begins after release");
+        // The late reader now resolves against `Initializing`: denied, and
+        // the denial proves it never slipped in ahead of the writer (an
+        // admitted-while-Open reader would report `Ok`).
+        assert_eq!(
+            admit_rx.recv_timeout(Duration::from_secs(5)).expect("late reader resolves"),
+            Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
+            "late reader resolves after the writer, against Initializing"
+        );
+        abandon_tx.send(()).expect("release the writer");
+    });
+    domain.admit_ordinary().expect("abandoned domain admits again");
 }
 
 #[test]

@@ -3,8 +3,9 @@ use super::*;
 impl FfiBackend {
     pub(super) fn ffi_get_info(&self) -> CkResult<CkInfo> {
         let mut info = cryptoki_sys::CK_INFO::default();
-        // Control choke: pre-Initialize-legal query — stateless, retains
-        // nothing, needs no admission.
+        // Control choke: stateless probe query, forwarded regardless of
+        // domain state (providers may still return
+        // CKR_CRYPTOKI_NOT_INITIALIZED); retains nothing, needs no admission.
         Self::call_control_unit(unsafe { (*self.func_list).C_GetInfo }, |function| unsafe {
             function(&mut info)
         })?;
@@ -24,8 +25,9 @@ impl FfiBackend {
     pub(super) fn ffi_get_slot_info(&self, slot_id: CkSlotId) -> CkResult<CkSlotInfo> {
         let mut info = cryptoki_sys::CK_SLOT_INFO::default();
         let h_slot = Self::slot_id(slot_id)?;
-        // Control choke: pre-Initialize-legal query — stateless, retains
-        // nothing, needs no admission.
+        // Control choke: stateless probe query, forwarded regardless of
+        // domain state (providers may still return
+        // CKR_CRYPTOKI_NOT_INITIALIZED); retains nothing, needs no admission.
         Self::call_control_unit(unsafe { (*self.func_list).C_GetSlotInfo }, |function| unsafe {
             function(h_slot, &mut info)
         })?;
@@ -462,7 +464,7 @@ mod tests {
 
     #[test]
     fn get_info_reaches_provider_before_lifecycle_open() {
-        // TF01a control-split proof: pre-Initialize-legal queries ride the
+        // TF01a control-split proof: stateless probe queries ride the
         // unguarded control choke, so they need no admission.
         let (backend, _functions) = backend_with_info_stubs();
         backend.ffi_get_info().unwrap();

@@ -18,7 +18,9 @@
 //! `LifecycleDomain` admission is compile-time-enforced (B2) on exactly two
 //! choke families — `call_bytes` (read path: 17 dependent-op entries) and
 //! `call_unit` (32 ordinary entries) plus the `call_control_unit` split for
-//! `Initialize`/`Finalize` and the pre-Initialize-legal info queries. Every
+//! `Initialize`/`Finalize` and the stateless probe info queries (forwarded
+//! regardless of domain state; providers may still return
+//! `CKR_CRYPTOKI_NOT_INITIALIZED`). Every
 //! other native entry (`call_bytes_exact*`, `call_*_with_mechanism*`,
 //! `call_raw`, `call_array`, `call_*_output`, `fill_bytes`, 3.x paths) is
 //! NOT yet admission-gated, `Finalize` performs no seal/drain (the domain
@@ -580,22 +582,85 @@ impl LifecycleTracker {
 // actual native return, validation and settlement. Admission is checked
 // under the read acquisition that seals it, and the proof is threaded
 // through the `Self::call_*` choke family as `&OrdinaryGuard` (B2 shape),
-// so every native entry proves admission at COMPILE TIME — never advisory.
+// so every threaded native entry proves admission at COMPILE TIME — never
+// advisory (TF01a: two families; see partial scope below).
 //
 // Whole-subsystem lock order (TF01a + TF01b; reviewed design TF01b follows):
-//   lifecycle-domain RwLock (outer) -> DashMap shard locks (inner, leaf).
+//   lifecycle-domain RwLock (outer) -> session fence(s) (TF01b, middle)
+//   -> DashMap shard locks (inner, leaf).
 // Ordinary guards are held across unbounded provider calls — the first
 // lock ever held there — so everything taken under a guard must be a
-// short leaf: DashMap shard ops qualify (per-op, never held across native
-// calls themselves). The order is never inverted: eviction helpers take
-// no lifecycle lock in TF01a (TF01b session fences stay leaf-scoped), and
-// the constructor-registry mutex is never acquired under lifecycle.
-// TF01a control sections (begin/publish/abandon) are SHORT write holds
-// that never span a native call, so ordinary traffic cannot wedge
-// Initialize. TF01b's Finalize seal is the one deliberate exception: it
-// holds write across a BOUNDED drain (existing `native_stop` overrun path),
-// and the drain terminates because in-flight readers only ever take short
-// shard leaves — modulo a truly stuck provider, which the bound covers.
+// short leaf or a TF01b session fence held under the order below: DashMap
+// shard ops qualify (per-op, never held across native calls themselves).
+// The order is never inverted: eviction helpers take no lifecycle lock in
+// TF01a, and the constructor-registry mutex is never acquired under
+// lifecycle.
+//
+// I1 contention decision (blocking is INTENDED — decided, not assumed):
+// the detached ticket only avoids HOLDING write across the native call;
+// ACQUIRING write in begin/publish/abandon blocks until in-flight readers
+// drain, and `std::sync::RwLock` is writer-preferring, so a queued control
+// op additionally stalls NEW ordinary admissions until the drain completes
+// (pinned by `queued_writer_stalls_new_admissions`). Blocking is chosen
+// over try_write-plus-fail-fast because (a) the daemon calls `initialize()`
+// once at startup before serving (`crates/server/src/main.rs:88`) and
+// per-client Initialize never touches the backend
+// (`grpc_service/general/lifecycle.rs`), so no production traffic can wedge
+// it — this mitigation is LOAD-BEARING; (b) blocking preserves
+// initialize-eventually-succeeds for direct embedders, while fail-fast
+// would invent spurious `GENERAL_ERROR` under load; (c) a truly stuck
+// provider wedges every design equally (the in-flight call never returns),
+// so fail-fast buys nothing there. Pinned by
+// `initialize_blocks_on_parked_ordinary_then_proceeds_after_release`
+// (Initialize waits behind parked ordinary work, then proceeds promptly
+// after release — it never fails fast under contention).
+//
+// TF01b Finalize seal (I3 — mechanism specified exactly, because a literal
+// "hold write across a bounded drain" is unimplementable with
+// `std::sync::RwLock`): acquisition IS the drain, and seal-before-drain is
+// impossible — the `Draining` flip needs write, which needs the drain
+// first (actual order is drain-then-seal). TF01b MUST therefore seal in two
+// arms: (1) a `try_write` loop against the shutdown deadline for the fast
+// path — each miss re-checks the deadline instead of blocking unboundedly,
+// and on expiry the sealer itself calls `abnormal_stop_native_lifetime`
+// (suicide — it never returns failure, never proceeds unsealed); (2) past
+// N misses, ONE blocking write acquisition under the already-armed
+// shutdown deadline — the queued writer stalls new admissions
+// (writer-preferring: probed and pinned, so the drain terminates modulo a
+// truly stuck provider), and the external deadline arm owns the bound.
+// Overrun on either arm is `abnormal_stop_native_lifetime` — PROCESS DEATH
+// (`exit_group(70)`; `native_stop.rs`) — acceptable ONLY because
+// `backend.finalize()` runs at post-traffic shutdown
+// (`crates/server/src/main.rs:658`), after the last ordinary call has
+// drained. TF01b test (for the TF01b brief): Finalize under continuous
+// ordinary load completes without hitting the death deadline (pins
+// writer-preferring drain termination).
+//
+// TF01b session fences (I4 — normative; TF01b builds from this text). For
+// close(S) to exclude in-flight ordinary ops on S, ORDINARY PATHS MUST
+// acquire S's fence — a second lock held across unbounded native calls.
+// Order: lifecycle-domain (outer) -> session fence (middle) -> DashMap
+// shard (inner, leaf); fences are per-session siblings, never nested
+// except by close-all, which acquires the affected fences in ascending
+// numeric session-handle order (a total order — no close-all-vs-close-all
+// deadlock). A fence is acquired ONLY under a live `OrdinaryGuard`
+// (admission is the gate: no guard ⇒ no fence), so the Finalize seal needs
+// no fence of its own — draining lifecycle readers drains fence holders
+// with them. Drop-may-never-admit: destructors MUST NOT call
+// `admit_ordinary` or any domain method that acquires the lock — a Drop
+// firing under a live guard would nest read behind a waiting writer and
+// deadlock (today's `PendingNativeObject::drop` → `destroy_object` edge is
+// safe only because no admitted path reaches it yet). Destroy-via-Drop MUST
+// therefore ride a control path that takes no lifecycle lock, or carry a
+// pre-admitted token threaded from the admitting scope; auditing every
+// `Drop` that can reach a native call is a TF01b exit gate.
+//
+// TF01b `Drop` integration: the backend `Drop` quiescence check over the
+// lifecycle domain MUST use non-blocking `try_write` (never block in
+// `Drop`). At backend `Drop` no guard can be alive anywhere — the backend
+// is `Arc`-owned with `&self` methods, so a live guard would keep its
+// owner alive — hence only poison is observable: any `try_write` failure
+// is fail-closed (poison ⇒ stop-fire via `abnormal_stop_native_lifetime`).
 //
 // Re-entrancy (load-bearing with `std` locks): a thread holding read that
 // takes write deadlocks, as does nested read behind a waiting writer. So:
@@ -605,6 +670,8 @@ impl LifecycleTracker {
 // `call_control_*` chokes take no guard, and no control path calls
 // `admit_ordinary`). While an `OrdinaryGuard` is alive on a thread, that
 // thread must not call any domain method that acquires the lock.
+// Destructors are in scope for this rule (see Drop-may-never-admit above):
+// no `Drop` may admit or acquire.
 //
 // Poison policy: `std::sync::RwLock` poison is sticky and maps to
 // fail-closed denial everywhere (precedent: `DomainError::MutexPoisoned`
@@ -734,8 +801,10 @@ impl LifecycleDomain {
     /// from sealed states (`Draining`/`Finalizing`: a TF01b Finalize owns
     /// the domain), consume an epoch, record the prior state in the
     /// ticket, enter `Initializing`. The write is NOT held across the
-    /// native call — the ticket is detached — so in-flight ordinary work
-    /// cannot wedge Initialize; settlement re-acquires short.
+    /// native call — the ticket is detached — but ACQUIRING it blocks until
+    /// in-flight readers drain (intended per the I1 contention decision in
+    /// the design block above; a queued writer also stalls new admissions).
+    /// Settlement re-acquires short.
     pub(in crate::ffi) fn begin_initialize(&self) -> CkResult<InitTicket<'_>> {
         let mut write = self.lock_write()?;
         match write.state {
@@ -750,12 +819,30 @@ impl LifecycleDomain {
         }
     }
 
-    /// Publish a successful native `C_Initialize`: last-writer-wins `Open`
-    /// (concurrent successes are idempotent-safe), consuming an epoch. At
-    /// epoch exhaustion there is no next identity: fail closed to
-    /// `Uncertain` (precedent: `GenerationExhausted` ⇒ `GENERAL_ERROR`).
+    /// Test-only plain publish: production publishes through
+    /// `publish_open_with_purge` so the incarnation purge is atomic with
+    /// the generation it retires.
+    #[cfg(test)]
     pub(in crate::ffi) fn publish_open(&self, ticket: InitTicket<'_>) -> CkResult<()> {
-        ticket.settle_publish()
+        ticket.settle_publish(|| {})
+    }
+
+    /// Publish exactly like [`publish_open`](Self::publish_open), running
+    /// `purge` INSIDE the same write section after the state flips to `Open`
+    /// (I2: the re-Initialize incarnation purge must be invisible to both
+    /// the pre-publish in-flight readers the write acquisition drains and
+    /// the post-publish admissions that wait for the section to end). The
+    /// closure runs under lifecycle write, so it may only take inner-leaf
+    /// locks (DashMap shards — legal under lifecycle→shard order); it must
+    /// never admit, begin control, or touch native entry points. On
+    /// exhaustion the purge does NOT run: fail closed to `Uncertain`, like
+    /// a refused cycle.
+    pub(in crate::ffi) fn publish_open_with_purge(
+        &self,
+        ticket: InitTicket<'_>,
+        purge: impl FnOnce(),
+    ) -> CkResult<()> {
+        ticket.settle_publish(purge)
     }
 
     /// Abandon a failed/refused Initialize cycle (best-effort cleanup, no
@@ -818,17 +905,24 @@ impl OrdinaryGuard<'_> {
 }
 
 impl InitTicket<'_> {
-    fn settle_publish(mut self) -> CkResult<()> {
+    fn settle_publish(mut self, purge: impl FnOnce()) -> CkResult<()> {
         self.settled = true;
         let mut write = self.domain.lock_write()?;
         match write.epoch.checked_add(1) {
             Some(epoch) => {
                 write.epoch = epoch;
                 write.state = ModuleState::Open;
+                // Still under write: post-publish admissions wait, so the
+                // purge is atomic with the generation it retires. The
+                // explicit `drop` keeps the guard alive across `purge`
+                // (NLL would otherwise end it at the last field store).
+                purge();
+                drop(write);
                 Ok(())
             }
             None => {
-                // No next identity: fail closed without consuming an epoch.
+                // No next identity: fail closed without consuming an epoch
+                // and without purging (a refused cycle purges nothing).
                 write.state = ModuleState::Uncertain;
                 Err(CkRv::GENERAL_ERROR)
             }
@@ -849,8 +943,9 @@ impl InitTicket<'_> {
             return;
         }
         // The only live ticket at u64::MAX is this one (begin is denied
-        // there), so restoring without a bump is confusion-free; every
-        // later begin is denied, fail-closed going forward.
+        // there), so restoring without a bump is confusion-free; control
+        // frozen from here on, incarnation pinned (a restored `Open` keeps
+        // admitting — only new control cycles are denied).
         if let Some(next) = write.epoch.checked_add(1) {
             write.epoch = next;
         }

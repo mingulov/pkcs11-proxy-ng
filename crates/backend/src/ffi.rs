@@ -317,8 +317,12 @@ impl Pkcs11Backend for FfiBackend {
         self.lifecycle.check_reinitialize().map_err(lifecycle_refusal_rv)?;
         // F-01 control transition (TF01a): short write entering
         // `Initializing`. Never holds read (this path admits nothing), and
-        // the ticket is detached — the write is not held across the native
-        // call below, so in-flight ordinary work cannot wedge Initialize.
+        // the ticket is detached — the write is not HELD across the native
+        // call below. ACQUIRING write still blocks until in-flight readers
+        // drain (a queued writer also stalls new admissions); that blocking
+        // is intended (I1 decision — see the design block), unreachable in
+        // the daemon flow (init-once-at-startup; per-client Initialize never
+        // touches the backend).
         let init_control = self.lifecycle_domain.begin_initialize()?;
         // Fail-closed attempt marker BEFORE native entry (C3M steps 4-5):
         // a failed `C_Initialize` ran provider code, so the reservation
@@ -347,13 +351,19 @@ impl Pkcs11Backend for FfiBackend {
         // before the purge, so a refused cycle purges nothing. (The `?`
         // also drops the control ticket, abandoning the domain transition.)
         self.lifecycle.note_initialized().map_err(lifecycle_refusal_rv)?;
-        // Publish `Open`: ordinary work admits from here on. Failure here
-        // (poison/epoch exhaustion — practically unreachable) fails closed
-        // without purging, like a refused cycle.
-        self.lifecycle_domain.publish_open(init_control)?;
-        if self.lifecycle.current_generation() != generation_before {
-            self.drop_all_mech_cache();
-        }
+        // Publish `Open` with the incarnation purge INSIDE the publish
+        // write section (I2): the write acquisition drains pre-publish
+        // in-flight readers, and post-publish admissions wait until the
+        // purge completes — no admitted reader ever observes a live
+        // incarnation's stale bindings. Failure here (poison/epoch
+        // exhaustion — practically unreachable) fails closed without
+        // purging, like a refused cycle.
+        let generation_changed = self.lifecycle.current_generation() != generation_before;
+        self.lifecycle_domain.publish_open_with_purge(init_control, || {
+            if generation_changed {
+                self.drop_all_mech_cache();
+            }
+        })?;
         Ok(())
     }
 
@@ -1859,6 +1869,96 @@ mod tests {
         backend.last_init_family.insert(7, OperationFamily::Sign);
         // Use the public path so the forward map and reverse index stay in sync.
         backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+    }
+
+    #[test]
+    fn reinit_purge_never_visible_to_admitted_readers() {
+        // I2 settling test: the re-Initialize incarnation purge runs INSIDE
+        // the publish write section, so no admitted reader can ever observe
+        // a live incarnation's bindings after the generation moved. Spinner
+        // threads admit continuously across finalize/re-initialize cycles;
+        // a (admitted, new generation, stale entry present) triple is the
+        // exact race the subsystem exists to close.
+        //
+        // Each spinner triple is atomic w.r.t. the domain write lock (the
+        // held guard blocks begin/publish mid-check), so post-fix the count
+        // is deterministically zero; pre-fix the publish-then-purge gap lets
+        // spinners catch the stale entry (red evidence: violations > 0).
+        // Bulk seeding widens that gap (a 2000-entry clear holds the purge
+        // window open while 4 hot spinners check it), so the red is reliable
+        // instead of a coin flip per cycle.
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        let (backend, _functions) =
+            backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
+        backend.initialize().expect("first initialize opens the incarnation");
+        let violations = AtomicUsize::new(0);
+        // Counting gate: only the current cycle's NEW generation judges.
+        // Admits before the cycle (old generation, pre-purge bindings
+        // legitimately present) and reseeds between cycles never count.
+        let target_generation = AtomicU64::new(0);
+        let observing = AtomicBool::new(false);
+        let done = AtomicBool::new(false);
+        let ready = AtomicUsize::new(0);
+        // Whole-struct borrow: closures must capture `&FfiBackend` (covered
+        // by its `unsafe impl Sync`), never `&mech_cache` directly (the
+        // `FfiMechanism` values are !Send/!Sync by design).
+        let backend = &backend;
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    ready.fetch_add(1, Ordering::SeqCst);
+                    while !done.load(Ordering::SeqCst) {
+                        if let Ok(_guard) = backend.lifecycle_domain.admit_ordinary() {
+                            let generation = backend.lifecycle.current_generation();
+                            let stale_present =
+                                backend.mech_cache.contains_key(&(7, OperationFamily::Sign));
+                            if observing.load(Ordering::SeqCst)
+                                && generation == target_generation.load(Ordering::SeqCst)
+                                && stale_present
+                            {
+                                violations.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                });
+            }
+            // All spinners hot before the first cycle: without this the
+            // main thread can finish every cycle before a spinner is even
+            // scheduled, hiding the race the test exists to catch.
+            while ready.load(Ordering::SeqCst) < 4 {
+                std::thread::yield_now();
+            }
+            for _ in 0..30 {
+                backend.finalize().expect("finalize between cycles");
+                // Each loop cycle is new (finalized_ok set): the generation
+                // advances exactly once per initialize below.
+                target_generation
+                    .store(backend.lifecycle.current_generation() + 1, Ordering::SeqCst);
+                seed_cache(backend);
+                seed_bulk_cache(backend);
+                observing.store(true, Ordering::SeqCst);
+                backend.initialize().expect("re-initialize with generation change");
+                observing.store(false, Ordering::SeqCst);
+            }
+            done.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(
+            violations.load(Ordering::SeqCst),
+            0,
+            "admitted readers must never observe stale bindings at a new generation"
+        );
+    }
+
+    /// Bulk `mech_cache` ballast for the re-init race test: 2000 extra
+    /// entries (cache-only, no slot-map bookkeeping — the purge clears every
+    /// map unconditionally) so the purge window stays open long enough for
+    /// spinning readers to observe it pre-fix.
+    fn seed_bulk_cache(backend: &FfiBackend) {
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        for session in 1000..3000u64 {
+            let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
+            backend.mech_cache.insert((session, OperationFamily::Sign), ffi_mechanism);
+        }
     }
 
     #[test]
