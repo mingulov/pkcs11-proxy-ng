@@ -10,9 +10,11 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         let h_key = Self::object_handle(key)?;
         self.call_init_with_mechanism(
+            &admission,
             session,
             OperationFamily::Sign,
             unsafe { (*self.func_list).C_SignInit },
@@ -74,7 +76,9 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_unit_with_mechanism(
+            &admission,
             unsafe { (*self.func_list).C_SignRecoverInit },
             mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
@@ -173,7 +177,9 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         Self::call_unit_with_mechanism(
+            &admission,
             unsafe { (*self.func_list).C_VerifyRecoverInit },
             mechanism,
             |function, mech| mechanism_key_init!(session, mechanism, key, function, mech),
@@ -213,7 +219,9 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         self.call_init_with_mechanism(
+            &admission,
             session,
             OperationFamily::Verify,
             unsafe { (*self.func_list).C_VerifyInit },
@@ -286,8 +294,10 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
     ) -> CkResult<()> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         let h_session = Self::session_handle(session)?;
         self.call_init_with_mechanism(
+            &admission,
             session,
             OperationFamily::Digest,
             unsafe { (*self.func_list).C_DigestInit },
@@ -395,7 +405,9 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         self.call_init_with_mechanism_output(
+            &admission,
             session,
             OperationFamily::Encrypt,
             unsafe { (*self.func_list).C_EncryptInit },
@@ -463,7 +475,9 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         key: CkObjectHandle,
     ) -> CkResult<Option<CkMechanismParams>> {
+        let admission = self.lifecycle_domain.admit_ordinary()?;
         self.call_init_with_mechanism_output(
+            &admission,
             session,
             OperationFamily::Decrypt,
             unsafe { (*self.func_list).C_DecryptInit },
@@ -1019,6 +1033,8 @@ mod tests {
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Init paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(12);
         let gcm = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
@@ -1076,6 +1092,8 @@ mod tests {
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Init paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(25);
         let gcm = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
@@ -1127,6 +1145,8 @@ mod tests {
             retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
             ),
         };
+        // Init paths are ordinary: establish post-Initialize state.
+        backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(26);
         let gcm = CkMechanism {
             mechanism_type: CkMechanismType::AES_GCM,
@@ -1220,6 +1240,202 @@ mod tests {
         backend.lifecycle_domain.open_for_tests();
         let signature = backend.ffi_sign(CkSessionHandle(7), CkInBuf::Bytes(b"data")).unwrap();
         assert_eq!(signature.len(), 4);
+    }
+
+    unsafe extern "C" fn sign_init_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _key: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
+    unsafe extern "C" fn sign_recover_init_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _key: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_init_stubs() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_SignInit = Some(sign_init_ok);
+        functions.C_SignRecoverInit = Some(sign_recover_init_ok);
+        functions.C_EncryptInit = Some(encrypt_init_ok);
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        (backend, functions)
+    }
+
+    fn rsa_pkcs_mechanism() -> CkMechanism {
+        CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None }
+    }
+
+    #[test]
+    fn sign_init_denied_before_lifecycle_open() {
+        // TF01b `call_init_with_mechanism` ordinary proof (Init publish
+        // path): no admission pre-Init.
+        let (backend, _functions) = backend_with_init_stubs();
+        assert_eq!(
+            backend
+                .ffi_sign_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn sign_init_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _functions) = backend_with_init_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        backend
+            .ffi_sign_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+            .unwrap();
+        assert!(backend.mech_cache.contains_key(&(7, OperationFamily::Sign)));
+    }
+
+    #[test]
+    fn sign_recover_init_denied_before_lifecycle_open() {
+        // TF01b `call_unit_with_mechanism` ordinary proof: no admission
+        // pre-Init.
+        let (backend, _functions) = backend_with_init_stubs();
+        assert_eq!(
+            backend
+                .ffi_sign_recover_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn sign_recover_init_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _functions) = backend_with_init_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        backend
+            .ffi_sign_recover_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+            .unwrap();
+    }
+
+    #[test]
+    fn encrypt_init_with_output_denied_before_lifecycle_open() {
+        // TF01b `call_init_with_mechanism_output` ordinary proof (Init
+        // publish path with output): no admission pre-Init.
+        let (backend, _functions) = backend_with_init_stubs();
+        let gcm = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0xA5; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new().into(),
+                tag_bits: 128,
+                iv_null: false,
+                aad_null: false,
+            })),
+        };
+        assert_eq!(
+            backend
+                .ffi_encrypt_init_with_output(CkSessionHandle(7), &gcm, CkObjectHandle(1))
+                .unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+    }
+
+    #[test]
+    fn encrypt_init_with_output_admitted_after_lifecycle_open() {
+        // Control: the same call reaches the stub once the domain is open.
+        let (backend, _functions) = backend_with_init_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        let gcm = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0xA5; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new().into(),
+                tag_bits: 128,
+                iv_null: false,
+                aad_null: false,
+            })),
+        };
+        backend.ffi_encrypt_init_with_output(CkSessionHandle(7), &gcm, CkObjectHandle(1)).unwrap();
+        assert!(backend.mech_cache.contains_key(&(7, OperationFamily::Encrypt)));
+    }
+
+    // Blocked-stub exclusion shape (Init publish family): a parked Init
+    // holds its guard across native entry AND the cache publication, so
+    // control settlement cannot complete until release.
+    static SIGN_INIT_PARK_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> =
+        Mutex::new(None);
+
+    unsafe extern "C" fn sign_init_parkable(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _key: cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        let gate = SIGN_INIT_PARK_GATE.lock().unwrap().take();
+        match gate {
+            Some((entered, release)) => {
+                let _ = entered.send(());
+                match release.recv_timeout(Duration::from_secs(10)) {
+                    Ok(()) => cryptoki_sys::CKR_OK,
+                    // Test bug (release never came): fail loudly, never hang.
+                    Err(_) => cryptoki_sys::CKR_FUNCTION_FAILED,
+                }
+            }
+            None => cryptoki_sys::CKR_FUNCTION_FAILED,
+        }
+    }
+
+    #[test]
+    fn parked_sign_init_blocks_control_until_release() {
+        let (backend, _functions) = backend_with_init_stubs();
+        backend.lifecycle_domain.open_for_tests();
+        unsafe { (*backend.func_list).C_SignInit = Some(sign_init_parkable) };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *SIGN_INIT_PARK_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                backend.ffi_sign_init(CkSessionHandle(7), &rsa_pkcs_mechanism(), CkObjectHandle(9))
+            });
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker parks inside the stub holding its guard");
+            scope.spawn(|| {
+                let ticket = backend.lifecycle_domain.begin_initialize().expect("control proceeds");
+                done_tx.send(()).expect("report control settlement");
+                backend.lifecycle_domain.abandon_initialize(ticket);
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "control must not settle while an ordinary call is parked"
+            );
+            release_tx.send(()).expect("release the parked stub");
+            done_rx.recv_timeout(Duration::from_secs(5)).expect("control proceeds after release");
+            worker.join().expect("worker joins").expect("parked call succeeds");
+        });
     }
 
     // Blocked-stub exclusion shape (`call_bytes` family): a provider parked

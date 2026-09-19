@@ -2118,8 +2118,11 @@ mod tests {
             backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
         backend.initialize().expect("first initialization succeeds");
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        // Ordinary choke under test: admit like the `ffi_*` boundary would.
+        let admission = backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
         let err = backend
             .call_init_with_mechanism(
+                &admission,
                 CkSessionHandle(7),
                 OperationFamily::Sign,
                 Some(0u8),
@@ -2149,8 +2152,11 @@ mod tests {
             backend_with_init_and_finalize(Some(initialize_ok), Some(finalize_ok));
         backend.initialize().expect("first initialization succeeds");
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+        // Ordinary choke under test: admit like the `ffi_*` boundary would.
+        let admission = backend.lifecycle_domain.admit_ordinary().expect("open domain admits");
         let err = backend
             .call_init_with_mechanism_output(
+                &admission,
                 CkSessionHandle(7),
                 OperationFamily::Sign,
                 Some(0u8),

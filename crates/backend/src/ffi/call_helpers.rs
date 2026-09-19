@@ -337,6 +337,7 @@ impl FfiBackend {
     }
 
     pub(super) fn call_unit_with_mechanism<TFunction, F>(
+        _admission: &OrdinaryGuard,
         function: Option<TFunction>,
         mechanism: &CkMechanism,
         call: F,
@@ -358,6 +359,7 @@ impl FfiBackend {
     /// are untouched, so dual operations (Encrypt + Digest) coexist.
     pub(super) fn call_init_with_mechanism<TFunction, F>(
         &self,
+        _admission: &OrdinaryGuard,
         session: CkSessionHandle,
         family: OperationFamily,
         function: Option<TFunction>,
@@ -387,6 +389,7 @@ impl FfiBackend {
 
     pub(super) fn call_init_with_mechanism_output<TFunction, F>(
         &self,
+        _admission: &OrdinaryGuard,
         session: CkSessionHandle,
         family: OperationFamily,
         function: Option<TFunction>,
