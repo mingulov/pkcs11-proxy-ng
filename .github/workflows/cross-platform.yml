@@ -98,13 +98,18 @@ jobs:
       # fetched by the compare script itself -- but its DLLs link the MSVC
       # 2015-2022 x64 runtime, which the runner image does not register
       # (without it every module load dies with 0x7E; win-ctr documents
-      # the same requirement). 3010 (reboot required) still means the
-      # runtime installed, so it passes too.
-      - name: Install MSVC x64 runtime (Windows)
+      # the same requirement). The VS installation ships the runtime
+      # DLLs, so expose them via PATH instead of running the vc_redist
+      # installer (which hangs on GHA runners -- run 35446950034).
+      - name: Expose MSVC x64 runtime (Windows)
         if: runner.os == 'Windows'
         run: |
-          curl -sSL -o "$RUNNER_TEMP/vc_redist.x64.exe" https://aka.ms/vs/17/release/vc_redist.x64.exe
-          "$RUNNER_TEMP/vc_redist.x64.exe" /quiet /norestart || [ $? -eq 3010 ]
+          VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          VSDIR=$("$VSWHERE" -latest -property installationPath)
+          REDIST=$(ls -d "$VSDIR"/VC/Redist/MSVC/*/x64 | head -1)
+          test -f "$REDIST/vcruntime140.dll" || { echo "no x64 redist under $VSDIR"; exit 1; }
+          echo "$REDIST" >> "$GITHUB_PATH"
+          echo "MSVC x64 redist: $REDIST"
         shell: bash
 
       - name: Cache cargo registry and build artifacts
@@ -203,11 +208,16 @@ jobs:
           arch: x86
 
       # x86 runtime for the WOW64 test binaries (same 0x7E class as the
-      # x64 leg; the stub DLL itself is /MT-static and needs none).
-      - name: Install MSVC x86 runtime
+      # x64 leg; the stub DLL itself is /MT-static and needs none). PATH
+      # exposure, not the hanging vc_redist installer (see above).
+      - name: Expose MSVC x86 runtime
         run: |
-          curl -sSL -o "$RUNNER_TEMP/vc_redist.x86.exe" https://aka.ms/vs/17/release/vc_redist.x86.exe
-          "$RUNNER_TEMP/vc_redist.x86.exe" /quiet /norestart || [ $? -eq 3010 ]
+          VSWHERE="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          VSDIR=$("$VSWHERE" -latest -property installationPath)
+          REDIST=$(ls -d "$VSDIR"/VC/Redist/MSVC/*/x86 | head -1)
+          test -f "$REDIST/vcruntime140.dll" || { echo "no x86 redist under $VSDIR"; exit 1; }
+          echo "$REDIST" >> "$GITHUB_PATH"
+          echo "MSVC x86 redist: $REDIST"
         shell: bash
 
       # Minimal 32-bit C stub provider (see tests/win32-stub/): /std:c11
