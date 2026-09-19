@@ -159,7 +159,42 @@ jobs:
           cargo test -p pkcs11-proxy-ng-shim --lib
         shell: bash
 
+      # T2-1 tuned subset (landed T2run-fix1 F1): -k selection excluding
+      # provider/framework-side un-runnable nodes. Owner rule: every
+      # exclusion is provider/framework-side only — proven red WITHOUT the
+      # proxy in the loop (direct-phase red, provider crash, or
+      # direct==proxied parity); proxy bugs are never excluded.
+      # Per-item record (what + why + provider-side evidence):
+      # - test_ckr_digest/_keygen/_sign/_verify, test_arithmetic_overflow,
+      #   test_cve_regression, test_ffi_length_boundary, test_padding_oracle,
+      #   test_parameter_validation, test_tookan, test_mech_negative,
+      #   test_operation_termination, test_verify_operability: baseline-red
+      #   files (SoftHSM strictness the framework rejects). Run 35443044655
+      #   ubuntu direct phase (job 105897117947): 14-file/66-FAILED baseline
+      #   group, no proxy in loop (commit dddbdec; CI review item 3).
+      # - test_scalar_attr_length_extended: baseline CRASHER (5 SoftHSM
+      #   crashes pre-proxy, dddbdec) — un-runnable, not just red.
+      # - test_set_attribute (minus 2 rescues): baseline-red file, except
+      #   test_set_attribute_after_destroy and
+      #   test_set_attribute_token_object_in_ro_fails stay admitted (green).
+      # - 5 win-only nodes (run-6 win64 direct exit 1 on disig 2.5.0
+      #   provider behavior; unix SoftHSM 2.6/2.7 pass — commit e04c186):
+      #   test_ckr_decrypt+test_key_type_inconsistent,
+      #   test_ckr_encrypt+test_key_size_range,
+      #   test_bad_mechanism_with_bad_key_size (mechanism/key strictness
+      #   rejections); test_dh_rejects_tiny_prime (DH tiny-prime
+      #   acceptance); test_null_template_nonzero_count+C_GenerateKey
+      #   (NULL-template provider crash, C_GenerateKey param only).
+      # Re-admitted by trial (left in the suite, NOT in the -k below):
+      # - test_aead: trial 1 green in-suite on all 3 legs, both phases
+      #   (0 failed/crashed; run 35470347373, ubuntu job 105970049189).
+      # - test_access_levels: trial 2 green in-suite on all 3 legs, both
+      #   phases (22 passed / 0 failed direct==proxied; run 35471555621,
+      #   ubuntu job 105973304853). Supersedes the 7027433 parity
+      #   exclusion and the CI review M-1 /tmp-only citation.
       - name: Direct-vs-proxied comparison
+        env:
+          EXTRA_P11CHECK_ARGS: '--match "(not test_ckr_digest) and (not test_ckr_keygen) and (not test_ckr_sign) and (not test_ckr_verify) and (not test_arithmetic_overflow) and (not test_cve_regression) and (not test_ffi_length_boundary) and (not test_padding_oracle) and (not test_parameter_validation) and (not test_scalar_attr_length_extended) and (not test_tookan) and (not test_mech_negative) and (not test_operation_termination) and (not test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails) and (not test_verify_operability) and (not (test_ckr_decrypt and test_key_type_inconsistent)) and (not (test_ckr_encrypt and test_key_size_range)) and (not test_bad_mechanism_with_bad_key_size) and (not (test_null_template_nonzero_count and C_GenerateKey)) and (not test_dh_rejects_tiny_prime)"'
         run: python3 scripts/ci-direct-vs-proxy.py
         shell: bash
 
