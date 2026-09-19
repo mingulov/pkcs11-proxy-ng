@@ -981,6 +981,8 @@ fn run_marker_child(scenario: &str) -> ! {
         "m5-finalize-stop" => run_m5_finalize_stop(),
         "m5-finalize-control" => run_m5_finalize_control(),
         "m6-sigabrt-control" => run_m6_sigabrt_control(),
+        "m7-poisoned-domain-stop" => run_m7_poisoned_domain_stop(),
+        "m7-poisoned-domain-control" => run_m7_poisoned_domain_control(),
         _ => std::process::exit(11),
     }
 }
@@ -1488,5 +1490,72 @@ fn native_stop_m6_sigabrt_handler_control_present() {
         b"sigabrt-handler-returned",
         "m6-sigabrt-control",
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M7 stop child: C3M-clean (initialized then finalized) backend whose
+/// lifecycle DOMAIN is poisoned. The C3M retirement predicate says
+/// Release, so only the TF01b Drop quiescence probe can stop the group:
+/// the child must exit 70. Reaching past the drop means no stop fired —
+/// fail loudly with exit 20 (never silently green).
+fn run_m7_poisoned_domain_stop() -> ! {
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    if backend.finalize().is_err() {
+        std::process::exit(32);
+    }
+    std::thread::scope(|scope| {
+        let poisoned = scope.spawn(|| {
+            backend
+                .lifecycle_domain
+                .hold_write_across_for_tests(|| panic!("intentional M7 domain poison"));
+        });
+        if poisoned.join().is_ok() {
+            std::process::exit(24);
+        }
+    });
+    let _ = writeln!(std::io::stdout(), "READY m7-poisoned-domain-stop");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    std::process::exit(20);
+}
+
+/// M7 control child: the same C3M-clean backend with a quiet domain — a
+/// normal Release drop and exit 0.
+fn run_m7_poisoned_domain_control() -> ! {
+    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
+    if backend.initialize().is_err() {
+        std::process::exit(14);
+    }
+    if backend.finalize().is_err() {
+        std::process::exit(32);
+    }
+    let _ = writeln!(std::io::stdout(), "READY m7-poisoned-domain-control");
+    let _ = std::io::stdout().flush();
+    drop(backend);
+    std::process::exit(0);
+}
+
+/// M7: dropping a backend whose lifecycle domain is poisoned stops the
+/// group at 70 even though the C3M predicate says Release.
+#[test]
+fn native_stop_m7_poisoned_domain_drop_stops() {
+    let dir = fresh_outcome_dir("m7-stop");
+    let (child, _permit) = spawn_marker_child("m7-poisoned-domain-stop", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_stop_status(&output, "m7-poisoned-domain-stop");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M7 positive control: the same C3M-clean backend with a quiet domain
+/// drops normally (exit 0, no stop).
+#[test]
+fn native_stop_m7_poisoned_domain_drop_control_clean() {
+    let dir = fresh_outcome_dir("m7-control");
+    let (child, _permit) = spawn_marker_child("m7-poisoned-domain-control", &dir);
+    let output = child.wait_with_output().expect("reap marker child");
+    assert_control_status(&output, "m7-poisoned-domain-control");
     let _ = std::fs::remove_dir_all(&dir);
 }

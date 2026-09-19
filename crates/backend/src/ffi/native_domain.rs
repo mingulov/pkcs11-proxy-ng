@@ -1005,6 +1005,21 @@ impl LifecycleDomain {
         ticket.settle_abandon();
     }
 
+    /// Backend-`Drop` quiescence probe (I4/conc-M3): a non-blocking
+    /// `try_write` that reports ONLY poison. At backend `Drop` no guard
+    /// can be alive anywhere — the backend is `Arc`-owned with `&self`
+    /// methods, so a live guard would keep its owner alive — hence
+    /// `WouldBlock` is unreachable and deliberately has NO arm (never
+    /// block in `Drop`, never stop-fire on contention). The backend
+    /// `Drop` stop-fires on `true`.
+    pub(in crate::ffi) fn quiescence_poisoned(&self) -> bool {
+        match self.inner.try_write() {
+            Ok(_) => false,
+            Err(TryLockError::WouldBlock) => false,
+            Err(TryLockError::Poisoned(_)) => true,
+        }
+    }
+
     fn lock_write(&self) -> CkResult<RwLockWriteGuard<'_, LifecycleInner>> {
         self.inner.write().map_err(|_| CkRv::GENERAL_ERROR)
     }

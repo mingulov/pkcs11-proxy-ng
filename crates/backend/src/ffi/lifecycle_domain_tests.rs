@@ -592,3 +592,31 @@ fn finalize_poisoned_domain_denies_begin_fail_closed() {
     drop(seal);
     assert_eq!(domain.admit_ordinary().unwrap_err(), CkRv::GENERAL_ERROR);
 }
+
+#[test]
+fn drop_quiescence_quiet_domain_not_poisoned() {
+    // I4/conc-M3 Drop probe: a domain that ran ordinary + control cycles
+    // without a writer panic reports clean from every settled state.
+    let domain = open_domain();
+    domain.admit_ordinary().expect("ordinary cycle");
+    assert!(!domain.quiescence_poisoned(), "open quiet domain is clean");
+    let seal = domain.begin_finalize().expect("begin succeeds");
+    seal.enter_finalizing().expect("enter exclusive phase");
+    domain.publish_finalized_with_purge(seal, || {}).expect("publish succeeds");
+    assert!(!domain.quiescence_poisoned(), "finalized quiet domain is clean");
+}
+
+#[test]
+fn drop_quiescence_poisoned_domain_reports_poison() {
+    // Only a writer panic poisons; the probe observes exactly that (the
+    // sole `Drop`-time signal — `WouldBlock` is unreachable there and
+    // deliberately has no arm).
+    let domain = open_domain();
+    std::thread::scope(|scope| {
+        let parked = scope.spawn(|| {
+            domain.hold_write_across_for_tests(|| panic!("intentional LifecycleDomain poison"))
+        });
+        assert!(parked.join().is_err(), "poisoning thread must panic");
+    });
+    assert!(domain.quiescence_poisoned(), "poisoned domain reports poison");
+}
