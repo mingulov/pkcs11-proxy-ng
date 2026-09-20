@@ -30,6 +30,8 @@ tokio-stream = "0.1"
 # release cdylib does not depend on tonic — it talks to the daemon via `client`.
 tonic = { workspace = true, features = ["transport", "router", "codegen", "tls-ring"] }
 libc = "0.2"
+# Dev-only: the stock-SoftHSM2 test provisions an isolated token dir + config.
+tempfile = "3"
 # Dev-only: the cross_width_smoke example loads the built shim module through
 # the public C ABI (C_GetFunctionList), exactly like a host application.
 libloading.workspace = true

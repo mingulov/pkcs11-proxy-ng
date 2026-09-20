@@ -1464,6 +1464,7 @@ dependencies = [
  "pkcs11-proxy-ng-client",
  "pkcs11-proxy-ng-proto",
  "pkcs11-proxy-ng-types",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
