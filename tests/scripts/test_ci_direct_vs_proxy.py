@@ -2,9 +2,8 @@
 
 Covers the logic that is unit-testable without a provider: EXTRA-args
 parsing, ZipSlip guard, download timeout wiring, token-provisioning
-helpers, differential argv construction (incl. the M-1 KAT-scope
-decision), and the Linux-aarch64 proxied-skip predicate (blocking leg).
-Provider-dependent paths -- softhsm2-util init, daemon start,
+helpers, and differential argv construction (incl. the M-1 KAT-scope
+decision). Provider-dependent paths -- softhsm2-util init, daemon start,
 pkcs11-check runs, PyPI fetch, Windows disig URL/SHA -- are NOT unit
 tested here; T2run proves them at runtime on first green dispatch.
 """
@@ -182,34 +181,6 @@ class DifferentialArgvTests(unittest.TestCase):
         # forces that to be a deliberate change, not drift.
         argv = mod.differential_argv("d", "p")
         self.assertNotIn("--all", argv)
-
-
-class ProxiedSkipTests(unittest.TestCase):
-    def check(self, plat, machine):
-        with mock.patch.object(mod.sys, "platform", plat):
-            with mock.patch.object(
-                mod.platform, "machine", return_value=machine
-            ):
-                return mod.proxied_skip_reason()
-
-    def test_linux_aarch64_skips(self) -> None:
-        reason = self.check("linux", "aarch64")
-        self.assertIsNotNone(reason)
-        self.assertIn("aarch64", reason)
-
-    def test_linux_arm64_alias_skips(self) -> None:
-        # platform.machine() reports arm64 on some kernels.
-        self.assertIsNotNone(self.check("linux", "arm64"))
-
-    def test_linux_x86_64_runs(self) -> None:
-        self.assertIsNone(self.check("linux", "x86_64"))
-
-    def test_macos_aarch64_runs(self) -> None:
-        # macOS ARM is FFI-qualified (green leg); the skip is Linux-only.
-        self.assertIsNone(self.check("darwin", "arm64"))
-
-    def test_windows_runs(self) -> None:
-        self.assertIsNone(self.check("win32", "AMD64"))
 
 
 if __name__ == "__main__":

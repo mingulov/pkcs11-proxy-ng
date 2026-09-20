@@ -250,8 +250,8 @@ impl Drop for FfiBackend {
     fn drop(&mut self) {
         use super::native_domain::RetirementDecision::{Poison, Release};
         let decision = self.lifecycle.retirement_decision();
-        // Stop-qualified targets only (Linux x86_64/x86 GNU/musl, Windows
-        // MSVC x86_64/x86, macOS aarch64/x86_64 — exactly the
+        // Stop-qualified targets only (Linux x86_64/x86/aarch64 GNU/musl,
+        // Windows MSVC x86_64/x86, macOS aarch64/x86_64 — exactly the
         // `NATIVE_FFI_QUALIFIED` legs): abnormally stop the native lifetime
         // when the managed final owner cannot prove quiescence. First
         // statement and lock-free (atomic-only decision plus a plain-bool
@@ -264,7 +264,8 @@ impl Drop for FfiBackend {
                 any(target_env = "gnu", target_env = "musl"),
                 any(
                     all(target_arch = "x86_64", target_pointer_width = "64"),
-                    all(target_arch = "x86", target_pointer_width = "32")
+                    all(target_arch = "x86", target_pointer_width = "32"),
+                    all(target_arch = "aarch64", target_pointer_width = "64")
                 )
             ),
             all(
@@ -298,7 +299,8 @@ impl Drop for FfiBackend {
                 any(target_env = "gnu", target_env = "musl"),
                 any(
                     all(target_arch = "x86_64", target_pointer_width = "64"),
-                    all(target_arch = "x86", target_pointer_width = "32")
+                    all(target_arch = "x86", target_pointer_width = "32"),
+                    all(target_arch = "aarch64", target_pointer_width = "64")
                 )
             ),
             all(

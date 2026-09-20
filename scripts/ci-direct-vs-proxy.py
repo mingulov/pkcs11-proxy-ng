@@ -45,10 +45,6 @@ Windows with stdlib only (no shell/PowerShell twin to keep in sync):
 
 Gate (strict within scope): direct exit 0 AND proxied exit 0 AND
 differential (KAT scope) exit 0.
-Linux-aarch64 exception: native FFI is unqualified there by design (the
-daemon fail-closes), so the proxied phase is skipped with an explicit
-PASS-WITH-SKIP verdict and the direct baseline (exit 0) is the whole
-signal. Remove the skip when aarch64 native-FFI qualification lands.
 Extra pkcs11-check args (subset tuning) pass through EXTRA_P11CHECK_ARGS
 (shell-quoted; parsed with shlex.split).
 
@@ -62,7 +58,6 @@ import hashlib
 import glob
 import json
 import os
-import platform
 import shlex
 import shutil
 import socket
@@ -156,19 +151,6 @@ def free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-def proxied_skip_reason():
-    """None when the PROXIED phase can run, else the skip reason.
-
-    Linux-aarch64: native FFI is unqualified by design
-    (NATIVE_FFI_QUALIFIED excludes it; the daemon fail-closes), so no
-    proxied comparison can run there -- the direct baseline is the
-    whole signal.
-    """
-    if sys.platform == "linux" and platform.machine() in ("aarch64", "arm64"):
-        return "linux-aarch64 native FFI unqualified (daemon fail-closes by design)"
-    return None
 
 
 def wait_for_port(port, proc, timeout_s=30):
@@ -478,17 +460,6 @@ def main():
         cwd=p11_cwd,
     )
     log(f"direct exit: {direct.returncode}")
-
-    skip_reason = proxied_skip_reason()
-    if skip_reason is not None:
-        log(f"PROXIED phase SKIPPED ({skip_reason})")
-        if direct.returncode != 0:
-            raise SystemExit(
-                f"DIRECT run failed (exit {direct.returncode}) -- baseline is "
-                "red, so the comparison is meaningless; see direct/results.json"
-            )
-        log("PASS-WITH-SKIP: direct baseline green; proxied skipped (see reason above)")
-        return
 
     # M-2: both phases start from identically-provisioned token state.
     log("[3/6] resetting scratch token to identical state")

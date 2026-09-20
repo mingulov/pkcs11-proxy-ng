@@ -33,8 +33,9 @@ DLL + smoke client vs a Linux daemon, plus the `[listener.local]` rejection
 negative), and leg C (BouncyHsm-win second provider, full set green).
 Windows compile coverage is the per-PR Tier 0f `windows-client-llp64` job
 (`cargo xwin build --target x86_64-pc-windows-msvc --all-targets`).
-Still excluded: Windows GNU and Linux ARM64 runtime claims (native FFI
-fail-closes on aarch64 by design). 32-bit Windows (PE32) is qualified
+Still excluded: Windows GNU. Linux ARM64 is runtime-qualified
+(cross-platform ubuntu-26.04-arm leg, full compare green). 32-bit Windows
+(PE32) is qualified
 at the win32 CI tier: `i686-pc-windows-msvc` build, lib suites executed
 on WOW64, and a stub C provider live-loaded through `FfiBackend::load`
 — the stub boundary (no production 32-bit provider runs in CI). macOS

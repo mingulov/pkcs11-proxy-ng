@@ -16,11 +16,9 @@
 # macOS/Windows minutes plus a full pkcs11-check double-run per leg make
 # this the slowest PR gate — keep the tuned subset current).
 #
-# Legs: linux-x64, linux-arm64 (BLOCKING on the direct baseline only --
-# native FFI is unqualified on Linux-aarch64 by design
-# (NATIVE_FFI_QUALIFIED excludes it), so the script skips the proxied
-# phase there with an explicit PASS-WITH-SKIP verdict; full comparison
-# waits on a future aarch64 native-FFI qualification),
+# Legs: linux-x64, linux-arm64 (full direct-vs-proxied comparison since
+# the 2026-09-20 native-FFI qualification extended the stop/load set to
+# Linux aarch64; stop stub is contract row 5),
 # macos-arm64 (PROMOTED by T2run M-5: M-1..M-3 compat prep proven by the
 # first green macOS leg -- compare green plus backend/shim lib behavior
 # suites green, including the STOP child receipts), windows-x64, plus
@@ -61,8 +59,7 @@ jobs:
           # 2026-09-20: 24.04 -> 26.04 (GA 2026-09-17; 22.04 deprecating).
           - os: ubuntu-26.04
             experimental: false
-          # Blocking on the direct baseline; the proxied phase self-skips
-          # here (see header). Full comparison on aarch64 qualification.
+          # Qualified 2026-09-20: full comparison, blocking (see header).
           - os: ubuntu-26.04-arm
             experimental: false
           # T2run M-5: promoted — first green macOS leg (compare +

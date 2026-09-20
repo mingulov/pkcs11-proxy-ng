@@ -595,6 +595,17 @@ fn native_domain_unsupported_platform_display_names_macos_hosts() {
     assert!(msg.contains("test-detail"), "Display must carry the detail, got: {msg}");
 }
 
+#[test]
+fn native_domain_unsupported_platform_display_names_linux_aarch64_hosts() {
+    // Linux aarch64 joined the v0.2 native-FFI qualification boundary;
+    // the refusal message must name it alongside the other Linux arms.
+    let msg = DomainError::UnsupportedPlatform { detail: "test-detail" }.to_string();
+    assert!(
+        msg.contains("Linux GNU/musl on x86_64 or aarch64 (64-bit)"),
+        "Display must name Linux aarch64 hosts, got: {msg}"
+    );
+}
+
 /// TO26b group 2: the domain holds exactly one waiter reservation — a
 /// second admission's reservation fails locally (FUNCTION_FAILED) while
 /// the first is outstanding, and the slot frees on settlement.
