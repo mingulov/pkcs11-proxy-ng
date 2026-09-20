@@ -150,8 +150,7 @@ pub struct PolicyEntry {
 /// ```
 ///
 /// The two forms can be mixed inside the same list.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub enum GrantSpec {
     /// A bare token-selector string; equivalent to a rich grant with
     /// `classes = None`, `mechanisms = None`, `extract = "allow"`.
@@ -160,8 +159,56 @@ pub enum GrantSpec {
     Rich(RichGrantConfig),
 }
 
+// Manual `Deserialize` (in place of `#[serde(untagged)]`) so a malformed rich
+// table — e.g. an unknown key rejected by `deny_unknown_fields` — surfaces
+// the inner error naming the key. A derived untagged impl discards
+// per-variant errors and reports only "data did not match any variant",
+// which would hide the typo'd key. Accepted shapes are unchanged: a string
+// or a table.
+impl<'de> Deserialize<'de> for GrantSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct GrantSpecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for GrantSpecVisitor {
+            type Value = GrantSpec;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a token selector string or a rich grant table")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(GrantSpec::Bare(v.to_owned()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(GrantSpec::Bare(v))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                RichGrantConfig::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(GrantSpec::Rich)
+            }
+        }
+
+        deserializer.deserialize_any(GrantSpecVisitor)
+    }
+}
+
 /// Rich grant table element for `tokens = [{ token = "...", ... }]`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RichGrantConfig {
     /// Token selector string (same syntax as bare strings: `"label:X"`, `"serial:Y"`, etc.)
     pub token: String,
@@ -197,8 +244,7 @@ pub enum ExtractPolicyConfig {
 /// Two forms accepted in TOML:
 /// - Bare hex string: `"a1b2c3"` — inherits grant-level extract policy.
 /// - Rich table: `{ id = "a1b2c3", extract = "deny" }` — per-object override.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub enum ObjectAclSpec {
     /// A bare CKA_UNIQUE_ID hex string; inherits grant-level extract policy.
     Bare(String),
@@ -206,8 +252,53 @@ pub enum ObjectAclSpec {
     Rich(ObjectAclRichConfig),
 }
 
+// Manual `Deserialize` (in place of `#[serde(untagged)]`); same rationale as
+// `GrantSpec` above — unknown keys must surface naming the key. Accepted
+// shapes are unchanged: a string or a table.
+impl<'de> Deserialize<'de> for ObjectAclSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ObjectAclSpecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ObjectAclSpecVisitor {
+            type Value = ObjectAclSpec;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a CKA_UNIQUE_ID hex string or a rich objects entry")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ObjectAclSpec::Bare(v.to_owned()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ObjectAclSpec::Bare(v))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                ObjectAclRichConfig::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(ObjectAclSpec::Rich)
+            }
+        }
+
+        deserializer.deserialize_any(ObjectAclSpecVisitor)
+    }
+}
+
 /// Rich form of an `objects` allow-list entry.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObjectAclRichConfig {
     /// CKA_UNIQUE_ID as a hex byte string (e.g. `"a1b2c3"`).
     pub id: String,
@@ -224,11 +315,55 @@ pub struct ObjectAclRichConfig {
 /// - `tokens = ["label:X", "serial:Y"]` — list of bare selector strings.
 /// - `tokens = [{ token = "label:X", classes = [...], mechanisms = [...], extract = "deny" }]`
 ///   — list of rich grant tables (may be mixed with bare strings).
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub enum TokenAccessSpec {
     All(String),
     Specific(Vec<GrantSpec>),
+}
+
+// Manual `Deserialize` (in place of `#[serde(untagged)]`); same rationale as
+// `GrantSpec` above — this is the outer layer wrapping rich grants, so a
+// derived untagged impl here would swallow the key-naming error from the
+// inner grant layer. Accepted shapes are unchanged: a string or an array.
+impl<'de> Deserialize<'de> for TokenAccessSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TokenAccessSpecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TokenAccessSpecVisitor {
+            type Value = TokenAccessSpec;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("`\"all\"` or a list of token selectors / rich grant tables")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(TokenAccessSpec::All(v.to_owned()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(TokenAccessSpec::All(v))
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                Vec::<GrantSpec>::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(TokenAccessSpec::Specific)
+            }
+        }
+
+        deserializer.deserialize_any(TokenAccessSpecVisitor)
+    }
 }
 
 #[derive(Deserialize)]

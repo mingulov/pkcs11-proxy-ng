@@ -1401,3 +1401,112 @@ allow_insecure_tcp = false
         "unset PKCS11_PROXY_ALLOW_INSECURE must leave TOML allow_insecure_tcp=false untouched"
     );
 }
+
+// W1-L8-05: rich-grant tables must reject unknown keys loudly. A typo like
+// `extrat = "deny"` was silently ignored while `extract` fell back to its
+// `Allow` default — permitting key extraction the operator believed denied.
+#[test]
+fn rich_grant_typo_rejected_loudly_naming_key() {
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.local]
+path = "/tmp/test.sock"
+auth = "peer_cred"
+
+[auth]
+allow_all_authenticated = false
+
+[[auth.policy]]
+identity = "uid=1000"
+tokens = [{ token = "label:MyToken", extrat = "deny" }]
+"#;
+    let err = toml::from_str::<DaemonConfig>(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("extrat"),
+        "typo'd grant key must be named loudly in the parse error (no silent Allow fallback): {err}"
+    );
+}
+
+// W1-L8-05 (same finding, objects allow-list): a typo in a rich
+// `{ id, extract }` entry must also fail loudly, not inherit silently.
+#[test]
+fn object_acl_rich_typo_rejected_loudly_naming_key() {
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.local]
+path = "/tmp/test.sock"
+auth = "peer_cred"
+
+[auth]
+allow_all_authenticated = false
+
+[[auth.policy]]
+identity = "uid=1000"
+tokens = [{ token = "label:MyToken", objects = [{ id = "a1b2", extrac = "deny" }] }]
+"#;
+    let err = toml::from_str::<DaemonConfig>(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("extrac"),
+        "typo'd objects key must be named loudly in the parse error: {err}"
+    );
+}
+
+// W1-L8-05: every example daemon config in the repo must still parse after
+// deny_unknown_fields lands on the grant tables. Parse-only (not
+// validate/load): placeholders like /CHANGE_ME and @BACKEND_MODULE@ are
+// intentionally not real paths.
+#[test]
+fn all_example_daemon_configs_still_parse() {
+    use std::collections::BTreeSet;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Pinned inventory of every daemon-config TOML in the repo. Mechanism
+    // registries (examples/cloudhsm-mechanisms.toml, fips/mechanism_params.toml,
+    // examples/vendors/*.toml, packaging mechanism examples) are NOT daemon
+    // configs and are excluded.
+    let pinned: &[&str] = &[
+        "examples/config-loopback-dev.toml",
+        "examples/config-mtls.toml",
+        "examples/config-multi-user.toml",
+        "examples/config-unix-local.toml",
+        "examples/configs/dev/proxy.toml",
+        "examples/configs/staging/proxy.toml",
+        "examples/configs/prod/proxy.toml",
+        "examples/configs/fips/proxy.toml",
+        "packaging/config/proxy.toml.default",
+        "tests/consumers/proxy.toml",
+    ];
+    for rel in pinned {
+        let path = root.join(rel);
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read pinned example config {rel}: {e}"));
+        toml::from_str::<DaemonConfig>(&content)
+            .unwrap_or_else(|e| panic!("example config {rel} must still parse: {e}"));
+    }
+    // Completeness: any daemon-config-shaped file under examples/ that is
+    // not in the pinned list fails here, forcing triage instead of silent
+    // omission from coverage.
+    let pinned_set: BTreeSet<String> = pinned.iter().map(|s| s.to_string()).collect();
+    let mut discovered: BTreeSet<String> = BTreeSet::new();
+    for entry in std::fs::read_dir(root.join("examples")).expect("read examples/") {
+        let path = entry.expect("dir entry").path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if path.extension().and_then(|e| e.to_str()) == Some("toml") && name.starts_with("config") {
+            discovered.insert(format!("examples/{name}"));
+        }
+    }
+    for tier in ["dev", "staging", "prod", "fips"] {
+        let rel = format!("examples/configs/{tier}/proxy.toml");
+        assert!(root.join(&rel).exists(), "expected tier config missing: {rel}");
+        discovered.insert(rel);
+    }
+    for rel in &discovered {
+        assert!(
+            pinned_set.contains(rel),
+            "daemon config {rel} exists but is not in the pinned parse list — add it"
+        );
+    }
+}
