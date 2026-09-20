@@ -1790,6 +1790,102 @@ fn skipjack_relayx_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// W1-C8-02: owned-adopting Skipjack conversions wipe the source buffers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn skipjack_private_wrap_adopting_conversion_wipes_source() {
+    let canary = vec![0xA5u8; 32];
+    let mut proto = v1_proto::SkipjackPrivateWrapParams {
+        password: canary.clone(),
+        public_data: vec![0x11; 128],
+        password_length: 32,
+        random_a: vec![0x22; 20],
+        prime_p: vec![0x33; 128],
+        base_g: vec![0x44; 128],
+        subprime_q: vec![0x55; 20],
+    };
+    let adopted = SkipjackPrivateWrapParams::from(&mut proto);
+    // Source buffers adopted out: no secret bytes remain in the prost message.
+    assert!(proto.password.is_empty());
+    // Converted value holds the canary.
+    adopted.password.expose(|bytes| assert_eq!(bytes, canary.as_slice()));
+    // Non-secret fields moved intact.
+    assert_eq!(adopted.public_data, vec![0x11; 128]);
+    assert_eq!(adopted.password_length, 32);
+    assert_eq!(adopted.random_a, vec![0x22; 20]);
+    assert_eq!(adopted.prime_p, vec![0x33; 128]);
+    assert_eq!(adopted.base_g, vec![0x44; 128]);
+    assert_eq!(adopted.subprime_q, vec![0x55; 20]);
+}
+
+#[test]
+fn skipjack_relayx_adopting_conversion_wipes_source() {
+    let canary_old = vec![0xA5u8; 8];
+    let canary_new = vec![0x5Au8; 8];
+    let mut proto = v1_proto::SkipjackRelayxParams {
+        old_wrapped_x: vec![0x01; 24],
+        old_password: canary_old.clone(),
+        old_public_data: vec![0x03; 128],
+        old_random_a: vec![0x04; 20],
+        new_password: canary_new.clone(),
+        new_public_data: vec![0x06; 128],
+        new_random_a: vec![0x07; 20],
+    };
+    let adopted = SkipjackRelayxParams::from(&mut proto);
+    // Every source buffer adopted out; nothing secret remains behind.
+    assert!(proto.old_wrapped_x.is_empty());
+    assert!(proto.old_password.is_empty());
+    assert!(proto.old_public_data.is_empty());
+    assert!(proto.old_random_a.is_empty());
+    assert!(proto.new_password.is_empty());
+    assert!(proto.new_public_data.is_empty());
+    assert!(proto.new_random_a.is_empty());
+    // Converted values hold the canaries.
+    adopted.old_wrapped_x.expose(|bytes| assert_eq!(bytes, vec![0x01; 24].as_slice()));
+    adopted.old_password.expose(|bytes| assert_eq!(bytes, canary_old.as_slice()));
+    adopted.new_password.expose(|bytes| assert_eq!(bytes, canary_new.as_slice()));
+    assert_eq!(adopted.old_public_data.len(), 128);
+    assert_eq!(adopted.old_random_a.len(), 20);
+    assert_eq!(adopted.new_public_data.len(), 128);
+    assert_eq!(adopted.new_random_a.len(), 20);
+}
+
+#[test]
+fn skipjack_prost_messages_zeroize_wipes_passwords() {
+    use zeroize::Zeroize;
+    // `ZeroizeOnDrop` (derived alongside `Zeroize` in build.rs) delegates
+    // drop-wiping to this same `zeroize`; post-drop memory is unobservable,
+    // so the test pins the wipe behavior directly.
+    // All fields spelled out: struct-update syntax cannot move fields out
+    // of the `ZeroizeOnDrop` temporary.
+    let mut private_wrap = v1_proto::SkipjackPrivateWrapParams {
+        password: vec![0xA5u8; 32],
+        public_data: Vec::new(),
+        password_length: 0,
+        random_a: Vec::new(),
+        prime_p: Vec::new(),
+        base_g: Vec::new(),
+        subprime_q: Vec::new(),
+    };
+    private_wrap.zeroize();
+    assert!(private_wrap.password.iter().all(|&byte| byte == 0));
+    let mut relayx = v1_proto::SkipjackRelayxParams {
+        old_wrapped_x: vec![0x01; 24],
+        old_password: vec![0xA5u8; 8],
+        old_public_data: Vec::new(),
+        old_random_a: Vec::new(),
+        new_password: vec![0x5Au8; 8],
+        new_public_data: Vec::new(),
+        new_random_a: Vec::new(),
+    };
+    relayx.zeroize();
+    assert!(relayx.old_password.iter().all(|&byte| byte == 0));
+    assert!(relayx.new_password.iter().all(|&byte| byte == 0));
+    assert!(relayx.old_wrapped_x.iter().all(|&byte| byte == 0));
+}
+
+// ---------------------------------------------------------------------------
 // Generic / vendor parameter shapes round-trip tests
 // ---------------------------------------------------------------------------
 

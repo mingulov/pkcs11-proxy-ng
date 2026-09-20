@@ -14,6 +14,9 @@ pkcs11-proxy-ng-types = { path = "../types" }
 tonic = { workspace = true, features = ["codegen", "channel"] }
 tonic-prost.workspace = true
 prost.workspace = true
+# W1-C8-02: `Zeroize`/`ZeroizeOnDrop` derived onto secret-bearing prost
+# messages in build.rs, so decoded password buffers wipe on drop.
+zeroize = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build.workspace = true

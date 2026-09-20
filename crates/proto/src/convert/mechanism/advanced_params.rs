@@ -547,6 +547,25 @@ impl From<&v1_proto::SkipjackPrivateWrapParams> for SkipjackPrivateWrapParams {
     }
 }
 
+// Owned-adopting conversion (W1-C8-02): takes ownership of the secret
+// buffers out of the prost message instead of copying them, so after
+// adoption the secret bytes exist in exactly one wiped-on-drop owner.
+// The source message is left with empty buffers; its drop wipes any
+// residual via the derived `ZeroizeOnDrop` impl (see build.rs).
+impl From<&mut v1_proto::SkipjackPrivateWrapParams> for SkipjackPrivateWrapParams {
+    fn from(p: &mut v1_proto::SkipjackPrivateWrapParams) -> Self {
+        Self {
+            password: SecretBytes::new(std::mem::take(&mut p.password)),
+            public_data: std::mem::take(&mut p.public_data),
+            password_length: p.password_length,
+            random_a: std::mem::take(&mut p.random_a),
+            prime_p: std::mem::take(&mut p.prime_p),
+            base_g: std::mem::take(&mut p.base_g),
+            subprime_q: std::mem::take(&mut p.subprime_q),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Misc: SkipjackRelayxParams
 // ---------------------------------------------------------------------------
@@ -575,6 +594,25 @@ impl From<&v1_proto::SkipjackRelayxParams> for SkipjackRelayxParams {
             new_password: SecretBytes::copy_from_slice(&p.new_password),
             new_public_data: SecretBytes::copy_from_slice(&p.new_public_data),
             new_random_a: SecretBytes::copy_from_slice(&p.new_random_a),
+        }
+    }
+}
+
+// Owned-adopting conversion (W1-C8-02): takes ownership of the secret
+// buffers out of the prost message instead of copying them, so after
+// adoption the secret bytes exist in exactly one wiped-on-drop owner.
+// The source message is left with empty buffers; its drop wipes any
+// residual via the derived `ZeroizeOnDrop` impl (see build.rs).
+impl From<&mut v1_proto::SkipjackRelayxParams> for SkipjackRelayxParams {
+    fn from(p: &mut v1_proto::SkipjackRelayxParams) -> Self {
+        Self {
+            old_wrapped_x: SecretBytes::new(std::mem::take(&mut p.old_wrapped_x)),
+            old_password: SecretBytes::new(std::mem::take(&mut p.old_password)),
+            old_public_data: SecretBytes::new(std::mem::take(&mut p.old_public_data)),
+            old_random_a: SecretBytes::new(std::mem::take(&mut p.old_random_a)),
+            new_password: SecretBytes::new(std::mem::take(&mut p.new_password)),
+            new_public_data: SecretBytes::new(std::mem::take(&mut p.new_public_data)),
+            new_random_a: SecretBytes::new(std::mem::take(&mut p.new_random_a)),
         }
     }
 }
