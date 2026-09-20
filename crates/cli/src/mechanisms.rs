@@ -62,4 +62,34 @@ mod tests {
         assert_eq!(mechanism_name(0x48), "SHA512_224");
         assert_eq!(mechanism_name(0x49), "SHA512_224_HMAC");
     }
+
+    #[test]
+    fn sha_keygen_and_sha512t_rows_use_official_ids() {
+        // Official IDs per cryptoki-sys 0.5.0 (OASIS PKCS#11 bindings):
+        // CKM_SHA_1_KEY_GEN..CKM_SHA512_T_KEY_GEN = 16387..16394
+        // (0x4003..0x400A); CKM_SHA512_T = 80 (0x50),
+        // CKM_SHA512_T_HMAC = 81 (0x51),
+        // CKM_SHA512_T_HMAC_GENERAL = 82 (0x52),
+        // CKM_SHA512_T_KEY_DERIVATION = 83 (0x53).
+        // Table names omit the CKM_ prefix. (W1-C11-02)
+        let expected: &[(&str, u64)] = &[
+            ("SHA_1_KEY_GEN", 0x4003),
+            ("SHA224_KEY_GEN", 0x4004),
+            ("SHA256_KEY_GEN", 0x4005),
+            ("SHA384_KEY_GEN", 0x4006),
+            ("SHA512_KEY_GEN", 0x4007),
+            ("SHA512_224_KEY_GEN", 0x4008),
+            ("SHA512_256_KEY_GEN", 0x4009),
+            ("SHA512_T_KEY_GEN", 0x400A),
+            ("SHA512_T", 0x50),
+            ("SHA512_T_HMAC", 0x51),
+            ("SHA512_T_HMAC_GENERAL", 0x52),
+            ("SHA512_T_KEY_DERIVATION", 0x53),
+        ];
+        assert_eq!(expected.len(), 12);
+        for (name, id) in expected {
+            assert_eq!(parse_mechanism(name).unwrap(), *id, "{name}");
+            assert_eq!(mechanism_name(*id), *name.to_string(), "0x{id:X}");
+        }
+    }
 }
