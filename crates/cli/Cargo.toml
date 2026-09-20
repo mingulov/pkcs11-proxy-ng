@@ -33,3 +33,5 @@ pkcs11-proxy-ng-backend = { path = "../backend" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
 tokio-stream = "0.1"
 tonic = { workspace = true, features = ["server"] }
+tempfile = "3"
+rcgen = "0.14"
