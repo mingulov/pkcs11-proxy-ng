@@ -5,6 +5,8 @@
 //! They prevent silent feature gaps where a new RPC is added to one
 //! layer but not wired through all layers.
 
+use std::collections::BTreeSet;
+
 /// Extract method names from the Pkcs11Backend trait source.
 fn backend_trait_methods() -> Vec<String> {
     let src = include_str!("../../backend/src/traits.rs");
@@ -209,6 +211,128 @@ fn client_method_names() -> Vec<String> {
     collect_methods(&client_dir, &mut methods);
     methods.sort();
     methods
+}
+
+/// Strip `//` comments and `"..."` string contents from one source line so
+/// brace counting and keyword detection see code only, not prose.
+/// (Hand-written RPC bodies contain comments naming `client_context_id` and
+/// `begin_operation`; without stripping, those would misclassify bodies.)
+fn code_only(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    let mut in_string = false;
+    while let Some(ch) = chars.next() {
+        if in_string {
+            if ch == '\\' {
+                chars.next(); // skip escaped char (keeps `\"` from ending the string)
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'/') {
+            break; // line comment: ignore the rest
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// One hand-written RPC method: its name plus its source lines (signature
+/// through the closing brace). Each line carries the brace depth at line
+/// start so nesting checks can tell "inside the scoped block" from "hoisted
+/// outside it".
+struct HandWrittenRpc {
+    name: String,
+    /// (raw trimmed line, comment/string-stripped line, brace depth at line start)
+    lines: Vec<(String, String, i32)>,
+}
+
+/// Extract the hand-written `async fn` methods from the `impl Pkcs11Proxy`
+/// block in grpc_service/mod.rs: everything between the trait-impl line and
+/// the `$(` line that starts the macro-generated repetition.
+fn hand_written_rpcs() -> Vec<HandWrittenRpc> {
+    let src = include_str!("server/grpc_service/mod.rs");
+    let lines: Vec<&str> = src.lines().collect();
+    let mut rpcs = Vec::new();
+    let mut i = 0;
+    while i < lines.len() && !lines[i].trim().starts_with("impl Pkcs11Proxy for ") {
+        i += 1;
+    }
+    assert!(i < lines.len(), "impl Pkcs11Proxy block not found in grpc_service/mod.rs");
+    i += 1;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed == "$(" {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("async fn ") {
+            let name = rest.split('(').next().unwrap().trim().to_string();
+            let mut body = Vec::new();
+            let mut depth: i32 = 0;
+            let mut entered = false;
+            while i < lines.len() {
+                let raw = lines[i].trim().to_string();
+                let code = code_only(&raw);
+                body.push((raw, code.clone(), depth));
+                depth += code.chars().filter(|&c| c == '{').count() as i32;
+                depth -= code.chars().filter(|&c| c == '}').count() as i32;
+                i += 1;
+                if depth > 0 {
+                    entered = true;
+                }
+                if entered && depth == 0 {
+                    break;
+                }
+            }
+            assert!(entered, "hand-written RPC {name} has no body block");
+            rpcs.push(HandWrittenRpc { name, lines: body });
+            continue;
+        }
+        i += 1;
+    }
+    assert!(!rpcs.is_empty(), "no hand-written RPCs found in grpc_service/mod.rs");
+    rpcs
+}
+
+/// A hand-written RPC is context-carrying when its code (comments stripped)
+/// touches `client_context_id`. Pre-context RPCs (`initialize`,
+/// `get_backend_interfaces`) never do.
+fn is_context_carrying(rpc: &HandWrittenRpc) -> bool {
+    rpc.lines.iter().any(|(_, code, _)| code.contains("client_context_id"))
+}
+
+/// Parse the `HAND_WRITTEN_RPCS` string list from the scoped-dispatch test
+/// module in grpc_service/mod.rs. Entries must stay bare `"name",` literals
+/// (see that const's doc comment) so this parser keeps working.
+fn test_enumerated_rpc_names() -> Vec<String> {
+    let src = include_str!("server/grpc_service/mod.rs");
+    let mut names = Vec::new();
+    let mut in_list = false;
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("const HAND_WRITTEN_RPCS") {
+            in_list = true;
+            continue;
+        }
+        if in_list {
+            if trimmed.starts_with("];") {
+                break;
+            }
+            let entry = trimmed.trim_end_matches(',').trim();
+            if let Some(name) = entry.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                names.push(name.to_string());
+            } else if !entry.is_empty() {
+                panic!("HAND_WRITTEN_RPCS entry is not a bare string literal: {entry:?}");
+            }
+        }
+    }
+    assert!(!names.is_empty(), "HAND_WRITTEN_RPCS list not found in grpc_service/mod.rs");
+    names
 }
 
 #[test]
@@ -601,4 +725,101 @@ fn example_configs_parse_and_validate_without_errors() {
         }
     }
     assert!(count >= 3, "examples/ should have at least 3 reference configs, found {count}");
+}
+
+/// I-1 (W1-L6-01 follow-up): the scoped-dispatch test enumeration must cover
+/// exactly the hand-written, context-carrying RPCs in the trait impl — a 10th
+/// hand-written RPC (or a removal) must fail here, never silently drop
+/// coverage. The two pre-context RPCs are pinned as explicit exemptions so a
+/// new unguarded-looking method also forces triage instead of passing quietly.
+#[test]
+fn hand_written_context_rpcs_match_test_enumeration() {
+    let rpcs = hand_written_rpcs();
+    let impl_names: BTreeSet<&str> =
+        rpcs.iter().filter(|rpc| is_context_carrying(rpc)).map(|rpc| rpc.name.as_str()).collect();
+    let listed_vec = test_enumerated_rpc_names();
+    let listed: BTreeSet<&str> = listed_vec.iter().map(String::as_str).collect();
+    let missing_from_tests: Vec<&&str> = impl_names.difference(&listed).collect();
+    let extra_in_tests: Vec<&&str> = listed.difference(&impl_names).collect();
+
+    let all_impl: BTreeSet<&str> = rpcs.iter().map(|rpc| rpc.name.as_str()).collect();
+    let mut expected_all = listed.clone();
+    expected_all.insert("initialize");
+    expected_all.insert("get_backend_interfaces");
+    let untriaged: Vec<&&str> = all_impl.difference(&expected_all).collect();
+    let stale_exempt: Vec<&&str> = expected_all.difference(&all_impl).collect();
+
+    assert!(
+        missing_from_tests.is_empty()
+            && extra_in_tests.is_empty()
+            && untriaged.is_empty()
+            && stale_exempt.is_empty(),
+        "HAND_WRITTEN_RPCS drift vs trait impl:\n\
+         in impl but not tested: {missing_from_tests:?}\n\
+         tested but not in impl: {extra_in_tests:?}\n\
+         hand-written but neither tested nor exempt: {untriaged:?}\n\
+         exempt/tested but no longer hand-written: {stale_exempt:?}\n\
+         impl context-carrying fns: {impl_names:?}\n\
+         HAND_WRITTEN_RPCS: {listed:?}"
+    );
+}
+
+/// I-2 (W1-L6-01 follow-up): every hand-written, context-carrying RPC body
+/// must route its handler call through exactly one `run_context_scoped` — the
+/// `*_with_policy` handler invocation must sit INSIDE the scoped async block
+/// (later line, deeper brace depth than the `run_context_scoped(` line), so a
+/// future edit cannot keep M2 admission while hoisting the handler outside
+/// the scope.
+#[test]
+fn hand_written_context_rpcs_route_through_scope_guard() {
+    let rpcs = hand_written_rpcs();
+    let mut failures = Vec::new();
+    for rpc in &rpcs {
+        if !is_context_carrying(rpc) {
+            continue;
+        }
+        let scoped: Vec<(usize, i32)> = rpc
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, code, _))| code.contains("run_context_scoped("))
+            .map(|(idx, (_, _, depth))| (idx, *depth))
+            .collect();
+        if scoped.len() != 1 {
+            failures.push(format!(
+                "{}: expected exactly one `run_context_scoped(` call, found {}",
+                rpc.name,
+                scoped.len()
+            ));
+            continue;
+        }
+        let (scoped_idx, scoped_depth) = scoped[0];
+        let handler_calls: Vec<(usize, i32)> = rpc
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, code, _))| code.contains("_with_policy("))
+            .map(|(idx, (_, _, depth))| (idx, *depth))
+            .collect();
+        if handler_calls.is_empty() {
+            failures.push(format!(
+                "{}: no `*_with_policy(` handler call found in body — if the handler \
+                 was renamed, extend this scanner's handler-call marker",
+                rpc.name
+            ));
+            continue;
+        }
+        for (idx, depth) in handler_calls {
+            if idx <= scoped_idx || depth <= scoped_depth {
+                failures.push(format!(
+                    "{}: handler call on body line {} is not nested inside the \
+                     `run_context_scoped` async block (handler depth {depth} vs \
+                     scoped-call depth {scoped_depth})",
+                    rpc.name,
+                    idx + 1,
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "scope-guard routing drift:\n  {}", failures.join("\n  "));
 }

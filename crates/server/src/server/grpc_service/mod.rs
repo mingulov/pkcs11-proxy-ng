@@ -459,9 +459,12 @@ mod scoped_dispatch_tests {
 
     /// The 9 hand-written RPCs that carry a `client_context_id` and must
     /// enforce the scope guard + M2 cap (W1-L6-01). Every test below iterates
-    /// this list and asserts its length, so adding or removing a hand-written
-    /// RPC without updating the enumeration fails loudly instead of silently
-    /// dropping coverage.
+    /// this list and asserts its length; `consistency_checks::
+    /// hand_written_context_rpcs_match_test_enumeration` additionally pins
+    /// this exact set against the trait impl, so adding or removing a
+    /// hand-written RPC without updating the enumeration fails loudly instead
+    /// of silently dropping coverage. Keep the entries bare `"name",`
+    /// literals — the consistency scanner parses them.
     const HAND_WRITTEN_RPCS: &[&str] = &[
         "get_slot_list",
         "get_slot_info",
