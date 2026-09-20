@@ -48,9 +48,10 @@ use super::super::handle_map::{BackendHandle, VirtualHandle};
 ///    (the first-access UID-fetch timing difference is the documented I1 limit).
 ///
 /// This structure ensures every handle-bearing mechanism variant — including
-/// nested CmsSig sub-mechanisms and SP800-108 byte-encoded key handles (the
-/// latter handled by a separate resolver in `key_ops/generation.rs`) — is
-/// gated through the same single `gate_object_handle` choke point.
+/// nested CmsSig/Kip/Ecies sub-mechanisms and SP800-108 byte-encoded key
+/// handles (the latter handled by a separate resolver in
+/// `key_ops/generation.rs`) — is gated through the same single
+/// `gate_object_handle` choke point.
 ///
 /// D6(1): embedding a private key in mechanism parameters is a USE of that
 /// key — every collected non-zero embedded (virtual, backend) pair is gated
@@ -201,7 +202,8 @@ pub(super) async fn remap_mechanism_handles(
 ///
 /// Mirrors the structure of [`remap_param_handles`] exactly — every
 /// handle-bearing variant pushes its non-zero fields, every handle-free
-/// variant is a no-op. CmsSig sub-mechanisms are walked recursively.
+/// variant is a no-op. Nested CmsSig/Kip/Ecies sub-mechanisms are walked
+/// recursively.
 /// SP800-108 byte-encoded key handles are NOT collected here (they are
 /// resolved by a dedicated path in `key_ops/generation.rs`).
 fn collect_param_handles(params: &CkMechanismParams) -> Vec<u64> {
@@ -271,7 +273,23 @@ fn push_param_handles(params: &CkMechanismParams, out: &mut Vec<u64>) {
             push(p.initiator_identity_handle, out);
             push(p.own_identity_handle, out);
         }
-        P::Kip(p) => push(p.key_handle, out),
+        P::Kip(p) => {
+            push(p.key_handle, out);
+            if let Some(inner) = p.mechanism.params.as_ref() {
+                push_param_handles(inner, out);
+            }
+        }
+        P::Ecies(p) => {
+            if let Some(inner) = p.derivation_mechanism.params.as_ref() {
+                push_param_handles(inner, out);
+            }
+            if let Some(inner) = p.encryption_mechanism.params.as_ref() {
+                push_param_handles(inner, out);
+            }
+            if let Some(inner) = p.mac_mechanism.params.as_ref() {
+                push_param_handles(inner, out);
+            }
+        }
         P::ObjectHandle(p) => push(p.handle, out),
         P::Kmac(p) => push(p.key_handle, out),
         P::MuGen(p) => push(p.key_handle, out),
@@ -339,7 +357,6 @@ fn push_param_handles(params: &CkMechanismParams, out: &mut Vec<u64>) {
         | P::SignAdditionalContext(_)
         | P::KeyDerivationString(_)
         | P::Raw(_)
-        | P::Ecies(_)
         | P::AesCmacKeyDerivation(_)
         | P::Dilithium(_)
         | P::HdKeyDerive(_)
@@ -436,7 +453,26 @@ pub(super) fn remap_param_handles(
             remap_handle(&mut p.initiator_identity_handle, resolve)?;
             remap_handle(&mut p.own_identity_handle, resolve)?;
         }
-        P::Kip(p) => remap_handle(&mut p.key_handle, resolve)?,
+        P::Kip(p) => {
+            remap_handle(&mut p.key_handle, resolve)?;
+            // The nested mechanism may itself carry params with embedded
+            // handles, so recurse (mirrors the CmsSig sub-mechanisms).
+            if let Some(inner) = p.mechanism.params.as_mut() {
+                remap_param_handles(inner, resolve)?;
+            }
+        }
+        P::Ecies(p) => {
+            // All three nested mechanisms may carry embedded handles.
+            if let Some(inner) = p.derivation_mechanism.params.as_mut() {
+                remap_param_handles(inner, resolve)?;
+            }
+            if let Some(inner) = p.encryption_mechanism.params.as_mut() {
+                remap_param_handles(inner, resolve)?;
+            }
+            if let Some(inner) = p.mac_mechanism.params.as_mut() {
+                remap_param_handles(inner, resolve)?;
+            }
+        }
         P::ObjectHandle(p) => remap_handle(&mut p.handle, resolve)?,
         P::Kmac(p) => remap_handle(&mut p.key_handle, resolve)?,
         P::MuGen(p) => remap_handle(&mut p.key_handle, resolve)?,
@@ -508,7 +544,6 @@ pub(super) fn remap_param_handles(
         | P::SignAdditionalContext(_)
         | P::KeyDerivationString(_)
         | P::Raw(_)
-        | P::Ecies(_)
         | P::AesCmacKeyDerivation(_)
         | P::Dilithium(_)
         | P::HdKeyDerive(_)
@@ -609,6 +644,85 @@ mod tests {
         let mut p = CkMechanismParams::Iv(IvParams { iv: vec![1, 2, 3] });
         remap_param_handles(&mut p, &resolver(&[])).unwrap();
         assert!(matches!(p, CkMechanismParams::Iv(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // W1-L4-09 + W1-C5-B01: nested Kip/Ecies handles must be remapped too
+    // -----------------------------------------------------------------------
+
+    fn paramless() -> pkcs11_proxy_ng_types::CkMechanism {
+        pkcs11_proxy_ng_types::CkMechanism {
+            mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0),
+            params: None,
+        }
+    }
+
+    fn with_params(inner: CkMechanismParams) -> pkcs11_proxy_ng_types::CkMechanism {
+        pkcs11_proxy_ng_types::CkMechanism {
+            mechanism_type: pkcs11_proxy_ng_types::CkMechanismType(0),
+            params: Some(inner),
+        }
+    }
+
+    fn kip(key_handle: u64, inner: CkMechanismParams) -> CkMechanismParams {
+        CkMechanismParams::Kip(pkcs11_proxy_ng_types::KipParams {
+            mechanism: Box::new(with_params(inner)),
+            key_handle,
+            seed: Vec::new().into(),
+        })
+    }
+
+    fn ecies(
+        derivation: pkcs11_proxy_ng_types::CkMechanism,
+        encryption: pkcs11_proxy_ng_types::CkMechanism,
+        mac: pkcs11_proxy_ng_types::CkMechanism,
+    ) -> CkMechanismParams {
+        CkMechanismParams::Ecies(pkcs11_proxy_ng_types::EciesParams {
+            derivation_mechanism: Box::new(derivation),
+            encryption_mechanism: Box::new(encryption),
+            mac_mechanism: Box::new(mac),
+            shared_data: Vec::new().into(),
+        })
+    }
+
+    #[test]
+    fn kip_nested_unmapped_handle_is_rejected() {
+        // Nested handle 9 is not owned → must reject exactly like a
+        // top-level unmapped handle, before any backend call.
+        let mut p = kip(0, hkdf(9));
+        let err = remap_param_handles(&mut p, &resolver(&[])).unwrap_err();
+        assert_eq!(err, CkRv::OBJECT_HANDLE_INVALID);
+    }
+
+    #[test]
+    fn kip_nested_mapped_handle_is_remapped() {
+        let mut p = kip(7, hkdf(9));
+        remap_param_handles(&mut p, &resolver(&[(7, 700), (9, 900)])).unwrap();
+        let CkMechanismParams::Kip(out) = p else { panic!() };
+        assert_eq!(out.key_handle, 700);
+        let Some(CkMechanismParams::Hkdf(inner)) = out.mechanism.params.as_ref() else { panic!() };
+        assert_eq!(inner.salt_key_handle, 900);
+    }
+
+    #[test]
+    fn ecies_nested_unmapped_handle_is_rejected() {
+        let mut p = ecies(with_params(hkdf(9)), paramless(), paramless());
+        let err = remap_param_handles(&mut p, &resolver(&[])).unwrap_err();
+        assert_eq!(err, CkRv::OBJECT_HANDLE_INVALID);
+    }
+
+    #[test]
+    fn ecies_nested_mapped_handles_are_remapped() {
+        let mut p = ecies(with_params(hkdf(1)), with_params(hkdf(2)), with_params(hkdf(3)));
+        remap_param_handles(&mut p, &resolver(&[(1, 11), (2, 22), (3, 33)])).unwrap();
+        let CkMechanismParams::Ecies(out) = p else { panic!() };
+        let salt_of = |m: &pkcs11_proxy_ng_types::CkMechanism| {
+            let Some(CkMechanismParams::Hkdf(inner)) = m.params.as_ref() else { panic!() };
+            inner.salt_key_handle
+        };
+        assert_eq!(salt_of(&out.derivation_mechanism), 11);
+        assert_eq!(salt_of(&out.encryption_mechanism), 22);
+        assert_eq!(salt_of(&out.mac_mechanism), 33);
     }
 
     // -----------------------------------------------------------------------
