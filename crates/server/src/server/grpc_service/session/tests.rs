@@ -2772,6 +2772,354 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
 }
 
 // ---------------------------------------------------------------------------
+// W1-L6-25: resolve-vs-close race — resolve under the slot lock, close takes
+// the login lock. A login that resolves its backend session before acquiring
+// the per-slot lock races a concurrent close: the close suspends/removes the
+// mapping, and the login then drives the backend with a stale handle and/or
+// mints LoginState for an untracked session.
+// ---------------------------------------------------------------------------
+
+/// W1-L6-25 leg 1: a close racing an in-flight backend login must serialize
+/// behind the per-slot login lock — it must NOT steal the session out from
+/// under the gated login.
+///
+/// Deterministic harness: gate client A's backend C_Login (A holds the slot
+/// lock inside the call), then race a close of the same session. Post-fix the
+/// close pends on the lock until the login finishes (login OK, close OK);
+/// pre-fix the close sails through (it takes no lock), the backend session is
+/// gone when the gate opens, and the stale backend login fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn w1_l6_25_close_waits_for_inflight_login() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let proceed = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    mock.set_login_gate(entered_tx, proceed.clone());
+
+    let login_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            login(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                    user_type: CkUserType::User as u64,
+                    pin: Some(b"1234".to_vec()),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    // Wait (off the executor) until the login is inside the backend call,
+    // holding the per-slot lock.
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap()).await.unwrap();
+
+    // Close races the gated login. The gate being closed pins the login inside
+    // the backend call (holding the slot lock) until the test opens it below;
+    // the sleep lets a lock-ignoring (pre-fix) close run to completion first
+    // so the stale-handle outcome is deterministic. Post-fix the close pends
+    // on the slot lock regardless of this sleep.
+    let close_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            close_session(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    {
+        let (lock, cv) = &*proceed;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+
+    let (rv_login, rv_close) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        (login_task.await.unwrap(), close_task.await.unwrap())
+    })
+    .await
+    .expect("login+close must not deadlock on the slot lock");
+
+    assert_eq!(
+        rv_login,
+        CkRv::OK.0,
+        "login gated inside the backend call must succeed once close serializes behind it \
+         (pre-fix: close stole the session mid-login, stale backend login failed)"
+    );
+    assert_eq!(rv_close, CkRv::OK.0, "close must succeed after the login releases the lock");
+    assert_eq!(mock.login_call_count(), 1, "exactly one backend C_Login");
+    // End state: session closed, and closing the last session cleared the
+    // minted login state (no mint lingering for an untracked session).
+    let held = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.login_state.contains_key(&crate::server::slot_map::BackendSlotId(CkSlotId(0)))
+        })
+        .await
+        .unwrap();
+    assert!(!held, "no login state may linger after the last session closed");
+}
+
+/// W1-L6-25 leg 2: a login that loses the race (session closed between its
+/// pre-resolve and slot-lock acquisition) must fail cleanly with
+/// SESSION_HANDLE_INVALID WITHOUT issuing a backend login on the dead
+/// handle — the post-lock re-resolve catches it.
+///
+/// Deterministic harness modulo one generous scheduling sleep: the test holds
+/// the slot lock, spawns the login (it pre-resolves, then pends on the held
+/// lock), then races a close. Pre-fix the close ignores the held lock and
+/// completes, and the login proceeds with its stale pre-resolve (backend call
+/// on the closed handle). Post-fix both pend; whoever wins the lock after the
+/// release, the loser observes the winner — never a stale handle.
+#[tokio::test(flavor = "multi_thread")]
+async fn w1_l6_25_login_short_circuits_when_close_won() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    ctx_mgr.register_slot(slot).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    // Hold the slot lock so the login is guaranteed to be parked between its
+    // pre-resolve and its locked section while the close runs.
+    let slot_lock = ctx_mgr.slot_login_lock(slot);
+    let guard = slot_lock.lock().await;
+    let login_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            login(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                    user_type: CkUserType::User as u64,
+                    pin: Some(b"1234".to_vec()),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    // One-sided scheduling margin: the login only needs a DashMap pre-resolve
+    // plus a mutex pend. If this margin ever proves too short on a loaded box,
+    // the pre-fix run passes spuriously (close first, clean pre-resolve miss)
+    // — the post-fix invariants below hold regardless of order.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let close_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            close_session(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    drop(guard);
+
+    let (rv_login, rv_close) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        (login_task.await.unwrap(), close_task.await.unwrap())
+    })
+    .await
+    .expect("login+close must not deadlock on the slot lock");
+
+    assert_eq!(rv_close, CkRv::OK.0, "close of the live session must succeed");
+    assert!(
+        rv_login == CkRv::OK.0 || rv_login == CkRv::SESSION_HANDLE_INVALID.0,
+        "login must either win cleanly (OK) or short-circuit (SESSION_HANDLE_INVALID), got {rv_login:#x}"
+    );
+    // The crux: a short-circuited login must never have reached the backend.
+    // Pre-fix the close won during the hold and the login still issued its
+    // stale backend login (count == 1 with SESSION_HANDLE_INVALID).
+    assert_eq!(
+        mock.login_call_count(),
+        usize::from(rv_login == CkRv::OK.0),
+        "short-circuited login must not issue a backend login on a dead handle"
+    );
+}
+
+/// W1-L6-25 leg 3 (post-call generation verify): lock-free mapping removers
+/// (close-all, eviction) can drop the session mapping while the backend login
+/// is in flight. The proxy must then mint NO LoginState for the untracked
+/// handle and report SESSION_HANDLE_INVALID.
+///
+/// Deterministic harness: gate the backend login, remove ONLY the proxy-side
+/// mapping (the backend session stays open so the backend call succeeds —
+/// exactly the close-all remove-then-close window), open the gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn w1_l6_25_login_mints_nothing_when_mapping_vanishes_mid_call() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    ctx_mgr.register_slot(slot).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let proceed = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    mock.set_login_gate(entered_tx, proceed.clone());
+
+    let login_task = {
+        let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+        tokio::spawn(async move {
+            login(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: session,
+                    user_type: CkUserType::User as u64,
+                    pin: Some(b"1234".to_vec()),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .ck_rv
+        })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap()).await.unwrap();
+
+    // Drop the proxy mapping while the backend call is in flight. The backend
+    // session itself stays open, so the backend login will succeed.
+    ctx_mgr.get_context(&ctx_id, |ctx| ctx.remove_session(VirtualHandle(session))).await.unwrap();
+    {
+        let (lock, cv) = &*proceed;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+    }
+
+    let rv_login = tokio::time::timeout(std::time::Duration::from_secs(30), login_task)
+        .await
+        .expect("gated login must finish")
+        .unwrap();
+
+    assert_eq!(
+        mock.login_call_count(),
+        1,
+        "backend must have been reached (else this exercises the pre-call path, not the post-call verify)"
+    );
+    assert_eq!(
+        rv_login,
+        CkRv::SESSION_HANDLE_INVALID.0,
+        "mapping vanished mid-call → no mint (pre-fix: OK with LoginState minted for an unmapped session)"
+    );
+    let held =
+        ctx_mgr.get_context(&ctx_id, |ctx| ctx.login_state.contains_key(&slot)).await.unwrap();
+    assert!(!held, "no login state may be minted for an untracked session");
+}
+
+/// W1-L6-25 acceptance hammer: resolve racing close on every iteration. Each
+/// iteration opens a fresh session, races a login against its close, and
+/// asserts the race end-state invariants: close always wins-or-loses cleanly,
+/// a short-circuited login never reached the backend, and nothing deadlocks.
+#[tokio::test(flavor = "multi_thread")]
+async fn w1_l6_25_login_close_hammer_never_uses_stale_handle() {
+    const ITERS: usize = 50;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+    for i in 0..ITERS {
+        let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+        let calls_before = mock.login_call_count();
+
+        let login_task = {
+            let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+            tokio::spawn(async move {
+                login(
+                    &HandlerContext::for_test(&ctx_mgr, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                        client_context_id: ctx_id.0.clone(),
+                        session_handle: session,
+                        user_type: CkUserType::User as u64,
+                        pin: Some(b"1234".to_vec()),
+                    }),
+                )
+                .await
+                .unwrap()
+                .into_inner()
+                .ck_rv
+            })
+        };
+        let close_task = {
+            let (ctx_mgr, backend, ctx_id) = (ctx_mgr.clone(), backend.clone(), ctx_id.clone());
+            tokio::spawn(async move {
+                close_session(
+                    &HandlerContext::for_test(&ctx_mgr, &backend),
+                    Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                        client_context_id: ctx_id.0.clone(),
+                        session_handle: session,
+                    }),
+                )
+                .await
+                .unwrap()
+                .into_inner()
+                .ck_rv
+            })
+        };
+
+        let (rv_login, rv_close) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                (login_task.await.unwrap(), close_task.await.unwrap())
+            })
+            .await
+            .unwrap_or_else(|_| panic!("iter {i}: login+close deadlocked on the slot lock"));
+
+        assert_eq!(rv_close, CkRv::OK.0, "iter {i}: close of the live session must succeed");
+        assert!(
+            rv_login == CkRv::OK.0 || rv_login == CkRv::SESSION_HANDLE_INVALID.0,
+            "iter {i}: login must be OK or SESSION_HANDLE_INVALID, got {rv_login:#x}"
+        );
+        let delta = mock.login_call_count() - calls_before;
+        if rv_login == CkRv::OK.0 {
+            // F-01 reconcile may legally retry the backend login once, so OK
+            // implies >= 1 backend call, never exactly 1.
+            assert!(delta >= 1, "iter {i}: successful login must have reached the backend");
+        } else {
+            assert_eq!(
+                delta, 0,
+                "iter {i}: short-circuited login must not issue a backend login on a dead handle"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // G1-PR2: Audit emission integration tests
 // ---------------------------------------------------------------------------
 

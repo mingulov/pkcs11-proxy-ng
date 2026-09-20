@@ -74,13 +74,16 @@ pub(super) async fn login(
     };
     let requested_login_state = login_state_for_user_type(user_type);
 
-    let (session, slot, current_login_state) =
-        match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
-            Ok(resolved) => resolved,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse { ck_rv: rv.0 }));
-            }
-        };
+    // Pre-resolve with transient contexts-DashMap guards (released before
+    // locking) to discover the owning slot for lock selection. The handle and
+    // login state from this read are NOT used: the authoritative resolve
+    // happens under the slot lock below (W1-L6-25).
+    let slot = match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
+        Ok((_, slot, _)) => slot,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse { ck_rv: rv.0 }));
+        }
+    };
 
     // Serialize login on this slot (M5): hold the per-slot lock across the
     // cross-context login-state scan, the backend C_Login, and the login_state
@@ -104,6 +107,33 @@ pub(super) async fn login(
             }));
         }
     };
+
+    // W1-L6-25: authoritative resolve UNDER the slot lock. Close takes the
+    // same lock around suspend, so a session closed between the pre-resolve
+    // and here now resolves to None — fail cleanly instead of driving the
+    // backend with a stale handle.
+    //
+    // Lock ordering (Task 3 order, shared with login/logout/login_user/
+    // close): per-slot login tokio Mutex OUTER; while holding it, take only
+    // TRANSIENT contexts-DashMap guards. Never acquire the slot lock while
+    // holding a contexts guard.
+    let (session, current_login_state) =
+        match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
+            Ok((session, resolved_slot, login_state)) if resolved_slot == slot => {
+                (session, login_state)
+            }
+            Ok(_) => {
+                // Slot rebound under a live virtual id: unreachable while vh
+                // ids are monotonic, but fail closed — the held lock covers
+                // the pre-resolved slot only.
+                return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+                    ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
+                }));
+            }
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse { ck_rv: rv.0 }));
+            }
+        };
 
     // G2-PR3: per-slot aggregate failed-login budget. Fast-reject during the
     // cooldown window without touching the backend — the proxy stops feeding
@@ -189,18 +219,30 @@ pub(super) async fn login(
 
     let ck_rv = match &result {
         Ok(()) => {
-            // G2-PR3: backend accepted the PIN → reset the slot's failure counter
-            // so the budget window starts fresh on the next wrong-PIN attempt.
-            crate::server::rate_quota::record_login_success(slot);
-            if let Some(login_state) = requested_login_state {
-                let _ = ctx_mgr
-                    .get_context(&ctx_id, |ctx| {
-                        ctx.login_state.insert(slot, login_state);
-                    })
-                    .await;
+            // W1-L6-25 post-call generation verify, still under the slot
+            // lock: lock-free mapping removers (close-all, eviction) may have
+            // dropped/recycled the mapping mid-call. Mint nothing for a
+            // handle we no longer track — the backend login landed, but no
+            // LoginState may reference an untracked session.
+            match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
+                Ok((fresh_session, fresh_slot, _))
+                    if fresh_session == session && fresh_slot == slot =>
+                {
+                    // G2-PR3: backend accepted the PIN → reset the slot's failure counter
+                    // so the budget window starts fresh on the next wrong-PIN attempt.
+                    crate::server::rate_quota::record_login_success(slot);
+                    if let Some(login_state) = requested_login_state {
+                        let _ = ctx_mgr
+                            .get_context(&ctx_id, |ctx| {
+                                ctx.login_state.insert(slot, login_state);
+                            })
+                            .await;
+                    }
+                    info!(context_id = %ctx_id.0, user_type = user_type_raw, "Login succeeded");
+                    CkRv::OK.0
+                }
+                _ => CkRv::SESSION_HANDLE_INVALID.0,
             }
-            info!(context_id = %ctx_id.0, user_type = user_type_raw, "Login succeeded");
-            CkRv::OK.0
         }
         Err(error) => {
             warn!(context_id = %ctx_id.0, user_type = user_type_raw, rv = error.0, "Login failed");
@@ -231,13 +273,16 @@ pub(super) async fn logout(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, slot, current_login_state) =
-        match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
-            Ok(resolved) => resolved,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv: rv.0 }));
-            }
-        };
+    // Pre-resolve with transient contexts-DashMap guards (released before
+    // locking) to discover the owning slot for lock selection. The handle and
+    // login state from this read are NOT used: the authoritative resolve
+    // happens under the slot lock below (W1-L6-25).
+    let slot = match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
+        Ok((_, slot, _)) => slot,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv: rv.0 }));
+        }
+    };
 
     // Serialize logout against concurrent login/logout on the same slot (M5),
     // so the cross-context scan and the login_state removal stay atomic.
@@ -256,6 +301,34 @@ pub(super) async fn logout(
             }));
         }
     };
+
+    // W1-L6-25: authoritative resolve UNDER the slot lock, same as login.
+    // Close takes the same lock around suspend, so a session closed between
+    // the pre-resolve and here now resolves to None — fail cleanly instead
+    // of driving the backend with a stale handle. (No post-call verify: this
+    // path only REMOVES login state, never mints it.)
+    //
+    // Lock ordering (Task 3 order, shared with login/logout/login_user/
+    // close): per-slot login tokio Mutex OUTER; while holding it, take only
+    // TRANSIENT contexts-DashMap guards. Never acquire the slot lock while
+    // holding a contexts guard.
+    let (session, current_login_state) =
+        match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
+            Ok((session, resolved_slot, login_state)) if resolved_slot == slot => {
+                (session, login_state)
+            }
+            Ok(_) => {
+                // Slot rebound under a live virtual id: unreachable while vh
+                // ids are monotonic, but fail closed — the held lock covers
+                // the pre-resolved slot only.
+                return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse {
+                    ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
+                }));
+            }
+            Err(rv) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv: rv.0 }));
+            }
+        };
 
     let other_login_state = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id);
 

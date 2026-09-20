@@ -47,8 +47,8 @@ pub(super) async fn login_user(
     let ctx_id = ClientContextId(req.client_context_id);
 
     // Gate order mirrors `session::auth::login` exactly (W1-C1-02, W1-L7-01):
-    // user-type → resolve → slot lock → cooldown → D6(3) → call →
-    // record/mint. Keep the two paths in sync.
+    // user-type → pre-resolve → slot lock → re-resolve → cooldown → D6(3) →
+    // call → post-call verify → record/mint. Keep the two paths in sync.
 
     let user_type = match CkUserType::from_raw(req.user_type) {
         Some(user_type) => user_type,
@@ -60,15 +60,22 @@ pub(super) async fn login_user(
     };
     let requested_login_state = super::session::auth::login_state_for_user_type(user_type);
 
-    let (session, slot, current_login_state) =
-        match super::session::auth::resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle)
-            .await
-        {
-            Ok(resolved) => resolved,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::LoginUserResponse { ck_rv: rv.0 }));
-            }
-        };
+    // Pre-resolve with transient contexts-DashMap guards (released before
+    // locking) to discover the owning slot for lock selection. The handle and
+    // login state from this read are NOT used: the authoritative resolve
+    // happens under the slot lock below (W1-L6-25).
+    let slot = match super::session::auth::resolve_session_slot_login(
+        ctx_mgr,
+        &ctx_id,
+        req.session_handle,
+    )
+    .await
+    {
+        Ok((_, slot, _)) => slot,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginUserResponse { ck_rv: rv.0 }));
+        }
+    };
 
     // Serialize login_user on this slot (M5), same as `C_Login`: hold the
     // per-slot lock across the cross-context login-state scan, the backend
@@ -89,6 +96,33 @@ pub(super) async fn login_user(
             return Ok(Response::new(pkcs11_proxy_ng_proto::LoginUserResponse {
                 ck_rv: CkRv::DEVICE_ERROR.0,
             }));
+        }
+    };
+
+    // W1-L6-25: authoritative resolve UNDER the slot lock, same as `C_Login`.
+    // Close takes the same lock around suspend, so a session closed between
+    // the pre-resolve and here now resolves to None — fail cleanly instead
+    // of driving the backend with a stale handle.
+    let (session, current_login_state) = match super::session::auth::resolve_session_slot_login(
+        ctx_mgr,
+        &ctx_id,
+        req.session_handle,
+    )
+    .await
+    {
+        Ok((session, resolved_slot, login_state)) if resolved_slot == slot => {
+            (session, login_state)
+        }
+        Ok(_) => {
+            // Slot rebound under a live virtual id: unreachable while vh
+            // ids are monotonic, but fail closed — the held lock covers
+            // the pre-resolved slot only.
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginUserResponse {
+                ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
+            }));
+        }
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginUserResponse { ck_rv: rv.0 }));
         }
     };
 
@@ -131,18 +165,35 @@ pub(super) async fn login_user(
 
     let ck_rv = match &result {
         Ok(()) => {
-            // G2-PR3: backend accepted the PIN → reset the slot's failure
-            // counter so the budget window starts fresh.
-            crate::server::rate_quota::record_login_success(slot);
-            if let Some(login_state) = requested_login_state {
-                let _ = ctx_mgr
-                    .get_context(&ctx_id, |ctx| {
-                        ctx.login_state.insert(slot, login_state);
-                    })
-                    .await;
+            // W1-L6-25 post-call generation verify, still under the slot
+            // lock, same as `C_Login`: lock-free mapping removers (close-all,
+            // eviction) may have dropped/recycled the mapping mid-call. Mint
+            // nothing for a handle we no longer track.
+            match super::session::auth::resolve_session_slot_login(
+                ctx_mgr,
+                &ctx_id,
+                req.session_handle,
+            )
+            .await
+            {
+                Ok((fresh_session, fresh_slot, _))
+                    if fresh_session == session && fresh_slot == slot =>
+                {
+                    // G2-PR3: backend accepted the PIN → reset the slot's failure
+                    // counter so the budget window starts fresh.
+                    crate::server::rate_quota::record_login_success(slot);
+                    if let Some(login_state) = requested_login_state {
+                        let _ = ctx_mgr
+                            .get_context(&ctx_id, |ctx| {
+                                ctx.login_state.insert(slot, login_state);
+                            })
+                            .await;
+                    }
+                    info!(context_id = %ctx_id.0, user_type = user_type_raw, "LoginUser succeeded");
+                    CkRv::OK.0
+                }
+                _ => CkRv::SESSION_HANDLE_INVALID.0,
             }
-            info!(context_id = %ctx_id.0, user_type = user_type_raw, "LoginUser succeeded");
-            CkRv::OK.0
         }
         Err(error) => {
             warn!(context_id = %ctx_id.0, user_type = user_type_raw, rv = error.0, "LoginUser failed");

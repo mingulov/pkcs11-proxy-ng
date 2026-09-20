@@ -15,8 +15,9 @@ use super::super::super::context_manager::{
 use super::super::super::handle_map::VirtualHandle;
 use super::super::authorization;
 use super::super::service_utils::{
-    ck_rv_only, context_exists, current_context_operation_guard, register_session_handle,
-    resolve_session, resolve_slot, spawn_backend, spawn_backend_with_optional_timeout,
+    ck_rv_only, context_exists, current_context_operation_guard, login_lock_timeout,
+    register_session_handle, resolve_session, resolve_slot, spawn_backend,
+    spawn_backend_with_optional_timeout,
 };
 
 pub(super) async fn open_session(
@@ -138,6 +139,38 @@ pub(super) async fn close_session_with_timeout(
     let ctx_id = ClientContextId(req.client_context_id);
 
     let vh = VirtualHandle(req.session_handle);
+
+    // W1-L6-25: close takes the per-slot login lock around the D6(2) snapshot
+    // + suspend, so login's re-resolve-under-lock and this suspend are
+    // mutually exclusive — a login can no longer drive the backend with a
+    // handle this close already suspended.
+    //
+    // Lock ordering (Task 3 order, shared with login/logout/login_user):
+    // per-slot login tokio Mutex OUTER; while holding it, take only
+    // TRANSIENT contexts-DashMap guards (the snapshot + begin below). Never
+    // acquire the slot lock while holding a contexts guard.
+    if !context_exists(ctx_mgr, &ctx_id).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
+            ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+        }));
+    }
+    let Some(slot) = ctx_mgr.slot_for_session(&ctx_id, vh).await else {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
+            ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
+        }));
+    };
+    // Bounded acquisition (G2/V11): same cross-tenant DoS bound and transient
+    // DEVICE_ERROR as login. Nothing is mutated yet, so early return is safe.
+    let login_guard = ctx_mgr.slot_login_lock(slot);
+    let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
+        Ok(guard) => guard,
+        Err(_elapsed) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
+                ck_rv: CkRv::DEVICE_ERROR.0,
+            }));
+        }
+    };
+
     // D6(2) snapshot: when this close drops the context's last logical login
     // for its slot, the backend login must be released too (last-context-out)
     // so a later login PIN-verifies against a logged-out token.
@@ -164,6 +197,13 @@ pub(super) async fn close_session_with_timeout(
             }));
         }
     };
+
+    // Release the slot lock before the backend calls. Suspend (above) is the
+    // step that races login's resolve, and both are now under the lock — the
+    // backend close needs no slot serialization once the mapping is suspended.
+    // The D6(2) last-holder helpers below take this same lock via try_lock, so
+    // holding it across them would skip the logout.
+    drop(_login_lock);
 
     let session = CkSessionHandle(transition.backend_handle().0);
     // T5F: attempt the last-holder logout BEFORE the backend close, using
