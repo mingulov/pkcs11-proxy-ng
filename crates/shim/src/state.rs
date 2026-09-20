@@ -155,11 +155,8 @@ pub fn mark_client_reconnect_required() {
 
 pub type SessionByteCacheMap = Mutex<HashMap<CK_SESSION_HANDLE, Vec<u8>>>;
 pub type SessionSlotMap = Mutex<HashMap<CK_SESSION_HANDLE, CK_SLOT_ID>>;
-type SessionMechanismParamMap = Mutex<HashMap<CK_SESSION_HANDLE, usize>>;
 
 static SESSION_SLOTS: LazyLock<SessionSlotMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
-static DELAYED_GCM_WRITEBACK: LazyLock<SessionMechanismParamMap> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum MessageOperation {
@@ -208,25 +205,6 @@ pub(crate) fn remember_session_slot(h_session: CK_SESSION_HANDLE, slot_id: CK_SL
 
 fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
     if let Ok(mut map) = SESSION_SLOTS.lock() {
-        map.remove(&h_session);
-    }
-}
-
-pub(crate) fn remember_delayed_gcm_writeback(
-    h_session: CK_SESSION_HANDLE,
-    mechanism_param_addr: usize,
-) {
-    if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
-        map.insert(h_session, mechanism_param_addr);
-    }
-}
-
-pub(crate) fn take_delayed_gcm_writeback(h_session: CK_SESSION_HANDLE) -> Option<usize> {
-    DELAYED_GCM_WRITEBACK.lock().ok().and_then(|mut map| map.remove(&h_session))
-}
-
-pub(crate) fn clear_delayed_gcm_writeback(h_session: CK_SESSION_HANDLE) {
-    if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
         map.remove(&h_session);
     }
 }
@@ -456,9 +434,6 @@ pub(crate) fn clear_all_caches() {
     if let Ok(mut map) = SESSION_SLOTS.lock() {
         map.clear();
     }
-    if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
-        map.clear();
-    }
     if let Ok(mut map) = MESSAGE_OPERATION_STATES.lock() {
         map.clear();
     }
@@ -473,7 +448,6 @@ fn evict_disposable_output_caches_for_session(h_session: CK_SESSION_HANDLE) {
     if let Ok(mut map) = encapsulate_cache().lock() {
         map.remove(&h_session);
     }
-    clear_delayed_gcm_writeback(h_session);
 }
 
 /// Drop only retryable/two-call output material, without changing session

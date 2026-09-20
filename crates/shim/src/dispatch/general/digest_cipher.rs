@@ -131,7 +131,6 @@ pub unsafe extern "C" fn c_encrypt_init(
         if p_mechanism.is_null() {
             let result = with_client!(client => client.encrypt_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
-                state::clear_delayed_gcm_writeback(h_session);
                 state::clear_encrypt_output_caches(h_session);
                 state::clear_operation_state_cache(h_session);
             }
@@ -142,8 +141,6 @@ pub unsafe extern "C" fn c_encrypt_init(
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let delayed_gcm_param = unsafe { delayed_gcm_parameter_addr(p_mechanism) };
-        state::clear_delayed_gcm_writeback(h_session);
         let result = with_client!(client => client.encrypt_init(
             CkSessionHandle(h_session as u64),
             &mech,
@@ -151,9 +148,10 @@ pub unsafe extern "C" fn c_encrypt_init(
         ));
         match result {
             Ok(output_params) => {
-                if let Some(param_addr) = delayed_gcm_param {
-                    state::remember_delayed_gcm_writeback(h_session, param_addr);
-                }
+                // W1-C6-01: the generated GCM IV is delivered here, inside
+                // the call whose caller memory is live. No caller address
+                // is retained: C_Encrypt receives no mechanism pointer, so
+                // there is no live target a later write could use.
                 if let Some(params) = output_params {
                     unsafe { write_mechanism_output_params(p_mechanism, &params) };
                 }
@@ -179,7 +177,11 @@ pub unsafe extern "C" fn c_encrypt(
             Err(e) => return rv_err(e),
         };
         let spec = unsafe { output_buffer_spec(p_encrypted_data, pul_encrypted_data_len) };
-        let result = with_client!(client => client.byte_output_exact_with_mechanism_out(
+        // W1-C6-01: plain byte_output_exact — Encrypt-time mechanism_out is
+        // deliberately not consumed. The generated GCM IV is delivered at
+        // Init (see c_encrypt_init); writing it here would mean writing to
+        // Init-scope caller memory through a retained address (use-after-scope).
+        let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session as u64),
             ByteOutputFunction::Encrypt,
             &spec,
@@ -189,57 +191,12 @@ pub unsafe extern "C" fn c_encrypt(
             0,
         ));
         match result {
-            Ok((r, mechanism_out)) => {
-                let rv = unsafe {
-                    write_exact_output(&spec, &r, p_encrypted_data, pul_encrypted_data_len)
-                };
-                if rv == rv_ok() && (spec.buffer_present || spec.length_pointer_null) {
-                    let delayed_gcm_param = state::take_delayed_gcm_writeback(h_session);
-                    if let (Some(param_addr), Some(params)) = (delayed_gcm_param, mechanism_out) {
-                        unsafe { write_delayed_gcm_output_params(param_addr, &params) };
-                    }
-                }
-                rv
-            }
+            Ok(r) => unsafe {
+                write_exact_output(&spec, &r, p_encrypted_data, pul_encrypted_data_len)
+            },
             Err(e) => rv_err(e),
         }
     })
-}
-
-pub(super) unsafe fn delayed_gcm_parameter_addr(p_mechanism: CK_MECHANISM_PTR) -> Option<usize> {
-    if p_mechanism.is_null() {
-        return None;
-    }
-    let mechanism = unsafe { &*p_mechanism };
-    if mechanism.mechanism != CKM_AES_GCM
-        || mechanism.pParameter.is_null()
-        || mechanism.ulParameterLen < std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG
-    {
-        return None;
-    }
-
-    let gcm = unsafe { &*(mechanism.pParameter as *const CK_GCM_PARAMS) };
-    if gcm.pIv.is_null() {
-        return None;
-    }
-    let capacity = if gcm.ulIvLen > 0 {
-        gcm.ulIvLen as usize
-    } else {
-        (((gcm.ulIvBits as u64).saturating_add(7)) / 8) as usize
-    };
-    if capacity == 0 { None } else { Some(mechanism.pParameter as usize) }
-}
-
-pub(super) unsafe fn write_delayed_gcm_output_params(
-    param_addr: usize,
-    params: &CkMechanismParams,
-) {
-    let mut mechanism = CK_MECHANISM {
-        mechanism: CKM_AES_GCM,
-        pParameter: param_addr as CK_VOID_PTR,
-        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
-    };
-    unsafe { write_mechanism_output_params(&mut mechanism, params) };
 }
 
 pub unsafe extern "C" fn c_encrypt_update(

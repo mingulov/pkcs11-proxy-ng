@@ -2455,10 +2455,46 @@ fn gcm_generated_iv_round_trips_through_shim_client_and_server() {
     assert_eq!(ul_iv_bits, 96, "provider IV bit length writeback");
     assert_eq!(ul_tag_bits, 128, "provider tag bit length writeback");
     assert_eq!(iv_buffer.as_slice(), generated_iv.as_slice(), "generated IV writeback");
+
+    // Single-part C_Encrypt leaves the app-visible IV exactly as C_EncryptInit
+    // delivered it: no cross-call writeback (W1-C6-01), byte-identical to a
+    // native module that generates the IV at Init time.
+    let plaintext = b"hello";
+    let mut ciphertext = [0_u8; 5];
+    let mut ciphertext_len = ciphertext.len() as CK_ULONG;
+    let encrypt_rv = unsafe {
+        dispatch::general::c_encrypt(
+            shim.session,
+            plaintext.as_ptr() as CK_BYTE_PTR,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ciphertext_len,
+        )
+    };
+    assert_eq!(encrypt_rv, CKR_OK as CK_RV, "C_Encrypt(data)");
+    assert_eq!(ciphertext_len, plaintext.len() as CK_ULONG);
+    assert_eq!(ciphertext, [0x2A, 0x27, 0x2E, 0x2E, 0x2D], "mock ciphertext");
+    let ul_iv_len_after = params.ulIvLen;
+    assert_eq!(
+        ul_iv_len_after,
+        generated_iv.len() as CK_ULONG,
+        "IV length stable across C_Encrypt"
+    );
+    assert_eq!(
+        iv_buffer.as_slice(),
+        generated_iv.as_slice(),
+        "app-visible IV unchanged by C_Encrypt"
+    );
 }
 
+/// W1-C6-01: `C_Encrypt` must never write into `C_EncryptInit`-scope caller
+/// memory. (This test previously asserted the delayed writeback that retained
+/// the caller's `pParameter` address across FFI calls — a use-after-scope
+/// write the caller may legally invalidate by freeing that memory. The P0 fix
+/// removed the delayed path: the IV is delivered only at Init, while the
+/// caller's memory is live.)
 #[test]
-fn gcm_delayed_iv_round_trips_after_encrypt_data_query() {
+fn gcm_encrypt_does_not_write_back_to_init_scope_memory() {
     let _guard = shim_state_test_guard();
     let daemon = TestDaemon::shared();
     let generated_iv = vec![0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB];
@@ -2508,13 +2544,21 @@ fn gcm_delayed_iv_round_trips_after_encrypt_data_query() {
     assert_eq!(encrypt_rv, CKR_OK as CK_RV, "C_Encrypt(data)");
     assert_eq!(ciphertext_len, plaintext.len() as CK_ULONG);
     assert_eq!(ciphertext, [0x2A, 0x27, 0x2E, 0x2E, 0x2D], "mock ciphertext");
+    // The Init-scope buffer is deliberately kept alive so a cross-call write
+    // is deterministically observable: any retained-pointer writeback lands here.
     let ul_iv_len = params.ulIvLen;
-    assert_eq!(ul_iv_len, generated_iv.len() as CK_ULONG, "delayed IV length writeback");
-    assert_eq!(iv_buffer.as_slice(), generated_iv.as_slice(), "delayed IV writeback");
+    assert_eq!(ul_iv_len, 0, "W1-C6-01: C_Encrypt must not touch Init-scope params");
+    assert_eq!(
+        iv_buffer, [0; 12],
+        "W1-C6-01: C_Encrypt must not write the IV into Init-scope caller memory"
+    );
 }
 
+/// W1-C6-01: neither the size query nor the data call may write into
+/// `C_EncryptInit`-scope caller memory (renamed from the delayed-writeback
+/// assertion it replaced — see `gcm_encrypt_does_not_write_back_to_init_scope_memory`).
 #[test]
-fn gcm_delayed_iv_size_query_does_not_consume_writeback() {
+fn gcm_encrypt_size_query_leaves_init_scope_memory_untouched() {
     let _guard = shim_state_test_guard();
     let daemon = TestDaemon::shared();
     let generated_iv = vec![0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB];
@@ -2559,7 +2603,7 @@ fn gcm_delayed_iv_size_query_does_not_consume_writeback() {
     };
     assert_eq!(size_rv, CKR_OK as CK_RV, "C_Encrypt(size query)");
     assert_eq!(size_len, plaintext.len() as CK_ULONG);
-    assert_eq!(iv_buffer, [0; 12], "size query must not write or consume delayed IV");
+    assert_eq!(iv_buffer, [0; 12], "size query must not write into Init-scope memory");
 
     let mut ciphertext = [0_u8; 5];
     let mut ciphertext_len = ciphertext.len() as CK_ULONG;
@@ -2575,7 +2619,113 @@ fn gcm_delayed_iv_size_query_does_not_consume_writeback() {
 
     daemon.backend.set_encrypt_exact_output(None);
     assert_eq!(encrypt_rv, CKR_OK as CK_RV, "C_Encrypt(data)");
-    assert_eq!(iv_buffer.as_slice(), generated_iv.as_slice(), "delayed IV writeback");
+    // W1-C6-01: no cross-call writeback — the data call leaves the
+    // Init-scope buffer exactly as the size query left it (untouched).
+    let ul_iv_len = params.ulIvLen;
+    assert_eq!(ul_iv_len, 0, "W1-C6-01: C_Encrypt must not touch Init-scope params");
+    assert_eq!(
+        iv_buffer, [0; 12],
+        "W1-C6-01: C_Encrypt must not write the IV into Init-scope caller memory"
+    );
+}
+
+/// W1-C6-01 (use-after-scope leg): the `CK_GCM_PARAMS` and its `pIv` buffer
+/// live on mapped pages that become inaccessible (`PROT_NONE`) once
+/// `C_EncryptInit` returns — modelling a caller that freed that memory.
+/// `C_Encrypt` must complete without touching them (a retained-pointer
+/// writeback faults with SIGSEGV instead of returning).
+#[cfg(unix)]
+#[test]
+fn gcm_encrypt_does_not_touch_released_init_params() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let generated_iv = vec![0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB];
+    daemon.backend.set_encrypt_exact_output(Some(CkMechanismParams::Gcm(GcmParams {
+        iv: generated_iv,
+        iv_bits: 96,
+        iv_buffer_len: 12,
+        aad: b"aad".to_vec().into(),
+        tag_bits: 128,
+
+        iv_null: false,
+        aad_null: false,
+    })));
+
+    let page_len = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    assert!(page_len >= 4096, "suspicious page size {page_len}");
+    let region_len = page_len * 2;
+    // SAFETY: anonymous private mapping, page-aligned; checked for MAP_FAILED.
+    let region = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            region_len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(region, libc::MAP_FAILED, "mmap test region");
+    // SAFETY: region is mapped and large enough; params on page 0, IV on page 1.
+    let params_ptr = region as *mut CK_GCM_PARAMS;
+    let iv_ptr = unsafe { (region as *mut u8).add(page_len) };
+    let mut aad = *b"aad";
+    unsafe {
+        params_ptr.write(CK_GCM_PARAMS {
+            pIv: iv_ptr,
+            ulIvLen: 0,
+            ulIvBits: 96,
+            pAAD: aad.as_mut_ptr(),
+            ulAADLen: aad.len() as CK_ULONG,
+            ulTagBits: 128,
+        });
+        std::ptr::write_bytes(iv_ptr, 0, 12);
+    }
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: params_ptr as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let init_rv = unsafe { dispatch::general::c_encrypt_init(shim.session, &mut mechanism, key) };
+    assert_eq!(init_rv, CKR_OK as CK_RV, "C_EncryptInit");
+
+    // The caller frees its Init-scope memory: any retained-pointer access
+    // below faults instead of silently corrupting reused memory.
+    // SAFETY: region is a live mapping of region_len bytes.
+    let protect_rv = unsafe { libc::mprotect(region, region_len, libc::PROT_NONE) };
+    assert_eq!(protect_rv, 0, "mprotect PROT_NONE test region");
+
+    let plaintext = b"hello";
+    let mut ciphertext = [0_u8; 5];
+    let mut ciphertext_len = ciphertext.len() as CK_ULONG;
+    let encrypt_rv = unsafe {
+        dispatch::general::c_encrypt(
+            shim.session,
+            plaintext.as_ptr() as CK_BYTE_PTR,
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ciphertext_len,
+        )
+    };
+
+    // Teardown: restore access before unmapping. Only reached when
+    // `C_Encrypt` did not touch the released pages (on a SIGSEGV the process
+    // dies here and the OS reclaims the mapping).
+    // SAFETY: region is a live mapping of region_len bytes.
+    let unprotect_rv =
+        unsafe { libc::mprotect(region, region_len, libc::PROT_READ | libc::PROT_WRITE) };
+    assert_eq!(unprotect_rv, 0, "mprotect restore test region");
+    // SAFETY: region is a live mapping of region_len bytes.
+    let unmap_rv = unsafe { libc::munmap(region, region_len) };
+    assert_eq!(unmap_rv, 0, "munmap test region");
+
+    daemon.backend.set_encrypt_exact_output(None);
+    assert_eq!(encrypt_rv, CKR_OK as CK_RV, "C_Encrypt(data)");
+    assert_eq!(ciphertext_len, plaintext.len() as CK_ULONG);
+    assert_eq!(ciphertext, [0x2A, 0x27, 0x2E, 0x2E, 0x2D], "mock ciphertext");
 }
 
 #[test]
