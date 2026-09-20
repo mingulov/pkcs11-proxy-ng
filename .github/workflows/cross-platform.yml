@@ -16,10 +16,11 @@
 # macOS/Windows minutes plus a full pkcs11-check double-run per leg make
 # this the slowest PR gate — keep the tuned subset current).
 #
-# Legs: linux-x64, linux-arm64 (EXPERIMENTAL: aarch64 build + direct-baseline
-# signal only -- the daemon fail-closes on Linux-aarch64 by design
-# (NATIVE_FFI_QUALIFIED excludes it), so no proxied comparison can run
-# there until a future aarch64 native-FFI qualification promotes it),
+# Legs: linux-x64, linux-arm64 (BLOCKING on the direct baseline only --
+# native FFI is unqualified on Linux-aarch64 by design
+# (NATIVE_FFI_QUALIFIED excludes it), so the script skips the proxied
+# phase there with an explicit PASS-WITH-SKIP verdict; full comparison
+# waits on a future aarch64 native-FFI qualification),
 # macos-arm64 (PROMOTED by T2run M-5: M-1..M-3 compat prep proven by the
 # first green macOS leg -- compare green plus backend/shim lib behavior
 # suites green, including the STOP child receipts), windows-x64, plus
@@ -60,10 +61,10 @@ jobs:
           # 2026-09-20: 24.04 -> 26.04 (GA 2026-09-17; 22.04 deprecating).
           - os: ubuntu-26.04
             experimental: false
-          # T2run: experimental -- native FFI fail-closes on this host by
-          # design (see header); promote on aarch64 qualification.
+          # Blocking on the direct baseline; the proxied phase self-skips
+          # here (see header). Full comparison on aarch64 qualification.
           - os: ubuntu-26.04-arm
-            experimental: true
+            experimental: false
           # T2run M-5: promoted — first green macOS leg (compare +
           # backend/shim lib behavior) proves the compat prep; failures
           # now fail the workflow.
