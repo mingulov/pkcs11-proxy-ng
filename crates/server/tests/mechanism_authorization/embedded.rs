@@ -12,18 +12,21 @@ use pkcs11_proxy_ng_types::{
 };
 
 fn hkdf(handle: u64) -> Option<Mechanism> {
-    Some(Mechanism::from(&CkMechanism {
-        mechanism_type: CkMechanismType::SHA256,
-        params: Some(CkMechanismParams::Hkdf(HkdfParams {
-            extract: true,
-            expand: true,
-            prf_hash_mechanism: CkMechanismType::SHA256.0,
-            salt_type: cryptoki_sys::CKF_HKDF_SALT_KEY as u64,
-            salt: vec![].into(),
-            salt_key_handle: handle,
-            info: vec![].into(),
-        })),
-    }))
+    Some(
+        Mechanism::try_from(&CkMechanism {
+            mechanism_type: CkMechanismType::SHA256,
+            params: Some(CkMechanismParams::Hkdf(HkdfParams {
+                extract: true,
+                expand: true,
+                prf_hash_mechanism: CkMechanismType::SHA256.0,
+                salt_type: cryptoki_sys::CKF_HKDF_SALT_KEY as u64,
+                salt: vec![].into(),
+                salt_key_handle: handle,
+                info: vec![].into(),
+            })),
+        })
+        .unwrap(),
+    )
 }
 
 fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
@@ -34,23 +37,26 @@ fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
         },
         PrfDataParam { type_: cryptoki_sys::CK_SP800_108_KEY_HANDLE as u64, value: value.into() },
     ];
-    Some(Mechanism::from(&CkMechanism {
-        mechanism_type: CkMechanismType::SHA256,
-        params: Some(if feedback {
-            CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: cryptoki_sys::CKM_SHA256_HMAC as u64,
-                data_params,
-                iv: vec![],
-                additional_derived_keys: vec![],
-            })
-        } else {
-            CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                prf_type: cryptoki_sys::CKM_SHA256_HMAC as u64,
-                data_params,
-                additional_derived_keys: vec![],
-            })
-        }),
-    }))
+    Some(
+        Mechanism::try_from(&CkMechanism {
+            mechanism_type: CkMechanismType::SHA256,
+            params: Some(if feedback {
+                CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
+                    prf_type: cryptoki_sys::CKM_SHA256_HMAC as u64,
+                    data_params,
+                    iv: vec![],
+                    additional_derived_keys: vec![],
+                })
+            } else {
+                CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+                    prf_type: cryptoki_sys::CKM_SHA256_HMAC as u64,
+                    data_params,
+                    additional_derived_keys: vec![],
+                })
+            }),
+        })
+        .unwrap(),
+    )
 }
 
 async fn native_handles(f: &MtlsFixture, client: &Client) -> (CkSessionHandle, CkObjectHandle) {

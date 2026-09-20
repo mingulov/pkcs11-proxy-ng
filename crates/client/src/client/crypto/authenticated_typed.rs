@@ -46,7 +46,7 @@ impl Pkcs11Client {
         let mut request = wire::WrapKeyAuthenticatedRequest {
             client_context_id: self.context_id()?,
             session_handle: session.0,
-            mechanism: Some(mechanism.into()),
+            mechanism: Some(mechanism.try_into()?),
             wrapping_key_handle: wrapping_key.0,
             key_handle: key.0,
             authenticated_parameters: Some(wire::AuthenticatedParameters {
@@ -83,7 +83,7 @@ impl Pkcs11Client {
             client_context_id: self.context_id()?,
             session_handle: session.0,
             function: wire::ParameterOutputFunction::WrapKeyAuthenticated as i32,
-            mechanism: Some(mechanism.into()),
+            mechanism: Some(mechanism.try_into()?),
             wrapping_key_handle: wrapping_key.0,
             key_handle: key.0,
             output_spec: Some(spec.into()),
@@ -149,7 +149,7 @@ impl Pkcs11Client {
         let mut request = wire::UnwrapKeyAuthenticatedRequest {
             client_context_id: self.context_id()?,
             session_handle: session.0,
-            mechanism: Some(mechanism.into()),
+            mechanism: Some(mechanism.try_into()?),
             unwrapping_key_handle: unwrapping_key.0,
             template: Self::proto_template(template.unwrap_or(&[])),
             template_null: template.is_none(),

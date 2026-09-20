@@ -163,14 +163,17 @@ async fn mapped_object(f: &MtlsFixture, c: &Client, class: CkObjectClass, uid: u
 }
 
 fn mechanism(handle: u64) -> Option<Mechanism> {
-    Some(Mechanism::from(&CkMechanism {
-        mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP,
-        params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
-            wrap_oid: vec![1, 2, 3],
-            ukm: vec![7; 8],
-            key_handle: handle,
-        })),
-    }))
+    Some(
+        Mechanism::try_from(&CkMechanism {
+            mechanism_type: CkMechanismType::GOSTR3410_KEY_WRAP,
+            params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
+                wrap_oid: vec![1, 2, 3],
+                ukm: vec![7; 8],
+                key_handle: handle,
+            })),
+        })
+        .unwrap(),
+    )
 }
 
 fn output_spec() -> OutputBufferSpec {

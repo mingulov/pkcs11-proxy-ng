@@ -18,8 +18,10 @@ use pkcs11_proxy_ng_types::{
     SeedCbcEncryptDataParams, SignAdditionalContext, TlsMacParams, XeddsaParams,
 };
 
-impl From<&CkMechanism> for v1_proto::Mechanism {
-    fn from(m: &CkMechanism) -> Self {
+impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
+    type Error = CkRv;
+
+    fn try_from(m: &CkMechanism) -> Result<Self, Self::Error> {
         let params = match &m.params {
             None => None,
             Some(CkMechanismParams::RsaPkcsPss(p)) => {
@@ -302,10 +304,10 @@ impl From<&CkMechanism> for v1_proto::Mechanism {
             }
             // SP800-108 KDF
             Some(CkMechanismParams::Sp800108Kdf(p)) => {
-                Some(v1_proto::mechanism::Params::Sp800108KdfParams(p.into()))
+                Some(v1_proto::mechanism::Params::Sp800108KdfParams(p.try_into()?))
             }
             Some(CkMechanismParams::Sp800108FeedbackKdf(p)) => {
-                Some(v1_proto::mechanism::Params::Sp800108FeedbackKdfParams(p.into()))
+                Some(v1_proto::mechanism::Params::Sp800108FeedbackKdfParams(p.try_into()?))
             }
             // Signal protocol
             Some(CkMechanismParams::X3dhInitiate(p)) => {
@@ -325,11 +327,11 @@ impl From<&CkMechanism> for v1_proto::Mechanism {
                 Some(v1_proto::mechanism::Params::OtpParams(p.into()))
             }
             Some(CkMechanismParams::Kip(p)) => {
-                let proto_kip: v1_proto::KipParams = p.into();
+                let proto_kip: v1_proto::KipParams = p.try_into()?;
                 Some(v1_proto::mechanism::Params::KipParams(Box::new(proto_kip)))
             }
             Some(CkMechanismParams::CmsSig(p)) => {
-                let proto_cms: v1_proto::CmsSigParams = p.into();
+                let proto_cms: v1_proto::CmsSigParams = p.try_into()?;
                 Some(v1_proto::mechanism::Params::CmsSigParams(Box::new(proto_cms)))
             }
             Some(CkMechanismParams::SkipjackPrivateWrap(p)) => {
@@ -389,7 +391,7 @@ impl From<&CkMechanism> for v1_proto::Mechanism {
             }
             // Vendor-specific parameter shapes
             Some(CkMechanismParams::Ecies(p)) => {
-                let proto_ecies: v1_proto::EciesParams = p.into();
+                let proto_ecies: v1_proto::EciesParams = p.try_into()?;
                 Some(v1_proto::mechanism::Params::EciesParams(Box::new(proto_ecies)))
             }
             Some(CkMechanismParams::AesCmacKeyDerivation(p)) => {
@@ -411,7 +413,7 @@ impl From<&CkMechanism> for v1_proto::Mechanism {
                 Some(v1_proto::mechanism::Params::VendorObjectInsertParams(p.into()))
             }
         };
-        v1_proto::Mechanism { mechanism_type: m.mechanism_type.0, params }
+        Ok(v1_proto::Mechanism { mechanism_type: m.mechanism_type.0, params })
     }
 }
 

@@ -99,8 +99,8 @@ impl Pkcs11Client {
         pkcs11_template!(template)
     }
 
-    fn proto_mechanism(mechanism: &CkMechanism) -> pkcs11_proxy_ng_proto::Mechanism {
-        pkcs11_proxy_ng_proto::Mechanism::from(mechanism)
+    fn proto_mechanism(mechanism: &CkMechanism) -> CkResult<pkcs11_proxy_ng_proto::Mechanism> {
+        pkcs11_proxy_ng_proto::Mechanism::try_from(mechanism)
     }
 
     /// Returns the stored context_id or `CKR_CRYPTOKI_NOT_INITIALIZED`.

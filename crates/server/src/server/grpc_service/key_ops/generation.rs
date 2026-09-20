@@ -347,12 +347,30 @@ async fn generate_key_impl(
                 Some(is_private),
             )
             .await;
-            let mechanism_out = mechanism_out_params.map(|params| {
-                pkcs11_proxy_ng_proto::Mechanism::from(&pkcs11_proxy_ng_types::CkMechanism {
-                    mechanism_type,
-                    params: Some(params),
+            let mechanism_out = match mechanism_out_params
+                .map(|params| {
+                    pkcs11_proxy_ng_proto::Mechanism::try_from(
+                        &pkcs11_proxy_ng_types::CkMechanism {
+                            mechanism_type,
+                            params: Some(params),
+                        },
+                    )
                 })
-            });
+                .transpose()
+            {
+                Ok(mechanism_out) => mechanism_out,
+                // The backend returned output params the wire cannot
+                // represent (e.g. a nested template, W1-C8-01): fail
+                // loudly rather than report success with silently
+                // dropped output. Shape matches the backend-error arm.
+                Err(rv) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
+                        ck_rv: rv.0,
+                        key_handle: 0,
+                        mechanism_out: None,
+                    }));
+                }
+            };
             Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
                 ck_rv: CkRv::OK.0,
                 key_handle,
@@ -536,12 +554,31 @@ async fn derive_key_impl(
                 virtualize_key_mat_out_handles(ctx_mgr, &ctx_id, virtual_session, is_token, params)
                     .await;
             }
-            let mechanism_out = derive_result.mechanism_out.map(|params| {
-                pkcs11_proxy_ng_proto::Mechanism::from(&pkcs11_proxy_ng_types::CkMechanism {
-                    mechanism_type,
-                    params: Some(params),
+            let mechanism_out = match derive_result
+                .mechanism_out
+                .map(|params| {
+                    pkcs11_proxy_ng_proto::Mechanism::try_from(
+                        &pkcs11_proxy_ng_types::CkMechanism {
+                            mechanism_type,
+                            params: Some(params),
+                        },
+                    )
                 })
-            });
+                .transpose()
+            {
+                Ok(mechanism_out) => mechanism_out,
+                // The backend returned output params the wire cannot
+                // represent (e.g. a nested template, W1-C8-01): fail
+                // loudly rather than report success with silently
+                // dropped output. Shape matches the backend-error arm.
+                Err(rv) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+                        ck_rv: rv.0,
+                        key_handle: 0,
+                        mechanism_out: None,
+                    }));
+                }
+            };
             Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
                 ck_rv: derive_result.rv.0,
                 key_handle,

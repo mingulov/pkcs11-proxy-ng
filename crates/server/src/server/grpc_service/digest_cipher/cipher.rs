@@ -102,12 +102,27 @@ pub(crate) async fn encrypt_init(
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.encrypt_init(session, &mechanism, key)).await?;
     let (ck_rv, params) = ck_result_to_rv(result);
-    let mechanism_out = params.flatten().map(|params| {
-        pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
-            mechanism_type,
-            params: Some(params),
+    let mechanism_out = match params
+        .flatten()
+        .map(|params| {
+            pkcs11_proxy_ng_proto::Mechanism::try_from(&CkMechanism {
+                mechanism_type,
+                params: Some(params),
+            })
         })
-    });
+        .transpose()
+    {
+        Ok(mechanism_out) => mechanism_out,
+        // The backend returned output params the wire cannot represent
+        // (e.g. a nested template, W1-C8-01): fail loudly rather than
+        // report success with silently dropped output.
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse {
+                ck_rv: rv.0,
+                mechanism_out: None,
+            }));
+        }
+    };
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse { ck_rv, mechanism_out }))
 }
 
@@ -321,12 +336,27 @@ pub(crate) async fn decrypt_init(
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || backend.decrypt_init(session, &mechanism, key)).await?;
     let (ck_rv, params) = ck_result_to_rv(result);
-    let mechanism_out = params.flatten().map(|params| {
-        pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
-            mechanism_type,
-            params: Some(params),
+    let mechanism_out = match params
+        .flatten()
+        .map(|params| {
+            pkcs11_proxy_ng_proto::Mechanism::try_from(&CkMechanism {
+                mechanism_type,
+                params: Some(params),
+            })
         })
-    });
+        .transpose()
+    {
+        Ok(mechanism_out) => mechanism_out,
+        // The backend returned output params the wire cannot represent
+        // (e.g. a nested template, W1-C8-01): fail loudly rather than
+        // report success with silently dropped output.
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse {
+                ck_rv: rv.0,
+                mechanism_out: None,
+            }));
+        }
+    };
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse { ck_rv, mechanism_out }))
 }
 

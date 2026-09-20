@@ -515,10 +515,18 @@ pub(super) fn mechanism_output_to_proto(
         | CkMechanismParams::VendorObjectExtract(_)
         | CkMechanismParams::VendorObjectInsert(_) => return None,
     };
-    Some(pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
+    // Only Gcm and Tls12MasterKeyDerive reach this conversion, and
+    // neither shape carries templates or nested mechanisms, so the
+    // fallible conversion cannot fail here (the nested-template
+    // refusal, W1-C8-01, is its only Err source). `.ok()` preserves
+    // the existing "variant does not surface output" contract; a
+    // future surfaced variant carrying templates must propagate the
+    // error loudly at its call sites instead.
+    pkcs11_proxy_ng_proto::Mechanism::try_from(&CkMechanism {
         mechanism_type,
         params: Some(params),
-    }))
+    })
+    .ok()
 }
 
 pub(super) async fn context_exists(

@@ -2331,7 +2331,7 @@ async fn generate_private_key_while_logged_out_is_refused() {
 
 /// HKDF-DERIVE proto mechanism carrying `salt_key` as the embedded salt key.
 fn hkdf_derive_mechanism(salt_key: u64) -> pkcs11_proxy_ng_proto::Mechanism {
-    pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
+    pkcs11_proxy_ng_proto::Mechanism::try_from(&CkMechanism {
         mechanism_type: CkMechanismType::HKDF_DERIVE,
         params: Some(CkMechanismParams::Hkdf(HkdfParams {
             extract: true,
@@ -2343,6 +2343,7 @@ fn hkdf_derive_mechanism(salt_key: u64) -> pkcs11_proxy_ng_proto::Mechanism {
             info: Vec::new().into(),
         })),
     })
+    .unwrap()
 }
 
 async fn derive_key_rv(

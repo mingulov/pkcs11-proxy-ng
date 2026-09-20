@@ -23,7 +23,7 @@ fn round_trip(params: CkMechanismParams) -> CkMechanismParams {
         mechanism_type: CkMechanismType(0x9999), // arbitrary, doesn't matter for conversion
         params: Some(params),
     };
-    let proto: v1_proto::Mechanism = (&mech).into();
+    let proto: v1_proto::Mechanism = (&mech).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     back.params.expect("params should survive round-trip")
 }
@@ -36,7 +36,7 @@ fn expect_mechanism_param_invalid(proto: v1_proto::Mechanism) {
 #[test]
 fn mechanism_parameterless_round_trip() {
     let original = CkMechanism { mechanism_type: CkMechanismType::SHA256_RSA_PKCS, params: None };
-    let proto: v1_proto::Mechanism = (&original).into();
+    let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     assert_eq!(back.mechanism_type, original.mechanism_type);
     assert!(back.params.is_none());
@@ -52,7 +52,7 @@ fn mechanism_pss_round_trip() {
             salt_len: 32,
         })),
     };
-    let proto: v1_proto::Mechanism = (&original).into();
+    let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     assert_eq!(back.mechanism_type, original.mechanism_type);
     match back.params.unwrap() {
@@ -77,7 +77,7 @@ fn mechanism_oaep_round_trip() {
             source_null: false,
         })),
     };
-    let proto: v1_proto::Mechanism = (&original).into();
+    let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     assert_eq!(back.mechanism_type, original.mechanism_type);
     match back.params.unwrap() {
@@ -99,7 +99,7 @@ fn mechanism_oaep_empty_source_data_round_trip() {
             source_null: false,
         })),
     };
-    let proto: v1_proto::Mechanism = (&original).into();
+    let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     match back.params.unwrap() {
         CkMechanismParams::RsaPkcsOaep(p) => assert!(p.source_data.is_empty()),
@@ -122,7 +122,7 @@ fn mechanism_gcm_round_trip() {
             aad_null: false,
         })),
     };
-    let proto: v1_proto::Mechanism = (&original).into();
+    let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     assert_eq!(back.mechanism_type, CkMechanismType::AES_GCM);
     match back.params.unwrap() {
@@ -152,7 +152,7 @@ fn mechanism_gcm_empty_aad_round_trip() {
             aad_null: false,
         })),
     };
-    let proto: v1_proto::Mechanism = (&original).into();
+    let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     match back.params.unwrap() {
         CkMechanismParams::Gcm(p) => {
@@ -173,7 +173,7 @@ fn mechanism_ecdh1_derive_round_trip() {
             public_data: vec![0x04; 65],
         })),
     };
-    let proto: v1_proto::Mechanism = (&original).into();
+    let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     assert_eq!(back.mechanism_type, CkMechanismType::ECDH1_DERIVE);
     match back.params.unwrap() {
@@ -196,7 +196,7 @@ fn mechanism_ecdh1_derive_null_kdf_no_shared_data() {
             public_data: vec![0x04; 65],
         })),
     };
-    let proto: v1_proto::Mechanism = (&original).into();
+    let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     match back.params.unwrap() {
         CkMechanismParams::Ecdh1Derive(p) => {
@@ -214,7 +214,7 @@ fn aes_cbc_iv_round_trip() {
         mechanism_type: CkMechanismType::AES_CBC,
         params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0x01; 16] })),
     };
-    let proto: v1_proto::Mechanism = (&mech).into();
+    let proto: v1_proto::Mechanism = (&mech).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     assert_eq!(mech, back);
 }
@@ -225,7 +225,7 @@ fn des3_cbc_iv_round_trip() {
         mechanism_type: CkMechanismType::DES3_CBC,
         params: Some(CkMechanismParams::Iv(IvParams { iv: vec![0xAB; 8] })),
     };
-    let proto: v1_proto::Mechanism = (&mech).into();
+    let proto: v1_proto::Mechanism = (&mech).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     assert_eq!(mech, back);
 }
@@ -233,7 +233,7 @@ fn des3_cbc_iv_round_trip() {
 #[test]
 fn mechanism_unknown_type_preserved_as_parameterless() {
     let original = CkMechanism { mechanism_type: CkMechanismType(0xFFFF_FFFF), params: None };
-    let proto: v1_proto::Mechanism = (&original).into();
+    let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
     assert_eq!(back.mechanism_type, CkMechanismType(0xFFFF_FFFF));
     assert!(back.params.is_none());
@@ -1432,6 +1432,66 @@ fn sp800_108_kdf_empty_data_params_round_trip() {
         }
         _ => panic!("wrong variant"),
     }
+}
+
+#[test]
+fn sp800_108_kdf_nested_template_refused_loudly() {
+    // W1-C8-01: a nested template inside an SP800-108 derived-key
+    // sub-template is not representable in Sp800108Attribute; the
+    // Rust→Proto conversion must refuse it with an explicit error
+    // instead of silently encoding it as value-absent.
+    let params = Sp800108KdfParams {
+        prf_type: 0x250,
+        data_params: vec![],
+        additional_derived_keys: vec![Sp800108DerivedKey {
+            template: vec![CkAttribute {
+                attr_type: CkAttributeType::WRAP_TEMPLATE,
+                value: Some(CkAttributeValue::NestedTemplate(vec![CkAttribute {
+                    attr_type: CkAttributeType::CLASS,
+                    value: Some(CkAttributeValue::Ulong(4)),
+                }])),
+            }],
+            key_handle: 0,
+        }],
+    };
+    let err = v1_proto::Sp800108KdfParams::try_from(&params)
+        .expect_err("nested template must be refused loudly");
+    assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
+    // The loud refusal must also surface through the full convert path.
+    let mech = CkMechanism {
+        mechanism_type: CkMechanismType(0x9999),
+        params: Some(CkMechanismParams::Sp800108Kdf(params)),
+    };
+    let err = v1_proto::Mechanism::try_from(&mech)
+        .expect_err("nested template must be refused through the full path");
+    assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
+}
+
+#[test]
+fn sp800_108_feedback_kdf_nested_template_refused_loudly() {
+    // W1-C8-01: same loud refusal for the feedback-KDF shape.
+    let params = Sp800108FeedbackKdfParams {
+        prf_type: 0x260,
+        data_params: vec![],
+        iv: vec![],
+        additional_derived_keys: vec![Sp800108DerivedKey {
+            template: vec![CkAttribute {
+                attr_type: CkAttributeType::WRAP_TEMPLATE,
+                value: Some(CkAttributeValue::NestedTemplate(vec![])),
+            }],
+            key_handle: 0,
+        }],
+    };
+    let err = v1_proto::Sp800108FeedbackKdfParams::try_from(&params)
+        .expect_err("nested template must be refused loudly");
+    assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
+    let mech = CkMechanism {
+        mechanism_type: CkMechanismType(0x9999),
+        params: Some(CkMechanismParams::Sp800108FeedbackKdf(params)),
+    };
+    let err = v1_proto::Mechanism::try_from(&mech)
+        .expect_err("nested template must be refused through the full path");
+    assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
 }
 
 // ---------------------------------------------------------------------------

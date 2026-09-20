@@ -143,7 +143,7 @@ fn prf_data_from_proto(p: &v1_proto::PrfDataParam) -> PrfDataParam {
     PrfDataParam { type_: p.r#type, value: SecretBytes::copy_from_slice(&p.value) }
 }
 
-fn sp800_108_attribute_to_proto(attr: &CkAttribute) -> v1_proto::Sp800108Attribute {
+fn sp800_108_attribute_to_proto(attr: &CkAttribute) -> Result<v1_proto::Sp800108Attribute, CkRv> {
     let value = match &attr.value {
         None => None,
         Some(CkAttributeValue::Bool(value)) => Some(sp800108_attribute::Value::BoolValue(*value)),
@@ -156,11 +156,13 @@ fn sp800_108_attribute_to_proto(attr: &CkAttribute) -> v1_proto::Sp800108Attribu
         }
         // A CKA_*_TEMPLATE inside an SP800-108 derived-key sub-template is
         // not representable in Sp800108Attribute (and no real provider
-        // consumes one there); encode as value-absent rather than shipping
-        // meaningless bytes.
-        Some(CkAttributeValue::NestedTemplate(_)) => None,
+        // consumes one there); refuse loudly rather than silently dropping
+        // the template content as value-absent (W1-C8-01).
+        Some(CkAttributeValue::NestedTemplate(_)) => {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
     };
-    v1_proto::Sp800108Attribute { attr_type: attr.attr_type.0, value }
+    Ok(v1_proto::Sp800108Attribute { attr_type: attr.attr_type.0, value })
 }
 
 fn sp800_108_attribute_from_proto(attr: &v1_proto::Sp800108Attribute) -> CkAttribute {
@@ -178,11 +180,17 @@ fn sp800_108_attribute_from_proto(attr: &v1_proto::Sp800108Attribute) -> CkAttri
     CkAttribute { attr_type: CkAttributeType(attr.attr_type), value }
 }
 
-fn sp800_108_derived_key_to_proto(key: &Sp800108DerivedKey) -> v1_proto::Sp800108DerivedKey {
-    v1_proto::Sp800108DerivedKey {
-        template: key.template.iter().map(sp800_108_attribute_to_proto).collect(),
+fn sp800_108_derived_key_to_proto(
+    key: &Sp800108DerivedKey,
+) -> Result<v1_proto::Sp800108DerivedKey, CkRv> {
+    Ok(v1_proto::Sp800108DerivedKey {
+        template: key
+            .template
+            .iter()
+            .map(sp800_108_attribute_to_proto)
+            .collect::<Result<Vec<_>, _>>()?,
         key_handle: key.key_handle,
-    }
+    })
 }
 
 fn sp800_108_derived_key_from_proto(key: &v1_proto::Sp800108DerivedKey) -> Sp800108DerivedKey {
@@ -196,17 +204,19 @@ fn sp800_108_derived_key_from_proto(key: &v1_proto::Sp800108DerivedKey) -> Sp800
 // SP800-108: Sp800108KdfParams
 // ---------------------------------------------------------------------------
 
-impl From<&Sp800108KdfParams> for v1_proto::Sp800108KdfParams {
-    fn from(p: &Sp800108KdfParams) -> Self {
-        Self {
+impl TryFrom<&Sp800108KdfParams> for v1_proto::Sp800108KdfParams {
+    type Error = CkRv;
+
+    fn try_from(p: &Sp800108KdfParams) -> Result<Self, Self::Error> {
+        Ok(Self {
             prf_type: p.prf_type,
             data_params: p.data_params.iter().map(prf_data_to_proto).collect(),
             additional_derived_keys: p
                 .additional_derived_keys
                 .iter()
                 .map(sp800_108_derived_key_to_proto)
-                .collect(),
-        }
+                .collect::<Result<Vec<_>, _>>()?,
+        })
     }
 }
 
@@ -228,9 +238,11 @@ impl From<&v1_proto::Sp800108KdfParams> for Sp800108KdfParams {
 // SP800-108: Sp800108FeedbackKdfParams
 // ---------------------------------------------------------------------------
 
-impl From<&Sp800108FeedbackKdfParams> for v1_proto::Sp800108FeedbackKdfParams {
-    fn from(p: &Sp800108FeedbackKdfParams) -> Self {
-        Self {
+impl TryFrom<&Sp800108FeedbackKdfParams> for v1_proto::Sp800108FeedbackKdfParams {
+    type Error = CkRv;
+
+    fn try_from(p: &Sp800108FeedbackKdfParams) -> Result<Self, Self::Error> {
+        Ok(Self {
             prf_type: p.prf_type,
             data_params: p.data_params.iter().map(prf_data_to_proto).collect(),
             iv: p.iv.clone(),
@@ -238,8 +250,8 @@ impl From<&Sp800108FeedbackKdfParams> for v1_proto::Sp800108FeedbackKdfParams {
                 .additional_derived_keys
                 .iter()
                 .map(sp800_108_derived_key_to_proto)
-                .collect(),
-        }
+                .collect::<Result<Vec<_>, _>>()?,
+        })
     }
 }
 
@@ -427,8 +439,10 @@ impl From<&v1_proto::OtpParams> for OtpParams {
 // ---------------------------------------------------------------------------
 
 /// Convert a Rust `CkMechanism` reference to a proto `Mechanism`.
-fn mechanism_to_proto(m: &CkMechanism) -> v1_proto::Mechanism {
-    m.into()
+/// Fallible: a nested mechanism may carry an unrepresentable nested
+/// template (W1-C8-01), which must be refused loudly.
+fn mechanism_to_proto(m: &CkMechanism) -> Result<v1_proto::Mechanism, CkRv> {
+    v1_proto::Mechanism::try_from(m)
 }
 
 /// Convert a required boxed proto `Mechanism` to a Rust `CkMechanism`.
@@ -441,13 +455,15 @@ fn required_mechanism_from_boxed_option(
     CkMechanism::try_from(mechanism)
 }
 
-impl From<&KipParams> for v1_proto::KipParams {
-    fn from(p: &KipParams) -> Self {
-        Self {
-            mechanism: Some(Box::new(mechanism_to_proto(&p.mechanism))),
+impl TryFrom<&KipParams> for v1_proto::KipParams {
+    type Error = CkRv;
+
+    fn try_from(p: &KipParams) -> Result<Self, Self::Error> {
+        Ok(Self {
+            mechanism: Some(Box::new(mechanism_to_proto(&p.mechanism)?)),
             key_handle: p.key_handle,
             seed: secret_to_plain(&p.seed),
-        }
+        })
     }
 }
 
@@ -467,16 +483,18 @@ impl TryFrom<&v1_proto::KipParams> for KipParams {
 // Misc: CmsSigParams (nested Mechanisms)
 // ---------------------------------------------------------------------------
 
-impl From<&CmsSigParams> for v1_proto::CmsSigParams {
-    fn from(p: &CmsSigParams) -> Self {
-        Self {
+impl TryFrom<&CmsSigParams> for v1_proto::CmsSigParams {
+    type Error = CkRv;
+
+    fn try_from(p: &CmsSigParams) -> Result<Self, Self::Error> {
+        Ok(Self {
             certificate_handle: p.certificate_handle,
-            signing_mechanism: Some(Box::new(mechanism_to_proto(&p.signing_mechanism))),
-            digest_mechanism: Some(Box::new(mechanism_to_proto(&p.digest_mechanism))),
+            signing_mechanism: Some(Box::new(mechanism_to_proto(&p.signing_mechanism)?)),
+            digest_mechanism: Some(Box::new(mechanism_to_proto(&p.digest_mechanism)?)),
             content_type: p.content_type.clone(),
             requested_attributes: secret_to_plain(&p.requested_attributes),
             required_attributes: secret_to_plain(&p.required_attributes),
-        }
+        })
     }
 }
 
@@ -565,14 +583,16 @@ impl From<&v1_proto::SkipjackRelayxParams> for SkipjackRelayxParams {
 // Vendor: EciesParams (nested Mechanisms)
 // ---------------------------------------------------------------------------
 
-impl From<&EciesParams> for v1_proto::EciesParams {
-    fn from(p: &EciesParams) -> Self {
-        Self {
-            derivation_mechanism: Some(Box::new(mechanism_to_proto(&p.derivation_mechanism))),
-            encryption_mechanism: Some(Box::new(mechanism_to_proto(&p.encryption_mechanism))),
-            mac_mechanism: Some(Box::new(mechanism_to_proto(&p.mac_mechanism))),
+impl TryFrom<&EciesParams> for v1_proto::EciesParams {
+    type Error = CkRv;
+
+    fn try_from(p: &EciesParams) -> Result<Self, Self::Error> {
+        Ok(Self {
+            derivation_mechanism: Some(Box::new(mechanism_to_proto(&p.derivation_mechanism)?)),
+            encryption_mechanism: Some(Box::new(mechanism_to_proto(&p.encryption_mechanism)?)),
+            mac_mechanism: Some(Box::new(mechanism_to_proto(&p.mac_mechanism)?)),
             shared_data: secret_to_plain(&p.shared_data),
-        }
+        })
     }
 }
 
