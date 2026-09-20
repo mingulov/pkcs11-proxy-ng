@@ -999,7 +999,7 @@ PARAMETER_SHAPE_LOCAL_TESTS = {
     ],
     "Gcm": [
         "gcm_generated_iv_buffer_is_preserved_and_written_back",
-        "gcm_delayed_iv_round_trips_after_encrypt_data_query",
+        "gcm_encrypt_does_not_write_back_to_init_scope_memory",
         "simple_encrypt_returns_late_gcm_output_params_through_grpc",
         "multipart_encrypt_returns_cached_gcm_output_params_through_grpc",
         "multipart_encrypt_returns_late_gcm_output_params_through_grpc",
