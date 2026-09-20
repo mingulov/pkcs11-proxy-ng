@@ -793,6 +793,130 @@ fn all_3_2_out_of_scope_slots_are_nonnull() {
     }
 }
 
+/// Panic-safe env override for connect-related vars (restored on drop even
+/// when an assertion fails, so later tests keep the suite-pinned values).
+struct SavedConnectEnv {
+    endpoint: Option<String>,
+    socket: Option<String>,
+    attempts: Option<String>,
+}
+
+impl SavedConnectEnv {
+    fn capture() -> Self {
+        Self {
+            endpoint: std::env::var("PKCS11_PROXY_ENDPOINT").ok(),
+            socket: std::env::var("PKCS11_PROXY_SOCKET").ok(),
+            attempts: std::env::var("PKCS11_PROXY_CONNECT_ATTEMPTS").ok(),
+        }
+    }
+
+    fn restore_var(name: &str, saved: &Option<String>) {
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
+
+impl Drop for SavedConnectEnv {
+    fn drop(&mut self) {
+        Self::restore_var("PKCS11_PROXY_ENDPOINT", &self.endpoint);
+        Self::restore_var("PKCS11_PROXY_SOCKET", &self.socket);
+        Self::restore_var("PKCS11_PROXY_CONNECT_ATTEMPTS", &self.attempts);
+        crate::state::clear_pre_init_connect_failure();
+        crate::interface_probe::clear_cache();
+    }
+}
+
+/// W1-C7-01: the first pre-init probe against an unreachable daemon runs one
+/// dial series; subsequent pre-init probes reuse the cached failure instead
+/// of re-dialing. Fails before the fix (second call re-dials: +1 series and
+/// backoff-dominated elapsed).
+#[test]
+fn pre_init_failed_dial_cached_across_probes() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedConnectEnv::capture();
+    // Guaranteed-refused loopback endpoint: bind an ephemeral port, then drop
+    // the listener so nothing answers it.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral loopback port")
+        .local_addr()
+        .expect("listener addr")
+        .port();
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", format!("http://127.0.0.1:{port}"));
+        std::env::remove_var("PKCS11_PROXY_SOCKET");
+        // 3 attempts => ~100ms + ~200ms backoff per series: slow enough to
+        // prove a dial happened, fast enough to keep the suite snappy.
+        std::env::set_var("PKCS11_PROXY_CONNECT_ATTEMPTS", "3");
+    }
+    crate::state::mark_finalized();
+    crate::interface_probe::clear_cache();
+    crate::state::clear_pre_init_connect_failure();
+    // Other tests leak a connected client to their (still alive) in-process
+    // daemons; force the reconnect path so this test genuinely dials the
+    // refused endpoint below instead of fast-pathing on the stale channel.
+    crate::state::mark_client_reconnect_required();
+    assert!(!crate::state::is_initialized(), "test requires pre-init state");
+
+    let before = crate::state::connect_series_count();
+    let first_start = std::time::Instant::now();
+    let first = crate::interface_probe::ensure_probed();
+    let first_elapsed = first_start.elapsed();
+    assert!(first.is_err(), "probe against a refused endpoint must fail");
+    assert_eq!(
+        crate::state::connect_series_count() - before,
+        1,
+        "first pre-init call must run exactly one dial series"
+    );
+    assert!(
+        first_elapsed >= std::time::Duration::from_millis(150),
+        "first call must actually dial (backoff-dominated): {first_elapsed:?}"
+    );
+
+    let second_start = std::time::Instant::now();
+    let second = crate::interface_probe::ensure_probed();
+    let second_elapsed = second_start.elapsed();
+    assert!(second.is_err(), "cached pre-init failure must still report an error");
+    assert_eq!(
+        crate::state::connect_series_count() - before,
+        1,
+        "second pre-init call must reuse the cached failure, not re-dial"
+    );
+    assert!(
+        second_elapsed < std::time::Duration::from_millis(100),
+        "cached failure must return fast, without a dial series: {second_elapsed:?}"
+    );
+
+    // The cache is keyed by endpoint: a different refused endpoint misses and
+    // dials exactly one fresh series, which is then cached in turn.
+    let port_b = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind second ephemeral loopback port")
+        .local_addr()
+        .expect("listener addr")
+        .port();
+    assert_ne!(port, port_b, "the two refused endpoints must differ");
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", format!("http://127.0.0.1:{port_b}"));
+    }
+    let third = crate::interface_probe::ensure_probed();
+    assert!(third.is_err(), "probe against the second refused endpoint must fail");
+    assert_eq!(
+        crate::state::connect_series_count() - before,
+        2,
+        "a changed endpoint must miss the cache and run one fresh dial series"
+    );
+    let fourth = crate::interface_probe::ensure_probed();
+    assert!(fourth.is_err(), "cached failure for the second endpoint must still err");
+    assert_eq!(
+        crate::state::connect_series_count() - before,
+        2,
+        "the fresh failure must be cached for subsequent same-endpoint probes"
+    );
+}
+
 #[test]
 fn out_of_scope_3_2_stubs_return_function_not_supported() {
     let _guard = shim_state_test_guard();

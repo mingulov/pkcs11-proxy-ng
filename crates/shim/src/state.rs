@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -36,6 +36,58 @@ static CLIENT_INIT: Mutex<()> = Mutex::new(());
 /// `C_Initialize` must re-read connection configuration instead of reusing a
 /// channel that may point at an old daemon.
 static CLIENT_RECONNECT_REQUIRED: AtomicBool = AtomicBool::new(false);
+
+/// Cached pre-init failed-dial outcome (W1-C7-01). A pre-init probe against
+/// an unreachable daemon burns one full dial series (~21 s at the default
+/// 10 attempts + backoff); without a cache, every `C_GetFunctionList` /
+/// `C_GetInterfaceList` / `C_GetInterface` call re-pays it. The key folds
+/// the pid and endpoint together so a forked child and an endpoint change
+/// both miss the cache and dial fresh — lock-free on purpose, so no
+/// fork-inherited mutex is ever touched on this path.
+static PRE_INIT_CONNECT_FAILED: AtomicBool = AtomicBool::new(false);
+static PRE_INIT_CONNECT_FAILED_KEY: AtomicU64 = AtomicU64::new(0);
+
+/// Dial-series counter, test-only: each `connect_with_retry` invocation is
+/// one series of up to `MAX_ATTEMPTS` attempts.
+#[cfg(test)]
+static CONNECT_SERIES: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(test)]
+pub(crate) fn connect_series_count() -> u32 {
+    CONNECT_SERIES.load(Ordering::Relaxed)
+}
+
+fn pre_init_failure_key(endpoint: &str) -> u64 {
+    // FNV-1a over the pid + endpoint; compared only within this process.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in std::process::id().to_le_bytes().iter().chain(endpoint.as_bytes()) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Whether the pre-init dial to the current endpoint already failed.
+/// Consulted only while `!is_initialized()`; `C_Initialize` sets the
+/// initialized flag before connecting, so it always dials fresh.
+pub(crate) fn pre_init_connect_failed() -> bool {
+    if !PRE_INIT_CONNECT_FAILED.load(Ordering::Acquire) {
+        return false;
+    }
+    PRE_INIT_CONNECT_FAILED_KEY.load(Ordering::Relaxed)
+        == pre_init_failure_key(&resolve_endpoint_from_env())
+}
+
+fn record_pre_init_connect_failure(endpoint: &str) {
+    PRE_INIT_CONNECT_FAILED_KEY.store(pre_init_failure_key(endpoint), Ordering::Relaxed);
+    PRE_INIT_CONNECT_FAILED.store(true, Ordering::Release);
+}
+
+/// Drop any cached pre-init dial failure. Called on successful connect,
+/// reconnect-required, re-probe/cache-clear, and by tests for isolation.
+pub(crate) fn clear_pre_init_connect_failure() {
+    PRE_INIT_CONNECT_FAILED.store(false, Ordering::Release);
+}
 
 /// The mechanism registry uses a two-level wrapper:
 ///
@@ -151,6 +203,8 @@ pub fn mark_finalized() {
 /// Require the next client access to connect from the current environment.
 pub fn mark_client_reconnect_required() {
     CLIENT_RECONNECT_REQUIRED.store(true, Ordering::Release);
+    // A forced reconnect must dial fresh — never reuse a cached failure.
+    clear_pre_init_connect_failure();
 }
 
 pub type SessionByteCacheMap = Mutex<HashMap<CK_SESSION_HANDLE, Vec<u8>>>;
@@ -533,8 +587,15 @@ fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {
     let tls_files =
         pkcs11_proxy_ng_client::tls::ClientTlsFiles::from_env().map_err(|_| CkRv::DEVICE_ERROR)?;
     let rt = runtime();
-    rt.block_on(async { connect_with_retry(&endpoint, tls_files, timeout_secs).await })
-        .map_err(|_| CkRv::DEVICE_ERROR)
+    let result = rt
+        .block_on(async { connect_with_retry(&endpoint, tls_files, timeout_secs).await })
+        .map_err(|_| CkRv::DEVICE_ERROR);
+    // W1-C7-01: cache only the failure; any success invalidates.
+    match &result {
+        Ok(_) => clear_pre_init_connect_failure(),
+        Err(_) => record_pre_init_connect_failure(&endpoint),
+    }
+    result
 }
 
 /// Resolve the daemon endpoint from environment variables.
@@ -606,6 +667,8 @@ pub fn ensure_client_connected() -> Result<(), CkRv> {
     reclaim_after_fork();
     // Fast path: already connected.
     if CLIENT.get().is_some() && !CLIENT_RECONNECT_REQUIRED.load(Ordering::Acquire) {
+        // Connected means reachable: no failure stays cached (W1-C7-01).
+        clear_pre_init_connect_failure();
         return Ok(());
     }
     // Slow path: serialize init attempts.
@@ -721,6 +784,8 @@ async fn connect_with_retry(
     tls_files: Option<pkcs11_proxy_ng_client::tls::ClientTlsFiles>,
     timeout_secs: u64,
 ) -> Result<Pkcs11Client, String> {
+    #[cfg(test)]
+    CONNECT_SERIES.fetch_add(1, Ordering::Relaxed);
     let connect_timeout = Duration::from_secs(timeout_secs);
     let max_attempts =
         connect_attempts_from_value(std::env::var("PKCS11_PROXY_CONNECT_ATTEMPTS").ok().as_deref());

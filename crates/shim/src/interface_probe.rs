@@ -577,6 +577,17 @@ impl std::fmt::Display for ProbeFailure {
 /// mechanism registry payload (when provided) and atomically swaps the
 /// shim's in-memory registry to match.
 fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
+    // W1-C7-01: pre-init probes share one failed dial outcome. A failed dial
+    // series (~21 s at default attempts/backoff) is cached in state; later
+    // pre-init probes to the same endpoint fail fast instead of re-dialing.
+    // C_Initialize always dials: it sets INITIALIZED before connecting, so
+    // this gate never engages there (nor in post-init reprobes), and any
+    // successful connect clears the cache.
+    if !state::is_initialized() && state::pre_init_connect_failed() {
+        return Err(ProbeFailure::Transient(
+            "connect failed (cached pre-init dial outcome; C_Initialize retries)".to_string(),
+        ));
+    }
     // Ensure the gRPC channel is up (returns Err(CkRv) on failure).
     state::ensure_client_connected()
         .map_err(|e| ProbeFailure::Transient(format!("connect failed: {e:?}")))?;
@@ -765,6 +776,8 @@ pub fn reprobe() -> Result<(), String> {
     // A reprobe can be talking to a restarted or downgraded daemon. Do not let
     // a transient failure retain permission for stateful message operations.
     clear_pointer_safe_message_parameters();
+    // A re-probe always dials fresh: drop any cached pre-init failure (W1-C7-01).
+    state::clear_pre_init_connect_failure();
     match probe_backend() {
         Ok(st) => {
             let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
@@ -792,6 +805,8 @@ pub fn reprobe() -> Result<(), String> {
 /// After this, `ensure_probed()` will re-probe on the next call.
 pub fn clear_cache() {
     clear_pointer_safe_message_parameters();
+    // Cache-clear (e.g. C_Finalize) also drops the dial-failure cache (W1-C7-01).
+    state::clear_pre_init_connect_failure();
     let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
     *guard = None;
     // Drop the advertised backend ABI so a fresh probe re-reads it (D2).
