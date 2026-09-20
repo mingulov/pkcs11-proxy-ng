@@ -74,8 +74,13 @@ pub(crate) fn pre_init_connect_failed() -> bool {
     if !PRE_INIT_CONNECT_FAILED.load(Ordering::Acquire) {
         return false;
     }
-    PRE_INIT_CONNECT_FAILED_KEY.load(Ordering::Relaxed)
-        == pre_init_failure_key(&resolve_endpoint_from_env())
+    // W1-L8-02: an unresolvable endpoint (e.g. tls:// socket) has no
+    // cache key; report "no cached failure" so the probe reaches the
+    // connect path, which surfaces the loud parse error.
+    let Ok(endpoint) = resolve_endpoint_from_env() else {
+        return false;
+    };
+    PRE_INIT_CONNECT_FAILED_KEY.load(Ordering::Relaxed) == pre_init_failure_key(&endpoint)
 }
 
 fn record_pre_init_connect_failure(endpoint: &str) {
@@ -579,7 +584,10 @@ pub fn runtime() -> &'static Runtime {
 }
 
 fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {
-    let endpoint = resolve_endpoint_from_env();
+    // W1-L8-02: a malformed endpoint (e.g. tls:// socket) fails the
+    // connect outright — never dial a fallback on the caller's behalf.
+    // The parse error is already logged loudly by the resolver.
+    let endpoint = resolve_endpoint_from_env().map_err(|_| CkRv::DEVICE_ERROR)?;
     let timeout_secs: u64 = std::env::var("PKCS11_PROXY_CONNECT_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -607,11 +615,14 @@ fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {
 ///      `tcp://host:port` → `http://host:port`). The legacy `tls://`
 ///      prefix is intentionally NOT supported here: the new shim uses
 ///      mTLS configured via `PKCS11_PROXY_TLS_*` env vars rather than
-///      TLS-PSK. A `tls://` URL logs an explicit error and falls
-///      through to the default endpoint so the daemon refuses the
-///      connection visibly rather than silently misrouting.
+///      TLS-PSK. A `tls://` URL is a loud error (W1-L8-02): it must
+///      never fall through to the default endpoint, which would
+///      silently connect to the wrong daemon with no TLS.
 ///   3. Default `http://127.0.0.1:7512`.
-fn resolve_endpoint_from_env() -> String {
+///
+/// Returns `Err` (naming the variable and the offending value class) for
+/// a `tls://` socket instead of producing any connection string.
+pub(crate) fn resolve_endpoint_from_env() -> Result<String, String> {
     if let Ok(endpoint) = std::env::var("PKCS11_PROXY_ENDPOINT") {
         if std::env::var_os("PKCS11_PROXY_SOCKET").is_some() {
             tracing::debug!(
@@ -619,7 +630,7 @@ fn resolve_endpoint_from_env() -> String {
                  PKCS11_PROXY_ENDPOINT wins"
             );
         }
-        return endpoint;
+        return Ok(endpoint);
     }
     if let Ok(socket) = std::env::var("PKCS11_PROXY_SOCKET") {
         if let Some(rest) = socket.strip_prefix("tcp://") {
@@ -629,24 +640,22 @@ fn resolve_endpoint_from_env() -> String {
                 endpoint = %translated,
                 "translating legacy PKCS11_PROXY_SOCKET to PKCS11_PROXY_ENDPOINT"
             );
-            return translated;
+            return Ok(translated);
         }
         if socket.starts_with("tls://") {
-            tracing::error!(
-                socket = %socket,
-                "PKCS11_PROXY_SOCKET tls:// is not supported by this shim; \
+            let msg = format!(
+                "PKCS11_PROXY_SOCKET has unsupported tls:// endpoint {socket:?}; \
                  use PKCS11_PROXY_ENDPOINT=https://... and PKCS11_PROXY_TLS_* env vars for mTLS"
             );
-            // Fall through to the default endpoint so the connection
-            // attempt fails visibly rather than silently misrouting.
-        } else {
-            tracing::warn!(
-                socket = %socket,
-                "PKCS11_PROXY_SOCKET must use tcp:// prefix; ignoring"
-            );
+            tracing::error!(socket = %socket, "{msg}");
+            return Err(msg);
         }
+        tracing::warn!(
+            socket = %socket,
+            "PKCS11_PROXY_SOCKET must use tcp:// prefix; ignoring"
+        );
     }
-    "http://127.0.0.1:7512".to_string()
+    Ok("http://127.0.0.1:7512".to_string())
 }
 
 /// Establish the gRPC client connection with retry.

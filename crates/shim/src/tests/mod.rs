@@ -24,6 +24,7 @@ mod attribute_classification;
 mod control_channel_live;
 mod cross_abi;
 mod cross_width_live;
+mod endpoint;
 mod init_args;
 mod interface;
 mod null_pointers;
