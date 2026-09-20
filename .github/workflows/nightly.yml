@@ -225,7 +225,9 @@ jobs:
   miri:
     name: Miri (types + shim parse paths)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # 2026-09-20: 45 -> 60 headroom for the two added reader tests (~15 min
+    # each under Miri on a loaded box; far less on an idle runner).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
@@ -245,10 +247,74 @@ jobs:
       # modules are the UB-relevant pure logic. On the shim, the daemon-based
       # tests:: modules need real sockets and are compiled out under Miri
       # (lib.rs cfg); the raw-pointer parse paths below are the point.
+      # 2026-09-20 audit: also pin the two reader tests covering the flagged
+      # 8-byte loads (mechanism_read.rs rsa_aes_key_wrap + sign_additional_
+      # context). They are aligned on LP64, so this leg guards the harness
+      # and future Linux-visible UB only — the guilty LLP64 pack(1) layout
+      # runs in miri-windows below.
       - name: cargo miri test (width/attribute logic + shim parse paths)
         run: |
           cargo +nightly miri test -p pkcs11-proxy-ng-types -- width attribute
           cargo +nightly miri test -p pkcs11-proxy-ng-shim --lib -- \
             dispatch::general::width_bridge \
             dispatch::general::helpers::nested_template_input \
-            not_wild_read
+            not_wild_read \
+            reads_rsa_wrap_parameter_structs \
+            reads_handle_string_and_sign_context_parameter_structs
+
+  # ── Miri on Windows (pack(1) UB sites) ────────────────────────────────────
+  # Same nightly cadence as the Linux Miri job above. Runs ONLY the two
+  # reader tests covering the audit-flagged 8-byte loads
+  # (mechanism_read.rs:930-932 rsa_aes_key_wrap, :990 sign_additional_context):
+  # on LLP64 pack(1) the pointer fields sit at offset 4 (misaligned), while
+  # on LP64 they sit at offset 8 (aligned) — so only this leg can trip them.
+  # Scoped to 2 tests deliberately: full-file Miri runs take hours (measured
+  # ~15 min/test on a loaded box); broad parse-path coverage stays on Linux.
+  # Needs the MSVC dev environment (ring's C build) plus protoc, like the
+  # cross-platform win32 leg. Miri interprets and never links, but the PATH
+  # export below is still required: git-bash prepends /usr/bin (GNU link.exe)
+  # ahead of the dev-cmd MSVC dirs in every fresh shell, and cc-rs build
+  # scripts (ring) resolve link.exe via PATH (same mechanism as win32).
+  miri-windows:
+    name: Miri (Windows pack(1) UB sites)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          # Same rate-limit hardening as the cross-platform legs.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install nightly toolchain with miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Set up x64 MSVC toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: Windows-X64-cargo-miri-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            Windows-X64-cargo-miri-
+
+      - name: cargo miri test (pack(1) UB-site readers)
+        run: |
+          MSVC_BINDIR="$(dirname "$(which cl)")"
+          export PATH="$MSVC_BINDIR:$PATH"
+          cargo +nightly miri test -p pkcs11-proxy-ng-shim --lib -- \
+            reads_rsa_wrap_parameter_structs \
+            reads_handle_string_and_sign_context_parameter_structs
+        shell: bash
