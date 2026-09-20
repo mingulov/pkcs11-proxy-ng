@@ -25,6 +25,11 @@ struct LoginGate {
     proceed: Arc<(Mutex<bool>, Condvar)>,
 }
 
+/// Predicate over a `find_objects_init` template: installed with
+/// [`MockBackend::set_find_template_gate`] so `find_objects` can simulate
+/// class-sensitive search.
+type FindTemplateGate = Arc<dyn Fn(&[CkAttribute]) -> bool + Send + Sync>;
+
 mod crypto_ops;
 pub mod echo;
 mod historical_flags;
@@ -281,6 +286,17 @@ pub struct MockBackend {
     /// `find_objects_init` resets it to 0. Enables multi-batch test scenarios where
     /// successive calls return successive slices (batch1 → batch2 → [] exhausted).
     find_objects_cursor: Mutex<usize>,
+    /// Log of every `find_objects_init` template, in call order. Tests drain it
+    /// with [`MockBackend::take_find_init_templates`] to assert which searches
+    /// a client issued (e.g. primary-class search followed by a SECRET_KEY
+    /// fallback). Unbounded by design — test-only, tiny templates.
+    find_init_templates: Mutex<Vec<Vec<CkAttribute>>>,
+    /// Optional gate (W1-C11-04 harness): when `Some`, `find_objects` serves
+    /// the override list only if the gate accepts the most recent init
+    /// template, and returns `[]` otherwise. `None` (default) keeps the
+    /// historical template-blind behavior. Lets tests simulate a backend
+    /// where only a specific class (e.g. SECRET_KEY) matches the search.
+    find_template_gate: Mutex<Option<FindTemplateGate>>,
 }
 
 /// Which mechanisms require parameters and which forbid them, snapshot
@@ -369,6 +385,8 @@ impl MockBackend {
             cryptoki_version: (3, 0),
             find_objects_override: Mutex::new(None),
             find_objects_cursor: Mutex::new(0),
+            find_init_templates: Mutex::new(Vec::new()),
+            find_template_gate: Mutex::new(None),
         }
     }
 
@@ -469,6 +487,35 @@ impl MockBackend {
     /// by configuring a list larger than `max_count` and using a small `max_object_count`.
     pub fn set_find_objects_result(&self, objects: Vec<CkObjectHandle>) {
         *self.find_objects_override.lock().unwrap() = Some(objects);
+    }
+
+    /// Install a gate so `find_objects` serves the override list only when
+    /// the gate accepts the most recent `find_objects_init` template, and
+    /// returns `[]` otherwise. Simulate class-sensitive search by matching
+    /// on the template's `CKA_CLASS` entry.
+    pub fn set_find_template_gate(
+        &self,
+        gate: impl Fn(&[CkAttribute]) -> bool + Send + Sync + 'static,
+    ) {
+        *self.find_template_gate.lock().unwrap() = Some(Arc::new(gate));
+    }
+
+    /// Drain the log of `find_objects_init` templates, in call order.
+    pub fn take_find_init_templates(&self) -> Vec<Vec<CkAttribute>> {
+        std::mem::take(&mut self.find_init_templates.lock().unwrap())
+    }
+
+    /// Whether the installed find gate (if any) accepts the most recent
+    /// init template. No gate installed means "serve the override".
+    fn find_template_gate_passes(&self) -> bool {
+        let gate = self.find_template_gate.lock().unwrap().clone();
+        match gate {
+            None => true,
+            Some(gate) => {
+                let templates = self.find_init_templates.lock().unwrap();
+                templates.last().is_some_and(|t| gate(t))
+            }
+        }
     }
 
     /// Enqueue a slot event to be returned by the next `wait_for_slot_event` call.
@@ -1600,8 +1647,9 @@ impl Pkcs11Backend for MockBackend {
     fn find_objects_init(
         &self,
         session: CkSessionHandle,
-        _t: Option<&[CkAttribute]>,
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
+        self.find_init_templates.lock().unwrap().push(template.unwrap_or(&[]).to_vec());
         self.find_objects_init_impl(session)
     }
     fn find_objects(

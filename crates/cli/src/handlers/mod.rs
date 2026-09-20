@@ -162,6 +162,31 @@ pub(crate) async fn find_key_by_label(
     key_label: &str,
     class: CkObjectClass,
 ) -> Result<CkObjectHandle, Box<dyn core::error::Error>> {
+    // W1-C11-04: symmetric crypto (AES encrypt/decrypt, HMAC sign/verify)
+    // operates on SECRET_KEY objects, but each op historically searched only
+    // its asymmetric class. Try the requested class first so existing
+    // behavior is unchanged, then fall back to SECRET_KEY.
+    let mut classes = vec![class];
+    if class != CkObjectClass::SECRET_KEY {
+        classes.push(CkObjectClass::SECRET_KEY);
+    }
+    for class in classes {
+        if let Some(handle) =
+            find_first_by_label_and_class(client, session, key_label, class).await?
+        {
+            return Ok(handle);
+        }
+    }
+
+    Err(format!("No {} found with label '{key_label}'", object_class_name(class.0)).into())
+}
+
+async fn find_first_by_label_and_class(
+    client: &mut Pkcs11Client,
+    session: CkSessionHandle,
+    key_label: &str,
+    class: CkObjectClass,
+) -> Result<Option<CkObjectHandle>, Box<dyn core::error::Error>> {
     let template = vec![
         CkAttribute {
             attr_type: CkAttributeType::LABEL,
@@ -183,7 +208,5 @@ pub(crate) async fn find_key_by_label(
         .await
         .map_err(crate::handlers::cli_err("C_FindObjectsFinal"))?;
 
-    objects.into_iter().next().ok_or_else(|| {
-        format!("No {} found with label '{key_label}'", object_class_name(class.0)).into()
-    })
+    Ok(objects.into_iter().next())
 }

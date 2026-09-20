@@ -24,3 +24,12 @@ tracing-subscriber.workspace = true
 hex = "0.4"
 base64 = "0.22"
 x509-parser.workspace = true
+
+# Test-only: spin an in-process mock daemon so handler tests cover the full
+# client -> gRPC -> backend path. Never linked into the shipped CLI binary.
+[dev-dependencies]
+pkcs11-proxy-ng = { path = "../server" }
+pkcs11-proxy-ng-backend = { path = "../backend" }
+pkcs11-proxy-ng-proto = { path = "../proto" }
+tokio-stream = "0.1"
+tonic = { workspace = true, features = ["server"] }
