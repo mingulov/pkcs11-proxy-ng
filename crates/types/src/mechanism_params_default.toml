@@ -94,8 +94,6 @@ parameterless = [
 
     # RC5 (historical)
     0x0330,  # CKM_RC5_KEY_GEN
-    0x0331,  # CKM_RC5_ECB
-    0x0333,  # CKM_RC5_MAC
 
     # DES (historical)
     0x0120,  # CKM_DES_KEY_GEN
@@ -552,8 +550,22 @@ mechanisms = [
 [[params]]
 shape = "rc5"
 mechanisms = [
+    0x0331,  # CKM_RC5_ECB
+    0x0333,  # CKM_RC5_MAC
+]
+
+# RC5 CBC: CK_RC5_CBC_PARAMS (word_size, rounds, iv)
+[[params]]
+shape = "rc5_cbc"
+mechanisms = [
     0x0332,  # CKM_RC5_CBC
-    0x0334,  # CKM_RC5_MAC_GENERAL (uses RC5_MAC_GENERAL_PARAMS actually)
+]
+
+# RC5 MAC general: CK_RC5_MAC_GENERAL_PARAMS (word_size, rounds, mac_length)
+[[params]]
+shape = "rc5_mac_general"
+mechanisms = [
+    0x0334,  # CKM_RC5_MAC_GENERAL
 ]
 
 # RC2 CBC: CK_RC2_CBC_PARAMS (effective_bits, iv[8])

@@ -397,6 +397,10 @@ mod tests {
     const CKM_RC2_ECB: u64 = 0x0101;
     const CKM_RC2_MAC: u64 = 0x0103;
     const CKM_RC2_MAC_GENERAL: u64 = 0x0104;
+    const CKM_RC5_ECB: u64 = 0x0331;
+    const CKM_RC5_CBC: u64 = 0x0332;
+    const CKM_RC5_MAC: u64 = 0x0333;
+    const CKM_RC5_MAC_GENERAL: u64 = 0x0334;
 
     #[test]
     fn load_embedded_default() {
@@ -467,6 +471,30 @@ mod tests {
             [Some("mac_general"), Some("mac_general"), Some("rc2_mac_general")]
         );
         for mechanism in [CKM_RC2_ECB, CKM_RC2_MAC, CKM_RC2_MAC_GENERAL] {
+            assert!(!reg.is_parameterless(mechanism));
+        }
+    }
+
+    #[test]
+    fn embedded_default_uses_the_rc5_parameter_shapes() {
+        // OASIS pkcs11t.h: CK_RC5_PARAMS serves CKM_RC5_ECB/CKM_RC5_MAC,
+        // CK_RC5_CBC_PARAMS serves CKM_RC5_CBC, and
+        // CK_RC5_MAC_GENERAL_PARAMS serves CKM_RC5_MAC_GENERAL.
+        // Regression test for W1-C9-02 + W1-L4-01: the default registry
+        // previously mapped CBC/MAC_GENERAL to "rc5" (dropping IV/mac_length)
+        // and listed ECB/MAC as parameterless.
+        let reg = MechanismRegistry::load_with_override_str(None).unwrap();
+
+        assert_eq!(
+            [
+                reg.param_shape(CKM_RC5_ECB),
+                reg.param_shape(CKM_RC5_CBC),
+                reg.param_shape(CKM_RC5_MAC),
+                reg.param_shape(CKM_RC5_MAC_GENERAL),
+            ],
+            [Some("rc5"), Some("rc5_cbc"), Some("rc5"), Some("rc5_mac_general")]
+        );
+        for mechanism in [CKM_RC5_ECB, CKM_RC5_CBC, CKM_RC5_MAC, CKM_RC5_MAC_GENERAL] {
             assert!(!reg.is_parameterless(mechanism));
         }
     }
@@ -932,10 +960,8 @@ mod tests {
             // RC4
             0x0110, // CKM_RC4_KEY_GEN
             0x0111, // CKM_RC4
-            // RC5
+            // RC5 (ECB/MAC take CK_RC5_PARAMS — registry shapes, not parameterless)
             0x0330, // CKM_RC5_KEY_GEN
-            0x0331, // CKM_RC5_ECB
-            0x0333, // CKM_RC5_MAC
             // DES
             0x0120, // CKM_DES_KEY_GEN
             0x0121, // CKM_DES_ECB
@@ -1028,12 +1054,12 @@ mod tests {
             0x001D, // CKM_ML_DSA
         ];
 
-        // Verify count matches the TOML (133 parameterless mechanisms).
-        // Parameterized RC2 ECB/MAC mechanisms use registry shapes.
+        // Verify count matches the TOML (131 parameterless mechanisms).
+        // Parameterized RC2 ECB/MAC and RC5 ECB/MAC mechanisms use registry shapes.
         assert_eq!(
             expected_parameterless.len(),
-            133,
-            "expected list should contain exactly 133 entries"
+            131,
+            "expected list should contain exactly 131 entries"
         );
 
         for &mech in expected_parameterless {
