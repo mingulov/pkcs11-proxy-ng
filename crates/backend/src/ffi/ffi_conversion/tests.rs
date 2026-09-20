@@ -12,8 +12,8 @@ mod mechanism_to_ffi_tests {
         AesCmacKeyDerivationParams, AesCtrParams, CkMechanism, CkMechanismParams, CkMechanismType,
         CkRv, DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams, IvParams,
         KeyDerivationStringData, KmacParams, KyberParams, MuGenParams, ObjectHandleParam,
-        PbeParams, Pkcs5Pbkd2Params, RawMechanismParams, RsaPkcsOaepParams, RsaPkcsPssParams,
-        SecretBytes, SignAdditionalContext, Ssl3KeyMatParams, SslRandomData,
+        PbeParams, Pkcs5Pbkd2Params, RawMechanismParams, RsaAesKeyWrapParams, RsaPkcsOaepParams,
+        RsaPkcsPssParams, SecretBytes, SignAdditionalContext, Ssl3KeyMatParams, SslRandomData,
         VendorObjectExtractParams, VendorObjectInsertParams, WtlsKeyMatParams,
         WtlsMasterKeyDeriveParams, WtlsRandomData,
     };
@@ -915,6 +915,112 @@ mod mechanism_to_ffi_tests {
             assert_eq!(p_source_data.is_null(), source_null, "pSourceData nullness");
             assert_eq!(ul_source_data_len, 0);
         }
+    }
+
+    #[test]
+    fn nested_oaep_empty_key_honors_source_null_like_top_level() {
+        // W1-L4-10: nested OAEP (inside RSA_AES_KEY_WRAP) with an empty key must
+        // convert byte-identically to the top-level OAEP conversion of the same
+        // input. Empty-input pointers are deterministic (NULL or dangling), so
+        // comparing every field including the pointer value is byte equality of
+        // all initialized struct bytes (padding excluded).
+        for source_null in [true, false] {
+            let oaep_params = RsaPkcsOaepParams {
+                hash_alg: CkMechanismType::SHA256,
+                mgf: 1,
+                source: 1,
+                source_data: Vec::new().into(),
+                source_null,
+            };
+            let top = convert(
+                CkMechanismType::RSA_PKCS_OAEP,
+                CkMechanismParams::RsaPkcsOaep(oaep_params.clone()),
+            );
+            let nested = convert(
+                CkMechanismType::RSA_AES_KEY_WRAP,
+                CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
+                    aes_key_bits: 256,
+                    oaep_params,
+                }),
+            );
+            // E0793: CK structs are packed on Windows; assert on by-value copies.
+            let top_oaep = unsafe {
+                top.ck_mechanism()
+                    .pParameter
+                    .cast::<cryptoki_sys::CK_RSA_PKCS_OAEP_PARAMS>()
+                    .read_unaligned()
+            };
+            let wrap = unsafe {
+                nested
+                    .ck_mechanism()
+                    .pParameter
+                    .cast::<super::FfiRsaAesKeyWrapParams>()
+                    .read_unaligned()
+            };
+            assert!(!wrap.p_oaep_params.is_null(), "nested OAEP pointer is set");
+            let nested_oaep = unsafe { wrap.p_oaep_params.read_unaligned() };
+            let (top_hash, top_mgf, top_source, top_ptr, top_len) = (
+                top_oaep.hashAlg,
+                top_oaep.mgf,
+                top_oaep.source,
+                top_oaep.pSourceData,
+                top_oaep.ulSourceDataLen,
+            );
+            let (nested_hash, nested_mgf, nested_source, nested_ptr, nested_len) = (
+                nested_oaep.hashAlg,
+                nested_oaep.mgf,
+                nested_oaep.source,
+                nested_oaep.pSourceData,
+                nested_oaep.ulSourceDataLen,
+            );
+            assert_eq!(
+                (nested_hash, nested_mgf, nested_source),
+                (top_hash, top_mgf, top_source),
+                "source_null={source_null}: nested OAEP scalars must match top-level"
+            );
+            assert_eq!(
+                nested_ptr, top_ptr,
+                "source_null={source_null}: nested pSourceData must equal top-level"
+            );
+            assert_eq!(
+                nested_len, top_len,
+                "source_null={source_null}: nested ulSourceDataLen must equal top-level"
+            );
+            assert_eq!(nested_len, 0);
+            assert_eq!(nested_ptr.is_null(), source_null, "pSourceData nullness");
+        }
+
+        // Non-empty nested keys are unchanged: valid pointer, correct bytes.
+        let oaep_params = RsaPkcsOaepParams {
+            hash_alg: CkMechanismType::SHA256,
+            mgf: 1,
+            source: 1,
+            source_data: vec![0xA0, 0xA1, 0xA2].into(),
+            source_null: false,
+        };
+        let nested = convert(
+            CkMechanismType::RSA_AES_KEY_WRAP,
+            CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
+                aes_key_bits: 256,
+                oaep_params,
+            }),
+        );
+        let wrap = unsafe {
+            nested
+                .ck_mechanism()
+                .pParameter
+                .cast::<super::FfiRsaAesKeyWrapParams>()
+                .read_unaligned()
+        };
+        let nested_oaep = unsafe { wrap.p_oaep_params.read_unaligned() };
+        let (p_source_data, ul_source_data_len) =
+            (nested_oaep.pSourceData, nested_oaep.ulSourceDataLen);
+        assert!(!p_source_data.is_null());
+        assert_eq!(ul_source_data_len, 3);
+        let source = unsafe {
+            std::slice::from_raw_parts(p_source_data as *const u8, ul_source_data_len as usize)
+        };
+        assert_eq!(source, [0xA0, 0xA1, 0xA2]);
     }
 }
 

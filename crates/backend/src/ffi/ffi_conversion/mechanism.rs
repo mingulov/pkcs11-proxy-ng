@@ -1300,8 +1300,12 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         CkMechanismParams::RsaAesKeyWrap(p) => {
             // Build the nested OAEP params first (same pattern as the Oaep arm)
             let mut source_data = p.oaep_params.source_data.expose(|b| Zeroizing::new(b.to_vec()));
-            let (src_ptr, src_len) = if source_data.is_empty() {
+            // F3/D2: honor source_null exactly like the top-level Oaep arm; only
+            // a caller-NULL source materializes NULL.
+            let (src_ptr, src_len) = if p.oaep_params.source_null {
                 (std::ptr::null_mut(), 0)
+            } else if source_data.is_empty() {
+                (std::ptr::NonNull::<u8>::dangling().as_ptr() as *mut std::ffi::c_void, 0)
             } else {
                 (source_data.as_mut_ptr() as *mut std::ffi::c_void, source_data.len())
             };
