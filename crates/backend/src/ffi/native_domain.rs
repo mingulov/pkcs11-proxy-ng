@@ -1581,7 +1581,7 @@ mod tests {
     #[test]
     fn t3_qualified_host_platform_check_is_ok() {
         // This test runs on a qualified native-FFI host (Linux GNU/musl
-        // x86_64/x86, macOS aarch64/x86_64, Windows MSVC x86_64/x86); the
+        // x86_64/x86/aarch64, macOS aarch64/x86_64, Windows MSVC x86_64/x86);
         // const itself is covered by
         // `native_domain_current_host_reports_qualified_or_refuses`.
         assert!(check_native_platform().is_ok());

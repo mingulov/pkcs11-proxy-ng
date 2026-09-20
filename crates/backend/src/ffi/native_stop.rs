@@ -1,6 +1,6 @@
 //! Abnormal native-lifetime stop: raw `exit_group(70)` on stop-qualified
 //! Linux, libSystem `_exit(70)` on stop-qualified macOS, and
-//! `TerminateProcess(70)` on stop-qualified Windows. The four stop arms
+//! `TerminateProcess(70)` on stop-qualified Windows. The five stop arms
 //! cover exactly the load-qualified set (`NATIVE_FFI_QUALIFIED`); on
 //! unqualified targets the guard compiles out and the poison path applies.
 //!
@@ -16,8 +16,9 @@
 //! (x86_64: `syscall` nr 231 with status 70 in RDI; i686: `int 0x80`
 //! nr 252 with status 70 via ECX into EBX and balanced push/pop;
 //! Windows MSVC x86_64/x86: `TerminateProcess` with status 70; macOS
-//! aarch64/x86_64: libSystem `_exit` with status 70). Both Linux stubs
-//! model a possible return; the outer loop retries on interception.
+//! aarch64/x86_64: libSystem `_exit` with status 70; aarch64 Linux:
+//! `svc #0` nr 94 with status 70 in X0). All three Linux stubs model
+//! a possible return; the outer loop retries on interception.
 
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
@@ -28,7 +29,8 @@ use std::time::{Duration, Instant};
 ///
 /// Transparent over `i32` so the modeled return stays visible in codegen
 /// instead of folding into a diverging shape. The x86_64 stub truncates
-/// the 64-bit RAX result; the i686 stub carries EAX directly.
+/// the 64-bit RAX result, the aarch64 stub truncates the 64-bit X0
+/// result, and the i686 stub carries EAX directly.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::ffi) struct RawStopAttempt(pub(in crate::ffi) i32);
@@ -557,7 +559,12 @@ mod tests {
     /// `cargo check -p pkcs11-proxy-ng-backend --tests
     /// --target aarch64-unknown-linux-gnu`, which compiles but cannot
     /// execute on x86_64 hosts.
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_env = "gnu", target_env = "musl"),
+        target_arch = "aarch64",
+        target_pointer_width = "64"
+    ))]
     const _: () = {
         assert!(crate::ffi::native_domain::NATIVE_FFI_QUALIFIED);
         assert!(NATIVE_STOP_QUALIFIED);

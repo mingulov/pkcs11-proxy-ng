@@ -918,9 +918,12 @@ fn install_exit_group_errno_deny() {
     let nr_exit_group: u32 = 231;
     #[cfg(all(target_arch = "x86", target_pointer_width = "32"))]
     let nr_exit_group: u32 = 252;
+    #[cfg(all(target_arch = "aarch64", target_pointer_width = "64"))]
+    let nr_exit_group: u32 = 94;
     #[cfg(not(any(
         all(target_arch = "x86_64", target_pointer_width = "64"),
-        all(target_arch = "x86", target_pointer_width = "32")
+        all(target_arch = "x86", target_pointer_width = "32"),
+        all(target_arch = "aarch64", target_pointer_width = "64")
     )))]
     let nr_exit_group: u32 = 0;
     // `if (nr == exit_group) return BPF_DENY; return ALLOW;`

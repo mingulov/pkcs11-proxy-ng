@@ -209,7 +209,8 @@ fn stop_fire_condition(
 }
 
 /// Test-only `cfg!` mirror of the `Drop`-guard predicate below (Linux
-/// x86_64/x86, Windows x86_64/x86, macOS aarch64/x86_64 — leg for leg with
+/// x86_64/x86/aarch64, Windows x86_64/x86, macOS aarch64/x86_64 — leg for
+/// leg with
 /// `NATIVE_STOP_QUALIFIED`). The `cfg` on the guard is the source of
 /// truth; this mirror lets the coherence test assert the guard arms
 /// exactly where stop arms exist.
@@ -220,7 +221,8 @@ pub(in crate::ffi) const DROP_GUARD_STOP_ARMED: bool = cfg!(any(
         any(target_env = "gnu", target_env = "musl"),
         any(
             all(target_arch = "x86_64", target_pointer_width = "64"),
-            all(target_arch = "x86", target_pointer_width = "32")
+            all(target_arch = "x86", target_pointer_width = "32"),
+            all(target_arch = "aarch64", target_pointer_width = "64")
         )
     ),
     all(

@@ -13,8 +13,9 @@ Production live FFI for v0.2 is limited to qualified targets:
 
 - Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit);
 - Linux GNU/musl on aarch64 (64-bit) — cross-platform
-  ubuntu-26.04-arm leg green (full direct-vs-proxied compare; stop stub
-  compile- and review-proven, stop-fire not natively executed);
+  ubuntu-26.04-arm leg enabled, blocking (full direct-vs-proxied
+  compare; stop stub compile- and review-proven, stop-fire not
+  natively executed);
 - Windows MSVC on x86_64 (64-bit) — tail stretch landed (T6 legs A/B/C)
   and T2run's windows-2022 compare leg green;
 - Windows MSVC on x86 (32-bit) at the stub tier — T2run's win32 leg
