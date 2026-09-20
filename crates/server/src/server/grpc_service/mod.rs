@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 
 use crate::config::{AuthConfig, TcpAuthMode, UnixAuthMode};
@@ -203,6 +204,49 @@ fn acquire_principal_op_guard(
         .ok_or_else(|| Status::resource_exhausted("per-principal concurrency limit exceeded"))
 }
 
+/// Admit one context-scoped operation under the per-context in-flight cap
+/// (M2) and run `fut` with the resulting guard scoped.
+///
+/// Shared by the macro-generated RPCs and the 9 hand-written RPCs (W1-L6-01)
+/// so the admission order and rejection values cannot drift:
+/// * at cap → `Err(Status::resource_exhausted("per-context concurrency limit
+///   exceeded"))`, and `fut` is never polled;
+/// * missing context → `Ok(None)` guard, `fut` still runs so the handler
+///   returns the proper `CK_RV`;
+/// * admitted → `fut` runs inside `scope_context_operation`, so the context
+///   stays un-evictable for the whole handler AND backend tasks cloned from
+///   the guard keep it alive past timeout/cancel.
+///
+/// Callers must run `check_context_owner` BEFORE this (a rejected identity
+/// must not consume a cap slot) and acquire the per-principal guard INSIDE
+/// `fut`. Final order: owner → M2 → scope → per-principal → handler.
+async fn run_context_scoped<T, F>(
+    ctx: &HandlerContext,
+    client_context_id: &str,
+    fut: F,
+) -> Result<T, Status>
+where
+    F: Future<Output = Result<T, Status>>,
+{
+    // Hold the context un-evictable for the whole operation so a
+    // long backend call (keygen/derive on a slow HSM, larger than
+    // the lease) is never reaped MID-CALL, AND enforce the
+    // per-context in-flight cap so one noisy client cannot drain
+    // the shared backend-call budget and DEVICE_ERROR every tenant
+    // (M2). A context that is already gone yields Ok(None) and the
+    // handler returns the right CKR.
+    let operation_guard = match ctx.context_manager.begin_operation_capped(
+        &super::context_manager::ClientContextId(client_context_id.to_owned()),
+        service_utils::per_context_max_in_flight() as i64,
+    ) {
+        Ok(guard) => guard,
+        Err(()) => {
+            return Err(Status::resource_exhausted("per-context concurrency limit exceeded"));
+        }
+    };
+    service_utils::scope_context_operation(operation_guard, fut).await
+}
+
 // ── Dispatch rate-quota tests (G2-PR3) ────────────────────────────────────────
 //
 // Placed BEFORE `macro_rules! impl_proxy_service!` so the consistency-check
@@ -393,6 +437,303 @@ mod dispatch_rate_quota_tests {
     }
 }
 
+// ── Scope-guard + M2-cap routing tests (W1-L6-01) ──────────────────────────────
+//
+// The 9 hand-written RPCs in the trait impl below must route through the same
+// per-context operation guard (M2 cap) + `scope_context_operation` wrapper as
+// the macro-generated RPCs, with identical rejection values. `initialize` and
+// `get_backend_interfaces` are intentionally NOT in this list: they carry no
+// `client_context_id` (pre-context discovery RPCs) and are rate-limited by the
+// per-IP layer instead (see their handler comments).
+//
+// Placed BEFORE `macro_rules! impl_proxy_service!` for the same source-scanner
+// reason as `dispatch_rate_quota_tests` above.
+#[cfg(test)]
+mod scoped_dispatch_tests {
+    use super::*;
+    use crate::server::context_manager::{ClientContextId, ContextManager};
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tonic::{Code, Request};
+
+    /// The 9 hand-written RPCs that carry a `client_context_id` and must
+    /// enforce the scope guard + M2 cap (W1-L6-01). Every test below iterates
+    /// this list and asserts its length, so adding or removing a hand-written
+    /// RPC without updating the enumeration fails loudly instead of silently
+    /// dropping coverage.
+    const HAND_WRITTEN_RPCS: &[&str] = &[
+        "get_slot_list",
+        "get_slot_info",
+        "get_token_info",
+        "get_mechanism_list",
+        "get_mechanism_info",
+        "wait_for_slot_event",
+        "open_session",
+        "close_all_sessions",
+        "init_token",
+    ];
+
+    struct Fixture {
+        svc: Pkcs11ProxyService,
+        ctx_mgr: Arc<ContextManager>,
+        ctx_id: ClientContextId,
+        slot: u64,
+    }
+
+    async fn setup() -> Fixture {
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let mock = MockBackend::default_test();
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+        let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend);
+        // No identity → the A2 owner check passes and the principal key falls
+        // back to the context id (same setup as `dispatch_rate_quota_tests`).
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let slot = ctx_mgr.virtual_slots().await[0].0;
+        Fixture { svc, ctx_mgr, ctx_id, slot }
+    }
+
+    /// Dispatch one hand-written RPC by name; returns the `ck_rv` body on
+    /// gRPC-level success. Panics on unknown names so a typo in
+    /// `HAND_WRITTEN_RPCS` fails loudly.
+    async fn call_hand_written_rpc(
+        svc: &Pkcs11ProxyService,
+        name: &str,
+        client_context_id: &str,
+        slot: u64,
+    ) -> Result<u64, Status> {
+        match name {
+            "get_slot_list" => svc
+                .get_slot_list(Request::new(pkcs11_proxy_ng_proto::GetSlotListRequest {
+                    client_context_id: client_context_id.to_owned(),
+                    token_present: false,
+                }))
+                .await
+                .map(|r| r.into_inner().ck_rv),
+            "get_slot_info" => svc
+                .get_slot_info(Request::new(pkcs11_proxy_ng_proto::GetSlotInfoRequest {
+                    client_context_id: client_context_id.to_owned(),
+                    slot_id: slot,
+                }))
+                .await
+                .map(|r| r.into_inner().ck_rv),
+            "get_token_info" => svc
+                .get_token_info(Request::new(pkcs11_proxy_ng_proto::GetTokenInfoRequest {
+                    client_context_id: client_context_id.to_owned(),
+                    slot_id: slot,
+                }))
+                .await
+                .map(|r| r.into_inner().ck_rv),
+            "get_mechanism_list" => svc
+                .get_mechanism_list(Request::new(pkcs11_proxy_ng_proto::GetMechanismListRequest {
+                    client_context_id: client_context_id.to_owned(),
+                    slot_id: slot,
+                }))
+                .await
+                .map(|r| r.into_inner().ck_rv),
+            "get_mechanism_info" => svc
+                .get_mechanism_info(Request::new(pkcs11_proxy_ng_proto::GetMechanismInfoRequest {
+                    client_context_id: client_context_id.to_owned(),
+                    slot_id: slot,
+                    mechanism_type: CkMechanismType::RSA_PKCS.0,
+                }))
+                .await
+                .map(|r| r.into_inner().ck_rv),
+            "wait_for_slot_event" => svc
+                .wait_for_slot_event(Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+                    client_context_id: client_context_id.to_owned(),
+                    flags: 1, // CKF_DONT_BLOCK — never parks the test
+                }))
+                .await
+                .map(|r| r.into_inner().ck_rv),
+            "open_session" => svc
+                .open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
+                    client_context_id: client_context_id.to_owned(),
+                    slot_id: slot,
+                    flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                }))
+                .await
+                .map(|r| r.into_inner().ck_rv),
+            "close_all_sessions" => svc
+                .close_all_sessions(Request::new(pkcs11_proxy_ng_proto::CloseAllSessionsRequest {
+                    client_context_id: client_context_id.to_owned(),
+                    slot_id: slot,
+                }))
+                .await
+                .map(|r| r.into_inner().ck_rv),
+            "init_token" => svc
+                .init_token(Request::new(pkcs11_proxy_ng_proto::InitTokenRequest {
+                    client_context_id: client_context_id.to_owned(),
+                    slot_id: slot,
+                    so_pin: Some(b"w1-l6-01-so-pin".to_vec()),
+                    label: "w1-l6-01-test".into(),
+                }))
+                .await
+                .map(|r| r.into_inner().ck_rv),
+            unknown => panic!("unknown hand-written RPC in test enumeration: {unknown}"),
+        }
+    }
+
+    /// W1-L6-01 core: every hand-written RPC must reject with the exact M2
+    /// error once its context is at the per-context in-flight cap — the same
+    /// code + message a macro-generated RPC (`get_info`) produces.
+    #[tokio::test]
+    async fn hand_written_rpcs_reject_at_per_context_cap() {
+        // The enumeration itself is the contract: exactly these 9.
+        assert_eq!(
+            HAND_WRITTEN_RPCS.len(),
+            9,
+            "hand-written RPC enumeration must cover exactly 9 RPCs"
+        );
+        let fix = setup().await;
+        // Saturate this context to its M2 cap (read live: another test in this
+        // binary may reconfigure the global backend-call budget first).
+        let cap = service_utils::per_context_max_in_flight();
+        let _held = (0..cap)
+            .map(|_| {
+                fix.ctx_mgr
+                    .begin_operation_capped(&fix.ctx_id, cap as i64)
+                    .expect("fill below cap")
+                    .expect("context exists")
+            })
+            .collect::<Vec<_>>();
+
+        // Macro-path reference error, obtained the same way.
+        let macro_err = fix
+            .svc
+            .get_info(Request::new(pkcs11_proxy_ng_proto::GetInfoRequest {
+                client_context_id: fix.ctx_id.0.clone(),
+            }))
+            .await
+            .expect_err("macro RPC must reject at the per-context cap");
+        assert_eq!(macro_err.code(), Code::ResourceExhausted);
+        assert_eq!(macro_err.message(), "per-context concurrency limit exceeded");
+
+        let mut tested = Vec::new();
+        for &name in HAND_WRITTEN_RPCS {
+            let err = call_hand_written_rpc(&fix.svc, name, &fix.ctx_id.0, fix.slot)
+                .await
+                .expect_err(name);
+            assert_eq!(err.code(), macro_err.code(), "{name}: code must match macro path");
+            assert_eq!(err.message(), macro_err.message(), "{name}: message must match macro path");
+            tested.push(name);
+        }
+        assert_eq!(tested, HAND_WRITTEN_RPCS, "every enumerated RPC must be exercised");
+    }
+
+    /// The guard is inert when under the cap: every hand-written RPC still
+    /// answers (gRPC-level Ok) on an idle context — routing through the guard
+    /// must not change success-path behaviour.
+    #[tokio::test]
+    async fn hand_written_rpcs_succeed_under_cap() {
+        assert_eq!(
+            HAND_WRITTEN_RPCS.len(),
+            9,
+            "hand-written RPC enumeration must cover exactly 9 RPCs"
+        );
+        let fix = setup().await;
+        for &name in HAND_WRITTEN_RPCS {
+            let rv = call_hand_written_rpc(&fix.svc, name, &fix.ctx_id.0, fix.slot).await;
+            assert!(rv.is_ok(), "{name} must succeed under the cap, got: {rv:?}");
+        }
+    }
+
+    /// A missing context yields `Ok(None)` from the capped admission (never a
+    /// cap rejection): every hand-written RPC must return a normal `ck_rv`
+    /// body for an unknown context, exactly as the macro path does.
+    #[tokio::test]
+    async fn hand_written_rpcs_unknown_context_returns_ckr() {
+        assert_eq!(
+            HAND_WRITTEN_RPCS.len(),
+            9,
+            "hand-written RPC enumeration must cover exactly 9 RPCs"
+        );
+        let fix = setup().await;
+        for &name in HAND_WRITTEN_RPCS {
+            let rv = call_hand_written_rpc(&fix.svc, name, "no-such-context", fix.slot).await;
+            assert!(rv.is_ok(), "{name} must return ck_rv for unknown context, got: {rv:?}");
+        }
+    }
+
+    /// The shared helper publishes the admitted guard into the task-local
+    /// scope for the whole future (so `spawn_backend` clones it into blocking
+    /// tasks) and releases it afterwards.
+    #[tokio::test]
+    async fn scoped_helper_holds_guard_for_the_whole_future() {
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        let mock = MockBackend::default_test();
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        assert!(service_utils::current_context_operation_guard().is_none());
+
+        let seen = run_context_scoped(&ctx, &ctx_id.0, async {
+            Result::<bool, Status>::Ok(service_utils::current_context_operation_guard().is_some())
+        })
+        .await
+        .expect("admitted under cap");
+        assert!(seen, "guard must be visible inside the scoped future");
+        assert!(
+            service_utils::current_context_operation_guard().is_none(),
+            "guard must release after the future completes"
+        );
+    }
+
+    /// At the cap the helper rejects with the exact M2 error without polling
+    /// the future at all.
+    #[tokio::test]
+    async fn scoped_helper_rejects_at_cap_without_polling_future() {
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        let mock = MockBackend::default_test();
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let cap = service_utils::per_context_max_in_flight();
+        let _held = (0..cap)
+            .map(|_| {
+                ctx_mgr
+                    .begin_operation_capped(&ctx_id, cap as i64)
+                    .expect("fill below cap")
+                    .expect("context exists")
+            })
+            .collect::<Vec<_>>();
+
+        let polled = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&polled);
+        let err = run_context_scoped(&ctx, &ctx_id.0, async move {
+            mark.store(true, Ordering::Relaxed);
+            Result::<(), Status>::Ok(())
+        })
+        .await
+        .expect_err("must reject at cap");
+        assert_eq!(err.code(), Code::ResourceExhausted);
+        assert_eq!(err.message(), "per-context concurrency limit exceeded");
+        assert!(!polled.load(Ordering::Relaxed), "future must never be polled at cap");
+    }
+
+    /// A missing context is NOT a cap rejection: the helper runs the future
+    /// (with a `None` guard) so the handler returns the proper CK_RV.
+    #[tokio::test]
+    async fn scoped_helper_missing_context_runs_future() {
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        let mock = MockBackend::default_test();
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let ran_none = run_context_scoped(&ctx, "no-such-context", async {
+            Result::<bool, Status>::Ok(service_utils::current_context_operation_guard().is_none())
+        })
+        .await
+        .expect("missing context must run the future");
+        assert!(ran_none, "missing context scopes a None guard");
+    }
+}
+
 macro_rules! impl_proxy_service {
     ($(($name:ident, $request:ident, $response:ident, $module:path)),+ $(,)?) => {
         #[tonic::async_trait]
@@ -421,17 +762,21 @@ macro_rules! impl_proxy_service {
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetSlotListResponse>, Status> {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
-                let _pguard = acquire_principal_op_guard(
-                    &self.ctx,
-                    &request.get_ref().client_context_id,
-                )?;
-                slot::get_slot_list_with_policy(
-                    &self.ctx.context_manager,
-                    &self.ctx.backend,
-                    self.ctx.token_policy.as_ref(),
-                    request,
-                )
+                // W1-L6-01: same M2 admission + scope as the macro-generated
+                // RPCs (order: owner → M2 → scope → per-principal → handler).
+                let client_context_id = request.get_ref().client_context_id.clone();
+                run_context_scoped(&self.ctx, &client_context_id, async {
+                    // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
+                    let _pguard =
+                        acquire_principal_op_guard(&self.ctx, &client_context_id)?;
+                    slot::get_slot_list_with_policy(
+                        &self.ctx.context_manager,
+                        &self.ctx.backend,
+                        self.ctx.token_policy.as_ref(),
+                        request,
+                    )
+                    .await
+                })
                 .await
             }
 
@@ -441,17 +786,21 @@ macro_rules! impl_proxy_service {
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetSlotInfoResponse>, Status> {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
-                let _pguard = acquire_principal_op_guard(
-                    &self.ctx,
-                    &request.get_ref().client_context_id,
-                )?;
-                slot::get_slot_info_with_policy(
-                    &self.ctx.context_manager,
-                    &self.ctx.backend,
-                    self.ctx.token_policy.as_ref(),
-                    request,
-                )
+                // W1-L6-01: same M2 admission + scope as the macro-generated
+                // RPCs (order: owner → M2 → scope → per-principal → handler).
+                let client_context_id = request.get_ref().client_context_id.clone();
+                run_context_scoped(&self.ctx, &client_context_id, async {
+                    // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
+                    let _pguard =
+                        acquire_principal_op_guard(&self.ctx, &client_context_id)?;
+                    slot::get_slot_info_with_policy(
+                        &self.ctx.context_manager,
+                        &self.ctx.backend,
+                        self.ctx.token_policy.as_ref(),
+                        request,
+                    )
+                    .await
+                })
                 .await
             }
 
@@ -461,17 +810,21 @@ macro_rules! impl_proxy_service {
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetTokenInfoResponse>, Status> {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
-                let _pguard = acquire_principal_op_guard(
-                    &self.ctx,
-                    &request.get_ref().client_context_id,
-                )?;
-                slot::get_token_info_with_policy(
-                    &self.ctx.context_manager,
-                    &self.ctx.backend,
-                    self.ctx.token_policy.as_ref(),
-                    request,
-                )
+                // W1-L6-01: same M2 admission + scope as the macro-generated
+                // RPCs (order: owner → M2 → scope → per-principal → handler).
+                let client_context_id = request.get_ref().client_context_id.clone();
+                run_context_scoped(&self.ctx, &client_context_id, async {
+                    // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
+                    let _pguard =
+                        acquire_principal_op_guard(&self.ctx, &client_context_id)?;
+                    slot::get_token_info_with_policy(
+                        &self.ctx.context_manager,
+                        &self.ctx.backend,
+                        self.ctx.token_policy.as_ref(),
+                        request,
+                    )
+                    .await
+                })
                 .await
             }
 
@@ -481,17 +834,21 @@ macro_rules! impl_proxy_service {
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetMechanismListResponse>, Status> {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
-                let _pguard = acquire_principal_op_guard(
-                    &self.ctx,
-                    &request.get_ref().client_context_id,
-                )?;
-                slot::get_mechanism_list_with_policy(
-                    &self.ctx.context_manager,
-                    &self.ctx.backend,
-                    self.ctx.token_policy.as_ref(),
-                    request,
-                )
+                // W1-L6-01: same M2 admission + scope as the macro-generated
+                // RPCs (order: owner → M2 → scope → per-principal → handler).
+                let client_context_id = request.get_ref().client_context_id.clone();
+                run_context_scoped(&self.ctx, &client_context_id, async {
+                    // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
+                    let _pguard =
+                        acquire_principal_op_guard(&self.ctx, &client_context_id)?;
+                    slot::get_mechanism_list_with_policy(
+                        &self.ctx.context_manager,
+                        &self.ctx.backend,
+                        self.ctx.token_policy.as_ref(),
+                        request,
+                    )
+                    .await
+                })
                 .await
             }
 
@@ -501,17 +858,21 @@ macro_rules! impl_proxy_service {
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetMechanismInfoResponse>, Status> {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
-                let _pguard = acquire_principal_op_guard(
-                    &self.ctx,
-                    &request.get_ref().client_context_id,
-                )?;
-                slot::get_mechanism_info_with_policy(
-                    &self.ctx.context_manager,
-                    &self.ctx.backend,
-                    self.ctx.token_policy.as_ref(),
-                    request,
-                )
+                // W1-L6-01: same M2 admission + scope as the macro-generated
+                // RPCs (order: owner → M2 → scope → per-principal → handler).
+                let client_context_id = request.get_ref().client_context_id.clone();
+                run_context_scoped(&self.ctx, &client_context_id, async {
+                    // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
+                    let _pguard =
+                        acquire_principal_op_guard(&self.ctx, &client_context_id)?;
+                    slot::get_mechanism_info_with_policy(
+                        &self.ctx.context_manager,
+                        &self.ctx.backend,
+                        self.ctx.token_policy.as_ref(),
+                        request,
+                    )
+                    .await
+                })
                 .await
             }
 
@@ -541,24 +902,23 @@ macro_rules! impl_proxy_service {
                 // token policy to suppress events for unauthorized slots (M13).
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
-                let _pguard = acquire_principal_op_guard(
-                    &self.ctx,
-                    &request.get_ref().client_context_id,
-                )?;
-                // A blocking wait (CKF_DONT_BLOCK omitted) must not be reaped
-                // mid-call, exactly as the dispatch macro guards its RPCs.
-                let _op = self.ctx.context_manager.begin_operation(
-                    &super::context_manager::ClientContextId(
-                        request.get_ref().client_context_id.clone(),
-                    ),
-                );
-                state_ops::wait_for_slot_event_with_policy(
-                    &self.ctx.context_manager,
-                    &self.ctx.backend,
-                    self.ctx.token_policy.as_ref(),
-                    request,
-                )
+                // W1-L6-01: same M2 admission + scope as the macro-generated
+                // RPCs (replacing the previous uncapped `begin_operation`) — a
+                // blocking wait (CKF_DONT_BLOCK omitted) must not be reaped
+                // mid-call.
+                let client_context_id = request.get_ref().client_context_id.clone();
+                run_context_scoped(&self.ctx, &client_context_id, async {
+                    // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
+                    let _pguard =
+                        acquire_principal_op_guard(&self.ctx, &client_context_id)?;
+                    state_ops::wait_for_slot_event_with_policy(
+                        &self.ctx.context_manager,
+                        &self.ctx.backend,
+                        self.ctx.token_policy.as_ref(),
+                        request,
+                    )
+                    .await
+                })
                 .await
             }
 
@@ -568,12 +928,16 @@ macro_rules! impl_proxy_service {
             ) -> Result<Response<pkcs11_proxy_ng_proto::OpenSessionResponse>, Status> {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
-                let _pguard = acquire_principal_op_guard(
-                    &self.ctx,
-                    &request.get_ref().client_context_id,
-                )?;
-                session::open_session_with_policy(&self.ctx, request).await
+                // W1-L6-01: same M2 admission + scope as the macro-generated
+                // RPCs (order: owner → M2 → scope → per-principal → handler).
+                let client_context_id = request.get_ref().client_context_id.clone();
+                run_context_scoped(&self.ctx, &client_context_id, async {
+                    // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
+                    let _pguard =
+                        acquire_principal_op_guard(&self.ctx, &client_context_id)?;
+                    session::open_session_with_policy(&self.ctx, request).await
+                })
+                .await
             }
 
             async fn close_all_sessions(
@@ -582,17 +946,21 @@ macro_rules! impl_proxy_service {
             ) -> Result<Response<pkcs11_proxy_ng_proto::CloseAllSessionsResponse>, Status> {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
-                let _pguard = acquire_principal_op_guard(
-                    &self.ctx,
-                    &request.get_ref().client_context_id,
-                )?;
-                session::close_all_sessions_with_policy(
-                    &self.ctx.context_manager,
-                    &self.ctx.backend,
-                    self.ctx.token_policy.as_ref(),
-                    request,
-                )
+                // W1-L6-01: same M2 admission + scope as the macro-generated
+                // RPCs (order: owner → M2 → scope → per-principal → handler).
+                let client_context_id = request.get_ref().client_context_id.clone();
+                run_context_scoped(&self.ctx, &client_context_id, async {
+                    // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
+                    let _pguard =
+                        acquire_principal_op_guard(&self.ctx, &client_context_id)?;
+                    session::close_all_sessions_with_policy(
+                        &self.ctx.context_manager,
+                        &self.ctx.backend,
+                        self.ctx.token_policy.as_ref(),
+                        request,
+                    )
+                    .await
+                })
                 .await
             }
 
@@ -602,12 +970,16 @@ macro_rules! impl_proxy_service {
             ) -> Result<Response<pkcs11_proxy_ng_proto::InitTokenResponse>, Status> {
                 self.check_context_owner(&request, &request.get_ref().client_context_id)
                     .await?;
-                // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
-                let _pguard = acquire_principal_op_guard(
-                    &self.ctx,
-                    &request.get_ref().client_context_id,
-                )?;
-                session::init_token_with_policy(&self.ctx, request).await
+                // W1-L6-01: same M2 admission + scope as the macro-generated
+                // RPCs (order: owner → M2 → scope → per-principal → handler).
+                let client_context_id = request.get_ref().client_context_id.clone();
+                run_context_scoped(&self.ctx, &client_context_id, async {
+                    // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
+                    let _pguard =
+                        acquire_principal_op_guard(&self.ctx, &client_context_id)?;
+                    session::init_token_with_policy(&self.ctx, request).await
+                })
+                .await
             }
 
             $(
@@ -622,37 +994,19 @@ macro_rules! impl_proxy_service {
                         &request.get_ref().client_context_id,
                     )
                     .await?;
-                    // Hold the context un-evictable for the whole operation so a
-                    // long backend call (keygen/derive on a slow HSM, larger than
-                    // the lease) is never reaped MID-CALL, AND enforce the
-                    // per-context in-flight cap so one noisy client cannot drain
-                    // the shared backend-call budget and DEVICE_ERROR every tenant
-                    // (M2). A context that is already gone yields Ok(None) and the
-                    // handler returns the right CKR.
-                    let operation_guard = match self.ctx.context_manager.begin_operation_capped(
-                        &$crate::server::context_manager::ClientContextId(
-                            request.get_ref().client_context_id.clone(),
-                        ),
-                        service_utils::per_context_max_in_flight() as i64,
-                    ) {
-                        Ok(guard) => guard,
-                        Err(()) => {
-                            return Err(Status::resource_exhausted(
-                                "per-context concurrency limit exceeded",
-                            ));
-                        }
-                    };
-                    service_utils::scope_context_operation(operation_guard, async {
+                    // M2 admission + operation scope, shared with the 9
+                    // hand-written RPCs (W1-L6-01). Order: owner → M2 → scope →
+                    // per-principal → handler.
+                    let client_context_id = request.get_ref().client_context_id.clone();
+                    run_context_scoped(&self.ctx, &client_context_id, async {
                         // G2-PR3: per-principal in-flight cap (opt-in; zero-cost
                         // no-op when per_principal_max_in_flight is unset →
                         // byte-identical to the pre-quota path). Acquired AFTER
                         // context-owner validation and the per-context cap.
                         // Never reaches the backend → rejection does NOT increment
                         // the backend-health failure counter.
-                        let _pguard = acquire_principal_op_guard(
-                            &self.ctx,
-                            &request.get_ref().client_context_id,
-                        )?;
+                        let _pguard =
+                            acquire_principal_op_guard(&self.ctx, &client_context_id)?;
                         $module(&self.ctx, request).await
                     })
                     .await
