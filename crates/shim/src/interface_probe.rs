@@ -31,12 +31,17 @@ static LAST_REGISTRY_REVISION: Mutex<Option<String>> = Mutex::new(None);
 struct InterfaceState {
     fl_2_40: CK_FUNCTION_LIST,
     fl_3_0: CK_FUNCTION_LIST_3_0,
+    /// PKCS#11 3.1 is layout-identical to 3.0 (no new functions), so the
+    /// 3.1 entry reuses the 3.0 list type stamped with version {3,1}.
+    fl_3_1: CK_FUNCTION_LIST_3_0,
     fl_3_2: CK_FUNCTION_LIST_3_2,
-    catalog: [CK_INTERFACE; 3],
-    /// Number of interfaces the backend actually supports (1, 2, or 3).
+    catalog: [CK_INTERFACE; 4],
+    /// Number of interfaces the backend actually supports (1 to 4).
     count: CK_ULONG,
     /// Whether the backend reported a 3.0-compatible interface.
     has_3_0: bool,
+    /// Whether the backend reported a 3.1 interface (W1-L5-01).
+    has_3_1: bool,
     /// Whether the backend reported a 3.2-compatible interface.
     has_3_2: bool,
     /// Advertised separately from function-list availability because every
@@ -541,6 +546,18 @@ fn build_patched_function_list_3_0(null_names: &[String]) -> CK_FUNCTION_LIST_3_
     fl
 }
 
+fn build_base_function_list_3_1() -> CK_FUNCTION_LIST_3_0 {
+    build_function_list_3_x!(CK_FUNCTION_LIST_3_0, CK_VERSION { major: 3, minor: 1 })
+}
+
+/// Build a patched v3.1 function list given a set of null function names.
+/// Same layout and patch table as 3.0; only the version stamp differs.
+fn build_patched_function_list_3_1(null_names: &[String]) -> CK_FUNCTION_LIST_3_0 {
+    let mut fl = build_base_function_list_3_1();
+    patch_function_list_3_0(&mut fl, null_names);
+    fl
+}
+
 /// Build a patched v3.2 function list given a set of null function names.
 fn build_patched_function_list_3_2(null_names: &[String]) -> CK_FUNCTION_LIST_3_2 {
     let mut fl = build_base_function_list_3_2();
@@ -627,25 +644,43 @@ fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
         );
     }
 
+    Ok(build_interface_state(&probe.interfaces, probe.pointer_safe_message_parameters))
+}
+
+/// Build the cached interface state from one probe response. Pure over the
+/// reported `(major, minor, null_functions)` triples so the version mapping
+/// is unit tested without a daemon.
+///
+/// Catalog order is ascending by version; entries exist only for versions
+/// the backend actually reported — a 3.1 report yields a {3,1} entry and no
+/// {3,0} alias (W1-L5-01).
+fn build_interface_state(
+    interfaces: &[(u8, u8, Vec<String>)],
+    pointer_safe_message_parameters: bool,
+) -> InterfaceState {
     // Index null-function lists by (major, minor).
     let mut null_map = std::collections::HashMap::<(u8, u8), Vec<String>>::new();
-    for (major, minor, nulls) in &probe.interfaces {
+    for (major, minor, nulls) in interfaces {
         null_map.insert((*major, *minor), nulls.clone());
     }
 
     let empty = Vec::new();
     let nulls_2_40 = null_map.get(&(2, 40)).unwrap_or(&empty);
     let nulls_3_0 = null_map.get(&(3, 0)).unwrap_or(&empty);
+    let nulls_3_1 = null_map.get(&(3, 1)).unwrap_or(&empty);
     let nulls_3_2 = null_map.get(&(3, 2)).unwrap_or(&empty);
 
     // Determine which interfaces the backend reported.
     let has_3_0 = null_map.contains_key(&(3, 0));
+    let has_3_1 = null_map.contains_key(&(3, 1));
     let has_3_2 = null_map.contains_key(&(3, 2));
     // Always include v2.40 — every PKCS#11 module has it.
-    let count: CK_ULONG = 1 + if has_3_0 { 1 } else { 0 } + if has_3_2 { 1 } else { 0 };
+    let count: CK_ULONG =
+        1 + if has_3_0 { 1 } else { 0 } + if has_3_1 { 1 } else { 0 } + if has_3_2 { 1 } else { 0 };
 
     let fl_2_40 = build_patched_function_list(nulls_2_40);
     let fl_3_0 = build_patched_function_list_3_0(nulls_3_0);
+    let fl_3_1 = build_patched_function_list_3_1(nulls_3_1);
     let fl_3_2 = build_patched_function_list_3_2(nulls_3_2);
 
     // Build a placeholder catalog — pointers will be fixed up after the
@@ -667,18 +702,25 @@ fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
             pFunctionList: std::ptr::null_mut(),
             flags: 0,
         },
+        CK_INTERFACE {
+            pInterfaceName: IFACE_NAME_PKCS11.as_ptr() as *mut CK_CHAR,
+            pFunctionList: std::ptr::null_mut(),
+            flags: 0,
+        },
     ];
 
-    Ok(InterfaceState {
+    InterfaceState {
         fl_2_40,
         fl_3_0,
+        fl_3_1,
         fl_3_2,
         catalog,
         count,
         has_3_0,
+        has_3_1,
         has_3_2,
-        pointer_safe_message_parameters: probe.pointer_safe_message_parameters,
-    })
+        pointer_safe_message_parameters,
+    }
 }
 
 /// Fix up the catalog's `pFunctionList` pointers to point into a leaked
@@ -694,10 +736,17 @@ fn fixup_catalog(st: &mut InterfaceState) {
             &st.fl_3_0 as *const CK_FUNCTION_LIST_3_0 as *mut std::ffi::c_void;
         idx += 1;
     }
+    if st.has_3_1 {
+        st.catalog[idx].pFunctionList =
+            &st.fl_3_1 as *const CK_FUNCTION_LIST_3_0 as *mut std::ffi::c_void;
+        idx += 1;
+    }
     if st.has_3_2 {
         st.catalog[idx].pFunctionList =
             &st.fl_3_2 as *const CK_FUNCTION_LIST_3_2 as *mut std::ffi::c_void;
+        idx += 1;
     }
+    debug_assert_eq!(idx as CK_ULONG, st.count, "catalog entries must match count");
 }
 
 /// Record the latest registry revision and emit a log line. A change
@@ -1034,6 +1083,65 @@ mod backend_abi_tests {
         {
             assert!(find_interface_in_catalog(&catalog, name, version, 0b0100).is_none());
         }
+    }
+
+    /// W1-L5-01: a BouncyHSM-class probe — backend offers 3.1 (and 3.2) but
+    /// no literal 3.0 — must answer {3,1} with the real interface and {3,0}
+    /// with NULL, exactly like the native module. No invented {3,0} alias.
+    #[test]
+    fn bouncyhsm_probe_answers_3_1_and_not_3_0() {
+        let probe = vec![(2u8, 40u8, Vec::new()), (3, 1, Vec::new()), (3, 2, Vec::new())];
+        let mut st = super::build_interface_state(&probe, false);
+        super::fixup_catalog(&mut st);
+        assert_eq!(st.count, 3);
+        let catalog = &st.catalog[..st.count as usize];
+        let name = c"PKCS 11";
+
+        // {3,1} → the real interface, stamped 3.1.
+        let v31 = CK_VERSION { major: 3, minor: 1 };
+        let hit = find_interface_in_catalog(catalog, Some(name), Some(&v31), 0)
+            .expect("{3,1} must resolve when the backend offers 3.1");
+        let stamped = unsafe { *((&*hit).pFunctionList as *const CK_VERSION) };
+        assert_eq!((stamped.major, stamped.minor), (3, 1));
+
+        // {3,0} → honest NULL: the backend offers no literal 3.0.
+        let v30 = CK_VERSION { major: 3, minor: 0 };
+        assert!(
+            find_interface_in_catalog(catalog, Some(name), Some(&v30), 0).is_none(),
+            "no invented {{3,0}} alias for a 3.1-only backend"
+        );
+
+        // {3,2} still resolves, and the default (no version) is the highest.
+        let v32 = CK_VERSION { major: 3, minor: 2 };
+        assert!(find_interface_in_catalog(catalog, Some(name), Some(&v32), 0).is_some());
+        let default = find_interface_in_catalog(catalog, Some(name), None, 0)
+            .expect("default interface must resolve");
+        let default_stamped = unsafe { *((&*default).pFunctionList as *const CK_VERSION) };
+        assert_eq!((default_stamped.major, default_stamped.minor), (3, 2));
+    }
+
+    /// Control: a classic probe — backend answers literal 3.0 — keeps
+    /// answering {3,0} and must not gain a phantom {3,1}.
+    #[test]
+    fn literal_3_0_probe_answers_3_0_and_not_3_1() {
+        let probe = vec![(2u8, 40u8, Vec::new()), (3, 0, Vec::new()), (3, 2, Vec::new())];
+        let mut st = super::build_interface_state(&probe, false);
+        super::fixup_catalog(&mut st);
+        assert_eq!(st.count, 3);
+        let catalog = &st.catalog[..st.count as usize];
+        let name = c"PKCS 11";
+
+        let v30 = CK_VERSION { major: 3, minor: 0 };
+        let hit = find_interface_in_catalog(catalog, Some(name), Some(&v30), 0)
+            .expect("{3,0} must resolve when the backend offers literal 3.0");
+        let stamped = unsafe { *((&*hit).pFunctionList as *const CK_VERSION) };
+        assert_eq!((stamped.major, stamped.minor), (3, 0));
+
+        let v31 = CK_VERSION { major: 3, minor: 1 };
+        assert!(
+            find_interface_in_catalog(catalog, Some(name), Some(&v31), 0).is_none(),
+            "no phantom {{3,1}} for a literal-3.0 backend"
+        );
     }
 
     #[test]

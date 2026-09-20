@@ -600,6 +600,23 @@ mod tests {
         );
         // BouncyHSM also offers an explicit 3.2 interface.
         assert!(backend.has_3_2_interface(), "BouncyHSM advertises a 3.2 interface");
+        // W1-L5-01: capability advertisement must match the native module —
+        // (3,1) offered, no invented (3,0) alias — even though dispatch keeps
+        // using the primary fallback above.
+        let versions: Vec<(u8, u8)> = backend
+            .detect_interface_capabilities()
+            .interfaces
+            .iter()
+            .map(|info| (info.version_major, info.version_minor))
+            .collect();
+        assert!(
+            versions.contains(&(3, 1)),
+            "BouncyHSM offers 3.1 and the proxy must advertise it: {versions:?}"
+        );
+        assert!(
+            !versions.contains(&(3, 0)),
+            "native BouncyHSM answers {{3,0}} with NULL; the proxy must not invent it: {versions:?}"
+        );
     }
 
     /// win32 stub live-load proof (T2-5): `LoadLibrary` a real PE32 provider

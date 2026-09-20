@@ -37,15 +37,27 @@ impl FfiBackend {
 
         // v3.0 if available (list came from a validated versioned {3,0} query):
         if let Some(fl3) = self.func_list_3_0 {
+            // W1-L5-01: the dispatch slot may hold a primary-fallback table
+            // stamped with a different 3.x version (BouncyHSM answers an
+            // explicit {3,0} with NULL, so its 3.1 default interface serves
+            // dispatch). Advertise the version the backend stamped on the
+            // table — 3.1≡3.0 layout, so the same 92-field surface walk
+            // applies — instead of inventing a {3,0} alias. Any other stamp
+            // keeps the slot default (3,0), i.e. today's behavior.
+            // Soundness: leading-CK_VERSION read on a non-null
+            // interface-derived table — the same reliance as
+            // `answer_version_at_least`/`primary_interface_fallback`.
+            let stamped = unsafe { (*fl3).version };
+            let minor = if stamped.major == 3 && stamped.minor == 1 { 1 } else { 0 };
             let nulls = nulls_for(
                 fl3 as *const u8,
                 Surface::StandardInterface {
-                    version: cryptoki_sys::CK_VERSION { major: 3, minor: 0 },
+                    version: cryptoki_sys::CK_VERSION { major: 3, minor },
                 },
             );
             interfaces.push(InterfaceInfo {
                 version_major: 3,
-                version_minor: 0,
+                version_minor: minor,
                 null_functions: nulls,
             });
         }
@@ -75,6 +87,79 @@ mod tests {
         FUNCTION_LIST_3_0_EXTRA_FIELDS, FUNCTION_LIST_3_2_EXTRA_FIELDS, FUNCTION_LIST_FIELDS,
         Surface, TableSet, tables_for,
     };
+
+    use super::super::FfiBackend;
+
+    /// Test backend whose 3.0-dispatch slot points at a table stamped with the
+    /// given version — mimics BouncyHSM when stamped {3,1} (explicit {3,0}
+    /// query NULL, primary fallback) and classic 3.0 modules when {3,0}.
+    fn backend_with_3_slot(
+        major: u8,
+        minor: u8,
+    ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>)
+    {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        base.version = cryptoki_sys::CK_VERSION { major: 2, minor: 40 };
+        let mut table_3 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+        table_3.version = cryptoki_sys::CK_VERSION { major, minor };
+        let backend = FfiBackend {
+            _lib: crate::ffi::loading::test_library_handle(),
+            func_list: base.as_mut(),
+            func_list_3_0: Some(table_3.as_ref()),
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            // Test-local backend: bypasses the process reservation without
+            // consuming it; never backs production dispatch (C3M.4).
+            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
+        };
+        (backend, base, table_3)
+    }
+
+    fn reported_versions(backend: &FfiBackend) -> Vec<(u8, u8)> {
+        backend
+            .detect_interface_capabilities()
+            .interfaces
+            .iter()
+            .map(|info| (info.version_major, info.version_minor))
+            .collect()
+    }
+
+    /// W1-L5-01: a 3.1-stamped table in the 3.0-dispatch slot (BouncyHSM:
+    /// explicit {3,0} NULL, primary fallback) must be advertised as (3,1) —
+    /// never as an invented (3,0) alias.
+    #[test]
+    fn capability_report_advertises_stamped_3_1_not_aliased_3_0() {
+        let (backend, _base, _table_3) = backend_with_3_slot(3, 1);
+        let versions = reported_versions(&backend);
+        assert!(
+            versions.contains(&(3, 1)),
+            "backend offering 3.1 must advertise (3,1): {versions:?}"
+        );
+        assert!(
+            !versions.contains(&(3, 0)),
+            "no invented (3,0) alias for a 3.1-only table: {versions:?}"
+        );
+    }
+
+    /// Control: a literally-answered 3.0 table keeps advertising (3,0) and
+    /// must not gain a phantom (3,1).
+    #[test]
+    fn capability_report_keeps_literal_3_0() {
+        let (backend, _base, _table_3) = backend_with_3_slot(3, 0);
+        let versions = reported_versions(&backend);
+        assert!(versions.contains(&(3, 0)), "literal 3.0 must be kept: {versions:?}");
+        assert!(!versions.contains(&(3, 1)), "no phantom (3,1): {versions:?}");
+    }
 
     fn walked_field_count(set: TableSet) -> Option<usize> {
         match set {
