@@ -925,10 +925,13 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 }))
             } else {
                 // Safety: param_ptr is valid for at least expected_size bytes.
-                let aes_key_bits = unsafe { *(param_ptr as *const CK_ULONG) };
+                // Unaligned-safe: a pack(1) caller struct may place 8-byte
+                // fields at misaligned offsets (W1-C6-03, W1-L1-01).
+                let aes_key_bits = unsafe { (param_ptr as *const CK_ULONG).read_unaligned() };
                 let oaep_ptr_offset = std::mem::size_of::<CK_ULONG>();
                 let oaep_ptr = unsafe {
-                    *(param_ptr.add(oaep_ptr_offset) as *const *const CK_RSA_PKCS_OAEP_PARAMS)
+                    (param_ptr.add(oaep_ptr_offset) as *const *const CK_RSA_PKCS_OAEP_PARAMS)
+                        .read_unaligned()
                 };
                 if oaep_ptr.is_null() {
                     Some(CkMechanismParams::Raw(RawMechanismParams {
@@ -985,11 +988,15 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
                 }))
             } else {
-                let hedge_variant = unsafe { *(param_ptr as *const CK_ULONG) };
+                // Unaligned-safe: see the rsa_aes_key_wrap arm above (W1-C6-03,
+                // W1-L1-01). Offsets unchanged.
+                let hedge_variant = unsafe { (param_ptr as *const CK_ULONG).read_unaligned() };
                 let ptr_offset = std::mem::size_of::<CK_ULONG>();
-                let ctx_ptr = unsafe { *(param_ptr.add(ptr_offset) as *const *const u8) };
+                let ctx_ptr =
+                    unsafe { (param_ptr.add(ptr_offset) as *const *const u8).read_unaligned() };
                 let len_offset = ptr_offset + std::mem::size_of::<*const u8>();
-                let ctx_len = unsafe { *(param_ptr.add(len_offset) as *const CK_ULONG) };
+                let ctx_len =
+                    unsafe { (param_ptr.add(len_offset) as *const CK_ULONG).read_unaligned() };
                 if missing_embedded_pointer(ctx_ptr, ctx_len) || !embedded_payload_len_ok(ctx_len) {
                     Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
@@ -1000,7 +1007,9 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     };
                     let hash = if param_len >= hash_size {
                         let hash_offset = len_offset + std::mem::size_of::<CK_ULONG>();
-                        unsafe { *(param_ptr.add(hash_offset) as *const CK_ULONG) as u64 }
+                        unsafe {
+                            (param_ptr.add(hash_offset) as *const CK_ULONG).read_unaligned() as u64
+                        }
                     } else {
                         0
                     };

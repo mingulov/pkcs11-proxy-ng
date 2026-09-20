@@ -7,8 +7,8 @@ use pkcs11_proxy_ng_types::{
     CcmParams, CcmWrapParams, ChaCha20Params, CkAttributeType, CkAttributeValue, CkMechanismParams,
     CkMechanismType, CkRv, ExtractParams, GcmParams, GcmWrapParams, KeyWrapSetOaepParams,
     KmacParams, MechanismRegistry, MuGenParams, RsaAesKeyWrapParams, RsaPkcsOaepParams,
-    RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, SecretBytes, Sp800108DerivedKey,
-    Sp800108FeedbackKdfParams,
+    RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, SecretBytes, SignAdditionalContext,
+    Sp800108DerivedKey, Sp800108FeedbackKdfParams,
 };
 
 fn ensure_registry() {
@@ -2414,6 +2414,121 @@ fn gcm_null_vs_empty_iv_aad_survive_the_read() {
                 assert_eq!(gcm.aad_null, aad_null, "pAAD nullness must survive");
             }
             other => panic!("unexpected GCM params: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn misaligned_rsa_aes_key_wrap_reads_byte_identical_values() {
+    // W1-C6-03 / W1-L1-01 residual: the manual field reads for
+    // rsa_aes_key_wrap must not dereference 8-byte fields at
+    // potentially-misaligned pack(1) offsets. Place the outer struct at a
+    // misaligned address (built with write_unaligned, so the test setup
+    // itself is Miri-clean); the nested OAEP struct stays aligned per the
+    // caller contract. Run under Miri: misaligned derefs are UB errors.
+    let mut source_data = [0xA0u8, 0xA1, 0xA2];
+    let mut oaep = CK_RSA_PKCS_OAEP_PARAMS {
+        hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        mgf: 1,
+        source: 1,
+        pSourceData: source_data.as_mut_ptr() as CK_VOID_PTR,
+        ulSourceDataLen: source_data.len() as CK_ULONG,
+    };
+    let ulong_size = std::mem::size_of::<CK_ULONG>();
+    let ptr_size = std::mem::size_of::<*mut std::ffi::c_void>();
+    let wrap_size = ulong_size + ptr_size;
+    let mut buf = [0u8; 64];
+    let buf_addr = buf.as_mut_ptr() as usize;
+    // Deterministic misalignment: some offset in 0..8 always misses 8-byte
+    // alignment, regardless of the stack address.
+    let offset = (0..8usize)
+        .find(|o| (buf_addr + o) % ulong_size != 0)
+        .expect("a misaligned offset always exists");
+    let base = buf.as_mut_ptr().wrapping_add(offset);
+    assert_ne!(base as usize % ulong_size, 0, "test setup must be misaligned");
+    unsafe {
+        std::ptr::write_unaligned(base as *mut CK_ULONG, 256);
+        std::ptr::write_unaligned(
+            base.add(ulong_size) as *mut *mut CK_RSA_PKCS_OAEP_PARAMS,
+            &mut oaep,
+        );
+    }
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType(0x0000_1054).0 as CK_MECHANISM_TYPE,
+        pParameter: base as CK_VOID_PTR,
+        ulParameterLen: wrap_size as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("rsa_aes_key_wrap")) }.params {
+        Some(CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
+            aes_key_bits,
+            oaep_params,
+        })) => {
+            assert_eq!(aes_key_bits, 256);
+            assert_eq!(oaep_params.hash_alg, CkMechanismType::SHA256);
+            assert_eq!(oaep_params.mgf, 1);
+            assert_eq!(oaep_params.source, 1);
+            assert_eq!(oaep_params.source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
+        }
+        other => panic!("unexpected RSA-AES key wrap params: {other:?}"),
+    }
+}
+
+#[test]
+fn misaligned_sign_additional_context_reads_byte_identical_values() {
+    // W1-C6-03 / W1-L1-01 residual: same misalignment class for the
+    // sign_additional_context manual reads, covering both the base
+    // CK_SIGN_ADDITIONAL_CONTEXT and the hash-extended
+    // CK_HASH_SIGN_ADDITIONAL_CONTEXT variant (trailing hash word).
+    for with_hash in [false, true] {
+        let mut sign_context = [0xB1u8, 0xB2];
+        let ulong_size = std::mem::size_of::<CK_ULONG>();
+        let ptr_size = std::mem::size_of::<*mut u8>();
+        let base_size = ulong_size + ptr_size + ulong_size;
+        let hash_size = base_size + ulong_size;
+        let total = if with_hash { hash_size } else { base_size };
+        let mut buf = [0u8; 64];
+        let buf_addr = buf.as_mut_ptr() as usize;
+        let offset = (0..8usize)
+            .find(|o| (buf_addr + o) % ulong_size != 0)
+            .expect("a misaligned offset always exists");
+        let base = buf.as_mut_ptr().wrapping_add(offset);
+        assert_ne!(base as usize % ulong_size, 0, "test setup must be misaligned");
+        unsafe {
+            std::ptr::write_unaligned(base as *mut CK_ULONG, 7);
+            std::ptr::write_unaligned(
+                base.add(ulong_size) as *mut *mut u8,
+                sign_context.as_mut_ptr(),
+            );
+            std::ptr::write_unaligned(
+                base.add(ulong_size + ptr_size) as *mut CK_ULONG,
+                sign_context.len() as CK_ULONG,
+            );
+            if with_hash {
+                std::ptr::write_unaligned(base.add(base_size) as *mut CK_ULONG, 0xA5A5);
+            }
+        }
+        let mechanism = CK_MECHANISM {
+            mechanism: CkMechanismType(0x0000_0502).0 as CK_MECHANISM_TYPE,
+            pParameter: base as CK_VOID_PTR,
+            ulParameterLen: total as CK_ULONG,
+        };
+        match unsafe { read_mechanism_with_shape(&mechanism, Some("sign_additional_context")) }
+            .params
+        {
+            Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
+                hedge_variant,
+                context,
+                hash,
+            })) => {
+                assert_eq!(hedge_variant, 7, "with_hash={with_hash}");
+                assert_eq!(
+                    context,
+                    SecretBytes::copy_from_slice(&[0xB1, 0xB2]),
+                    "with_hash={with_hash}"
+                );
+                assert_eq!(hash, if with_hash { 0xA5A5 } else { 0 }, "with_hash={with_hash}");
+            }
+            other => panic!("unexpected sign additional context params: {other:?}"),
         }
     }
 }
