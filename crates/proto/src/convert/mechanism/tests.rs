@@ -1494,6 +1494,40 @@ fn sp800_108_feedback_kdf_nested_template_refused_loudly() {
     assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
 }
 
+#[test]
+fn kip_embedded_sp800_108_nested_template_refused_loudly() {
+    // W1-C8-01 review I-1: the loud refusal must also pin the embedded
+    // path — a nested template buried inside a nested mechanism (here
+    // SP800-108 inside Kip) must fail loudly rather than silently
+    // dropping the nested mechanism.
+    let nested = CkMechanism {
+        mechanism_type: CkMechanismType(0x9999),
+        params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+            prf_type: 0x250,
+            data_params: vec![],
+            additional_derived_keys: vec![Sp800108DerivedKey {
+                template: vec![CkAttribute {
+                    attr_type: CkAttributeType::WRAP_TEMPLATE,
+                    value: Some(CkAttributeValue::NestedTemplate(vec![])),
+                }],
+                key_handle: 0,
+            }],
+        })),
+    };
+    let params =
+        KipParams { mechanism: Box::new(nested), key_handle: 0xBEEF, seed: vec![0xAA; 16].into() };
+    let err = v1_proto::KipParams::try_from(&params)
+        .expect_err("embedded nested template must be refused loudly");
+    assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
+    let mech = CkMechanism {
+        mechanism_type: CkMechanismType(0x9999),
+        params: Some(CkMechanismParams::Kip(params)),
+    };
+    let err = v1_proto::Mechanism::try_from(&mech)
+        .expect_err("embedded nested template must be refused through the full path");
+    assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
+}
+
 // ---------------------------------------------------------------------------
 // Batch 3: Signal protocol round-trip tests
 // ---------------------------------------------------------------------------
