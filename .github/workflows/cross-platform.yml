@@ -11,9 +11,10 @@
 # three runner OSes).
 #
 # Cadence: daily schedule (staggered off the nightly provider matrix),
-# pushes to main, and manual dispatch (the way PRs opt in). NOT per-PR:
-# hosted macOS/Windows minutes plus a full pkcs11-check double-run per leg
-# is too slow and expensive for every pull request.
+# pushes to main, manual dispatch, and every pull request (2026-09-20:
+# ARM/x64 legs re-admitted to PRs on the Ubuntu 26.04 images; hosted
+# macOS/Windows minutes plus a full pkcs11-check double-run per leg make
+# this the slowest PR gate — keep the tuned subset current).
 #
 # Legs: linux-x64, linux-arm64 (EXPERIMENTAL: aarch64 build + direct-baseline
 # signal only -- the daemon fail-closes on Linux-aarch64 by design
@@ -38,6 +39,7 @@ on:
   workflow_dispatch:
   push:
     branches: ["main"]
+  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
@@ -55,11 +57,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          # 2026-09-20: 24.04 -> 26.04 (GA 2026-09-17; 22.04 deprecating).
+          - os: ubuntu-26.04
             experimental: false
           # T2run: experimental -- native FFI fail-closes on this host by
           # design (see header); promote on aarch64 qualification.
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             experimental: true
           # T2run M-5: promoted — first green macOS leg (compare +
           # backend/shim lib behavior) proves the compat prep; failures
@@ -138,9 +141,11 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-xplat-${{ hashFiles('**/Cargo.lock') }}
+          # matrix.os scopes the key by image (ubuntu-26.04 vs 24.04) so a
+          # new image never restores another image's compiled artifacts.
+          key: ${{ matrix.os }}-${{ runner.arch }}-cargo-xplat-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cargo-xplat-
+            ${{ matrix.os }}-${{ runner.arch }}-cargo-xplat-
 
       - name: Build release daemon + shim
         run: cargo build --release -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
