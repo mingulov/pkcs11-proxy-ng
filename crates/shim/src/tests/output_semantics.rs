@@ -4070,3 +4070,95 @@ fn generate_random_returns_exact_requested_length() {
 
     drop(shim);
 }
+
+#[test]
+fn shim_async_complete_oversized_result_returns_buffer_too_small() {
+    // W1-C6-02: an async result larger than the caller's CK_ASYNC_DATA buffer
+    // must return CKR_BUFFER_TOO_SMALL with the required length in ulValue
+    // (standard two-call semantics) — never silently truncate with CKR_OK.
+    // The mock backend returns 8 bytes of 0xA5 for any function name.
+    let _guard = shim_state_test_guard();
+    let _daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+
+    let mut buf = [0xAA_u8; 4];
+    let mut async_data = CK_ASYNC_DATA {
+        ulVersion: 0,
+        pValue: buf.as_mut_ptr(),
+        ulValue: buf.len() as CK_ULONG,
+        hObject: CK_INVALID_HANDLE,
+        hAdditionalObject: CK_INVALID_HANDLE,
+    };
+    let name = std::ffi::CString::new("C_Encrypt").expect("function name");
+    let rv = unsafe {
+        dispatch::general::c_async_complete(
+            shim.session,
+            name.as_ptr() as *mut CK_UTF8CHAR,
+            &mut async_data,
+        )
+    };
+    assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_AsyncComplete(oversized)");
+    assert_eq!(async_data.ulValue, 8, "required length must be reported");
+    assert_eq!(buf, [0xAA_u8; 4], "no bytes may be copied on BUFFER_TOO_SMALL");
+
+    drop(shim);
+}
+
+#[test]
+fn shim_async_complete_fitting_result_copies_bytes() {
+    // W1-C6-02: fitting async results stay byte-identical (CKR_OK + full copy).
+    let _guard = shim_state_test_guard();
+    let _daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+
+    let mut buf = [0xAA_u8; 8];
+    let mut async_data = CK_ASYNC_DATA {
+        ulVersion: 0,
+        pValue: buf.as_mut_ptr(),
+        ulValue: buf.len() as CK_ULONG,
+        hObject: CK_INVALID_HANDLE,
+        hAdditionalObject: CK_INVALID_HANDLE,
+    };
+    let name = std::ffi::CString::new("C_Encrypt").expect("function name");
+    let rv = unsafe {
+        dispatch::general::c_async_complete(
+            shim.session,
+            name.as_ptr() as *mut CK_UTF8CHAR,
+            &mut async_data,
+        )
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_AsyncComplete(fitting)");
+    assert_eq!(async_data.ulValue, 8);
+    assert_eq!(buf, [0xA5_u8; 8], "fitting value must be copied verbatim");
+
+    drop(shim);
+}
+
+#[test]
+fn shim_async_complete_null_buffer_returns_required_length() {
+    // W1-C6-02: length-query call (null pValue) still returns the required
+    // length with CKR_OK.
+    let _guard = shim_state_test_guard();
+    let _daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+
+    let mut async_data = CK_ASYNC_DATA {
+        ulVersion: 0,
+        pValue: std::ptr::null_mut(),
+        ulValue: 0,
+        hObject: CK_INVALID_HANDLE,
+        hAdditionalObject: CK_INVALID_HANDLE,
+    };
+    let name = std::ffi::CString::new("C_Encrypt").expect("function name");
+    let rv = unsafe {
+        dispatch::general::c_async_complete(
+            shim.session,
+            name.as_ptr() as *mut CK_UTF8CHAR,
+            &mut async_data,
+        )
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "C_AsyncComplete(length query)");
+    assert_eq!(async_data.ulValue, 8, "required length must be reported");
+
+    drop(shim);
+}
