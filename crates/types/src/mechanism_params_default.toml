@@ -82,6 +82,9 @@ parameterless = [
     # KEA (historical)
     0x1010,  # CKM_KEA_KEY_PAIR_GEN
 
+    # GOST (historical)
+    0x1201,  # CKM_GOSTR3410
+
     # Generic secret
     0x0350,  # CKM_GENERIC_SECRET_KEY_GEN
 
@@ -764,7 +767,7 @@ mechanisms = [
 [[params]]
 shape = "gostr3410_derive"
 mechanisms = [
-    0x1201,  # CKM_GOSTR3410_DERIVE
+    0x1204,  # CKM_GOSTR3410_DERIVE
 ]
 
 # GOSTR3410 Key Wrap: CK_GOSTR3410_KEY_WRAP_PARAMS

@@ -401,6 +401,8 @@ mod tests {
     const CKM_RC5_CBC: u64 = 0x0332;
     const CKM_RC5_MAC: u64 = 0x0333;
     const CKM_RC5_MAC_GENERAL: u64 = 0x0334;
+    const CKM_GOSTR3410: u64 = 0x1201;
+    const CKM_GOSTR3410_DERIVE: u64 = 0x1204;
 
     #[test]
     fn load_embedded_default() {
@@ -497,6 +499,22 @@ mod tests {
         for mechanism in [CKM_RC5_ECB, CKM_RC5_CBC, CKM_RC5_MAC, CKM_RC5_MAC_GENERAL] {
             assert!(!reg.is_parameterless(mechanism));
         }
+    }
+
+    #[test]
+    fn embedded_default_binds_gostr3410_derive_and_sign_shapes() {
+        // OASIS pkcs11t.h (v3.02): CKM_GOSTR3410 = 0x1201 is the parameterless
+        // sign mechanism ("This mechanism does not have a parameter",
+        // gost_r_34.10-2001.md), and CKM_GOSTR3410_DERIVE = 0x1204 takes
+        // CK_GOSTR3410_DERIVE_PARAMS. Regression test for W1-L4-02: the
+        // default registry previously bound "gostr3410_derive" to 0x1201,
+        // rejecting real derive calls and mis-shaping sign calls.
+        let reg = MechanismRegistry::load_with_override_str(None).unwrap();
+
+        assert_eq!(reg.param_shape(CKM_GOSTR3410_DERIVE), Some("gostr3410_derive"));
+        assert_eq!(reg.param_shape(CKM_GOSTR3410), None);
+        assert!(reg.is_parameterless(CKM_GOSTR3410));
+        assert!(!reg.is_parameterless(CKM_GOSTR3410_DERIVE));
     }
 
     #[test]
@@ -886,7 +904,7 @@ mod tests {
 
     #[test]
     fn all_standard_parameterless_mechanisms_present_in_default_config() {
-        // Verify that the embedded default TOML contains all 133 standard
+        // Verify that the embedded default TOML contains all 132 standard
         // parameterless mechanisms. This list is exhaustive against the
         // mechanism_params_default.toml file to catch accidental deletions.
         let reg = MechanismRegistry::load_with_override_str(None).unwrap();
@@ -953,6 +971,8 @@ mod tests {
             0x1057, // CKM_EDDSA
             // KEA
             0x1010, // CKM_KEA_KEY_PAIR_GEN
+            // GOST
+            0x1201, // CKM_GOSTR3410
             // Generic secret
             0x0350, // CKM_GENERIC_SECRET_KEY_GEN
             // RC2
@@ -1054,12 +1074,12 @@ mod tests {
             0x001D, // CKM_ML_DSA
         ];
 
-        // Verify count matches the TOML (131 parameterless mechanisms).
+        // Verify count matches the TOML (132 parameterless mechanisms).
         // Parameterized RC2 ECB/MAC and RC5 ECB/MAC mechanisms use registry shapes.
         assert_eq!(
             expected_parameterless.len(),
-            131,
-            "expected list should contain exactly 131 entries"
+            132,
+            "expected list should contain exactly 132 entries"
         );
 
         for &mech in expected_parameterless {
