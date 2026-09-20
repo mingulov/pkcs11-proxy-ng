@@ -91,16 +91,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        // W1-C8-02 (D3-S2 codegen Zeroize): decoded password buffers must
-        // wipe on drop. The borrow-based conversions copy secrets out of
-        // these messages; without drop-wiping the source `Vec`s free plain.
-        // Field-covering derive, so future secret fields wipe with no drift.
+        // W1-C8-02 + W1-L2-04 (D3-S2 codegen Zeroize): decoded password
+        // buffers must wipe on drop. The borrow-based conversions copy
+        // secrets out of these messages; without drop-wiping the source
+        // `Vec`s free plain. Field-covering derive, so future secret
+        // fields wipe with no drift.
         .type_attribute(
             ".pkcs11_proxy_ng.v1.SkipjackPrivateWrapParams",
             "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
         )
         .type_attribute(
             ".pkcs11_proxy_ng.v1.SkipjackRelayxParams",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.PbeParams",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.Pkcs5Pbkd2Params",
             "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
         )
         .skip_debug(redacted.iter().map(|message| format!(".pkcs11_proxy_ng.v1.{message}")))

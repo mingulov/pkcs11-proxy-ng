@@ -655,6 +655,97 @@ fn pkcs5_pbkd2_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
+// W1-L2-04: owned-adopting PBE conversions wipe the source password buffers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pbe_adopting_conversion_wipes_source() {
+    let canary = vec![0xA5u8; 32];
+    let mut proto = v1_proto::PbeParams {
+        init_vector: vec![0x01; 16],
+        password: canary.clone(),
+        salt: vec![0xAA; 16],
+        iteration: 10000,
+    };
+    let adopted = PbeParams::from(&mut proto);
+    // Source buffers adopted out: no secret bytes remain in the prost message.
+    assert!(proto.init_vector.is_empty());
+    assert!(proto.password.is_empty());
+    assert!(proto.salt.is_empty());
+    // Converted value holds the canary.
+    adopted.password.expose(|bytes| assert_eq!(bytes, canary.as_slice()));
+    assert_eq!(adopted.init_vector.len(), 16);
+    assert_eq!(adopted.salt.len(), 16);
+    assert_eq!(adopted.iteration, 10000);
+}
+
+#[test]
+fn pkcs5_pbkd2_adopting_conversion_wipes_source() {
+    let canary = vec![0x5Au8; 16];
+    let mut proto = v1_proto::Pkcs5Pbkd2Params {
+        salt_source: 1,
+        salt_source_data: vec![0xBB; 16],
+        iterations: 600000,
+        prf: 2,
+        prf_data: vec![0xCC; 8],
+        password: canary.clone(),
+    };
+    let adopted = Pkcs5Pbkd2Params::from(&mut proto);
+    // Every source buffer adopted out; nothing secret remains behind.
+    assert!(proto.salt_source_data.is_empty());
+    assert!(proto.prf_data.is_empty());
+    assert!(proto.password.is_empty());
+    // Converted values hold the canary.
+    adopted.password.expose(|bytes| assert_eq!(bytes, canary.as_slice()));
+    adopted.salt_source_data.expose(|bytes| assert_eq!(bytes, vec![0xBB; 16].as_slice()));
+    adopted.prf_data.expose(|bytes| assert_eq!(bytes, vec![0xCC; 8].as_slice()));
+    assert_eq!(adopted.salt_source, 1);
+    assert_eq!(adopted.iterations, 600000);
+    assert_eq!(adopted.prf, 2);
+}
+
+#[test]
+fn pbe_prost_messages_zeroize_wipes_passwords() {
+    use zeroize::Zeroize;
+    // `ZeroizeOnDrop` (derived alongside `Zeroize` in build.rs) delegates
+    // drop-wiping to this same `zeroize`; post-drop memory is unobservable,
+    // so the test pins the wipe behavior directly.
+    // All fields spelled out: struct-update syntax cannot move fields out
+    // of the `ZeroizeOnDrop` temporary.
+    let mut pbe = v1_proto::PbeParams {
+        init_vector: vec![0x01; 16],
+        password: vec![0xA5u8; 32],
+        salt: vec![0xAA; 16],
+        iteration: 10000,
+    };
+    pbe.zeroize();
+    assert!(pbe.password.iter().all(|&byte| byte == 0));
+    assert!(pbe.init_vector.iter().all(|&byte| byte == 0));
+    assert!(pbe.salt.iter().all(|&byte| byte == 0));
+    let mut pbkd2 = v1_proto::Pkcs5Pbkd2Params {
+        salt_source: 1,
+        salt_source_data: vec![0xBB; 16],
+        iterations: 600000,
+        prf: 2,
+        prf_data: vec![0xCC; 8],
+        password: vec![0x5Au8; 16],
+    };
+    pbkd2.zeroize();
+    assert!(pbkd2.password.iter().all(|&byte| byte == 0));
+    assert!(pbkd2.salt_source_data.iter().all(|&byte| byte == 0));
+    assert!(pbkd2.prf_data.iter().all(|&byte| byte == 0));
+}
+
+#[test]
+fn pbe_prost_messages_wipe_on_drop() {
+    // Compile-time pin (Task 8 review-B1 pattern): deleting `ZeroizeOnDrop`
+    // from either build.rs `type_attribute` line must fail compilation here.
+    fn assert_wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_wiped_on_drop::<v1_proto::PbeParams>();
+    assert_wiped_on_drop::<v1_proto::Pkcs5Pbkd2Params>();
+}
+
+// ---------------------------------------------------------------------------
 // Batch 1: Trivial scalar-only round-trip tests
 // ---------------------------------------------------------------------------
 

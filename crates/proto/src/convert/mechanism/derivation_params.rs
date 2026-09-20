@@ -370,6 +370,22 @@ impl From<&v1_proto::PbeParams> for PbeParams {
     }
 }
 
+// Owned-adopting conversion (W1-L2-04): takes ownership of the password
+// buffers out of the prost message instead of copying them, so after
+// adoption the password bytes exist in exactly one wiped-on-drop owner.
+// The source message is left with empty buffers; its drop wipes any
+// residual via the derived `ZeroizeOnDrop` impl (see build.rs).
+impl From<&mut v1_proto::PbeParams> for PbeParams {
+    fn from(p: &mut v1_proto::PbeParams) -> Self {
+        Self {
+            init_vector: SecretBytes::new(std::mem::take(&mut p.init_vector)),
+            password: SecretBytes::new(std::mem::take(&mut p.password)),
+            salt: SecretBytes::new(std::mem::take(&mut p.salt)),
+            iteration: p.iteration,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PBE: Pkcs5Pbkd2Params
 // ---------------------------------------------------------------------------
@@ -396,6 +412,24 @@ impl From<&v1_proto::Pkcs5Pbkd2Params> for Pkcs5Pbkd2Params {
             prf: p.prf,
             prf_data: SecretBytes::copy_from_slice(&p.prf_data),
             password: SecretBytes::copy_from_slice(&p.password),
+        }
+    }
+}
+
+// Owned-adopting conversion (W1-L2-04): takes ownership of the password
+// buffers out of the prost message instead of copying them, so after
+// adoption the password bytes exist in exactly one wiped-on-drop owner.
+// The source message is left with empty buffers; its drop wipes any
+// residual via the derived `ZeroizeOnDrop` impl (see build.rs).
+impl From<&mut v1_proto::Pkcs5Pbkd2Params> for Pkcs5Pbkd2Params {
+    fn from(p: &mut v1_proto::Pkcs5Pbkd2Params) -> Self {
+        Self {
+            salt_source: p.salt_source,
+            salt_source_data: SecretBytes::new(std::mem::take(&mut p.salt_source_data)),
+            iterations: p.iterations,
+            prf: p.prf,
+            prf_data: SecretBytes::new(std::mem::take(&mut p.prf_data)),
+            password: SecretBytes::new(std::mem::take(&mut p.password)),
         }
     }
 }
