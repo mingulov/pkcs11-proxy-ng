@@ -47,3 +47,19 @@ pub(crate) fn parse_mechanism(name: &str) -> Result<u64, Box<dyn core::error::Er
             ).into())
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha512_224_rows_use_official_ids() {
+        // Official IDs per cryptoki-sys 0.5.0 (OASIS PKCS#11 bindings):
+        // CKM_SHA512_224 = 72 (0x48), CKM_SHA512_224_HMAC = 73 (0x49).
+        // Table names omit the CKM_ prefix. (W1-C11-01)
+        assert_eq!(parse_mechanism("SHA512_224").unwrap(), 0x48);
+        assert_eq!(parse_mechanism("CKM_SHA512_224_HMAC").unwrap(), 0x49);
+        assert_eq!(mechanism_name(0x48), "SHA512_224");
+        assert_eq!(mechanism_name(0x49), "SHA512_224_HMAC");
+    }
+}
