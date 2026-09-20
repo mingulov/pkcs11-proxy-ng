@@ -779,6 +779,7 @@ impl DaemonConfig {
     /// - `PKCS11_PROXY_BACKEND_MODULE`                → `backend.module`
     /// - `PKCS11_PROXY_BACKEND_ARGS`                  → `backend.initialize_args`
     /// - `PKCS11_PROXY_MECHANISMS_CONFIG`             → `mechanisms.config_path`
+    /// - `PKCS11_PROXY_ALLOW_INSECURE`                → `listener.remote.allow_insecure_tcp`
     /// - `PKCS11_PROXY_RESILIENCE_METRICS_SOCKET`     → `resilience.metrics_socket`
     /// - `PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD`     → `resilience.find_result_warn_threshold`
     /// - `PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET`     → `test_hooks.control_socket`
@@ -803,7 +804,16 @@ impl DaemonConfig {
             // provision an open listener. Tighter listener semantics (auth,
             // TLS) still have to come from the TOML.
             match self.listener.remote.as_mut() {
-                Some(tcp) => tcp.bind = v,
+                Some(tcp) => {
+                    tcp.bind = v;
+                    // W1-L8-01: honor the documented PKCS11_PROXY_ALLOW_INSECURE
+                    // override here too (env > TOML). Unset => the TOML value
+                    // is kept, so this can never silently enable an insecure
+                    // listener. Parse matches the `None` branch below.
+                    if let Ok(val) = std::env::var("PKCS11_PROXY_ALLOW_INSECURE") {
+                        tcp.allow_insecure_tcp = val == "1" || val.eq_ignore_ascii_case("true");
+                    }
+                }
                 None => {
                     let allow_insecure_tcp = std::env::var("PKCS11_PROXY_ALLOW_INSECURE")
                         .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))

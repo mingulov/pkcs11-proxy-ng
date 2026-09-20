@@ -1340,3 +1340,53 @@ fn daemon_validate_accepts_audit_defaults() {
     assert_eq!(cfg.audit.fail_closed_reserve, 256);
     assert!(cfg.validate().is_ok(), "audit defaults must validate OK");
 }
+
+// W1-L8-01: the documented env mapping promises PKCS11_PROXY_ALLOW_INSECURE
+// overrides `listener.remote.allow_insecure_tcp` (env > TOML), including
+// when the TOML already carries a [listener.remote] block (the `Some`
+// branch of `apply_env_overrides`).
+#[test]
+fn allow_insecure_env_overrides_existing_remote_block() {
+    let toml = r#"
+[backend]
+module = "."
+
+[proxy]
+
+[listener.remote]
+bind = "127.0.0.1:7512"
+auth = "none"
+allow_insecure_tcp = false
+"#;
+    // Env set: the override must be honored in the `Some` branch.
+    unsafe { std::env::set_var("PKCS11_PROXY_BIND", "0.0.0.0:9999") };
+    unsafe { std::env::set_var("PKCS11_PROXY_ALLOW_INSECURE", "1") };
+    let mut config: DaemonConfig = toml::from_str(toml).unwrap();
+    config.apply_env_overrides();
+    let tcp = config.listener.remote.as_ref().unwrap();
+    assert_eq!(tcp.bind, "0.0.0.0:9999");
+    assert!(
+        tcp.allow_insecure_tcp,
+        "PKCS11_PROXY_ALLOW_INSECURE=1 must override TOML allow_insecure_tcp=false (W1-L8-01)"
+    );
+    // Env set to a falsy value: env still wins (secure direction).
+    unsafe { std::env::set_var("PKCS11_PROXY_ALLOW_INSECURE", "0") };
+    let toml_true = toml.replace("allow_insecure_tcp = false", "allow_insecure_tcp = true");
+    let mut config: DaemonConfig = toml::from_str(&toml_true).unwrap();
+    config.apply_env_overrides();
+    assert!(
+        !config.listener.remote.as_ref().unwrap().allow_insecure_tcp,
+        "PKCS11_PROXY_ALLOW_INSECURE=0 must override TOML allow_insecure_tcp=true"
+    );
+    // Env unset: the TOML value must be preserved — no insecure default.
+    unsafe { std::env::remove_var("PKCS11_PROXY_ALLOW_INSECURE") };
+    let mut config: DaemonConfig = toml::from_str(toml).unwrap();
+    config.apply_env_overrides();
+    let tcp = config.listener.remote.as_ref().unwrap();
+    assert_eq!(tcp.bind, "0.0.0.0:9999");
+    assert!(
+        !tcp.allow_insecure_tcp,
+        "unset PKCS11_PROXY_ALLOW_INSECURE must leave TOML allow_insecure_tcp=false untouched"
+    );
+    unsafe { std::env::remove_var("PKCS11_PROXY_BIND") };
+}
