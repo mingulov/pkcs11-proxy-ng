@@ -27,10 +27,89 @@ fn c_set_pin_before_initialize_returns_not_initialized() {
 
 #[test]
 fn c_init_pin_rejects_unserializable_pin_length_before_client_use() {
+    // W1-L3-03: oversize PIN must return CKR_ARGUMENTS_BAD (the documented
+    // stable RV for the transport-impossible class, matching classify_input),
+    // never panic-to-CKR_GENERAL_ERROR via catch_panics. Asserting
+    // ARGUMENTS_BAD (not GENERAL_ERROR) proves the catch_panics panic branch
+    // was not taken: any panic would surface as GENERAL_ERROR.
     let _guard = shim_state_test_guard();
     let pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
     let rv = unsafe { dispatch::general::c_init_pin(0, pin, CK_ULONG::MAX) };
-    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_init_token_rejects_unserializable_pin_length_before_client_use() {
+    // W1-L3-03: same class as c_init_pin — oversize SO PIN is ARGUMENTS_BAD,
+    // never a panic surfaced as GENERAL_ERROR.
+    let _guard = shim_state_test_guard();
+    let pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let rv =
+        unsafe { dispatch::general::c_init_token(0, pin, CK_ULONG::MAX, std::ptr::null_mut()) };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_set_pin_rejects_unserializable_old_pin_length_before_client_use() {
+    // W1-L3-03: oversize old PIN is ARGUMENTS_BAD even when the new PIN is valid.
+    let _guard = shim_state_test_guard();
+    let old_pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let new_pin = *b"5678";
+    let rv = unsafe {
+        dispatch::general::c_set_pin(0, old_pin, CK_ULONG::MAX, new_pin.as_ptr() as *mut _, 4)
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_set_pin_rejects_unserializable_new_pin_length_before_client_use() {
+    // W1-L3-03: oversize new PIN is ARGUMENTS_BAD even when the old PIN is valid.
+    let _guard = shim_state_test_guard();
+    let old_pin = *b"1234";
+    let new_pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let rv = unsafe {
+        dispatch::general::c_set_pin(0, old_pin.as_ptr() as *mut _, 4, new_pin, CK_ULONG::MAX)
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_init_pin_valid_pin_reaches_client_state() {
+    // W1-L3-03: valid PINs are unaffected — parsing passes through to the
+    // client gate (NOT_INITIALIZED here, since C_Initialize was never called).
+    let _guard = shim_state_test_guard();
+    let pin = *b"1234";
+    let rv = unsafe { dispatch::general::c_init_pin(0, pin.as_ptr() as *mut _, 4) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
+fn c_init_token_valid_pin_reaches_client_state() {
+    // W1-L3-03: valid SO PIN is unaffected — parsing passes through.
+    let _guard = shim_state_test_guard();
+    let pin = *b"1234";
+    let rv = unsafe {
+        dispatch::general::c_init_token(0, pin.as_ptr() as *mut _, 4, std::ptr::null_mut())
+    };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
+fn c_set_pin_valid_pins_reach_client_state() {
+    // W1-L3-03: valid old/new PINs are unaffected — parsing passes through.
+    let _guard = shim_state_test_guard();
+    let old_pin = *b"1234";
+    let new_pin = *b"5678";
+    let rv = unsafe {
+        dispatch::general::c_set_pin(
+            0,
+            old_pin.as_ptr() as *mut _,
+            4,
+            new_pin.as_ptr() as *mut _,
+            4,
+        )
+    };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 }
 
 #[test]

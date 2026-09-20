@@ -128,6 +128,33 @@ pub(crate) fn input_buf_to_ck_in_buf(buf: InputBuf<'_>) -> Result<CkInBuf<'_>, C
     }
 }
 
+/// Fallible reader for optional PIN-style byte inputs (W1-L3-03).
+///
+/// Unlike `read_input_slice` (which panics on unmaterializable lengths, and
+/// the panic surfaces as CKR_GENERAL_ERROR via `catch_panics`), this returns
+/// the transport-impossible class as `Err(CkRv::ARGUMENTS_BAD)` — the same
+/// documented stable RV that `classify_input` + `input_buf_to_ck_in_buf`
+/// produce — and never panics. NULL maps to `None` for any claimed length,
+/// matching the historical null handling of the PIN call sites.
+///
+/// # Safety
+///
+/// When `ptr` is non-null, it must point to a valid, readable buffer of at
+/// least `len` bytes (as required by PKCS#11 semantics for input parameters).
+/// The returned slice borrows from that memory and must not outlive it. When
+/// `ptr` is null, no memory is accessed regardless of `len`. Lengths that
+/// cannot be materialized are rejected before any memory access.
+pub(crate) unsafe fn try_read_optional_bytes<'a>(
+    ptr: *const u8,
+    len: CK_ULONG,
+) -> Result<Option<&'a [u8]>, CkRv> {
+    match unsafe { classify_input(ptr, len) } {
+        InputBuf::Bytes(b) => Ok(Some(b)),
+        InputBuf::Null { .. } => Ok(None),
+        InputBuf::TooLarge { .. } => Err(CkRv::ARGUMENTS_BAD),
+    }
+}
+
 /// Build a `CkOutputBufferSpec` from the C caller's pointer pair.
 ///
 /// This captures exactly what the PKCS#11 caller passed:
@@ -482,6 +509,48 @@ mod tests {
         let buf = super::InputBuf::Null { len: 42 };
         let result = super::input_buf_to_ck_in_buf(buf).unwrap();
         assert!(matches!(result, pkcs11_proxy_ng_types::CkInBuf::Null { len: 42 }));
+    }
+
+    #[test]
+    fn try_read_optional_bytes_oversize_returns_arguments_bad_without_panic() {
+        // W1-L3-03: the fallible PIN reader must return Err(ARGUMENTS_BAD) for
+        // the transport-impossible class — never panic (which catch_panics
+        // would surface as CKR_GENERAL_ERROR). The outer catch_unwind proves
+        // no unwind happens at all, not just that the RV differs.
+        let buf = [0u8; 1];
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            super::try_read_optional_bytes(buf.as_ptr(), CK_ULONG::MAX)
+        }));
+        let inner = result.expect("fallible PIN reader must not panic");
+        assert_eq!(inner.unwrap_err(), pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD);
+    }
+
+    #[test]
+    fn try_read_optional_bytes_valid_pin_roundtrips() {
+        // W1-L3-03: valid PINs are unaffected — Some(bytes) with exact content.
+        let pin = *b"1234";
+        let result = unsafe { super::try_read_optional_bytes(pin.as_ptr(), 4) }.unwrap();
+        assert_eq!(result, Some(pin.as_slice()));
+    }
+
+    #[test]
+    fn try_read_optional_bytes_null_is_none_for_any_length() {
+        // Historical null handling preserved: NULL → None regardless of the
+        // claimed length (read_input_slice returned empty for NULL too, and
+        // the call sites mapped NULL to None before ever reading).
+        assert_eq!(unsafe { super::try_read_optional_bytes(std::ptr::null(), 0) }.unwrap(), None);
+        assert_eq!(
+            unsafe { super::try_read_optional_bytes(std::ptr::null(), CK_ULONG::MAX) }.unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn try_read_optional_bytes_non_null_len0_is_some_empty() {
+        // Matches read_input_slice: non-NULL + len 0 → Some(&[]), not None.
+        let buf = [0u8; 1];
+        let result = unsafe { super::try_read_optional_bytes(buf.as_ptr(), 0) }.unwrap();
+        assert_eq!(result, Some([].as_slice()));
     }
 }
 

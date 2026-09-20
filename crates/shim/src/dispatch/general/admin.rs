@@ -11,10 +11,9 @@ pub unsafe extern "C" fn c_init_token(
     p_label: CK_UTF8CHAR_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        let so_pin = if p_pin.is_null() {
-            None
-        } else {
-            Some(unsafe { read_input_slice(p_pin, ul_pin_len) })
+        let so_pin = match unsafe { try_read_optional_bytes(p_pin, ul_pin_len) } {
+            Ok(pin) => pin,
+            Err(e) => return rv_err(e),
         };
         // PKCS#11 label is 32 bytes, space-padded; trim trailing spaces for client.
         let label = if p_label.is_null() {
@@ -36,10 +35,9 @@ pub unsafe extern "C" fn c_init_pin(
     ul_pin_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let pin = if p_pin.is_null() {
-            None
-        } else {
-            Some(unsafe { read_input_slice(p_pin, ul_pin_len) })
+        let pin = match unsafe { try_read_optional_bytes(p_pin, ul_pin_len) } {
+            Ok(pin) => pin,
+            Err(e) => return rv_err(e),
         };
         match with_client!(client => client.init_pin(CkSessionHandle(h_session as u64), pin)) {
             Ok(()) => rv_ok(),
@@ -56,15 +54,13 @@ pub unsafe extern "C" fn c_set_pin(
     ul_new_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let old_pin = if p_old_pin.is_null() {
-            None
-        } else {
-            Some(unsafe { read_input_slice(p_old_pin, ul_old_len) })
+        let old_pin = match unsafe { try_read_optional_bytes(p_old_pin, ul_old_len) } {
+            Ok(pin) => pin,
+            Err(e) => return rv_err(e),
         };
-        let new_pin = if p_new_pin.is_null() {
-            None
-        } else {
-            Some(unsafe { read_input_slice(p_new_pin, ul_new_len) })
+        let new_pin = match unsafe { try_read_optional_bytes(p_new_pin, ul_new_len) } {
+            Ok(pin) => pin,
+            Err(e) => return rv_err(e),
         };
         match with_client!(client => client.set_pin(CkSessionHandle(h_session as u64), old_pin, new_pin))
         {
