@@ -236,4 +236,185 @@ async fn per_slot_failed_login_budget_end_to_end() {
             "after cooldown expiry, backend must be called again"
         );
     }
+
+    // Reset again for the C_LoginUser scenarios (W1-L7-01).
+    rate_quota::record_login_success(::pkcs11_proxy_ng::server::slot_map::BackendSlotId(CkSlotId(
+        0,
+    )));
+
+    // ── Scenario D1: C_LoginUser failures trip the same per-slot budget ──────
+    //
+    // W1-L7-01: wrong-PIN C_LoginUser attempts must count toward the per-slot
+    // budget exactly like C_Login attempts (no evasion). With budget = 3:
+    // attempts 1-3 reach the backend and return transparent CKR_PIN_INCORRECT;
+    // attempt 4 is fast-rejected with CKR_DEVICE_ERROR without a backend call.
+    {
+        let mock_d = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock_d.initialize().unwrap();
+
+        let (endpoint, _shutdown) = mock_daemon(mock_d.clone()).await;
+        let mut client = pkcs11_proxy_ng_client::Pkcs11Client::connect(&endpoint).await.unwrap();
+        client.initialize().await.unwrap();
+
+        let slots = client.get_slot_list(false).await.unwrap();
+        let session = client
+            .open_session(
+                slots[0],
+                CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
+            )
+            .await
+            .unwrap();
+
+        for i in 1_usize..=3 {
+            let rv = client
+                .login_user(session, CkUserType::User, b"operator", b"bad")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                rv,
+                CkRv::PIN_INCORRECT,
+                "login_user attempt {i}: must be transparent CKR_PIN_INCORRECT"
+            );
+            assert_eq!(
+                mock_d.login_user_call_count(),
+                i,
+                "login_user attempt {i}: backend must have been called exactly {i} time(s)"
+            );
+        }
+
+        let rv4 =
+            client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
+        assert_eq!(
+            rv4,
+            CkRv::DEVICE_ERROR,
+            "login_user 4th attempt must be fast-rejected with CKR_DEVICE_ERROR (cooldown active)"
+        );
+        assert_eq!(
+            mock_d.login_user_call_count(),
+            3,
+            "login_user 4th attempt must NOT reach the backend"
+        );
+    }
+
+    // Reset for the success-resets scenario.
+    rate_quota::record_login_success(::pkcs11_proxy_ng::server::slot_map::BackendSlotId(CkSlotId(
+        0,
+    )));
+
+    // ── Scenario D2: a successful C_LoginUser resets the failure counter ─────
+    //
+    // Sequence: 2 failed login_user (count=2), one successful (count=0 reset),
+    // then 3 fresh fails (trip again), then the next is fast-rejected.
+    {
+        let mock_e = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock_e.initialize().unwrap();
+
+        let (endpoint, _shutdown) = mock_daemon(mock_e.clone()).await;
+        let mut client = pkcs11_proxy_ng_client::Pkcs11Client::connect(&endpoint).await.unwrap();
+        client.initialize().await.unwrap();
+
+        let slots = client.get_slot_list(false).await.unwrap();
+        let session = client
+            .open_session(
+                slots[0],
+                CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
+            )
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            let rv = client
+                .login_user(session, CkUserType::User, b"operator", b"bad")
+                .await
+                .unwrap_err();
+            assert_eq!(rv, CkRv::PIN_INCORRECT, "pre-success fail must be PIN_INCORRECT");
+        }
+        assert_eq!(mock_e.login_user_call_count(), 2, "two failures must each reach the backend");
+
+        // Successful login_user (mock PIN is b"1234") resets the counter.
+        client.login_user(session, CkUserType::User, b"operator", b"1234").await.unwrap();
+        assert_eq!(mock_e.login_user_call_count(), 3, "success must reach the backend");
+
+        for i in 1_usize..=3 {
+            let rv = client
+                .login_user(session, CkUserType::User, b"operator", b"bad")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                rv,
+                CkRv::PIN_INCORRECT,
+                "post-reset attempt {i}: must be transparent PIN_INCORRECT (fresh budget)"
+            );
+        }
+        assert_eq!(
+            mock_e.login_user_call_count(),
+            6,
+            "three post-reset fails + one success + two pre-success fails = 6 backend calls"
+        );
+
+        let rv_reject =
+            client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
+        assert_eq!(
+            rv_reject,
+            CkRv::DEVICE_ERROR,
+            "post-reset 4th failure must be fast-rejected (budget tripped again)"
+        );
+        assert_eq!(mock_e.login_user_call_count(), 6, "fast-reject must not call the backend");
+    }
+
+    // Reset for the cross-path scenario.
+    rate_quota::record_login_success(::pkcs11_proxy_ng::server::slot_map::BackendSlotId(CkSlotId(
+        0,
+    )));
+
+    // ── Scenario D3: C_Login and C_LoginUser share ONE per-slot budget ────────
+    //
+    // W1-L7-01 (evasion): failures from both login paths accumulate on the
+    // same slot counter — 2 C_Login fails + 1 C_LoginUser fail trips budget=3,
+    // and the next C_LoginUser is fast-rejected.
+    {
+        let mock_f = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock_f.initialize().unwrap();
+        mock_f.inject_login_rv(CkRv::PIN_INCORRECT);
+
+        let (endpoint, _shutdown) = mock_daemon(mock_f.clone()).await;
+        let mut client = pkcs11_proxy_ng_client::Pkcs11Client::connect(&endpoint).await.unwrap();
+        client.initialize().await.unwrap();
+
+        let slots = client.get_slot_list(false).await.unwrap();
+        let session = client
+            .open_session(
+                slots[0],
+                CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
+            )
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            let rv = client.login(session, CkUserType::User, Some(b"bad")).await.unwrap_err();
+            assert_eq!(rv, CkRv::PIN_INCORRECT, "C_Login fail must be PIN_INCORRECT");
+        }
+        assert_eq!(mock_f.login_call_count(), 2, "two C_Login fails must reach the backend");
+
+        // Third strike via C_LoginUser: trips the shared budget.
+        let rv3 =
+            client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
+        assert_eq!(
+            rv3,
+            CkRv::PIN_INCORRECT,
+            "3rd strike (via C_LoginUser) must still be transparent PIN_INCORRECT"
+        );
+        assert_eq!(mock_f.login_user_call_count(), 1, "3rd strike must reach the backend");
+
+        // Budget tripped: the next C_LoginUser is fast-rejected.
+        let rv4 =
+            client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
+        assert_eq!(
+            rv4,
+            CkRv::DEVICE_ERROR,
+            "post-trip C_LoginUser must be fast-rejected (shared budget)"
+        );
+        assert_eq!(mock_f.login_user_call_count(), 1, "fast-reject must not call the backend");
+        assert_eq!(mock_f.login_call_count(), 2, "no further C_Login backend calls");
+    }
 }

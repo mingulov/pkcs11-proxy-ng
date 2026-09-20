@@ -208,6 +208,7 @@ pub struct MockBackend {
     /// default 2.40/3.0/3.2 catalog with no NULL functions.
     interface_capabilities: Mutex<Option<InterfaceCapabilities>>,
     login_calls: AtomicUsize,
+    login_user_calls: AtomicUsize,
     token_info_calls: AtomicUsize,
     /// Count of backend data-operation calls (sign, verify, digest, encrypt,
     /// decrypt and their variants). Incremented inside `resolve_input` so
@@ -251,6 +252,9 @@ pub struct MockBackend {
     /// Test-only gate (M5 harness): when `Some`, each real backend `login`
     /// signals + blocks on it. `None` (default) makes `login` a no-op gate.
     login_gate: Mutex<Option<LoginGate>>,
+    /// Test-only gate (W1-C1-02 harness): the `C_LoginUser` analogue of
+    /// `login_gate`. `None` (default) makes `login_user` a no-op gate.
+    login_user_gate: Mutex<Option<LoginGate>>,
     /// The backend ABI this mock emulates on the wire (ADR-0011): ulong
     /// width for values/lengths, CK_ATTRIBUTE stride for nested templates.
     abi: MockAbi,
@@ -342,6 +346,7 @@ impl MockBackend {
             verify_signature_accumulator: Mutex::new(HashMap::new()),
             interface_capabilities: Mutex::new(None),
             login_calls: AtomicUsize::new(0),
+            login_user_calls: AtomicUsize::new(0),
             token_info_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
             message_begin_calls: AtomicUsize::new(0),
@@ -357,6 +362,7 @@ impl MockBackend {
             attr_get_calls: AtomicUsize::new(0),
             attr_get_exact_calls: AtomicUsize::new(0),
             login_gate: Mutex::new(None),
+            login_user_gate: Mutex::new(None),
             abi: MockAbi::host(),
             advertised_byte_order: None,
             param_presence: None,
@@ -376,6 +382,19 @@ impl MockBackend {
         proceed: Arc<(Mutex<bool>, Condvar)>,
     ) {
         *self.login_gate.lock().unwrap() = Some(LoginGate { entered, proceed });
+    }
+
+    /// Install a gate so the next `login_user` call(s) signal `entered` and
+    /// block until `proceed`'s flag is set and the condvar notified. The
+    /// `C_LoginUser` analogue of [`MockBackend::set_login_gate`]: lets a test
+    /// deterministically hold the first client inside `C_LoginUser` while it
+    /// starts a second, forcing the race.
+    pub fn set_login_user_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        proceed: Arc<(Mutex<bool>, Condvar)>,
+    ) {
+        *self.login_user_gate.lock().unwrap() = Some(LoginGate { entered, proceed });
     }
 
     /// Build a mock backend that advertises every mechanism registered by
@@ -492,6 +511,12 @@ impl MockBackend {
 
     pub fn login_call_count(&self) -> usize {
         self.login_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of backend `login_user` (`C_LoginUser`) calls. The `C_LoginUser`
+    /// analogue of [`MockBackend::login_call_count`].
+    pub fn login_user_call_count(&self) -> usize {
+        self.login_user_calls.load(Ordering::SeqCst)
     }
 
     /// Number of backend data-operation calls (sign, verify, digest, encrypt,
@@ -2707,6 +2732,24 @@ impl Pkcs11Backend for MockBackend {
         _username: &[u8],
         pin: &[u8],
     ) -> CkResult<()> {
+        self.login_user_calls.fetch_add(1, Ordering::SeqCst);
+        // W1-C1-02 test gate: same enter/block contract as the `login` gate —
+        // clone the handles out from under the gate lock, then signal + block
+        // WITHOUT holding that lock.
+        let gate = self
+            .login_user_gate
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|g| (g.entered.clone(), Arc::clone(&g.proceed)));
+        if let Some((entered, proceed)) = gate {
+            let _ = entered.send(());
+            let (lock, cv) = &*proceed;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = cv.wait(released).unwrap();
+            }
+        }
         if !self.state.lock().unwrap().has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }

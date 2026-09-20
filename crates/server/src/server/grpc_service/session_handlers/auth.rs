@@ -11,7 +11,7 @@ use super::super::super::context_manager::{ClientContextId, ContextManager, Logi
 use super::super::super::handle_map::VirtualHandle;
 use super::super::service_utils::{login_lock_timeout, spawn_backend};
 
-fn login_state_for_user_type(user_type: CkUserType) -> Option<LoginState> {
+pub(crate) fn login_state_for_user_type(user_type: CkUserType) -> Option<LoginState> {
     match user_type {
         CkUserType::So => Some(LoginState::So),
         CkUserType::User => Some(LoginState::User),
@@ -19,7 +19,7 @@ fn login_state_for_user_type(user_type: CkUserType) -> Option<LoginState> {
     }
 }
 
-fn already_logged_in_rv(current: LoginState, requested: LoginState) -> CkRv {
+pub(crate) fn already_logged_in_rv(current: LoginState, requested: LoginState) -> CkRv {
     if current == requested {
         CkRv::USER_ALREADY_LOGGED_IN
     } else {
@@ -32,7 +32,7 @@ fn already_logged_in_rv(current: LoginState, requested: LoginState) -> CkRv {
 /// Returns the CK_RV the caller should surface when the context is gone
 /// (`CRYPTOKI_NOT_INITIALIZED`) or the session handle is unknown
 /// (`SESSION_HANDLE_INVALID`).
-async fn resolve_session_slot_login(
+pub(crate) async fn resolve_session_slot_login(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
     session_handle: u64,
