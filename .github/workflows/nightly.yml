@@ -160,6 +160,14 @@ jobs:
           apt-get download libsofthsm2:i386
           sudo mkdir -p /opt/softhsm2-i386
           sudo dpkg -x libsofthsm2_*i386.deb /opt/softhsm2-i386/
+          # libsofthsm2's runtime closure (2026-09-20 first CI run: the
+          # 32-bit daemon failed to start on missing libcrypto.so.3).
+          # libssl3t64 = OpenSSL 3 (t64 transition name); libstdc++6/libgcc-s1
+          # for the C++ runtime. libc6:i386 is already on the runner image.
+          apt-get download libssl3t64:i386 libstdc++6:i386 libgcc-s1:i386
+          sudo dpkg -x libssl3t64_*i386.deb /opt/softhsm2-i386/
+          sudo dpkg -x libstdc++6_*i386.deb /opt/softhsm2-i386/
+          sudo dpkg -x libgcc-s1_*i386.deb /opt/softhsm2-i386/
           # Second 32-bit provider leg (NSS i386): libsoftokn3 needs its
           # i386 closure (libnspr4 for libnspr4/libplc4/libplds4,
           # libsqlite3-0 for libsqlite3) extracted beside it, and the
@@ -244,23 +252,24 @@ jobs:
       # Scope notes (measured 2026-07-04): the FULL types suite takes ~2.5 h
       # under Miri (TOML/serde interpretation dominates) and its registry
       # tests use real fs (cfg_attr(miri, ignore)). The width/attribute
-      # modules are the UB-relevant pure logic. On the shim, the daemon-based
-      # tests:: modules need real sockets and are compiled out under Miri
-      # (lib.rs cfg); the raw-pointer parse paths below are the point.
-      # 2026-09-20 audit: also pin the two reader tests covering the flagged
-      # 8-byte loads (mechanism_read.rs rsa_aes_key_wrap + sign_additional_
-      # context). They are aligned on LP64, so this leg guards the harness
-      # and future Linux-visible UB only — the guilty LLP64 pack(1) layout
-      # runs in miri-windows below.
+      # modules are the UB-relevant pure logic (36 tests, ~7 s, green).
+      # On the shim, the daemon-based tests:: modules need real sockets and
+      # are compiled out under Miri (lib.rs cfg).
+      # 2026-09-20 first run: Miri serializes tests and some parse tests are
+      # pathologically slow (reads_rsa_wrap 41 min, pbe not_wild_read 12 min),
+      # so the shim scope is the two seconds-proven parse tests below, each
+      # exact-named and timeout-guarded. Dropped: width_bridge (18 tests, 100%
+      # safe code — the only "unsafe" is a comment — still covered by the
+      # native tiers), the stale nested_template_input filter (matches
+      # nothing), and the slow readers (follow-up: re-scope post-D4-S3 fix).
+      # The guilty LLP64 pack(1) layout runs in miri-windows below.
       - name: cargo miri test (width/attribute logic + shim parse paths)
         run: |
           cargo +nightly miri test -p pkcs11-proxy-ng-types -- width attribute
-          cargo +nightly miri test -p pkcs11-proxy-ng-shim --lib -- \
-            dispatch::general::width_bridge \
-            dispatch::general::helpers::nested_template_input \
-            not_wild_read \
-            reads_rsa_wrap_parameter_structs \
-            reads_handle_string_and_sign_context_parameter_structs
+          timeout 600 cargo +nightly miri test -p pkcs11-proxy-ng-shim --lib -- \
+            --exact dispatch::general::helpers::mechanism_parameter_tests::gcm_aad_unmaterializable_len_rejected_not_wild_read
+          timeout 600 cargo +nightly miri test -p pkcs11-proxy-ng-shim --lib -- \
+            --exact dispatch::general::helpers::mechanism_parameter_tests::reads_handle_string_and_sign_context_parameter_structs
 
   # ── Miri on Windows (pack(1) UB sites) ────────────────────────────────────
   # Same nightly cadence as the Linux Miri job above. Runs ONLY the two
@@ -278,7 +287,9 @@ jobs:
   miri-windows:
     name: Miri (Windows pack(1) UB sites)
     runs-on: windows-2022
-    timeout-minutes: 60
+    # 120 not 60: while red this trips in seconds, but post-D4-S3-fix passing
+    # runs inherit the Linux-measured ~45-min class (reads_rsa_wrap: 41 min).
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
 
