@@ -1885,6 +1885,15 @@ fn skipjack_prost_messages_zeroize_wipes_passwords() {
     assert!(relayx.old_wrapped_x.iter().all(|&byte| byte == 0));
 }
 
+#[test]
+fn skipjack_prost_messages_wipe_on_drop() {
+    // Compile-time pin (W1-C8-02 review B1): deleting `ZeroizeOnDrop` from
+    // either build.rs `type_attribute` line must fail compilation here.
+    fn assert_wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_wiped_on_drop::<v1_proto::SkipjackPrivateWrapParams>();
+    assert_wiped_on_drop::<v1_proto::SkipjackRelayxParams>();
+}
+
 // ---------------------------------------------------------------------------
 // Generic / vendor parameter shapes round-trip tests
 // ---------------------------------------------------------------------------
