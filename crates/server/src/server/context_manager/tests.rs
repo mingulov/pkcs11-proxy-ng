@@ -664,16 +664,35 @@ async fn object_metadata_session_object_round_trip() {
 }
 
 #[tokio::test]
-async fn object_metadata_token_object_not_cached() {
-    // I2 fix: token objects (is_token=true) must never be stored in the cache.
+async fn object_metadata_token_object_cached_within_generation() {
+    // W1-L13-18: token objects (is_token=true) ARE cached, gated by the
+    // authz generation — reuse within the generation avoids a backend
+    // round-trip; revocation invalidates. Session-object entries are
+    // generation-independent and survive revocation.
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let ctx_id = mgr.create_context(None).await.unwrap();
     let uid = vec![0xde, 0xad, 0xbe, 0xef];
-    mgr.cache_object_metadata(&ctx_id, 9, make_token_meta(uid)).await;
+    mgr.cache_object_metadata(&ctx_id, 9, make_token_meta(uid.clone())).await;
+    assert_eq!(
+        mgr.object_metadata(&ctx_id, 9).await.map(|m| m.unique_id),
+        Some(SecretBytes::new(uid)),
+        "token object metadata must be cached within the authz generation"
+    );
+
+    // A session-object entry in the same context is generation-independent.
+    mgr.cache_object_metadata(&ctx_id, 7, make_session_meta(vec![0xaa])).await;
+
+    // Revocation invalidates the token entry (eagerly dropped: reads as a
+    // miss) while the session entry survives.
+    mgr.revoke_authz_generation();
     assert_eq!(
         mgr.object_metadata(&ctx_id, 9).await.map(|m| m.unique_id),
         None,
-        "token object metadata must not be cached (I2 fix: re-fetched every gate call)"
+        "revoking the authz generation must invalidate cached token metadata"
+    );
+    assert!(
+        mgr.object_metadata(&ctx_id, 7).await.is_some(),
+        "revocation must not evict session-object entries"
     );
 }
 

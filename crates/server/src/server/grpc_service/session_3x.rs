@@ -5,15 +5,17 @@
 //! - `C_SessionCancel`
 //! - `C_GetSessionValidationFlags`
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
+use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::context_manager::{ClientContextId, MessageOperation};
 use super::super::handle_map::VirtualHandle;
+use super::audit_events::emit_auth_event;
 use super::service_utils::{
     login_lock_timeout, resolve_session, spawn_backend, spawn_backend_with_optional_timeout,
 };
@@ -37,7 +39,54 @@ fn cancelled_message_operations(flags: u64) -> Vec<MessageOperation> {
     .collect()
 }
 
+/// `C_LoginUser`, emitting a fail-closed `Auth` audit record exactly like
+/// `C_Login` does (`session.rs:177`) — W1-C1-03. The inner handler runs
+/// first, then the outcome is recorded; a rejected emit fails the call with
+/// `CKR_FUNCTION_FAILED` rather than confirming an unaudited security action
+/// (same accepted divergence as `C_Login`, ADR-0012).
 pub(super) async fn login_user(
+    ctx: &HandlerContext,
+    request: Request<pkcs11_proxy_ng_proto::LoginUserRequest>,
+) -> Result<Response<pkcs11_proxy_ng_proto::LoginUserResponse>, Status> {
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
+    // Look up the owning slot before handing the request to the inner handler.
+    let vh = VirtualHandle(request.get_ref().session_handle);
+    let slot_for_audit = ctx
+        .context_manager
+        .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
+        .await
+        .flatten();
+    let slot_for_audit = match slot_for_audit {
+        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
+        None => None,
+    };
+
+    let response = login_user_inner(ctx, request).await?;
+    let ck_rv = response.get_ref().ck_rv;
+
+    if emit_auth_event(
+        ctx,
+        &ctx_id,
+        "C_LoginUser",
+        EventClass::Auth,
+        slot_for_audit,
+        session_for_audit,
+        ck_rv,
+        started,
+    )
+    .is_err()
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::LoginUserResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+        }));
+    }
+
+    Ok(response)
+}
+
+async fn login_user_inner(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::LoginUserRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::LoginUserResponse>, Status> {
@@ -563,6 +612,60 @@ mod tests {
             !output.contains("operator-7"),
             "username must never appear in log output: {output}"
         );
+    }
+
+    /// W1-C1-03: `login_user` must emit a fail-closed `Auth` audit record
+    /// exactly like `C_Login` does (`session.rs:177`) — including failed
+    /// (wrong-PIN) attempts. Record shape matches the sibling auth ops.
+    #[tokio::test]
+    async fn login_user_wrong_pin_emits_auth_audit_record() {
+        let dir = std::env::temp_dir()
+            .join(format!("pkcs11-proxy-audit-{}-login-user", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (ctx_mgr, _mock, backend, ctx_a, _ctx_b, session_a, _session_b, _slot) =
+            setup_login_user().await;
+        let cfg = crate::config::AuditConfig {
+            dir: Some(dir.clone()),
+            rotate_max_bytes: 1 << 20,
+            rotate_keep_files: 10,
+            ..Default::default()
+        };
+        let sink =
+            crate::server::audit::spawn_audit_sink(&cfg).unwrap().expect("audit sink must spawn");
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.audit = Some(sink.clone());
+
+        let wrong_pin = b"C1-03-WrongPin-SENSITIVE".to_vec();
+        let rv = login_user(
+            &ctx,
+            login_user_request(&ctx_a, session_a, CkUserType::User as u64, &wrong_pin),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+        assert_eq!(rv, CkRv::PIN_INCORRECT.0, "wrong PIN must fail with PIN_INCORRECT");
+
+        sink.flush().await.unwrap();
+        let jsonl = std::fs::read_to_string(dir.join("audit.jsonl")).unwrap();
+        assert!(
+            jsonl.contains("\"C_LoginUser\""),
+            "wrong-PIN login_user must emit an audit record, got: {jsonl}"
+        );
+        let record: serde_json::Value = jsonl
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .find(|record: &serde_json::Value| record["method"] == "C_LoginUser")
+            .expect("C_LoginUser record must be present");
+        assert_eq!(record["class"], "auth", "record class must match sibling auth ops");
+        assert_eq!(record["ck_rv"], CkRv::PIN_INCORRECT.0);
+        assert!(record.get("session").is_some(), "record must carry the session field");
+        assert!(record.get("slot").is_some(), "record must carry the slot field");
+        assert!(
+            !jsonl.contains("C1-03-WrongPin-SENSITIVE"),
+            "PIN must never appear in audit output"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Set up two client contexts sharing one backend slot, each with one

@@ -215,6 +215,9 @@ pub struct MockBackend {
     login_calls: AtomicUsize,
     login_user_calls: AtomicUsize,
     token_info_calls: AtomicUsize,
+    /// Count of backend `find_objects` (`C_FindObjects`) calls. Used by the
+    /// W1-C1-07 scan-bound test to prove bounded backend round-trips.
+    find_objects_calls: AtomicUsize,
     /// Count of backend data-operation calls (sign, verify, digest, encrypt,
     /// decrypt and their variants). Incremented inside `resolve_input` so
     /// every migrated data op that calls it contributes. Used by
@@ -364,6 +367,7 @@ impl MockBackend {
             login_calls: AtomicUsize::new(0),
             login_user_calls: AtomicUsize::new(0),
             token_info_calls: AtomicUsize::new(0),
+            find_objects_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
             message_begin_calls: AtomicUsize::new(0),
             message_init_contract: Mutex::new(None),
@@ -564,6 +568,11 @@ impl MockBackend {
     /// analogue of [`MockBackend::login_call_count`].
     pub fn login_user_call_count(&self) -> usize {
         self.login_user_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of backend `find_objects` (`C_FindObjects`) calls.
+    pub fn find_objects_call_count(&self) -> usize {
+        self.find_objects_calls.load(Ordering::SeqCst)
     }
 
     /// Number of backend data-operation calls (sign, verify, digest, encrypt,

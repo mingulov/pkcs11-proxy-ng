@@ -199,7 +199,9 @@ pub(super) async fn destroy_object(
     // cached attribute entries so a recycled virtual handle cannot alias stale
     // data, inherit created-status or privacy, or serve stale coalesced
     // attributes for the now-destroyed object (B2, G3, G3-PR3 Task 2, R2 I1,
-    // D6(1)).
+    // D6(1)). Revoke the daemon-wide authz generation (W1-L13-18): the freed
+    // backend handle may be recycled by another context's create, which must
+    // invalidate every context's cached token-object metadata.
     if result.is_ok() {
         let virtual_object = VirtualHandle(req.object_handle);
         let _ = ctx
@@ -207,6 +209,7 @@ pub(super) async fn destroy_object(
             .get_context(&ctx_id, |client_ctx| {
                 client_ctx.object_handles.remove(virtual_object);
                 client_ctx.object_metadata.remove(&virtual_object);
+                client_ctx.token_object_metadata.remove(&virtual_object);
                 client_ctx.created_objects.remove(&virtual_object);
                 client_ctx.object_private.remove(&virtual_object);
                 // I1: evict cached attribute entries for this object (R2 coalescer).
@@ -216,6 +219,7 @@ pub(super) async fn destroy_object(
                 client_ctx.attr_cache.retain(|(vh, _), _| *vh != virtual_object);
             })
             .await;
+        ctx.context_manager.revoke_authz_generation();
     }
 
     Ok(Response::new(pkcs11_proxy_ng_proto::DestroyObjectResponse { ck_rv: ck_rv_only(result) }))
@@ -231,7 +235,7 @@ mod tests {
     use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
     use pkcs11_proxy_ng_types::*;
 
-    use crate::server::context_manager::{CachedAttr, ContextManager};
+    use crate::server::context_manager::{CachedAttr, ContextManager, ObjectMetadata};
     use crate::server::grpc_service::HandlerContext;
     use crate::server::handle_map::BackendHandle;
 
@@ -298,6 +302,81 @@ mod tests {
         assert!(
             ctx_mgr.attr_cache_get(&ctx_id, obj_vh.0, CkAttributeType::ID).await.is_none(),
             "attr_cache entry for destroyed object must be evicted (I1 fix)"
+        );
+    }
+
+    /// W1-L13-18: a successful C_DestroyObject revokes the daemon-wide authz
+    /// generation (the freed backend handle may be recycled by another
+    /// context's create) and evicts the destroyed handle's token entry.
+    #[tokio::test]
+    async fn destroy_object_revokes_authz_generation() {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        let (session_vh, obj_vh) = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                let svh = ctx.register_session(BackendHandle(backend_session.0), backend_slot);
+                let ovh = ctx.object_handles.insert(BackendHandle(backend_object.0));
+                (svh, ovh)
+            })
+            .await
+            .unwrap();
+
+        // Seed token-metadata entries for the object and an unrelated handle.
+        for vh in [obj_vh.0, 999] {
+            ctx_mgr
+                .cache_object_metadata(
+                    &ctx_id,
+                    vh,
+                    ObjectMetadata {
+                        unique_id: b"tok-uid".to_vec().into(),
+                        class: Some(CkObjectClass::SECRET_KEY),
+                        is_token: true,
+                    },
+                )
+                .await;
+        }
+        assert!(
+            ctx_mgr.object_metadata(&ctx_id, obj_vh.0).await.is_some(),
+            "token entry must be cached before destroy"
+        );
+        let generation_before = ctx_mgr.authz_generation();
+
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        let resp = super::destroy_object(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh.0,
+                object_handle: obj_vh.0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "destroy_object must succeed");
+        assert_eq!(
+            ctx_mgr.authz_generation(),
+            generation_before + 1,
+            "successful destroy must revoke the authz generation"
+        );
+        assert!(
+            ctx_mgr.object_metadata(&ctx_id, 999).await.is_none(),
+            "revocation must invalidate unrelated cached token entries"
         );
     }
 

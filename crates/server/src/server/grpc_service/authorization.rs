@@ -87,8 +87,9 @@ pub(super) async fn slot_is_authorized(
 /// **Per-object gate (when `per_object_active()` is true):** If any grant in
 /// the policy has an `objects` list, the gate also checks for a per-object
 /// extract override for `virtual_object`. The object's `CKA_UNIQUE_ID` is
-/// resolved from the session-object metadata cache (`object_metadata`) when
-/// available, otherwise fetched from the backend and cached.
+/// resolved from the metadata cache (`object_metadata` — session objects
+/// per-handle, token objects gated by the authz generation) when available,
+/// otherwise fetched from the backend and cached.
 ///
 /// On uid-resolution failure (I1 fix — fail-closed when overrides exist):
 /// - If the principal has ANY per-object extract override (`extract.is_some()`)
@@ -182,7 +183,7 @@ pub(super) async fn extract_is_permitted(
 /// Resolve the `CKA_UNIQUE_ID` of `virtual_object` for the extract gate.
 ///
 /// Fast path: returns the cached `ObjectMetadata::unique_id` when already
-/// present in the session-object cache (populated by `gate_object_handle`
+/// present in the metadata cache (populated by `gate_object_handle`
 /// earlier in the same request). On a cache miss, resolves the backend
 /// session and object handles in one context-lock and calls
 /// `fetch_object_metadata` — the result is cached for subsequent calls.
@@ -199,8 +200,8 @@ async fn resolve_uid_for_extract(
     virtual_session: u64,
     virtual_object: u64,
 ) -> Option<SecretBytes> {
-    // Fast path: metadata already in cache (session objects only; token objects
-    // are never cached per the I2 invariant).
+    // Fast path: metadata already in cache — session objects per-handle,
+    // token objects while their authz generation is current (W1-L13-18).
     if let Some(cached) = ctx.context_manager.object_metadata(ctx_id, virtual_object).await {
         return Some(cached.unique_id);
     }
@@ -1064,11 +1065,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn session_object_metadata_is_cached_token_object_is_not() {
-            // I2 proof: after fetch_object_metadata, a session object (is_token=false)
-            // CAN be cached, while a token object (is_token=true) MUST NOT be cached.
-            // We verify this by checking that cache_object_metadata respects the
-            // is_token flag: session objects land in the cache, token objects do not.
+        async fn session_object_metadata_is_cached_token_object_is_gated() {
+            // W1-L13-18: a session object (is_token=false) caches per-handle,
+            // while a token object (is_token=true) caches gated by the authz
+            // generation — revocation invalidates the token entry only.
             use crate::server::context_manager::ContextManager;
 
             let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
@@ -1090,17 +1090,30 @@ mod tests {
             };
             ctx_mgr.cache_object_metadata(&ctx_id, 2, token_meta).await;
             let cached_token = ctx_mgr.object_metadata(&ctx_id, 2).await;
-            assert!(cached_token.is_none(), "token object metadata must NOT be cached (I2 fix)");
+            assert!(
+                cached_token.is_some(),
+                "token object metadata must be cached within the generation"
+            );
+
+            ctx_mgr.revoke_authz_generation();
+            assert!(
+                ctx_mgr.object_metadata(&ctx_id, 2).await.is_none(),
+                "revocation must invalidate cached token metadata"
+            );
+            assert!(
+                ctx_mgr.object_metadata(&ctx_id, 1).await.is_some(),
+                "revocation must not evict session-object entries"
+            );
         }
 
         #[tokio::test]
-        async fn token_object_refetched_on_each_gate_call() {
-            // I2 proof via mock call count: a token object (is_token=true) must
-            // trigger a backend C_GetAttributeValue on every gate invocation
-            // (no cache hit). We verify by counting get_attribute_value calls
-            // against the mock backend for two consecutive gate checks.
-            // (Uses gate_object_handle indirectly via setup_per_object_test.)
-            // This is tested in service_utils::tests as per_object_gate_token_object_not_cached.
+        async fn token_object_refetched_after_revocation() {
+            // W1-L13-18 proof via mock call count: a token object (is_token=true)
+            // is cached within the authz generation (repeated gated uses issue
+            // one backend fetch) and re-fetched after revocation. We verify by
+            // counting get_attribute_value calls against the mock backend.
+            // This is tested in service_utils::tests as
+            // per_object_gate_token_object_cached_until_revoked.
         }
 
         // --- M2: unrecognised CLASS format yields class=None, not fail-closed ---

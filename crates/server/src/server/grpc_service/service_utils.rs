@@ -708,9 +708,9 @@ pub(super) async fn gate_object_handle(
     }
 
     // --- 3. Resolve ObjectMetadata from cache or backend (non-created objects) ---
-    // Token objects (is_token=true) are never cached (I2 fix: cross-client backend
-    // handle recycling immunity). Session objects are cached for the lifetime of
-    // the virtual handle.
+    // Session objects are cached for the lifetime of the virtual handle;
+    // token objects are cached gated by the authz generation (W1-L13-18:
+    // cross-client backend handle recycling immunity via revocation).
     let meta: Option<ObjectMetadata> =
         ctx.context_manager.object_metadata(ctx_id, virtual_object).await;
     let meta = match meta {
@@ -720,7 +720,8 @@ pub(super) async fn gate_object_handle(
             let fetched =
                 super::authorization::fetch_object_metadata(ctx, backend_session, backend_object)
                     .await;
-            // cache_object_metadata internally skips token objects (I2 fix).
+            // cache_object_metadata tags token objects with the current
+            // authz generation (W1-L13-18).
             if let Some(ref m) = fetched {
                 ctx.context_manager.cache_object_metadata(ctx_id, virtual_object, m.clone()).await;
             }
@@ -2120,11 +2121,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_object_gate_token_object_not_cached() {
-        // I2 proof: a token object (is_token=true) must NOT be cached.
-        // Two consecutive gate calls on the same token-object virtual handle must
-        // each trigger a fresh backend C_GetAttributeValue (no cache hit).
-        // We verify by counting backend attribute calls via a mock counter.
+    async fn per_object_gate_token_object_cached_until_revoked() {
+        // W1-L13-18: a token object (is_token=true) IS cached, gated by the
+        // authz generation. Two consecutive gated uses issue one backend
+        // fetch; revoking the generation forces a re-fetch.
         use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
@@ -2149,6 +2149,14 @@ mod tests {
             CkAttributeType::UNIQUE_ID,
             MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone().into())),
         );
+        // Public object (native default): the D6(1) logged-out USE check then
+        // needs no per-operation backend probe, so the mock counter below
+        // observes metadata fetches only.
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
         let policy = per_object_policy(IDENTITY, "MockToken", ALLOWED_UID_HEX);
@@ -2167,6 +2175,9 @@ mod tests {
                     crate::server::slot_map::BackendSlotId(CkSlotId(0)),
                 );
                 let vo = c.object_handles.insert(BackendHandle(backend_object.0));
+                // Record the known-public bit (as mint registration would) so
+                // logged-out USE skips the backend privacy probe.
+                c.object_private.insert(vo, false);
                 (vs, vo)
             })
             .await
@@ -2174,21 +2185,48 @@ mod tests {
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = policy;
 
-        // First gate call — should fetch from backend.
-        let _ = resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object.0)
+        let calls_before = mock.attr_get_call_count();
+        // First gated use — must fetch from the backend.
+        let first = resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object.0)
             .await
             .unwrap();
-        // Second gate call — token objects must NOT be cached; must re-fetch.
-        let _ = resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object.0)
-            .await
-            .unwrap();
+        let calls_after_first = mock.attr_get_call_count();
+        assert!(
+            calls_after_first > calls_before,
+            "first gated use must fetch token metadata from the backend"
+        );
 
-        // cache_object_metadata skips token objects (is_token=true), so the context's
-        // object_metadata map must have NO entry for this virtual handle.
+        // Second gated use — generation still current, no re-fetch.
+        let second = resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object.0)
+            .await
+            .unwrap();
+        assert_eq!(
+            mock.attr_get_call_count(),
+            calls_after_first,
+            "repeated gated use of a token object must not re-fetch"
+        );
+        assert_eq!(first, second, "gated reuse must resolve identically");
+
+        // The entry is cached under the virtual handle.
         let cached = ctx_mgr.object_metadata(&ctx_id, virtual_object.0).await;
         assert!(
-            cached.is_none(),
-            "token object metadata must NOT be cached in the context (I2 fix)"
+            cached.is_some_and(|meta| meta.is_token),
+            "token object metadata must be cached within the generation"
+        );
+
+        // Revocation invalidates: the entry reads as a miss and the next
+        // gated use re-fetches from the backend.
+        ctx_mgr.revoke_authz_generation();
+        assert!(
+            ctx_mgr.object_metadata(&ctx_id, virtual_object.0).await.is_none(),
+            "revoking the authz generation must invalidate cached token metadata"
+        );
+        let _ = resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object.0)
+            .await
+            .unwrap();
+        assert!(
+            mock.attr_get_call_count() > calls_after_first,
+            "gated use after revocation must re-fetch from the backend"
         );
     }
 

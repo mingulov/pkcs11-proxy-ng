@@ -49,6 +49,8 @@ impl MockBackend {
         session: CkSessionHandle,
         max_count: u32,
     ) -> CkResult<Vec<CkObjectHandle>> {
+        use std::sync::atomic::Ordering;
+        self.find_objects_calls.fetch_add(1, Ordering::SeqCst);
         let state = self.state.lock().unwrap();
         if !state.has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);

@@ -584,6 +584,9 @@ pub struct ListenerGroup {
 pub struct ResilienceConfig {
     /// If set, a `C_FindObjects` result larger than this is counted as a
     /// pathological-population event and logged. Count-only: NO extra backend calls.
+    /// The same value also bounds each `find_objects` filter scan (W1-C1-07):
+    /// past the bound the scan stops with a loud failure instead of draining
+    /// an adversarial population unboundedly. Unset = unbounded, as before.
     pub find_result_warn_threshold: Option<usize>,
     /// If set, a Unix-domain metrics endpoint (mode 0600) is bound here, serving
     /// Prometheus text on `GET /metrics`.

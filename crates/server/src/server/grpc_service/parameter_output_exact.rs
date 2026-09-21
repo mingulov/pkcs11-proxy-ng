@@ -96,11 +96,23 @@ pub(super) async fn parameter_output_exact(
     let function = match parameter_output_function_from_i32(req.function) {
         Some(f) => f,
         None => {
+            // W1-C1-10: same as byte_output_exact — an unknown function id
+            // carries an explicit CK_RV in both result carriers, never a
+            // result-less response the shim cannot interpret.
             return Ok(Response::new(pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
                 message_effects: None,
                 authenticated_output: None,
-                output_result: None,
-                parameter_result: None,
+                output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                    apply_returned_len: Some(false),
+                    ck_rv: CkRv::FUNCTION_NOT_SUPPORTED.0,
+                    returned_len: 0,
+                    value: None,
+                }),
+                parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult {
+                    ck_rv: CkRv::FUNCTION_NOT_SUPPORTED.0,
+                    returned_len: 0,
+                    value: None,
+                }),
                 message_parameter_out: None,
             }));
         }
@@ -1090,5 +1102,33 @@ mod ambiguity_tests {
         );
         assert_eq!(mock.message_parameter_call_count(), calls_before + 1);
         assert_eq!(operation.lock().await.shape, None);
+    }
+
+    /// W1-C1-10: an unknown parameter-output function id must yield a
+    /// response carrying an explicit CK_RV — never a result-less response.
+    #[tokio::test]
+    async fn unknown_function_returns_explicit_ck_rv() {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+
+        let resp = parameter_output_exact(
+            &HandlerContext::for_test(&ctx_mgr, &backend),
+            Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                exact_output_effects_version: 1,
+                function: 9999,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        let output = resp.output_result.expect("unknown function must still carry a ck_rv");
+        assert_eq!(output.ck_rv, CkRv::FUNCTION_NOT_SUPPORTED.0);
+        let parameter =
+            resp.parameter_result.expect("parameter result must be present with the ck_rv");
+        assert_eq!(parameter.ck_rv, CkRv::FUNCTION_NOT_SUPPORTED.0);
     }
 }

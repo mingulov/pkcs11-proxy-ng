@@ -5,7 +5,7 @@ use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use uuid::Uuid;
@@ -168,10 +168,11 @@ impl Drop for CloseSessionTransition {
 /// Cached object metadata for the per-object / per-class authorization gate (G3).
 ///
 /// Fetched in a single `C_GetAttributeValue` round-trip covering
-/// `CKA_UNIQUE_ID`, `CKA_CLASS`, and `CKA_TOKEN`. Only session objects
-/// (`is_token = false`) are stored in the cache; token objects are always
-/// re-fetched to prevent stale authorization against recycled backend handles
-/// (I2 fix, ADR-0012 §G3).
+/// `CKA_UNIQUE_ID`, `CKA_CLASS`, and `CKA_TOKEN`. Session objects
+/// (`is_token = false`) are cached for the virtual handle's lifetime; token
+/// objects are cached gated by the authz generation (W1-L13-18) so gated
+/// reuse avoids a backend round-trip without stale-authz risk (the I2
+/// never-cache rule it replaces; ADR-0012 §G3).
 #[derive(Debug, Clone)]
 pub struct ObjectMetadata {
     /// `CKA_UNIQUE_ID` bytes (ADR-0013: attribute values are secret-classified
@@ -203,6 +204,17 @@ pub struct CachedAttr {
     pub ck_rv: u64,
 }
 
+/// Token-object metadata tagged with the authz generation that fetched it
+/// (W1-L13-18). Reusable only while `generation` equals the manager's
+/// current generation; older entries are stale and must be re-fetched.
+#[derive(Debug, Clone)]
+pub struct GatedObjectMetadata {
+    /// Daemon-wide authz generation at fetch time.
+    pub generation: u64,
+    /// The fetched metadata.
+    pub meta: ObjectMetadata,
+}
+
 /// A logical client instance — the server-side PKCS#11 "application" (ADR-0002).
 pub struct LogicalClientInstance {
     pub id: ClientContextId,
@@ -212,15 +224,26 @@ pub struct LogicalClientInstance {
     pub session_slots: HashMap<VirtualHandle, BackendSlotId>, // session → slot ownership (ADR-0002 §7)
     pub object_handles: HandleMap,                            // virtual object → backend object
     /// Per-virtual-object cached `ObjectMetadata` (G3). **Only session objects
-    /// (`CKA_TOKEN=false`) are cached.** Token objects are never stored here —
-    /// they are re-fetched on every gate call so a cross-client backend handle
-    /// recycling event cannot cause a stale authorization decision (I2 fix).
+    /// (`CKA_TOKEN=false`) are cached here** — their lifetime is tied to the
+    /// owning session, so per-handle eviction suffices. Token objects live in
+    /// [`LogicalClientInstance::token_object_metadata`], gated by the
+    /// daemon-wide authz generation (W1-L13-18).
     ///
     /// Entries are evicted wherever `object_handles` entries are removed —
     /// on explicit `C_DestroyObject`, on session close (for session objects),
     /// and on context teardown — so a recycled virtual handle can never return
     /// stale metadata within one context.
     pub object_metadata: HashMap<VirtualHandle, ObjectMetadata>,
+    /// Per-virtual-object cached token-object `ObjectMetadata` (W1-L13-18),
+    /// each tagged with the authz generation that fetched it. An entry is
+    /// reusable only while its generation is current; any daemon-wide object
+    /// mutation (`C_DestroyObject`, `C_InitToken`) revokes the generation, so
+    /// a cross-client backend handle recycling event cannot cause a stale
+    /// authorization decision (the I2 never-cache rule, made generational).
+    ///
+    /// Evicted in the SAME removal hooks as `object_metadata` (per-handle
+    /// removal on session close and on `C_DestroyObject`, plus full teardown).
+    pub token_object_metadata: HashMap<VirtualHandle, GatedObjectMetadata>,
     /// Virtual object handles created as SESSION objects (CKA_TOKEN=false) in
     /// each virtual session. Evicted when that session closes so a recycled
     /// backend object number can never alias a stale handle (B2). Token objects
@@ -292,6 +315,7 @@ impl LogicalClientInstance {
             session_slots: HashMap::new(),
             object_handles: HandleMap::new(),
             object_metadata: HashMap::new(),
+            token_object_metadata: HashMap::new(),
             session_objects: HashMap::new(),
             created_objects: HashSet::new(),
             object_private: HashMap::new(),
@@ -335,6 +359,7 @@ impl LogicalClientInstance {
                 for object in objects {
                     self.object_handles.remove(object);
                     self.object_metadata.remove(&object);
+                    self.token_object_metadata.remove(&object);
                     self.created_objects.remove(&object);
                     self.object_private.remove(&object);
                     // Evict all cached attribute entries for this object (R2). Mirrors
@@ -372,6 +397,7 @@ impl LogicalClientInstance {
             for object in objects {
                 self.object_handles.remove(object);
                 self.object_metadata.remove(&object);
+                self.token_object_metadata.remove(&object);
                 self.created_objects.remove(&object);
                 self.object_private.remove(&object);
                 // Evict all cached attribute entries for this object (R2). Mirrors
@@ -400,6 +426,7 @@ impl LogicalClientInstance {
         self.session_slots.clear();
         self.object_handles.clear();
         self.object_metadata.clear();
+        self.token_object_metadata.clear();
         self.session_objects.clear();
         self.created_objects.clear();
         self.object_private.clear();
@@ -464,6 +491,12 @@ pub struct ContextManager {
     /// the already-logged-in token instead of the synthesized logical OK. One
     /// lock per slot id; different slots log in concurrently.
     login_locks: Arc<DashMap<BackendSlotId, Arc<Mutex<()>>>>,
+    /// Daemon-wide authz generation (W1-L13-18). Cached token-object metadata
+    /// is tagged with the generation at fetch time and reusable only while
+    /// current. Revoked (bumped) by every daemon-wide object mutation —
+    /// `C_DestroyObject` and `C_InitToken` — so a cross-client backend handle
+    /// recycling event can never validate a stale cached entry.
+    authz_generation: AtomicU64,
 }
 
 /// Maximum age of a cached `(label, serial)` before an authorization check
@@ -517,7 +550,22 @@ impl ContextManager {
             max_contexts,
             token_info_cache: Arc::new(DashMap::new()),
             login_locks: Arc::new(DashMap::new()),
+            authz_generation: AtomicU64::new(0),
         }
+    }
+
+    /// Current daemon-wide authz generation (W1-L13-18). Token-object
+    /// metadata cached under an older generation is stale.
+    pub fn authz_generation(&self) -> u64 {
+        self.authz_generation.load(Ordering::SeqCst)
+    }
+
+    /// Revoke the daemon-wide authz generation (W1-L13-18), invalidating all
+    /// cached token-object metadata. Called after every daemon-wide object
+    /// mutation (`C_DestroyObject`, `C_InitToken`); session-object entries are
+    /// unaffected (their lifetime is per-handle, not generational).
+    pub fn revoke_authz_generation(&self) {
+        self.authz_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Per-slot login/logout serialization lock (M5). Acquire it (`.lock().await`)
@@ -668,17 +716,31 @@ impl ContextManager {
     /// Return the cached [`ObjectMetadata`] for `virtual_object` within context
     /// `ctx_id`, or `None` on a cache miss.
     ///
-    /// A `None` result means either the object has never been fetched, OR it is
-    /// a token object (token objects are never cached — see `cache_object_metadata`).
-    /// The caller must fetch from the backend via `fetch_object_metadata` when
-    /// this returns `None`.
+    /// Session objects hit the per-handle cache. Token objects hit only while
+    /// their entry's authz generation is current (W1-L13-18); a revoked entry
+    /// is dropped eagerly and reads as a miss. The caller must fetch from the
+    /// backend via `fetch_object_metadata` when this returns `None`.
     pub async fn object_metadata(
         &self,
         ctx_id: &ClientContextId,
         virtual_object: u64,
     ) -> Option<ObjectMetadata> {
+        let generation = self.authz_generation.load(Ordering::SeqCst);
         self.get_context(ctx_id, |ctx| {
-            ctx.object_metadata.get(&VirtualHandle(virtual_object)).cloned()
+            let vh = VirtualHandle(virtual_object);
+            if let Some(meta) = ctx.object_metadata.get(&vh) {
+                return Some(meta.clone());
+            }
+            match ctx.token_object_metadata.get(&vh) {
+                Some(gated) if gated.generation == generation => Some(gated.meta.clone()),
+                // Stale generation: drop eagerly so the entry can never
+                // validate a later gate call.
+                Some(_) => {
+                    ctx.token_object_metadata.remove(&vh);
+                    None
+                }
+                None => None,
+            }
         })
         .await
         .flatten()
@@ -686,14 +748,17 @@ impl ContextManager {
 
     /// Cache [`ObjectMetadata`] for `virtual_object` within context `ctx_id`.
     ///
-    /// **I2 fix:** token objects (`meta.is_token == true`) are NEVER cached.
-    /// They are re-fetched on every gate call so a cross-client backend handle
-    /// recycling event cannot cause a stale authorization decision.
-    ///
     /// Session objects (`!meta.is_token`) are cached and evicted together with
     /// the virtual object handle (on `C_DestroyObject`, session close, or
     /// context teardown) so a recycled virtual handle can never return stale
     /// metadata within one context.
+    ///
+    /// Token objects (`meta.is_token == true`) are cached tagged with the
+    /// current authz generation (W1-L13-18): gated reuse within the generation
+    /// avoids a backend round-trip, and any daemon-wide object mutation
+    /// revokes the generation so a cross-client backend handle recycling event
+    /// cannot cause a stale authorization decision (the I2 never-cache rule,
+    /// made generational).
     ///
     /// No-ops silently when the context no longer exists.
     pub async fn cache_object_metadata(
@@ -703,7 +768,16 @@ impl ContextManager {
         meta: ObjectMetadata,
     ) {
         if meta.is_token {
-            return; // Never cache token objects (I2 fix).
+            let generation = self.authz_generation.load(Ordering::SeqCst);
+            let _ = self
+                .get_context(ctx_id, |ctx| {
+                    ctx.token_object_metadata.insert(
+                        VirtualHandle(virtual_object),
+                        GatedObjectMetadata { generation, meta },
+                    );
+                })
+                .await;
+            return;
         }
         let _ = self
             .get_context(ctx_id, |ctx| {
@@ -728,6 +802,22 @@ impl ContextManager {
         attr: CkAttributeType,
     ) -> Option<CachedAttr> {
         self.get_context(ctx_id, |ctx| ctx.attr_cache.get(&(VirtualHandle(object), attr)).cloned())
+            .await
+            .flatten()
+    }
+
+    /// Borrow a cached attribute to build a response without cloning the
+    /// entry out of the map (W1-L13-15: single copy on the coalescer hit
+    /// path — only the wire encoding allocates). Returns `None` on a cache
+    /// miss or when the context is gone.
+    pub async fn attr_cache_get_with<R>(
+        &self,
+        ctx_id: &ClientContextId,
+        object: u64,
+        attr: CkAttributeType,
+        f: impl FnOnce(&CachedAttr) -> R,
+    ) -> Option<R> {
+        self.get_context(ctx_id, |ctx| ctx.attr_cache.get(&(VirtualHandle(object), attr)).map(f))
             .await
             .flatten()
     }

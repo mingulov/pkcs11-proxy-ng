@@ -67,6 +67,10 @@ pub(super) async fn init_token(
     let ck_rv = match &result {
         Ok(()) => {
             info!(context_id = %ctx_id.0, label = %label_for_log, "Token initialized");
+            // W1-L13-18: initializing the token destroys its objects — revoke
+            // the daemon-wide authz generation so no cached token-object
+            // metadata survives the wipe.
+            ctx_mgr.revoke_authz_generation();
             CkRv::OK.0
         }
         Err(error) => {
