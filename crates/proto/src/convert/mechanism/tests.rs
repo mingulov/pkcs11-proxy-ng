@@ -18,6 +18,9 @@ use pkcs11_proxy_ng_types::{
 };
 
 /// Helper: wrap params in a mechanism, round-trip through proto, return the result.
+/// W1-C8-05: pins full-field equality plus mechanism_type for every caller,
+/// so a dropped field or a mistyped mechanism fails the suite even when the
+/// per-test match arm below only spot-checks individual fields.
 fn round_trip(params: CkMechanismParams) -> CkMechanismParams {
     let mech = CkMechanism {
         mechanism_type: CkMechanismType(0x9999), // arbitrary, doesn't matter for conversion
@@ -25,6 +28,7 @@ fn round_trip(params: CkMechanismParams) -> CkMechanismParams {
     };
     let proto: v1_proto::Mechanism = (&mech).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
+    assert_eq!(back, mech, "round-trip must preserve every field and mechanism_type");
     back.params.expect("params should survive round-trip")
 }
 
@@ -59,6 +63,7 @@ fn mechanism_pss_round_trip() {
         CkMechanismParams::RsaPkcsPss(p) => {
             assert_eq!(p.salt_len, 32);
             assert_eq!(p.hash_alg, CkMechanismType::SHA256);
+            assert_eq!(p.mgf, 1);
         }
         _ => panic!("wrong variant"),
     }
@@ -81,7 +86,14 @@ fn mechanism_oaep_round_trip() {
     let back = CkMechanism::try_from(&proto).unwrap();
     assert_eq!(back.mechanism_type, original.mechanism_type);
     match back.params.unwrap() {
-        CkMechanismParams::RsaPkcsOaep(p) => assert_eq!(p.source_data, vec![1, 2, 3].into()),
+        CkMechanismParams::RsaPkcsOaep(p) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
+            assert_eq!(p.hash_alg, CkMechanismType::SHA256);
+            assert_eq!(p.mgf, 1);
+            assert_eq!(p.source, 1);
+            assert_eq!(p.source_data, vec![1, 2, 3].into());
+            assert!(!p.source_null);
+        }
         _ => panic!("wrong variant"),
     }
 }
@@ -101,8 +113,16 @@ fn mechanism_oaep_empty_source_data_round_trip() {
     };
     let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
+    // W1-C8-05: full-field + mechanism_type assertions; a dropped field must fail.
+    assert_eq!(back.mechanism_type, original.mechanism_type);
     match back.params.unwrap() {
-        CkMechanismParams::RsaPkcsOaep(p) => assert!(p.source_data.is_empty()),
+        CkMechanismParams::RsaPkcsOaep(p) => {
+            assert_eq!(p.hash_alg, CkMechanismType::SHA256);
+            assert_eq!(p.mgf, 0x00000002);
+            assert_eq!(p.source, 0x00000001);
+            assert!(p.source_data.is_empty());
+            assert!(!p.source_null);
+        }
         _ => panic!("wrong variant"),
     }
 }
@@ -132,6 +152,9 @@ fn mechanism_gcm_round_trip() {
             assert_eq!(p.iv_buffer_len, 12);
             assert_eq!(p.aad, vec![0xAA, 0xBB].into());
             assert_eq!(p.tag_bits, 128);
+            // W1-C8-05: null flags are fields too; a dropped flag must fail.
+            assert!(!p.iv_null);
+            assert!(!p.aad_null);
         }
         _ => panic!("wrong variant"),
     }
@@ -154,10 +177,17 @@ fn mechanism_gcm_empty_aad_round_trip() {
     };
     let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
+    // W1-C8-05: full-field + mechanism_type assertions; a dropped field must fail.
+    assert_eq!(back.mechanism_type, original.mechanism_type);
     match back.params.unwrap() {
         CkMechanismParams::Gcm(p) => {
+            assert_eq!(p.iv, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+            assert_eq!(p.iv_bits, 96);
+            assert_eq!(p.iv_buffer_len, 12);
             assert!(p.aad.is_empty());
             assert_eq!(p.tag_bits, 96);
+            assert!(!p.iv_null);
+            assert!(!p.aad_null);
         }
         _ => panic!("wrong variant"),
     }
@@ -198,6 +228,8 @@ fn mechanism_ecdh1_derive_null_kdf_no_shared_data() {
     };
     let proto: v1_proto::Mechanism = (&original).try_into().unwrap();
     let back = CkMechanism::try_from(&proto).unwrap();
+    // W1-C8-05: mechanism_type must be pinned alongside the fields.
+    assert_eq!(back.mechanism_type, original.mechanism_type);
     match back.params.unwrap() {
         CkMechanismParams::Ecdh1Derive(p) => {
             assert_eq!(p.kdf, 1);
@@ -284,6 +316,8 @@ fn mechanism_info_all_known_flags_round_trip() {
     let proto: v1_proto::MechanismInfo = (&original).into();
     let back = CkMechanismInfo::from(&proto);
     assert_eq!(back.flags.0, flags);
+    // W1-C8-05: full-field assertions; a dropped field must fail.
+    assert_eq!(back.min_key_size, 0);
     assert_eq!(back.max_key_size, u64::MAX);
 }
 
@@ -293,6 +327,8 @@ fn mechanism_info_sentinel_key_sizes() {
         CkMechanismInfo { min_key_size: 0, max_key_size: u64::MAX, flags: CkMechanismFlags(0) };
     let proto: v1_proto::MechanismInfo = (&original).into();
     let back = CkMechanismInfo::from(&proto);
+    // W1-C8-05: full-field assertions; a dropped field must fail.
+    assert_eq!(back.flags, CkMechanismFlags(0));
     assert_eq!(back.min_key_size, 0);
     assert_eq!(back.max_key_size, u64::MAX);
 }
@@ -345,7 +381,12 @@ fn ecmqv_derive_round_trip() {
     });
     match round_trip(params) {
         CkMechanismParams::EcmqvDerive(p) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(p.kdf, 3);
+            assert_eq!(p.shared_data, vec![0xAA].into());
+            assert_eq!(p.public_data, vec![0x04; 33]);
+            assert_eq!(p.private_data_len, 16);
+            assert_eq!(p.public_data2, vec![0x04; 33]);
             assert_eq!(p.public_key_handle, 0xDEAD);
             assert_eq!(p.private_data_handle, 0xABCD);
         }
@@ -382,8 +423,11 @@ fn x942_dh2_derive_round_trip() {
     });
     match round_trip(params) {
         CkMechanismParams::X942Dh2Derive(p) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(p.kdf, 2);
             assert!(p.other_info.is_empty());
+            assert_eq!(p.public_data, vec![0x55; 128]);
+            assert_eq!(p.private_data_len, 64);
             assert_eq!(p.private_data_handle, 42);
             assert_eq!(p.public_data2.len(), 128);
         }
@@ -404,9 +448,14 @@ fn x942_mqv_derive_round_trip() {
     });
     match round_trip(params) {
         CkMechanismParams::X942MqvDerive(p) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(p.kdf, 3);
-            assert_eq!(p.public_key_handle, 200);
+            assert_eq!(p.other_info, vec![0xFF].into());
+            assert_eq!(p.public_data, vec![0x11; 64]);
+            assert_eq!(p.private_data_len, 32);
             assert_eq!(p.private_data_handle, 100);
+            assert_eq!(p.public_data2, vec![0x22; 64]);
+            assert_eq!(p.public_key_handle, 200);
         }
         _ => panic!("wrong variant"),
     }
@@ -425,10 +474,13 @@ fn hkdf_round_trip() {
     });
     match round_trip(params) {
         CkMechanismParams::Hkdf(p) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
             assert!(p.extract);
             assert!(p.expand);
             assert_eq!(p.prf_hash_mechanism, CkMechanismType::SHA256.0);
+            assert_eq!(p.salt_type, 1);
             assert_eq!(p.salt.len(), 32);
+            assert_eq!(p.salt_key_handle, 0);
             assert_eq!(p.info.len(), 16);
         }
         _ => panic!("wrong variant"),
@@ -448,9 +500,14 @@ fn hkdf_extract_only_round_trip() {
     });
     match round_trip(params) {
         CkMechanismParams::Hkdf(p) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
             assert!(p.extract);
             assert!(!p.expand);
+            assert_eq!(p.prf_hash_mechanism, CkMechanismType::SHA384.0);
+            assert_eq!(p.salt_type, 2);
+            assert!(p.salt.is_empty());
             assert_eq!(p.salt_key_handle, 0x42);
+            assert!(p.info.is_empty());
         }
         _ => panic!("wrong variant"),
     }
@@ -561,6 +618,8 @@ fn rsa_aes_key_wrap_round_trip() {
             assert_eq!(p.oaep_params.mgf, 1);
             assert_eq!(p.oaep_params.source, 1);
             assert_eq!(p.oaep_params.source_data, vec![0x01, 0x02].into());
+            // W1-C8-05: nested source_null is a field too; a drop must fail.
+            assert!(!p.oaep_params.source_null);
         }
         _ => panic!("wrong variant"),
     }
@@ -1183,11 +1242,30 @@ fn ssl3_master_key_derive_round_trip() {
     match p {
         CkMechanismParams::Ssl3MasterKeyDerive(v) => {
             assert_eq!(v.random_info.client_random.len(), 32);
+            // W1-C8-05: server_random is a field too; a dropped half must fail.
+            assert_eq!(v.random_info.server_random, vec![0x22; 32]);
             assert_eq!(v.version_major, 3);
             assert_eq!(v.version_minor, 0);
         }
         _ => panic!("wrong variant"),
     }
+}
+
+#[test]
+fn ssl3_master_key_derive_rejects_missing_random_info() {
+    // W1-C8-04: required nested random_info must be rejected when absent.
+    let proto = v1_proto::Mechanism {
+        mechanism_type: CkMechanismType::SSL3_MASTER_KEY_DERIVE.0,
+        params: Some(v1_proto::mechanism::Params::Ssl3MasterKeyDeriveParams(
+            v1_proto::Ssl3MasterKeyDeriveParams {
+                random_info: None,
+                version_major: 3,
+                version_minor: 0,
+            },
+        )),
+    };
+
+    expect_mechanism_param_invalid(proto);
 }
 
 #[test]
@@ -1204,9 +1282,29 @@ fn tls12_master_key_derive_round_trip() {
             assert_eq!(v.version_minor, 3);
             assert_eq!(v.prf_hash_mechanism, 0x250);
             assert_eq!(v.random_info.client_random.len(), 32);
+            // W1-C8-05: server_random is a field too; a dropped half must fail.
+            assert_eq!(v.random_info.server_random, vec![0x44; 32]);
         }
         _ => panic!("wrong variant"),
     }
+}
+
+#[test]
+fn tls12_master_key_derive_rejects_missing_random_info() {
+    // W1-C8-04: required nested random_info must be rejected when absent.
+    let proto = v1_proto::Mechanism {
+        mechanism_type: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0,
+        params: Some(v1_proto::mechanism::Params::Tls12MasterKeyDeriveParams(
+            v1_proto::Tls12MasterKeyDeriveParams {
+                random_info: None,
+                version_major: 3,
+                version_minor: 3,
+                prf_hash_mechanism: 0x250,
+            },
+        )),
+    };
+
+    expect_mechanism_param_invalid(proto);
 }
 
 #[test]
@@ -1252,6 +1350,9 @@ fn ssl3_key_mat_params_round_trip() {
             assert_eq!(v.key_size_bits, 128);
             assert_eq!(v.iv_size_bits, 128);
             assert!(!v.is_export);
+            // W1-C8-05: random_info contents are fields too; a drop must fail.
+            assert_eq!(v.random_info.client_random, vec![0x66; 32]);
+            assert_eq!(v.random_info.server_random, vec![0x77; 32]);
             assert_eq!(v.prf_hash_mechanism, 0x250);
             assert_eq!(v.client_mac_secret_handle, 101);
             assert_eq!(v.server_mac_secret_handle, 102);
@@ -1262,6 +1363,30 @@ fn ssl3_key_mat_params_round_trip() {
         }
         _ => panic!("wrong variant"),
     }
+}
+
+#[test]
+fn ssl3_key_mat_params_rejects_missing_random_info() {
+    // W1-C8-04: required nested random_info must be rejected when absent.
+    let proto = v1_proto::Mechanism {
+        mechanism_type: CkMechanismType::SSL3_KEY_AND_MAC_DERIVE.0,
+        params: Some(v1_proto::mechanism::Params::Ssl3KeyMatParams(v1_proto::Ssl3KeyMatParams {
+            mac_size_bits: 160,
+            key_size_bits: 128,
+            iv_size_bits: 128,
+            is_export: false,
+            random_info: None,
+            prf_hash_mechanism: 0x250,
+            client_mac_secret_handle: 101,
+            server_mac_secret_handle: 102,
+            client_key_handle: 201,
+            server_key_handle: 202,
+            client_iv: vec![0xA1; 16],
+            server_iv: vec![0xB1; 16],
+        })),
+    };
+
+    expect_mechanism_param_invalid(proto);
 }
 
 #[test]
@@ -1278,6 +1403,8 @@ fn wtls_master_key_derive_round_trip() {
         CkMechanismParams::WtlsMasterKeyDerive(v) => {
             assert_eq!(v.digest_mechanism, 0x250);
             assert_eq!(v.random_info.client_random.len(), 16);
+            // W1-C8-05: server_random is a field too; a dropped half must fail.
+            assert_eq!(v.random_info.server_random, vec![0x99; 16]);
             assert_eq!(v.version, 1);
         }
         _ => panic!("wrong variant"),
@@ -1338,17 +1465,43 @@ fn wtls_key_mat_params_round_trip() {
     }));
     match p {
         CkMechanismParams::WtlsKeyMat(v) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(v.digest_mechanism, 0x250);
             assert_eq!(v.mac_size_bits, 160);
+            assert_eq!(v.key_size_bits, 128);
+            assert_eq!(v.iv_size_bits, 64);
             assert_eq!(v.sequence_number, 42);
             assert!(v.is_export);
             assert_eq!(v.random_info.client_random.len(), 16);
+            assert_eq!(v.random_info.server_random, vec![0xDD; 16]);
             assert_eq!(v.mac_secret_handle, 101);
             assert_eq!(v.key_handle, 202);
             assert_eq!(v.iv, vec![0xA1; 8]);
         }
         _ => panic!("wrong variant"),
     }
+}
+
+#[test]
+fn wtls_key_mat_params_rejects_missing_random_info() {
+    // W1-C8-04: required nested random_info must be rejected when absent.
+    let proto = v1_proto::Mechanism {
+        mechanism_type: CkMechanismType::WTLS_PRF.0,
+        params: Some(v1_proto::mechanism::Params::WtlsKeyMatParams(v1_proto::WtlsKeyMatParams {
+            digest_mechanism: 0x250,
+            mac_size_bits: 160,
+            key_size_bits: 128,
+            iv_size_bits: 64,
+            sequence_number: 42,
+            is_export: true,
+            random_info: None,
+            mac_secret_handle: 101,
+            key_handle: 202,
+            iv: vec![0xA1; 8],
+        })),
+    };
+
+    expect_mechanism_param_invalid(proto);
 }
 
 // ---------------------------------------------------------------------------
@@ -1396,6 +1549,8 @@ fn ike1_prf_derive_round_trip() {
             assert_eq!(v.keygxy_handle, 0xAAAA);
             assert_eq!(v.prev_key_handle, 0xBBBB);
             assert_eq!(v.ckyi.len(), 8);
+            // W1-C8-05: ckyr is a field too; a dropped half must fail.
+            assert_eq!(v.ckyr, vec![0x22; 8].into());
             assert_eq!(v.key_number, 3);
         }
         _ => panic!("wrong variant"),
@@ -1685,8 +1840,11 @@ fn x2_ratchet_initialize_round_trip() {
     }));
     match p {
         CkMechanismParams::X2RatchetInitialize(v) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(v.sk.len(), 32);
             assert_eq!(v.peer_public_prekey_handle, 0x1111);
+            assert_eq!(v.peer_public_identity_handle, 0x2222);
+            assert_eq!(v.own_public_identity_handle, 0x3333);
             assert!(v.encrypted_header);
             assert_eq!(v.curve, 0x0403);
             assert_eq!(v.aead_mechanism, 0x1087);
@@ -1710,9 +1868,14 @@ fn x2_ratchet_respond_round_trip() {
     }));
     match p {
         CkMechanismParams::X2RatchetRespond(v) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(v.sk.len(), 32);
             assert_eq!(v.own_prekey_handle, 0xAAAA);
+            assert_eq!(v.initiator_identity_handle, 0xBBBB);
+            assert_eq!(v.own_identity_handle, 0xCCCC);
             assert!(!v.encrypted_header);
+            assert_eq!(v.curve, 0x0403);
+            assert_eq!(v.aead_mechanism, 0x1087);
             assert_eq!(v.kdf_mechanism, 0x0260);
         }
         _ => panic!("wrong variant"),
@@ -1821,6 +1984,27 @@ fn cms_sig_params_reject_missing_digest_mechanism() {
                 params: None,
             })),
             digest_mechanism: None,
+            content_type: "1.2.840.113549.1.7.1".to_string(),
+            requested_attributes: vec![],
+            required_attributes: vec![],
+        }))),
+    };
+
+    expect_mechanism_param_invalid(proto);
+}
+
+#[test]
+fn cms_sig_params_reject_missing_signing_mechanism() {
+    // W1-C8-04: required nested signing_mechanism must be rejected when absent.
+    let proto = v1_proto::Mechanism {
+        mechanism_type: CkMechanismType::CMS_SIG.0,
+        params: Some(v1_proto::mechanism::Params::CmsSigParams(Box::new(v1_proto::CmsSigParams {
+            certificate_handle: 0x42,
+            signing_mechanism: None,
+            digest_mechanism: Some(Box::new(v1_proto::Mechanism {
+                mechanism_type: CkMechanismType::SHA256.0,
+                params: None,
+            })),
             content_type: "1.2.840.113549.1.7.1".to_string(),
             requested_attributes: vec![],
             required_attributes: vec![],
@@ -2119,6 +2303,13 @@ fn ecies_params_empty_shared_data_round_trip() {
     }));
     match p {
         CkMechanismParams::Ecies(v) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
+            assert_eq!(v.derivation_mechanism.mechanism_type, CkMechanismType::ECDH1_DERIVE);
+            assert!(v.derivation_mechanism.params.is_none());
+            assert_eq!(v.encryption_mechanism.mechanism_type, CkMechanismType::AES_CBC);
+            assert!(v.encryption_mechanism.params.is_none());
+            assert_eq!(v.mac_mechanism.mechanism_type, CkMechanismType::SHA256);
+            assert!(v.mac_mechanism.params.is_none());
             assert!(v.shared_data.is_empty());
         }
         _ => panic!("wrong variant"),
@@ -2139,6 +2330,50 @@ fn ecies_params_reject_missing_mac_mechanism() {
                 params: None,
             })),
             mac_mechanism: None,
+            shared_data: vec![],
+        }))),
+    };
+
+    expect_mechanism_param_invalid(proto);
+}
+
+#[test]
+fn ecies_params_reject_missing_derivation_mechanism() {
+    // W1-C8-04: required nested derivation_mechanism must be rejected when absent.
+    let proto = v1_proto::Mechanism {
+        mechanism_type: CkMechanismType::ECDH1_DERIVE.0,
+        params: Some(v1_proto::mechanism::Params::EciesParams(Box::new(v1_proto::EciesParams {
+            derivation_mechanism: None,
+            encryption_mechanism: Some(Box::new(v1_proto::Mechanism {
+                mechanism_type: CkMechanismType::AES_CBC.0,
+                params: None,
+            })),
+            mac_mechanism: Some(Box::new(v1_proto::Mechanism {
+                mechanism_type: CkMechanismType::SHA256.0,
+                params: None,
+            })),
+            shared_data: vec![],
+        }))),
+    };
+
+    expect_mechanism_param_invalid(proto);
+}
+
+#[test]
+fn ecies_params_reject_missing_encryption_mechanism() {
+    // W1-C8-04: required nested encryption_mechanism must be rejected when absent.
+    let proto = v1_proto::Mechanism {
+        mechanism_type: CkMechanismType::ECDH1_DERIVE.0,
+        params: Some(v1_proto::mechanism::Params::EciesParams(Box::new(v1_proto::EciesParams {
+            derivation_mechanism: Some(Box::new(v1_proto::Mechanism {
+                mechanism_type: CkMechanismType::ECDH1_DERIVE.0,
+                params: None,
+            })),
+            encryption_mechanism: None,
+            mac_mechanism: Some(Box::new(v1_proto::Mechanism {
+                mechanism_type: CkMechanismType::SHA256.0,
+                params: None,
+            })),
             shared_data: vec![],
         }))),
     };
@@ -2205,7 +2440,10 @@ fn kyber_params_empty_optional_fields_round_trip() {
     }));
     match p {
         CkMechanismParams::Kyber(v) => {
+            // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(v.version, 1);
+            assert_eq!(v.mode, 0);
+            assert_eq!(v.secret_handle, 0);
             assert!(v.shared_data.is_empty());
             assert!(v.blob.is_empty());
         }

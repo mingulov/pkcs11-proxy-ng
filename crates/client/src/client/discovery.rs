@@ -8,7 +8,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::GetInfoRequest { client_context_id: ctx };
         let resp = pkcs11_unary_call!(self.grpc.get_info(req), false);
         let info = resp.info.ok_or(CkRv::DEVICE_ERROR)?;
-        Ok(CkInfo::from(&info))
+        Ok(CkInfo::try_from(&info)?)
     }
 
     pub async fn get_slot_list(&mut self, token_present: bool) -> CkResult<Vec<CkSlotId>> {
@@ -27,7 +27,7 @@ impl Pkcs11Client {
         };
         let resp = pkcs11_unary_call!(self.grpc.get_slot_info(req), false);
         let info = resp.info.ok_or(CkRv::DEVICE_ERROR)?;
-        Ok(CkSlotInfo::from(&info))
+        Ok(CkSlotInfo::try_from(&info)?)
     }
 
     pub async fn get_token_info(&mut self, slot_id: CkSlotId) -> CkResult<CkTokenInfo> {
@@ -38,7 +38,7 @@ impl Pkcs11Client {
         };
         let resp = pkcs11_unary_call!(self.grpc.get_token_info(req), false);
         let info = resp.info.ok_or(CkRv::DEVICE_ERROR)?;
-        Ok(CkTokenInfo::from(&info))
+        Ok(CkTokenInfo::try_from(&info)?)
     }
 
     pub async fn get_mechanism_list(

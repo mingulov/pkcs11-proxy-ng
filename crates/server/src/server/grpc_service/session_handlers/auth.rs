@@ -61,8 +61,10 @@ pub(super) async fn login(
     backend_ref: &Arc<dyn Pkcs11Backend>,
     request: Request<pkcs11_proxy_ng_proto::LoginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::LoginResponse>, Status> {
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // W1-C8-11: `LoginRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let user_type = match CkUserType::from_raw(req.user_type) {
         Some(user_type) => user_type,
@@ -149,7 +151,7 @@ pub(super) async fn login(
 
     // Hold PIN bytes in `SecretBytes`: the backing buffer is overwritten
     // when dropped, and Debug redacts the secret (audit/log safety net).
-    let pin = req.pin.map(SecretBytes::new);
+    let pin = std::mem::take(&mut req.pin).map(SecretBytes::new);
 
     // D6(3) reconciliation (Wave 3.5 tenancy ruling; supersedes ADR-0008): when
     // another live context already holds a login on this slot, the shared

@@ -186,7 +186,7 @@ impl TryFrom<&wire::MessageParameterEffects> for MessageEffects {
                 Ok(Self::Ccm { nonce: value.nonce.clone(), mac: value.mac.clone() })
             }
             Some(Effect::Salsa(value)) => Ok(Self::Salsa { tag: value.tag.clone() }),
-            None => Err(CkRv::FUNCTION_NOT_SUPPORTED),
+            None => Err(super::ABSENT_MESSAGE_ONEOF_RV),
         }
     }
 }
@@ -376,6 +376,19 @@ mod tests {
                     }
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn absent_effect_oneof_decodes_to_unified_rv() {
+        // W1-C8-03: absent oneof must report the documented sibling-wide RV.
+        assert_eq!(
+            MessageEffects::try_from(&wire::MessageParameterEffects { effect: None }),
+            Err(crate::convert::ABSENT_MESSAGE_ONEOF_RV),
+        );
+        assert_eq!(
+            MessageEffects::try_from(&wire::MessageParameterEffects { effect: None }),
+            Err(CkRv::ARGUMENTS_BAD),
         );
     }
 

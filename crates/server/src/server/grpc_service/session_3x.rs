@@ -92,8 +92,10 @@ async fn login_user_inner(
 ) -> Result<Response<pkcs11_proxy_ng_proto::LoginUserResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // W1-C8-11: `LoginUserRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     // Gate order mirrors `session::auth::login` exactly (W1-C1-02, W1-L7-01):
     // user-type → pre-resolve → slot lock → re-resolve → cooldown → D6(3) →
@@ -202,8 +204,8 @@ async fn login_user_inner(
     // Hold the PIN and username in `SecretBytes`: wiped on drop and redacted
     // in Debug. DO NOT log pin or username at any tracing level.
     // (build.rs flags LoginUserRequest.username secret-bearing.)
-    let pin = SecretBytes::new(req.pin);
-    let username = SecretBytes::new(req.username);
+    let pin = SecretBytes::new(std::mem::take(&mut req.pin));
+    let username = SecretBytes::new(std::mem::take(&mut req.username));
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
         let pin = pin.into_zeroizing();
