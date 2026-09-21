@@ -60,8 +60,10 @@ pub struct VerifyReport {
     /// `true` if a public key was supplied, i.e. signature verification was
     /// requested (regardless of whether the sidecar was usable).
     pub signature_checked: bool,
-    /// `true` if there is no anchor, or the anchor matches the replayed head
-    /// and last seq. `false` is a tamper signal (e.g. the tail was altered).
+    /// `true` if the anchor matches the replayed head and last seq, or the log
+    /// is empty and there is no anchor yet. `false` is a tamper signal (e.g.
+    /// the tail was altered, or the anchor is missing on a non-empty log —
+    /// fail closed, W1-C12-02).
     pub head_matches_anchor: bool,
     /// Total data-plane records dropped (fail-open) as reported by all
     /// `__AUDIT_GAP__` sentinel records in the log.
@@ -120,8 +122,9 @@ struct ReplayOutcome {
 ///
 /// Checkpoints in `dir/audit.checkpoints.jsonl` (if present) are bound to the
 /// replayed chain head at their seq; when `public_key_hex` is `Some` their
-/// Ed25519 signature is also verified. `dir/audit.anchor.json` (if present) is
-/// cross-checked against the replayed head as a tamper signal.
+/// Ed25519 signature is also verified. `dir/audit.anchor.json` is cross-checked
+/// against the replayed head as a tamper signal; a non-empty log without an
+/// anchor fails closed (W1-C12-02).
 ///
 /// # Errors
 ///
@@ -172,9 +175,7 @@ pub fn verify_dir(dir: &Path, public_key_hex: Option<&str>) -> Result<VerifyRepo
         &replay.seq_to_hash,
     )?;
 
-    let (anchor_present, anchor_ok) =
-        check_anchor(dir, all_records.is_empty(), last_seq, &replay.head)?;
-    let head_matches_anchor = !anchor_present || anchor_ok;
+    let head_matches_anchor = check_anchor(dir, all_records.is_empty(), last_seq, &replay.head)?;
 
     let chain_ok =
         replay.links_ok && replay.contiguous && checkpoints_failed == 0 && head_matches_anchor;
@@ -244,12 +245,21 @@ fn replay_chain(records: &[AuditRecord], first_seq: u64, last_seq: u64) -> Repla
     let mut expected_prev = records[0].prev_hash.clone();
     let mut seq_to_hash: HashMap<u64, String> = HashMap::with_capacity(records.len());
 
-    for rec in records {
+    for (i, rec) in records.iter().enumerate() {
+        // Backward link: this record must point at the running head.
         if rec.prev_hash != expected_prev {
             links_ok = false;
         }
         let h = record_hash(&expected_prev, rec);
         seq_to_hash.insert(rec.seq, h.clone());
+        // Forward link (W1-C12-02): this record's hash must be the next
+        // record's `prev_hash`. The tail record has no successor; its forward
+        // commitment is the anchor, enforced fail-closed by `check_anchor`.
+        if let Some(next) = records.get(i + 1)
+            && next.prev_hash != h
+        {
+            links_ok = false;
+        }
         expected_prev = h;
     }
 
@@ -352,18 +362,23 @@ fn check_checkpoints(
 
 /// Cross-checks `dir/audit.anchor.json` against the replayed chain.
 ///
-/// Returns `(anchor_present, anchor_ok)`. When an anchor is present it must
-/// match both the replayed head hash and the next-seq (`last_seq + 1`); any
-/// mismatch is a tamper signal (e.g. the last record was altered).
+/// Returns `true` when the anchor state is consistent with the replayed log:
+/// - Anchor present: its `last_hash`/`last_seq` must match the replayed head
+///   hash and the next-seq (`last_seq + 1`); any mismatch is a tamper signal
+///   (e.g. the last record was altered).
+/// - Anchor absent: consistent only when the log is empty (nothing sealed
+///   yet). A non-empty log without an anchor fails closed (W1-C12-02): the
+///   server always writes an anchor alongside records, so absence leaves the
+///   tail with no forward commitment (e.g. tail altered + anchor deleted).
 fn check_anchor(
     dir: &Path,
     records_empty: bool,
     last_seq: u64,
     head: &str,
-) -> Result<(bool, bool), AuditError> {
+) -> Result<bool, AuditError> {
     let anchor_path = dir.join("audit.anchor.json");
     if !anchor_path.exists() {
-        return Ok((false, true));
+        return Ok(records_empty);
     }
     let data = fs::read(&anchor_path).map_err(|e| AuditError::Io(e.to_string()))?;
     let anchor: AnchorFile =
@@ -371,14 +386,13 @@ fn check_anchor(
 
     if records_empty {
         // No retained records: the only self-consistent anchor is genesis.
-        let ok = anchor.last_hash == GENESIS_HASH && anchor.last_seq == 0;
-        return Ok((true, ok));
+        return Ok(anchor.last_hash == GENESIS_HASH && anchor.last_seq == 0);
     }
 
     // `anchor.last_seq` is the next slot, i.e. the last record's seq + 1.
     let head_ok = anchor.last_hash == head;
     let seq_ok = anchor.last_seq == last_seq + 1;
-    Ok((true, head_ok && seq_ok))
+    Ok(head_ok && seq_ok)
 }
 
 // --- tests ------------------------------------------------------------------
@@ -461,6 +475,8 @@ mod tests {
             .unwrap();
         // seqs 2–3 in the active file
         fs::write(dir.join("audit.jsonl"), format!("{}{}", to_jsonl(&r2), to_jsonl(&r3))).unwrap();
+        // The server always seals records with an anchor (W1-C12-02).
+        write_test_anchor(&dir, &st.last_hash, st.last_seq);
 
         let report = verify_dir(&dir, None).unwrap();
 
@@ -538,6 +554,9 @@ mod tests {
             format!("{}\n", serde_json::to_string(&line).unwrap()),
         )
         .unwrap();
+
+        // The server always seals records with an anchor (W1-C12-02).
+        write_test_anchor(&dir, &st.last_hash, st.last_seq);
 
         let report = verify_dir(&dir, Some(&signer.public_hex())).unwrap();
 
@@ -732,6 +751,9 @@ mod tests {
         )
         .unwrap();
 
+        // The server always seals records with an anchor (W1-C12-02).
+        write_test_anchor(&dir, &st.last_hash, st.last_seq);
+
         let report = verify_dir(&dir, None).unwrap();
         assert!(report.chain_ok, "chain with sentinels must be chain_ok: {report:?}");
         assert_eq!(report.dropped_records, 10, "7 + 3 = 10 dropped records");
@@ -786,6 +808,9 @@ mod tests {
         st.append(&mut r1);
 
         fs::write(dir.join("audit.jsonl"), format!("{}{}", to_jsonl(&r0), to_jsonl(&r1))).unwrap();
+
+        // The server always seals records with an anchor (W1-C12-02).
+        write_test_anchor(&dir, &st.last_hash, st.last_seq);
 
         let report = verify_dir(&dir, None).unwrap();
         assert!(report.chain_ok, "chain without sentinels must be chain_ok");
@@ -939,6 +964,109 @@ mod tests {
             report.checkpoints_failed > 0,
             "all-out-of-range sidecar with key must count a failure; got: {report:?}"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // W1-C12-02: validate anchor + forward links (tail-tamper must fail)
+    // -----------------------------------------------------------------------
+
+    /// A tampered tail with the anchor DELETED must fail. Before the fix, an
+    /// absent anchor mapped to "match" and the backward-only replay had no
+    /// successor link to break, so tail-tamper + anchor-delete verified OK.
+    #[test]
+    fn tail_tamper_without_anchor_fails() {
+        let dir = temp_dir("tail-no-anchor");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut recs: Vec<AuditRecord> = (0..3).map(|_| rec("C_Op", 0)).collect();
+        for r in recs.iter_mut() {
+            st.append(r);
+        }
+
+        // Tamper the LAST record; write NO anchor (attacker deleted it).
+        let mut tampered_last = recs[2].clone();
+        tampered_last.ck_rv = 0xFF;
+        fs::write(
+            dir.join("audit.jsonl"),
+            format!("{}{}{}", to_jsonl(&recs[0]), to_jsonl(&recs[1]), to_jsonl(&tampered_last)),
+        )
+        .unwrap();
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert!(
+            !report.head_matches_anchor,
+            "absent anchor with records must not match; got: {report:?}"
+        );
+        assert!(!report.chain_ok, "tail tamper with deleted anchor must fail; got: {report:?}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The server always writes an anchor alongside records, so a non-empty
+    /// log without one fails closed even when the records are untampered.
+    #[test]
+    fn missing_anchor_with_records_fails_closed() {
+        let dir = chained_log_no_sidecar("anchor-missing");
+        // No audit.anchor.json created.
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert!(
+            !report.head_matches_anchor,
+            "absent anchor with records must not match; got: {report:?}"
+        );
+        assert!(!report.chain_ok, "missing anchor with records must fail closed; got: {report:?}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Corrupting the anchor itself (hash flipped while the records are
+    /// genuine) must fail verification.
+    #[test]
+    fn tampered_anchor_fails_verification() {
+        let dir = temp_dir("anchor-tamper");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut recs: Vec<AuditRecord> = (0..3).map(|_| rec("C_Op", 0)).collect();
+        for r in recs.iter_mut() {
+            st.append(r);
+        }
+        fs::write(
+            dir.join("audit.jsonl"),
+            format!("{}{}{}", to_jsonl(&recs[0]), to_jsonl(&recs[1]), to_jsonl(&recs[2])),
+        )
+        .unwrap();
+
+        // Anchor with a corrupted hash (genuine seq).
+        let mut bad_hash = st.last_hash.clone();
+        let first = bad_hash.remove(0);
+        bad_hash.insert(0, if first == '0' { '1' } else { '0' });
+        write_test_anchor(&dir, &bad_hash, st.last_seq);
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert!(!report.head_matches_anchor, "tampered anchor must not match; got: {report:?}");
+        assert!(!report.chain_ok, "tampered anchor must fail verification; got: {report:?}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Gating pin: an empty log with no anchor still verifies (nothing sealed
+    /// yet) — the W1-C12-02 fail-closed applies only when records are present.
+    #[test]
+    fn empty_log_without_anchor_still_passes() {
+        let dir = temp_dir("empty-no-anchor");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("audit.jsonl"), "").unwrap();
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert!(report.chain_ok, "empty log with no anchor must still pass; got: {report:?}");
+        assert!(report.head_matches_anchor);
 
         fs::remove_dir_all(&dir).ok();
     }

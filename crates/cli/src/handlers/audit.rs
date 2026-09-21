@@ -108,6 +108,10 @@ mod tests {
         st.append(&mut r1);
 
         fs::write(dir.join("audit.jsonl"), format!("{}{}", to_jsonl(&r0), to_jsonl(&r1))).unwrap();
+        // The server always seals records with an anchor (W1-C12-02 fail-closed).
+        // Manual JSON: hex hash + int need no escaping; avoids a serde_json dep.
+        let anchor = format!("{{\"last_hash\":\"{}\",\"last_seq\":{}}}", st.last_hash, st.last_seq);
+        fs::write(dir.join("audit.anchor.json"), anchor).unwrap();
 
         let result = verify(&dir, None);
         fs::remove_dir_all(&dir).unwrap();
