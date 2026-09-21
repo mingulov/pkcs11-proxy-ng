@@ -15,7 +15,8 @@ pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-client = { path = "../client" }
 pkcs11-proxy-ng-audit = { path = "../audit" }
 clap.workspace = true
-tokio.workspace = true
+# W1-L16-15: #[tokio::main] (multi-thread) + client async surface.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
 # CLI is a gRPC client: `channel` transport + `codegen` + `tls-ring`. No server.
 tonic = { workspace = true, features = ["channel", "codegen", "tls-ring"] }
 tonic-health.workspace = true

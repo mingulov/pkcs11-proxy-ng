@@ -32,7 +32,13 @@ rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
+# W1-L16-15: tokio features are selected per crate (same rule as the M11
+# tonic transport split), not workspace-wide `full`, so the client-side
+# artifacts — especially the shim cdylib — do not link the server-only
+# surface (signal/process). Each member below enables exactly what it
+# uses; the daemon keeps signal (graceful shutdown) while process stays
+# a server dev-dependency (integration-test child management).
+tokio = { version = "1", default-features = false }
 # tonic transport features are selected per-crate (M11), not workspace-wide, so
 # the client-side artifacts (shim cdylib, client, CLI) do not link the server
 # stack — axum `router`, h2/hyper `server`, socket2. Each member enables exactly

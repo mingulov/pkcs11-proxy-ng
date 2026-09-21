@@ -12,7 +12,8 @@ pkcs11-proxy-ng-proto = { path = "../proto" }
 # Client side only: `channel` transport + `codegen` + `tls-ring` (mTLS client
 # config). No server stack.
 tonic = { workspace = true, features = ["channel", "codegen", "tls-ring"] }
-tokio.workspace = true
+# W1-L16-15: client async surface only (UnixStream dial, sync/time, spawn).
+tokio = { workspace = true, features = ["rt", "sync", "time", "net", "macros"] }
 tracing.workspace = true
 uuid.workspace = true
 # Unix-domain-socket transport (local-testing endpoint): a tower connector

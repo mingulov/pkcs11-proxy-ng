@@ -14,7 +14,7 @@ usage() {
 Usage: scripts/test-matrix.sh [options]
 
 Options:
-  --fast-only                 Run only CI Tier 0 fmt/audit/build/test/clippy checks
+  --fast-only                 Run only CI Tier 0 fmt/audit/deny/build/test/clippy checks
   --skip-fast                 Skip fmt/audit/build/test/clippy
   --skip-consumers            Skip external consumer smoke tests
   --skip-optional-providers   Skip optional NSS/Kryoptic suites
@@ -90,9 +90,11 @@ run_step() {
 if [[ "$run_fast_checks" -eq 1 ]]; then
     run_step "cargo fmt check" cargo fmt --all -- --check
     run_step "cargo audit" cargo audit
-    run_step "cargo build" cargo build --workspace
-    run_step "cargo test" cargo test --workspace
-    run_step "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings
+    run_step "cargo deny check" cargo deny check
+    run_step "standalone audit+deny" "$ROOT_DIR/scripts/audit-test-workspaces.sh"
+    run_step "cargo build" cargo build --workspace --locked
+    run_step "cargo test" cargo test --workspace --locked
+    run_step "cargo clippy" cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
 fi
 
 if [[ "$fast_only" -eq 1 ]]; then
@@ -100,7 +102,7 @@ if [[ "$fast_only" -eq 1 ]]; then
 fi
 
 run_step "concurrency tests" \
-    cargo test -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored --test-threads=1
+    cargo test --locked -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored --test-threads=1
 
 if [[ "$run_optional_providers" -eq 1 ]]; then
     run_step "provider backends" "$ROOT_DIR/scripts/test-provider-backends.sh"
@@ -114,7 +116,7 @@ if [[ "$run_optional_providers" -eq 1 ]]; then
     fi
 else
     run_step "integration tests" \
-        cargo test -p pkcs11-proxy-ng --test integration_test -- --ignored --test-threads=1
+        cargo test --locked -p pkcs11-proxy-ng --test integration_test -- --ignored --test-threads=1
 fi
 
 if [[ "$run_consumers" -eq 1 ]]; then

@@ -174,22 +174,14 @@ mod tests {
         ck_rv: u64,
     }
 
-    fn ok_call(
-        ck_rv: u64,
-    ) -> impl std::future::Future<Output = Result<tonic::Response<FakeUnaryResponse>, tonic::Status>>
-    {
-        async move { Ok(tonic::Response::new(FakeUnaryResponse { ck_rv })) }
+    async fn ok_call(ck_rv: u64) -> Result<tonic::Response<FakeUnaryResponse>, tonic::Status> {
+        Ok(tonic::Response::new(FakeUnaryResponse { ck_rv }))
     }
 
-    fn err_call(
+    async fn err_call(
         code: tonic::Code,
-    ) -> impl std::future::Future<Output = Result<tonic::Response<FakeUnaryResponse>, tonic::Status>>
-    {
-        async move {
-            Err::<tonic::Response<FakeUnaryResponse>, tonic::Status>(tonic::Status::new(
-                code, "boom",
-            ))
-        }
+    ) -> Result<tonic::Response<FakeUnaryResponse>, tonic::Status> {
+        Err::<tonic::Response<FakeUnaryResponse>, tonic::Status>(tonic::Status::new(code, "boom"))
     }
 
     // W1-L11-04 characterization: pin each macro's ok / backend-RV /

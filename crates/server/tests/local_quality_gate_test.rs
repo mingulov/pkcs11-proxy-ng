@@ -13,9 +13,12 @@ use serde_json::Value;
 const CI_TIER0_COMMANDS: &[&str] = &[
     "cargo fmt --all -- --check",
     "cargo audit",
-    "cargo build --workspace",
-    "cargo test --workspace",
-    "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    // W1-L16-07: the deny policy gate is part of Tier 0 (CI needs + matrix).
+    "cargo deny check",
+    // W1-L16-06: Tier 0 builds/tests run --locked.
+    "cargo build --workspace --locked",
+    "cargo test --workspace --locked",
+    "cargo clippy --workspace --locked --all-targets --all-features -- -D warnings",
 ];
 
 struct IgnoredTestLane {
@@ -228,6 +231,104 @@ fn rust_sources_under(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
+fn supply_chain_pins_are_consistent() {
+    // W1-L16-09/10/13: one pinned toolchain, one protoc version, zero
+    // floating action tags. mise.toml is canonical for protoc;
+    // rust-toolchain.toml is canonical for the Rust channel.
+    let root = workspace_root();
+    let workflows_dir = root.join(".github/workflows");
+    let mut workflow_texts = Vec::new();
+    for entry in
+        fs::read_dir(&workflows_dir).expect("workflows directory should be readable")
+    {
+        let path = entry.expect("workflow entry should be readable").path();
+        if path.extension().is_some_and(|extension| extension == "yml") {
+            workflow_texts.push(fs::read_to_string(&path).expect("workflow should be readable"));
+        }
+    }
+    assert!(!workflow_texts.is_empty(), "expected workflow files");
+
+    // Protoc: single version across mise, setup-protoc steps, Dockerfile.
+    let mise = fs::read_to_string(root.join("mise.toml")).expect("mise.toml should be readable");
+    let mise_version = mise
+        .lines()
+        .find_map(|line| line.strip_prefix("protoc = \"")?.strip_suffix('"'))
+        .expect("mise.toml should pin protoc");
+    for text in &workflow_texts {
+        assert!(
+            !text.contains("protobuf-compiler"),
+            "workflows should use pinned setup-protoc, not distro protobuf-compiler"
+        );
+    }
+    let dockerfile =
+        fs::read_to_string(root.join("Dockerfile.test")).expect("Dockerfile.test should be readable");
+    assert!(
+        !dockerfile.contains("protobuf-compiler"),
+        "Dockerfile.test should use pinned protoc, not distro protobuf-compiler"
+    );
+    assert!(
+        dockerfile.contains(&format!("ARG PROTOC_VERSION={mise_version}")),
+        "Dockerfile.test protoc should match mise.toml ({mise_version})"
+    );
+    let mut setup_protoc_steps = 0;
+    for text in &workflow_texts {
+        setup_protoc_steps += text.matches("uses: arduino/setup-protoc@").count();
+    }
+    assert!(setup_protoc_steps > 0, "expected setup-protoc steps");
+    let mut pinned_protoc_steps = 0;
+    for text in &workflow_texts {
+        pinned_protoc_steps += text.matches(&format!("version: \"{mise_version}\"")).count();
+    }
+    assert_eq!(
+        pinned_protoc_steps, setup_protoc_steps,
+        "every setup-protoc step should pin protoc {mise_version}"
+    );
+
+    // Toolchain: rust-toolchain.toml channel mirrored in CI + Dockerfile.
+    let toolchain_file = fs::read_to_string(root.join("rust-toolchain.toml"))
+        .expect("rust-toolchain.toml should exist");
+    let channel = toolchain_file
+        .lines()
+        .find_map(|line| line.strip_prefix("channel = \"")?.strip_suffix('"'))
+        .expect("rust-toolchain.toml should pin a channel");
+    assert_ne!(channel, "stable", "toolchain pin should not float on stable");
+    for text in &workflow_texts {
+        assert!(
+            !text.contains("dtolnay/rust-toolchain@stable"),
+            "workflows should not float the toolchain action on @stable"
+        );
+        assert!(
+            !text.contains("dtolnay/rust-toolchain@nightly"),
+            "workflows should not float the toolchain action on @nightly"
+        );
+    }
+    assert!(
+        dockerfile.contains(&format!("ARG RUST_TOOLCHAIN={channel}")),
+        "Dockerfile.test toolchain should match rust-toolchain.toml ({channel})"
+    );
+    assert!(
+        workflow_texts.iter().any(|text| text.contains("toolchain: 1.88")),
+        "MSRV job should keep Rust 1.88"
+    );
+
+    // Actions: pinned to SHAs, never floating major tags.
+    for text in &workflow_texts {
+        for line in text.lines().map(str::trim) {
+            let Some(pinned) = line.strip_prefix("- uses: ").or_else(|| line.strip_prefix("uses: "))
+            else {
+                continue;
+            };
+            let reference =
+                pinned.split('#').next().unwrap_or("").trim().split('@').nth(1).unwrap_or("");
+            assert!(
+                reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit()),
+                "action `{pinned}` should be pinned to a 40-char commit SHA"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_matrix_fast_only_matches_ci_tier0_commands() {
     let root = workspace_root();
     let test_matrix = fs::read_to_string(root.join("scripts/test-matrix.sh"))
@@ -272,9 +373,18 @@ fn ci_workflow_runs_cargo_audit_before_build_and_test() {
         "CI should have a dedicated cargo audit job"
     );
     assert!(ci_workflow.contains("cargo audit"), "CI should run cargo audit");
+    // W1-L16-07: the deny policy gate blocks the main leg like audit does.
     assert!(
-        ci_workflow.contains("needs: [fmt, audit]"),
-        "build-and-test should depend on fmt and audit"
+        ci_workflow.contains("name: Cargo Deny"),
+        "CI should have a dedicated cargo deny job"
+    );
+    assert!(
+        ci_workflow.contains("cargo deny check"),
+        "CI should run cargo deny check"
+    );
+    assert!(
+        ci_workflow.contains("needs: [fmt, audit, deny]"),
+        "build-and-test should depend on fmt, audit, and deny"
     );
 }
 
@@ -356,7 +466,8 @@ fn dockerfile_test_references_current_workspace_crates() {
 
     for package_name in package_names {
         assert!(
-            dockerfile.contains("cargo build --workspace")
+            // W1-L16-06: workspace builds in Dockerfile.test run --locked.
+            dockerfile.contains("cargo build --locked --workspace")
                 || dockerfile.contains(&format!("-p {package_name}")),
             "Dockerfile.test should build package `{package_name}` by name or build the workspace"
         );

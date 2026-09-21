@@ -1,5 +1,8 @@
 use super::*;
 
+// (W1-L16-09) Alias keeps clippy::type_complexity quiet on the 1.98 toolchain.
+type FieldSetter<'a, P> = [(&'a str, fn(&mut P, u32)); 4];
+
 #[test]
 fn slot_info_round_trip() {
     let original = CkSlotInfo {
@@ -248,7 +251,7 @@ fn slot_info_version_narrowing_rejects_above_255() {
         firmware_version: (3, 4),
     };
     let wire: v1_proto::SlotInfo = (&base).into();
-    let setters: [(&str, fn(&mut v1_proto::SlotInfo, u32)); 4] = [
+    let setters: FieldSetter<v1_proto::SlotInfo> = [
         ("hardware_version_major", |p, v| p.hardware_version_major = v),
         ("hardware_version_minor", |p, v| p.hardware_version_minor = v),
         ("firmware_version_major", |p, v| p.firmware_version_major = v),
@@ -291,7 +294,7 @@ fn token_info_version_narrowing_rejects_above_255() {
         utc_time: String::new(),
     };
     let wire: v1_proto::TokenInfo = (&base).into();
-    let setters: [(&str, fn(&mut v1_proto::TokenInfo, u32)); 4] = [
+    let setters: FieldSetter<v1_proto::TokenInfo> = [
         ("hardware_version_major", |p, v| p.hardware_version_major = v),
         ("hardware_version_minor", |p, v| p.hardware_version_minor = v),
         ("firmware_version_major", |p, v| p.firmware_version_major = v),
@@ -321,7 +324,7 @@ fn cryptoki_info_version_narrowing_rejects_above_255() {
         library_version: (1, 0),
     };
     let wire: v1_proto::CryptokiInfo = (&base).into();
-    let setters: [(&str, fn(&mut v1_proto::CryptokiInfo, u32)); 4] = [
+    let setters: FieldSetter<v1_proto::CryptokiInfo> = [
         ("cryptoki_version_major", |p, v| p.cryptoki_version_major = v),
         ("cryptoki_version_minor", |p, v| p.cryptoki_version_minor = v),
         ("library_version_major", |p, v| p.library_version_major = v),

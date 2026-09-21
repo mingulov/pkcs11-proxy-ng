@@ -9,7 +9,11 @@
 #   * Block known-bad crates and copy-cats.
 
 [graph]
-all-features = false
+# W1-L16-08: aligned with the CI clippy tree (--all-targets
+# --all-features) so the feature-unified dependency graph is the one
+# deny gates — a default-features-only graph would miss deps that only
+# appear under --all-features.
+all-features = true
 no-default-features = false
 
 [output]
@@ -92,6 +96,17 @@ skip = [
     { crate = "hashbrown@0.14.5" },   # pulled by older transitive deps; newest in tree is 0.16.x
     { crate = "hashbrown@0.15.5" },   # intermediate line, same reason
     { crate = "windows-sys@0.52.0" }, # transitive only; host target is Linux so it is never built
+    # W1-L16-05: the 0.21 line arrives only via hdrhistogram 7 (server
+    # dev-deps: criterion 0.8 pins hdrhistogram ^7, plus the direct
+    # hdrhistogram 7 bench dep); the production tree is 0.22 via tonic.
+    # Collapsing needs a criterion release on hdrhistogram 8 — a fork of
+    # upstream either way — so the older copy stays skip-listed.
+    { crate = "base64@0.21.7" },
+    # W1-L16-05: the 0.13 line arrives only via criterion 0.8 (server
+    # dev-dep); the build tree is 0.14 via prost-build. Same
+    # ecosystem-forced split as base64 above; skipping the older copy
+    # keeps multiple-versions=deny live for anything new.
+    { crate = "itertools@0.13.0" },
 ]
 
 [sources]

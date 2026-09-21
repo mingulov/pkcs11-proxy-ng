@@ -17,7 +17,9 @@ pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-client = { path = "../client" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
 cryptoki-sys.workspace = true
-tokio.workspace = true
+# W1-L16-15: minimal cdylib closure — current-thread runtime + sync/time/net.
+# No signal/process (verified via `cargo tree -p pkcs11-proxy-ng-shim`).
+tokio = { workspace = true, features = ["rt", "sync", "time", "net", "macros"] }
 tracing.workspace = true
 
 [dev-dependencies]

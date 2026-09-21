@@ -124,7 +124,7 @@ fi
 require_cmd install
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-    cargo build --release --workspace
+    cargo build --locked --release --workspace
 fi
 
 require_executable "$DAEMON_BIN"

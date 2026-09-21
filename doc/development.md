@@ -1,6 +1,7 @@
 # Development environment
 
-Use stable Rust through rustup, with `rustfmt` and `clippy`. The minimum
+Use the pinned Rust toolchain through rustup (`rust-toolchain.toml`
+selects it automatically), with `rustfmt` and `clippy`. The minimum
 supported Rust version is **1.88.0**, including when updating dependencies.
 The repository builds independently of the umbrella workspace and OASIS
 specification checkout.
@@ -13,7 +14,7 @@ Install the compiler and the tools used by local provider and consumer tests:
 sudo apt update
 sudo apt install build-essential pkg-config protobuf-compiler \
     softhsm2 opensc gnutls-bin libnss3-tools
-rustup toolchain install stable --component rustfmt --component clippy
+rustup toolchain install 1.98.1 --component rustfmt --component clippy
 rustup toolchain install 1.88.0 --profile minimal
 cargo install cargo-audit cargo-deny --locked
 ```

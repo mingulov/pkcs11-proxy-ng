@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # The receipt step compares against HEAD~1 and diffs HEAD~1..HEAD,
           # so the checkout must contain at least the tag commit and its parent.
@@ -100,16 +100,21 @@ jobs:
           done <<<"$DELTA_PATHS"
           echo "quality receipt verified for subject $SUBJECT_COMMIT at tag commit $TAG_COMMIT"
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y protobuf-compiler
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          # W1-L16-13: single protoc version everywhere; must match
+          # mise.toml.
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install stable Rust toolchain (must satisfy MSRV from Cargo.toml)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain (must satisfy MSRV from Cargo.toml)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -176,7 +181,7 @@ jobs:
           cat dist/RELEASE_NOTES.md
 
       - name: Upload Linux dist artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: linux-dist
           path: |
@@ -190,7 +195,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Validate tag format
         run: |
@@ -201,18 +206,25 @@ jobs:
           fi
           echo "tag $GITHUB_REF_NAME validated"
 
-      - name: Install protobuf + LLVM (clang/lld) + nasm
+      - name: Install LLVM (clang/lld) + nasm
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y protobuf-compiler clang lld nasm
+          sudo apt-get install -y clang lld nasm
 
-      - name: Install stable toolchain with Windows MSVC target
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned toolchain with Windows MSVC target
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
           targets: x86_64-pc-windows-msvc
 
       - name: Install cargo-xwin
-        run: cargo install cargo-xwin --locked
+        run: cargo install cargo-xwin --version 0.23.1 --locked
 
       - name: Build deterministic Windows bundle via release script
         run: scripts/release-windows.sh --prefix dist/win-stage
@@ -223,7 +235,7 @@ jobs:
           ( cd dist/win-stage && sha256sum -c SHA256SUMS-windows )
 
       - name: Upload Windows dist artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: windows-dist
           path: |
@@ -241,19 +253,19 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Download Linux dist artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: linux-dist
           path: dist/
 
       - name: Download Windows dist artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: windows-dist
           path: dist/win-stage/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           name: pkcs11-proxy-ng ${{ github.ref_name }}
           body_path: dist/RELEASE_NOTES.md
@@ -263,7 +275,7 @@ jobs:
           fail_on_unmatched_files: true
 
       - name: Append Windows assets to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             dist/win-stage/*.zip

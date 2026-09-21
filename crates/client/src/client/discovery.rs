@@ -9,7 +9,7 @@ impl Pkcs11Client {
         let resp = pkcs11_unary_call!(self.grpc.get_info(req), false);
         // Absent info = uninterpretable daemon payload (W1-L3-06).
         let info = resp.info.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        Ok(CkInfo::try_from(&info)?)
+        CkInfo::try_from(&info)
     }
 
     pub async fn get_slot_list(&mut self, token_present: bool) -> CkResult<Vec<CkSlotId>> {
@@ -29,7 +29,7 @@ impl Pkcs11Client {
         let resp = pkcs11_unary_call!(self.grpc.get_slot_info(req), false);
         // Absent info = uninterpretable daemon payload (W1-L3-06).
         let info = resp.info.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        Ok(CkSlotInfo::try_from(&info)?)
+        CkSlotInfo::try_from(&info)
     }
 
     pub async fn get_token_info(&mut self, slot_id: CkSlotId) -> CkResult<CkTokenInfo> {
@@ -41,7 +41,7 @@ impl Pkcs11Client {
         let resp = pkcs11_unary_call!(self.grpc.get_token_info(req), false);
         // Absent info = uninterpretable daemon payload (W1-L3-06).
         let info = resp.info.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
-        Ok(CkTokenInfo::try_from(&info)?)
+        CkTokenInfo::try_from(&info)
     }
 
     pub async fn get_mechanism_list(
