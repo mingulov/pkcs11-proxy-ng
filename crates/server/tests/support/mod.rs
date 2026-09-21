@@ -3,6 +3,7 @@
 mod consumers;
 mod daemon;
 mod mechanism_tests;
+mod mtls_fixture;
 mod ops;
 mod providers;
 mod shape_matrix;
