@@ -58,6 +58,7 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     // Integration-test diagnostics (skip notices, progress, summaries).
     "crates/server/tests/support/skip.rs",
     "crates/server/tests/cli_hardening_test.rs",
+    "crates/server/tests/concurrency_and_recovery_test.rs",
     "crates/server/tests/consumer_p11tool_test.rs",
     "crates/server/tests/consumer_pkcs11_tool_test.rs",
     "crates/server/tests/consumer_python_test.rs",

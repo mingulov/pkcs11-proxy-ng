@@ -1472,6 +1472,7 @@ dependencies = [
  "cryptoki-sys",
  "libc",
  "libloading",
+ "pkcs11-module",
  "pkcs11-proxy-ng",
  "pkcs11-proxy-ng-backend",
  "pkcs11-proxy-ng-client",

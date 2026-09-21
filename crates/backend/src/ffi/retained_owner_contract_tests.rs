@@ -125,9 +125,18 @@ fn oracle_retains_init_root_across_native_calls() {
 #[ignore = "C3M.6: requires the built retained-mechanism oracle cdylib, run serially"]
 fn native_owner_oracle_retains_init_root_across_calls() {
     let _guard = oracle::acquire_test_serial();
+    // W1-L10-11: this test is `#[ignore]`, so reaching this code means an
+    // explicit opt-in run. A missing oracle library is then a real error,
+    // not a silent skip — fail loudly rather than returning a misleading
+    // green pass (same L14 rule as the GCM-IV `require_patched_lib` gate).
     let Some(lib) = std::env::var_os("PKCS11_PROXY_RETAINED_ORACLE_LIB") else {
-        eprintln!("SKIP: PKCS11_PROXY_RETAINED_ORACLE_LIB is not set");
-        return;
+        panic!(
+            "PKCS11_PROXY_RETAINED_ORACLE_LIB is not set — this #[ignore] test requires the \
+             built retained-mechanism oracle cdylib. Build it with `cargo build --locked \
+             --manifest-path tests/ffi_oracles/retained_mechanisms/Cargo.toml` and point the \
+             env var at the resulting .so, then re-run serially (--test-threads=1). \
+             (Refusing to pass silently — W1-L10-11.)"
+        );
     };
     // Same assertions as the in-process test, through a real dlopen-loaded
     // provider: proves the cdylib artifact serves the retention contract.

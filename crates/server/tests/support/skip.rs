@@ -56,6 +56,23 @@ macro_rules! record_skip {
     }};
 }
 
+/// Fail an explicitly-requested `#[ignore]` lane whose prerequisite is
+/// missing (W1-L9-11): reaching this code means the runner opted in with
+/// `--ignored`, so a missing provider/mechanism is a failure, not a green
+/// pass. Records the reason loudly on stderr and returns it as the test's
+/// `Err`, so the failure message carries the skip reason.
+///
+/// Usage (in a `-> Result<(), String>` ignored test):
+/// ```ignore
+/// return Err(support::fail_explicit_skip(
+///     support::SkipReason::ProviderMissing("kryoptic"),
+/// ));
+/// ```
+pub fn fail_explicit_skip(reason: SkipReason) -> String {
+    eprintln!("✗  explicit --ignored run cannot execute: {reason}");
+    format!("explicit --ignored run cannot execute: {reason}")
+}
+
 /// Check whether a command-line tool is available on PATH.
 pub fn tool_available(name: &str) -> bool {
     Command::new("which").arg(name).output().map(|o| o.status.success()).unwrap_or(false)

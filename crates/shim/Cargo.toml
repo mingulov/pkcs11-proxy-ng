@@ -37,6 +37,9 @@ tempfile = "3"
 # Dev-only: the cross_width_smoke example loads the built shim module through
 # the public C ABI (C_GetFunctionList), exactly like a host application.
 libloading.workspace = true
+# Dev-only: the ABI audit walks the served function-list tables with the
+# shared module-FFI offset facts (W1-L10-14). Same pinned rev as the backend.
+pkcs11-module = { git = "https://github.com/mingulov/pkcs11-components", rev = "d0a47c71d34294466bc41100ae6b5a5a329029d2" }
 
 [lints]
 workspace = true

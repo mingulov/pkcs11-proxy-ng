@@ -9,30 +9,482 @@ use std::collections::BTreeSet;
 
 /// Extract method names from the Pkcs11Backend trait source.
 fn backend_trait_methods() -> Vec<String> {
-    let src = include_str!("../../backend/src/traits.rs");
-    let mut methods = Vec::new();
-    for line in src.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("fn ") && trimmed.contains('(') {
-            let name = trimmed.strip_prefix("fn ").unwrap().split('(').next().unwrap().trim();
-            methods.push(name.to_string());
-        }
-    }
-    methods
+    parse_backend_trait_methods(include_str!("../../backend/src/traits.rs"))
 }
 
 /// Extract RPC names from the proto service definition.
 fn proto_rpc_names() -> Vec<String> {
-    let src = include_str!("../../../proto/pkcs11-proxy-ng/v1/service.proto");
+    parse_proto_rpc_names(include_str!("../../../proto/pkcs11-proxy-ng/v1/service.proto"))
+}
+
+/// Method names declared in the `Pkcs11Backend` trait body of `src`.
+fn parse_backend_trait_methods(src: &str) -> Vec<String> {
+    // W1-L10-15: token parse inside the brace-matched trait body — immune to
+    // commented-out methods, `fn` inside strings, helpers in inherent impls,
+    // and attribute/wrapping drift that line-prefix scans miss or misread.
+    let cleaned = strip_rust_code(src);
+    let body =
+        keyword_block(&cleaned, 0, &["trait", "Pkcs11Backend"]).expect("trait Pkcs11Backend body");
+    fn_idents_in(&cleaned[body.0..body.1])
+}
+
+/// RPC names declared in the proto `service` block of `src`.
+fn parse_proto_rpc_names(src: &str) -> Vec<String> {
+    // W1-L10-15: token parse inside every brace-matched `service` block.
+    let cleaned = strip_proto_code(src);
     let mut rpcs = Vec::new();
-    for line in src.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("rpc ") {
-            let name = trimmed.strip_prefix("rpc ").unwrap().split('(').next().unwrap().trim();
-            rpcs.push(name.to_string());
+    let mut search_from = 0;
+    while let Some((body, next)) = keyword_block_from(&cleaned, search_from, &["service"]) {
+        rpcs.extend(rpc_idents_in(&cleaned[body.0..body.1]));
+        search_from = next;
+    }
+    assert!(!rpcs.is_empty(), "no service block found in service.proto");
+    rpcs
+}
+
+/// `fn <ident>(...)` declaration names in `text` (comment/string-stripped).
+/// Skips fn-pointer types (`fn(` with no name), `Fn(...)` bounds, and macro
+/// placeholders; tolerates `async`/`unsafe`/`const` prefixes, attributes, and
+/// wrapped signatures.
+fn fn_idents_in(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut from = 0;
+    while let Some(idx) = find_keyword(text, from, "fn") {
+        from = idx + 2;
+        let Some((name, after)) = read_ident(text, from) else { continue };
+        // A declaration has `(` (possibly after `<...>` generics) after the
+        // name; anything else (`fn(`, `fn name =`, ...) is not one.
+        let mut cursor = skip_ws(text, after);
+        if text.as_bytes().get(cursor) == Some(&b'<') {
+            cursor = skip_balanced(text, cursor, b'<', b'>').unwrap_or(text.len());
+            cursor = skip_ws(text, cursor);
+        }
+        if text.as_bytes().get(cursor) == Some(&b'(') {
+            names.push(name);
+        }
+        from = after;
+    }
+    names
+}
+
+/// `rpc <Name>(...)` names in a proto `service` body (comment-stripped).
+fn rpc_idents_in(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut from = 0;
+    while let Some(idx) = find_keyword(text, from, "rpc") {
+        from = idx + 3;
+        if let Some((name, after)) = read_ident(text, from) {
+            let cursor = skip_ws(text, after);
+            if text.as_bytes().get(cursor) == Some(&b'(') {
+                names.push(name);
+            }
+            from = after;
         }
     }
-    rpcs
+    names
+}
+
+/// `async fn <ident>` names in `text` (comment/string-stripped), skipping
+/// macro-template placeholders (`async fn $name`). Preserves the historical
+/// lowercase-first rule: only concrete handler names count.
+fn async_fn_idents_in(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut from = 0;
+    while let Some(idx) = find_keyword(text, from, "async") {
+        from = idx + 5;
+        let cursor = skip_ws(text, from);
+        if !text[cursor..].starts_with("fn")
+            || (cursor > 0 && is_ident_char(text.as_bytes()[cursor - 1]))
+            || text.as_bytes().get(cursor + 2).is_some_and(|b| is_ident_char(*b))
+        {
+            continue;
+        }
+        if let Some((name, after)) = read_ident(text, cursor + 2) {
+            if name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+                names.push(name);
+            }
+            from = after;
+        }
+    }
+    names
+}
+
+/// Inner span + end offset of the first `{ ... }` block following the keyword
+/// sequence `words` (adjacent idents, in order: `impl Pkcs11Proxy for`, not a
+/// far-apart `impl` + `for` loop) at or after `from`.
+/// Returns `(inner_start, inner_end), after_close`.
+fn keyword_block_from(text: &str, from: usize, words: &[&str]) -> Option<((usize, usize), usize)> {
+    let mut cursor = from;
+    loop {
+        let idx = find_keyword(text, cursor, words[0])?;
+        let mut probe = idx + words[0].len();
+        let mut matched = true;
+        for word in &words[1..] {
+            match read_ident(text, probe) {
+                Some((name, after)) if name == *word => probe = after,
+                _ => {
+                    matched = false;
+                    break;
+                }
+            }
+        }
+        cursor = idx + 1;
+        if !matched {
+            continue;
+        }
+        probe = skip_ws_and_attrs(text, probe);
+        let Some(rel) = text[probe..].find('{') else { continue };
+        // The `{` must arrive before any `;` (a declaration, not a block) or
+        // a nested `}` (ran past the item): otherwise keep scanning.
+        let between = &text[probe..probe + rel];
+        if between.contains([';', '}']) {
+            continue;
+        }
+        if let Some((start, end, after)) = brace_span(text, probe + rel) {
+            debug_assert_eq!(start, probe + rel + 1);
+            return Some(((start, end), after));
+        }
+    }
+}
+
+/// `keyword_block_from` from the start of `text`, dropping the end offset.
+fn keyword_block(text: &str, from: usize, words: &[&str]) -> Option<(usize, usize)> {
+    keyword_block_from(text, from, words).map(|(span, _)| span)
+}
+
+/// Skip whitespace and Rust attributes (`#[...]`, including `#![...]`-style
+/// doc shapes after blanking) starting at `cursor`.
+fn skip_ws_and_attrs(text: &str, mut cursor: usize) -> usize {
+    loop {
+        cursor = skip_ws(text, cursor);
+        if text.as_bytes().get(cursor) == Some(&b'#') {
+            let mut end = cursor + 1;
+            if text.as_bytes().get(end) == Some(&b'!') {
+                end += 1;
+            }
+            if text.as_bytes().get(end) == Some(&b'[') {
+                cursor = skip_balanced(text, end, b'[', b']').unwrap_or(text.len());
+                continue;
+            }
+        }
+        return cursor;
+    }
+}
+
+/// Inner span + closing offset of the `{ ... }` block opening at `open`.
+fn brace_span(text: &str, open: usize) -> Option<(usize, usize, usize)> {
+    debug_assert_eq!(text.as_bytes().get(open), Some(&b'{'));
+    let mut depth = 0usize;
+    for (i, b) in text.bytes().enumerate().skip(open) {
+        if b == b'{' {
+            depth += 1;
+        } else if b == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some((open + 1, i, i + 1));
+            }
+        }
+    }
+    None
+}
+
+/// Offset just past the balanced `open..close` pair starting at `start`
+/// (which must hold `open`), or `None` when unbalanced.
+fn skip_balanced(text: &str, start: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(start) != Some(&open) {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (i, b) in bytes.iter().enumerate().skip(start) {
+        if *b == open {
+            depth += 1;
+        } else if *b == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+    }
+    None
+}
+
+/// Next word-boundary occurrence of keyword `kw` at or after `from`.
+/// Shared with the session PIN gates (`session::tests`).
+pub(crate) fn find_keyword(text: &str, from: usize, kw: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut cursor = from.min(bytes.len());
+    while let Some(rel) = text[cursor..].find(kw) {
+        let idx = cursor + rel;
+        let before_ok = idx == 0 || !is_ident_char(bytes[idx - 1]);
+        let after_ok = bytes.get(idx + kw.len()).is_none_or(|b| !is_ident_char(*b));
+        if before_ok && after_ok {
+            return Some(idx);
+        }
+        cursor = idx + 1;
+    }
+    None
+}
+
+/// Identifier starting at the first non-whitespace char at or after `from`.
+/// Shared with the session PIN gates (`session::tests`).
+pub(crate) fn read_ident(text: &str, from: usize) -> Option<(String, usize)> {
+    let bytes = text.as_bytes();
+    let mut start = skip_ws(text, from);
+    if bytes.get(start).is_none_or(|b| !is_ident_start(*b)) {
+        return None;
+    }
+    start += 1;
+    let mut end = start;
+    while bytes.get(end).is_some_and(|b| is_ident_char(*b)) {
+        end += 1;
+    }
+    Some((text[start - 1..end].to_string(), end))
+}
+
+/// First offset at or after `from` holding a non-whitespace byte.
+/// Shared with the session PIN gates (`session::tests`).
+pub(crate) fn skip_ws(text: &str, mut cursor: usize) -> usize {
+    let bytes = text.as_bytes();
+    while bytes.get(cursor).is_some_and(|b| b.is_ascii_whitespace()) {
+        cursor += 1;
+    }
+    cursor
+}
+
+/// Shared with the session PIN gates (`session::tests`).
+pub(crate) fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
+}
+
+/// Rust source with comments (`//`, nested `/* */`), strings (`"..."`, raw
+/// and byte forms), and char literals blanked to spaces; newlines and byte
+/// offsets are preserved so brace matching sees code structure only.
+/// Shared with the session PIN gates (`session::tests`).
+pub(crate) fn strip_rust_code(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if rest.starts_with(b"//") {
+            let mut end = i + 2;
+            while end < bytes.len() && bytes[end] != b'\n' {
+                end += 1;
+            }
+            blank_span(&mut out, i, end);
+            i = end;
+        } else if rest.starts_with(b"/*") {
+            let mut end = i + 2;
+            let mut depth = 1;
+            while end + 1 < bytes.len() && depth > 0 {
+                if bytes[end..].starts_with(b"/*") {
+                    depth += 1;
+                    end += 2;
+                } else if bytes[end..].starts_with(b"*/") {
+                    depth -= 1;
+                    end += 2;
+                } else {
+                    end += 1;
+                }
+            }
+            let end = end.min(bytes.len());
+            blank_span(&mut out, i, end);
+            i = end;
+        } else if let Some(len) = raw_string_len(rest) {
+            blank_span(&mut out, i, i + len);
+            i += len;
+        } else if rest.starts_with(b"\"") || rest.starts_with(b"b\"") {
+            let mut end = i + usize::from(rest.starts_with(b"b\"")) + 1;
+            while end < bytes.len() {
+                if bytes[end] == b'\\' {
+                    end += 2;
+                } else if bytes[end] == b'"' {
+                    end += 1;
+                    break;
+                } else {
+                    end += 1;
+                }
+            }
+            let end = end.min(bytes.len());
+            blank_span(&mut out, i, end);
+            i = end;
+        } else if rest.starts_with(b"'") || rest.starts_with(b"b'") {
+            // A char literal only (`'x'`, `'\n'`); a lifetime (`'a`) is left
+            // alone — lifetimes carry no braces, strings, or keywords.
+            let start = i + usize::from(rest.starts_with(b"b'"));
+            let mut end = start + 1;
+            if end < bytes.len() && bytes[end] == b'\\' {
+                end += 2;
+            } else if end < bytes.len() {
+                end += 1;
+            }
+            if end < bytes.len() && bytes[end] == b'\'' {
+                blank_span(&mut out, i, end + 1);
+                i = end + 1;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("blanking preserves UTF-8 boundaries")
+}
+
+/// Shared with the session PIN gates (`session::tests`).
+pub(crate) fn strip_rust_comments_only(src: &str) -> String {
+    // Like `strip_rust_code`, but blanks COMMENTS only: string contents are
+    // preserved (log-macro `{ident}` interpolation lives inside string
+    // literals) while comment text cannot forge a match. Newlines and byte
+    // offsets are preserved, so spans located on fully-stripped text line up.
+    let bytes = src.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if rest.starts_with(b"//") {
+            let mut end = i + 2;
+            while end < bytes.len() && bytes[end] != b'\n' {
+                end += 1;
+            }
+            blank_span(&mut out, i, end);
+            i = end;
+        } else if rest.starts_with(b"/*") {
+            let mut end = i + 2;
+            let mut depth = 1;
+            while end + 1 < bytes.len() && depth > 0 {
+                if bytes[end..].starts_with(b"/*") {
+                    depth += 1;
+                    end += 2;
+                } else if bytes[end..].starts_with(b"*/") {
+                    depth -= 1;
+                    end += 2;
+                } else {
+                    end += 1;
+                }
+            }
+            let end = end.min(bytes.len());
+            blank_span(&mut out, i, end);
+            i = end;
+        } else if let Some(len) = raw_string_len(rest) {
+            i += len;
+        } else if rest.starts_with(b"\"") || rest.starts_with(b"b\"") {
+            let mut end = i + usize::from(rest.starts_with(b"b\"")) + 1;
+            while end < bytes.len() {
+                if bytes[end] == b'\\' {
+                    end += 2;
+                } else if bytes[end] == b'"' {
+                    end += 1;
+                    break;
+                } else {
+                    end += 1;
+                }
+            }
+            i = end.min(bytes.len());
+        } else if rest.starts_with(b"'") || rest.starts_with(b"b'") {
+            let start = i + usize::from(rest.starts_with(b"b'"));
+            let mut end = start + 1;
+            if end < bytes.len() && bytes[end] == b'\\' {
+                end += 2;
+            } else if end < bytes.len() {
+                end += 1;
+            }
+            i = if end < bytes.len() && bytes[end] == b'\'' { end + 1 } else { i + 1 };
+        } else {
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("blanking preserves UTF-8 boundaries")
+}
+
+/// Proto source with `//` and `/* */` comments and `"..."`
+/// (`'...'`-quoted too) option strings blanked to spaces.
+fn strip_proto_code(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if rest.starts_with(b"//") {
+            let mut end = i + 2;
+            while end < bytes.len() && bytes[end] != b'\n' {
+                end += 1;
+            }
+            blank_span(&mut out, i, end);
+            i = end;
+        } else if rest.starts_with(b"/*") {
+            let mut end = i + 2;
+            while end + 1 < bytes.len() && !bytes[end..].starts_with(b"*/") {
+                end += 1;
+            }
+            let end = (end + 2).min(bytes.len());
+            blank_span(&mut out, i, end);
+            i = end;
+        } else if rest.starts_with(b"\"") || rest.starts_with(b"'") {
+            let quote = bytes[i];
+            let mut end = i + 1;
+            while end < bytes.len() {
+                if bytes[end] == b'\\' {
+                    end += 2;
+                } else if bytes[end] == quote {
+                    end += 1;
+                    break;
+                } else {
+                    end += 1;
+                }
+            }
+            let end = end.min(bytes.len());
+            blank_span(&mut out, i, end);
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("blanking preserves UTF-8 boundaries")
+}
+
+fn blank_span(out: &mut [u8], from: usize, to: usize) {
+    let len = out.len();
+    for b in &mut out[from..to.min(len)] {
+        if *b != b'\n' {
+            *b = b' ';
+        }
+    }
+}
+
+/// Length of the raw string (`r"..."`, `r#"..."#`, `br"..."`) at the start
+/// of `rest`, or `None` when `rest` does not start with one.
+fn raw_string_len(rest: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    if rest.first() == Some(&b'b') {
+        i += 1;
+    }
+    if rest.get(i) != Some(&b'r') {
+        return None;
+    }
+    i += 1;
+    let mut hashes = 0;
+    while rest.get(i) == Some(&b'#') {
+        hashes += 1;
+        i += 1;
+    }
+    if rest.get(i) != Some(&b'"') {
+        return None;
+    }
+    i += 1;
+    while i < rest.len() {
+        if rest[i] == b'"' && rest.get(i + 1..).is_some_and(|t| t.starts_with(&vec![b'#'; hashes]))
+        {
+            return Some(i + 1 + hashes);
+        }
+        i += 1;
+    }
+    Some(rest.len())
 }
 
 /// List protobuf source files that should feed code generation.
@@ -55,65 +507,94 @@ fn proto_source_paths() -> Vec<String> {
 
 /// Extract handler delegation lines from the gRPC service implementation.
 fn grpc_handler_rpcs() -> Vec<String> {
-    let src = include_str!("server/grpc_service/mod.rs");
+    parse_grpc_handler_rpcs(include_str!("server/grpc_service/mod.rs"))
+}
+
+/// Handler names from the `impl Pkcs11Proxy` block plus the
+/// `impl_proxy_service!` invocation tuples of `src`.
+fn parse_grpc_handler_rpcs(src: &str) -> Vec<String> {
+    // W1-L10-15: brace-matched block + balanced top-level tuple split. The old
+    // scan never left the trait impl once triggered, so any `async fn` placed
+    // after it (e.g. a later test module) counted as a handler; the block
+    // match closes that placement footgun structurally.
+    let cleaned = strip_rust_code(src);
     let mut handlers = Vec::new();
     // Only methods inside the `impl Pkcs11Proxy for ...` trait block are RPC
     // handlers. Inherent helpers on the service (e.g. `check_context_owner`)
     // are also `async fn` but must not be counted as handlers.
-    let mut in_trait_impl = false;
-
-    for line in src.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("impl Pkcs11Proxy for ") {
-            in_trait_impl = true;
-        }
-        if in_trait_impl && let Some(rest) = trimmed.strip_prefix("async fn ") {
-            let name = rest.split('(').next().unwrap().trim();
-            if name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-                && !handlers.contains(&name.to_string())
-            {
-                handlers.push(name.to_string());
-            }
+    if let Some(body) = keyword_block(&cleaned, 0, &["impl", "Pkcs11Proxy", "for"]) {
+        for name in async_fn_idents_in(&cleaned[body.0..body.1]) {
+            push_unique(&mut handlers, name);
         }
     }
+    for name in macro_tuple_first_idents(&cleaned, "impl_proxy_service") {
+        push_unique(&mut handlers, name);
+    }
+    assert!(!handlers.is_empty(), "no gRPC handlers found");
+    handlers
+}
 
-    let invocation = src
-        .rsplit_once("impl_proxy_service!(")
-        .map(|(_, rest)| rest)
-        .expect("impl_proxy_service! invocation missing");
+/// First identifier of each top-level `(name, ...)` group in the last
+/// `macro_name!(...)` invocation of `text` (comment/string-stripped).
+/// Only lowercase-first idents count, matching the historical rule.
+fn macro_tuple_first_idents(text: &str, macro_name: &str) -> Vec<String> {
+    // Last invocation (same anchor the old `rsplit_once` used).
+    let mut cursor = 0;
+    let mut last_open = None;
+    while let Some(idx) = find_keyword(text, cursor, macro_name) {
+        let mut probe = skip_ws(text, idx + macro_name.len());
+        if text.as_bytes().get(probe) == Some(&b'!') {
+            probe = skip_ws(text, probe + 1);
+            if text.as_bytes().get(probe) == Some(&b'(') {
+                last_open = Some(probe);
+            }
+        }
+        cursor = idx + 1;
+    }
+    let Some(open) = last_open else {
+        panic!("{macro_name}! invocation missing");
+    };
+    let close = skip_balanced(text, open, b'(', b')').expect("balanced macro invocation");
+    let inner = &text[open + 1..close - 1];
+    let mut names = Vec::new();
+    for group in split_top_level(inner) {
+        let group = group.trim().trim_start_matches('(');
+        if let Some((name, _)) = read_ident(group, 0)
+            && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        {
+            names.push(name);
+        }
+    }
+    names
+}
 
-    let mut tuple = String::new();
+/// Split `text` on commas at nesting depth 0 (all of `()`, `[]`, `{}` nest).
+fn split_top_level(text: &str) -> Vec<&str> {
+    let mut groups = Vec::new();
     let mut depth = 0usize;
-
-    for ch in invocation.chars() {
-        match ch {
-            '(' => {
-                depth += 1;
-                if depth == 1 {
-                    tuple.clear();
-                } else {
-                    tuple.push(ch);
-                }
+    let mut start = 0;
+    for (i, b) in text.bytes().enumerate() {
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                groups.push(text[start..i].trim());
+                start = i + 1;
             }
-            ')' => {
-                if depth == 1 {
-                    let name = tuple.split(',').next().unwrap().trim();
-                    if name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-                        && !handlers.contains(&name.to_string())
-                    {
-                        handlers.push(name.to_string());
-                    }
-                    tuple.clear();
-                } else if depth > 1 {
-                    tuple.push(ch);
-                }
-                depth = depth.saturating_sub(1);
-            }
-            _ if depth >= 1 => tuple.push(ch),
             _ => {}
         }
     }
-    handlers
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        groups.push(tail);
+    }
+    groups
+}
+
+fn push_unique(handlers: &mut Vec<String>, name: String) {
+    if !handlers.contains(&name) {
+        handlers.push(name);
+    }
 }
 
 /// Convert snake_case to PascalCase for name comparison.
@@ -153,30 +634,79 @@ fn pascal_to_snake(s: &str) -> String {
 
 /// Scan shim dispatch directory for all `pub unsafe extern "C" fn c_*` functions.
 fn shim_dispatch_functions() -> Vec<String> {
+    // W1-L10-15: recursive walk of the whole dispatch tree (not just
+    // `general/*.rs`), so exports in a new nested module cannot bypass the
+    // layer-sync gates.
     let dispatch_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../shim/src/dispatch/general");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../shim/src/dispatch");
     let mut fns = Vec::new();
-    for entry in std::fs::read_dir(&dispatch_dir).expect("cannot read shim dispatch dir") {
+    collect_shim_dispatch_fns(&dispatch_dir, &mut fns);
+    assert!(!fns.is_empty(), "no shim dispatch functions found");
+    fns
+}
+
+fn collect_shim_dispatch_fns(dir: &std::path::Path, fns: &mut Vec<String>) {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    for entry in entries {
         let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
+        if path.is_dir() {
+            collect_shim_dispatch_fns(&path, fns);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            fns.extend(parse_shim_dispatch_fns(&content));
         }
-        let content = std::fs::read_to_string(&path).expect("cannot read file");
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("pub unsafe extern")
-                && trimmed.contains("fn c_")
-                && let Some(after_fn) = trimmed.split("fn ").nth(1)
-                && let Some(name) = after_fn.split('(').next()
+    }
+}
+
+/// `c_*` export names declared in one shim dispatch source file: token
+/// matches of `extern "C" fn c_<name>(`, tolerant to wrapping and immune to
+/// commented-out declarations.
+fn parse_shim_dispatch_fns(src: &str) -> Vec<String> {
+    let cleaned = strip_rust_code_except_extern_abi(src);
+    let mut fns = Vec::new();
+    let mut cursor = 0;
+    while let Some(idx) = find_keyword(&cleaned, cursor, "extern") {
+        cursor = idx + 6;
+        // The ABI string is preserved by the stripper: it must read `"C"`.
+        let probe = skip_ws(&cleaned, cursor);
+        if cleaned[probe..].starts_with("\"C\"") {
+            let after_abi = skip_ws(&cleaned, probe + 3);
+            if cleaned[after_abi..].starts_with("fn")
+                && cleaned.as_bytes().get(after_abi + 2).is_none_or(|b| !is_ident_char(*b))
+                && let Some((name, after)) = read_ident(&cleaned, after_abi + 2)
+                && name.starts_with("c_")
+                && !name.starts_with("c_not_supported")
             {
-                let name = name.trim();
-                if !name.starts_with("c_not_supported") {
-                    fns.push(name.to_string());
+                let paren = skip_ws(&cleaned, after);
+                if cleaned.as_bytes().get(paren) == Some(&b'(') {
+                    fns.push(name);
                 }
             }
         }
     }
     fns
+}
+
+/// Like `strip_rust_code`, but preserves the two bytes of the `"C"` ABI
+/// string in `extern "C"` declarations (blanked to a sentinel-free `"C"`);
+/// every other comment/string/char is blanked as usual.
+fn strip_rust_code_except_extern_abi(src: &str) -> String {
+    let mut cleaned = strip_rust_code(src);
+    // Restore: find `extern` idents in the ORIGINAL source whose ABI string
+    // reads exactly `"C"`, and write it back over the blank at the same
+    // offsets (blanking preserves offsets, so positions line up).
+    let mut cursor = 0;
+    while let Some(idx) = find_keyword(src, cursor, "extern") {
+        cursor = idx + 6;
+        let probe = skip_ws(src, cursor);
+        if src[probe..].starts_with("\"C\"") {
+            // SAFETY of indexing: `probe` sits at a `"` (ASCII) by the check.
+            cleaned.replace_range(probe..probe + 3, "\"C\"");
+        }
+    }
+    cleaned
 }
 
 fn client_method_names() -> Vec<String> {
@@ -336,6 +866,109 @@ fn test_enumerated_rpc_names() -> Vec<String> {
 }
 
 #[test]
+fn trait_parser_ignores_comments_strings_and_impl_helpers() {
+    // W1-L10-15 negative control: formatting drift (commented-out method,
+    // `fn` inside a string, helper in an inherent impl, fn-pointer type)
+    // must not pollute the trait method set; an attribute-prefixed and a
+    // wrapped declaration must still be found.
+    let fixture = r#"
+pub trait Pkcs11Backend: Send + Sync {
+    fn initialize(&self) -> CkResult<()>;
+    // fn phantom_disabled(&self);
+    #[cfg(unix)] fn single_line_attr(&self);
+    fn wrapped
+        (&self, slot_id: CkSlotId) -> CkResult<()>;
+    fn docs(&self) -> &'static str {
+        "fn not_a_method("
+    }
+}
+struct Helper;
+impl Helper {
+    pub fn impl_helper(&self) {}
+}
+type Callback = Box<dyn Fn(&str)>;
+"#;
+    assert_eq!(
+        parse_backend_trait_methods(fixture),
+        vec!["initialize", "single_line_attr", "wrapped", "docs"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn proto_parser_ignores_comments_options_and_wrapping() {
+    // W1-L10-15 negative control: a commented-out RPC, an option string
+    // mentioning `rpc`, and a wrapped declaration must parse exactly.
+    let fixture = r#"
+syntax = "proto3";
+service Pkcs11Proxy {
+  rpc Initialize(InitializeRequest) returns (InitializeResponse);
+  // rpc Phantom(PhantomRequest) returns (PhantomResponse);
+  /*
+  rpc BlockCommented(BlockRequest) returns (BlockResponse);
+  */
+  rpc Wrapped(
+    WrappedRequest) returns (WrappedResponse);
+  option (audit) = "rpc Fake;";
+}
+"#;
+    assert_eq!(
+        parse_proto_rpc_names(fixture),
+        vec!["Initialize".to_string(), "Wrapped".to_string()],
+    );
+}
+
+#[test]
+fn macro_parser_ignores_comment_parens_and_wrapping() {
+    // W1-L10-15 negative control: parens inside comments/strings and
+    // multi-line tuples must not confuse the invocation parser; a test
+    // `async fn` AFTER the impl block must not count as a handler (the
+    // placement footgun documented at grpc_service/mod.rs:263-267).
+    let fixture = r#"
+macro_rules! impl_proxy_service {
+    ($(($name:ident, $request:ident, $response:ident, $module:path)),+ $(,)?) => {
+        impl Pkcs11Proxy for Pkcs11ProxyService {
+            async fn initialize(&self) -> Status {
+                Status::ok(") (")
+            }
+            $(
+                async fn $name(&self) -> Status { Status::ok() }
+            )*
+        }
+    };
+}
+impl_proxy_service!(
+    // comment with (parens) must not shift the parse
+    (finalize, FinalizeRequest, FinalizeResponse, general::finalize),
+    (
+        get_info,
+        GetInfoRequest,
+        GetInfoResponse,
+        general::get_info
+    ),
+);
+#[cfg(test)]
+mod later_tests {
+    async fn test_helper_after_impl() {}
+}
+"#;
+    assert_eq!(
+        parse_grpc_handler_rpcs(fixture),
+        vec!["initialize".to_string(), "finalize".to_string(), "get_info".to_string()],
+    );
+}
+
+#[test]
+fn dispatch_parser_tolerates_wrapping_and_recurses() {
+    // W1-L10-15 negative control: an `extern "C"` declaration wrapped across
+    // lines must still be found; a commented-out export must not.
+    let fixture = "pub unsafe extern \"C\"\n    fn c_split(\n        arg: u64,\n    ) -> u64 {\n    arg\n}\n// pub unsafe extern \"C\" fn c_commented() {}\n";
+    assert_eq!(parse_shim_dispatch_fns(fixture), vec!["c_split".to_string()]);
+}
+
+#[test]
 fn proto_build_script_tracks_all_proto_sources() {
     let build_rs = include_str!("../../proto/build.rs");
     for path in proto_source_paths() {
@@ -356,107 +989,153 @@ fn backend_methods_have_proto_rpcs() {
     let rpcs = proto_rpc_names();
     let rpc_pascal: Vec<String> = rpcs.iter().map(|r| r.to_lowercase()).collect();
 
-    // Methods exempt from the "must have a matching proto RPC" check:
-    // - initialize/finalize: handled specially in the proto (C_Initialize/C_Finalize)
-    // - get_interface_capabilities: internal BUG-001 RPC, not a PKCS#11 function
-    // - *_exact: these are exact-output variants that share the ByteOutputExact
-    //   or GetAttributeValueExact multiplexed RPCs, not individual RPCs
-    let exempt = [
-        "initialize",
-        "finalize",
-        "get_interface_capabilities",
+    // Methods exempt from the "must have a matching proto RPC" check, each
+    // with its per-item justification (W1-L10-15). The table shrank from 68:
+    // `initialize`, `finalize`, `encapsulate_key_exact`, and
+    // `get_attribute_value_exact` have same-named proto RPCs, so the mapping
+    // check now covers them directly instead of exempting them.
+    let exempt: &[(&str, &str)] = &[
+        (
+            "get_interface_capabilities",
+            "provider capability probe served from GetBackendInterfaces, not a PKCS#11 function; no wire method",
+        ),
         // ABI advertisement metadata (ADR-0011 D2/D6): carried inside the
         // GetBackendInterfaces response, not PKCS#11 functions.
-        "abi_ulong_size",
-        "abi_byte_order",
-        "abi_attribute_stride",
-        // Exact-output trait method shared via EncapsulateKeyExact RPC
-        "encapsulate_key_exact",
-        // Exact-output trait methods shared via ByteOutputExact RPC
-        "sign_exact",
-        "sign_final_exact",
-        "sign_recover_exact",
-        "verify_recover_exact",
-        "digest_exact",
-        "digest_final_exact",
-        "encrypt_exact",
-        "encrypt_exact_with_output",
-        "encrypt_update_exact",
-        "encrypt_final_exact",
-        "decrypt_exact",
-        "decrypt_update_exact",
-        "decrypt_final_exact",
-        "digest_encrypt_update_exact",
-        "decrypt_digest_update_exact",
-        "sign_encrypt_update_exact",
-        "decrypt_verify_update_exact",
-        "wrap_key_exact",
-        "wrap_key_exact_with_output",
-        "derive_key_with_output",
-        "derive_key_with_output_result",
-        // Reuses the GenerateKey RPC, surfacing HSM-written mechanism params
-        // (CK_PBE_PARAMS.pInitVector) via GenerateKeyResponse.mechanism_out.
-        "generate_key_with_output",
-        "get_operation_state_exact",
+        ("abi_ulong_size", "D2 advertisement inside GetBackendInterfaces; not a PKCS#11 function"),
+        ("abi_byte_order", "D6 advertisement inside GetBackendInterfaces; not a PKCS#11 function"),
+        (
+            "abi_attribute_stride",
+            "D2-extension advertisement inside GetBackendInterfaces; not a PKCS#11 function",
+        ),
+        // Exact-output trait methods sharing the multiplexed ByteOutputExact RPC.
+        ("sign_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("sign_final_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("sign_recover_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("verify_recover_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("digest_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("digest_final_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("encrypt_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("encrypt_exact_with_output", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("encrypt_update_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("encrypt_final_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("decrypt_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("decrypt_update_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("decrypt_final_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("digest_encrypt_update_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("decrypt_digest_update_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("sign_encrypt_update_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("decrypt_verify_update_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("wrap_key_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("wrap_key_exact_with_output", "exact-output variant sharing the ByteOutputExact RPC"),
+        ("get_operation_state_exact", "exact-output variant sharing the ByteOutputExact RPC"),
+        // Mechanism-out writers sharing their op's existing RPC via
+        // `*Response.mechanism_out` (no separate wire method).
+        (
+            "derive_key_with_output",
+            "shares the DeriveKey RPC via DeriveKeyResponse.mechanism_out (e.g. TLS pVersion writeback)",
+        ),
+        (
+            "derive_key_with_output_result",
+            "non-throwing result shape over derive_key_with_output; shares the DeriveKey RPC",
+        ),
+        (
+            "generate_key_with_output",
+            "shares the GenerateKey RPC via GenerateKeyResponse.mechanism_out (CK_PBE_PARAMS.pInitVector)",
+        ),
         // Helper used by the simple Encrypt/Decrypt + Update/Final RPCs to
         // surface HSM-mutated mechanism params. Not its own RPC; populates
         // the `mechanism_out` field of the existing crypto-op responses.
-        "session_output_mechanism_params",
+        (
+            "session_output_mechanism_params",
+            "populates mechanism_out on existing crypto-op responses; not its own RPC",
+        ),
         // NULL-mechanism init cancellation is carried by the existing *Init
         // RPCs with `mechanism: None`, not by separate proto methods.
-        "sign_init_cancel",
-        "verify_init_cancel",
-        "sign_recover_init_cancel",
-        "verify_recover_init_cancel",
-        "digest_init_cancel",
-        "encrypt_init_cancel",
-        "decrypt_init_cancel",
-        // Exact-output trait method for GetAttributeValueExact RPC
-        "get_attribute_value_exact",
-        // Exact-output trait methods shared via ParameterOutputExact RPC
-        "encrypt_message_exact",
-        "decrypt_message_exact",
-        "sign_message_exact",
-        "encrypt_message_next_exact",
-        "decrypt_message_next_exact",
-        "sign_message_next_exact",
-        "wrap_key_authenticated_exact",
+        ("sign_init_cancel", "carried by the SignInit RPC with mechanism: None"),
+        ("verify_init_cancel", "carried by the VerifyInit RPC with mechanism: None"),
+        ("sign_recover_init_cancel", "carried by the SignRecoverInit RPC with mechanism: None"),
+        ("verify_recover_init_cancel", "carried by the VerifyRecoverInit RPC with mechanism: None"),
+        ("digest_init_cancel", "carried by the DigestInit RPC with mechanism: None"),
+        ("encrypt_init_cancel", "carried by the EncryptInit RPC with mechanism: None"),
+        ("decrypt_init_cancel", "carried by the DecryptInit RPC with mechanism: None"),
+        // Exact-output trait methods shared via ParameterOutputExact RPC.
+        ("encrypt_message_exact", "exact-output variant sharing the ParameterOutputExact RPC"),
+        ("decrypt_message_exact", "exact-output variant sharing the ParameterOutputExact RPC"),
+        ("sign_message_exact", "exact-output variant sharing the ParameterOutputExact RPC"),
+        ("encrypt_message_next_exact", "exact-output variant sharing the ParameterOutputExact RPC"),
+        ("decrypt_message_next_exact", "exact-output variant sharing the ParameterOutputExact RPC"),
+        ("sign_message_next_exact", "exact-output variant sharing the ParameterOutputExact RPC"),
+        (
+            "wrap_key_authenticated_exact",
+            "exact-output variant sharing the ParameterOutputExact RPC",
+        ),
         // Typed authenticated envelopes reuse the existing authenticated RPCs
         // and ParameterOutputExact rather than introducing function-list slots.
-        "wrap_key_authenticated_typed",
-        "wrap_key_authenticated_exact_typed",
-        "unwrap_key_authenticated_typed",
-        // Batch close via CloseAllSessions RPC
-        "close_sessions",
-        // Structured message parameter variants (also via ParameterOutputExact RPC)
-        "encrypt_message_exact_msg",
-        "decrypt_message_exact_msg",
-        "sign_message_exact_msg",
-        "encrypt_message_next_exact_msg",
-        "decrypt_message_next_exact_msg",
-        "sign_message_next_exact_msg",
+        ("wrap_key_authenticated_typed", "typed envelope reusing the WrapKeyAuthenticated RPC"),
+        (
+            "wrap_key_authenticated_exact_typed",
+            "typed envelope reusing the WrapKeyAuthenticated RPC via ParameterOutputExact",
+        ),
+        ("unwrap_key_authenticated_typed", "typed envelope reusing the UnwrapKeyAuthenticated RPC"),
+        // Batch close via CloseAllSessions RPC.
+        ("close_sessions", "batch close sharing the CloseAllSessions RPC"),
+        // Structured message parameter variants (also via ParameterOutputExact RPC).
+        ("encrypt_message_exact_msg", "structured variant sharing the ParameterOutputExact RPC"),
+        ("decrypt_message_exact_msg", "structured variant sharing the ParameterOutputExact RPC"),
+        ("sign_message_exact_msg", "structured variant sharing the ParameterOutputExact RPC"),
+        (
+            "encrypt_message_next_exact_msg",
+            "structured variant sharing the ParameterOutputExact RPC",
+        ),
+        (
+            "decrypt_message_next_exact_msg",
+            "structured variant sharing the ParameterOutputExact RPC",
+        ),
+        ("sign_message_next_exact_msg", "structured variant sharing the ParameterOutputExact RPC"),
         // Structured/transactional helpers carried by the named message RPCs,
         // not additional wire methods.
-        "message_encrypt_init_contract",
-        "message_decrypt_init_contract",
-        "encrypt_message_begin_exact",
-        "decrypt_message_begin_exact",
-        "encrypt_message_begin_msg",
-        "decrypt_message_begin_msg",
-        "sign_message_begin_exact",
-        "sign_message_next_feed_exact",
-        "verify_message_exact",
-        "verify_message_begin_exact",
-        "verify_message_next_exact",
+        ("message_encrypt_init_contract", "contract helper carried by the MessageEncryptInit RPC"),
+        ("message_decrypt_init_contract", "contract helper carried by the MessageDecryptInit RPC"),
+        (
+            "encrypt_message_begin_exact",
+            "transactional helper carried by the EncryptMessageBegin RPC",
+        ),
+        (
+            "decrypt_message_begin_exact",
+            "transactional helper carried by the DecryptMessageBegin RPC",
+        ),
+        ("encrypt_message_begin_msg", "structured helper carried by the EncryptMessageBegin RPC"),
+        ("decrypt_message_begin_msg", "structured helper carried by the DecryptMessageBegin RPC"),
+        ("sign_message_begin_exact", "transactional helper carried by the SignMessageBegin RPC"),
+        ("sign_message_next_feed_exact", "transactional helper carried by the SignMessageNext RPC"),
+        ("verify_message_exact", "exact-output variant carried by the VerifyMessage RPC"),
+        (
+            "verify_message_begin_exact",
+            "transactional helper carried by the VerifyMessageBegin RPC",
+        ),
+        ("verify_message_next_exact", "transactional helper carried by the VerifyMessageNext RPC"),
         // Drop-path destroy (F-01 Drop-may-never-admit): destructor cleanup
         // rides the enclosing op's exclusion and RPC; never itself on the
         // wire, so no proto method exists for it.
-        "destroy_quarantined_object",
+        (
+            "destroy_quarantined_object",
+            "drop-path destroy riding the enclosing op's RPC; never on the wire (F-01)",
+        ),
     ];
+
+    // The exemption list itself must not rot: every entry names a real trait
+    // method, and every entry carries a non-empty justification.
+    for (method, justification) in exempt {
+        assert!(
+            backend.iter().any(|m| m == method),
+            "stale exemption: `{method}` is not a Pkcs11Backend trait method"
+        );
+        assert!(!justification.is_empty(), "exemption `{method}` lacks a justification");
+    }
 
     let mut missing = Vec::new();
     for method in &backend {
-        if exempt.contains(&method.as_str()) {
+        if exempt.iter().any(|(name, _)| name == method) {
             continue;
         }
         let pascal = snake_to_pascal(method);

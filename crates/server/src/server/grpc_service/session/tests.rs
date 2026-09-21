@@ -734,83 +734,351 @@ fn proto_pin_requests_debug_redacts_data() {
     assert!(!debug_output.contains("secret-pin-data"));
 }
 
-#[test]
-fn grpc_handlers_never_debug_format_requests() {
-    let handler_sources: &[(&str, &str)] = &[
-        ("session_handlers/lifecycle.rs", include_str!("../session_handlers/lifecycle.rs")),
-        ("session_handlers/auth.rs", include_str!("../session_handlers/auth.rs")),
-        ("session_handlers/management.rs", include_str!("../session_handlers/management.rs")),
-        ("key_ops/generation.rs", include_str!("../key_ops/generation.rs")),
-        ("key_ops/wrapping.rs", include_str!("../key_ops/wrapping.rs")),
-        ("object/search.rs", include_str!("../object/search.rs")),
-        ("object/attributes.rs", include_str!("../object/attributes.rs")),
-        ("object/lifecycle.rs", include_str!("../object/lifecycle.rs")),
-        ("digest_cipher/digest.rs", include_str!("../digest_cipher/digest.rs")),
-        ("digest_cipher/cipher.rs", include_str!("../digest_cipher/cipher.rs")),
-        ("sign_verify/sign.rs", include_str!("../sign_verify/sign.rs")),
-        ("sign_verify/verify.rs", include_str!("../sign_verify/verify.rs")),
-        ("combined/sign_encrypt.rs", include_str!("../combined/sign_encrypt.rs")),
-        ("combined/decrypt_digest.rs", include_str!("../combined/decrypt_digest.rs")),
-        ("general/lifecycle.rs", include_str!("../general/lifecycle.rs")),
-        ("general/info.rs", include_str!("../general/info.rs")),
-        ("slot/discovery.rs", include_str!("../slot/discovery.rs")),
-        ("slot/mechanisms.rs", include_str!("../slot/mechanisms.rs")),
-        ("state_ops/random.rs", include_str!("../state_ops/random.rs")),
-        ("state_ops/operation_state.rs", include_str!("../state_ops/operation_state.rs")),
-        ("state_ops/slot_event.rs", include_str!("../state_ops/slot_event.rs")),
-    ];
+/// Secret identifiers whose VALUE must never be captured by a log macro.
+const PIN_SECRET_IDENTS: &[&str] = &[
+    "pin", "so_pin", "old_pin", "new_pin", "user_pin", "username", "password", "secret", "pin_hash",
+];
 
-    let dbg_pattern = concat!("dbg", "!(");
-    for (name, src) in handler_sources {
-        for (lineno, line) in src.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("//") {
+/// Log macros whose invocation bodies are scanned for secret captures:
+/// tracing levels plus print sinks. (`dbg!` is banned outright by the gate
+/// below, so it needs no body scan.)
+const PIN_SCANNED_MACROS: &[&str] =
+    &["info", "warn", "debug", "error", "trace", "print", "eprint", "println", "eprintln"];
+
+/// Every `.rs` file under `grpc_service/`, walked recursively from disk so a
+/// new handler file cannot bypass the PIN gates (W1-L2-06, W1-L9-07).
+fn grpc_service_rs_files() -> Vec<String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/grpc_service");
+    let mut files = Vec::new();
+    collect_rs_files(&root, &mut files);
+    files.sort();
+    files.into_iter().map(|path| path.display().to_string()).collect()
+}
+
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Secret-value captures in one file's log-macro bodies, as
+/// `file:line: ...` violations (empty when clean). Each tracing/print-macro
+/// invocation body (possibly multi-line) is checked for `ident =` fields
+/// (on string-blanked text, so `"pin = {}"` labels cannot trip), `%`/`?`
+/// sigils, and `{ident}` interpolation (on comments-only-stripped text, since
+/// interpolation lives inside string literals) over every secret ident.
+fn pin_log_violations(file: &str, src: &str) -> Vec<String> {
+    use crate::consistency_checks::{strip_rust_code, strip_rust_comments_only};
+
+    let stripped = strip_rust_code(src);
+    let with_strings = strip_rust_comments_only(src);
+    let mut violations = Vec::new();
+    for (lineno, span) in log_macro_body_spans(&stripped) {
+        let code_body = &stripped[span.clone()];
+        let text_body = &with_strings[span];
+        for ident in PIN_SECRET_IDENTS {
+            if tracing_field_captures(code_body, ident) {
+                violations.push(format!(
+                    "{file}:{lineno}: log macro captures the value of secret '{ident}' \
+                     (`{ident} =` field): {}",
+                    first_line(text_body),
+                ));
+            } else if logs_secret_sigil(text_body, ident) {
+                violations.push(format!(
+                    "{file}:{lineno}: log macro captures the value of secret '{ident}' \
+                     (%/?/{{}} form): {}",
+                    first_line(text_body),
+                ));
+            }
+        }
+    }
+    violations
+}
+
+/// `(invocation line, body span)` for every scanned log-macro call, located
+/// on comment- and string-stripped `src`. Handles `tracing::info!`-qualified
+/// and wrapped invocations; strings/comments cannot forge a match (already
+/// blanked). Spans index any same-offset stripping of the same source.
+fn log_macro_body_spans(src: &str) -> Vec<(usize, std::ops::Range<usize>)> {
+    use crate::consistency_checks::{is_ident_char, skip_ws};
+
+    let bytes = src.as_bytes();
+    let mut bodies = Vec::new();
+    for macro_name in PIN_SCANNED_MACROS {
+        let mut cursor = 0;
+        while let Some(rel) = src[cursor..].find(macro_name) {
+            let idx = cursor + rel;
+            cursor = idx + 1;
+            // Whole ident, not `my_info`/`debug_assert`/`eprintln`-inside-...:
+            // the char before must not extend the ident (start or `::` or
+            // punctuation), and after the name (plus whitespace) must come `!`.
+            if idx > 0 && is_ident_char(bytes[idx - 1]) {
                 continue;
             }
+            let bang = skip_ws(src, idx + macro_name.len());
+            if bytes.get(bang) != Some(&b'!') {
+                continue;
+            }
+            let open = skip_ws(src, bang + 1);
+            if bytes.get(open) != Some(&b'(') {
+                continue;
+            }
+            // Balanced body on stripped text (no strings/comments left).
+            let mut depth = 0usize;
+            let mut end = open;
+            for (i, b) in bytes.iter().enumerate().skip(open) {
+                if *b == b'(' {
+                    depth += 1;
+                } else if *b == b')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i;
+                        break;
+                    }
+                }
+            }
+            if end == open {
+                continue;
+            }
+            let lineno = src[..open].bytes().filter(|b| *b == b'\n').count() + 1;
+            bodies.push((lineno, open + 1..end));
+        }
+    }
+    bodies.sort_by_key(|(lineno, _)| *lineno);
+    bodies
+}
+
+/// True when `body` assigns the secret's value to a tracing field
+/// (`ident = value`), with `ident` as a whole token. Comparisons
+/// (`ident == ...`), match arms (`ident => ...`), and local bindings
+/// (`let [mut] ident = ...`) are not captures.
+fn tracing_field_captures(body: &str, ident: &str) -> bool {
+    use crate::consistency_checks::{is_ident_char, skip_ws};
+
+    let bytes = body.as_bytes();
+    let mut cursor = 0;
+    while let Some(rel) = body[cursor..].find(ident) {
+        let start = cursor + rel;
+        cursor = start + 1;
+        if start > 0 && is_ident_char(bytes[start - 1]) {
+            continue;
+        }
+        let end = start + ident.len();
+        if bytes.get(end).is_some_and(|b| is_ident_char(*b)) {
+            continue;
+        }
+        let eq = skip_ws(body, end);
+        if bytes.get(eq) != Some(&b'=') {
+            continue;
+        }
+        // `==`, `=>`: comparison or match arm, not a field capture.
+        if bytes.get(eq + 1).is_some_and(|b| *b == b'=' || *b == b'>') {
+            continue;
+        }
+        // `let [mut] ident =`: a local binding inside a block argument.
+        if preceded_by_let(body, start) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// True when the ident at `start` is bound by a `let`/`let mut` immediately
+/// before it (whitespace-separated).
+fn preceded_by_let(body: &str, start: usize) -> bool {
+    use crate::consistency_checks::is_ident_char;
+
+    let bytes = body.as_bytes();
+    let mut cursor = start;
+    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    // Optional `mut`.
+    let mut word_end = cursor;
+    let mut word_start = word_end;
+    while word_start > 0 && is_ident_char(bytes[word_start - 1]) {
+        word_start -= 1;
+    }
+    if &body[word_start..word_end] == "mut" {
+        cursor = word_start;
+        while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+            cursor -= 1;
+        }
+        word_end = cursor;
+        word_start = word_end;
+        while word_start > 0 && is_ident_char(bytes[word_start - 1]) {
+            word_start -= 1;
+        }
+    }
+    &body[word_start..word_end] == "let"
+        && (word_start == 0 || !is_ident_char(bytes[word_start - 1]))
+}
+
+/// True when `body` captures the value of `ident` via a tracing sigil
+/// (`?ident`, `%ident`) or interpolates it (`{ident}`, `{ident:?}`, or any
+/// other `{ident:...}` format spec), with `ident` as a whole token.
+/// (Same rule as the shim PIN gate's `logs_secret_sigil`.)
+fn logs_secret_sigil(body: &str, ident: &str) -> bool {
+    use crate::consistency_checks::is_ident_char;
+
+    let bytes = body.as_bytes();
+    for sigil in ['?', '%'] {
+        let pat = format!("{sigil}{ident}");
+        let mut from = 0;
+        while let Some(rel) = body[from..].find(&pat) {
+            let start = from + rel;
+            let end = start + pat.len();
+            if end >= bytes.len() || !is_ident_char(bytes[end]) {
+                return true;
+            }
+            from = start + 1;
+        }
+    }
+    // Inline-format interpolation, skipping `{{` escapes: `{{pin}}` prints a
+    // literal and must not trip, while `{pin}` and `{pin:?...}` capture.
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if bytes.get(i + 1) == Some(&b'{') {
+                i += 2;
+                continue;
+            }
+            if body[i + 1..].starts_with(ident) {
+                let after = i + 1 + ident.len();
+                if bytes.get(after).is_some_and(|b| *b == b'}' || *b == b':') {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// First line of a macro body, for violation messages.
+fn first_line(body: &str) -> String {
+    body.lines().next().unwrap_or_default().trim().to_string()
+}
+
+#[test]
+fn grpc_handlers_never_debug_format_requests() {
+    // W1-L9-07: whole-tree walk (not a hardcoded file list) so a new handler
+    // file cannot bypass the dbg! ban; comments/strings cannot forge a match.
+    let files = grpc_service_rs_files();
+    assert!(!files.is_empty(), "no grpc_service sources found");
+
+    let dbg_pattern = concat!("dbg", "!(");
+    for name in &files {
+        let src =
+            std::fs::read_to_string(name).unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
+        let stripped = crate::consistency_checks::strip_rust_code(&src);
+        for (lineno, line) in stripped.lines().enumerate() {
             assert!(
-                !trimmed.contains(dbg_pattern),
-                "{name} line {}: found debug macro that may leak secrets: {trimmed}",
+                !line.contains(dbg_pattern),
+                "{name} line {}: found debug macro that may leak secrets: {}",
                 lineno + 1,
+                line.trim(),
             );
         }
     }
 }
 
 #[test]
-fn source_code_never_logs_pin_fields() {
-    let session_sources: &[(&str, &str)] = &[
-        ("session.rs", include_str!("../session.rs")),
-        ("session_handlers/lifecycle.rs", include_str!("../session_handlers/lifecycle.rs")),
-        ("session_handlers/auth.rs", include_str!("../session_handlers/auth.rs")),
-        ("session_handlers/management.rs", include_str!("../session_handlers/management.rs")),
-    ];
-
-    for (name, source) in session_sources {
-        for (lineno, line) in source.lines().enumerate() {
-            let trimmed = line.trim();
-            if !trimmed.contains("info!(")
-                && !trimmed.contains("warn!(")
-                && !trimmed.contains("debug!(")
-                && !trimmed.contains("error!(")
-            {
-                continue;
-            }
-            if trimmed.starts_with("//")
-                || trimmed.starts_with("assert")
-                || trimmed.starts_with("let")
-            {
-                continue;
-            }
-            for forbidden in &["pin =", "so_pin =", "old_pin =", "new_pin =", "pin=", "so_pin="] {
-                assert!(
-                    !trimmed.contains(forbidden),
-                    "{name} line {}: tracing macro must not log PIN data: {}",
-                    lineno + 1,
-                    trimmed
-                );
-            }
-        }
+fn pin_gate_trips_on_every_secret_form() {
+    // W1-L10-25 negative control: every (macro, secret, form) combination the
+    // old gate missed — `trace!`, `user_pin`/`username`/`password` idents,
+    // `%`/`?` sigils, `{ident}` interpolation — must trip.
+    for (macro_name, line) in [
+        ("trace", "trace!(pin = pin, \"login\")"),
+        ("user_pin", "info!(user_pin = user_pin, \"login_user\")"),
+        ("username", "info!(username = username, \"login_user\")"),
+        ("password", "debug!(password = password, \"auth\")"),
+        ("display-sigil", "info!(pin = %pin, \"login\")"),
+        ("debug-sigil", "info!(pin = ?pin, \"login\")"),
+        ("interpolation", "info!(\"pin={pin}\")"),
+        ("debug-interpolation", "info!(\"pin={pin:?}\")"),
+        ("bare-sigil", "warn!(?so_pin)"),
+        ("multiline", "debug!(\n    old_pin = old_pin,\n    \"set_pin\"\n)"),
+    ] {
+        let violations = pin_log_violations("control.rs", line);
+        assert!(
+            !violations.is_empty(),
+            "gate must trip on {macro_name} form: {line:?} (got no violations)"
+        );
     }
+}
+
+#[test]
+fn pin_gate_covers_new_handler_files() {
+    // W1-L2-06 + W1-L9-07 negative control: the walk reaches the PIN-bearing
+    // files the hardcoded lists omitted, and a planted PIN in any of them
+    // trips the gate.
+    let files = grpc_service_rs_files();
+    for required in
+        ["session_3x.rs", "byte_output_exact.rs", "parameter_output_exact.rs", "message_crypto"]
+    {
+        assert!(
+            files.iter().any(|path| path.contains(required)),
+            "PIN-gate walk must reach {required}"
+        );
+    }
+    for name in ["session_3x.rs", "message_crypto/mod.rs", "byte_output_exact.rs", "key_ops/kem.rs"]
+    {
+        let planted =
+            "fn login_user() {\n    let pin = take_pin();\n    info!(pin = pin, \"leak\");\n}\n";
+        let violations = pin_log_violations(name, planted);
+        assert!(
+            violations.iter().any(|v| v.contains(name)),
+            "planted PIN in {name} must trip the gate (got {violations:?})"
+        );
+    }
+}
+
+#[test]
+fn pin_gate_ignores_comments_and_length_fields() {
+    // Precision control: length/metadata handling that never captures a
+    // secret value must pass — `pin_len` fields, comparisons, and commented
+    // or string-literal mentions.
+    let clean = r#"
+fn login() {
+    let pin = take_pin();
+    info!(pin_len = pin.len(), "login attempt");
+    info!(pin_ok = (pin == expected), "verify");
+    // info!(pin = pin, "disabled");
+    let _ = "info!(pin = pin)";
+    info!(context_id = %ctx_id.0, "InitPIN succeeded");
+    info!("pin = {}", pin.len());
+    info!("{{pin}} literal = {}", pin.len());
+}
+"#;
+    assert!(pin_log_violations("clean.rs", clean).is_empty());
+}
+
+#[test]
+fn source_code_never_logs_pin_fields() {
+    // W1-L10-25 + W1-L2-06 + W1-L9-07 (one coherent gate): whole-tree walk
+    // over grpc_service (session_3x.rs, message_crypto/, byte_output_exact.rs
+    // and every future handler included); every tracing/print-macro body must
+    // not capture a secret value via `ident =` fields, `%`/`?` sigils, or
+    // `{ident}` interpolation — at any level including `trace!`.
+    let files = grpc_service_rs_files();
+    assert!(!files.is_empty(), "no grpc_service sources found");
+
+    let mut violations = Vec::new();
+    for name in &files {
+        let src =
+            std::fs::read_to_string(name).unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
+        violations.extend(pin_log_violations(name, &src));
+    }
+    assert!(violations.is_empty(), "PIN logging violations:\n{}", violations.join("\n"));
 }
 
 #[tokio::test]

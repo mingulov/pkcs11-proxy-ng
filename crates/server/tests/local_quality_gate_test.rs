@@ -2074,6 +2074,121 @@ fn oasis_inventory_cites_local_tests_for_safe_represented_parameter_shapes() {
     );
 }
 
+/// `rust_variant`s of the safe represented mechanism shapes: FFI conversion +
+/// proto message + shim read support, with no unsupported reasons (the same
+/// filter as `oasis_inventory_cites_local_tests_for_safe_represented_parameter_shapes`).
+fn safe_represented_shape_variants(inventory: &Value) -> Vec<String> {
+    inventory["mechanism_parameter_shape_matrix"]
+        .as_array()
+        .expect("mechanism_parameter_shape_matrix should be an array")
+        .iter()
+        .filter(|entry| {
+            entry["backend_ffi_conversion"] == true
+                && entry["proto_message"].is_string()
+                && entry["shim_read_support"] == true
+                && entry["unsupported_reason"].is_null()
+                && entry["shim_read_unsupported_reason"].is_null()
+        })
+        .map(|entry| {
+            entry["rust_variant"].as_str().expect("rust_variant should be a string").to_owned()
+        })
+        .collect()
+}
+
+/// `variant: "..."` entries of the real-backend shape driver table
+/// (`support/shape_matrix.rs`): every entry is pushed through the live
+/// SoftHSM2 stack by `softhsm_all_param_shapes_execute` (executed when the
+/// provider advertises the mechanism, honestly skipped otherwise, zero
+/// transport failures tolerated).
+fn driver_shape_variants(root: &Path) -> Vec<String> {
+    let path = root.join("crates/server/tests/support/shape_matrix.rs");
+    let src =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("should read {}: {e}", path.display()));
+    let mut variants = Vec::new();
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("variant: \"")
+            && let Some(end) = rest.find('"')
+        {
+            variants.push(rest[..end].to_owned());
+        }
+    }
+    assert!(!variants.is_empty(), "shape driver table should list variants");
+    variants
+}
+
+/// Split inventory variants vs driver variants into `(unproven, stale)`:
+/// inventory shapes with no real-backend driver entry, and driver entries
+/// with no inventory shape. Both must be empty.
+fn unproven_shape_variants(inventory: &[String], driver: &[String]) -> (Vec<String>, Vec<String>) {
+    let driver_set: BTreeSet<&str> = driver.iter().map(String::as_str).collect();
+    let inventory_set: BTreeSet<&str> = inventory.iter().map(String::as_str).collect();
+    let mut unproven: Vec<String> =
+        inventory.iter().filter(|v| !driver_set.contains(v.as_str())).cloned().collect();
+    let mut stale: Vec<String> =
+        driver.iter().filter(|v| !inventory_set.contains(v.as_str())).cloned().collect();
+    unproven.sort();
+    stale.sort();
+    (unproven, stale)
+}
+
+#[test]
+fn oasis_inventory_safe_shapes_have_real_backend_driver_coverage() {
+    // W1-L9-13: per-shape real-backend gate giving AGENTS §7/§12-step-8
+    // teeth beyond MockBackend-local test strings. Every safe represented
+    // shape must be covered by the live SoftHSM2 shape driver
+    // (`softhsm_all_param_shapes_execute` over `support/shape_matrix.rs`),
+    // which executes each advertised shape through the full FFI stack and
+    // honestly skips the rest with zero transport failures. A new shape
+    // with proto+mock tests but no driver entry fails here.
+    let root = workspace_root();
+    let Some(inventory) = oasis_inventory_json(&root) else {
+        return;
+    };
+
+    // The proof itself must exist — not just the table it runs over.
+    let driver_test =
+        fs::read_to_string(root.join("crates/server/tests/parameterized_mechanism_test.rs"))
+            .expect("parameterized mechanism driver should be readable");
+    assert!(
+        driver_test.contains("fn softhsm_all_param_shapes_execute"),
+        "real-backend shape driver test must exist"
+    );
+
+    let safe = safe_represented_shape_variants(&inventory);
+    assert!(!safe.is_empty(), "inventory should list safe represented shapes");
+    let driver = driver_shape_variants(&root);
+    let all_inventory: Vec<String> = inventory["mechanism_parameter_shape_matrix"]
+        .as_array()
+        .expect("mechanism_parameter_shape_matrix should be an array")
+        .iter()
+        .map(|entry| {
+            entry["rust_variant"].as_str().expect("rust_variant should be a string").to_owned()
+        })
+        .collect();
+    // Unproven is measured against the SAFE set (driver legitimately also
+    // covers unsafe shapes the inventory marks unsupported); stale is
+    // measured against ALL inventory shapes in both directions fail-closed.
+    let (unproven, _) = unproven_shape_variants(&safe, &driver);
+    let (_, stale) = unproven_shape_variants(&all_inventory, &driver);
+    assert!(unproven.is_empty(), "safe shapes without real-backend driver proof: {unproven:?}");
+    assert!(stale.is_empty(), "driver entries without an inventory shape: {stale:?}");
+}
+
+#[test]
+fn real_backend_shape_gate_trips_on_unplugged_shape() {
+    // W1-L9-13 negative control: unplug one shape from the real-backend
+    // driver set and the gate flags exactly that shape as unproven; a stale
+    // driver entry trips the reverse direction.
+    let inventory = vec!["Gcm".to_string(), "Iv".to_string(), "Raw".to_string()];
+    let driver = vec!["Gcm".to_string(), "Stale".to_string()];
+    let (unproven, stale) = unproven_shape_variants(&inventory, &driver);
+    assert_eq!(unproven, vec!["Iv".to_string(), "Raw".to_string()]);
+    assert_eq!(stale, vec!["Stale".to_string()]);
+    let (unproven, stale) = unproven_shape_variants(&inventory, &inventory);
+    assert!(unproven.is_empty() && stale.is_empty());
+}
+
 #[test]
 fn oasis_inventory_reports_stale_shape_test_citations() {
     let root = workspace_root();

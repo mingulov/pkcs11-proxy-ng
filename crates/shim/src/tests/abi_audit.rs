@@ -50,28 +50,123 @@ fn ck_mechanism_type_is_ck_ulong() {
     assert_eq!(std::mem::size_of::<CK_MECHANISM_TYPE>(), std::mem::size_of::<CK_ULONG>());
 }
 
+/// Align `offset` up to `align` (portable padding rule for the layout gates).
+fn align_up(offset: usize, align: usize) -> usize {
+    offset.div_ceil(align) * align
+}
+
+/// Expected `(field offsets, align, size)` for a 3-field struct under the
+/// target's actual repr: the Windows MSVC bindings are `packed` (dense,
+/// align 1) while System V targets are aligned. The branch is read off the
+/// real `align_of`, so each target pins its exact offsets either way — a
+/// field swap or padding change trips the gate on every target.
+fn expected_3field_layout(
+    actual_align: usize,
+    sizes: [usize; 3],
+    aligns: [usize; 3],
+) -> ([usize; 3], usize, usize) {
+    if actual_align == 1 {
+        ([0, sizes[0], sizes[0] + sizes[1]], 1, sizes[0] + sizes[1] + sizes[2])
+    } else {
+        let off1 = align_up(sizes[0], aligns[1]);
+        let off2 = align_up(off1 + sizes[1], aligns[2]);
+        let align = aligns[0].max(aligns[1]).max(aligns[2]);
+        ([0, off1, off2], align, align_up(off2 + sizes[2], align))
+    }
+}
+
 #[test]
 fn ck_attribute_layout() {
-    let expected = std::mem::size_of::<CK_ULONG>()
-        + std::mem::size_of::<*mut std::os::raw::c_void>()
-        + std::mem::size_of::<CK_ULONG>();
-    assert_eq!(std::mem::size_of::<CK_ATTRIBUTE>(), expected);
+    // W1-L10-14: offsets + alignment, not sizeof-only: a field swap that
+    // preserves total size must trip this gate.
+    let ulong = std::mem::size_of::<CK_ULONG>();
+    let ptr = std::mem::size_of::<*mut std::os::raw::c_void>();
+    let ptr_align = std::mem::align_of::<*mut std::os::raw::c_void>();
+    let ulong_align = std::mem::align_of::<CK_ULONG>();
+    let (off, align, size) = expected_3field_layout(
+        std::mem::align_of::<CK_ATTRIBUTE>(),
+        [ulong, ptr, ulong],
+        [ulong_align, ptr_align, ulong_align],
+    );
+    assert_eq!(std::mem::offset_of!(CK_ATTRIBUTE, type_), off[0]);
+    assert_eq!(std::mem::offset_of!(CK_ATTRIBUTE, pValue), off[1]);
+    assert_eq!(std::mem::offset_of!(CK_ATTRIBUTE, ulValueLen), off[2]);
+    assert_eq!(std::mem::align_of::<CK_ATTRIBUTE>(), align);
+    assert_eq!(std::mem::size_of::<CK_ATTRIBUTE>(), size);
 }
 
 #[test]
 fn ck_mechanism_layout() {
-    let expected = std::mem::size_of::<CK_ULONG>()
-        + std::mem::size_of::<*mut std::os::raw::c_void>()
-        + std::mem::size_of::<CK_ULONG>();
-    assert_eq!(std::mem::size_of::<CK_MECHANISM>(), expected);
+    // W1-L10-14: offsets + alignment, not sizeof-only.
+    let ulong = std::mem::size_of::<CK_ULONG>();
+    let ptr = std::mem::size_of::<*mut std::os::raw::c_void>();
+    let ptr_align = std::mem::align_of::<*mut std::os::raw::c_void>();
+    let ulong_align = std::mem::align_of::<CK_ULONG>();
+    let (off, align, size) = expected_3field_layout(
+        std::mem::align_of::<CK_MECHANISM>(),
+        [ulong, ptr, ulong],
+        [ulong_align, ptr_align, ulong_align],
+    );
+    assert_eq!(std::mem::offset_of!(CK_MECHANISM, mechanism), off[0]);
+    assert_eq!(std::mem::offset_of!(CK_MECHANISM, pParameter), off[1]);
+    assert_eq!(std::mem::offset_of!(CK_MECHANISM, ulParameterLen), off[2]);
+    assert_eq!(std::mem::align_of::<CK_MECHANISM>(), align);
+    assert_eq!(std::mem::size_of::<CK_MECHANISM>(), size);
 }
 
 #[test]
 fn ck_interface_layout() {
-    let expected = std::mem::size_of::<*mut CK_UTF8CHAR>()
-        + std::mem::size_of::<*mut std::os::raw::c_void>()
-        + std::mem::size_of::<CK_ULONG>();
-    assert_eq!(std::mem::size_of::<CK_INTERFACE>(), expected);
+    // W1-L10-14: offsets + alignment, not sizeof-only.
+    let ptr = std::mem::size_of::<*mut std::os::raw::c_void>();
+    let ulong = std::mem::size_of::<CK_ULONG>();
+    let ptr_align = std::mem::align_of::<*mut std::os::raw::c_void>();
+    let ulong_align = std::mem::align_of::<CK_ULONG>();
+    let (off, align, size) = expected_3field_layout(
+        std::mem::align_of::<CK_INTERFACE>(),
+        [ptr, ptr, ulong],
+        [ptr_align, ptr_align, ulong_align],
+    );
+    assert_eq!(std::mem::offset_of!(CK_INTERFACE, pInterfaceName), off[0]);
+    assert_eq!(std::mem::offset_of!(CK_INTERFACE, pFunctionList), off[1]);
+    assert_eq!(std::mem::offset_of!(CK_INTERFACE, flags), off[2]);
+    assert_eq!(std::mem::align_of::<CK_INTERFACE>(), align);
+    assert_eq!(std::mem::size_of::<CK_INTERFACE>(), size);
+}
+
+#[test]
+fn layout_gate_trips_on_offset_drift_with_same_size() {
+    // W1-L10-14 negative control: a field swap that preserves total size
+    // passes a sizeof-only gate (both layouts sum identically) but must trip
+    // the offset gate. The drifted offsets below model CK_ATTRIBUTE with
+    // pValue/ulValueLen swapped on LP64: same 24-byte size, wrong offsets.
+    let correct = [0, 8, 16];
+    let drifted = [0, 16, 8];
+    let size_of_both = 24;
+    assert_eq!(size_of_both, 24, "sizeof-only check passes both layouts (the blind spot)");
+    assert!(
+        dense_offsets_deviation("synthetic", &correct, 8).is_none(),
+        "correct dense offsets must pass"
+    );
+    let deviation = dense_offsets_deviation("synthetic", &drifted, 8)
+        .expect("offset drift with identical size must trip the gate");
+    assert!(deviation.contains("16"), "deviation must name the drifted offset: {deviation}");
+}
+
+/// First deviation from dense packing (`offsets[i] == offsets[0] + i*stride`)
+/// in a function-pointer table, or `None` when every field sits on stride.
+/// Shared by the control above and the module-FFI table walk below.
+fn dense_offsets_deviation(name: &str, offsets: &[usize], stride: usize) -> Option<String> {
+    let first = *offsets.first()?;
+    for (i, &offset) in offsets.iter().enumerate() {
+        let expected = first + i * stride;
+        if offset != expected {
+            return Some(format!(
+                "{name}: field {i} at offset {offset}, expected {expected} \
+                 (dense stride {stride} from {first})"
+            ));
+        }
+    }
+    None
 }
 
 #[test]
@@ -82,6 +177,105 @@ fn function_list_version_at_offset_zero() {
         let fl_ptr = p as *const u8;
         let ver_ptr = &(*p).version as *const CK_VERSION as *const u8;
         assert_eq!(fl_ptr, ver_ptr);
+    }
+}
+
+#[test]
+fn function_list_tables_match_module_ffi_offset_facts() {
+    // W1-L10-14: full-table offsets, not version-at-zero only. Walk the
+    // shim's served 2.40/3.0/3.2 tables with the shared module-FFI offset
+    // facts (AGENTS §13): pinned spec field counts (68 + 24 + 12), dense
+    // pointer-stride packing from the first function field, a populated
+    // pointer at every walked offset, and the surface version at byte 0.
+    use pkcs11_module::tables::Surface;
+
+    let _guard = shim_state_test_guard();
+
+    let mut legacy: *mut CK_FUNCTION_LIST = std::ptr::null_mut();
+    assert_eq!(unsafe { C_GetFunctionList(&mut legacy) }, CKR_OK as CK_RV);
+    check_served_function_table(
+        "CK_FUNCTION_LIST",
+        legacy as *const u8,
+        (2, 40),
+        Surface::LegacyFunctionList { version: CK_VERSION { major: 2, minor: 40 } },
+        std::mem::align_of::<CK_FUNCTION_LIST>(),
+        &[68],
+    );
+
+    for (major, minor, align) in [
+        (3u8, 0u8, std::mem::align_of::<CK_FUNCTION_LIST_3_0>()),
+        (3u8, 2u8, std::mem::align_of::<CK_FUNCTION_LIST_3_2>()),
+    ] {
+        let name = b"PKCS 11\0";
+        let mut req_ver = CK_VERSION { major, minor };
+        let mut iface: *mut CK_INTERFACE = std::ptr::null_mut();
+        let rv = unsafe {
+            C_GetInterface(name.as_ptr() as *mut CK_UTF8CHAR, &mut req_ver, &mut iface, 0)
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "C_GetInterface({major}.{minor})");
+        assert!(!iface.is_null(), "C_GetInterface({major}.{minor}) returned null");
+        let base = unsafe { (*iface).pFunctionList as *const u8 };
+        let label = if minor == 0 { "CK_FUNCTION_LIST_3_0" } else { "CK_FUNCTION_LIST_3_2" };
+        let expected_spans: &[usize] = if minor == 0 { &[68, 24] } else { &[68, 24, 12] };
+        check_served_function_table(
+            label,
+            base,
+            (major, minor),
+            Surface::StandardInterface { version: CK_VERSION { major, minor } },
+            align,
+            expected_spans,
+        );
+    }
+}
+
+/// Walk one served function-list table against the module-FFI offset facts:
+/// version bytes at offset 0, pinned per-span field counts, dense packing on
+/// a pointer stride (continuing across spans), the first function field right
+/// after the 2-byte version header, and a non-null pointer at every offset.
+fn check_served_function_table(
+    label: &str,
+    base: *const u8,
+    version: (u8, u8),
+    surface: pkcs11_module::tables::Surface,
+    table_align: usize,
+    expected_span_lens: &[usize],
+) {
+    use pkcs11_module::tables::{TableSet, detect_null_functions, tables_for};
+
+    assert!(!base.is_null(), "{label}: served table must be non-null");
+    // Unaligned-safe: on packed Windows the function fields start at 2.
+    let ver = unsafe { (base as *const CK_VERSION).read_unaligned() };
+    assert_eq!((ver.major, ver.minor), version, "{label}: version bytes at offset zero");
+
+    let TableSet::Walk(spans) = tables_for(surface) else {
+        panic!("{label}: module-FFI facts must walk surface version {version:?}");
+    };
+    assert_eq!(spans.len(), expected_span_lens.len(), "{label}: span count");
+    let stride = std::mem::size_of::<usize>();
+    // First function field: dense after the 2-byte version when packed,
+    // pointer-aligned on System V.
+    let first_expected =
+        if table_align == 1 { 2 } else { align_up(std::mem::size_of::<CK_VERSION>(), stride) };
+    let mut prev_end: Option<usize> = None;
+    for (span, &expected_len) in spans.iter().zip(expected_span_lens) {
+        let fields = span.fields();
+        assert_eq!(fields.len(), expected_len, "{label}: pinned span field count");
+        let offsets: Vec<usize> = fields.iter().map(|field| field.offset).collect();
+        assert!(
+            dense_offsets_deviation(label, &offsets, stride).is_none(),
+            "{label}: {}",
+            dense_offsets_deviation(label, &offsets, stride).unwrap_or_default()
+        );
+        match prev_end {
+            None => assert_eq!(offsets[0], first_expected, "{label}: first function offset"),
+            Some(prev) => assert_eq!(
+                offsets[0], prev,
+                "{label}: 3.x extras must continue the base table densely"
+            ),
+        }
+        let nulls = unsafe { detect_null_functions(base, fields) };
+        assert!(nulls.is_empty(), "{label}: null function pointers at {nulls:?}");
+        prev_end = Some(offsets[offsets.len() - 1] + stride);
     }
 }
 
@@ -562,44 +756,228 @@ fn catch_panics_source_coverage() {
         if let Some(violation) = catch_panics_violation(&path.display().to_string(), &src) {
             panic!("{violation}");
         }
-        if catch_panics_counts(&src).is_some() {
+        if defines_exports(&src) {
             checked += 1;
         }
     }
     assert!(checked > 0, "gate must cover at least one export file");
 }
 
-/// Per-file `catch_panics` check shared by the gate and its negative control.
-/// Returns `None` when the file defines no exports or every non-stub export
-/// is wrapped; otherwise a human-readable violation.
+/// Per-export `catch_panics` check shared by the gate and its negative
+/// control. Returns `None` when the file defines no exports or every
+/// non-stub export's own body contains a `catch_panics(` call; otherwise a
+/// violation naming the first ungated export (call-site attribution).
 fn catch_panics_violation(name: &str, src: &str) -> Option<String> {
-    let (real_fns, catch_calls) = catch_panics_counts(src)?;
-    if real_fns == catch_calls {
-        None
-    } else {
-        Some(format!(
-            "{name}: every non-stub extern \"C\" fn must use catch_panics \
-             ({real_fns} real fns, {catch_calls} catch_panics calls)"
-        ))
-    }
+    ungated_exports(src).into_iter().next().map(|(export, lineno)| {
+        format!(
+            "{name}:{lineno}: export `{export}` has no catch_panics call in its own body \
+             (every non-stub extern \"C\" fn must be wrapped)"
+        )
+    })
 }
 
-/// Count non-stub `pub unsafe extern "C"` exports and `catch_panics(` calls in
-/// one source file. Returns `None` when the file defines no exports (nothing
-/// for the gate to check — e.g. the `catch_panics` definition site and its
-/// unit tests); otherwise `Some((exports, calls))`.
-fn catch_panics_counts(src: &str) -> Option<(usize, usize)> {
-    let real_fns = src
-        .lines()
-        .filter(|line| {
-            line.contains("pub unsafe extern \"C\" fn") && !line.contains("c_not_supported")
-        })
-        .count();
-    if real_fns == 0 {
+/// True when the file defines at least one non-stub `pub unsafe extern "C"`
+/// export (the gate's coverage signal — e.g. the `catch_panics` definition
+/// site and its unit tests define none).
+fn defines_exports(src: &str) -> bool {
+    src.lines().any(|line| {
+        line.contains("pub unsafe extern \"C\" fn") && !line.contains("c_not_supported")
+    })
+}
+
+/// Non-stub exports whose own brace-matched body contains no `catch_panics(`
+/// call, as `(name, definition line)` pairs. A stray call elsewhere in the
+/// file (helper, test, duplicated call in a sibling export) does NOT satisfy
+/// an export: only a call inside its own `{ ... }` body counts.
+fn ungated_exports(src: &str) -> Vec<(String, usize)> {
+    let cleaned = strip_comments_and_strings(src);
+    let line_starts = line_start_offsets(src);
+    let mut ungated = Vec::new();
+    for (lineno, line) in src.lines().enumerate() {
+        if !line.contains("pub unsafe extern \"C\" fn") || line.contains("c_not_supported") {
+            continue;
+        }
+        let name = export_name_from_line(line).unwrap_or_else(|| "<unknown>".to_string());
+        // Scan from the definition line itself: the body's opening `{` may sit
+        // on the signature line (signatures carry no braces of their own).
+        if !export_body_is_gated(&cleaned, line_starts[lineno]) {
+            ungated.push((name, lineno + 1));
+        }
+    }
+    ungated
+}
+
+/// Export name from a `pub unsafe extern "C" fn <name>(...)` definition line.
+fn export_name_from_line(line: &str) -> Option<String> {
+    let after_fn = line.split("fn ").nth(1)?;
+    let name = after_fn.split('(').next()?.trim();
+    if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
+/// True when the first `{ ... }` block at or after `from` (the export's own
+/// body, located in comment/string-stripped source so braces in literals do
+/// not confuse the match) contains a `catch_panics(` call.
+fn export_body_is_gated(cleaned: &str, from: usize) -> bool {
+    let bytes = cleaned.as_bytes();
+    let mut i = from.min(bytes.len());
+    while i < bytes.len() && bytes[i] != b'{' {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return false;
+    }
+    let mut depth = 0usize;
+    let body_start = i;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return cleaned[body_start..=i].contains("catch_panics(");
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Byte offsets at which each source line starts (line `n` starts at index
+/// `n - 1`; a trailing empty line is covered by the final push).
+fn line_start_offsets(src: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (i, b) in src.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
+/// Source with comments (`//`, `/* */`), string/char literals (`"..."`,
+/// `'...'`, raw and byte forms) blanked to spaces, preserving byte offsets.
+/// Only code-significant braces remain for body matching.
+fn strip_comments_and_strings(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut i = 0;
+    let blank = |out: &mut [u8], from: usize, to: usize| {
+        let len = out.len();
+        for b in &mut out[from..to.min(len)] {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+    };
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        if rest.starts_with(b"//") {
+            let mut end = i + 2;
+            while end < bytes.len() && bytes[end] != b'\n' {
+                end += 1;
+            }
+            blank(&mut out, i, end);
+            i = end;
+        } else if rest.starts_with(b"/*") {
+            // Block comments nest in Rust.
+            let mut end = i + 2;
+            let mut depth = 1;
+            while end + 1 < bytes.len() && depth > 0 {
+                if bytes[end..].starts_with(b"/*") {
+                    depth += 1;
+                    end += 2;
+                } else if bytes[end..].starts_with(b"*/") {
+                    depth -= 1;
+                    end += 2;
+                } else {
+                    end += 1;
+                }
+            }
+            blank(&mut out, i, end.min(bytes.len()));
+            i = end.min(bytes.len());
+        } else if let Some(len) = raw_string_len(rest) {
+            blank(&mut out, i, i + len);
+            i += len;
+        } else if rest.starts_with(b"\"") || rest.starts_with(b"b\"") {
+            let mut end = i + rest.starts_with(b"b\"") as usize + 1;
+            while end < bytes.len() {
+                if bytes[end] == b'\\' {
+                    end += 2;
+                } else if bytes[end] == b'"' {
+                    end += 1;
+                    break;
+                } else {
+                    end += 1;
+                }
+            }
+            blank(&mut out, i, end.min(bytes.len()));
+            i = end.min(bytes.len());
+        } else if rest.starts_with(b"'") || rest.starts_with(b"b'") {
+            // A char literal only: `'x'`, `'\n'`, `'\''`. A bare `'` starting
+            // a lifetime (`'a`) is left alone (lifetimes carry no braces).
+            let start = i + rest.starts_with(b"b'") as usize;
+            let mut end = start + 1;
+            if end < bytes.len() && bytes[end] == b'\\' {
+                end += 2;
+            } else if end < bytes.len() {
+                end += 1;
+            }
+            if end < bytes.len() && bytes[end] == b'\'' {
+                blank(&mut out, i, end + 1);
+                i = end + 1;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("blanking preserves UTF-8 boundaries")
+}
+
+/// Length of the raw string (`r"..."`, `r#"..."#`, `br"..."`) at the start of
+/// `rest`, or `None` when `rest` does not start with one.
+fn raw_string_len(rest: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    if rest.first() == Some(&b'b') {
+        i += 1;
+    }
+    if rest.get(i) != Some(&b'r') {
         return None;
     }
-    let catch_calls = src.matches("catch_panics(").count();
-    Some((real_fns, catch_calls))
+    i += 1;
+    let mut hashes = 0;
+    while rest.get(i) == Some(&b'#') {
+        hashes += 1;
+        i += 1;
+    }
+    if rest.get(i) != Some(&b'"') {
+        return None;
+    }
+    i += 1;
+    while i < rest.len() {
+        if rest[i] == b'"' && rest[i + 1..].starts_with(&vec![b'#'; hashes]) {
+            return Some(i + 1 + hashes);
+        }
+        i += 1;
+    }
+    Some(rest.len())
+}
+
+#[test]
+fn catch_panics_gate_trips_on_balanced_but_misplaced_calls() {
+    // W1-L10-13 negative control: per-file fn-vs-call counts miss an ungated
+    // export when a stray `catch_panics(` elsewhere in the file balances the
+    // count (2 fns, 2 calls). Per-export attribution must name the ungated
+    // export instead of passing.
+    let balanced_but_ungated = "pub unsafe extern \"C\" fn c_gated() -> CK_RV {\n    catch_panics(|| {\n        CKR_OK as CK_RV\n    })\n}\nfn helper() {\n    catch_panics(|| {});\n}\npub unsafe extern \"C\" fn c_ungated() -> CK_RV {\n    CKR_OK as CK_RV\n}\n";
+    let violation = catch_panics_violation("balanced.rs", balanced_but_ungated);
+    assert!(
+        violation.as_ref().is_some_and(|v| v.contains("c_ungated")),
+        "gate must attribute the missing catch_panics to c_ungated, got {violation:?}"
+    );
 }
 
 #[test]
@@ -625,6 +1003,34 @@ fn catch_panics_gate_trips_on_ungated_export() {
     assert!(
         catch_panics_violation("unsupported.rs", stub).is_none(),
         "gate must keep exempting c_not_supported stubs"
+    );
+
+    // A multi-line signature (C_GetInterfaceList shape) still attributes the
+    // call inside its body.
+    let multiline = "pub unsafe extern \"C\" fn c_multi(\n    a: usize,\n    b: usize,\n) -> CK_RV {\n    catch_panics(|| {\n        CKR_OK as CK_RV\n    })\n}\n";
+    assert!(
+        catch_panics_violation("multi.rs", multiline).is_none(),
+        "gate must follow multi-line signatures into the export body"
+    );
+
+    // A comment or string literal mentioning catch_panics does not satisfy
+    // the export: only a real call in the body counts.
+    let mentioned = "pub unsafe extern \"C\" fn c_mentioned() -> CK_RV {\n    // TODO: wrap this in catch_panics(\n    let _ = \"catch_panics(\";\n    CKR_OK as CK_RV\n}\n";
+    assert!(
+        catch_panics_violation("mentioned.rs", mentioned)
+            .as_ref()
+            .is_some_and(|v| v.contains("c_mentioned")),
+        "gate must not accept a commented-out or string-literal mention"
+    );
+
+    // A stray call in a helper between two exports satisfies neither.
+    let helper_only = "pub unsafe extern \"C\" fn c_first() -> CK_RV {\n    helper()\n}\nfn helper() -> CK_RV {\n    catch_panics(|| CKR_OK as CK_RV)\n}\npub unsafe extern \"C\" fn c_second() -> CK_RV {\n    helper()\n}\n";
+    let both: Vec<String> =
+        ungated_exports(helper_only).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(
+        both,
+        vec!["c_first".to_string(), "c_second".to_string()],
+        "a helper-owned call must leave both exports ungated"
     );
 
     // The walk itself must cover the whole tree: a nested helper file (never
