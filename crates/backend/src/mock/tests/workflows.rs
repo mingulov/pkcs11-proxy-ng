@@ -37,32 +37,32 @@ fn mock_backend_reports_3x_interface_capabilities_by_default() {
 #[test]
 fn mock_mechanism_info_uses_source_grounded_workflow_flags() {
     let blake2b_digest_mechanisms = [
-        CkMechanismType(0x0000_400C), // CKM_BLAKE2B_160
-        CkMechanismType(0x0000_4011), // CKM_BLAKE2B_256
-        CkMechanismType(0x0000_4016), // CKM_BLAKE2B_384
-        CkMechanismType(0x0000_401B), // CKM_BLAKE2B_512
+        CkMechanismType::BLAKE2B_160, // CKM_BLAKE2B_160
+        CkMechanismType::BLAKE2B_256, // CKM_BLAKE2B_256
+        CkMechanismType::BLAKE2B_384, // CKM_BLAKE2B_384
+        CkMechanismType::BLAKE2B_512, // CKM_BLAKE2B_512
     ];
     let blake2b_hmac_mechanisms = [
-        CkMechanismType(0x0000_400D), // CKM_BLAKE2B_160_HMAC
-        CkMechanismType(0x0000_400E), // CKM_BLAKE2B_160_HMAC_GENERAL
-        CkMechanismType(0x0000_4012), // CKM_BLAKE2B_256_HMAC
-        CkMechanismType(0x0000_4013), // CKM_BLAKE2B_256_HMAC_GENERAL
-        CkMechanismType(0x0000_4017), // CKM_BLAKE2B_384_HMAC
-        CkMechanismType(0x0000_4018), // CKM_BLAKE2B_384_HMAC_GENERAL
-        CkMechanismType(0x0000_401C), // CKM_BLAKE2B_512_HMAC
-        CkMechanismType(0x0000_401D), // CKM_BLAKE2B_512_HMAC_GENERAL
+        CkMechanismType::BLAKE2B_160_HMAC,         // CKM_BLAKE2B_160_HMAC
+        CkMechanismType::BLAKE2B_160_HMAC_GENERAL, // CKM_BLAKE2B_160_HMAC_GENERAL
+        CkMechanismType::BLAKE2B_256_HMAC,         // CKM_BLAKE2B_256_HMAC
+        CkMechanismType::BLAKE2B_256_HMAC_GENERAL, // CKM_BLAKE2B_256_HMAC_GENERAL
+        CkMechanismType::BLAKE2B_384_HMAC,         // CKM_BLAKE2B_384_HMAC
+        CkMechanismType::BLAKE2B_384_HMAC_GENERAL, // CKM_BLAKE2B_384_HMAC_GENERAL
+        CkMechanismType::BLAKE2B_512_HMAC,         // CKM_BLAKE2B_512_HMAC
+        CkMechanismType::BLAKE2B_512_HMAC_GENERAL, // CKM_BLAKE2B_512_HMAC_GENERAL
     ];
     let blake2b_derive_mechanisms = [
-        CkMechanismType(0x0000_400F), // CKM_BLAKE2B_160_KEY_DERIVE
-        CkMechanismType(0x0000_4014), // CKM_BLAKE2B_256_KEY_DERIVE
-        CkMechanismType(0x0000_4019), // CKM_BLAKE2B_384_KEY_DERIVE
-        CkMechanismType(0x0000_401E), // CKM_BLAKE2B_512_KEY_DERIVE
+        CkMechanismType::BLAKE2B_160_KEY_DERIVE, // CKM_BLAKE2B_160_KEY_DERIVE
+        CkMechanismType::BLAKE2B_256_KEY_DERIVE, // CKM_BLAKE2B_256_KEY_DERIVE
+        CkMechanismType::BLAKE2B_384_KEY_DERIVE, // CKM_BLAKE2B_384_KEY_DERIVE
+        CkMechanismType::BLAKE2B_512_KEY_DERIVE, // CKM_BLAKE2B_512_KEY_DERIVE
     ];
     let blake2b_key_gen_mechanisms = [
-        CkMechanismType(0x0000_4010), // CKM_BLAKE2B_160_KEY_GEN
-        CkMechanismType(0x0000_4015), // CKM_BLAKE2B_256_KEY_GEN
-        CkMechanismType(0x0000_401A), // CKM_BLAKE2B_384_KEY_GEN
-        CkMechanismType(0x0000_401F), // CKM_BLAKE2B_512_KEY_GEN
+        CkMechanismType::BLAKE2B_160_KEY_GEN, // CKM_BLAKE2B_160_KEY_GEN
+        CkMechanismType::BLAKE2B_256_KEY_GEN, // CKM_BLAKE2B_256_KEY_GEN
+        CkMechanismType::BLAKE2B_384_KEY_GEN, // CKM_BLAKE2B_384_KEY_GEN
+        CkMechanismType::BLAKE2B_512_KEY_GEN, // CKM_BLAKE2B_512_KEY_GEN
     ];
     let rsa_hash_sign_verify_mechanisms = [
         CkMechanismType(0x0000_000D), // CKM_RSA_PKCS_PSS
@@ -112,39 +112,39 @@ fn mock_mechanism_info_uses_source_grounded_workflow_flags() {
         CkMechanismType(0x0000_001B), // CKM_DSA_SHA3_512
     ];
     let pq_dsa_key_pair_gen_mechanisms = [
-        CkMechanismType(0x0000_001C), // CKM_ML_DSA_KEY_PAIR_GEN
-        CkMechanismType(0x0000_002D), // CKM_SLH_DSA_KEY_PAIR_GEN
+        CkMechanismType::ML_DSA_KEY_PAIR_GEN,  // CKM_ML_DSA_KEY_PAIR_GEN
+        CkMechanismType::SLH_DSA_KEY_PAIR_GEN, // CKM_SLH_DSA_KEY_PAIR_GEN
     ];
     let pq_dsa_sign_verify_mechanisms = [
-        CkMechanismType(0x0000_001D), // CKM_ML_DSA
-        CkMechanismType(0x0000_001F), // CKM_HASH_ML_DSA
-        CkMechanismType(0x0000_0023), // CKM_HASH_ML_DSA_SHA224
-        CkMechanismType(0x0000_0024), // CKM_HASH_ML_DSA_SHA256
-        CkMechanismType(0x0000_0025), // CKM_HASH_ML_DSA_SHA384
-        CkMechanismType(0x0000_0026), // CKM_HASH_ML_DSA_SHA512
-        CkMechanismType(0x0000_0027), // CKM_HASH_ML_DSA_SHA3_224
-        CkMechanismType(0x0000_0028), // CKM_HASH_ML_DSA_SHA3_256
-        CkMechanismType(0x0000_0029), // CKM_HASH_ML_DSA_SHA3_384
-        CkMechanismType(0x0000_002A), // CKM_HASH_ML_DSA_SHA3_512
-        CkMechanismType(0x0000_002B), // CKM_HASH_ML_DSA_SHAKE128
-        CkMechanismType(0x0000_002C), // CKM_HASH_ML_DSA_SHAKE256
-        CkMechanismType(0x0000_002E), // CKM_SLH_DSA
-        CkMechanismType(0x0000_0034), // CKM_HASH_SLH_DSA
-        CkMechanismType(0x0000_0036), // CKM_HASH_SLH_DSA_SHA224
-        CkMechanismType(0x0000_0037), // CKM_HASH_SLH_DSA_SHA256
-        CkMechanismType(0x0000_0038), // CKM_HASH_SLH_DSA_SHA384
-        CkMechanismType(0x0000_0039), // CKM_HASH_SLH_DSA_SHA512
-        CkMechanismType(0x0000_003A), // CKM_HASH_SLH_DSA_SHA3_224
-        CkMechanismType(0x0000_003B), // CKM_HASH_SLH_DSA_SHA3_256
-        CkMechanismType(0x0000_003C), // CKM_HASH_SLH_DSA_SHA3_384
-        CkMechanismType(0x0000_003D), // CKM_HASH_SLH_DSA_SHA3_512
-        CkMechanismType(0x0000_003E), // CKM_HASH_SLH_DSA_SHAKE128
-        CkMechanismType(0x0000_003F), // CKM_HASH_SLH_DSA_SHAKE256
+        CkMechanismType::ML_DSA,                // CKM_ML_DSA
+        CkMechanismType::HASH_ML_DSA,           // CKM_HASH_ML_DSA
+        CkMechanismType::HASH_ML_DSA_SHA224,    // CKM_HASH_ML_DSA_SHA224
+        CkMechanismType::HASH_ML_DSA_SHA256,    // CKM_HASH_ML_DSA_SHA256
+        CkMechanismType::HASH_ML_DSA_SHA384,    // CKM_HASH_ML_DSA_SHA384
+        CkMechanismType::HASH_ML_DSA_SHA512,    // CKM_HASH_ML_DSA_SHA512
+        CkMechanismType::HASH_ML_DSA_SHA3_224,  // CKM_HASH_ML_DSA_SHA3_224
+        CkMechanismType::HASH_ML_DSA_SHA3_256,  // CKM_HASH_ML_DSA_SHA3_256
+        CkMechanismType::HASH_ML_DSA_SHA3_384,  // CKM_HASH_ML_DSA_SHA3_384
+        CkMechanismType::HASH_ML_DSA_SHA3_512,  // CKM_HASH_ML_DSA_SHA3_512
+        CkMechanismType::HASH_ML_DSA_SHAKE128,  // CKM_HASH_ML_DSA_SHAKE128
+        CkMechanismType::HASH_ML_DSA_SHAKE256,  // CKM_HASH_ML_DSA_SHAKE256
+        CkMechanismType::SLH_DSA,               // CKM_SLH_DSA
+        CkMechanismType::HASH_SLH_DSA,          // CKM_HASH_SLH_DSA
+        CkMechanismType::HASH_SLH_DSA_SHA224,   // CKM_HASH_SLH_DSA_SHA224
+        CkMechanismType::HASH_SLH_DSA_SHA256,   // CKM_HASH_SLH_DSA_SHA256
+        CkMechanismType::HASH_SLH_DSA_SHA384,   // CKM_HASH_SLH_DSA_SHA384
+        CkMechanismType::HASH_SLH_DSA_SHA512,   // CKM_HASH_SLH_DSA_SHA512
+        CkMechanismType::HASH_SLH_DSA_SHA3_224, // CKM_HASH_SLH_DSA_SHA3_224
+        CkMechanismType::HASH_SLH_DSA_SHA3_256, // CKM_HASH_SLH_DSA_SHA3_256
+        CkMechanismType::HASH_SLH_DSA_SHA3_384, // CKM_HASH_SLH_DSA_SHA3_384
+        CkMechanismType::HASH_SLH_DSA_SHA3_512, // CKM_HASH_SLH_DSA_SHA3_512
+        CkMechanismType::HASH_SLH_DSA_SHAKE128, // CKM_HASH_SLH_DSA_SHAKE128
+        CkMechanismType::HASH_SLH_DSA_SHAKE256, // CKM_HASH_SLH_DSA_SHAKE256
     ];
     let sha_digest_mechanisms = [
         CkMechanismType::MD2,
         CkMechanismType::MD5,
-        CkMechanismType(0x0000_0220), // CKM_SHA_1
+        CkMechanismType::SHA_1,       // CKM_SHA_1
         CkMechanismType(0x0000_0255), // CKM_SHA224
         CkMechanismType(0x0000_0250), // CKM_SHA256
         CkMechanismType(0x0000_0260), // CKM_SHA384
@@ -154,22 +154,22 @@ fn mock_mechanism_info_uses_source_grounded_workflow_flags() {
         CkMechanismType(0x0000_0050), // CKM_SHA512_T
     ];
     let sha_hmac_mechanisms = [
-        CkMechanismType(0x0000_0221), // CKM_SHA_1_HMAC
-        CkMechanismType(0x0000_0222), // CKM_SHA_1_HMAC_GENERAL
-        CkMechanismType(0x0000_0256), // CKM_SHA224_HMAC
-        CkMechanismType(0x0000_0257), // CKM_SHA224_HMAC_GENERAL
-        CkMechanismType(0x0000_0251), // CKM_SHA256_HMAC
-        CkMechanismType(0x0000_0252), // CKM_SHA256_HMAC_GENERAL
-        CkMechanismType(0x0000_0261), // CKM_SHA384_HMAC
-        CkMechanismType(0x0000_0262), // CKM_SHA384_HMAC_GENERAL
-        CkMechanismType(0x0000_0271), // CKM_SHA512_HMAC
-        CkMechanismType(0x0000_0272), // CKM_SHA512_HMAC_GENERAL
-        CkMechanismType(0x0000_0049), // CKM_SHA512_224_HMAC
-        CkMechanismType(0x0000_004A), // CKM_SHA512_224_HMAC_GENERAL
-        CkMechanismType(0x0000_004D), // CKM_SHA512_256_HMAC
-        CkMechanismType(0x0000_004E), // CKM_SHA512_256_HMAC_GENERAL
-        CkMechanismType(0x0000_0051), // CKM_SHA512_T_HMAC
-        CkMechanismType(0x0000_0052), // CKM_SHA512_T_HMAC_GENERAL
+        CkMechanismType::SHA_1_HMAC,         // CKM_SHA_1_HMAC
+        CkMechanismType::SHA_1_HMAC_GENERAL, // CKM_SHA_1_HMAC_GENERAL
+        CkMechanismType(0x0000_0256),        // CKM_SHA224_HMAC
+        CkMechanismType(0x0000_0257),        // CKM_SHA224_HMAC_GENERAL
+        CkMechanismType(0x0000_0251),        // CKM_SHA256_HMAC
+        CkMechanismType(0x0000_0252),        // CKM_SHA256_HMAC_GENERAL
+        CkMechanismType(0x0000_0261),        // CKM_SHA384_HMAC
+        CkMechanismType(0x0000_0262),        // CKM_SHA384_HMAC_GENERAL
+        CkMechanismType(0x0000_0271),        // CKM_SHA512_HMAC
+        CkMechanismType(0x0000_0272),        // CKM_SHA512_HMAC_GENERAL
+        CkMechanismType(0x0000_0049),        // CKM_SHA512_224_HMAC
+        CkMechanismType(0x0000_004A),        // CKM_SHA512_224_HMAC_GENERAL
+        CkMechanismType(0x0000_004D),        // CKM_SHA512_256_HMAC
+        CkMechanismType(0x0000_004E),        // CKM_SHA512_256_HMAC_GENERAL
+        CkMechanismType(0x0000_0051),        // CKM_SHA512_T_HMAC
+        CkMechanismType(0x0000_0052),        // CKM_SHA512_T_HMAC_GENERAL
     ];
     let sha_derive_mechanisms = [
         CkMechanismType(0x0000_0392), // CKM_SHA1_KEY_DERIVATION
@@ -220,9 +220,9 @@ fn mock_mechanism_info_uses_source_grounded_workflow_flags() {
         CkMechanismType(0x0000_02D3), // CKM_SHA3_512_KEY_GEN
     ];
     let sp800_108_derive_mechanisms = [
-        CkMechanismType(0x0000_03AC), // CKM_SP800_108_COUNTER_KDF
-        CkMechanismType(0x0000_03AD), // CKM_SP800_108_FEEDBACK_KDF
-        CkMechanismType(0x0000_03AE), // CKM_SP800_108_DOUBLE_PIPELINE_KDF
+        CkMechanismType::SP800_108_COUNTER_KDF, // CKM_SP800_108_COUNTER_KDF
+        CkMechanismType::SP800_108_FEEDBACK_KDF, // CKM_SP800_108_FEEDBACK_KDF
+        CkMechanismType::SP800_108_DOUBLE_PIPELINE_KDF, // CKM_SP800_108_DOUBLE_PIPELINE_KDF
     ];
     let aes_encrypt_wrap_mechanisms = [
         CkMechanismType::AES_CBC,
@@ -473,10 +473,10 @@ fn mock_mechanism_info_uses_source_grounded_workflow_flags() {
         CkMechanismType::AES_KEY_GEN,
         CkMechanismType::AES_ECB,
         CkMechanismType::AES_GCM,
-        CkMechanismType(0x0000_000F), // CKM_ML_KEM_KEY_PAIR_GEN
-        CkMechanismType(0x0000_0017), // CKM_ML_KEM
-        CkMechanismType(0x0000_02A0), // CKM_ACTI
-        CkMechanismType(0x0000_02A1), // CKM_ACTI_KEY_GEN
+        CkMechanismType::ML_KEM_KEY_PAIR_GEN, // CKM_ML_KEM_KEY_PAIR_GEN
+        CkMechanismType::ML_KEM,              // CKM_ML_KEM
+        CkMechanismType(0x0000_02A0),         // CKM_ACTI
+        CkMechanismType(0x0000_02A1),         // CKM_ACTI_KEY_GEN
     ];
     mechanisms.extend(blake2b_digest_mechanisms.iter().copied());
     mechanisms.extend(blake2b_hmac_mechanisms.iter().copied());
@@ -574,11 +574,8 @@ fn mock_mechanism_info_uses_source_grounded_workflow_flags() {
                 | CkMechanismFlags::WRAP
                 | CkMechanismFlags::UNWRAP,
         ),
-        (CkMechanismType(0x0000_000F), CkMechanismFlags::GENERATE_KEY_PAIR),
-        (
-            CkMechanismType(0x0000_0017),
-            CkMechanismFlags::ENCAPSULATE | CkMechanismFlags::DECAPSULATE,
-        ),
+        (CkMechanismType::ML_KEM_KEY_PAIR_GEN, CkMechanismFlags::GENERATE_KEY_PAIR),
+        (CkMechanismType::ML_KEM, CkMechanismFlags::ENCAPSULATE | CkMechanismFlags::DECAPSULATE),
         (CkMechanismType(0x0000_02A0), CkMechanismFlags::SIGN | CkMechanismFlags::VERIFY),
         (CkMechanismType(0x0000_02A1), CkMechanismFlags::GENERATE),
         (
@@ -1035,7 +1032,7 @@ fn mock_backend_supports_provider_gap_3x_workflows() {
     backend.initialize().unwrap();
     let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
     let key = backend.create_object(session, Some(&[])).unwrap();
-    let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+    let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
 
     assert_eq!(backend.login_user(session, CkUserType::User, b"alice", b"1234"), Ok(()));
     assert_eq!(backend.session_cancel(session, CkFlags(0)), Ok(()));
@@ -1181,7 +1178,7 @@ fn official_source_grounded_mock_enforces_mechanism_workflow_flags() {
         CkRv::MECHANISM_INVALID
     );
 
-    let ml_kem = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+    let ml_kem = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
     let (capsule, encapsulated) =
         backend.encapsulate_key(session, &ml_kem, key, Some(&[])).unwrap();
     let capsule_bytes = capsule.expose(|raw| raw.to_vec());
@@ -2017,14 +2014,14 @@ fn mock_encrypt_decrypt_roundtrip() {
 fn wait_for_slot_event_no_event_when_empty() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    assert_eq!(backend.wait_for_slot_event(CKF_DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
 }
 
 #[test]
 fn wait_for_slot_event_before_initialize_returns_cryptoki_not_initialized() {
     let backend = MockBackend::default_test();
     assert_eq!(
-        backend.wait_for_slot_event(CKF_DONT_BLOCK).unwrap_err(),
+        backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap_err(),
         CkRv::CRYPTOKI_NOT_INITIALIZED
     );
 }
@@ -2034,7 +2031,7 @@ fn wait_for_slot_event_returns_queued_event() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     backend.enqueue_slot_event(CkSlotId(3));
-    let slot = backend.wait_for_slot_event(CKF_DONT_BLOCK).unwrap();
+    let slot = backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap();
     assert_eq!(slot, CkSlotId(3));
 }
 
@@ -2045,10 +2042,10 @@ fn wait_for_slot_event_fifo_order() {
     backend.enqueue_slot_event(CkSlotId(1));
     backend.enqueue_slot_event(CkSlotId(2));
     backend.enqueue_slot_event(CkSlotId(3));
-    assert_eq!(backend.wait_for_slot_event(CKF_DONT_BLOCK).unwrap(), CkSlotId(1));
-    assert_eq!(backend.wait_for_slot_event(CKF_DONT_BLOCK).unwrap(), CkSlotId(2));
-    assert_eq!(backend.wait_for_slot_event(CKF_DONT_BLOCK).unwrap(), CkSlotId(3));
-    assert_eq!(backend.wait_for_slot_event(CKF_DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap(), CkSlotId(1));
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap(), CkSlotId(2));
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap(), CkSlotId(3));
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
 }
 
 #[test]
@@ -2081,7 +2078,7 @@ fn initialize_clears_pending_slot_events() {
     backend.enqueue_slot_event(CkSlotId(3));
     backend.initialize().unwrap();
 
-    assert_eq!(backend.wait_for_slot_event(CKF_DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
+    assert_eq!(backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap_err(), CkRv::NO_EVENT);
 }
 
 #[test]
@@ -2089,7 +2086,7 @@ fn wait_for_slot_event_event_slots_need_not_be_in_slot_list() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
     backend.enqueue_slot_event(CkSlotId(99));
-    let slot = backend.wait_for_slot_event(CKF_DONT_BLOCK).unwrap();
+    let slot = backend.wait_for_slot_event(CkFlags::DONT_BLOCK).unwrap();
     assert_eq!(slot, CkSlotId(99));
 }
 
@@ -2383,7 +2380,7 @@ fn historically_grounded_mechanisms_are_accepted_with_workflow_flags() {
     let backend = MockBackend::new(
         vec![CkSlotId(0)],
         vec![
-            CkMechanismType(0x0000_0122), // CKM_DES_CBC (enc/dec + wrap)
+            CkMechanismType::DES_CBC,     // (enc/dec + wrap)
             CkMechanismType(0x0000_0322), // CKM_CAST5_CBC
             CkMechanismType(0x0000_1010), // CKM_SKIPJACK_ECB64
             CkMechanismType(0x0000_1030), // CKM_BATON_KEY_GEN (generate)
@@ -2394,7 +2391,7 @@ fn historically_grounded_mechanisms_are_accepted_with_workflow_flags() {
     let key = backend.create_object(session, Some(&[])).unwrap();
 
     // DES-CBC grounded with ENCRYPT/DECRYPT: encrypt_init is accepted.
-    let des_cbc = CkMechanism { mechanism_type: CkMechanismType(0x0000_0122), params: None };
+    let des_cbc = CkMechanism { mechanism_type: CkMechanismType::DES_CBC, params: None };
     backend.encrypt_init(session, &des_cbc, key).unwrap();
     backend.encrypt_init_cancel(session).unwrap();
 

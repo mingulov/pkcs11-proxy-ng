@@ -2336,10 +2336,10 @@ fn hkdf_derive_mechanism(salt_key: u64) -> pkcs11_proxy_ng_proto::Mechanism {
         params: Some(CkMechanismParams::Hkdf(HkdfParams {
             extract: true,
             expand: true,
-            prf_hash_mechanism: CkMechanismType::SHA256.0,
+            prf_hash_mechanism: CkMechanismType::SHA256,
             salt_type: cryptoki_sys::CKF_HKDF_SALT_KEY as u64,
             salt: Vec::new().into(),
-            salt_key_handle: salt_key,
+            salt_key_handle: CkObjectHandle(salt_key),
             info: Vec::new().into(),
         })),
     })

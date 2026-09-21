@@ -169,7 +169,7 @@ fn mechanism(handle: u64) -> Option<Mechanism> {
             params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
                 wrap_oid: vec![1, 2, 3],
                 ukm: vec![7; 8],
-                key_handle: handle,
+                key_handle: CkObjectHandle(handle),
             })),
         })
         .unwrap(),

@@ -8,13 +8,13 @@ use crate::pkcs11_proxy_ng::v1::sp800108_attribute;
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use crate::secret_boundary::{secret_to_plain, secret_to_plain_string};
 use pkcs11_proxy_ng_types::{
-    AesCmacKeyDerivationParams, CkAttribute, CkAttributeType, CkAttributeValue, CkMechanism, CkRv,
-    CmsSigParams, DilithiumParams, EciesParams, HdKeyDeriveParams, Ike1ExtendedDeriveParams,
-    Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams, IkePrfDeriveParams, KipParams, KyberParams,
-    OtpParam, OtpParams, PrfDataParam, SecretBytes, SkipjackPrivateWrapParams,
-    SkipjackRelayxParams, Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams,
-    VendorObjectExtractParams, VendorObjectInsertParams, X2RatchetInitializeParams,
-    X2RatchetRespondParams, X3dhInitiateParams, X3dhRespondParams,
+    AesCmacKeyDerivationParams, CkAttribute, CkAttributeType, CkAttributeValue, CkKdf, CkMechanism,
+    CkMechanismType, CkObjectHandle, CkRv, CmsSigParams, DilithiumParams, EciesParams,
+    HdKeyDeriveParams, Ike1ExtendedDeriveParams, Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams,
+    IkePrfDeriveParams, KipParams, KyberParams, OtpParam, OtpParams, PrfDataParam, SecretBytes,
+    SkipjackPrivateWrapParams, SkipjackRelayxParams, Sp800108DerivedKey, Sp800108FeedbackKdfParams,
+    Sp800108KdfParams, VendorObjectExtractParams, VendorObjectInsertParams,
+    X2RatchetInitializeParams, X2RatchetRespondParams, X3dhInitiateParams, X3dhRespondParams,
 };
 
 // ---------------------------------------------------------------------------
@@ -24,12 +24,12 @@ use pkcs11_proxy_ng_types::{
 impl From<&IkePrfDeriveParams> for v1_proto::IkePrfDeriveParams {
     fn from(p: &IkePrfDeriveParams) -> Self {
         Self {
-            prf_mechanism: p.prf_mechanism,
+            prf_mechanism: p.prf_mechanism.0,
             data_as_key: p.data_as_key,
             rekey: p.rekey,
             ni: secret_to_plain(&p.ni),
             nr: secret_to_plain(&p.nr),
-            new_key_handle: p.new_key_handle,
+            new_key_handle: p.new_key_handle.0,
         }
     }
 }
@@ -37,12 +37,12 @@ impl From<&IkePrfDeriveParams> for v1_proto::IkePrfDeriveParams {
 impl From<&v1_proto::IkePrfDeriveParams> for IkePrfDeriveParams {
     fn from(p: &v1_proto::IkePrfDeriveParams) -> Self {
         Self {
-            prf_mechanism: p.prf_mechanism,
+            prf_mechanism: CkMechanismType(p.prf_mechanism),
             data_as_key: p.data_as_key,
             rekey: p.rekey,
             ni: SecretBytes::copy_from_slice(&p.ni),
             nr: SecretBytes::copy_from_slice(&p.nr),
-            new_key_handle: p.new_key_handle,
+            new_key_handle: CkObjectHandle(p.new_key_handle),
         }
     }
 }
@@ -54,10 +54,10 @@ impl From<&v1_proto::IkePrfDeriveParams> for IkePrfDeriveParams {
 impl From<&Ike1PrfDeriveParams> for v1_proto::Ike1PrfDeriveParams {
     fn from(p: &Ike1PrfDeriveParams) -> Self {
         Self {
-            prf_mechanism: p.prf_mechanism,
+            prf_mechanism: p.prf_mechanism.0,
             has_prev_key: p.has_prev_key,
-            keygxy_handle: p.keygxy_handle,
-            prev_key_handle: p.prev_key_handle,
+            keygxy_handle: p.keygxy_handle.0,
+            prev_key_handle: p.prev_key_handle.0,
             ckyi: secret_to_plain(&p.ckyi),
             ckyr: secret_to_plain(&p.ckyr),
             key_number: p.key_number,
@@ -68,10 +68,10 @@ impl From<&Ike1PrfDeriveParams> for v1_proto::Ike1PrfDeriveParams {
 impl From<&v1_proto::Ike1PrfDeriveParams> for Ike1PrfDeriveParams {
     fn from(p: &v1_proto::Ike1PrfDeriveParams) -> Self {
         Self {
-            prf_mechanism: p.prf_mechanism,
+            prf_mechanism: CkMechanismType(p.prf_mechanism),
             has_prev_key: p.has_prev_key,
-            keygxy_handle: p.keygxy_handle,
-            prev_key_handle: p.prev_key_handle,
+            keygxy_handle: CkObjectHandle(p.keygxy_handle),
+            prev_key_handle: CkObjectHandle(p.prev_key_handle),
             ckyi: SecretBytes::copy_from_slice(&p.ckyi),
             ckyr: SecretBytes::copy_from_slice(&p.ckyr),
             key_number: p.key_number,
@@ -86,9 +86,9 @@ impl From<&v1_proto::Ike1PrfDeriveParams> for Ike1PrfDeriveParams {
 impl From<&Ike1ExtendedDeriveParams> for v1_proto::Ike1ExtendedDeriveParams {
     fn from(p: &Ike1ExtendedDeriveParams) -> Self {
         Self {
-            prf_mechanism: p.prf_mechanism,
+            prf_mechanism: p.prf_mechanism.0,
             has_keygxy: p.has_keygxy,
-            keygxy_handle: p.keygxy_handle,
+            keygxy_handle: p.keygxy_handle.0,
             extra_data: secret_to_plain(&p.extra_data),
         }
     }
@@ -97,9 +97,9 @@ impl From<&Ike1ExtendedDeriveParams> for v1_proto::Ike1ExtendedDeriveParams {
 impl From<&v1_proto::Ike1ExtendedDeriveParams> for Ike1ExtendedDeriveParams {
     fn from(p: &v1_proto::Ike1ExtendedDeriveParams) -> Self {
         Self {
-            prf_mechanism: p.prf_mechanism,
+            prf_mechanism: CkMechanismType(p.prf_mechanism),
             has_keygxy: p.has_keygxy,
-            keygxy_handle: p.keygxy_handle,
+            keygxy_handle: CkObjectHandle(p.keygxy_handle),
             extra_data: SecretBytes::copy_from_slice(&p.extra_data),
         }
     }
@@ -112,9 +112,9 @@ impl From<&v1_proto::Ike1ExtendedDeriveParams> for Ike1ExtendedDeriveParams {
 impl From<&Ike2PrfPlusDeriveParams> for v1_proto::Ike2PrfPlusDeriveParams {
     fn from(p: &Ike2PrfPlusDeriveParams) -> Self {
         Self {
-            prf_mechanism: p.prf_mechanism,
+            prf_mechanism: p.prf_mechanism.0,
             has_seed_key: p.has_seed_key,
-            seed_key_handle: p.seed_key_handle,
+            seed_key_handle: p.seed_key_handle.0,
             seed_data: secret_to_plain(&p.seed_data),
         }
     }
@@ -123,9 +123,9 @@ impl From<&Ike2PrfPlusDeriveParams> for v1_proto::Ike2PrfPlusDeriveParams {
 impl From<&v1_proto::Ike2PrfPlusDeriveParams> for Ike2PrfPlusDeriveParams {
     fn from(p: &v1_proto::Ike2PrfPlusDeriveParams) -> Self {
         Self {
-            prf_mechanism: p.prf_mechanism,
+            prf_mechanism: CkMechanismType(p.prf_mechanism),
             has_seed_key: p.has_seed_key,
-            seed_key_handle: p.seed_key_handle,
+            seed_key_handle: CkObjectHandle(p.seed_key_handle),
             seed_data: SecretBytes::copy_from_slice(&p.seed_data),
         }
     }
@@ -189,14 +189,14 @@ fn sp800_108_derived_key_to_proto(
             .iter()
             .map(sp800_108_attribute_to_proto)
             .collect::<Result<Vec<_>, _>>()?,
-        key_handle: key.key_handle,
+        key_handle: key.key_handle.0,
     })
 }
 
 fn sp800_108_derived_key_from_proto(key: &v1_proto::Sp800108DerivedKey) -> Sp800108DerivedKey {
     Sp800108DerivedKey {
         template: key.template.iter().map(sp800_108_attribute_from_proto).collect(),
-        key_handle: key.key_handle,
+        key_handle: CkObjectHandle(key.key_handle),
     }
 }
 
@@ -209,7 +209,7 @@ impl TryFrom<&Sp800108KdfParams> for v1_proto::Sp800108KdfParams {
 
     fn try_from(p: &Sp800108KdfParams) -> Result<Self, Self::Error> {
         Ok(Self {
-            prf_type: p.prf_type,
+            prf_type: p.prf_type.0,
             data_params: p.data_params.iter().map(prf_data_to_proto).collect(),
             additional_derived_keys: p
                 .additional_derived_keys
@@ -223,7 +223,7 @@ impl TryFrom<&Sp800108KdfParams> for v1_proto::Sp800108KdfParams {
 impl From<&v1_proto::Sp800108KdfParams> for Sp800108KdfParams {
     fn from(p: &v1_proto::Sp800108KdfParams) -> Self {
         Self {
-            prf_type: p.prf_type,
+            prf_type: CkMechanismType(p.prf_type),
             data_params: p.data_params.iter().map(prf_data_from_proto).collect(),
             additional_derived_keys: p
                 .additional_derived_keys
@@ -243,7 +243,7 @@ impl TryFrom<&Sp800108FeedbackKdfParams> for v1_proto::Sp800108FeedbackKdfParams
 
     fn try_from(p: &Sp800108FeedbackKdfParams) -> Result<Self, Self::Error> {
         Ok(Self {
-            prf_type: p.prf_type,
+            prf_type: p.prf_type.0,
             data_params: p.data_params.iter().map(prf_data_to_proto).collect(),
             iv: p.iv.clone(),
             additional_derived_keys: p
@@ -258,7 +258,7 @@ impl TryFrom<&Sp800108FeedbackKdfParams> for v1_proto::Sp800108FeedbackKdfParams
 impl From<&v1_proto::Sp800108FeedbackKdfParams> for Sp800108FeedbackKdfParams {
     fn from(p: &v1_proto::Sp800108FeedbackKdfParams) -> Self {
         Self {
-            prf_type: p.prf_type,
+            prf_type: CkMechanismType(p.prf_type),
             data_params: p.data_params.iter().map(prf_data_from_proto).collect(),
             iv: p.iv.clone(),
             additional_derived_keys: p
@@ -278,12 +278,12 @@ impl From<&X3dhInitiateParams> for v1_proto::X3dhInitiateParams {
     fn from(p: &X3dhInitiateParams) -> Self {
         Self {
             kdf: p.kdf,
-            peer_identity_handle: p.peer_identity_handle,
-            peer_prekey_handle: p.peer_prekey_handle,
+            peer_identity_handle: p.peer_identity_handle.0,
+            peer_prekey_handle: p.peer_prekey_handle.0,
             prekey_signature: p.prekey_signature.clone(),
-            onetime_key_handle: p.onetime_key_handle,
-            own_identity_handle: p.own_identity_handle,
-            own_ephemeral_handle: p.own_ephemeral_handle,
+            onetime_key_handle: p.onetime_key_handle.0,
+            own_identity_handle: p.own_identity_handle.0,
+            own_ephemeral_handle: p.own_ephemeral_handle.0,
         }
     }
 }
@@ -292,12 +292,12 @@ impl From<&v1_proto::X3dhInitiateParams> for X3dhInitiateParams {
     fn from(p: &v1_proto::X3dhInitiateParams) -> Self {
         Self {
             kdf: p.kdf,
-            peer_identity_handle: p.peer_identity_handle,
-            peer_prekey_handle: p.peer_prekey_handle,
+            peer_identity_handle: CkObjectHandle(p.peer_identity_handle),
+            peer_prekey_handle: CkObjectHandle(p.peer_prekey_handle),
             prekey_signature: p.prekey_signature.clone(),
-            onetime_key_handle: p.onetime_key_handle,
-            own_identity_handle: p.own_identity_handle,
-            own_ephemeral_handle: p.own_ephemeral_handle,
+            onetime_key_handle: CkObjectHandle(p.onetime_key_handle),
+            own_identity_handle: CkObjectHandle(p.own_identity_handle),
+            own_ephemeral_handle: CkObjectHandle(p.own_ephemeral_handle),
         }
     }
 }
@@ -310,11 +310,11 @@ impl From<&X3dhRespondParams> for v1_proto::X3dhRespondParams {
     fn from(p: &X3dhRespondParams) -> Self {
         Self {
             kdf: p.kdf,
-            identity_handle: p.identity_handle,
-            prekey_handle: p.prekey_handle,
-            onetime_key_handle: p.onetime_key_handle,
-            initiator_identity_handle: p.initiator_identity_handle,
-            initiator_ephemeral_handle: p.initiator_ephemeral_handle,
+            identity_handle: p.identity_handle.0,
+            prekey_handle: p.prekey_handle.0,
+            onetime_key_handle: p.onetime_key_handle.0,
+            initiator_identity_handle: p.initiator_identity_handle.0,
+            initiator_ephemeral_handle: p.initiator_ephemeral_handle.0,
         }
     }
 }
@@ -323,11 +323,11 @@ impl From<&v1_proto::X3dhRespondParams> for X3dhRespondParams {
     fn from(p: &v1_proto::X3dhRespondParams) -> Self {
         Self {
             kdf: p.kdf,
-            identity_handle: p.identity_handle,
-            prekey_handle: p.prekey_handle,
-            onetime_key_handle: p.onetime_key_handle,
-            initiator_identity_handle: p.initiator_identity_handle,
-            initiator_ephemeral_handle: p.initiator_ephemeral_handle,
+            identity_handle: CkObjectHandle(p.identity_handle),
+            prekey_handle: CkObjectHandle(p.prekey_handle),
+            onetime_key_handle: CkObjectHandle(p.onetime_key_handle),
+            initiator_identity_handle: CkObjectHandle(p.initiator_identity_handle),
+            initiator_ephemeral_handle: CkObjectHandle(p.initiator_ephemeral_handle),
         }
     }
 }
@@ -340,13 +340,13 @@ impl From<&X2RatchetInitializeParams> for v1_proto::X2RatchetInitializeParams {
     fn from(p: &X2RatchetInitializeParams) -> Self {
         Self {
             sk: secret_to_plain(&p.sk),
-            peer_public_prekey_handle: p.peer_public_prekey_handle,
-            peer_public_identity_handle: p.peer_public_identity_handle,
-            own_public_identity_handle: p.own_public_identity_handle,
+            peer_public_prekey_handle: p.peer_public_prekey_handle.0,
+            peer_public_identity_handle: p.peer_public_identity_handle.0,
+            own_public_identity_handle: p.own_public_identity_handle.0,
             encrypted_header: p.encrypted_header,
             curve: p.curve,
-            aead_mechanism: p.aead_mechanism,
-            kdf_mechanism: p.kdf_mechanism,
+            aead_mechanism: p.aead_mechanism.0,
+            kdf_mechanism: p.kdf_mechanism.0,
         }
     }
 }
@@ -355,13 +355,13 @@ impl From<&v1_proto::X2RatchetInitializeParams> for X2RatchetInitializeParams {
     fn from(p: &v1_proto::X2RatchetInitializeParams) -> Self {
         Self {
             sk: SecretBytes::copy_from_slice(&p.sk),
-            peer_public_prekey_handle: p.peer_public_prekey_handle,
-            peer_public_identity_handle: p.peer_public_identity_handle,
-            own_public_identity_handle: p.own_public_identity_handle,
+            peer_public_prekey_handle: CkObjectHandle(p.peer_public_prekey_handle),
+            peer_public_identity_handle: CkObjectHandle(p.peer_public_identity_handle),
+            own_public_identity_handle: CkObjectHandle(p.own_public_identity_handle),
             encrypted_header: p.encrypted_header,
             curve: p.curve,
-            aead_mechanism: p.aead_mechanism,
-            kdf_mechanism: p.kdf_mechanism,
+            aead_mechanism: CkMechanismType(p.aead_mechanism),
+            kdf_mechanism: CkKdf(p.kdf_mechanism),
         }
     }
 }
@@ -374,13 +374,13 @@ impl From<&X2RatchetRespondParams> for v1_proto::X2RatchetRespondParams {
     fn from(p: &X2RatchetRespondParams) -> Self {
         Self {
             sk: secret_to_plain(&p.sk),
-            own_prekey_handle: p.own_prekey_handle,
-            initiator_identity_handle: p.initiator_identity_handle,
-            own_identity_handle: p.own_identity_handle,
+            own_prekey_handle: p.own_prekey_handle.0,
+            initiator_identity_handle: p.initiator_identity_handle.0,
+            own_identity_handle: p.own_identity_handle.0,
             encrypted_header: p.encrypted_header,
             curve: p.curve,
-            aead_mechanism: p.aead_mechanism,
-            kdf_mechanism: p.kdf_mechanism,
+            aead_mechanism: p.aead_mechanism.0,
+            kdf_mechanism: p.kdf_mechanism.0,
         }
     }
 }
@@ -389,13 +389,13 @@ impl From<&v1_proto::X2RatchetRespondParams> for X2RatchetRespondParams {
     fn from(p: &v1_proto::X2RatchetRespondParams) -> Self {
         Self {
             sk: SecretBytes::copy_from_slice(&p.sk),
-            own_prekey_handle: p.own_prekey_handle,
-            initiator_identity_handle: p.initiator_identity_handle,
-            own_identity_handle: p.own_identity_handle,
+            own_prekey_handle: CkObjectHandle(p.own_prekey_handle),
+            initiator_identity_handle: CkObjectHandle(p.initiator_identity_handle),
+            own_identity_handle: CkObjectHandle(p.own_identity_handle),
             encrypted_header: p.encrypted_header,
             curve: p.curve,
-            aead_mechanism: p.aead_mechanism,
-            kdf_mechanism: p.kdf_mechanism,
+            aead_mechanism: CkMechanismType(p.aead_mechanism),
+            kdf_mechanism: CkKdf(p.kdf_mechanism),
         }
     }
 }
@@ -461,7 +461,7 @@ impl TryFrom<&KipParams> for v1_proto::KipParams {
     fn try_from(p: &KipParams) -> Result<Self, Self::Error> {
         Ok(Self {
             mechanism: Some(Box::new(mechanism_to_proto(&p.mechanism)?)),
-            key_handle: p.key_handle,
+            key_handle: p.key_handle.0,
             seed: secret_to_plain(&p.seed),
         })
     }
@@ -473,7 +473,7 @@ impl TryFrom<&v1_proto::KipParams> for KipParams {
     fn try_from(p: &v1_proto::KipParams) -> Result<Self, Self::Error> {
         Ok(Self {
             mechanism: Box::new(required_mechanism_from_boxed_option(&p.mechanism)?),
-            key_handle: p.key_handle,
+            key_handle: CkObjectHandle(p.key_handle),
             seed: SecretBytes::copy_from_slice(&p.seed),
         })
     }
@@ -488,7 +488,7 @@ impl TryFrom<&CmsSigParams> for v1_proto::CmsSigParams {
 
     fn try_from(p: &CmsSigParams) -> Result<Self, Self::Error> {
         Ok(Self {
-            certificate_handle: p.certificate_handle,
+            certificate_handle: p.certificate_handle.0,
             signing_mechanism: Some(Box::new(mechanism_to_proto(&p.signing_mechanism)?)),
             digest_mechanism: Some(Box::new(mechanism_to_proto(&p.digest_mechanism)?)),
             content_type: p.content_type.clone(),
@@ -503,7 +503,7 @@ impl TryFrom<&v1_proto::CmsSigParams> for CmsSigParams {
 
     fn try_from(p: &v1_proto::CmsSigParams) -> Result<Self, Self::Error> {
         Ok(Self {
-            certificate_handle: p.certificate_handle,
+            certificate_handle: CkObjectHandle(p.certificate_handle),
             signing_mechanism: Box::new(required_mechanism_from_boxed_option(
                 &p.signing_mechanism,
             )?),
@@ -695,7 +695,7 @@ impl From<&KyberParams> for v1_proto::KyberParams {
         Self {
             version: p.version,
             mode: p.mode,
-            secret_handle: p.secret_handle,
+            secret_handle: p.secret_handle.0,
             shared_data: secret_to_plain(&p.shared_data),
             blob: secret_to_plain(&p.blob),
         }
@@ -707,7 +707,7 @@ impl From<&v1_proto::KyberParams> for KyberParams {
         Self {
             version: p.version,
             mode: p.mode,
-            secret_handle: p.secret_handle,
+            secret_handle: CkObjectHandle(p.secret_handle),
             shared_data: SecretBytes::copy_from_slice(&p.shared_data),
             blob: SecretBytes::copy_from_slice(&p.blob),
         }

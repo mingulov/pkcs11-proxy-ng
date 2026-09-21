@@ -87,6 +87,10 @@ pub(crate) fn object_class_name(v: u64) -> String {
         CkObjectClass::PUBLIC_KEY => "public-key",
         CkObjectClass::PRIVATE_KEY => "private-key",
         CkObjectClass::SECRET_KEY => "secret-key",
+        CkObjectClass::HW_FEATURE => "hw-feature",
+        CkObjectClass::DOMAIN_PARAMETERS => "domain-parameters",
+        CkObjectClass::MECHANISM => "mechanism",
+        CkObjectClass::OTP_KEY => "otp-key",
         _ => return format!("0x{v:08X}"),
     };
     name.to_string()
@@ -148,6 +152,26 @@ pub(crate) fn key_type_name(v: u64) -> String {
         _ => return format!("0x{v:08X}"),
     };
     name.to_string()
+}
+
+#[cfg(test)]
+mod object_class_name_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_standard_and_extended_classes() {
+        assert_eq!(object_class_name(0), "data");
+        assert_eq!(object_class_name(1), "certificate");
+        assert_eq!(object_class_name(2), "public-key");
+        assert_eq!(object_class_name(3), "private-key");
+        assert_eq!(object_class_name(4), "secret-key");
+        // W1-C9-07: extended classes resolve instead of falling through to hex.
+        assert_eq!(object_class_name(5), "hw-feature");
+        assert_eq!(object_class_name(6), "domain-parameters");
+        assert_eq!(object_class_name(7), "mechanism");
+        assert_eq!(object_class_name(8), "otp-key");
+        assert_eq!(object_class_name(0x8000_0001), "0x80000001");
+    }
 }
 
 #[cfg(test)]

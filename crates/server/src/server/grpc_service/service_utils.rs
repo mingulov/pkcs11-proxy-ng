@@ -1600,7 +1600,7 @@ mod tests {
             },
             version_major: 3,
             version_minor: 3, // TLS 1.2
-            prf_hash_mechanism: CkMechanismType::SHA256.0,
+            prf_hash_mechanism: CkMechanismType::SHA256,
         });
         let proto_mech = mechanism_output_to_proto(params).expect("tls12 should convert");
         assert_eq!(proto_mech.mechanism_type, CkMechanismType::TLS12_MASTER_KEY_DERIVE.0);

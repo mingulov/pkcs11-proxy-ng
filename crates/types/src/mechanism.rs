@@ -1,4 +1,5 @@
 use crate::attribute::CkAttribute;
+use crate::object::CkObjectHandle;
 use crate::secret::SecretBytes;
 
 /// Mechanism type identifier.
@@ -61,6 +62,36 @@ impl CkMechanismType {
     pub const X9_42_DH_HYBRID_DERIVE: Self = Self(0x00000032);
     pub const X9_42_MQV_DERIVE: Self = Self(0x00000033);
 
+    // Post-quantum mechanisms (PKCS#11 3.2)
+    pub const ML_KEM_KEY_PAIR_GEN: Self = Self(0x0000000F);
+    pub const ML_KEM: Self = Self(0x00000017);
+    pub const ML_DSA_KEY_PAIR_GEN: Self = Self(0x0000001C);
+    pub const ML_DSA: Self = Self(0x0000001D);
+    pub const HASH_ML_DSA: Self = Self(0x0000001F);
+    pub const HASH_ML_DSA_SHA224: Self = Self(0x00000023);
+    pub const HASH_ML_DSA_SHA256: Self = Self(0x00000024);
+    pub const HASH_ML_DSA_SHA384: Self = Self(0x00000025);
+    pub const HASH_ML_DSA_SHA512: Self = Self(0x00000026);
+    pub const HASH_ML_DSA_SHA3_224: Self = Self(0x00000027);
+    pub const HASH_ML_DSA_SHA3_256: Self = Self(0x00000028);
+    pub const HASH_ML_DSA_SHA3_384: Self = Self(0x00000029);
+    pub const HASH_ML_DSA_SHA3_512: Self = Self(0x0000002A);
+    pub const HASH_ML_DSA_SHAKE128: Self = Self(0x0000002B);
+    pub const HASH_ML_DSA_SHAKE256: Self = Self(0x0000002C);
+    pub const SLH_DSA_KEY_PAIR_GEN: Self = Self(0x0000002D);
+    pub const SLH_DSA: Self = Self(0x0000002E);
+    pub const HASH_SLH_DSA: Self = Self(0x00000034);
+    pub const HASH_SLH_DSA_SHA224: Self = Self(0x00000036);
+    pub const HASH_SLH_DSA_SHA256: Self = Self(0x00000037);
+    pub const HASH_SLH_DSA_SHA384: Self = Self(0x00000038);
+    pub const HASH_SLH_DSA_SHA512: Self = Self(0x00000039);
+    pub const HASH_SLH_DSA_SHA3_224: Self = Self(0x0000003A);
+    pub const HASH_SLH_DSA_SHA3_256: Self = Self(0x0000003B);
+    pub const HASH_SLH_DSA_SHA3_384: Self = Self(0x0000003C);
+    pub const HASH_SLH_DSA_SHA3_512: Self = Self(0x0000003D);
+    pub const HASH_SLH_DSA_SHAKE128: Self = Self(0x0000003E);
+    pub const HASH_SLH_DSA_SHAKE256: Self = Self(0x0000003F);
+
     // Planned extensions (P1)
     pub const AES_XTS: Self = Self(0x00001071);
     pub const AES_XTS_KEY_GEN: Self = Self(0x00001072);
@@ -85,6 +116,9 @@ impl CkMechanismType {
     pub const DES3_CBC_ENCRYPT_DATA: Self = Self(0x00001103);
     pub const MD2: Self = Self(0x00000200);
     pub const MD5: Self = Self(0x00000210);
+    pub const SHA_1: Self = Self(0x00000220);
+    pub const SHA_1_HMAC: Self = Self(0x00000221);
+    pub const SHA_1_HMAC_GENERAL: Self = Self(0x00000222);
     pub const SHAKE_128_KEY_DERIVATION: Self = Self(0x0000039B);
     pub const SHAKE_256_KEY_DERIVATION: Self = Self(0x0000039C);
     pub const CHACHA20_KEY_GEN: Self = Self(0x00001225);
@@ -104,6 +138,9 @@ impl CkMechanismType {
     pub const HOTP: Self = Self(0x00000291);
     pub const PBE_SHA1_DES3_EDE_CBC: Self = Self(0x000003A8);
     pub const PBE_SHA1_DES2_EDE_CBC: Self = Self(0x000003A9);
+    pub const SP800_108_COUNTER_KDF: Self = Self(0x000003AC);
+    pub const SP800_108_FEEDBACK_KDF: Self = Self(0x000003AD);
+    pub const SP800_108_DOUBLE_PIPELINE_KDF: Self = Self(0x000003AE);
     pub const PKCS5_PBKD2: Self = Self(0x000003B0);
     pub const PBA_SHA1_WITH_SHA1_HMAC: Self = Self(0x000003C0);
     pub const CMS_SIG: Self = Self(0x00000500);
@@ -120,9 +157,19 @@ impl CkMechanismType {
     pub const XOR_BASE_AND_DATA: Self = Self(0x00000364);
     pub const EXTRACT_KEY_FROM_KEY: Self = Self(0x00000365);
     pub const PUB_KEY_FROM_PRIV_KEY: Self = Self(0x0000403A);
+    pub const RC2_KEY_GEN: Self = Self(0x00000100);
+    pub const RC2_ECB: Self = Self(0x00000101);
+    pub const RC2_CBC: Self = Self(0x00000102);
+    pub const RC2_MAC: Self = Self(0x00000103);
+    pub const RC2_MAC_GENERAL: Self = Self(0x00000104);
+    pub const RC2_CBC_PAD: Self = Self(0x00000105);
+    pub const RC4_KEY_GEN: Self = Self(0x00000110);
+    pub const RC4: Self = Self(0x00000111);
     pub const DES_KEY_GEN: Self = Self(0x00000120);
     pub const DES_ECB: Self = Self(0x00000121);
+    pub const DES_CBC: Self = Self(0x00000122);
     pub const DES_MAC: Self = Self(0x00000123);
+    pub const DES_MAC_GENERAL: Self = Self(0x00000124);
     pub const DES_CBC_PAD: Self = Self(0x00000125);
     pub const DES2_KEY_GEN: Self = Self(0x00000130);
     pub const DES3_KEY_GEN: Self = Self(0x00000131);
@@ -192,6 +239,26 @@ impl CkMechanismType {
     pub const RSA_PKCS_TPM_1_1: Self = Self(0x00004001);
     pub const RSA_PKCS_OAEP_TPM_1_1: Self = Self(0x00004002);
     pub const NULL: Self = Self(0x0000400B);
+    pub const BLAKE2B_160: Self = Self(0x0000400C);
+    pub const BLAKE2B_160_HMAC: Self = Self(0x0000400D);
+    pub const BLAKE2B_160_HMAC_GENERAL: Self = Self(0x0000400E);
+    pub const BLAKE2B_160_KEY_DERIVE: Self = Self(0x0000400F);
+    pub const BLAKE2B_160_KEY_GEN: Self = Self(0x00004010);
+    pub const BLAKE2B_256: Self = Self(0x00004011);
+    pub const BLAKE2B_256_HMAC: Self = Self(0x00004012);
+    pub const BLAKE2B_256_HMAC_GENERAL: Self = Self(0x00004013);
+    pub const BLAKE2B_256_KEY_DERIVE: Self = Self(0x00004014);
+    pub const BLAKE2B_256_KEY_GEN: Self = Self(0x00004015);
+    pub const BLAKE2B_384: Self = Self(0x00004016);
+    pub const BLAKE2B_384_HMAC: Self = Self(0x00004017);
+    pub const BLAKE2B_384_HMAC_GENERAL: Self = Self(0x00004018);
+    pub const BLAKE2B_384_KEY_DERIVE: Self = Self(0x00004019);
+    pub const BLAKE2B_384_KEY_GEN: Self = Self(0x0000401A);
+    pub const BLAKE2B_512: Self = Self(0x0000401B);
+    pub const BLAKE2B_512_HMAC: Self = Self(0x0000401C);
+    pub const BLAKE2B_512_HMAC_GENERAL: Self = Self(0x0000401D);
+    pub const BLAKE2B_512_KEY_DERIVE: Self = Self(0x0000401E);
+    pub const BLAKE2B_512_KEY_GEN: Self = Self(0x0000401F);
     pub const SALSA20: Self = Self(0x00004020);
     pub const CHACHA20_POLY1305: Self = Self(0x00004021);
     pub const SALSA20_POLY1305: Self = Self(0x00004022);
@@ -239,6 +306,102 @@ impl CkMechanismType {
     pub const fn is_vendor_defined(self) -> bool {
         (self.0 & Self::VENDOR_DEFINED.0) == Self::VENDOR_DEFINED.0
     }
+}
+
+/// Mask generation function for RSA-PSS/OAEP (`CK_RSA_PKCS_MGF_TYPE`,
+/// `CKG_MGF1_*` values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CkMgf(pub u64);
+
+impl CkMgf {
+    pub const MGF1_SHA1: Self = Self(1);
+    pub const MGF1_SHA256: Self = Self(2);
+    pub const MGF1_SHA384: Self = Self(3);
+    pub const MGF1_SHA512: Self = Self(4);
+    pub const MGF1_SHA224: Self = Self(5);
+    pub const MGF1_SHA3_224: Self = Self(6);
+    pub const MGF1_SHA3_256: Self = Self(7);
+    pub const MGF1_SHA3_384: Self = Self(8);
+    pub const MGF1_SHA3_512: Self = Self(9);
+}
+
+/// IV/nonce generator function for GCM/CCM wrap params
+/// (`CK_GENERATOR_FUNCTION`, `CKG_*` values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CkGeneratorFunction(pub u64);
+
+impl CkGeneratorFunction {
+    pub const NO_GENERATE: Self = Self(0);
+    pub const GENERATE: Self = Self(1);
+    pub const GENERATE_COUNTER: Self = Self(2);
+    pub const GENERATE_RANDOM: Self = Self(3);
+    pub const GENERATE_COUNTER_XOR: Self = Self(4);
+}
+
+/// Key derivation function selector (`CK_EC_KDF_TYPE` / `CK_X9_42_DH_KDF_TYPE` /
+/// `CK_X2RATCHET_KDF_TYPE`, shared `CKD_*` values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CkKdf(pub u64);
+
+impl CkKdf {
+    pub const NULL: Self = Self(1);
+    pub const SHA1_KDF: Self = Self(2);
+    pub const SHA1_KDF_ASN1: Self = Self(3);
+    pub const SHA1_KDF_CONCATENATE: Self = Self(4);
+    pub const SHA224_KDF: Self = Self(5);
+    pub const SHA256_KDF: Self = Self(6);
+    pub const SHA384_KDF: Self = Self(7);
+    pub const SHA512_KDF: Self = Self(8);
+    pub const CPDIVERSIFY_KDF: Self = Self(9);
+    pub const SHA3_224_KDF: Self = Self(10);
+    pub const SHA3_256_KDF: Self = Self(11);
+    pub const SHA3_384_KDF: Self = Self(12);
+    pub const SHA3_512_KDF: Self = Self(13);
+    pub const SHA1_KDF_SP800: Self = Self(14);
+    pub const SHA224_KDF_SP800: Self = Self(15);
+    pub const SHA256_KDF_SP800: Self = Self(16);
+    pub const SHA384_KDF_SP800: Self = Self(17);
+    pub const SHA512_KDF_SP800: Self = Self(18);
+    pub const SHA3_224_KDF_SP800: Self = Self(19);
+    pub const SHA3_256_KDF_SP800: Self = Self(20);
+    pub const SHA3_384_KDF_SP800: Self = Self(21);
+    pub const SHA3_512_KDF_SP800: Self = Self(22);
+    pub const BLAKE2B_160_KDF: Self = Self(23);
+    pub const BLAKE2B_256_KDF: Self = Self(24);
+    pub const BLAKE2B_384_KDF: Self = Self(25);
+    pub const BLAKE2B_512_KDF: Self = Self(26);
+}
+
+/// RSA-OAEP data source (`CK_RSA_PKCS_OAEP_SOURCE_TYPE`, `CKZ_*` values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CkOaepSource(pub u64);
+
+impl CkOaepSource {
+    pub const DATA_SPECIFIED: Self = Self(1);
+}
+
+/// PBKDF2 salt source (`CK_PKCS5_PBKDF2_SALT_SOURCE_TYPE`, `CKZ_*` values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, zeroize::Zeroize)]
+pub struct CkPbkdf2SaltSource(pub u64);
+
+impl CkPbkdf2SaltSource {
+    pub const SALT_SPECIFIED: Self = Self(1);
+}
+
+/// PBKDF2 pseudo-random function (`CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE`,
+/// `CKP_PKCS5_PBKD2_HMAC_*` values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, zeroize::Zeroize)]
+pub struct CkPbkdf2Prf(pub u64);
+
+impl CkPbkdf2Prf {
+    pub const HMAC_SHA1: Self = Self(1);
+    pub const HMAC_GOSTR3411: Self = Self(2);
+    pub const HMAC_SHA224: Self = Self(3);
+    pub const HMAC_SHA256: Self = Self(4);
+    pub const HMAC_SHA384: Self = Self(5);
+    pub const HMAC_SHA512: Self = Self(6);
+    pub const HMAC_SHA512_224: Self = Self(7);
+    pub const HMAC_SHA512_256: Self = Self(8);
 }
 
 /// Mechanism info returned by C_GetMechanismInfo.
@@ -292,7 +455,7 @@ impl CkMechanismFlags {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RsaPkcsPssParams {
     pub hash_alg: CkMechanismType,
-    pub mgf: u64, // CKG_MGF1_SHA256 etc.
+    pub mgf: CkMgf,
     pub salt_len: u64,
 }
 
@@ -303,8 +466,8 @@ pub struct RsaPkcsPssParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RsaPkcsOaepParams {
     pub hash_alg: CkMechanismType,
-    pub mgf: u64,
-    pub source: u64,
+    pub mgf: CkMgf,
+    pub source: CkOaepSource,
     pub source_data: SecretBytes,
     pub source_null: bool,
 }
@@ -336,7 +499,7 @@ pub struct GcmParams {
 /// - `public_data`: other party's EC public key (uncompressed EC point)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ecdh1DeriveParams {
-    pub kdf: u64,
+    pub kdf: CkKdf,
     pub shared_data: SecretBytes,
     pub public_data: Vec<u8>,
 }
@@ -375,13 +538,13 @@ pub struct Rc2MacGeneralParams {
 /// CK_XEDDSA_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XeddsaParams {
-    pub hash: u64,
+    pub hash: CkMechanismType,
 }
 
 /// CK_TLS_MAC_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsMacParams {
-    pub prf_hash_mechanism: u64,
+    pub prf_hash_mechanism: CkMechanismType,
     pub mac_length: u64,
     pub server_or_client: u64,
 }
@@ -494,7 +657,7 @@ pub struct Salsa20ChaCha20Poly1305Params {
 pub struct GcmWrapParams {
     pub iv: Vec<u8>,
     pub iv_fixed_bits: u64,
-    pub iv_generator: u64,
+    pub iv_generator: CkGeneratorFunction,
     pub aad: SecretBytes,
     pub tag_bits: u64,
 }
@@ -505,7 +668,7 @@ pub struct CcmWrapParams {
     pub data_len: u64,
     pub nonce: Vec<u8>,
     pub nonce_fixed_bits: u64,
-    pub nonce_generator: u64,
+    pub nonce_generator: CkGeneratorFunction,
     pub aad: SecretBytes,
     pub mac_len: u64,
 }
@@ -517,30 +680,30 @@ pub struct CcmWrapParams {
 /// CK_ECDH2_DERIVE_PARAMS — dual ECDH key derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ecdh2DeriveParams {
-    pub kdf: u64,
+    pub kdf: CkKdf,
     pub shared_data: SecretBytes,
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
-    pub private_data_handle: u64,
+    pub private_data_handle: CkObjectHandle,
     pub public_data2: Vec<u8>,
 }
 
 /// CK_ECMQV_DERIVE_PARAMS — EC-MQV key derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EcmqvDeriveParams {
-    pub kdf: u64,
+    pub kdf: CkKdf,
     pub shared_data: SecretBytes,
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
-    pub private_data_handle: u64,
+    pub private_data_handle: CkObjectHandle,
     pub public_data2: Vec<u8>,
-    pub public_key_handle: u64,
+    pub public_key_handle: CkObjectHandle,
 }
 
 /// CK_X9_42_DH1_DERIVE_PARAMS — X9.42 DH key derivation (single).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X942Dh1DeriveParams {
-    pub kdf: u64,
+    pub kdf: CkKdf,
     pub other_info: SecretBytes,
     pub public_data: Vec<u8>,
 }
@@ -548,24 +711,24 @@ pub struct X942Dh1DeriveParams {
 /// CK_X9_42_DH2_DERIVE_PARAMS — X9.42 DH key derivation (dual).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X942Dh2DeriveParams {
-    pub kdf: u64,
+    pub kdf: CkKdf,
     pub other_info: SecretBytes,
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
-    pub private_data_handle: u64,
+    pub private_data_handle: CkObjectHandle,
     pub public_data2: Vec<u8>,
 }
 
 /// CK_X9_42_MQV_DERIVE_PARAMS — X9.42 MQV key derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X942MqvDeriveParams {
-    pub kdf: u64,
+    pub kdf: CkKdf,
     pub other_info: SecretBytes,
     pub public_data: Vec<u8>,
     pub private_data_len: u64,
-    pub private_data_handle: u64,
+    pub private_data_handle: CkObjectHandle,
     pub public_data2: Vec<u8>,
-    pub public_key_handle: u64,
+    pub public_key_handle: CkObjectHandle,
 }
 
 /// CK_HKDF_PARAMS — HKDF key derivation.
@@ -573,10 +736,10 @@ pub struct X942MqvDeriveParams {
 pub struct HkdfParams {
     pub extract: bool,
     pub expand: bool,
-    pub prf_hash_mechanism: u64,
+    pub prf_hash_mechanism: CkMechanismType,
     pub salt_type: u64,
     pub salt: SecretBytes,
-    pub salt_key_handle: u64,
+    pub salt_key_handle: CkObjectHandle,
     pub info: SecretBytes,
 }
 
@@ -590,7 +753,7 @@ pub struct EddsaParams {
 /// CK_GOSTR3410_DERIVE_PARAMS — GOST R 34.10 key derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gostr3410DeriveParams {
-    pub kdf: u64,
+    pub kdf: CkKdf,
     pub public_data: Vec<u8>,
     pub ukm: Vec<u8>,
 }
@@ -612,7 +775,7 @@ pub struct KeaDeriveParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EcdhAesKeyWrapParams {
     pub aes_key_bits: u64,
-    pub kdf: u64,
+    pub kdf: CkKdf,
     pub shared_data: SecretBytes,
 }
 
@@ -628,7 +791,7 @@ pub struct RsaAesKeyWrapParams {
 pub struct Gostr3410KeyWrapParams {
     pub wrap_oid: Vec<u8>,
     pub ukm: Vec<u8>,
-    pub key_handle: u64,
+    pub key_handle: CkObjectHandle,
 }
 
 /// CK_KEY_WRAP_SET_OAEP_PARAMS — SET OAEP key wrapping.
@@ -676,10 +839,10 @@ impl std::fmt::Debug for PbeParams {
 /// [`PbeParams`].
 #[derive(Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct Pkcs5Pbkd2Params {
-    pub salt_source: u64,
+    pub salt_source: CkPbkdf2SaltSource,
     pub salt_source_data: SecretBytes,
     pub iterations: u64,
-    pub prf: u64,
+    pub prf: CkPbkdf2Prf,
     pub prf_data: SecretBytes,
     pub password: SecretBytes,
 }
@@ -721,7 +884,7 @@ pub struct TlsPrfParams {
 /// CK_TLS_KDF_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsKdfParams {
-    pub prf_mechanism: u64,
+    pub prf_mechanism: CkMechanismType,
     pub label: SecretBytes,
     pub random_info: SslRandomData,
     pub context_data: SecretBytes,
@@ -741,13 +904,13 @@ pub struct Tls12MasterKeyDeriveParams {
     pub random_info: SslRandomData,
     pub version_major: u32,
     pub version_minor: u32,
-    pub prf_hash_mechanism: u64,
+    pub prf_hash_mechanism: CkMechanismType,
 }
 
 /// CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tls12ExtendedMasterKeyDeriveParams {
-    pub prf_hash_mechanism: u64,
+    pub prf_hash_mechanism: CkMechanismType,
     pub session_hash: Vec<u8>,
     pub version_major: u32,
     pub version_minor: u32,
@@ -761,11 +924,11 @@ pub struct Ssl3KeyMatParams {
     pub iv_size_bits: u64,
     pub is_export: bool,
     pub random_info: SslRandomData,
-    pub prf_hash_mechanism: u64,
-    pub client_mac_secret_handle: u64,
-    pub server_mac_secret_handle: u64,
-    pub client_key_handle: u64,
-    pub server_key_handle: u64,
+    pub prf_hash_mechanism: CkMechanismType,
+    pub client_mac_secret_handle: CkObjectHandle,
+    pub server_mac_secret_handle: CkObjectHandle,
+    pub client_key_handle: CkObjectHandle,
+    pub server_key_handle: CkObjectHandle,
     pub client_iv: SecretBytes,
     pub server_iv: SecretBytes,
 }
@@ -780,7 +943,7 @@ pub struct WtlsRandomData {
 /// CK_WTLS_MASTER_KEY_DERIVE_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WtlsMasterKeyDeriveParams {
-    pub digest_mechanism: u64,
+    pub digest_mechanism: CkMechanismType,
     pub random_info: WtlsRandomData,
     pub version: u32,
 }
@@ -788,7 +951,7 @@ pub struct WtlsMasterKeyDeriveParams {
 /// CK_WTLS_PRF_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WtlsPrfParams {
-    pub digest_mechanism: u64,
+    pub digest_mechanism: CkMechanismType,
     pub seed: SecretBytes,
     pub label: SecretBytes,
     pub output_len: u64,
@@ -797,15 +960,15 @@ pub struct WtlsPrfParams {
 /// CK_WTLS_KEY_MAT_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WtlsKeyMatParams {
-    pub digest_mechanism: u64,
+    pub digest_mechanism: CkMechanismType,
     pub mac_size_bits: u64,
     pub key_size_bits: u64,
     pub iv_size_bits: u64,
     pub sequence_number: u64,
     pub is_export: bool,
     pub random_info: WtlsRandomData,
-    pub mac_secret_handle: u64,
-    pub key_handle: u64,
+    pub mac_secret_handle: CkObjectHandle,
+    pub key_handle: CkObjectHandle,
     pub iv: Vec<u8>,
 }
 
@@ -816,21 +979,21 @@ pub struct WtlsKeyMatParams {
 /// CK_IKE_PRF_DERIVE_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IkePrfDeriveParams {
-    pub prf_mechanism: u64,
+    pub prf_mechanism: CkMechanismType,
     pub data_as_key: bool,
     pub rekey: bool,
     pub ni: SecretBytes,
     pub nr: SecretBytes,
-    pub new_key_handle: u64,
+    pub new_key_handle: CkObjectHandle,
 }
 
 /// CK_IKE1_PRF_DERIVE_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ike1PrfDeriveParams {
-    pub prf_mechanism: u64,
+    pub prf_mechanism: CkMechanismType,
     pub has_prev_key: bool,
-    pub keygxy_handle: u64,
-    pub prev_key_handle: u64,
+    pub keygxy_handle: CkObjectHandle,
+    pub prev_key_handle: CkObjectHandle,
     pub ckyi: SecretBytes,
     pub ckyr: SecretBytes,
     pub key_number: u32,
@@ -839,18 +1002,18 @@ pub struct Ike1PrfDeriveParams {
 /// CK_IKE1_EXTENDED_DERIVE_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ike1ExtendedDeriveParams {
-    pub prf_mechanism: u64,
+    pub prf_mechanism: CkMechanismType,
     pub has_keygxy: bool,
-    pub keygxy_handle: u64,
+    pub keygxy_handle: CkObjectHandle,
     pub extra_data: SecretBytes,
 }
 
 /// CK_IKE2_PRF_PLUS_DERIVE_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ike2PrfPlusDeriveParams {
-    pub prf_mechanism: u64,
+    pub prf_mechanism: CkMechanismType,
     pub has_seed_key: bool,
-    pub seed_key_handle: u64,
+    pub seed_key_handle: CkObjectHandle,
     pub seed_data: SecretBytes,
 }
 
@@ -868,7 +1031,7 @@ pub struct PrfDataParam {
 /// CK_SP800_108_KDF_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sp800108KdfParams {
-    pub prf_type: u64,
+    pub prf_type: CkMechanismType,
     pub data_params: Vec<PrfDataParam>,
     pub additional_derived_keys: Vec<Sp800108DerivedKey>,
 }
@@ -876,7 +1039,7 @@ pub struct Sp800108KdfParams {
 /// CK_SP800_108_FEEDBACK_KDF_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sp800108FeedbackKdfParams {
-    pub prf_type: u64,
+    pub prf_type: CkMechanismType,
     pub data_params: Vec<PrfDataParam>,
     pub iv: Vec<u8>,
     pub additional_derived_keys: Vec<Sp800108DerivedKey>,
@@ -886,21 +1049,17 @@ pub struct Sp800108FeedbackKdfParams {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sp800108DerivedKey {
     pub template: Vec<CkAttribute>,
-    pub key_handle: u64,
+    pub key_handle: CkObjectHandle,
 }
 
-/// CK_SP800_108_COUNTER_FORMAT
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sp800108CounterFormat {
-    pub width_in_bits: u64,
-}
-
-/// CK_SP800_108_DKM_LENGTH_FORMAT
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sp800108DkmLengthFormat {
-    pub dkm_length_method: u64,
-    pub width_in_bits: u64,
-}
+// W1-C9-12 removal note: CK_SP800_108_COUNTER_FORMAT and
+// CK_SP800_108_DKM_LENGTH_FORMAT were previously modeled as exported structs
+// here, but nothing referenced them — no CkMechanismParams variant, proto
+// oneof member, or conversion. They are nested SP800-108 data-format structs,
+// not mechanism parameters, so there is no valid enum variant to wire them
+// into; their payloads ride opaquely in PrfDataParam::value (mirrored by the
+// proto PrfDataParam bytes field). Removed from both the Rust types and
+// mechanism_params.proto to keep types.proto and code in agreement.
 
 // ---------------------------------------------------------------------------
 // Signal Protocol parameter structs
@@ -910,49 +1069,49 @@ pub struct Sp800108DkmLengthFormat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X3dhInitiateParams {
     pub kdf: u64,
-    pub peer_identity_handle: u64,
-    pub peer_prekey_handle: u64,
+    pub peer_identity_handle: CkObjectHandle,
+    pub peer_prekey_handle: CkObjectHandle,
     pub prekey_signature: Vec<u8>,
-    pub onetime_key_handle: u64,
-    pub own_identity_handle: u64,
-    pub own_ephemeral_handle: u64,
+    pub onetime_key_handle: CkObjectHandle,
+    pub own_identity_handle: CkObjectHandle,
+    pub own_ephemeral_handle: CkObjectHandle,
 }
 
 /// CK_X3DH_RESPOND_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X3dhRespondParams {
     pub kdf: u64,
-    pub identity_handle: u64,
-    pub prekey_handle: u64,
-    pub onetime_key_handle: u64,
-    pub initiator_identity_handle: u64,
-    pub initiator_ephemeral_handle: u64,
+    pub identity_handle: CkObjectHandle,
+    pub prekey_handle: CkObjectHandle,
+    pub onetime_key_handle: CkObjectHandle,
+    pub initiator_identity_handle: CkObjectHandle,
+    pub initiator_ephemeral_handle: CkObjectHandle,
 }
 
 /// CK_X2RATCHET_INITIALIZE_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X2RatchetInitializeParams {
     pub sk: SecretBytes,
-    pub peer_public_prekey_handle: u64,
-    pub peer_public_identity_handle: u64,
-    pub own_public_identity_handle: u64,
+    pub peer_public_prekey_handle: CkObjectHandle,
+    pub peer_public_identity_handle: CkObjectHandle,
+    pub own_public_identity_handle: CkObjectHandle,
     pub encrypted_header: bool,
     pub curve: u64,
-    pub aead_mechanism: u64,
-    pub kdf_mechanism: u64,
+    pub aead_mechanism: CkMechanismType,
+    pub kdf_mechanism: CkKdf,
 }
 
 /// CK_X2RATCHET_RESPOND_PARAMS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct X2RatchetRespondParams {
     pub sk: SecretBytes,
-    pub own_prekey_handle: u64,
-    pub initiator_identity_handle: u64,
-    pub own_identity_handle: u64,
+    pub own_prekey_handle: CkObjectHandle,
+    pub initiator_identity_handle: CkObjectHandle,
+    pub own_identity_handle: CkObjectHandle,
     pub encrypted_header: bool,
     pub curve: u64,
-    pub aead_mechanism: u64,
-    pub kdf_mechanism: u64,
+    pub aead_mechanism: CkMechanismType,
+    pub kdf_mechanism: CkKdf,
 }
 
 // ---------------------------------------------------------------------------
@@ -976,14 +1135,14 @@ pub struct OtpParams {
 #[derive(Debug, Clone, PartialEq)]
 pub struct KipParams {
     pub mechanism: Box<CkMechanism>,
-    pub key_handle: u64,
+    pub key_handle: CkObjectHandle,
     pub seed: SecretBytes,
 }
 
 /// CK_CMS_SIG_PARAMS — references nested Mechanisms (boxed to avoid infinite size).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CmsSigParams {
-    pub certificate_handle: u64,
+    pub certificate_handle: CkObjectHandle,
     pub signing_mechanism: Box<CkMechanism>,
     pub digest_mechanism: Box<CkMechanism>,
     pub content_type: String,
@@ -1076,7 +1235,7 @@ pub struct MacGeneralParams {
 /// Parameter for CKM_CONCATENATE_BASE_AND_KEY — a single CK_OBJECT_HANDLE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectHandleParam {
-    pub handle: u64,
+    pub handle: CkObjectHandle,
 }
 
 /// CK_EXTRACT_PARAMS — bit position for CKM_EXTRACT_KEY_FROM_KEY.
@@ -1101,13 +1260,13 @@ pub struct SignAdditionalContext {
     pub hedge_variant: u64,
     pub context: SecretBytes,
     /// 0 = plain CK_SIGN_ADDITIONAL_CONTEXT; non-zero = CK_HASH_SIGN_ADDITIONAL_CONTEXT.
-    pub hash: u64,
+    pub hash: CkMechanismType,
 }
 
 /// CK_KMAC_PARAMS — keyed MAC output length and optional customization string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KmacParams {
-    pub key_handle: u64,
+    pub key_handle: CkObjectHandle,
     pub mac_length: u64,
     pub customization_string: SecretBytes,
 }
@@ -1115,7 +1274,7 @@ pub struct KmacParams {
 /// CK_MU_GEN_PARAMS — ML-DSA external-mu generation inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MuGenParams {
-    pub key_handle: u64,
+    pub key_handle: CkObjectHandle,
     pub tr: SecretBytes,
     pub context: SecretBytes,
 }
@@ -1161,7 +1320,7 @@ pub struct DilithiumParams {
 pub struct KyberParams {
     pub version: u64,
     pub mode: u64,
-    pub secret_handle: u64,
+    pub secret_handle: CkObjectHandle,
     pub shared_data: SecretBytes,
     pub blob: SecretBytes,
 }
@@ -1301,6 +1460,535 @@ pub enum CkMechanismParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::CkObjectHandle;
+
+    // W1-C9-04: all 42 object-handle fields across mechanism params use
+    // CkObjectHandle (mirror the existing CkObjectHandle precedent). If any
+    // handle field regresses to raw u64, this fails to compile.
+    #[test]
+    fn object_handle_fields_use_ck_object_handle() {
+        let empty = SecretBytes::copy_from_slice(b"");
+        let mech = || CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: None };
+
+        let p = Ecdh2DeriveParams {
+            kdf: CkKdf(1),
+            shared_data: empty.clone(),
+            public_data: vec![],
+            private_data_len: 0,
+            private_data_handle: CkObjectHandle(7),
+            public_data2: vec![],
+        };
+        assert_eq!(p.private_data_handle.0, 7);
+
+        let p = EcmqvDeriveParams {
+            kdf: CkKdf(1),
+            shared_data: empty.clone(),
+            public_data: vec![],
+            private_data_len: 0,
+            private_data_handle: CkObjectHandle(7),
+            public_data2: vec![],
+            public_key_handle: CkObjectHandle(8),
+        };
+        assert_eq!((p.private_data_handle.0, p.public_key_handle.0), (7, 8));
+
+        let p = X942Dh2DeriveParams {
+            kdf: CkKdf(1),
+            other_info: empty.clone(),
+            public_data: vec![],
+            private_data_len: 0,
+            private_data_handle: CkObjectHandle(7),
+            public_data2: vec![],
+        };
+        assert_eq!(p.private_data_handle.0, 7);
+
+        let p = X942MqvDeriveParams {
+            kdf: CkKdf(1),
+            other_info: empty.clone(),
+            public_data: vec![],
+            private_data_len: 0,
+            private_data_handle: CkObjectHandle(7),
+            public_data2: vec![],
+            public_key_handle: CkObjectHandle(8),
+        };
+        assert_eq!((p.private_data_handle.0, p.public_key_handle.0), (7, 8));
+
+        let p = HkdfParams {
+            extract: true,
+            expand: true,
+            prf_hash_mechanism: CkMechanismType(0x250),
+            salt_type: 0,
+            salt: empty.clone(),
+            salt_key_handle: CkObjectHandle(9),
+            info: empty.clone(),
+        };
+        assert_eq!(p.salt_key_handle.0, 9);
+
+        let p =
+            Gostr3410KeyWrapParams { wrap_oid: vec![], ukm: vec![], key_handle: CkObjectHandle(9) };
+        assert_eq!(p.key_handle.0, 9);
+
+        let p = Ssl3KeyMatParams {
+            mac_size_bits: 0,
+            key_size_bits: 0,
+            iv_size_bits: 0,
+            is_export: false,
+            random_info: SslRandomData { client_random: vec![], server_random: vec![] },
+            prf_hash_mechanism: CkMechanismType(0),
+            client_mac_secret_handle: CkObjectHandle(1),
+            server_mac_secret_handle: CkObjectHandle(2),
+            client_key_handle: CkObjectHandle(3),
+            server_key_handle: CkObjectHandle(4),
+            client_iv: empty.clone(),
+            server_iv: empty.clone(),
+        };
+        assert_eq!(p.server_key_handle.0, 4);
+
+        let p = WtlsKeyMatParams {
+            digest_mechanism: CkMechanismType(0),
+            mac_size_bits: 0,
+            key_size_bits: 0,
+            iv_size_bits: 0,
+            sequence_number: 0,
+            is_export: false,
+            random_info: WtlsRandomData { client_random: vec![], server_random: vec![] },
+            mac_secret_handle: CkObjectHandle(5),
+            key_handle: CkObjectHandle(6),
+            iv: vec![],
+        };
+        assert_eq!((p.mac_secret_handle.0, p.key_handle.0), (5, 6));
+
+        let p = IkePrfDeriveParams {
+            prf_mechanism: CkMechanismType(0),
+            data_as_key: false,
+            rekey: false,
+            ni: empty.clone(),
+            nr: empty.clone(),
+            new_key_handle: CkObjectHandle(10),
+        };
+        assert_eq!(p.new_key_handle.0, 10);
+
+        let p = Ike1PrfDeriveParams {
+            prf_mechanism: CkMechanismType(0),
+            has_prev_key: false,
+            keygxy_handle: CkObjectHandle(11),
+            prev_key_handle: CkObjectHandle(12),
+            ckyi: empty.clone(),
+            ckyr: empty.clone(),
+            key_number: 0,
+        };
+        assert_eq!((p.keygxy_handle.0, p.prev_key_handle.0), (11, 12));
+
+        let p = Ike1ExtendedDeriveParams {
+            prf_mechanism: CkMechanismType(0),
+            has_keygxy: false,
+            keygxy_handle: CkObjectHandle(11),
+            extra_data: empty.clone(),
+        };
+        assert_eq!(p.keygxy_handle.0, 11);
+
+        let p = Ike2PrfPlusDeriveParams {
+            prf_mechanism: CkMechanismType(0),
+            has_seed_key: false,
+            seed_key_handle: CkObjectHandle(13),
+            seed_data: empty.clone(),
+        };
+        assert_eq!(p.seed_key_handle.0, 13);
+
+        let p = Sp800108DerivedKey { template: vec![], key_handle: CkObjectHandle(14) };
+        assert_eq!(p.key_handle.0, 14);
+
+        let p = X3dhInitiateParams {
+            kdf: 1,
+            peer_identity_handle: CkObjectHandle(21),
+            peer_prekey_handle: CkObjectHandle(22),
+            prekey_signature: vec![],
+            onetime_key_handle: CkObjectHandle(23),
+            own_identity_handle: CkObjectHandle(24),
+            own_ephemeral_handle: CkObjectHandle(25),
+        };
+        assert_eq!(p.own_ephemeral_handle.0, 25);
+
+        let p = X3dhRespondParams {
+            kdf: 1,
+            identity_handle: CkObjectHandle(26),
+            prekey_handle: CkObjectHandle(27),
+            onetime_key_handle: CkObjectHandle(28),
+            initiator_identity_handle: CkObjectHandle(29),
+            initiator_ephemeral_handle: CkObjectHandle(30),
+        };
+        assert_eq!(p.initiator_ephemeral_handle.0, 30);
+
+        let p = X2RatchetInitializeParams {
+            sk: empty.clone(),
+            peer_public_prekey_handle: CkObjectHandle(31),
+            peer_public_identity_handle: CkObjectHandle(32),
+            own_public_identity_handle: CkObjectHandle(33),
+            encrypted_header: false,
+            curve: 255,
+            aead_mechanism: CkMechanismType(0),
+            kdf_mechanism: CkKdf(1),
+        };
+        assert_eq!(p.own_public_identity_handle.0, 33);
+
+        let p = X2RatchetRespondParams {
+            sk: empty.clone(),
+            own_prekey_handle: CkObjectHandle(34),
+            initiator_identity_handle: CkObjectHandle(35),
+            own_identity_handle: CkObjectHandle(36),
+            encrypted_header: false,
+            curve: 255,
+            aead_mechanism: CkMechanismType(0),
+            kdf_mechanism: CkKdf(1),
+        };
+        assert_eq!(p.own_identity_handle.0, 36);
+
+        let p = KipParams {
+            mechanism: Box::new(mech()),
+            key_handle: CkObjectHandle(37),
+            seed: empty.clone(),
+        };
+        assert_eq!(p.key_handle.0, 37);
+
+        let p = CmsSigParams {
+            certificate_handle: CkObjectHandle(38),
+            signing_mechanism: Box::new(mech()),
+            digest_mechanism: Box::new(mech()),
+            content_type: String::new(),
+            requested_attributes: empty.clone(),
+            required_attributes: empty.clone(),
+        };
+        assert_eq!(p.certificate_handle.0, 38);
+
+        let p = ObjectHandleParam { handle: CkObjectHandle(39) };
+        assert_eq!(p.handle.0, 39);
+
+        let p = KmacParams {
+            key_handle: CkObjectHandle(40),
+            mac_length: 0,
+            customization_string: empty.clone(),
+        };
+        assert_eq!(p.key_handle.0, 40);
+
+        let p = MuGenParams {
+            key_handle: CkObjectHandle(41),
+            tr: empty.clone(),
+            context: empty.clone(),
+        };
+        assert_eq!(p.key_handle.0, 41);
+
+        let p = KyberParams {
+            version: 0,
+            mode: 0,
+            secret_handle: CkObjectHandle(42),
+            shared_data: empty.clone(),
+            blob: empty.clone(),
+        };
+        assert_eq!(p.secret_handle.0, 42);
+    }
+
+    // W1-C9-05: all 19 mechanism-valued fields use CkMechanismType, matching
+    // the hash_alg precedent. If any regresses to raw u64, this fails to compile.
+    #[test]
+    fn mechanism_valued_fields_use_ck_mechanism_type() {
+        let empty = SecretBytes::copy_from_slice(b"");
+        let sha256 = CkMechanismType::SHA256;
+
+        let p = XeddsaParams { hash: sha256 };
+        assert_eq!(p.hash.0, 0x250);
+
+        let p = TlsMacParams { prf_hash_mechanism: sha256, mac_length: 0, server_or_client: 0 };
+        assert_eq!(p.prf_hash_mechanism.0, 0x250);
+
+        let p = HkdfParams {
+            extract: true,
+            expand: true,
+            prf_hash_mechanism: sha256,
+            salt_type: 0,
+            salt: empty.clone(),
+            salt_key_handle: CkObjectHandle(0),
+            info: empty.clone(),
+        };
+        assert_eq!(p.prf_hash_mechanism.0, 0x250);
+
+        let p = TlsKdfParams {
+            prf_mechanism: sha256,
+            label: empty.clone(),
+            random_info: SslRandomData { client_random: vec![], server_random: vec![] },
+            context_data: empty.clone(),
+        };
+        assert_eq!(p.prf_mechanism.0, 0x250);
+
+        let p = Tls12MasterKeyDeriveParams {
+            random_info: SslRandomData { client_random: vec![], server_random: vec![] },
+            version_major: 3,
+            version_minor: 3,
+            prf_hash_mechanism: sha256,
+        };
+        assert_eq!(p.prf_hash_mechanism.0, 0x250);
+
+        let p = Tls12ExtendedMasterKeyDeriveParams {
+            prf_hash_mechanism: sha256,
+            session_hash: vec![],
+            version_major: 3,
+            version_minor: 3,
+        };
+        assert_eq!(p.prf_hash_mechanism.0, 0x250);
+
+        let p = Ssl3KeyMatParams {
+            mac_size_bits: 0,
+            key_size_bits: 0,
+            iv_size_bits: 0,
+            is_export: false,
+            random_info: SslRandomData { client_random: vec![], server_random: vec![] },
+            prf_hash_mechanism: sha256,
+            client_mac_secret_handle: CkObjectHandle(0),
+            server_mac_secret_handle: CkObjectHandle(0),
+            client_key_handle: CkObjectHandle(0),
+            server_key_handle: CkObjectHandle(0),
+            client_iv: empty.clone(),
+            server_iv: empty.clone(),
+        };
+        assert_eq!(p.prf_hash_mechanism.0, 0x250);
+
+        let p = WtlsMasterKeyDeriveParams {
+            digest_mechanism: sha256,
+            random_info: WtlsRandomData { client_random: vec![], server_random: vec![] },
+            version: 0,
+        };
+        assert_eq!(p.digest_mechanism.0, 0x250);
+
+        let p = WtlsPrfParams {
+            digest_mechanism: sha256,
+            seed: empty.clone(),
+            label: empty.clone(),
+            output_len: 0,
+        };
+        assert_eq!(p.digest_mechanism.0, 0x250);
+
+        let p = WtlsKeyMatParams {
+            digest_mechanism: sha256,
+            mac_size_bits: 0,
+            key_size_bits: 0,
+            iv_size_bits: 0,
+            sequence_number: 0,
+            is_export: false,
+            random_info: WtlsRandomData { client_random: vec![], server_random: vec![] },
+            mac_secret_handle: CkObjectHandle(0),
+            key_handle: CkObjectHandle(0),
+            iv: vec![],
+        };
+        assert_eq!(p.digest_mechanism.0, 0x250);
+
+        let p = IkePrfDeriveParams {
+            prf_mechanism: sha256,
+            data_as_key: false,
+            rekey: false,
+            ni: empty.clone(),
+            nr: empty.clone(),
+            new_key_handle: CkObjectHandle(0),
+        };
+        assert_eq!(p.prf_mechanism.0, 0x250);
+
+        let p = Ike1PrfDeriveParams {
+            prf_mechanism: sha256,
+            has_prev_key: false,
+            keygxy_handle: CkObjectHandle(0),
+            prev_key_handle: CkObjectHandle(0),
+            ckyi: empty.clone(),
+            ckyr: empty.clone(),
+            key_number: 0,
+        };
+        assert_eq!(p.prf_mechanism.0, 0x250);
+
+        let p = Ike1ExtendedDeriveParams {
+            prf_mechanism: sha256,
+            has_keygxy: false,
+            keygxy_handle: CkObjectHandle(0),
+            extra_data: empty.clone(),
+        };
+        assert_eq!(p.prf_mechanism.0, 0x250);
+
+        let p = Ike2PrfPlusDeriveParams {
+            prf_mechanism: sha256,
+            has_seed_key: false,
+            seed_key_handle: CkObjectHandle(0),
+            seed_data: empty.clone(),
+        };
+        assert_eq!(p.prf_mechanism.0, 0x250);
+
+        let p = X2RatchetInitializeParams {
+            sk: empty.clone(),
+            peer_public_prekey_handle: CkObjectHandle(0),
+            peer_public_identity_handle: CkObjectHandle(0),
+            own_public_identity_handle: CkObjectHandle(0),
+            encrypted_header: false,
+            curve: 255,
+            aead_mechanism: CkMechanismType::AES_GCM,
+            kdf_mechanism: CkKdf(1),
+        };
+        assert_eq!(p.aead_mechanism.0, 0x1087);
+
+        let p = X2RatchetRespondParams {
+            sk: empty.clone(),
+            own_prekey_handle: CkObjectHandle(0),
+            initiator_identity_handle: CkObjectHandle(0),
+            own_identity_handle: CkObjectHandle(0),
+            encrypted_header: false,
+            curve: 255,
+            aead_mechanism: CkMechanismType::AES_GCM,
+            kdf_mechanism: CkKdf(1),
+        };
+        assert_eq!(p.aead_mechanism.0, 0x1087);
+
+        let p = SignAdditionalContext { hedge_variant: 0, context: empty.clone(), hash: sha256 };
+        assert_eq!(p.hash.0, 0x250);
+
+        let p = Sp800108KdfParams {
+            prf_type: sha256,
+            data_params: vec![],
+            additional_derived_keys: vec![],
+        };
+        assert_eq!(p.prf_type.0, 0x250);
+
+        let p = Sp800108FeedbackKdfParams {
+            prf_type: sha256,
+            data_params: vec![],
+            iv: vec![],
+            additional_derived_keys: vec![],
+        };
+        assert_eq!(p.prf_type.0, 0x250);
+    }
+
+    // W1-C9-10: named tables for the CKG/CKD/CKZ/CKP/salt-source enums
+    // (OASIS PKCS#11 v3.2, verified against cryptoki-sys 0.5.0).
+    #[test]
+    fn generator_and_kdf_tables_match_headers() {
+        assert_eq!(CkMgf::MGF1_SHA1.0, 1);
+        assert_eq!(CkMgf::MGF1_SHA256.0, 2);
+        assert_eq!(CkMgf::MGF1_SHA384.0, 3);
+        assert_eq!(CkMgf::MGF1_SHA512.0, 4);
+        assert_eq!(CkMgf::MGF1_SHA224.0, 5);
+        assert_eq!(CkMgf::MGF1_SHA3_224.0, 6);
+        assert_eq!(CkMgf::MGF1_SHA3_256.0, 7);
+        assert_eq!(CkMgf::MGF1_SHA3_384.0, 8);
+        assert_eq!(CkMgf::MGF1_SHA3_512.0, 9);
+
+        assert_eq!(CkGeneratorFunction::NO_GENERATE.0, 0);
+        assert_eq!(CkGeneratorFunction::GENERATE.0, 1);
+        assert_eq!(CkGeneratorFunction::GENERATE_COUNTER.0, 2);
+        assert_eq!(CkGeneratorFunction::GENERATE_RANDOM.0, 3);
+        assert_eq!(CkGeneratorFunction::GENERATE_COUNTER_XOR.0, 4);
+
+        assert_eq!(CkKdf::NULL.0, 1);
+        assert_eq!(CkKdf::SHA1_KDF.0, 2);
+        assert_eq!(CkKdf::SHA1_KDF_ASN1.0, 3);
+        assert_eq!(CkKdf::SHA1_KDF_CONCATENATE.0, 4);
+        assert_eq!(CkKdf::SHA224_KDF.0, 5);
+        assert_eq!(CkKdf::SHA256_KDF.0, 6);
+        assert_eq!(CkKdf::SHA384_KDF.0, 7);
+        assert_eq!(CkKdf::SHA512_KDF.0, 8);
+        assert_eq!(CkKdf::CPDIVERSIFY_KDF.0, 9);
+        assert_eq!(CkKdf::SHA3_224_KDF.0, 10);
+        assert_eq!(CkKdf::SHA3_256_KDF.0, 11);
+        assert_eq!(CkKdf::SHA3_384_KDF.0, 12);
+        assert_eq!(CkKdf::SHA3_512_KDF.0, 13);
+        assert_eq!(CkKdf::SHA1_KDF_SP800.0, 14);
+        assert_eq!(CkKdf::SHA224_KDF_SP800.0, 15);
+        assert_eq!(CkKdf::SHA256_KDF_SP800.0, 16);
+        assert_eq!(CkKdf::SHA384_KDF_SP800.0, 17);
+        assert_eq!(CkKdf::SHA512_KDF_SP800.0, 18);
+        assert_eq!(CkKdf::SHA3_224_KDF_SP800.0, 19);
+        assert_eq!(CkKdf::SHA3_256_KDF_SP800.0, 20);
+        assert_eq!(CkKdf::SHA3_384_KDF_SP800.0, 21);
+        assert_eq!(CkKdf::SHA3_512_KDF_SP800.0, 22);
+        assert_eq!(CkKdf::BLAKE2B_160_KDF.0, 23);
+        assert_eq!(CkKdf::BLAKE2B_256_KDF.0, 24);
+        assert_eq!(CkKdf::BLAKE2B_384_KDF.0, 25);
+        assert_eq!(CkKdf::BLAKE2B_512_KDF.0, 26);
+
+        assert_eq!(CkOaepSource::DATA_SPECIFIED.0, 1);
+        assert_eq!(CkPbkdf2SaltSource::SALT_SPECIFIED.0, 1);
+
+        assert_eq!(CkPbkdf2Prf::HMAC_SHA1.0, 1);
+        assert_eq!(CkPbkdf2Prf::HMAC_GOSTR3411.0, 2);
+        assert_eq!(CkPbkdf2Prf::HMAC_SHA224.0, 3);
+        assert_eq!(CkPbkdf2Prf::HMAC_SHA256.0, 4);
+        assert_eq!(CkPbkdf2Prf::HMAC_SHA384.0, 5);
+        assert_eq!(CkPbkdf2Prf::HMAC_SHA512.0, 6);
+        assert_eq!(CkPbkdf2Prf::HMAC_SHA512_224.0, 7);
+        assert_eq!(CkPbkdf2Prf::HMAC_SHA512_256.0, 8);
+    }
+
+    // W1-C9-10: mgf/kdf/source/salt-source/prf/iv-generator fields use the
+    // enum newtypes. If any regresses to raw u64, this fails to compile.
+    #[test]
+    fn raw_enum_fields_use_newtypes() {
+        let empty = SecretBytes::copy_from_slice(b"");
+
+        let p = RsaPkcsPssParams {
+            hash_alg: CkMechanismType::SHA256,
+            mgf: CkMgf::MGF1_SHA256,
+            salt_len: 0,
+        };
+        assert_eq!(p.mgf.0, 2);
+
+        let p = RsaPkcsOaepParams {
+            hash_alg: CkMechanismType::SHA256,
+            mgf: CkMgf::MGF1_SHA1,
+            source: CkOaepSource::DATA_SPECIFIED,
+            source_data: empty.clone(),
+            source_null: false,
+        };
+        assert_eq!((p.mgf.0, p.source.0), (1, 1));
+
+        let p = GcmWrapParams {
+            iv: vec![],
+            iv_fixed_bits: 0,
+            iv_generator: CkGeneratorFunction::GENERATE_RANDOM,
+            aad: empty.clone(),
+            tag_bits: 0,
+        };
+        assert_eq!(p.iv_generator.0, 3);
+
+        let p = CcmWrapParams {
+            data_len: 0,
+            nonce: vec![],
+            nonce_fixed_bits: 0,
+            nonce_generator: CkGeneratorFunction::NO_GENERATE,
+            aad: empty.clone(),
+            mac_len: 0,
+        };
+        assert_eq!(p.nonce_generator.0, 0);
+
+        let p = Ecdh1DeriveParams {
+            kdf: CkKdf::SHA256_KDF,
+            shared_data: empty.clone(),
+            public_data: vec![],
+        };
+        assert_eq!(p.kdf.0, 6);
+
+        let p = Pkcs5Pbkd2Params {
+            salt_source: CkPbkdf2SaltSource::SALT_SPECIFIED,
+            salt_source_data: empty.clone(),
+            iterations: 0,
+            prf: CkPbkdf2Prf::HMAC_SHA256,
+            prf_data: empty.clone(),
+            password: empty.clone(),
+        };
+        assert_eq!((p.salt_source.0, p.prf.0), (1, 4));
+
+        let p = X2RatchetInitializeParams {
+            sk: empty.clone(),
+            peer_public_prekey_handle: CkObjectHandle(0),
+            peer_public_identity_handle: CkObjectHandle(0),
+            own_public_identity_handle: CkObjectHandle(0),
+            encrypted_header: false,
+            curve: 255,
+            aead_mechanism: CkMechanismType::AES_GCM,
+            kdf_mechanism: CkKdf::BLAKE2B_512_KDF,
+        };
+        assert_eq!(p.kdf_mechanism.0, 26);
+    }
 
     #[test]
     fn vendor_mechanism_helpers() {
@@ -1386,7 +2074,9 @@ mod tests {
     fn standard_des_family_constants_match_spec() {
         assert_eq!(CkMechanismType::DES_KEY_GEN.0, 0x0000_0120);
         assert_eq!(CkMechanismType::DES_ECB.0, 0x0000_0121);
+        assert_eq!(CkMechanismType::DES_CBC.0, 0x0000_0122);
         assert_eq!(CkMechanismType::DES_MAC.0, 0x0000_0123);
+        assert_eq!(CkMechanismType::DES_MAC_GENERAL.0, 0x0000_0124);
         assert_eq!(CkMechanismType::DES_CBC_PAD.0, 0x0000_0125);
         assert_eq!(CkMechanismType::DES2_KEY_GEN.0, 0x0000_0130);
         assert_eq!(CkMechanismType::DES3_KEY_GEN.0, 0x0000_0131);
@@ -1486,6 +2176,84 @@ mod tests {
     fn standard_historical_md_digest_constants_match_spec() {
         assert_eq!(CkMechanismType::MD2.0, 0x0000_0200);
         assert_eq!(CkMechanismType::MD5.0, 0x0000_0210);
+        assert_eq!(CkMechanismType::SHA_1.0, 0x0000_0220);
+        assert_eq!(CkMechanismType::SHA_1_HMAC.0, 0x0000_0221);
+        assert_eq!(CkMechanismType::SHA_1_HMAC_GENERAL.0, 0x0000_0222);
+    }
+
+    #[test]
+    fn standard_rivest_rc2_rc4_constants_match_spec() {
+        assert_eq!(CkMechanismType::RC2_KEY_GEN.0, 0x0000_0100);
+        assert_eq!(CkMechanismType::RC2_ECB.0, 0x0000_0101);
+        assert_eq!(CkMechanismType::RC2_CBC.0, 0x0000_0102);
+        assert_eq!(CkMechanismType::RC2_MAC.0, 0x0000_0103);
+        assert_eq!(CkMechanismType::RC2_MAC_GENERAL.0, 0x0000_0104);
+        assert_eq!(CkMechanismType::RC2_CBC_PAD.0, 0x0000_0105);
+        assert_eq!(CkMechanismType::RC4_KEY_GEN.0, 0x0000_0110);
+        assert_eq!(CkMechanismType::RC4.0, 0x0000_0111);
+    }
+
+    #[test]
+    fn standard_sp800_108_kdf_constants_match_spec() {
+        assert_eq!(CkMechanismType::SP800_108_COUNTER_KDF.0, 0x0000_03AC);
+        assert_eq!(CkMechanismType::SP800_108_FEEDBACK_KDF.0, 0x0000_03AD);
+        assert_eq!(CkMechanismType::SP800_108_DOUBLE_PIPELINE_KDF.0, 0x0000_03AE);
+    }
+
+    #[test]
+    fn standard_blake2b_constants_match_spec() {
+        assert_eq!(CkMechanismType::BLAKE2B_160.0, 0x0000_400C);
+        assert_eq!(CkMechanismType::BLAKE2B_160_HMAC.0, 0x0000_400D);
+        assert_eq!(CkMechanismType::BLAKE2B_160_HMAC_GENERAL.0, 0x0000_400E);
+        assert_eq!(CkMechanismType::BLAKE2B_160_KEY_DERIVE.0, 0x0000_400F);
+        assert_eq!(CkMechanismType::BLAKE2B_160_KEY_GEN.0, 0x0000_4010);
+        assert_eq!(CkMechanismType::BLAKE2B_256.0, 0x0000_4011);
+        assert_eq!(CkMechanismType::BLAKE2B_256_HMAC.0, 0x0000_4012);
+        assert_eq!(CkMechanismType::BLAKE2B_256_HMAC_GENERAL.0, 0x0000_4013);
+        assert_eq!(CkMechanismType::BLAKE2B_256_KEY_DERIVE.0, 0x0000_4014);
+        assert_eq!(CkMechanismType::BLAKE2B_256_KEY_GEN.0, 0x0000_4015);
+        assert_eq!(CkMechanismType::BLAKE2B_384.0, 0x0000_4016);
+        assert_eq!(CkMechanismType::BLAKE2B_384_HMAC.0, 0x0000_4017);
+        assert_eq!(CkMechanismType::BLAKE2B_384_HMAC_GENERAL.0, 0x0000_4018);
+        assert_eq!(CkMechanismType::BLAKE2B_384_KEY_DERIVE.0, 0x0000_4019);
+        assert_eq!(CkMechanismType::BLAKE2B_384_KEY_GEN.0, 0x0000_401A);
+        assert_eq!(CkMechanismType::BLAKE2B_512.0, 0x0000_401B);
+        assert_eq!(CkMechanismType::BLAKE2B_512_HMAC.0, 0x0000_401C);
+        assert_eq!(CkMechanismType::BLAKE2B_512_HMAC_GENERAL.0, 0x0000_401D);
+        assert_eq!(CkMechanismType::BLAKE2B_512_KEY_DERIVE.0, 0x0000_401E);
+        assert_eq!(CkMechanismType::BLAKE2B_512_KEY_GEN.0, 0x0000_401F);
+    }
+
+    #[test]
+    fn standard_pqc_mlkem_mldsa_slhdsa_constants_match_spec() {
+        assert_eq!(CkMechanismType::ML_KEM_KEY_PAIR_GEN.0, 0x0000_000F);
+        assert_eq!(CkMechanismType::ML_KEM.0, 0x0000_0017);
+        assert_eq!(CkMechanismType::ML_DSA_KEY_PAIR_GEN.0, 0x0000_001C);
+        assert_eq!(CkMechanismType::ML_DSA.0, 0x0000_001D);
+        assert_eq!(CkMechanismType::HASH_ML_DSA.0, 0x0000_001F);
+        assert_eq!(CkMechanismType::HASH_ML_DSA_SHA224.0, 0x0000_0023);
+        assert_eq!(CkMechanismType::HASH_ML_DSA_SHA256.0, 0x0000_0024);
+        assert_eq!(CkMechanismType::HASH_ML_DSA_SHA384.0, 0x0000_0025);
+        assert_eq!(CkMechanismType::HASH_ML_DSA_SHA512.0, 0x0000_0026);
+        assert_eq!(CkMechanismType::HASH_ML_DSA_SHA3_224.0, 0x0000_0027);
+        assert_eq!(CkMechanismType::HASH_ML_DSA_SHA3_256.0, 0x0000_0028);
+        assert_eq!(CkMechanismType::HASH_ML_DSA_SHA3_384.0, 0x0000_0029);
+        assert_eq!(CkMechanismType::HASH_ML_DSA_SHA3_512.0, 0x0000_002A);
+        assert_eq!(CkMechanismType::HASH_ML_DSA_SHAKE128.0, 0x0000_002B);
+        assert_eq!(CkMechanismType::HASH_ML_DSA_SHAKE256.0, 0x0000_002C);
+        assert_eq!(CkMechanismType::SLH_DSA_KEY_PAIR_GEN.0, 0x0000_002D);
+        assert_eq!(CkMechanismType::SLH_DSA.0, 0x0000_002E);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA.0, 0x0000_0034);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA_SHA224.0, 0x0000_0036);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA_SHA256.0, 0x0000_0037);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA_SHA384.0, 0x0000_0038);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA_SHA512.0, 0x0000_0039);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA_SHA3_224.0, 0x0000_003A);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA_SHA3_256.0, 0x0000_003B);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA_SHA3_384.0, 0x0000_003C);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA_SHA3_512.0, 0x0000_003D);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA_SHAKE128.0, 0x0000_003E);
+        assert_eq!(CkMechanismType::HASH_SLH_DSA_SHAKE256.0, 0x0000_003F);
     }
 
     #[test]
@@ -1645,10 +2413,10 @@ mod tests {
     fn pkcs5_pbkd2_params_zeroizes_password() {
         use zeroize::Zeroize;
         let mut p = Pkcs5Pbkd2Params {
-            salt_source: 1,
+            salt_source: CkPbkdf2SaltSource::SALT_SPECIFIED,
             salt_source_data: vec![1u8; 8].into(),
             iterations: 10_000,
-            prf: 0x40,
+            prf: CkPbkdf2Prf(0x40),
             prf_data: vec![2u8; 4].into(),
             password: b"hunter2".to_vec().into(),
         };
@@ -1748,10 +2516,10 @@ mod tests {
     #[test]
     fn pkcs5_pbkd2_debug_redacts_password() {
         let p = Pkcs5Pbkd2Params {
-            salt_source: 1,
+            salt_source: CkPbkdf2SaltSource::SALT_SPECIFIED,
             salt_source_data: vec![].into(),
             iterations: 1,
-            prf: 0,
+            prf: CkPbkdf2Prf(0),
             prf_data: vec![].into(),
             password: b"correct horse battery staple".to_vec().into(),
         };

@@ -270,7 +270,7 @@ impl MockBackend {
         if let Some(outcome) = self.next_wait_outcome.lock().unwrap().take() {
             return outcome;
         }
-        let dont_block = flags & 0x1 != 0;
+        let dont_block = flags & CkFlags::DONT_BLOCK != 0;
         let mut queue = self.slot_event_queue.lock().unwrap();
 
         loop {
@@ -387,10 +387,10 @@ fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
         | CkMechanismType::HSS_KEY_PAIR_GEN
         | CkMechanismType::XMSS_KEY_PAIR_GEN
         | CkMechanismType::XMSSMT_KEY_PAIR_GEN => CkMechanismFlags::GENERATE_KEY_PAIR,
-        CkMechanismType(0x0000_000F)
+        CkMechanismType::ML_KEM_KEY_PAIR_GEN
         | CkMechanismType(0x0000_0010)
-        | CkMechanismType(0x0000_001C)
-        | CkMechanismType(0x0000_002D) => CkMechanismFlags::GENERATE_KEY_PAIR,
+        | CkMechanismType::ML_DSA_KEY_PAIR_GEN
+        | CkMechanismType::SLH_DSA_KEY_PAIR_GEN => CkMechanismFlags::GENERATE_KEY_PAIR,
         CkMechanismType(0x0000_2000)
         | CkMechanismType(0x0000_2003)
         | CkMechanismType(0x0000_2004)
@@ -398,7 +398,7 @@ fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
         | CkMechanismType::DH_PKCS_PARAMETER_GEN
         | CkMechanismType::X9_42_DH_PARAMETER_GEN
         | CkMechanismType::EC_KEY_PAIR_GEN_W_EXTRA_BITS => generate_and_generate_key_pair,
-        CkMechanismType(0x0000_0017) => encapsulate_decapsulate,
+        CkMechanismType::ML_KEM => encapsulate_decapsulate,
         CkMechanismType(0x0000_02A0) => sign_verify,
         CkMechanismType(0x0000_02A1) => CkMechanismFlags::GENERATE,
         CkMechanismType::AES_KEY_GEN
@@ -428,7 +428,7 @@ fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
         | CkMechanismType::HKDF_KEY_GEN => CkMechanismFlags::GENERATE,
         CkMechanismType::MD2
         | CkMechanismType::MD5
-        | CkMechanismType(0x0000_0220)
+        | CkMechanismType::SHA_1
         | CkMechanismType::SHA256
         | CkMechanismType(0x0000_0255)
         | CkMechanismType::SHA384
@@ -436,17 +436,17 @@ fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
         | CkMechanismType(0x0000_0048)
         | CkMechanismType(0x0000_004C)
         | CkMechanismType(0x0000_0050)
-        | CkMechanismType(0x0000_400C)
-        | CkMechanismType(0x0000_4011)
-        | CkMechanismType(0x0000_4016)
-        | CkMechanismType(0x0000_401B)
+        | CkMechanismType::BLAKE2B_160
+        | CkMechanismType::BLAKE2B_256
+        | CkMechanismType::BLAKE2B_384
+        | CkMechanismType::BLAKE2B_512
         | CkMechanismType(0x0000_02B5)
         | CkMechanismType(0x0000_02B0)
         | CkMechanismType(0x0000_02C0)
         | CkMechanismType(0x0000_02D0)
         | CkMechanismType::GOSTR3411 => CkMechanismFlags::DIGEST,
-        CkMechanismType(0x0000_0221)
-        | CkMechanismType(0x0000_0222)
+        CkMechanismType::SHA_1_HMAC
+        | CkMechanismType::SHA_1_HMAC_GENERAL
         | CkMechanismType(0x0000_0256)
         | CkMechanismType(0x0000_0257)
         | CkMechanismType(0x0000_0251)
@@ -461,14 +461,14 @@ fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
         | CkMechanismType(0x0000_004E)
         | CkMechanismType(0x0000_0051)
         | CkMechanismType(0x0000_0052)
-        | CkMechanismType(0x0000_400D)
-        | CkMechanismType(0x0000_400E)
-        | CkMechanismType(0x0000_4012)
-        | CkMechanismType(0x0000_4013)
-        | CkMechanismType(0x0000_4017)
-        | CkMechanismType(0x0000_4018)
-        | CkMechanismType(0x0000_401C)
-        | CkMechanismType(0x0000_401D)
+        | CkMechanismType::BLAKE2B_160_HMAC
+        | CkMechanismType::BLAKE2B_160_HMAC_GENERAL
+        | CkMechanismType::BLAKE2B_256_HMAC
+        | CkMechanismType::BLAKE2B_256_HMAC_GENERAL
+        | CkMechanismType::BLAKE2B_384_HMAC
+        | CkMechanismType::BLAKE2B_384_HMAC_GENERAL
+        | CkMechanismType::BLAKE2B_512_HMAC
+        | CkMechanismType::BLAKE2B_512_HMAC_GENERAL
         | CkMechanismType(0x0000_02B6)
         | CkMechanismType(0x0000_02B7)
         | CkMechanismType(0x0000_02B1)
@@ -563,30 +563,30 @@ fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
         | CkMechanismType(0x0000_0019)
         | CkMechanismType(0x0000_001A)
         | CkMechanismType(0x0000_001B)
-        | CkMechanismType(0x0000_001D)
-        | CkMechanismType(0x0000_001F)
-        | CkMechanismType(0x0000_0023)
-        | CkMechanismType(0x0000_0024)
-        | CkMechanismType(0x0000_0025)
-        | CkMechanismType(0x0000_0026)
-        | CkMechanismType(0x0000_0027)
-        | CkMechanismType(0x0000_0028)
-        | CkMechanismType(0x0000_0029)
-        | CkMechanismType(0x0000_002A)
-        | CkMechanismType(0x0000_002B)
-        | CkMechanismType(0x0000_002C)
-        | CkMechanismType(0x0000_002E)
-        | CkMechanismType(0x0000_0034)
-        | CkMechanismType(0x0000_0036)
-        | CkMechanismType(0x0000_0037)
-        | CkMechanismType(0x0000_0038)
-        | CkMechanismType(0x0000_0039)
-        | CkMechanismType(0x0000_003A)
-        | CkMechanismType(0x0000_003B)
-        | CkMechanismType(0x0000_003C)
-        | CkMechanismType(0x0000_003D)
-        | CkMechanismType(0x0000_003E)
-        | CkMechanismType(0x0000_003F)
+        | CkMechanismType::ML_DSA
+        | CkMechanismType::HASH_ML_DSA
+        | CkMechanismType::HASH_ML_DSA_SHA224
+        | CkMechanismType::HASH_ML_DSA_SHA256
+        | CkMechanismType::HASH_ML_DSA_SHA384
+        | CkMechanismType::HASH_ML_DSA_SHA512
+        | CkMechanismType::HASH_ML_DSA_SHA3_224
+        | CkMechanismType::HASH_ML_DSA_SHA3_256
+        | CkMechanismType::HASH_ML_DSA_SHA3_384
+        | CkMechanismType::HASH_ML_DSA_SHA3_512
+        | CkMechanismType::HASH_ML_DSA_SHAKE128
+        | CkMechanismType::HASH_ML_DSA_SHAKE256
+        | CkMechanismType::SLH_DSA
+        | CkMechanismType::HASH_SLH_DSA
+        | CkMechanismType::HASH_SLH_DSA_SHA224
+        | CkMechanismType::HASH_SLH_DSA_SHA256
+        | CkMechanismType::HASH_SLH_DSA_SHA384
+        | CkMechanismType::HASH_SLH_DSA_SHA512
+        | CkMechanismType::HASH_SLH_DSA_SHA3_224
+        | CkMechanismType::HASH_SLH_DSA_SHA3_256
+        | CkMechanismType::HASH_SLH_DSA_SHA3_384
+        | CkMechanismType::HASH_SLH_DSA_SHA3_512
+        | CkMechanismType::HASH_SLH_DSA_SHAKE128
+        | CkMechanismType::HASH_SLH_DSA_SHAKE256
         | CkMechanismType::ECDSA
         | CkMechanismType::ECDSA_SHA1
         | CkMechanismType::ECDSA_SHA224
@@ -722,17 +722,17 @@ fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
         | CkMechanismType(0x0000_004B)
         | CkMechanismType(0x0000_004F)
         | CkMechanismType(0x0000_0053)
-        | CkMechanismType(0x0000_400F)
-        | CkMechanismType(0x0000_4014)
-        | CkMechanismType(0x0000_4019)
-        | CkMechanismType(0x0000_401E)
+        | CkMechanismType::BLAKE2B_160_KEY_DERIVE
+        | CkMechanismType::BLAKE2B_256_KEY_DERIVE
+        | CkMechanismType::BLAKE2B_384_KEY_DERIVE
+        | CkMechanismType::BLAKE2B_512_KEY_DERIVE
         | CkMechanismType(0x0000_0398)
         | CkMechanismType(0x0000_0397)
         | CkMechanismType(0x0000_0399)
         | CkMechanismType(0x0000_039A)
-        | CkMechanismType(0x0000_03AC)
-        | CkMechanismType(0x0000_03AD)
-        | CkMechanismType(0x0000_03AE) => CkMechanismFlags::DERIVE,
+        | CkMechanismType::SP800_108_COUNTER_KDF
+        | CkMechanismType::SP800_108_FEEDBACK_KDF
+        | CkMechanismType::SP800_108_DOUBLE_PIPELINE_KDF => CkMechanismFlags::DERIVE,
         CkMechanismType::X2RATCHET_ENCRYPT | CkMechanismType::X2RATCHET_DECRYPT => {
             encrypt_decrypt | wrap_unwrap
         }
@@ -752,10 +752,10 @@ fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
         | CkMechanismType(0x0000_4008)
         | CkMechanismType(0x0000_4009)
         | CkMechanismType(0x0000_400A)
-        | CkMechanismType(0x0000_4010)
-        | CkMechanismType(0x0000_4015)
-        | CkMechanismType(0x0000_401A)
-        | CkMechanismType(0x0000_401F)
+        | CkMechanismType::BLAKE2B_160_KEY_GEN
+        | CkMechanismType::BLAKE2B_256_KEY_GEN
+        | CkMechanismType::BLAKE2B_384_KEY_GEN
+        | CkMechanismType::BLAKE2B_512_KEY_GEN
         | CkMechanismType(0x0000_02B8)
         | CkMechanismType(0x0000_02B3)
         | CkMechanismType(0x0000_02C3)

@@ -1,10 +1,9 @@
 //! Typed direction/stage effects; only owned output bytes can cross this boundary.
 use super::message_params::MessageParameter;
 use crate::pkcs11_proxy_ng::v1 as wire;
-use pkcs11_proxy_ng_types::{CkOutputBufferSpec, CkResult, CkRv, OutputContractViolation};
-// Published CK_GENERATOR_FUNCTION values, independent of native integer width.
-const CKG_NO_GENERATE: u64 = 0;
-const CKG_GENERATE_COUNTER_XOR: u64 = 4;
+use pkcs11_proxy_ng_types::{
+    CkGeneratorFunction, CkOutputBufferSpec, CkResult, CkRv, OutputContractViolation,
+};
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum MessageEffects {
@@ -73,8 +72,8 @@ impl MessageEffects {
         let generated = |generator: u64| {
             context.encrypt
                 && context.generated_stage
-                && generator != CKG_NO_GENERATE
-                && (generator == CKG_GENERATE_COUNTER_XOR
+                && generator != CkGeneratorFunction::NO_GENERATE.0
+                && (generator == CkGeneratorFunction::GENERATE_COUNTER_XOR.0
                     || (context.rv == CkRv::OK
                         && matches!(
                             context.mode,
@@ -355,7 +354,7 @@ mod tests {
             iv: vec![0xa5; 12],
             iv_null_len: None,
             iv_fixed_bits: 9,
-            iv_generator: CKG_GENERATE_COUNTER_XOR,
+            iv_generator: CkGeneratorFunction::GENERATE_COUNTER_XOR.0,
             tag: vec![0; 16],
             tag_null_len: None,
             tag_bits: 128,

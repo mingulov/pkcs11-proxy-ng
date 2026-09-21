@@ -166,7 +166,7 @@ mod tests {
             params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
                 wrap_oid: vec![1; 3],
                 ukm: vec![2; 8],
-                key_handle: 7,
+                key_handle: CkObjectHandle(7),
             })),
         };
         {
@@ -249,7 +249,7 @@ mod tests {
             params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
                 wrap_oid: vec![1; 3],
                 ukm: vec![2; 8],
-                key_handle: 7,
+                key_handle: CkObjectHandle(7),
             })),
         };
         for route in 0..3 {
@@ -382,7 +382,7 @@ mod tests {
                     params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
                         wrap_oid: vec![1; 3],
                         ukm: vec![2; 8],
-                        key_handle: 7,
+                        key_handle: CkObjectHandle(7),
                     })),
                 },
                 None,

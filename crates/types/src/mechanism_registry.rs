@@ -932,8 +932,8 @@ mod tests {
         let mechanisms = crate::pkcs11_3_2_official_mechanisms();
 
         assert!(mechanisms.windows(2).all(|pair| pair[0].0 < pair[1].0), "sorted unique");
-        assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_001F))); // CKM_HASH_ML_DSA
-        assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_002E))); // CKM_SLH_DSA
+        assert!(mechanisms.contains(&crate::CkMechanismType::HASH_ML_DSA)); // CKM_HASH_ML_DSA
+        assert!(mechanisms.contains(&crate::CkMechanismType::SLH_DSA)); // CKM_SLH_DSA
         assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_03D5))); // CKM_WTLS_CLIENT_KEY_AND_MAC_DERIVE
         assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_108D))); // CKM_AES_XCBC_MAC_96
         assert!(mechanisms.contains(&crate::CkMechanismType(0x0000_4037))); // CKM_XMSSMT

@@ -304,7 +304,7 @@ mod tests {
                 params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
                     wrap_oid: vec![0; 3],
                     ukm: vec![0; 8],
-                    key_handle: 17,
+                    key_handle: CkObjectHandle(17),
                 })),
             },
         ] {

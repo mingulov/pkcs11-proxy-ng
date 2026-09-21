@@ -54,7 +54,7 @@ pub(crate) unsafe fn write_mechanism_output_params(
                 gcm.ulIvLen = copy_len as CK_ULONG;
             }
             gcm.ulIvFixedBits = gcm_out.iv_fixed_bits as CK_ULONG;
-            gcm.ivGenerator = gcm_out.iv_generator as CK_GENERATOR_FUNCTION;
+            gcm.ivGenerator = gcm_out.iv_generator.0 as CK_GENERATOR_FUNCTION;
             gcm.ulTagBits = gcm_out.tag_bits as CK_ULONG;
         }
         CkMechanismParams::CcmWrap(ccm_out) => {
@@ -77,7 +77,7 @@ pub(crate) unsafe fn write_mechanism_output_params(
             }
             ccm.ulDataLen = ccm_out.data_len as CK_ULONG;
             ccm.ulNonceFixedBits = ccm_out.nonce_fixed_bits as CK_ULONG;
-            ccm.nonceGenerator = ccm_out.nonce_generator as CK_GENERATOR_FUNCTION;
+            ccm.nonceGenerator = ccm_out.nonce_generator.0 as CK_GENERATOR_FUNCTION;
             ccm.ulMACLen = ccm_out.mac_len as CK_ULONG;
         }
         CkMechanismParams::Tls12MasterKeyDerive(tls12_out) => {
@@ -130,8 +130,8 @@ pub(crate) unsafe fn write_mechanism_output_params(
                 return;
             }
             let output = unsafe { &mut *wtls.pReturnedKeyMaterial };
-            output.hMacSecret = wtls_out.mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE;
-            output.hKey = wtls_out.key_handle as cryptoki_sys::CK_OBJECT_HANDLE;
+            output.hMacSecret = wtls_out.mac_secret_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
+            output.hKey = wtls_out.key_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
             if !output.pIV.is_null() {
                 let capacity = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8)
                     .min(MAX_SERIALIZABLE_BYTES);
@@ -158,11 +158,11 @@ pub(crate) unsafe fn write_mechanism_output_params(
             }
             let output = unsafe { &mut *ssl3.pReturnedKeyMaterial };
             output.hClientMacSecret =
-                ssl3_out.client_mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE;
+                ssl3_out.client_mac_secret_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
             output.hServerMacSecret =
-                ssl3_out.server_mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE;
-            output.hClientKey = ssl3_out.client_key_handle as cryptoki_sys::CK_OBJECT_HANDLE;
-            output.hServerKey = ssl3_out.server_key_handle as cryptoki_sys::CK_OBJECT_HANDLE;
+                ssl3_out.server_mac_secret_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
+            output.hClientKey = ssl3_out.client_key_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
+            output.hServerKey = ssl3_out.server_key_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
             let capacity = (((ssl3.ulIVSizeInBits as usize).saturating_add(7)) / 8)
                 .min(MAX_SERIALIZABLE_BYTES);
             if !output.pIVClient.is_null() {
@@ -251,7 +251,7 @@ unsafe fn write_sp800_108_derived_key_handles(
     {
         if !derived.phKey.is_null() {
             unsafe {
-                *derived.phKey = output.key_handle as CK_OBJECT_HANDLE;
+                *derived.phKey = output.key_handle.0 as CK_OBJECT_HANDLE;
             }
         }
     }

@@ -1,17 +1,18 @@
 use super::*;
 use pkcs11_proxy_ng_types::{
-    AesCmacKeyDerivationParams, CkAttribute, CkAttributeType, CkAttributeValue, CmsSigParams,
-    DilithiumParams, Ecdh1DeriveParams, Ecdh2DeriveParams, EcdhAesKeyWrapParams, EciesParams,
-    EcmqvDeriveParams, EddsaParams, ExtractParams, GcmParams, Gostr3410DeriveParams,
-    Gostr3410KeyWrapParams, HdKeyDeriveParams, HkdfParams, Ike1ExtendedDeriveParams,
-    Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams, IkePrfDeriveParams, IvParams, KeaDeriveParams,
-    KeyDerivationStringData, KeyWrapSetOaepParams, KipParams, KmacParams, KyberParams,
-    MacGeneralParams, MuGenParams, ObjectHandleParam, OtpParam, OtpParams, PbeParams,
-    Pkcs5Pbkd2Params, PrfDataParam, RawMechanismParams, RsaAesKeyWrapParams, SignAdditionalContext,
-    SkipjackPrivateWrapParams, SkipjackRelayxParams, Sp800108DerivedKey, Sp800108FeedbackKdfParams,
-    Sp800108KdfParams, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData,
-    Tls12ExtendedMasterKeyDeriveParams, Tls12MasterKeyDeriveParams, TlsKdfParams, TlsPrfParams,
-    VendorObjectExtractParams, VendorObjectInsertParams, WtlsKeyMatParams,
+    AesCmacKeyDerivationParams, CkAttribute, CkAttributeType, CkAttributeValue,
+    CkGeneratorFunction, CkKdf, CkMechanismType, CkMgf, CkOaepSource, CkObjectHandle, CkPbkdf2Prf,
+    CkPbkdf2SaltSource, CmsSigParams, DilithiumParams, Ecdh1DeriveParams, Ecdh2DeriveParams,
+    EcdhAesKeyWrapParams, EciesParams, EcmqvDeriveParams, EddsaParams, ExtractParams, GcmParams,
+    Gostr3410DeriveParams, Gostr3410KeyWrapParams, HdKeyDeriveParams, HkdfParams,
+    Ike1ExtendedDeriveParams, Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams, IkePrfDeriveParams,
+    IvParams, KeaDeriveParams, KeyDerivationStringData, KeyWrapSetOaepParams, KipParams,
+    KmacParams, KyberParams, MacGeneralParams, MuGenParams, ObjectHandleParam, OtpParam, OtpParams,
+    PbeParams, Pkcs5Pbkd2Params, PrfDataParam, RawMechanismParams, RsaAesKeyWrapParams,
+    SignAdditionalContext, SkipjackPrivateWrapParams, SkipjackRelayxParams, Sp800108DerivedKey,
+    Sp800108FeedbackKdfParams, Sp800108KdfParams, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams,
+    SslRandomData, Tls12ExtendedMasterKeyDeriveParams, Tls12MasterKeyDeriveParams, TlsKdfParams,
+    TlsPrfParams, VendorObjectExtractParams, VendorObjectInsertParams, WtlsKeyMatParams,
     WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData, X2RatchetInitializeParams,
     X2RatchetRespondParams, X3dhInitiateParams, X3dhRespondParams, X942Dh1DeriveParams,
     X942Dh2DeriveParams, X942MqvDeriveParams,
@@ -52,7 +53,7 @@ fn mechanism_pss_round_trip() {
         mechanism_type: CkMechanismType::RSA_PKCS_PSS,
         params: Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
             hash_alg: CkMechanismType::SHA256,
-            mgf: 1,
+            mgf: CkMgf(1),
             salt_len: 32,
         })),
     };
@@ -63,7 +64,7 @@ fn mechanism_pss_round_trip() {
         CkMechanismParams::RsaPkcsPss(p) => {
             assert_eq!(p.salt_len, 32);
             assert_eq!(p.hash_alg, CkMechanismType::SHA256);
-            assert_eq!(p.mgf, 1);
+            assert_eq!(p.mgf.0, 1);
         }
         _ => panic!("wrong variant"),
     }
@@ -75,8 +76,8 @@ fn mechanism_oaep_round_trip() {
         mechanism_type: CkMechanismType::RSA_PKCS_OAEP,
         params: Some(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
             hash_alg: CkMechanismType::SHA256,
-            mgf: 1,
-            source: 1,
+            mgf: CkMgf(1),
+            source: CkOaepSource(1),
             source_data: vec![1, 2, 3].into(),
 
             source_null: false,
@@ -89,8 +90,8 @@ fn mechanism_oaep_round_trip() {
         CkMechanismParams::RsaPkcsOaep(p) => {
             // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(p.hash_alg, CkMechanismType::SHA256);
-            assert_eq!(p.mgf, 1);
-            assert_eq!(p.source, 1);
+            assert_eq!(p.mgf.0, 1);
+            assert_eq!(p.source.0, 1);
             assert_eq!(p.source_data, vec![1, 2, 3].into());
             assert!(!p.source_null);
         }
@@ -104,8 +105,8 @@ fn mechanism_oaep_empty_source_data_round_trip() {
         mechanism_type: CkMechanismType::RSA_PKCS_OAEP,
         params: Some(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
             hash_alg: CkMechanismType::SHA256,
-            mgf: 0x00000002,
-            source: 0x00000001,
+            mgf: CkMgf(0x00000002),
+            source: CkOaepSource(0x00000001),
             source_data: vec![].into(),
 
             source_null: false,
@@ -118,8 +119,8 @@ fn mechanism_oaep_empty_source_data_round_trip() {
     match back.params.unwrap() {
         CkMechanismParams::RsaPkcsOaep(p) => {
             assert_eq!(p.hash_alg, CkMechanismType::SHA256);
-            assert_eq!(p.mgf, 0x00000002);
-            assert_eq!(p.source, 0x00000001);
+            assert_eq!(p.mgf.0, 0x00000002);
+            assert_eq!(p.source.0, 0x00000001);
             assert!(p.source_data.is_empty());
             assert!(!p.source_null);
         }
@@ -198,7 +199,7 @@ fn mechanism_ecdh1_derive_round_trip() {
     let original = CkMechanism {
         mechanism_type: CkMechanismType::ECDH1_DERIVE,
         params: Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
-            kdf: 2,
+            kdf: CkKdf(2),
             shared_data: vec![0x01, 0x02, 0x03].into(),
             public_data: vec![0x04; 65],
         })),
@@ -208,7 +209,7 @@ fn mechanism_ecdh1_derive_round_trip() {
     assert_eq!(back.mechanism_type, CkMechanismType::ECDH1_DERIVE);
     match back.params.unwrap() {
         CkMechanismParams::Ecdh1Derive(p) => {
-            assert_eq!(p.kdf, 2);
+            assert_eq!(p.kdf.0, 2);
             assert_eq!(p.shared_data, vec![0x01, 0x02, 0x03].into());
             assert_eq!(p.public_data, vec![0x04; 65]);
         }
@@ -221,7 +222,7 @@ fn mechanism_ecdh1_derive_null_kdf_no_shared_data() {
     let original = CkMechanism {
         mechanism_type: CkMechanismType::ECDH1_DERIVE,
         params: Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
-            kdf: 1,
+            kdf: CkKdf(1),
             shared_data: vec![].into(),
             public_data: vec![0x04; 65],
         })),
@@ -232,7 +233,7 @@ fn mechanism_ecdh1_derive_null_kdf_no_shared_data() {
     assert_eq!(back.mechanism_type, original.mechanism_type);
     match back.params.unwrap() {
         CkMechanismParams::Ecdh1Derive(p) => {
-            assert_eq!(p.kdf, 1);
+            assert_eq!(p.kdf.0, 1);
             assert!(p.shared_data.is_empty());
             assert_eq!(p.public_data.len(), 65);
         }
@@ -348,20 +349,20 @@ fn mechanism_info_flags_zero_round_trip() {
 #[test]
 fn ecdh2_derive_round_trip() {
     let params = CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams {
-        kdf: 2,
+        kdf: CkKdf(2),
         shared_data: vec![0x01, 0x02].into(),
         public_data: vec![0x04; 65],
         private_data_len: 32,
-        private_data_handle: 0x1234,
+        private_data_handle: CkObjectHandle(0x1234),
         public_data2: vec![0x04; 65],
     });
     match round_trip(params) {
         CkMechanismParams::Ecdh2Derive(p) => {
-            assert_eq!(p.kdf, 2);
+            assert_eq!(p.kdf.0, 2);
             assert_eq!(p.shared_data, vec![0x01, 0x02].into());
             assert_eq!(p.public_data.len(), 65);
             assert_eq!(p.private_data_len, 32);
-            assert_eq!(p.private_data_handle, 0x1234);
+            assert_eq!(p.private_data_handle.0, 0x1234);
             assert_eq!(p.public_data2.len(), 65);
         }
         _ => panic!("wrong variant"),
@@ -371,24 +372,24 @@ fn ecdh2_derive_round_trip() {
 #[test]
 fn ecmqv_derive_round_trip() {
     let params = CkMechanismParams::EcmqvDerive(EcmqvDeriveParams {
-        kdf: 3,
+        kdf: CkKdf(3),
         shared_data: vec![0xAA].into(),
         public_data: vec![0x04; 33],
         private_data_len: 16,
-        private_data_handle: 0xABCD,
+        private_data_handle: CkObjectHandle(0xABCD),
         public_data2: vec![0x04; 33],
-        public_key_handle: 0xDEAD,
+        public_key_handle: CkObjectHandle(0xDEAD),
     });
     match round_trip(params) {
         CkMechanismParams::EcmqvDerive(p) => {
             // W1-C8-05: full-field assertions; a dropped field must fail.
-            assert_eq!(p.kdf, 3);
+            assert_eq!(p.kdf.0, 3);
             assert_eq!(p.shared_data, vec![0xAA].into());
             assert_eq!(p.public_data, vec![0x04; 33]);
             assert_eq!(p.private_data_len, 16);
             assert_eq!(p.public_data2, vec![0x04; 33]);
-            assert_eq!(p.public_key_handle, 0xDEAD);
-            assert_eq!(p.private_data_handle, 0xABCD);
+            assert_eq!(p.public_key_handle.0, 0xDEAD);
+            assert_eq!(p.private_data_handle.0, 0xABCD);
         }
         _ => panic!("wrong variant"),
     }
@@ -397,13 +398,13 @@ fn ecmqv_derive_round_trip() {
 #[test]
 fn x942_dh1_derive_round_trip() {
     let params = CkMechanismParams::X942Dh1Derive(X942Dh1DeriveParams {
-        kdf: 1,
+        kdf: CkKdf(1),
         other_info: vec![0x10, 0x20].into(),
         public_data: vec![0x55; 128],
     });
     match round_trip(params) {
         CkMechanismParams::X942Dh1Derive(p) => {
-            assert_eq!(p.kdf, 1);
+            assert_eq!(p.kdf.0, 1);
             assert_eq!(p.other_info, vec![0x10, 0x20].into());
             assert_eq!(p.public_data.len(), 128);
         }
@@ -414,21 +415,21 @@ fn x942_dh1_derive_round_trip() {
 #[test]
 fn x942_dh2_derive_round_trip() {
     let params = CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams {
-        kdf: 2,
+        kdf: CkKdf(2),
         other_info: vec![].into(),
         public_data: vec![0x55; 128],
         private_data_len: 64,
-        private_data_handle: 42,
+        private_data_handle: CkObjectHandle(42),
         public_data2: vec![0x66; 128],
     });
     match round_trip(params) {
         CkMechanismParams::X942Dh2Derive(p) => {
             // W1-C8-05: full-field assertions; a dropped field must fail.
-            assert_eq!(p.kdf, 2);
+            assert_eq!(p.kdf.0, 2);
             assert!(p.other_info.is_empty());
             assert_eq!(p.public_data, vec![0x55; 128]);
             assert_eq!(p.private_data_len, 64);
-            assert_eq!(p.private_data_handle, 42);
+            assert_eq!(p.private_data_handle.0, 42);
             assert_eq!(p.public_data2.len(), 128);
         }
         _ => panic!("wrong variant"),
@@ -438,24 +439,24 @@ fn x942_dh2_derive_round_trip() {
 #[test]
 fn x942_mqv_derive_round_trip() {
     let params = CkMechanismParams::X942MqvDerive(X942MqvDeriveParams {
-        kdf: 3,
+        kdf: CkKdf(3),
         other_info: vec![0xFF].into(),
         public_data: vec![0x11; 64],
         private_data_len: 32,
-        private_data_handle: 100,
+        private_data_handle: CkObjectHandle(100),
         public_data2: vec![0x22; 64],
-        public_key_handle: 200,
+        public_key_handle: CkObjectHandle(200),
     });
     match round_trip(params) {
         CkMechanismParams::X942MqvDerive(p) => {
             // W1-C8-05: full-field assertions; a dropped field must fail.
-            assert_eq!(p.kdf, 3);
+            assert_eq!(p.kdf.0, 3);
             assert_eq!(p.other_info, vec![0xFF].into());
             assert_eq!(p.public_data, vec![0x11; 64]);
             assert_eq!(p.private_data_len, 32);
-            assert_eq!(p.private_data_handle, 100);
+            assert_eq!(p.private_data_handle.0, 100);
             assert_eq!(p.public_data2, vec![0x22; 64]);
-            assert_eq!(p.public_key_handle, 200);
+            assert_eq!(p.public_key_handle.0, 200);
         }
         _ => panic!("wrong variant"),
     }
@@ -466,10 +467,10 @@ fn hkdf_round_trip() {
     let params = CkMechanismParams::Hkdf(HkdfParams {
         extract: true,
         expand: true,
-        prf_hash_mechanism: CkMechanismType::SHA256.0,
+        prf_hash_mechanism: CkMechanismType::SHA256,
         salt_type: 1,
         salt: vec![0xAA; 32].into(),
-        salt_key_handle: 0,
+        salt_key_handle: CkObjectHandle(0),
         info: vec![0xBB; 16].into(),
     });
     match round_trip(params) {
@@ -477,10 +478,10 @@ fn hkdf_round_trip() {
             // W1-C8-05: full-field assertions; a dropped field must fail.
             assert!(p.extract);
             assert!(p.expand);
-            assert_eq!(p.prf_hash_mechanism, CkMechanismType::SHA256.0);
+            assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA256.0);
             assert_eq!(p.salt_type, 1);
             assert_eq!(p.salt.len(), 32);
-            assert_eq!(p.salt_key_handle, 0);
+            assert_eq!(p.salt_key_handle.0, 0);
             assert_eq!(p.info.len(), 16);
         }
         _ => panic!("wrong variant"),
@@ -492,10 +493,10 @@ fn hkdf_extract_only_round_trip() {
     let params = CkMechanismParams::Hkdf(HkdfParams {
         extract: true,
         expand: false,
-        prf_hash_mechanism: CkMechanismType::SHA384.0,
+        prf_hash_mechanism: CkMechanismType::SHA384,
         salt_type: 2,
         salt: vec![].into(),
-        salt_key_handle: 0x42,
+        salt_key_handle: CkObjectHandle(0x42),
         info: vec![].into(),
     });
     match round_trip(params) {
@@ -503,10 +504,10 @@ fn hkdf_extract_only_round_trip() {
             // W1-C8-05: full-field assertions; a dropped field must fail.
             assert!(p.extract);
             assert!(!p.expand);
-            assert_eq!(p.prf_hash_mechanism, CkMechanismType::SHA384.0);
+            assert_eq!(p.prf_hash_mechanism.0, CkMechanismType::SHA384.0);
             assert_eq!(p.salt_type, 2);
             assert!(p.salt.is_empty());
-            assert_eq!(p.salt_key_handle, 0x42);
+            assert_eq!(p.salt_key_handle.0, 0x42);
             assert!(p.info.is_empty());
         }
         _ => panic!("wrong variant"),
@@ -544,13 +545,13 @@ fn eddsa_no_context_round_trip() {
 #[test]
 fn gostr3410_derive_round_trip() {
     let params = CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams {
-        kdf: 1,
+        kdf: CkKdf(1),
         public_data: vec![0xCC; 64],
         ukm: vec![0xDD; 8],
     });
     match round_trip(params) {
         CkMechanismParams::Gostr3410Derive(p) => {
-            assert_eq!(p.kdf, 1);
+            assert_eq!(p.kdf.0, 1);
             assert_eq!(p.public_data.len(), 64);
             assert_eq!(p.ukm, vec![0xDD; 8]);
         }
@@ -585,13 +586,13 @@ fn kea_derive_round_trip() {
 fn ecdh_aes_key_wrap_round_trip() {
     let params = CkMechanismParams::EcdhAesKeyWrap(EcdhAesKeyWrapParams {
         aes_key_bits: 256,
-        kdf: 2,
+        kdf: CkKdf(2),
         shared_data: vec![0xAA, 0xBB].into(),
     });
     match round_trip(params) {
         CkMechanismParams::EcdhAesKeyWrap(p) => {
             assert_eq!(p.aes_key_bits, 256);
-            assert_eq!(p.kdf, 2);
+            assert_eq!(p.kdf.0, 2);
             assert_eq!(p.shared_data, vec![0xAA, 0xBB].into());
         }
         _ => panic!("wrong variant"),
@@ -604,8 +605,8 @@ fn rsa_aes_key_wrap_round_trip() {
         aes_key_bits: 128,
         oaep_params: RsaPkcsOaepParams {
             hash_alg: CkMechanismType::SHA256,
-            mgf: 1,
-            source: 1,
+            mgf: CkMgf(1),
+            source: CkOaepSource(1),
             source_data: vec![0x01, 0x02].into(),
 
             source_null: false,
@@ -615,8 +616,8 @@ fn rsa_aes_key_wrap_round_trip() {
         CkMechanismParams::RsaAesKeyWrap(p) => {
             assert_eq!(p.aes_key_bits, 128);
             assert_eq!(p.oaep_params.hash_alg, CkMechanismType::SHA256);
-            assert_eq!(p.oaep_params.mgf, 1);
-            assert_eq!(p.oaep_params.source, 1);
+            assert_eq!(p.oaep_params.mgf.0, 1);
+            assert_eq!(p.oaep_params.source.0, 1);
             assert_eq!(p.oaep_params.source_data, vec![0x01, 0x02].into());
             // W1-C8-05: nested source_null is a field too; a drop must fail.
             assert!(!p.oaep_params.source_null);
@@ -642,13 +643,13 @@ fn gostr3410_key_wrap_round_trip() {
     let params = CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
         wrap_oid: vec![0x06, 0x07, 0x2A],
         ukm: vec![0xEE; 8],
-        key_handle: 0xBEEF,
+        key_handle: CkObjectHandle(0xBEEF),
     });
     match round_trip(params) {
         CkMechanismParams::Gostr3410KeyWrap(p) => {
             assert_eq!(p.wrap_oid, vec![0x06, 0x07, 0x2A]);
             assert_eq!(p.ukm.len(), 8);
-            assert_eq!(p.key_handle, 0xBEEF);
+            assert_eq!(p.key_handle.0, 0xBEEF);
         }
         _ => panic!("wrong variant"),
     }
@@ -693,19 +694,19 @@ fn pbe_round_trip() {
 #[test]
 fn pkcs5_pbkd2_round_trip() {
     let params = CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
-        salt_source: 1,
+        salt_source: CkPbkdf2SaltSource(1),
         salt_source_data: vec![0xBB; 16].into(),
         iterations: 600000,
-        prf: 2,
+        prf: CkPbkdf2Prf(2),
         prf_data: vec![].into(),
         password: vec![0x73, 0x65, 0x63, 0x72, 0x65, 0x74].into(), // "secret"
     });
     match round_trip(params) {
         CkMechanismParams::Pkcs5Pbkd2(p) => {
-            assert_eq!(p.salt_source, 1);
+            assert_eq!(p.salt_source.0, 1);
             assert_eq!(p.salt_source_data.len(), 16);
             assert_eq!(p.iterations, 600000);
-            assert_eq!(p.prf, 2);
+            assert_eq!(p.prf.0, 2);
             assert!(p.prf_data.is_empty());
             assert_eq!(p.password.len(), 6);
         }
@@ -758,9 +759,9 @@ fn pkcs5_pbkd2_adopting_conversion_wipes_source() {
     adopted.password.expose(|bytes| assert_eq!(bytes, canary.as_slice()));
     adopted.salt_source_data.expose(|bytes| assert_eq!(bytes, vec![0xBB; 16].as_slice()));
     adopted.prf_data.expose(|bytes| assert_eq!(bytes, vec![0xCC; 8].as_slice()));
-    assert_eq!(adopted.salt_source, 1);
+    assert_eq!(adopted.salt_source.0, 1);
     assert_eq!(adopted.iterations, 600000);
-    assert_eq!(adopted.prf, 2);
+    assert_eq!(adopted.prf.0, 2);
 }
 
 #[test]
@@ -854,9 +855,9 @@ fn rc2_mac_general_params_round_trip() {
 
 #[test]
 fn xeddsa_params_round_trip() {
-    let p = round_trip(CkMechanismParams::Xeddsa(XeddsaParams { hash: 0x250 }));
+    let p = round_trip(CkMechanismParams::Xeddsa(XeddsaParams { hash: CkMechanismType(0x250) }));
     match p {
-        CkMechanismParams::Xeddsa(v) => assert_eq!(v.hash, 0x250),
+        CkMechanismParams::Xeddsa(v) => assert_eq!(v.hash.0, 0x250),
         _ => panic!("wrong variant"),
     }
 }
@@ -864,13 +865,13 @@ fn xeddsa_params_round_trip() {
 #[test]
 fn tls_mac_params_round_trip() {
     let p = round_trip(CkMechanismParams::TlsMac(TlsMacParams {
-        prf_hash_mechanism: 0x250,
+        prf_hash_mechanism: CkMechanismType(0x250),
         mac_length: 32,
         server_or_client: 1,
     }));
     match p {
         CkMechanismParams::TlsMac(v) => {
-            assert_eq!(v.prf_hash_mechanism, 0x250);
+            assert_eq!(v.prf_hash_mechanism.0, 0x250);
             assert_eq!(v.mac_length, 32);
             assert_eq!(v.server_or_client, 1);
         }
@@ -1117,7 +1118,7 @@ fn gcm_wrap_params_round_trip() {
     let p = round_trip(CkMechanismParams::GcmWrap(GcmWrapParams {
         iv: vec![0x01; 12],
         iv_fixed_bits: 32,
-        iv_generator: 1,
+        iv_generator: CkGeneratorFunction(1),
         aad: vec![0xAA].into(),
         tag_bits: 128,
     }));
@@ -1125,7 +1126,7 @@ fn gcm_wrap_params_round_trip() {
         CkMechanismParams::GcmWrap(v) => {
             assert_eq!(v.iv, vec![0x01; 12]);
             assert_eq!(v.iv_fixed_bits, 32);
-            assert_eq!(v.iv_generator, 1);
+            assert_eq!(v.iv_generator.0, 1);
             assert_eq!(v.aad, vec![0xAA].into());
             assert_eq!(v.tag_bits, 128);
         }
@@ -1139,7 +1140,7 @@ fn ccm_wrap_params_round_trip() {
         data_len: 1024,
         nonce: vec![0x02; 7],
         nonce_fixed_bits: 24,
-        nonce_generator: 2,
+        nonce_generator: CkGeneratorFunction(2),
         aad: vec![0xBB, 0xCC].into(),
         mac_len: 8,
     }));
@@ -1148,7 +1149,7 @@ fn ccm_wrap_params_round_trip() {
             assert_eq!(v.data_len, 1024);
             assert_eq!(v.nonce, vec![0x02; 7]);
             assert_eq!(v.nonce_fixed_bits, 24);
-            assert_eq!(v.nonce_generator, 2);
+            assert_eq!(v.nonce_generator.0, 2);
             assert_eq!(v.aad, vec![0xBB, 0xCC].into());
             assert_eq!(v.mac_len, 8);
         }
@@ -1180,14 +1181,14 @@ fn tls_prf_params_round_trip() {
 #[test]
 fn tls_kdf_params_round_trip() {
     let p = round_trip(CkMechanismParams::TlsKdf(TlsKdfParams {
-        prf_mechanism: 0x250,
+        prf_mechanism: CkMechanismType(0x250),
         label: vec![0x6B, 0x65, 0x79].into(), // "key"
         random_info: SslRandomData { client_random: vec![0xAA; 32], server_random: vec![0xBB; 32] },
         context_data: vec![0xCC; 16].into(),
     }));
     match p {
         CkMechanismParams::TlsKdf(v) => {
-            assert_eq!(v.prf_mechanism, 0x250);
+            assert_eq!(v.prf_mechanism.0, 0x250);
             assert_eq!(v.label, vec![0x6B, 0x65, 0x79].into());
             assert_eq!(v.random_info.client_random, vec![0xAA; 32]);
             assert_eq!(v.random_info.server_random, vec![0xBB; 32]);
@@ -1215,7 +1216,7 @@ fn tls_kdf_params_reject_missing_random_info() {
 #[test]
 fn tls_kdf_params_preserve_present_empty_random_info() {
     let p = round_trip(CkMechanismParams::TlsKdf(TlsKdfParams {
-        prf_mechanism: CkMechanismType::SHA256.0,
+        prf_mechanism: CkMechanismType::SHA256,
         label: vec![].into(),
         random_info: SslRandomData { client_random: vec![], server_random: vec![] },
         context_data: vec![].into(),
@@ -1274,13 +1275,13 @@ fn tls12_master_key_derive_round_trip() {
         random_info: SslRandomData { client_random: vec![0x33; 32], server_random: vec![0x44; 32] },
         version_major: 3,
         version_minor: 3,
-        prf_hash_mechanism: 0x250,
+        prf_hash_mechanism: CkMechanismType(0x250),
     }));
     match p {
         CkMechanismParams::Tls12MasterKeyDerive(v) => {
             assert_eq!(v.version_major, 3);
             assert_eq!(v.version_minor, 3);
-            assert_eq!(v.prf_hash_mechanism, 0x250);
+            assert_eq!(v.prf_hash_mechanism.0, 0x250);
             assert_eq!(v.random_info.client_random.len(), 32);
             // W1-C8-05: server_random is a field too; a dropped half must fail.
             assert_eq!(v.random_info.server_random, vec![0x44; 32]);
@@ -1311,7 +1312,7 @@ fn tls12_master_key_derive_rejects_missing_random_info() {
 fn tls12_extended_master_key_derive_round_trip() {
     let p = round_trip(CkMechanismParams::Tls12ExtendedMasterKeyDerive(
         Tls12ExtendedMasterKeyDeriveParams {
-            prf_hash_mechanism: 0x260,
+            prf_hash_mechanism: CkMechanismType(0x260),
             session_hash: vec![0x55; 48],
             version_major: 3,
             version_minor: 3,
@@ -1319,7 +1320,7 @@ fn tls12_extended_master_key_derive_round_trip() {
     ));
     match p {
         CkMechanismParams::Tls12ExtendedMasterKeyDerive(v) => {
-            assert_eq!(v.prf_hash_mechanism, 0x260);
+            assert_eq!(v.prf_hash_mechanism.0, 0x260);
             assert_eq!(v.session_hash.len(), 48);
             assert_eq!(v.version_major, 3);
             assert_eq!(v.version_minor, 3);
@@ -1336,11 +1337,11 @@ fn ssl3_key_mat_params_round_trip() {
         iv_size_bits: 128,
         is_export: false,
         random_info: SslRandomData { client_random: vec![0x66; 32], server_random: vec![0x77; 32] },
-        prf_hash_mechanism: 0x250,
-        client_mac_secret_handle: 101,
-        server_mac_secret_handle: 102,
-        client_key_handle: 201,
-        server_key_handle: 202,
+        prf_hash_mechanism: CkMechanismType(0x250),
+        client_mac_secret_handle: CkObjectHandle(101),
+        server_mac_secret_handle: CkObjectHandle(102),
+        client_key_handle: CkObjectHandle(201),
+        server_key_handle: CkObjectHandle(202),
         client_iv: vec![0xA1; 16].into(),
         server_iv: vec![0xB1; 16].into(),
     }));
@@ -1353,11 +1354,11 @@ fn ssl3_key_mat_params_round_trip() {
             // W1-C8-05: random_info contents are fields too; a drop must fail.
             assert_eq!(v.random_info.client_random, vec![0x66; 32]);
             assert_eq!(v.random_info.server_random, vec![0x77; 32]);
-            assert_eq!(v.prf_hash_mechanism, 0x250);
-            assert_eq!(v.client_mac_secret_handle, 101);
-            assert_eq!(v.server_mac_secret_handle, 102);
-            assert_eq!(v.client_key_handle, 201);
-            assert_eq!(v.server_key_handle, 202);
+            assert_eq!(v.prf_hash_mechanism.0, 0x250);
+            assert_eq!(v.client_mac_secret_handle.0, 101);
+            assert_eq!(v.server_mac_secret_handle.0, 102);
+            assert_eq!(v.client_key_handle.0, 201);
+            assert_eq!(v.server_key_handle.0, 202);
             assert_eq!(v.client_iv, vec![0xA1; 16].into());
             assert_eq!(v.server_iv, vec![0xB1; 16].into());
         }
@@ -1392,7 +1393,7 @@ fn ssl3_key_mat_params_rejects_missing_random_info() {
 #[test]
 fn wtls_master_key_derive_round_trip() {
     let p = round_trip(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
-        digest_mechanism: 0x250,
+        digest_mechanism: CkMechanismType(0x250),
         random_info: WtlsRandomData {
             client_random: vec![0x88; 16],
             server_random: vec![0x99; 16],
@@ -1401,7 +1402,7 @@ fn wtls_master_key_derive_round_trip() {
     }));
     match p {
         CkMechanismParams::WtlsMasterKeyDerive(v) => {
-            assert_eq!(v.digest_mechanism, 0x250);
+            assert_eq!(v.digest_mechanism.0, 0x250);
             assert_eq!(v.random_info.client_random.len(), 16);
             // W1-C8-05: server_random is a field too; a dropped half must fail.
             assert_eq!(v.random_info.server_random, vec![0x99; 16]);
@@ -1430,14 +1431,14 @@ fn wtls_master_key_derive_rejects_missing_random_info() {
 #[test]
 fn wtls_prf_params_round_trip() {
     let p = round_trip(CkMechanismParams::WtlsPrf(WtlsPrfParams {
-        digest_mechanism: 0x260,
+        digest_mechanism: CkMechanismType(0x260),
         seed: vec![0xAA; 20].into(),
         label: vec![0xBB; 10].into(),
         output_len: 32,
     }));
     match p {
         CkMechanismParams::WtlsPrf(v) => {
-            assert_eq!(v.digest_mechanism, 0x260);
+            assert_eq!(v.digest_mechanism.0, 0x260);
             assert_eq!(v.seed.len(), 20);
             assert_eq!(v.label.len(), 10);
             assert_eq!(v.output_len, 32);
@@ -1449,7 +1450,7 @@ fn wtls_prf_params_round_trip() {
 #[test]
 fn wtls_key_mat_params_round_trip() {
     let p = round_trip(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
-        digest_mechanism: 0x250,
+        digest_mechanism: CkMechanismType(0x250),
         mac_size_bits: 160,
         key_size_bits: 128,
         iv_size_bits: 64,
@@ -1459,14 +1460,14 @@ fn wtls_key_mat_params_round_trip() {
             client_random: vec![0xCC; 16],
             server_random: vec![0xDD; 16],
         },
-        mac_secret_handle: 101,
-        key_handle: 202,
+        mac_secret_handle: CkObjectHandle(101),
+        key_handle: CkObjectHandle(202),
         iv: vec![0xA1; 8],
     }));
     match p {
         CkMechanismParams::WtlsKeyMat(v) => {
             // W1-C8-05: full-field assertions; a dropped field must fail.
-            assert_eq!(v.digest_mechanism, 0x250);
+            assert_eq!(v.digest_mechanism.0, 0x250);
             assert_eq!(v.mac_size_bits, 160);
             assert_eq!(v.key_size_bits, 128);
             assert_eq!(v.iv_size_bits, 64);
@@ -1474,8 +1475,8 @@ fn wtls_key_mat_params_round_trip() {
             assert!(v.is_export);
             assert_eq!(v.random_info.client_random.len(), 16);
             assert_eq!(v.random_info.server_random, vec![0xDD; 16]);
-            assert_eq!(v.mac_secret_handle, 101);
-            assert_eq!(v.key_handle, 202);
+            assert_eq!(v.mac_secret_handle.0, 101);
+            assert_eq!(v.key_handle.0, 202);
             assert_eq!(v.iv, vec![0xA1; 8]);
         }
         _ => panic!("wrong variant"),
@@ -1511,21 +1512,21 @@ fn wtls_key_mat_params_rejects_missing_random_info() {
 #[test]
 fn ike_prf_derive_round_trip() {
     let p = round_trip(CkMechanismParams::IkePrfDerive(IkePrfDeriveParams {
-        prf_mechanism: 0x250,
+        prf_mechanism: CkMechanismType(0x250),
         data_as_key: true,
         rekey: false,
         ni: vec![0x01; 32].into(),
         nr: vec![0x02; 32].into(),
-        new_key_handle: 0x1234,
+        new_key_handle: CkObjectHandle(0x1234),
     }));
     match p {
         CkMechanismParams::IkePrfDerive(v) => {
-            assert_eq!(v.prf_mechanism, 0x250);
+            assert_eq!(v.prf_mechanism.0, 0x250);
             assert!(v.data_as_key);
             assert!(!v.rekey);
             assert_eq!(v.ni.len(), 32);
             assert_eq!(v.nr.len(), 32);
-            assert_eq!(v.new_key_handle, 0x1234);
+            assert_eq!(v.new_key_handle.0, 0x1234);
         }
         _ => panic!("wrong variant"),
     }
@@ -1534,20 +1535,20 @@ fn ike_prf_derive_round_trip() {
 #[test]
 fn ike1_prf_derive_round_trip() {
     let p = round_trip(CkMechanismParams::Ike1PrfDerive(Ike1PrfDeriveParams {
-        prf_mechanism: 0x260,
+        prf_mechanism: CkMechanismType(0x260),
         has_prev_key: true,
-        keygxy_handle: 0xAAAA,
-        prev_key_handle: 0xBBBB,
+        keygxy_handle: CkObjectHandle(0xAAAA),
+        prev_key_handle: CkObjectHandle(0xBBBB),
         ckyi: vec![0x11; 8].into(),
         ckyr: vec![0x22; 8].into(),
         key_number: 3,
     }));
     match p {
         CkMechanismParams::Ike1PrfDerive(v) => {
-            assert_eq!(v.prf_mechanism, 0x260);
+            assert_eq!(v.prf_mechanism.0, 0x260);
             assert!(v.has_prev_key);
-            assert_eq!(v.keygxy_handle, 0xAAAA);
-            assert_eq!(v.prev_key_handle, 0xBBBB);
+            assert_eq!(v.keygxy_handle.0, 0xAAAA);
+            assert_eq!(v.prev_key_handle.0, 0xBBBB);
             assert_eq!(v.ckyi.len(), 8);
             // W1-C8-05: ckyr is a field too; a dropped half must fail.
             assert_eq!(v.ckyr, vec![0x22; 8].into());
@@ -1560,16 +1561,16 @@ fn ike1_prf_derive_round_trip() {
 #[test]
 fn ike1_extended_derive_round_trip() {
     let p = round_trip(CkMechanismParams::Ike1ExtendedDerive(Ike1ExtendedDeriveParams {
-        prf_mechanism: 0x270,
+        prf_mechanism: CkMechanismType(0x270),
         has_keygxy: true,
-        keygxy_handle: 0xCCCC,
+        keygxy_handle: CkObjectHandle(0xCCCC),
         extra_data: vec![0x33; 64].into(),
     }));
     match p {
         CkMechanismParams::Ike1ExtendedDerive(v) => {
-            assert_eq!(v.prf_mechanism, 0x270);
+            assert_eq!(v.prf_mechanism.0, 0x270);
             assert!(v.has_keygxy);
-            assert_eq!(v.keygxy_handle, 0xCCCC);
+            assert_eq!(v.keygxy_handle.0, 0xCCCC);
             assert_eq!(v.extra_data.len(), 64);
         }
         _ => panic!("wrong variant"),
@@ -1579,16 +1580,16 @@ fn ike1_extended_derive_round_trip() {
 #[test]
 fn ike2_prf_plus_derive_round_trip() {
     let p = round_trip(CkMechanismParams::Ike2PrfPlusDerive(Ike2PrfPlusDeriveParams {
-        prf_mechanism: 0x250,
+        prf_mechanism: CkMechanismType(0x250),
         has_seed_key: true,
-        seed_key_handle: 0xDDDD,
+        seed_key_handle: CkObjectHandle(0xDDDD),
         seed_data: vec![0x44; 32].into(),
     }));
     match p {
         CkMechanismParams::Ike2PrfPlusDerive(v) => {
-            assert_eq!(v.prf_mechanism, 0x250);
+            assert_eq!(v.prf_mechanism.0, 0x250);
             assert!(v.has_seed_key);
-            assert_eq!(v.seed_key_handle, 0xDDDD);
+            assert_eq!(v.seed_key_handle.0, 0xDDDD);
             assert_eq!(v.seed_data.len(), 32);
         }
         _ => panic!("wrong variant"),
@@ -1602,7 +1603,7 @@ fn ike2_prf_plus_derive_round_trip() {
 #[test]
 fn sp800_108_kdf_params_round_trip() {
     let p = round_trip(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-        prf_type: 0x250,
+        prf_type: CkMechanismType(0x250),
         data_params: vec![
             PrfDataParam { type_: 1, value: vec![0xAA; 4].into() },
             PrfDataParam { type_: 2, value: vec![0xBB; 8].into() },
@@ -1618,19 +1619,19 @@ fn sp800_108_kdf_params_round_trip() {
                     value: Some(CkAttributeValue::Ulong(32)),
                 },
             ],
-            key_handle: 0xAA55,
+            key_handle: CkObjectHandle(0xAA55),
         }],
     }));
     match p {
         CkMechanismParams::Sp800108Kdf(v) => {
-            assert_eq!(v.prf_type, 0x250);
+            assert_eq!(v.prf_type.0, 0x250);
             assert_eq!(v.data_params.len(), 2);
             assert_eq!(v.data_params[0].type_, 1);
             assert_eq!(v.data_params[0].value, vec![0xAA; 4].into());
             assert_eq!(v.data_params[1].type_, 2);
             assert_eq!(v.data_params[1].value, vec![0xBB; 8].into());
             assert_eq!(v.additional_derived_keys.len(), 1);
-            assert_eq!(v.additional_derived_keys[0].key_handle, 0xAA55);
+            assert_eq!(v.additional_derived_keys[0].key_handle.0, 0xAA55);
             assert_eq!(v.additional_derived_keys[0].template.len(), 2);
         }
         _ => panic!("wrong variant"),
@@ -1640,7 +1641,7 @@ fn sp800_108_kdf_params_round_trip() {
 #[test]
 fn sp800_108_feedback_kdf_params_round_trip() {
     let p = round_trip(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-        prf_type: 0x260,
+        prf_type: CkMechanismType(0x260),
         data_params: vec![PrfDataParam { type_: 3, value: vec![0xCC; 16].into() }],
         iv: vec![0xDD; 16],
         additional_derived_keys: vec![Sp800108DerivedKey {
@@ -1648,16 +1649,16 @@ fn sp800_108_feedback_kdf_params_round_trip() {
                 attr_type: CkAttributeType::VALUE_LEN,
                 value: Some(CkAttributeValue::Ulong(16)),
             }],
-            key_handle: 0xBB66,
+            key_handle: CkObjectHandle(0xBB66),
         }],
     }));
     match p {
         CkMechanismParams::Sp800108FeedbackKdf(v) => {
-            assert_eq!(v.prf_type, 0x260);
+            assert_eq!(v.prf_type.0, 0x260);
             assert_eq!(v.data_params.len(), 1);
             assert_eq!(v.iv.len(), 16);
             assert_eq!(v.additional_derived_keys.len(), 1);
-            assert_eq!(v.additional_derived_keys[0].key_handle, 0xBB66);
+            assert_eq!(v.additional_derived_keys[0].key_handle.0, 0xBB66);
         }
         _ => panic!("wrong variant"),
     }
@@ -1666,13 +1667,13 @@ fn sp800_108_feedback_kdf_params_round_trip() {
 #[test]
 fn sp800_108_kdf_empty_data_params_round_trip() {
     let p = round_trip(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-        prf_type: 1,
+        prf_type: CkMechanismType(1),
         data_params: vec![],
         additional_derived_keys: vec![],
     }));
     match p {
         CkMechanismParams::Sp800108Kdf(v) => {
-            assert_eq!(v.prf_type, 1);
+            assert_eq!(v.prf_type.0, 1);
             assert!(v.data_params.is_empty());
             assert!(v.additional_derived_keys.is_empty());
         }
@@ -1687,7 +1688,7 @@ fn sp800_108_kdf_nested_template_refused_loudly() {
     // Rust→Proto conversion must refuse it with an explicit error
     // instead of silently encoding it as value-absent.
     let params = Sp800108KdfParams {
-        prf_type: 0x250,
+        prf_type: CkMechanismType(0x250),
         data_params: vec![],
         additional_derived_keys: vec![Sp800108DerivedKey {
             template: vec![CkAttribute {
@@ -1697,7 +1698,7 @@ fn sp800_108_kdf_nested_template_refused_loudly() {
                     value: Some(CkAttributeValue::Ulong(4)),
                 }])),
             }],
-            key_handle: 0,
+            key_handle: CkObjectHandle(0),
         }],
     };
     let err = v1_proto::Sp800108KdfParams::try_from(&params)
@@ -1717,7 +1718,7 @@ fn sp800_108_kdf_nested_template_refused_loudly() {
 fn sp800_108_feedback_kdf_nested_template_refused_loudly() {
     // W1-C8-01: same loud refusal for the feedback-KDF shape.
     let params = Sp800108FeedbackKdfParams {
-        prf_type: 0x260,
+        prf_type: CkMechanismType(0x260),
         data_params: vec![],
         iv: vec![],
         additional_derived_keys: vec![Sp800108DerivedKey {
@@ -1725,7 +1726,7 @@ fn sp800_108_feedback_kdf_nested_template_refused_loudly() {
                 attr_type: CkAttributeType::WRAP_TEMPLATE,
                 value: Some(CkAttributeValue::NestedTemplate(vec![])),
             }],
-            key_handle: 0,
+            key_handle: CkObjectHandle(0),
         }],
     };
     let err = v1_proto::Sp800108FeedbackKdfParams::try_from(&params)
@@ -1749,19 +1750,22 @@ fn kip_embedded_sp800_108_nested_template_refused_loudly() {
     let nested = CkMechanism {
         mechanism_type: CkMechanismType(0x9999),
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: 0x250,
+            prf_type: CkMechanismType(0x250),
             data_params: vec![],
             additional_derived_keys: vec![Sp800108DerivedKey {
                 template: vec![CkAttribute {
                     attr_type: CkAttributeType::WRAP_TEMPLATE,
                     value: Some(CkAttributeValue::NestedTemplate(vec![])),
                 }],
-                key_handle: 0,
+                key_handle: CkObjectHandle(0),
             }],
         })),
     };
-    let params =
-        KipParams { mechanism: Box::new(nested), key_handle: 0xBEEF, seed: vec![0xAA; 16].into() };
+    let params = KipParams {
+        mechanism: Box::new(nested),
+        key_handle: CkObjectHandle(0xBEEF),
+        seed: vec![0xAA; 16].into(),
+    };
     let err = v1_proto::KipParams::try_from(&params)
         .expect_err("embedded nested template must be refused loudly");
     assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
@@ -1782,22 +1786,22 @@ fn kip_embedded_sp800_108_nested_template_refused_loudly() {
 fn x3dh_initiate_round_trip() {
     let p = round_trip(CkMechanismParams::X3dhInitiate(X3dhInitiateParams {
         kdf: 1,
-        peer_identity_handle: 0x1111,
-        peer_prekey_handle: 0x2222,
+        peer_identity_handle: CkObjectHandle(0x1111),
+        peer_prekey_handle: CkObjectHandle(0x2222),
         prekey_signature: vec![0xAA; 64],
-        onetime_key_handle: 0x3333,
-        own_identity_handle: 0x4444,
-        own_ephemeral_handle: 0x5555,
+        onetime_key_handle: CkObjectHandle(0x3333),
+        own_identity_handle: CkObjectHandle(0x4444),
+        own_ephemeral_handle: CkObjectHandle(0x5555),
     }));
     match p {
         CkMechanismParams::X3dhInitiate(v) => {
             assert_eq!(v.kdf, 1);
-            assert_eq!(v.peer_identity_handle, 0x1111);
-            assert_eq!(v.peer_prekey_handle, 0x2222);
+            assert_eq!(v.peer_identity_handle.0, 0x1111);
+            assert_eq!(v.peer_prekey_handle.0, 0x2222);
             assert_eq!(v.prekey_signature.len(), 64);
-            assert_eq!(v.onetime_key_handle, 0x3333);
-            assert_eq!(v.own_identity_handle, 0x4444);
-            assert_eq!(v.own_ephemeral_handle, 0x5555);
+            assert_eq!(v.onetime_key_handle.0, 0x3333);
+            assert_eq!(v.own_identity_handle.0, 0x4444);
+            assert_eq!(v.own_ephemeral_handle.0, 0x5555);
         }
         _ => panic!("wrong variant"),
     }
@@ -1807,20 +1811,20 @@ fn x3dh_initiate_round_trip() {
 fn x3dh_respond_round_trip() {
     let p = round_trip(CkMechanismParams::X3dhRespond(X3dhRespondParams {
         kdf: 2,
-        identity_handle: 0xAAAA,
-        prekey_handle: 0xBBBB,
-        onetime_key_handle: 0xCCCC,
-        initiator_identity_handle: 0xDDDD,
-        initiator_ephemeral_handle: 0xEEEE,
+        identity_handle: CkObjectHandle(0xAAAA),
+        prekey_handle: CkObjectHandle(0xBBBB),
+        onetime_key_handle: CkObjectHandle(0xCCCC),
+        initiator_identity_handle: CkObjectHandle(0xDDDD),
+        initiator_ephemeral_handle: CkObjectHandle(0xEEEE),
     }));
     match p {
         CkMechanismParams::X3dhRespond(v) => {
             assert_eq!(v.kdf, 2);
-            assert_eq!(v.identity_handle, 0xAAAA);
-            assert_eq!(v.prekey_handle, 0xBBBB);
-            assert_eq!(v.onetime_key_handle, 0xCCCC);
-            assert_eq!(v.initiator_identity_handle, 0xDDDD);
-            assert_eq!(v.initiator_ephemeral_handle, 0xEEEE);
+            assert_eq!(v.identity_handle.0, 0xAAAA);
+            assert_eq!(v.prekey_handle.0, 0xBBBB);
+            assert_eq!(v.onetime_key_handle.0, 0xCCCC);
+            assert_eq!(v.initiator_identity_handle.0, 0xDDDD);
+            assert_eq!(v.initiator_ephemeral_handle.0, 0xEEEE);
         }
         _ => panic!("wrong variant"),
     }
@@ -1830,25 +1834,25 @@ fn x3dh_respond_round_trip() {
 fn x2_ratchet_initialize_round_trip() {
     let p = round_trip(CkMechanismParams::X2RatchetInitialize(X2RatchetInitializeParams {
         sk: vec![0x01; 32].into(),
-        peer_public_prekey_handle: 0x1111,
-        peer_public_identity_handle: 0x2222,
-        own_public_identity_handle: 0x3333,
+        peer_public_prekey_handle: CkObjectHandle(0x1111),
+        peer_public_identity_handle: CkObjectHandle(0x2222),
+        own_public_identity_handle: CkObjectHandle(0x3333),
         encrypted_header: true,
         curve: 0x0403, // CKP_EC_NIST_P256 for example
-        aead_mechanism: 0x1087,
-        kdf_mechanism: 0x0250,
+        aead_mechanism: CkMechanismType(0x1087),
+        kdf_mechanism: CkKdf(0x0250),
     }));
     match p {
         CkMechanismParams::X2RatchetInitialize(v) => {
             // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(v.sk.len(), 32);
-            assert_eq!(v.peer_public_prekey_handle, 0x1111);
-            assert_eq!(v.peer_public_identity_handle, 0x2222);
-            assert_eq!(v.own_public_identity_handle, 0x3333);
+            assert_eq!(v.peer_public_prekey_handle.0, 0x1111);
+            assert_eq!(v.peer_public_identity_handle.0, 0x2222);
+            assert_eq!(v.own_public_identity_handle.0, 0x3333);
             assert!(v.encrypted_header);
             assert_eq!(v.curve, 0x0403);
-            assert_eq!(v.aead_mechanism, 0x1087);
-            assert_eq!(v.kdf_mechanism, 0x0250);
+            assert_eq!(v.aead_mechanism.0, 0x1087);
+            assert_eq!(v.kdf_mechanism.0, 0x0250);
         }
         _ => panic!("wrong variant"),
     }
@@ -1858,25 +1862,25 @@ fn x2_ratchet_initialize_round_trip() {
 fn x2_ratchet_respond_round_trip() {
     let p = round_trip(CkMechanismParams::X2RatchetRespond(X2RatchetRespondParams {
         sk: vec![0x02; 32].into(),
-        own_prekey_handle: 0xAAAA,
-        initiator_identity_handle: 0xBBBB,
-        own_identity_handle: 0xCCCC,
+        own_prekey_handle: CkObjectHandle(0xAAAA),
+        initiator_identity_handle: CkObjectHandle(0xBBBB),
+        own_identity_handle: CkObjectHandle(0xCCCC),
         encrypted_header: false,
         curve: 0x0403,
-        aead_mechanism: 0x1087,
-        kdf_mechanism: 0x0260,
+        aead_mechanism: CkMechanismType(0x1087),
+        kdf_mechanism: CkKdf(0x0260),
     }));
     match p {
         CkMechanismParams::X2RatchetRespond(v) => {
             // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(v.sk.len(), 32);
-            assert_eq!(v.own_prekey_handle, 0xAAAA);
-            assert_eq!(v.initiator_identity_handle, 0xBBBB);
-            assert_eq!(v.own_identity_handle, 0xCCCC);
+            assert_eq!(v.own_prekey_handle.0, 0xAAAA);
+            assert_eq!(v.initiator_identity_handle.0, 0xBBBB);
+            assert_eq!(v.own_identity_handle.0, 0xCCCC);
             assert!(!v.encrypted_header);
             assert_eq!(v.curve, 0x0403);
-            assert_eq!(v.aead_mechanism, 0x1087);
-            assert_eq!(v.kdf_mechanism, 0x0260);
+            assert_eq!(v.aead_mechanism.0, 0x1087);
+            assert_eq!(v.kdf_mechanism.0, 0x0260);
         }
         _ => panic!("wrong variant"),
     }
@@ -1920,14 +1924,14 @@ fn kip_params_round_trip() {
     let nested = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
     let p = round_trip(CkMechanismParams::Kip(KipParams {
         mechanism: Box::new(nested),
-        key_handle: 0xBEEF,
+        key_handle: CkObjectHandle(0xBEEF),
         seed: vec![0xAA; 16].into(),
     }));
     match p {
         CkMechanismParams::Kip(v) => {
             assert_eq!(v.mechanism.mechanism_type, CkMechanismType::SHA256);
             assert!(v.mechanism.params.is_none());
-            assert_eq!(v.key_handle, 0xBEEF);
+            assert_eq!(v.key_handle.0, 0xBEEF);
             assert_eq!(v.seed, vec![0xAA; 16].into());
         }
         _ => panic!("wrong variant"),
@@ -1953,7 +1957,7 @@ fn cms_sig_params_round_trip() {
     let signing = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
     let digest = CkMechanism { mechanism_type: CkMechanismType::SHA256, params: None };
     let p = round_trip(CkMechanismParams::CmsSig(CmsSigParams {
-        certificate_handle: 0x42,
+        certificate_handle: CkObjectHandle(0x42),
         signing_mechanism: Box::new(signing),
         digest_mechanism: Box::new(digest),
         content_type: "1.2.840.113549.1.7.1".to_string(),
@@ -1962,7 +1966,7 @@ fn cms_sig_params_round_trip() {
     }));
     match p {
         CkMechanismParams::CmsSig(v) => {
-            assert_eq!(v.certificate_handle, 0x42);
+            assert_eq!(v.certificate_handle.0, 0x42);
             assert_eq!(v.signing_mechanism.mechanism_type, CkMechanismType::RSA_PKCS);
             assert_eq!(v.digest_mechanism.mechanism_type, CkMechanismType::SHA256);
             assert_eq!(v.content_type, "1.2.840.113549.1.7.1");
@@ -2413,7 +2417,7 @@ fn kyber_params_round_trip() {
     let p = round_trip(CkMechanismParams::Kyber(KyberParams {
         version: 2,
         mode: 1,
-        secret_handle: 0xDEAD,
+        secret_handle: CkObjectHandle(0xDEAD),
         shared_data: vec![0xAB; 32].into(),
         blob: vec![0xCD; 64].into(),
     }));
@@ -2421,7 +2425,7 @@ fn kyber_params_round_trip() {
         CkMechanismParams::Kyber(v) => {
             assert_eq!(v.version, 2);
             assert_eq!(v.mode, 1);
-            assert_eq!(v.secret_handle, 0xDEAD);
+            assert_eq!(v.secret_handle.0, 0xDEAD);
             assert_eq!(v.shared_data, vec![0xAB; 32].into());
             assert_eq!(v.blob, vec![0xCD; 64].into());
         }
@@ -2434,7 +2438,7 @@ fn kyber_params_empty_optional_fields_round_trip() {
     let p = round_trip(CkMechanismParams::Kyber(KyberParams {
         version: 1,
         mode: 0,
-        secret_handle: 0,
+        secret_handle: CkObjectHandle(0),
         shared_data: vec![].into(),
         blob: vec![].into(),
     }));
@@ -2443,7 +2447,7 @@ fn kyber_params_empty_optional_fields_round_trip() {
             // W1-C8-05: full-field assertions; a dropped field must fail.
             assert_eq!(v.version, 1);
             assert_eq!(v.mode, 0);
-            assert_eq!(v.secret_handle, 0);
+            assert_eq!(v.secret_handle.0, 0);
             assert!(v.shared_data.is_empty());
             assert!(v.blob.is_empty());
         }
@@ -2505,13 +2509,13 @@ fn vendor_object_insert_params_round_trip() {
 #[test]
 fn kmac_params_round_trip() {
     let p = round_trip(CkMechanismParams::Kmac(KmacParams {
-        key_handle: 0xCAFE,
+        key_handle: CkObjectHandle(0xCAFE),
         mac_length: 64,
         customization_string: b"custom".to_vec().into(),
     }));
     match p {
         CkMechanismParams::Kmac(v) => {
-            assert_eq!(v.key_handle, 0xCAFE);
+            assert_eq!(v.key_handle.0, 0xCAFE);
             assert_eq!(v.mac_length, 64);
             assert_eq!(v.customization_string, SecretBytes::copy_from_slice(b"custom"));
         }
@@ -2522,13 +2526,13 @@ fn kmac_params_round_trip() {
 #[test]
 fn mu_gen_params_round_trip() {
     let p = round_trip(CkMechanismParams::MuGen(MuGenParams {
-        key_handle: 0xA11CE,
+        key_handle: CkObjectHandle(0xA11CE),
         tr: b"precomputed-tr".to_vec().into(),
         context: b"context".to_vec().into(),
     }));
     match p {
         CkMechanismParams::MuGen(v) => {
-            assert_eq!(v.key_handle, 0xA11CE);
+            assert_eq!(v.key_handle.0, 0xA11CE);
             assert_eq!(v.tr, SecretBytes::copy_from_slice(b"precomputed-tr"));
             assert_eq!(v.context, SecretBytes::copy_from_slice(b"context"));
         }
@@ -2538,9 +2542,11 @@ fn mu_gen_params_round_trip() {
 
 #[test]
 fn object_handle_param_round_trip() {
-    let p = round_trip(CkMechanismParams::ObjectHandle(ObjectHandleParam { handle: 42 }));
+    let p = round_trip(CkMechanismParams::ObjectHandle(ObjectHandleParam {
+        handle: CkObjectHandle(42),
+    }));
     match p {
-        CkMechanismParams::ObjectHandle(v) => assert_eq!(v.handle, 42),
+        CkMechanismParams::ObjectHandle(v) => assert_eq!(v.handle.0, 42),
         other => panic!("expected ObjectHandle, got {other:?}"),
     }
 }
@@ -2550,13 +2556,13 @@ fn sign_additional_context_round_trip() {
     let p = round_trip(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
         hedge_variant: 1, // CKH_HEDGE_REQUIRED
         context: vec![1, 2, 3].into(),
-        hash: 0,
+        hash: CkMechanismType(0),
     }));
     match p {
         CkMechanismParams::SignAdditionalContext(v) => {
             assert_eq!(v.hedge_variant, 1);
             assert_eq!(v.context, vec![1, 2, 3].into());
-            assert_eq!(v.hash, 0);
+            assert_eq!(v.hash.0, 0);
         }
         other => panic!("expected SignAdditionalContext, got {other:?}"),
     }
@@ -2568,13 +2574,13 @@ fn hash_sign_additional_context_round_trip() {
     let p = round_trip(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
         hedge_variant: 1,
         context: vec![4, 5].into(),
-        hash: 0x0000_0250, // CKM_SHA256
+        hash: CkMechanismType::SHA256,
     }));
     match p {
         CkMechanismParams::SignAdditionalContext(v) => {
             assert_eq!(v.hedge_variant, 1);
             assert_eq!(v.context, vec![4, 5].into());
-            assert_eq!(v.hash, 0x0000_0250);
+            assert_eq!(v.hash, CkMechanismType::SHA256);
         }
         other => panic!("expected SignAdditionalContext, got {other:?}"),
     }
@@ -2609,8 +2615,8 @@ fn oaep_source_null_round_trip() {
     for source_null in [true, false] {
         let p = round_trip(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
             hash_alg: CkMechanismType::SHA256,
-            mgf: 1,
-            source: 1,
+            mgf: CkMgf(1),
+            source: CkOaepSource(1),
             source_data: Vec::new().into(),
             source_null,
         }));

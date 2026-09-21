@@ -10,7 +10,8 @@ mod mechanism_to_ffi_tests {
     use super::mechanism_to_ffi;
     use pkcs11_proxy_ng_types::{
         AesCmacKeyDerivationParams, AesCtrParams, CkMechanism, CkMechanismParams, CkMechanismType,
-        CkRv, DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams, IvParams,
+        CkMgf, CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv,
+        DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams, IvParams,
         KeyDerivationStringData, KmacParams, KyberParams, MuGenParams, ObjectHandleParam,
         PbeParams, Pkcs5Pbkd2Params, RawMechanismParams, RsaAesKeyWrapParams, RsaPkcsOaepParams,
         RsaPkcsPssParams, SecretBytes, SignAdditionalContext, Ssl3KeyMatParams, SslRandomData,
@@ -47,7 +48,7 @@ mod mechanism_to_ffi_tests {
             mechanism_type: CkMechanismType::RSA_PKCS,
             params: Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
                 hash_alg: CkMechanismType::SHA256,
-                mgf: 2,
+                mgf: CkMgf(2),
                 salt_len: 0x1_0000_0001,
             })),
         };
@@ -86,7 +87,7 @@ mod mechanism_to_ffi_tests {
                 CkMechanismParams::Kyber(KyberParams {
                     version: 3,
                     mode: 4,
-                    secret_handle: 5,
+                    secret_handle: CkObjectHandle(5),
                     shared_data: vec![0x06].into(),
                     blob: vec![0x07].into(),
                 }),
@@ -127,6 +128,82 @@ mod mechanism_to_ffi_tests {
         }
     }
 
+    // W1-C9-06: the new DES/RC2/RC4/SHA-1/SP800-108/BLAKE2B/PQC named
+    // constants must match the published cryptoki-sys headers exactly.
+    #[test]
+    fn new_mechanism_constants_match_cryptoki_sys_headers() {
+        let eq = |named: CkMechanismType, header: cryptoki_sys::CK_MECHANISM_TYPE| {
+            assert_eq!(named.0, header as u64);
+        };
+        eq(CkMechanismType::DES_CBC, cryptoki_sys::CKM_DES_CBC);
+        eq(CkMechanismType::DES_MAC_GENERAL, cryptoki_sys::CKM_DES_MAC_GENERAL);
+        eq(CkMechanismType::RC2_KEY_GEN, cryptoki_sys::CKM_RC2_KEY_GEN);
+        eq(CkMechanismType::RC2_ECB, cryptoki_sys::CKM_RC2_ECB);
+        eq(CkMechanismType::RC2_CBC, cryptoki_sys::CKM_RC2_CBC);
+        eq(CkMechanismType::RC2_MAC, cryptoki_sys::CKM_RC2_MAC);
+        eq(CkMechanismType::RC2_MAC_GENERAL, cryptoki_sys::CKM_RC2_MAC_GENERAL);
+        eq(CkMechanismType::RC2_CBC_PAD, cryptoki_sys::CKM_RC2_CBC_PAD);
+        eq(CkMechanismType::RC4_KEY_GEN, cryptoki_sys::CKM_RC4_KEY_GEN);
+        eq(CkMechanismType::RC4, cryptoki_sys::CKM_RC4);
+        eq(CkMechanismType::SHA_1, cryptoki_sys::CKM_SHA_1);
+        eq(CkMechanismType::SHA_1_HMAC, cryptoki_sys::CKM_SHA_1_HMAC);
+        eq(CkMechanismType::SHA_1_HMAC_GENERAL, cryptoki_sys::CKM_SHA_1_HMAC_GENERAL);
+        eq(CkMechanismType::SP800_108_COUNTER_KDF, cryptoki_sys::CKM_SP800_108_COUNTER_KDF);
+        eq(CkMechanismType::SP800_108_FEEDBACK_KDF, cryptoki_sys::CKM_SP800_108_FEEDBACK_KDF);
+        eq(
+            CkMechanismType::SP800_108_DOUBLE_PIPELINE_KDF,
+            cryptoki_sys::CKM_SP800_108_DOUBLE_PIPELINE_KDF,
+        );
+        eq(CkMechanismType::BLAKE2B_160, cryptoki_sys::CKM_BLAKE2B_160);
+        eq(CkMechanismType::BLAKE2B_160_HMAC, cryptoki_sys::CKM_BLAKE2B_160_HMAC);
+        eq(CkMechanismType::BLAKE2B_160_HMAC_GENERAL, cryptoki_sys::CKM_BLAKE2B_160_HMAC_GENERAL);
+        eq(CkMechanismType::BLAKE2B_160_KEY_DERIVE, cryptoki_sys::CKM_BLAKE2B_160_KEY_DERIVE);
+        eq(CkMechanismType::BLAKE2B_160_KEY_GEN, cryptoki_sys::CKM_BLAKE2B_160_KEY_GEN);
+        eq(CkMechanismType::BLAKE2B_256, cryptoki_sys::CKM_BLAKE2B_256);
+        eq(CkMechanismType::BLAKE2B_256_HMAC, cryptoki_sys::CKM_BLAKE2B_256_HMAC);
+        eq(CkMechanismType::BLAKE2B_256_HMAC_GENERAL, cryptoki_sys::CKM_BLAKE2B_256_HMAC_GENERAL);
+        eq(CkMechanismType::BLAKE2B_256_KEY_DERIVE, cryptoki_sys::CKM_BLAKE2B_256_KEY_DERIVE);
+        eq(CkMechanismType::BLAKE2B_256_KEY_GEN, cryptoki_sys::CKM_BLAKE2B_256_KEY_GEN);
+        eq(CkMechanismType::BLAKE2B_384, cryptoki_sys::CKM_BLAKE2B_384);
+        eq(CkMechanismType::BLAKE2B_384_HMAC, cryptoki_sys::CKM_BLAKE2B_384_HMAC);
+        eq(CkMechanismType::BLAKE2B_384_HMAC_GENERAL, cryptoki_sys::CKM_BLAKE2B_384_HMAC_GENERAL);
+        eq(CkMechanismType::BLAKE2B_384_KEY_DERIVE, cryptoki_sys::CKM_BLAKE2B_384_KEY_DERIVE);
+        eq(CkMechanismType::BLAKE2B_384_KEY_GEN, cryptoki_sys::CKM_BLAKE2B_384_KEY_GEN);
+        eq(CkMechanismType::BLAKE2B_512, cryptoki_sys::CKM_BLAKE2B_512);
+        eq(CkMechanismType::BLAKE2B_512_HMAC, cryptoki_sys::CKM_BLAKE2B_512_HMAC);
+        eq(CkMechanismType::BLAKE2B_512_HMAC_GENERAL, cryptoki_sys::CKM_BLAKE2B_512_HMAC_GENERAL);
+        eq(CkMechanismType::BLAKE2B_512_KEY_DERIVE, cryptoki_sys::CKM_BLAKE2B_512_KEY_DERIVE);
+        eq(CkMechanismType::BLAKE2B_512_KEY_GEN, cryptoki_sys::CKM_BLAKE2B_512_KEY_GEN);
+        eq(CkMechanismType::ML_KEM_KEY_PAIR_GEN, cryptoki_sys::CKM_ML_KEM_KEY_PAIR_GEN);
+        eq(CkMechanismType::ML_KEM, cryptoki_sys::CKM_ML_KEM);
+        eq(CkMechanismType::ML_DSA_KEY_PAIR_GEN, cryptoki_sys::CKM_ML_DSA_KEY_PAIR_GEN);
+        eq(CkMechanismType::ML_DSA, cryptoki_sys::CKM_ML_DSA);
+        eq(CkMechanismType::HASH_ML_DSA, cryptoki_sys::CKM_HASH_ML_DSA);
+        eq(CkMechanismType::HASH_ML_DSA_SHA224, cryptoki_sys::CKM_HASH_ML_DSA_SHA224);
+        eq(CkMechanismType::HASH_ML_DSA_SHA256, cryptoki_sys::CKM_HASH_ML_DSA_SHA256);
+        eq(CkMechanismType::HASH_ML_DSA_SHA384, cryptoki_sys::CKM_HASH_ML_DSA_SHA384);
+        eq(CkMechanismType::HASH_ML_DSA_SHA512, cryptoki_sys::CKM_HASH_ML_DSA_SHA512);
+        eq(CkMechanismType::HASH_ML_DSA_SHA3_224, cryptoki_sys::CKM_HASH_ML_DSA_SHA3_224);
+        eq(CkMechanismType::HASH_ML_DSA_SHA3_256, cryptoki_sys::CKM_HASH_ML_DSA_SHA3_256);
+        eq(CkMechanismType::HASH_ML_DSA_SHA3_384, cryptoki_sys::CKM_HASH_ML_DSA_SHA3_384);
+        eq(CkMechanismType::HASH_ML_DSA_SHA3_512, cryptoki_sys::CKM_HASH_ML_DSA_SHA3_512);
+        eq(CkMechanismType::HASH_ML_DSA_SHAKE128, cryptoki_sys::CKM_HASH_ML_DSA_SHAKE128);
+        eq(CkMechanismType::HASH_ML_DSA_SHAKE256, cryptoki_sys::CKM_HASH_ML_DSA_SHAKE256);
+        eq(CkMechanismType::SLH_DSA_KEY_PAIR_GEN, cryptoki_sys::CKM_SLH_DSA_KEY_PAIR_GEN);
+        eq(CkMechanismType::SLH_DSA, cryptoki_sys::CKM_SLH_DSA);
+        eq(CkMechanismType::HASH_SLH_DSA, cryptoki_sys::CKM_HASH_SLH_DSA);
+        eq(CkMechanismType::HASH_SLH_DSA_SHA224, cryptoki_sys::CKM_HASH_SLH_DSA_SHA224);
+        eq(CkMechanismType::HASH_SLH_DSA_SHA256, cryptoki_sys::CKM_HASH_SLH_DSA_SHA256);
+        eq(CkMechanismType::HASH_SLH_DSA_SHA384, cryptoki_sys::CKM_HASH_SLH_DSA_SHA384);
+        eq(CkMechanismType::HASH_SLH_DSA_SHA512, cryptoki_sys::CKM_HASH_SLH_DSA_SHA512);
+        eq(CkMechanismType::HASH_SLH_DSA_SHA3_224, cryptoki_sys::CKM_HASH_SLH_DSA_SHA3_224);
+        eq(CkMechanismType::HASH_SLH_DSA_SHA3_256, cryptoki_sys::CKM_HASH_SLH_DSA_SHA3_256);
+        eq(CkMechanismType::HASH_SLH_DSA_SHA3_384, cryptoki_sys::CKM_HASH_SLH_DSA_SHA3_384);
+        eq(CkMechanismType::HASH_SLH_DSA_SHA3_512, cryptoki_sys::CKM_HASH_SLH_DSA_SHA3_512);
+        eq(CkMechanismType::HASH_SLH_DSA_SHAKE128, cryptoki_sys::CKM_HASH_SLH_DSA_SHAKE128);
+        eq(CkMechanismType::HASH_SLH_DSA_SHAKE256, cryptoki_sys::CKM_HASH_SLH_DSA_SHAKE256);
+    }
+
     #[test]
     fn official_pqc_mechanisms_flow_parameterless_to_null_ffi() {
         // OASIS v3.2 (ml-kem.md): CKM_ML_KEM keygen/encaps/decaps take no
@@ -135,15 +212,15 @@ mod mechanism_to_ffi_tests {
         // them with NULL params — this is what CloudHSM PQC rides on, and
         // it must keep working while vendor shapes are gated.
         let pqc_ids = [
-            (0x0000_000F, "CKM_ML_KEM_KEY_PAIR_GEN"),
-            (0x0000_0017, "CKM_ML_KEM"),
-            (0x0000_001C, "CKM_ML_DSA_KEY_PAIR_GEN"),
-            (0x0000_001D, "CKM_ML_DSA"),
-            (0x0000_002D, "CKM_SLH_DSA_KEY_PAIR_GEN"),
-            (0x0000_002E, "CKM_SLH_DSA"),
+            (CkMechanismType::ML_KEM_KEY_PAIR_GEN, "CKM_ML_KEM_KEY_PAIR_GEN"),
+            (CkMechanismType::ML_KEM, "CKM_ML_KEM"),
+            (CkMechanismType::ML_DSA_KEY_PAIR_GEN, "CKM_ML_DSA_KEY_PAIR_GEN"),
+            (CkMechanismType::ML_DSA, "CKM_ML_DSA"),
+            (CkMechanismType::SLH_DSA_KEY_PAIR_GEN, "CKM_SLH_DSA_KEY_PAIR_GEN"),
+            (CkMechanismType::SLH_DSA, "CKM_SLH_DSA"),
         ];
         for (id, name) in pqc_ids {
-            let mech = CkMechanism { mechanism_type: CkMechanismType(id), params: None };
+            let mech = CkMechanism { mechanism_type: id, params: None };
             let ffi = mechanism_to_ffi(&mech).expect("official PQC flows parameterless");
             let native = ffi.ck_mechanism();
             assert!(native.pParameter.is_null(), "{name}: NULL params on the wire");
@@ -159,7 +236,7 @@ mod mechanism_to_ffi_tests {
             CkMechanismType::RSA_PKCS_PSS,
             CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
                 hash_alg: CkMechanismType::SHA256,
-                mgf: 1,
+                mgf: CkMgf(1),
                 salt_len: 32,
             }),
         );
@@ -185,8 +262,8 @@ mod mechanism_to_ffi_tests {
             CkMechanismType::RSA_PKCS_OAEP,
             CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
                 hash_alg: CkMechanismType::SHA256,
-                mgf: 1,
-                source: 1,
+                mgf: CkMgf(1),
+                source: CkOaepSource(1),
                 source_data: vec![0xA0, 0xA1, 0xA2].into(),
 
                 source_null: false,
@@ -352,10 +429,10 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType(0x0000_03B0), // CKM_PKCS5_PBKD2
             CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
-                salt_source: 1,
+                salt_source: CkPbkdf2SaltSource(1),
                 salt_source_data: vec![0x09; 8].into(),
                 iterations: 2048,
-                prf: 2,
+                prf: CkPbkdf2Prf(2),
                 prf_data: vec![].into(),
                 password: password.clone().into(),
             }),
@@ -418,7 +495,7 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CKM_WTLS_MASTER_KEY_DERIVE,
             CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
-                digest_mechanism: CkMechanismType::SHA256.0,
+                digest_mechanism: CkMechanismType::SHA256,
                 random_info: WtlsRandomData {
                     client_random: vec![0xA1, 0xA2],
                     server_random: vec![0xB1, 0xB2],
@@ -438,7 +515,7 @@ mod mechanism_to_ffi_tests {
 
         match ffi.output_params() {
             Some(CkMechanismParams::WtlsMasterKeyDerive(params)) => {
-                assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0);
+                assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0);
                 assert_eq!(params.random_info.client_random, [0xA1, 0xA2]);
                 assert_eq!(params.random_info.server_random, [0xB1, 0xB2]);
                 assert_eq!(params.version, 2);
@@ -454,7 +531,7 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE,
             CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
-                digest_mechanism: CkMechanismType::SHA256.0,
+                digest_mechanism: CkMechanismType::SHA256,
                 mac_size_bits: 160,
                 key_size_bits: 128,
                 iv_size_bits: 32,
@@ -464,8 +541,8 @@ mod mechanism_to_ffi_tests {
                     client_random: vec![0xC1, 0xC2],
                     server_random: vec![0xD1, 0xD2],
                 },
-                mac_secret_handle: 0,
-                key_handle: 0,
+                mac_secret_handle: CkObjectHandle(0),
+                key_handle: CkObjectHandle(0),
                 iv: Vec::new(),
             }),
         );
@@ -483,7 +560,7 @@ mod mechanism_to_ffi_tests {
 
         match ffi.output_params() {
             Some(CkMechanismParams::WtlsKeyMat(params)) => {
-                assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0);
+                assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0);
                 assert_eq!(params.mac_size_bits, 160);
                 assert_eq!(params.key_size_bits, 128);
                 assert_eq!(params.iv_size_bits, 32);
@@ -491,8 +568,8 @@ mod mechanism_to_ffi_tests {
                 assert!(params.is_export);
                 assert_eq!(params.random_info.client_random, [0xC1, 0xC2]);
                 assert_eq!(params.random_info.server_random, [0xD1, 0xD2]);
-                assert_eq!(params.mac_secret_handle, 101);
-                assert_eq!(params.key_handle, 202);
+                assert_eq!(params.mac_secret_handle.0, 101);
+                assert_eq!(params.key_handle.0, 202);
                 assert_eq!(params.iv, [0xA1, 0xA2, 0xA3, 0xA4]);
             }
             other => panic!("unexpected output params: {other:?}"),
@@ -514,11 +591,11 @@ mod mechanism_to_ffi_tests {
                     client_random: vec![0x11, 0x12],
                     server_random: vec![0x21, 0x22],
                 },
-                prf_hash_mechanism: 0,
-                client_mac_secret_handle: 0,
-                server_mac_secret_handle: 0,
-                client_key_handle: 0,
-                server_key_handle: 0,
+                prf_hash_mechanism: CkMechanismType(0),
+                client_mac_secret_handle: CkObjectHandle(0),
+                server_mac_secret_handle: CkObjectHandle(0),
+                client_key_handle: CkObjectHandle(0),
+                server_key_handle: CkObjectHandle(0),
                 client_iv: Vec::new().into(),
                 server_iv: Vec::new().into(),
             }),
@@ -553,11 +630,11 @@ mod mechanism_to_ffi_tests {
                 assert!(!params.is_export);
                 assert_eq!(params.random_info.client_random, [0x11, 0x12]);
                 assert_eq!(params.random_info.server_random, [0x21, 0x22]);
-                assert_eq!(params.prf_hash_mechanism, 0);
-                assert_eq!(params.client_mac_secret_handle, 101);
-                assert_eq!(params.server_mac_secret_handle, 102);
-                assert_eq!(params.client_key_handle, 201);
-                assert_eq!(params.server_key_handle, 202);
+                assert_eq!(params.prf_hash_mechanism.0, 0);
+                assert_eq!(params.client_mac_secret_handle.0, 101);
+                assert_eq!(params.server_mac_secret_handle.0, 102);
+                assert_eq!(params.client_key_handle.0, 201);
+                assert_eq!(params.server_key_handle.0, 202);
                 assert_eq!(
                     params.client_iv,
                     SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4])
@@ -586,11 +663,11 @@ mod mechanism_to_ffi_tests {
                     client_random: vec![0x31, 0x32],
                     server_random: vec![0x41, 0x42],
                 },
-                prf_hash_mechanism: CkMechanismType::SHA256.0,
-                client_mac_secret_handle: 0,
-                server_mac_secret_handle: 0,
-                client_key_handle: 0,
-                server_key_handle: 0,
+                prf_hash_mechanism: CkMechanismType::SHA256,
+                client_mac_secret_handle: CkObjectHandle(0),
+                server_mac_secret_handle: CkObjectHandle(0),
+                client_key_handle: CkObjectHandle(0),
+                server_key_handle: CkObjectHandle(0),
                 client_iv: Vec::new().into(),
                 server_iv: Vec::new().into(),
             }),
@@ -621,11 +698,11 @@ mod mechanism_to_ffi_tests {
             Some(CkMechanismParams::Ssl3KeyMat(params)) => {
                 assert_eq!(params.random_info.client_random, [0x31, 0x32]);
                 assert_eq!(params.random_info.server_random, [0x41, 0x42]);
-                assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0);
-                assert_eq!(params.client_mac_secret_handle, 111);
-                assert_eq!(params.server_mac_secret_handle, 112);
-                assert_eq!(params.client_key_handle, 211);
-                assert_eq!(params.server_key_handle, 212);
+                assert_eq!(params.prf_hash_mechanism.0, CkMechanismType::SHA256.0);
+                assert_eq!(params.client_mac_secret_handle.0, 111);
+                assert_eq!(params.server_mac_secret_handle.0, 112);
+                assert_eq!(params.client_key_handle.0, 211);
+                assert_eq!(params.server_key_handle.0, 212);
                 assert_eq!(
                     params.client_iv,
                     SecretBytes::copy_from_slice(&[0xC1, 0xC2, 0xC3, 0xC4])
@@ -700,7 +777,7 @@ mod mechanism_to_ffi_tests {
     fn object_handle_param_reconstructs_ck_object_handle() {
         let ffi = convert(
             CkMechanismType(0x0000_0500),
-            CkMechanismParams::ObjectHandle(ObjectHandleParam { handle: 0xCAFE }),
+            CkMechanismParams::ObjectHandle(ObjectHandleParam { handle: CkObjectHandle(0xCAFE) }),
         );
 
         // E0793: CK_MECHANISM is packed on Windows; assert on a by-value copy.
@@ -746,7 +823,7 @@ mod mechanism_to_ffi_tests {
             CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant: 1,
                 context: vec![0xA1, 0xA2, 0xA3].into(),
-                hash: 0,
+                hash: CkMechanismType(0),
             }),
         );
 
@@ -771,11 +848,11 @@ mod mechanism_to_ffi_tests {
         // hash != 0 → the larger CK_HASH_SIGN_ADDITIONAL_CONTEXT (generic
         // CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA), with the trailing hash mechanism.
         let ffi = convert(
-            CkMechanismType(0x0000_001F), // CKM_HASH_ML_DSA
+            CkMechanismType::HASH_ML_DSA,
             CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                 hedge_variant: 1,
                 context: vec![0xB1, 0xB2].into(),
-                hash: 0x0000_0250, // CKM_SHA256
+                hash: CkMechanismType::SHA256,
             }),
         );
 
@@ -803,7 +880,7 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType(0x8000_0001),
             CkMechanismParams::Kmac(KmacParams {
-                key_handle: 0xCAFE,
+                key_handle: CkObjectHandle(0xCAFE),
                 mac_length: 64,
                 customization_string: b"custom".to_vec().into(),
             }),
@@ -835,7 +912,7 @@ mod mechanism_to_ffi_tests {
         let ffi = convert(
             CkMechanismType(0x8000_0002),
             CkMechanismParams::MuGen(MuGenParams {
-                key_handle: 0xA11CE,
+                key_handle: CkObjectHandle(0xA11CE),
                 tr: b"precomputed-tr".to_vec().into(),
                 context: b"context".to_vec().into(),
             }),
@@ -898,8 +975,8 @@ mod mechanism_to_ffi_tests {
                 CkMechanismType::RSA_PKCS_OAEP,
                 CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
                     hash_alg: CkMechanismType::SHA256,
-                    mgf: 1,
-                    source: 1,
+                    mgf: CkMgf(1),
+                    source: CkOaepSource(1),
                     source_data: Vec::new().into(),
                     source_null,
                 }),
@@ -927,8 +1004,8 @@ mod mechanism_to_ffi_tests {
         for source_null in [true, false] {
             let oaep_params = RsaPkcsOaepParams {
                 hash_alg: CkMechanismType::SHA256,
-                mgf: 1,
-                source: 1,
+                mgf: CkMgf(1),
+                source: CkOaepSource(1),
                 source_data: Vec::new().into(),
                 source_null,
             };
@@ -993,8 +1070,8 @@ mod mechanism_to_ffi_tests {
         // Non-empty nested keys are unchanged: valid pointer, correct bytes.
         let oaep_params = RsaPkcsOaepParams {
             hash_alg: CkMechanismType::SHA256,
-            mgf: 1,
-            source: 1,
+            mgf: CkMgf(1),
+            source: CkOaepSource(1),
             source_data: vec![0xA0, 0xA1, 0xA2].into(),
             source_null: false,
         };

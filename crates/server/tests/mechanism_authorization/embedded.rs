@@ -8,7 +8,7 @@ use ::pkcs11_proxy_ng::server::handle_map::{BackendHandle, VirtualHandle};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::MockEmbeddedHandles;
 use pkcs11_proxy_ng_types::{
-    HkdfParams, PrfDataParam, Sp800108FeedbackKdfParams, Sp800108KdfParams,
+    CkObjectHandle, HkdfParams, PrfDataParam, Sp800108FeedbackKdfParams, Sp800108KdfParams,
 };
 
 fn hkdf(handle: u64) -> Option<Mechanism> {
@@ -18,10 +18,10 @@ fn hkdf(handle: u64) -> Option<Mechanism> {
             params: Some(CkMechanismParams::Hkdf(HkdfParams {
                 extract: true,
                 expand: true,
-                prf_hash_mechanism: CkMechanismType::SHA256.0,
+                prf_hash_mechanism: CkMechanismType::SHA256,
                 salt_type: cryptoki_sys::CKF_HKDF_SALT_KEY as u64,
                 salt: vec![].into(),
-                salt_key_handle: handle,
+                salt_key_handle: CkObjectHandle(handle),
                 info: vec![].into(),
             })),
         })
@@ -42,14 +42,14 @@ fn sp800108(value: Vec<u8>, feedback: bool) -> Option<Mechanism> {
             mechanism_type: CkMechanismType::SHA256,
             params: Some(if feedback {
                 CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                    prf_type: cryptoki_sys::CKM_SHA256_HMAC as u64,
+                    prf_type: CkMechanismType(cryptoki_sys::CKM_SHA256_HMAC as u64),
                     data_params,
                     iv: vec![],
                     additional_derived_keys: vec![],
                 })
             } else {
                 CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                    prf_type: cryptoki_sys::CKM_SHA256_HMAC as u64,
+                    prf_type: CkMechanismType(cryptoki_sys::CKM_SHA256_HMAC as u64),
                     data_params,
                     additional_derived_keys: vec![],
                 })

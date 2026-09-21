@@ -211,7 +211,7 @@ mod tests {
         // admission pre-Init.
         let _guard = TEST_LOCK.lock().unwrap();
         let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
         assert_eq!(
@@ -234,7 +234,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap();
         let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
         backend.lifecycle_domain.open_for_tests();
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
         let result = backend
@@ -255,7 +255,7 @@ mod tests {
         // admission pre-Init.
         let _guard = TEST_LOCK.lock().unwrap();
         let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
         assert_eq!(
             backend
                 .ffi_encapsulate_key(CkSessionHandle(1), &mechanism, CkObjectHandle(2), None)
@@ -270,7 +270,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap();
         let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
         backend.lifecycle_domain.open_for_tests();
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
         let (_ciphertext, handle) = backend
             .ffi_encapsulate_key(CkSessionHandle(1), &mechanism, CkObjectHandle(2), None)
             .unwrap();
@@ -286,7 +286,7 @@ mod tests {
         let (backend, _base, _functions) = backend_with_missing_length_encapsulate();
         // Exact paths are ordinary: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
-        let mechanism = CkMechanism { mechanism_type: CkMechanismType(0x0000_0017), params: None };
+        let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
         let output_spec =
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
 

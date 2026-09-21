@@ -8,8 +8,6 @@ use sha2::{Digest, Sha256};
 use super::{ProviderFixture, TokenSetupState};
 
 static LABEL_COUNTER: AtomicU64 = AtomicU64::new(1);
-const CKG_MGF1_SHA256: u64 = 0x00000002;
-const CKZ_DATA_SPECIFIED: u64 = 0x00000001;
 pub const CKF_SIGN_RECOVER: u64 = 0x00001000;
 pub const CKF_VERIFY_RECOVER: u64 = 0x00004000;
 
@@ -443,7 +441,7 @@ pub async fn rsa_pss_sign(
         mechanism_type: CkMechanismType::RSA_PKCS_PSS,
         params: Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
             hash_alg: CkMechanismType::SHA256,
-            mgf: CKG_MGF1_SHA256,
+            mgf: CkMgf::MGF1_SHA256,
             salt_len: 32,
         })),
     };
@@ -471,9 +469,9 @@ pub async fn rsa_oaep_encrypt(
         mechanism_type: CkMechanismType::RSA_PKCS_OAEP,
         // Use SHA-1/MGF1-SHA1 for maximum compatibility (SoftHSM2 rejects SHA-256 OAEP).
         params: Some(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
-            hash_alg: CkMechanismType(0x00000220), // CKM_SHA_1
-            mgf: 0x00000001,                       // CKG_MGF1_SHA1
-            source: CKZ_DATA_SPECIFIED,
+            hash_alg: CkMechanismType::SHA_1,
+            mgf: CkMgf::MGF1_SHA1,
+            source: CkOaepSource::DATA_SPECIFIED,
             source_data: Vec::new().into(),
 
             source_null: false,

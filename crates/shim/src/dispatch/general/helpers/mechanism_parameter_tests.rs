@@ -4,11 +4,12 @@ use super::{
 };
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::{
-    CcmParams, CcmWrapParams, ChaCha20Params, CkAttributeType, CkAttributeValue, CkMechanismParams,
-    CkMechanismType, CkRv, ExtractParams, GcmParams, GcmWrapParams, KeyWrapSetOaepParams,
-    KmacParams, MechanismRegistry, MuGenParams, RsaAesKeyWrapParams, RsaPkcsOaepParams,
-    RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, SecretBytes, SignAdditionalContext,
-    Sp800108DerivedKey, Sp800108FeedbackKdfParams,
+    CcmParams, CcmWrapParams, ChaCha20Params, CkAttributeType, CkAttributeValue,
+    CkGeneratorFunction, CkKdf, CkMechanismParams, CkMechanismType, CkMgf, CkOaepSource,
+    CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv, ExtractParams, GcmParams, GcmWrapParams,
+    KeyWrapSetOaepParams, KmacParams, MechanismRegistry, MuGenParams, RsaAesKeyWrapParams,
+    RsaPkcsOaepParams, RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, SecretBytes,
+    SignAdditionalContext, Sp800108DerivedKey, Sp800108FeedbackKdfParams,
 };
 
 fn ensure_registry() {
@@ -152,7 +153,7 @@ fn reads_handle_string_and_sign_context_parameter_structs() {
     };
     match unsafe { read_mechanism_with_shape(&mechanism, Some("object_handle")) }.params {
         Some(CkMechanismParams::ObjectHandle(params)) => {
-            assert_eq!(params.handle, 0xCAFE);
+            assert_eq!(params.handle.0, 0xCAFE);
         }
         other => panic!("unexpected object handle params: {other:?}"),
     }
@@ -228,7 +229,7 @@ fn reads_signature_parameter_structs() {
         other => panic!("unexpected EdDSA params: {other:?}"),
     }
 
-    let mut xeddsa = CK_XEDDSA_PARAMS { hash: CkMechanismType::SHA256.0 as _ };
+    let mut xeddsa = CK_XEDDSA_PARAMS { hash: CkMechanismType::SHA256.0 };
     let mechanism = CK_MECHANISM {
         mechanism: CKM_TEST_XEDDSA,
         pParameter: &mut xeddsa as *mut _ as CK_VOID_PTR,
@@ -239,7 +240,7 @@ fn reads_signature_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Xeddsa(params) => {
-            assert_eq!(params.hash, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.hash, CkMechanismType::SHA256);
         }
         other => panic!("unexpected XEdDSA params: {other:?}"),
     }
@@ -265,8 +266,8 @@ fn reads_rsa_wrap_parameter_structs() {
         CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams { aes_key_bits, oaep_params }) => {
             assert_eq!(aes_key_bits, 256);
             assert_eq!(oaep_params.hash_alg, CkMechanismType::SHA256);
-            assert_eq!(oaep_params.mgf, 1);
-            assert_eq!(oaep_params.source, 1);
+            assert_eq!(oaep_params.mgf, CkMgf(1));
+            assert_eq!(oaep_params.source, CkOaepSource(1));
             assert_eq!(oaep_params.source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
         }
         other => panic!("unexpected RSA-AES key wrap params: {other:?}"),
@@ -323,7 +324,7 @@ fn reads_authenticated_wrap_parameter_structs() {
         }) => {
             assert_eq!(iv, [0x11; 12]);
             assert_eq!(iv_fixed_bits, 32);
-            assert_eq!(iv_generator, 1);
+            assert_eq!(iv_generator, CkGeneratorFunction(1));
             assert_eq!(aad, SecretBytes::copy_from_slice(&[0xA1, 0xA2]));
             assert_eq!(tag_bits, 128);
         }
@@ -362,7 +363,7 @@ fn reads_authenticated_wrap_parameter_structs() {
             assert_eq!(data_len, 1024);
             assert_eq!(nonce, [0x22; 7]);
             assert_eq!(nonce_fixed_bits, 24);
-            assert_eq!(nonce_generator, 2);
+            assert_eq!(nonce_generator, CkGeneratorFunction(2));
             assert_eq!(aad, SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3]));
             assert_eq!(mac_len, 16);
         }
@@ -393,7 +394,7 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
     match unsafe { read_wrap_key_mechanism(&mechanism) }.params.expect("params") {
         CkMechanismParams::GcmWrap(GcmWrapParams { iv, iv_generator, aad, .. }) => {
             assert_eq!(iv, [0x11; 12]);
-            assert_eq!(iv_generator, CKG_GENERATE as u64);
+            assert_eq!(iv_generator, CkGeneratorFunction(CKG_GENERATE as u64));
             assert_eq!(aad, SecretBytes::copy_from_slice(&[0xA1, 0xA2]));
         }
         other => panic!("unexpected GCM wrap-key params: {other:?}"),
@@ -427,7 +428,7 @@ fn wrap_key_reader_uses_v32_aead_wrap_shapes() {
         }) => {
             assert_eq!(data_len, 16);
             assert_eq!(nonce, [0x22; 12]);
-            assert_eq!(nonce_generator, CKG_GENERATE as u64);
+            assert_eq!(nonce_generator, CkGeneratorFunction(CKG_GENERATE as u64));
             assert_eq!(aad, SecretBytes::copy_from_slice(&[0xB1, 0xB2, 0xB3]));
             assert_eq!(mac_len, 16);
         }
@@ -530,7 +531,7 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
     let output = CkMechanismParams::GcmWrap(GcmWrapParams {
         iv: vec![1, 2, 3, 4],
         iv_fixed_bits: 0,
-        iv_generator: CKG_GENERATE as _,
+        iv_generator: CkGeneratorFunction(CKG_GENERATE as u64),
         aad: Vec::new().into(),
         tag_bits: 96,
     });
@@ -561,7 +562,7 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         data_len: 16,
         nonce: vec![9, 8, 7, 6],
         nonce_fixed_bits: 0,
-        nonce_generator: CKG_GENERATE as _,
+        nonce_generator: CkGeneratorFunction(CKG_GENERATE as u64),
         aad: Vec::new().into(),
         mac_len: 12,
     });
@@ -987,7 +988,7 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::TlsMac(params) => {
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.mac_length, 32);
             assert_eq!(params.server_or_client, 1);
         }
@@ -1050,7 +1051,7 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::TlsKdf(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA384.0 as u64);
+            assert_eq!(params.prf_mechanism.0, CkMechanismType::SHA384.0 as u64);
             assert_eq!(params.label, vec![0x33, 0x34].into());
             assert_eq!(params.random_info.client_random, vec![0x11; 4]);
             assert_eq!(params.random_info.server_random, vec![0x22; 4]);
@@ -1108,7 +1109,7 @@ fn reads_tls_ssl_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Tls12ExtendedMasterKeyDerive(params) => {
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA512.0 as u64);
+            assert_eq!(params.prf_hash_mechanism.0, CkMechanismType::SHA512.0 as u64);
             assert_eq!(params.session_hash, vec![0x61; 8]);
             assert_eq!(params.version_major, 3);
             assert_eq!(params.version_minor, 3);
@@ -1150,10 +1151,10 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
         CkMechanismParams::Hkdf(params) => {
             assert!(params.extract);
             assert!(params.expand);
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.salt_type, 1);
             assert_eq!(params.salt, vec![0xA1, 0xA2, 0xA3].into());
-            assert_eq!(params.salt_key_handle, 0x1234);
+            assert_eq!(params.salt_key_handle.0, 0x1234);
             assert_eq!(params.info, vec![0xB1, 0xB2].into());
         }
         other => panic!("unexpected HKDF params: {other:?}"),
@@ -1178,7 +1179,7 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Gostr3410Derive(params) => {
-            assert_eq!(params.kdf, 1);
+            assert_eq!(params.kdf, CkKdf(1));
             assert_eq!(params.public_data, vec![0xC1, 0xC2, 0xC3]);
             assert_eq!(params.ukm, vec![0xD1, 0xD2]);
         }
@@ -1206,7 +1207,7 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
         CkMechanismParams::Gostr3410KeyWrap(params) => {
             assert_eq!(params.wrap_oid, vec![0x06, 0x07, 0x2A]);
             assert_eq!(params.ukm, vec![0xE1, 0xE2, 0xE3, 0xE4]);
-            assert_eq!(params.key_handle, 0xBEEF);
+            assert_eq!(params.key_handle.0, 0xBEEF);
         }
         other => panic!("unexpected GOSTR3410 key-wrap params: {other:?}"),
     }
@@ -1264,10 +1265,10 @@ fn reads_kdf_and_legacy_agreement_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Pkcs5Pbkd2(params) => {
-            assert_eq!(params.salt_source, 1);
+            assert_eq!(params.salt_source, CkPbkdf2SaltSource(1));
             assert_eq!(params.salt_source_data, vec![0x41, 0x42].into());
             assert_eq!(params.iterations, 600_000);
-            assert_eq!(params.prf, 2);
+            assert_eq!(params.prf, CkPbkdf2Prf(2));
             assert_eq!(params.prf_data, vec![0x51].into());
             assert_eq!(params.password, SecretBytes::copy_from_slice(b"secret"));
         }
@@ -1303,7 +1304,7 @@ fn reads_ecdh_and_x942_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ecdh1Derive(params) => {
-            assert_eq!(params.kdf, 7);
+            assert_eq!(params.kdf, CkKdf(7));
             assert_eq!(params.shared_data, vec![0xA1, 0xA2].into());
             assert_eq!(params.public_data, vec![0xB1, 0xB2, 0xB3]);
         }
@@ -1334,11 +1335,11 @@ fn reads_ecdh_and_x942_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ecdh2Derive(params) => {
-            assert_eq!(params.kdf, 8);
+            assert_eq!(params.kdf, CkKdf(8));
             assert_eq!(params.shared_data, vec![0xC1, 0xC2, 0xC3].into());
             assert_eq!(params.public_data, vec![0xD1, 0xD2]);
             assert_eq!(params.private_data_len, 32);
-            assert_eq!(params.private_data_handle, 0x1234);
+            assert_eq!(params.private_data_handle.0, 0x1234);
             assert_eq!(params.public_data2, vec![0xE1, 0xE2, 0xE3, 0xE4]);
         }
         other => panic!("unexpected ECDH2 derive params: {other:?}"),
@@ -1369,13 +1370,13 @@ fn reads_ecdh_and_x942_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::EcmqvDerive(params) => {
-            assert_eq!(params.kdf, 9);
+            assert_eq!(params.kdf, CkKdf(9));
             assert_eq!(params.shared_data, vec![0x11, 0x12].into());
             assert_eq!(params.public_data, vec![0x21, 0x22, 0x23]);
             assert_eq!(params.private_data_len, 48);
-            assert_eq!(params.private_data_handle, 0x2345);
+            assert_eq!(params.private_data_handle.0, 0x2345);
             assert_eq!(params.public_data2, vec![0x31, 0x32]);
-            assert_eq!(params.public_key_handle, 0x3456);
+            assert_eq!(params.public_key_handle.0, 0x3456);
         }
         other => panic!("unexpected ECMQV derive params: {other:?}"),
     }
@@ -1398,7 +1399,7 @@ fn reads_ecdh_and_x942_parameter_structs() {
     {
         CkMechanismParams::EcdhAesKeyWrap(params) => {
             assert_eq!(params.aes_key_bits, 256);
-            assert_eq!(params.kdf, 10);
+            assert_eq!(params.kdf, CkKdf(10));
             assert_eq!(params.shared_data, vec![0x41, 0x42, 0x43].into());
         }
         other => panic!("unexpected ECDH AES key-wrap params: {other:?}"),
@@ -1423,7 +1424,7 @@ fn reads_ecdh_and_x942_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::X942Dh1Derive(params) => {
-            assert_eq!(params.kdf, 11);
+            assert_eq!(params.kdf, CkKdf(11));
             assert_eq!(params.other_info, vec![0x51, 0x52].into());
             assert_eq!(params.public_data, vec![0x61, 0x62, 0x63]);
         }
@@ -1454,11 +1455,11 @@ fn reads_ecdh_and_x942_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::X942Dh2Derive(params) => {
-            assert_eq!(params.kdf, 12);
+            assert_eq!(params.kdf, CkKdf(12));
             assert_eq!(params.other_info, vec![0x71, 0x72, 0x73].into());
             assert_eq!(params.public_data, vec![0x81, 0x82]);
             assert_eq!(params.private_data_len, 64);
-            assert_eq!(params.private_data_handle, 0x4567);
+            assert_eq!(params.private_data_handle.0, 0x4567);
             assert_eq!(params.public_data2, vec![0x91, 0x92, 0x93, 0x94]);
         }
         other => panic!("unexpected X9.42 DH2 derive params: {other:?}"),
@@ -1494,12 +1495,12 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::IkePrfDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.prf_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert!(params.data_as_key);
             assert!(!params.rekey);
             assert_eq!(params.ni, vec![0xA1, 0xA2, 0xA3].into());
             assert_eq!(params.nr, vec![0xB1, 0xB2].into());
-            assert_eq!(params.new_key_handle, 0x1234);
+            assert_eq!(params.new_key_handle.0, 0x1234);
         }
         other => panic!("unexpected IKE PRF derive params: {other:?}"),
     }
@@ -1527,10 +1528,10 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ike1PrfDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA384.0 as u64);
+            assert_eq!(params.prf_mechanism.0, CkMechanismType::SHA384.0 as u64);
             assert!(params.has_prev_key);
-            assert_eq!(params.keygxy_handle, 0x2345);
-            assert_eq!(params.prev_key_handle, 0x3456);
+            assert_eq!(params.keygxy_handle.0, 0x2345);
+            assert_eq!(params.prev_key_handle.0, 0x3456);
             assert_eq!(params.ckyi, vec![0xC1, 0xC2].into());
             assert_eq!(params.ckyr, vec![0xD1, 0xD2, 0xD3].into());
             assert_eq!(params.key_number, 3);
@@ -1556,9 +1557,9 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ike1ExtendedDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA512.0 as u64);
+            assert_eq!(params.prf_mechanism.0, CkMechanismType::SHA512.0 as u64);
             assert!(params.has_keygxy);
-            assert_eq!(params.keygxy_handle, 0x4567);
+            assert_eq!(params.keygxy_handle.0, 0x4567);
             assert_eq!(params.extra_data, vec![0xE1, 0xE2, 0xE3, 0xE4].into());
         }
         other => panic!("unexpected IKE1 extended derive params: {other:?}"),
@@ -1582,9 +1583,9 @@ fn reads_ike_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::Ike2PrfPlusDerive(params) => {
-            assert_eq!(params.prf_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.prf_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert!(params.has_seed_key);
-            assert_eq!(params.seed_key_handle, 0x5678);
+            assert_eq!(params.seed_key_handle.0, 0x5678);
             assert_eq!(params.seed_data, vec![0xF1, 0xF2, 0xF3].into());
         }
         other => panic!("unexpected IKE2 PRF-plus derive params: {other:?}"),
@@ -1619,7 +1620,7 @@ fn reads_wtls_prf_and_x942_mqv_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::WtlsPrf(params) => {
-            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.seed, vec![0xA1, 0xA2, 0xA3].into());
             assert_eq!(params.label, vec![0xB1, 0xB2].into());
             assert_eq!(params.output_len, 12);
@@ -1652,13 +1653,13 @@ fn reads_wtls_prf_and_x942_mqv_parameter_structs() {
         .expect("mechanism params")
     {
         CkMechanismParams::X942MqvDerive(params) => {
-            assert_eq!(params.kdf, 7);
+            assert_eq!(params.kdf, CkKdf(7));
             assert_eq!(params.other_info, vec![0xC1, 0xC2].into());
             assert_eq!(params.public_data, vec![0xD1, 0xD2, 0xD3]);
             assert_eq!(params.private_data_len, 32);
-            assert_eq!(params.private_data_handle, 77);
+            assert_eq!(params.private_data_handle.0, 77);
             assert_eq!(params.public_data2, vec![0xE1, 0xE2, 0xE3, 0xE4]);
-            assert_eq!(params.public_key_handle, 88);
+            assert_eq!(params.public_key_handle.0, 88);
         }
         other => panic!("unexpected X9.42 MQV params: {other:?}"),
     }
@@ -1820,7 +1821,7 @@ fn reads_kip_parameter_struct_with_nested_mechanism() {
         CkMechanismParams::Kip(params) => {
             assert_eq!(params.mechanism.mechanism_type, CkMechanismType::SHA256);
             assert!(params.mechanism.params.is_none());
-            assert_eq!(params.key_handle, 99);
+            assert_eq!(params.key_handle.0, 99);
             assert_eq!(params.seed, vec![0x44, 0x45, 0x46].into());
         }
         other => panic!("unexpected KIP params: {other:?}"),
@@ -1967,7 +1968,7 @@ fn kmac_params_reads_key_length_and_customization_string() {
         .expect("mechanism params")
     {
         CkMechanismParams::Kmac(KmacParams { key_handle, mac_length, customization_string }) => {
-            assert_eq!(key_handle, 0xCAFE);
+            assert_eq!(key_handle.0, 0xCAFE);
             assert_eq!(mac_length, 64);
             assert_eq!(customization_string, SecretBytes::copy_from_slice(b"custom"));
         }
@@ -1999,7 +2000,7 @@ fn mu_gen_params_reads_key_tr_and_context() {
         .expect("mechanism params")
     {
         CkMechanismParams::MuGen(MuGenParams { key_handle, tr, context }) => {
-            assert_eq!(key_handle, 0xA11CE);
+            assert_eq!(key_handle.0, 0xA11CE);
             assert_eq!(tr, SecretBytes::copy_from_slice(b"precomputed-tr"));
             assert_eq!(context, SecretBytes::copy_from_slice(b"context"));
         }
@@ -2225,11 +2226,11 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
 
     match unsafe { read_ck_mechanism(&mechanism) } {
         CkMechanismParams::Sp800108FeedbackKdf(params) => {
-            assert_eq!(params.prf_type, CKM_SHA256_HMAC as u64);
+            assert_eq!(params.prf_type.0, CKM_SHA256_HMAC as u64);
             assert_eq!(params.iv, vec![0xA5; 16]);
             assert_eq!(params.additional_derived_keys.len(), 1);
             let derived = &params.additional_derived_keys[0];
-            assert_eq!(derived.key_handle, 0);
+            assert_eq!(derived.key_handle.0, 0);
             assert_eq!(derived.template.len(), 2);
             assert_eq!(
                 derived.template[0].value,
@@ -2244,12 +2245,12 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
         write_mechanism_output_params(
             &mut mechanism,
             &CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CKM_SHA256_HMAC as _,
+                prf_type: CkMechanismType(CKM_SHA256_HMAC),
                 data_params: Vec::new(),
                 iv: vec![0xA5; 16],
                 additional_derived_keys: vec![Sp800108DerivedKey {
                     template: Vec::new(),
-                    key_handle: 0xCAFE,
+                    key_handle: CkObjectHandle(0xCAFE),
                 }],
             }),
         );
@@ -2465,8 +2466,8 @@ fn misaligned_rsa_aes_key_wrap_reads_byte_identical_values() {
         })) => {
             assert_eq!(aes_key_bits, 256);
             assert_eq!(oaep_params.hash_alg, CkMechanismType::SHA256);
-            assert_eq!(oaep_params.mgf, 1);
-            assert_eq!(oaep_params.source, 1);
+            assert_eq!(oaep_params.mgf, CkMgf(1));
+            assert_eq!(oaep_params.source, CkOaepSource(1));
             assert_eq!(oaep_params.source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
         }
         other => panic!("unexpected RSA-AES key wrap params: {other:?}"),
@@ -2526,7 +2527,7 @@ fn misaligned_sign_additional_context_reads_byte_identical_values() {
                     SecretBytes::copy_from_slice(&[0xB1, 0xB2]),
                     "with_hash={with_hash}"
                 );
-                assert_eq!(hash, if with_hash { 0xA5A5 } else { 0 }, "with_hash={with_hash}");
+                assert_eq!(hash.0, if with_hash { 0xA5A5 } else { 0 }, "with_hash={with_hash}");
             }
             other => panic!("unexpected sign additional context params: {other:?}"),
         }

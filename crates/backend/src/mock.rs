@@ -1087,7 +1087,7 @@ impl MockBackend {
 
         match params {
             CkMechanismParams::ObjectHandle(params) => {
-                self.require_live_object(state, CkObjectHandle(params.handle as u64))?;
+                self.require_live_object(state, params.handle)?;
             }
             CkMechanismParams::Kip(params)
                 if matches!(
@@ -1095,22 +1095,22 @@ impl MockBackend {
                     CkMechanismType::KIP_DERIVE | CkMechanismType::KIP_MAC
                 ) =>
             {
-                self.require_live_object_if_nonzero(state, params.key_handle)?;
+                self.require_live_object_if_nonzero(state, params.key_handle.0)?;
             }
             CkMechanismParams::Ecdh2Derive(params) => {
-                self.require_live_object(state, CkObjectHandle(params.private_data_handle as u64))?;
+                self.require_live_object(state, params.private_data_handle)?;
             }
             CkMechanismParams::EcmqvDerive(params) => {
                 for handle in [params.private_data_handle, params.public_key_handle] {
-                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
+                    self.require_live_object(state, handle)?;
                 }
             }
             CkMechanismParams::X942Dh2Derive(params) => {
-                self.require_live_object(state, CkObjectHandle(params.private_data_handle as u64))?;
+                self.require_live_object(state, params.private_data_handle)?;
             }
             CkMechanismParams::X942MqvDerive(params) => {
                 for handle in [params.private_data_handle, params.public_key_handle] {
-                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
+                    self.require_live_object(state, handle)?;
                 }
             }
             CkMechanismParams::X3dhInitiate(params) => {
@@ -1122,14 +1122,11 @@ impl MockBackend {
                     params.own_identity_handle,
                     params.own_ephemeral_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
+                    self.require_live_object(state, handle)?;
                 }
             }
             CkMechanismParams::X3dhRespond(params) => {
-                self.require_live_object(
-                    state,
-                    CkObjectHandle(params.initiator_identity_handle as u64),
-                )?;
+                self.require_live_object(state, params.initiator_identity_handle)?;
             }
             CkMechanismParams::X2RatchetInitialize(params) => {
                 for handle in [
@@ -1137,7 +1134,7 @@ impl MockBackend {
                     params.peer_public_identity_handle,
                     params.own_public_identity_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
+                    self.require_live_object(state, handle)?;
                 }
             }
             CkMechanismParams::X2RatchetRespond(params) => {
@@ -1146,13 +1143,13 @@ impl MockBackend {
                     params.initiator_identity_handle,
                     params.own_identity_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
+                    self.require_live_object(state, handle)?;
                 }
             }
             CkMechanismParams::CmsSig(params) => {
                 // The spec permits an absent certificate; this transport uses
                 // CK_OBJECT_HANDLE(0) for that absent value.
-                self.require_live_object_if_nonzero(state, params.certificate_handle)?;
+                self.require_live_object_if_nonzero(state, params.certificate_handle.0)?;
             }
             _ => {}
         }
@@ -1242,7 +1239,7 @@ impl MockBackend {
         let Some(CkMechanismParams::GcmWrap(p)) = &mechanism.params else {
             return None;
         };
-        if p.iv_generator <= 1 || p.iv.is_empty() {
+        if p.iv_generator.0 <= 1 || p.iv.is_empty() {
             return None;
         }
         let fixed_bytes = ((p.iv_fixed_bits as usize) / 8).min(p.iv.len());
@@ -1313,13 +1310,11 @@ impl MockBackend {
             {
                 let mut params = params.clone();
                 for derived_key in &mut params.additional_derived_keys {
-                    derived_key.key_handle = self
-                        .allocate_session_object_with_template(
-                            &mut state,
-                            session,
-                            &derived_key.template,
-                        )?
-                        .0;
+                    derived_key.key_handle = self.allocate_session_object_with_template(
+                        &mut state,
+                        session,
+                        &derived_key.template,
+                    )?;
                 }
                 Some(CkMechanismParams::Sp800108Kdf(params))
             }
@@ -1328,13 +1323,11 @@ impl MockBackend {
             {
                 let mut params = params.clone();
                 for derived_key in &mut params.additional_derived_keys {
-                    derived_key.key_handle = self
-                        .allocate_session_object_with_template(
-                            &mut state,
-                            session,
-                            &derived_key.template,
-                        )?
-                        .0;
+                    derived_key.key_handle = self.allocate_session_object_with_template(
+                        &mut state,
+                        session,
+                        &derived_key.template,
+                    )?;
                 }
                 Some(CkMechanismParams::Sp800108FeedbackKdf(params))
             }
@@ -1360,7 +1353,7 @@ impl MockBackend {
             _ => return Ok(()),
         };
 
-        if !sp800_108_prf_type_valid(prf_type) {
+        if !sp800_108_prf_type_valid(prf_type.0) {
             return Err(CkRv::MECHANISM_PARAM_INVALID);
         }
 
@@ -1480,14 +1473,14 @@ fn sp800_108_template_failure_output(mechanism: &CkMechanism) -> Option<CkMechan
             let failure_index =
                 sp800_108_additional_template_failure_index(&params.additional_derived_keys)?;
             let mut output = params.clone();
-            output.additional_derived_keys[failure_index].key_handle = 0;
+            output.additional_derived_keys[failure_index].key_handle = CkObjectHandle(0);
             Some(CkMechanismParams::Sp800108Kdf(output))
         }
         CkMechanismParams::Sp800108FeedbackKdf(params) => {
             let failure_index =
                 sp800_108_additional_template_failure_index(&params.additional_derived_keys)?;
             let mut output = params.clone();
-            output.additional_derived_keys[failure_index].key_handle = 0;
+            output.additional_derived_keys[failure_index].key_handle = CkObjectHandle(0);
             Some(CkMechanismParams::Sp800108FeedbackKdf(output))
         }
         _ => None,
@@ -2687,7 +2680,7 @@ impl Pkcs11Backend for MockBackend {
                 mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: true,
                 generated_stage: false,
-                auth_stage: flags.0 & cryptoki_sys::CKF_END_OF_MESSAGE as u64 != 0,
+                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE != 0,
                 rv: output.ck_rv,
             },
         );
@@ -2729,7 +2722,7 @@ impl Pkcs11Backend for MockBackend {
                 mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: false,
                 generated_stage: false,
-                auth_stage: flags.0 & cryptoki_sys::CKF_END_OF_MESSAGE as u64 != 0,
+                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE != 0,
                 rv: output.ck_rv,
             },
         );

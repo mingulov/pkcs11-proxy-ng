@@ -146,7 +146,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 let pss = unsafe { &*(param_ptr as *const CK_RSA_PKCS_PSS_PARAMS) };
                 Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
                     hash_alg: CkMechanismType(pss.hashAlg as u64),
-                    mgf: pss.mgf as u64,
+                    mgf: CkMgf(pss.mgf as u64),
                     salt_len: pss.sLen as u64,
                 }))
             }
@@ -181,8 +181,8 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     };
                     Some(CkMechanismParams::RsaPkcsOaep(RsaPkcsOaepParams {
                         hash_alg: CkMechanismType(oaep.hashAlg as u64),
-                        mgf: oaep.mgf as u64,
-                        source: oaep.source as u64,
+                        mgf: CkMgf(oaep.mgf as u64),
+                        source: CkOaepSource(oaep.source as u64),
                         source_data: source_data.into(),
                         // F3/D2: (NULL, 0) vs (ptr, 0) must survive the
                         // crossing; (NULL, len > 0) took the Raw path above.
@@ -309,7 +309,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         .to_vec()
                     };
                     Some(CkMechanismParams::Ecdh1Derive(Ecdh1DeriveParams {
-                        kdf: ecdh.kdf as u64,
+                        kdf: CkKdf(ecdh.kdf as u64),
                         shared_data: shared_data.into(),
                         public_data,
                     }))
@@ -377,10 +377,10 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     Some(CkMechanismParams::Hkdf(HkdfParams {
                         extract: hkdf.bExtract != 0,
                         expand: hkdf.bExpand != 0,
-                        prf_hash_mechanism: hkdf.prfHashMechanism as u64,
+                        prf_hash_mechanism: CkMechanismType(hkdf.prfHashMechanism as u64),
                         salt_type: hkdf.ulSaltType as u64,
                         salt: salt.into(),
-                        salt_key_handle: hkdf.hSaltKey as u64,
+                        salt_key_handle: CkObjectHandle(hkdf.hSaltKey as u64),
                         info: info.into(),
                     }))
                 }
@@ -681,7 +681,9 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 // Safety: pParameter points to a CK_OBJECT_HANDLE
                 // (which is a CK_ULONG).
                 let val = unsafe { *(param_ptr as *const CK_OBJECT_HANDLE) };
-                Some(CkMechanismParams::ObjectHandle(ObjectHandleParam { handle: val as u64 }))
+                Some(CkMechanismParams::ObjectHandle(ObjectHandleParam {
+                    handle: CkObjectHandle(val as u64),
+                }))
             }
         }
 
@@ -752,7 +754,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     Some(CkMechanismParams::GcmWrap(GcmWrapParams {
                         iv,
                         iv_fixed_bits: gw.ulIvFixedBits as u64,
-                        iv_generator: gw.ivGenerator as u64,
+                        iv_generator: CkGeneratorFunction(gw.ivGenerator as u64),
                         aad: aad.into(),
                         tag_bits: gw.ulTagBits as u64,
                     }))
@@ -791,7 +793,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         data_len: cw.ulDataLen as u64,
                         nonce,
                         nonce_fixed_bits: cw.ulNonceFixedBits as u64,
-                        nonce_generator: cw.nonceGenerator as u64,
+                        nonce_generator: CkGeneratorFunction(cw.nonceGenerator as u64),
                         aad: aad.into(),
                         mac_len: cw.ulMACLen as u64,
                     }))
@@ -893,7 +895,9 @@ pub(crate) unsafe fn read_mechanism_with_shape(
             } else {
                 // Safety: pParameter points to a valid CK_XEDDSA_PARAMS.
                 let xed = unsafe { &*(param_ptr as *const CK_XEDDSA_PARAMS) };
-                Some(CkMechanismParams::Xeddsa(XeddsaParams { hash: xed.hash as u64 }))
+                Some(CkMechanismParams::Xeddsa(XeddsaParams {
+                    hash: CkMechanismType(xed.hash as u64),
+                }))
             }
         }
 
@@ -906,7 +910,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 // Safety: pParameter points to a valid CK_TLS_MAC_PARAMS.
                 let tls = unsafe { &*(param_ptr as *const CK_TLS_MAC_PARAMS) };
                 Some(CkMechanismParams::TlsMac(TlsMacParams {
-                    prf_hash_mechanism: tls.prfHashMechanism as u64,
+                    prf_hash_mechanism: CkMechanismType(tls.prfHashMechanism as u64),
                     mac_length: tls.ulMacLength as u64,
                     server_or_client: tls.ulServerOrClient as u64,
                 }))
@@ -962,8 +966,8 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             aes_key_bits: aes_key_bits as u64,
                             oaep_params: RsaPkcsOaepParams {
                                 hash_alg: CkMechanismType(oaep.hashAlg as u64),
-                                mgf: oaep.mgf as u64,
-                                source: oaep.source as u64,
+                                mgf: CkMgf(oaep.mgf as u64),
+                                source: CkOaepSource(oaep.source as u64),
                                 source_data: source_data.into(),
                                 source_null: oaep.pSourceData.is_null(),
                             },
@@ -1016,7 +1020,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                         hedge_variant: hedge_variant as u64,
                         context: context.into(),
-                        hash,
+                        hash: CkMechanismType(hash),
                     }))
                 }
             }
@@ -1050,7 +1054,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         .to_vec()
                     };
                     Some(CkMechanismParams::Kmac(KmacParams {
-                        key_handle: p.h_key as u64,
+                        key_handle: CkObjectHandle(p.h_key as u64),
                         mac_length: p.ul_mac_length as u64,
                         customization_string: customization_string.into(),
                     }))
@@ -1084,7 +1088,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             .to_vec()
                     };
                     Some(CkMechanismParams::MuGen(MuGenParams {
-                        key_handle: p.h_key as u64,
+                        key_handle: CkObjectHandle(p.h_key as u64),
                         tr: tr.into(),
                         context: context.into(),
                     }))
@@ -1138,10 +1142,10 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             .to_vec()
                     };
                     Some(CkMechanismParams::Pkcs5Pbkd2(Pkcs5Pbkd2Params {
-                        salt_source: p.saltSource as u64,
+                        salt_source: CkPbkdf2SaltSource(p.saltSource as u64),
                         salt_source_data: salt_source_data.into(),
                         iterations: p.iterations as u64,
-                        prf: p.prf as u64,
+                        prf: CkPbkdf2Prf(p.prf as u64),
                         prf_data: prf_data.into(),
                         password: password.into(),
                     }))
@@ -1196,7 +1200,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     let version =
                         if p.pVersion.is_null() { 0 } else { unsafe { *p.pVersion as u32 } };
                     Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
-                        digest_mechanism: p.DigestMechanism as u64,
+                        digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
                         random_info: WtlsRandomData { client_random, server_random },
                         version,
                     }))
@@ -1236,7 +1240,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         unsafe { *p.pulOutputLen as u64 }
                     };
                     Some(CkMechanismParams::WtlsPrf(WtlsPrfParams {
-                        digest_mechanism: p.DigestMechanism as u64,
+                        digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
                         seed: seed.into(),
                         label: label.into(),
                         output_len,
@@ -1303,15 +1307,15 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             unsafe { std::slice::from_raw_parts(output.pIV, iv_len) }.to_vec()
                         };
                         Some(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
-                            digest_mechanism: p.DigestMechanism as u64,
+                            digest_mechanism: CkMechanismType(p.DigestMechanism as u64),
                             mac_size_bits: p.ulMacSizeInBits as u64,
                             key_size_bits: p.ulKeySizeInBits as u64,
                             iv_size_bits: p.ulIVSizeInBits as u64,
                             sequence_number: p.ulSequenceNumber as u64,
                             is_export: p.bIsExport != 0,
                             random_info: WtlsRandomData { client_random, server_random },
-                            mac_secret_handle: output.hMacSecret as u64,
-                            key_handle: output.hKey as u64,
+                            mac_secret_handle: CkObjectHandle(output.hMacSecret as u64),
+                            key_handle: CkObjectHandle(output.hKey as u64),
                             iv,
                         }))
                     }
@@ -1373,7 +1377,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         random_info: SslRandomData { client_random, server_random },
                         version_major,
                         version_minor,
-                        prf_hash_mechanism: p.prfHashMechanism as u64,
+                        prf_hash_mechanism: CkMechanismType(p.prfHashMechanism as u64),
                     }))
                 }
             }
@@ -1487,7 +1491,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         .to_vec()
                     };
                     Some(CkMechanismParams::TlsKdf(TlsKdfParams {
-                        prf_mechanism: p.prfMechanism as u64,
+                        prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         label: label.into(),
                         random_info: SslRandomData { client_random, server_random },
                         context_data: context_data.into(),
@@ -1587,7 +1591,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 };
                 Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(
                     Tls12ExtendedMasterKeyDeriveParams {
-                        prf_hash_mechanism: p.prfHashMechanism as u64,
+                        prf_hash_mechanism: CkMechanismType(p.prfHashMechanism as u64),
                         session_hash,
                         version_major,
                         version_minor,
@@ -1674,11 +1678,15 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             iv_size_bits: p.ulIVSizeInBits as u64,
                             is_export: p.bIsExport != 0,
                             random_info: SslRandomData { client_random, server_random },
-                            prf_hash_mechanism,
-                            client_mac_secret_handle: output.hClientMacSecret as u64,
-                            server_mac_secret_handle: output.hServerMacSecret as u64,
-                            client_key_handle: output.hClientKey as u64,
-                            server_key_handle: output.hServerKey as u64,
+                            prf_hash_mechanism: CkMechanismType(prf_hash_mechanism),
+                            client_mac_secret_handle: CkObjectHandle(
+                                output.hClientMacSecret as u64,
+                            ),
+                            server_mac_secret_handle: CkObjectHandle(
+                                output.hServerMacSecret as u64,
+                            ),
+                            client_key_handle: CkObjectHandle(output.hClientKey as u64),
+                            server_key_handle: CkObjectHandle(output.hServerKey as u64),
                             client_iv: client_iv.into(),
                             server_iv: server_iv.into(),
                         }))
@@ -1750,7 +1758,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     };
                     Some(CkMechanismParams::EcdhAesKeyWrap(EcdhAesKeyWrapParams {
                         aes_key_bits: p.ulAESKeyBits as u64,
-                        kdf: p.kdf as u64,
+                        kdf: CkKdf(p.kdf as u64),
                         shared_data: shared_data.into(),
                     }))
                 }
@@ -1798,11 +1806,11 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         .to_vec()
                     };
                     Some(CkMechanismParams::Ecdh2Derive(Ecdh2DeriveParams {
-                        kdf: p.kdf as u64,
+                        kdf: CkKdf(p.kdf as u64),
                         shared_data: shared_data.into(),
                         public_data,
                         private_data_len: p.ulPrivateDataLen as u64,
-                        private_data_handle: p.hPrivateData as u64,
+                        private_data_handle: CkObjectHandle(p.hPrivateData as u64),
                         public_data2,
                     }))
                 }
@@ -1850,13 +1858,13 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         .to_vec()
                     };
                     Some(CkMechanismParams::EcmqvDerive(EcmqvDeriveParams {
-                        kdf: p.kdf as u64,
+                        kdf: CkKdf(p.kdf as u64),
                         shared_data: shared_data.into(),
                         public_data,
                         private_data_len: p.ulPrivateDataLen as u64,
-                        private_data_handle: p.hPrivateData as u64,
+                        private_data_handle: CkObjectHandle(p.hPrivateData as u64),
                         public_data2,
-                        public_key_handle: p.publicKey as u64,
+                        public_key_handle: CkObjectHandle(p.publicKey as u64),
                     }))
                 }
             }
@@ -1893,7 +1901,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         .to_vec()
                     };
                     Some(CkMechanismParams::X942Dh1Derive(X942Dh1DeriveParams {
-                        kdf: p.kdf as u64,
+                        kdf: CkKdf(p.kdf as u64),
                         other_info: other_info.into(),
                         public_data,
                     }))
@@ -1942,11 +1950,11 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         .to_vec()
                     };
                     Some(CkMechanismParams::X942Dh2Derive(X942Dh2DeriveParams {
-                        kdf: p.kdf as u64,
+                        kdf: CkKdf(p.kdf as u64),
                         other_info: other_info.into(),
                         public_data,
                         private_data_len: p.ulPrivateDataLen as u64,
-                        private_data_handle: p.hPrivateData as u64,
+                        private_data_handle: CkObjectHandle(p.hPrivateData as u64),
                         public_data2,
                     }))
                 }
@@ -1994,13 +2002,13 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         .to_vec()
                     };
                     Some(CkMechanismParams::X942MqvDerive(X942MqvDeriveParams {
-                        kdf: p.kdf as u64,
+                        kdf: CkKdf(p.kdf as u64),
                         other_info: other_info.into(),
                         public_data,
                         private_data_len: p.ulPrivateDataLen as u64,
-                        private_data_handle: p.hPrivateData as u64,
+                        private_data_handle: CkObjectHandle(p.hPrivateData as u64),
                         public_data2,
-                        public_key_handle: p.publicKey as u64,
+                        public_key_handle: CkObjectHandle(p.publicKey as u64),
                     }))
                 }
             }
@@ -2034,7 +2042,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         unsafe { std::slice::from_raw_parts(p.pUKM, p.ulUKMLen as usize) }.to_vec()
                     };
                     Some(CkMechanismParams::Gostr3410Derive(Gostr3410DeriveParams {
-                        kdf: p.kdf as u64,
+                        kdf: CkKdf(p.kdf as u64),
                         public_data,
                         ukm,
                     }))
@@ -2070,7 +2078,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
                         wrap_oid,
                         ukm,
-                        key_handle: p.hKey as u64,
+                        key_handle: CkObjectHandle(p.hKey as u64),
                     }))
                 }
             }
@@ -2165,12 +2173,12 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         unsafe { std::slice::from_raw_parts(p.pNr, p.ulNrLen as usize) }.to_vec()
                     };
                     Some(CkMechanismParams::IkePrfDerive(IkePrfDeriveParams {
-                        prf_mechanism: p.prfMechanism as u64,
+                        prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         data_as_key: p.bDataAsKey != 0,
                         rekey: p.bRekey != 0,
                         ni: ni.into(),
                         nr: nr.into(),
-                        new_key_handle: p.hNewKey as u64,
+                        new_key_handle: CkObjectHandle(p.hNewKey as u64),
                     }))
                 }
             }
@@ -2203,10 +2211,10 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             .to_vec()
                     };
                     Some(CkMechanismParams::Ike1PrfDerive(Ike1PrfDeriveParams {
-                        prf_mechanism: p.prfMechanism as u64,
+                        prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         has_prev_key: p.bHasPrevKey != 0,
-                        keygxy_handle: p.hKeygxy as u64,
-                        prev_key_handle: p.hPrevKey as u64,
+                        keygxy_handle: CkObjectHandle(p.hKeygxy as u64),
+                        prev_key_handle: CkObjectHandle(p.hPrevKey as u64),
                         ckyi: ckyi.into(),
                         ckyr: ckyr.into(),
                         key_number: p.keyNumber as u32,
@@ -2236,9 +2244,9 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         .to_vec()
                     };
                     Some(CkMechanismParams::Ike1ExtendedDerive(Ike1ExtendedDeriveParams {
-                        prf_mechanism: p.prfMechanism as u64,
+                        prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         has_keygxy: p.bHasKeygxy != 0,
-                        keygxy_handle: p.hKeygxy as u64,
+                        keygxy_handle: CkObjectHandle(p.hKeygxy as u64),
                         extra_data: extra_data.into(),
                     }))
                 }
@@ -2264,9 +2272,9 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             .to_vec()
                     };
                     Some(CkMechanismParams::Ike2PrfPlusDerive(Ike2PrfPlusDeriveParams {
-                        prf_mechanism: p.prfMechanism as u64,
+                        prf_mechanism: CkMechanismType(p.prfMechanism as u64),
                         has_seed_key: p.bHasSeedKey != 0,
-                        seed_key_handle: p.hSeedKey as u64,
+                        seed_key_handle: CkObjectHandle(p.hSeedKey as u64),
                         seed_data: seed_data.into(),
                     }))
                 }
@@ -2303,7 +2311,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     };
                     Some(CkMechanismParams::Kip(KipParams {
                         mechanism: Box::new(mechanism),
-                        key_handle: p.hKey as u64,
+                        key_handle: CkObjectHandle(p.hKey as u64),
                         seed: seed.into(),
                     }))
                 }
@@ -2546,7 +2554,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     Some(raw_mechanism_params(param_ptr, param_len))
                 } else {
                     Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-                        prf_type: p.prfType as u64,
+                        prf_type: CkMechanismType(p.prfType as u64),
                         data_params: unsafe {
                             read_sp800_108_data_params(p.pDataParams, p.ulNumberOfDataParams)
                         },
@@ -2586,7 +2594,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         unsafe { std::slice::from_raw_parts(p.pIV, p.ulIVLen as usize) }.to_vec()
                     };
                     Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                        prf_type: p.prfType as u64,
+                        prf_type: CkMechanismType(p.prfType as u64),
                         data_params: unsafe {
                             read_sp800_108_data_params(p.pDataParams, p.ulNumberOfDataParams)
                         },
@@ -2683,7 +2691,7 @@ unsafe fn read_sp800_108_derived_keys(
                     .unwrap_or_default();
             let key_handle =
                 if derived.phKey.is_null() { 0 } else { unsafe { *derived.phKey as u64 } };
-            Sp800108DerivedKey { template, key_handle }
+            Sp800108DerivedKey { template, key_handle: CkObjectHandle(key_handle) }
         })
         .collect()
 }

@@ -253,7 +253,8 @@ async fn loaded_shim_preserves_provider_mechanism_info_flags() {
 
     const CKM_BATON_KEY_GEN: CK_MECHANISM_TYPE = 0x0000_1030;
     const CKM_CAMELLIA_CTR: CK_MECHANISM_TYPE = 0x0000_0558;
-    const CKM_DES_CBC: CK_MECHANISM_TYPE = 0x0000_0122;
+    // W1-C9-06: bridge the canonical types const (no local hex).
+    const CKM_DES_CBC: CK_MECHANISM_TYPE = CkMechanismType::DES_CBC.0 as CK_MECHANISM_TYPE;
 
     let backend = Arc::new(MockBackend::new(
         vec![CkSlotId(0)],

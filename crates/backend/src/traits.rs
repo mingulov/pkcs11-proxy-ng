@@ -364,7 +364,7 @@ pub trait Pkcs11Backend: Send + Sync {
         pub_template: Option<&[CkAttribute]>,
         priv_template: Option<&[CkAttribute]>,
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)>;
-    /// Wait for a slot event. `flags == 1` means non-blocking (CKF_DONT_BLOCK).
+    /// Wait for a slot event. `flags == CkFlags::DONT_BLOCK` means non-blocking.
     /// Returns the slot ID where the event occurred.
     ///
     /// Native backends enforce the ownership wait boundary

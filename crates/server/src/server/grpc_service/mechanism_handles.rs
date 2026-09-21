@@ -220,61 +220,61 @@ fn push_param_handles(params: &CkMechanismParams, out: &mut Vec<u64>) {
     };
     use CkMechanismParams as P;
     match params {
-        P::Hkdf(p) => push(p.salt_key_handle, out),
-        P::Ecdh2Derive(p) => push(p.private_data_handle, out),
+        P::Hkdf(p) => push(p.salt_key_handle.0, out),
+        P::Ecdh2Derive(p) => push(p.private_data_handle.0, out),
         P::EcmqvDerive(p) => {
-            push(p.private_data_handle, out);
-            push(p.public_key_handle, out);
+            push(p.private_data_handle.0, out);
+            push(p.public_key_handle.0, out);
         }
-        P::X942Dh2Derive(p) => push(p.private_data_handle, out),
+        P::X942Dh2Derive(p) => push(p.private_data_handle.0, out),
         P::X942MqvDerive(p) => {
-            push(p.private_data_handle, out);
-            push(p.public_key_handle, out);
+            push(p.private_data_handle.0, out);
+            push(p.public_key_handle.0, out);
         }
-        P::Gostr3410KeyWrap(p) => push(p.key_handle, out),
+        P::Gostr3410KeyWrap(p) => push(p.key_handle.0, out),
         P::Ssl3KeyMat(p) => {
-            push(p.client_mac_secret_handle, out);
-            push(p.server_mac_secret_handle, out);
-            push(p.client_key_handle, out);
-            push(p.server_key_handle, out);
+            push(p.client_mac_secret_handle.0, out);
+            push(p.server_mac_secret_handle.0, out);
+            push(p.client_key_handle.0, out);
+            push(p.server_key_handle.0, out);
         }
         P::WtlsKeyMat(p) => {
-            push(p.mac_secret_handle, out);
-            push(p.key_handle, out);
+            push(p.mac_secret_handle.0, out);
+            push(p.key_handle.0, out);
         }
-        P::IkePrfDerive(p) => push(p.new_key_handle, out),
+        P::IkePrfDerive(p) => push(p.new_key_handle.0, out),
         P::Ike1PrfDerive(p) => {
-            push(p.keygxy_handle, out);
-            push(p.prev_key_handle, out);
+            push(p.keygxy_handle.0, out);
+            push(p.prev_key_handle.0, out);
         }
-        P::Ike1ExtendedDerive(p) => push(p.keygxy_handle, out),
-        P::Ike2PrfPlusDerive(p) => push(p.seed_key_handle, out),
+        P::Ike1ExtendedDerive(p) => push(p.keygxy_handle.0, out),
+        P::Ike2PrfPlusDerive(p) => push(p.seed_key_handle.0, out),
         P::X3dhInitiate(p) => {
-            push(p.peer_identity_handle, out);
-            push(p.peer_prekey_handle, out);
-            push(p.onetime_key_handle, out);
-            push(p.own_identity_handle, out);
-            push(p.own_ephemeral_handle, out);
+            push(p.peer_identity_handle.0, out);
+            push(p.peer_prekey_handle.0, out);
+            push(p.onetime_key_handle.0, out);
+            push(p.own_identity_handle.0, out);
+            push(p.own_ephemeral_handle.0, out);
         }
         P::X3dhRespond(p) => {
-            push(p.identity_handle, out);
-            push(p.prekey_handle, out);
-            push(p.onetime_key_handle, out);
-            push(p.initiator_identity_handle, out);
-            push(p.initiator_ephemeral_handle, out);
+            push(p.identity_handle.0, out);
+            push(p.prekey_handle.0, out);
+            push(p.onetime_key_handle.0, out);
+            push(p.initiator_identity_handle.0, out);
+            push(p.initiator_ephemeral_handle.0, out);
         }
         P::X2RatchetInitialize(p) => {
-            push(p.peer_public_prekey_handle, out);
-            push(p.peer_public_identity_handle, out);
-            push(p.own_public_identity_handle, out);
+            push(p.peer_public_prekey_handle.0, out);
+            push(p.peer_public_identity_handle.0, out);
+            push(p.own_public_identity_handle.0, out);
         }
         P::X2RatchetRespond(p) => {
-            push(p.own_prekey_handle, out);
-            push(p.initiator_identity_handle, out);
-            push(p.own_identity_handle, out);
+            push(p.own_prekey_handle.0, out);
+            push(p.initiator_identity_handle.0, out);
+            push(p.own_identity_handle.0, out);
         }
         P::Kip(p) => {
-            push(p.key_handle, out);
+            push(p.key_handle.0, out);
             if let Some(inner) = p.mechanism.params.as_ref() {
                 push_param_handles(inner, out);
             }
@@ -290,12 +290,12 @@ fn push_param_handles(params: &CkMechanismParams, out: &mut Vec<u64>) {
                 push_param_handles(inner, out);
             }
         }
-        P::ObjectHandle(p) => push(p.handle, out),
-        P::Kmac(p) => push(p.key_handle, out),
-        P::MuGen(p) => push(p.key_handle, out),
-        P::Kyber(p) => push(p.secret_handle, out),
+        P::ObjectHandle(p) => push(p.handle.0, out),
+        P::Kmac(p) => push(p.key_handle.0, out),
+        P::MuGen(p) => push(p.key_handle.0, out),
+        P::Kyber(p) => push(p.secret_handle.0, out),
         P::CmsSig(p) => {
-            push(p.certificate_handle, out);
+            push(p.certificate_handle.0, out);
             if let Some(inner) = p.signing_mechanism.params.as_ref() {
                 push_param_handles(inner, out);
             }
@@ -372,13 +372,16 @@ fn push_param_handles(params: &CkMechanismParams, out: &mut Vec<u64>) {
 /// client virtual handle that must resolve to a backend handle; an unresolvable
 /// handle rejects the whole call with `CKR_OBJECT_HANDLE_INVALID` (matching how
 /// the proxy already reports cross-context/unknown object handles).
-fn remap_handle(field: &mut u64, resolve: &impl Fn(u64) -> Option<u64>) -> Result<(), CkRv> {
-    if *field == 0 {
+fn remap_handle(
+    field: &mut CkObjectHandle,
+    resolve: &impl Fn(u64) -> Option<u64>,
+) -> Result<(), CkRv> {
+    if field.0 == 0 {
         return Ok(());
     }
-    match resolve(*field) {
+    match resolve(field.0) {
         Some(backend) => {
-            *field = backend;
+            field.0 = backend;
             Ok(())
         }
         None => Err(CkRv::OBJECT_HANDLE_INVALID),
@@ -570,10 +573,10 @@ mod tests {
         CkMechanismParams::Hkdf(HkdfParams {
             extract: true,
             expand: true,
-            prf_hash_mechanism: 0,
+            prf_hash_mechanism: pkcs11_proxy_ng_types::CkMechanismType(0),
             salt_type: 0,
             salt: Vec::new().into(),
-            salt_key_handle: salt,
+            salt_key_handle: CkObjectHandle(salt),
             info: Vec::new().into(),
         })
     }
@@ -581,12 +584,12 @@ mod tests {
     fn x3dh(handles: [u64; 5]) -> CkMechanismParams {
         CkMechanismParams::X3dhInitiate(X3dhInitiateParams {
             kdf: 0,
-            peer_identity_handle: handles[0],
-            peer_prekey_handle: handles[1],
+            peer_identity_handle: CkObjectHandle(handles[0]),
+            peer_prekey_handle: CkObjectHandle(handles[1]),
             prekey_signature: Vec::new(),
-            onetime_key_handle: handles[2],
-            own_identity_handle: handles[3],
-            own_ephemeral_handle: handles[4],
+            onetime_key_handle: CkObjectHandle(handles[2]),
+            own_identity_handle: CkObjectHandle(handles[3]),
+            own_ephemeral_handle: CkObjectHandle(handles[4]),
         })
     }
 
@@ -596,7 +599,7 @@ mod tests {
         let mut p = hkdf(0);
         remap_param_handles(&mut p, &resolver(&[])).unwrap();
         let CkMechanismParams::Hkdf(out) = p else { panic!() };
-        assert_eq!(out.salt_key_handle, 0);
+        assert_eq!(out.salt_key_handle.0, 0);
     }
 
     #[test]
@@ -604,7 +607,7 @@ mod tests {
         let mut p = hkdf(7);
         remap_param_handles(&mut p, &resolver(&[(7, 4242)])).unwrap();
         let CkMechanismParams::Hkdf(out) = p else { panic!() };
-        assert_eq!(out.salt_key_handle, 4242);
+        assert_eq!(out.salt_key_handle.0, 4242);
     }
 
     #[test]
@@ -628,7 +631,13 @@ mod tests {
                 out.own_identity_handle,
                 out.own_ephemeral_handle
             ),
-            (11, 22, 0, 33, 44)
+            (
+                CkObjectHandle(11),
+                CkObjectHandle(22),
+                CkObjectHandle(0),
+                CkObjectHandle(33),
+                CkObjectHandle(44)
+            )
         );
     }
 
@@ -667,7 +676,7 @@ mod tests {
     fn kip(key_handle: u64, inner: CkMechanismParams) -> CkMechanismParams {
         CkMechanismParams::Kip(pkcs11_proxy_ng_types::KipParams {
             mechanism: Box::new(with_params(inner)),
-            key_handle,
+            key_handle: CkObjectHandle(key_handle),
             seed: Vec::new().into(),
         })
     }
@@ -699,9 +708,9 @@ mod tests {
         let mut p = kip(7, hkdf(9));
         remap_param_handles(&mut p, &resolver(&[(7, 700), (9, 900)])).unwrap();
         let CkMechanismParams::Kip(out) = p else { panic!() };
-        assert_eq!(out.key_handle, 700);
+        assert_eq!(out.key_handle.0, 700);
         let Some(CkMechanismParams::Hkdf(inner)) = out.mechanism.params.as_ref() else { panic!() };
-        assert_eq!(inner.salt_key_handle, 900);
+        assert_eq!(inner.salt_key_handle.0, 900);
     }
 
     #[test]
@@ -720,9 +729,9 @@ mod tests {
             let Some(CkMechanismParams::Hkdf(inner)) = m.params.as_ref() else { panic!() };
             inner.salt_key_handle
         };
-        assert_eq!(salt_of(&out.derivation_mechanism), 11);
-        assert_eq!(salt_of(&out.encryption_mechanism), 22);
-        assert_eq!(salt_of(&out.mac_mechanism), 33);
+        assert_eq!(salt_of(&out.derivation_mechanism), CkObjectHandle(11));
+        assert_eq!(salt_of(&out.encryption_mechanism), CkObjectHandle(22));
+        assert_eq!(salt_of(&out.mac_mechanism), CkObjectHandle(33));
     }
 
     // -----------------------------------------------------------------------
@@ -856,10 +865,10 @@ mod tests {
             params: Some(CkMechanismParams::Hkdf(HkdfParams {
                 extract: true,
                 expand: true,
-                prf_hash_mechanism: 0,
+                prf_hash_mechanism: pkcs11_proxy_ng_types::CkMechanismType(0),
                 salt_type: 0,
                 salt: Vec::new().into(),
-                salt_key_handle: vo, // this virtual handle is denied (wrong uid)
+                salt_key_handle: CkObjectHandle(vo), // this virtual handle is denied (wrong uid)
                 info: Vec::new().into(),
             })),
         };
@@ -886,10 +895,10 @@ mod tests {
             params: Some(CkMechanismParams::Hkdf(HkdfParams {
                 extract: true,
                 expand: true,
-                prf_hash_mechanism: 0,
+                prf_hash_mechanism: pkcs11_proxy_ng_types::CkMechanismType(0),
                 salt_type: 0,
                 salt: Vec::new().into(),
-                salt_key_handle: vo, // this virtual handle is allowed
+                salt_key_handle: CkObjectHandle(vo), // this virtual handle is allowed
                 info: Vec::new().into(),
             })),
         };
@@ -901,7 +910,7 @@ mod tests {
             panic!("mechanism params must still be Hkdf after remap");
         };
         assert_ne!(
-            out.salt_key_handle, 0,
+            out.salt_key_handle.0, 0,
             "remapped backend handle must be non-zero for allowed object"
         );
     }

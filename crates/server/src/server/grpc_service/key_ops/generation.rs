@@ -804,21 +804,23 @@ async fn virtualize_derived_key_handles(
     derived_keys: &mut [Sp800108DerivedKey],
 ) {
     for derived_key in derived_keys {
-        if derived_key.key_handle != 0 {
+        if derived_key.key_handle != CkObjectHandle(0) {
             // m-1: derived keys are always private secret keys. Each key is
             // bound to the derive session per its own template (B2), so a
             // session additional key evicts — mapping and privacy bit — when
             // the owner session closes instead of lingering as a stale
             // mapping that over-refuses with CKR_USER_NOT_LOGGED_IN.
-            derived_key.key_handle = register_session_object_handle(
-                ctx_mgr,
-                ctx_id,
-                virtual_session,
-                CkObjectHandle(derived_key.key_handle as u64),
-                template_declares_token_object(&derived_key.template),
-                Some(true),
-            )
-            .await;
+            derived_key.key_handle = CkObjectHandle(
+                register_session_object_handle(
+                    ctx_mgr,
+                    ctx_id,
+                    virtual_session,
+                    derived_key.key_handle,
+                    template_declares_token_object(&derived_key.template),
+                    Some(true),
+                )
+                .await,
+            );
         }
     }
 }
@@ -835,7 +837,7 @@ async fn virtualize_key_mat_out_handles(
     is_token_object: bool,
     params: &mut CkMechanismParams,
 ) {
-    let handles: &mut [&mut u64] = match params {
+    let handles: &mut [&mut CkObjectHandle] = match params {
         CkMechanismParams::Ssl3KeyMat(p) => &mut [
             &mut p.client_mac_secret_handle,
             &mut p.server_mac_secret_handle,
@@ -846,21 +848,23 @@ async fn virtualize_key_mat_out_handles(
         _ => return,
     };
     for handle in handles {
-        if **handle != 0 {
+        if **handle != CkObjectHandle(0) {
             // m-1: key-mat OUT handles are always private secret keys. Key-mat
             // params carry no per-key template, so the outputs inherit the
             // derive template's token classification (like the primary
             // derived key) and bind to the derive session (B2): a session
             // output's mapping and privacy bit evict on owner-session close.
-            **handle = register_session_object_handle(
-                ctx_mgr,
-                ctx_id,
-                virtual_session,
-                CkObjectHandle(**handle),
-                is_token_object,
-                Some(true),
-            )
-            .await;
+            **handle = CkObjectHandle(
+                register_session_object_handle(
+                    ctx_mgr,
+                    ctx_id,
+                    virtual_session,
+                    **handle,
+                    is_token_object,
+                    Some(true),
+                )
+                .await,
+            );
         }
     }
 }
@@ -894,7 +898,7 @@ mod tests {
         let virtual_key =
             ctx_mgr.get_context(&ctx_id, |c| c.object_handles.insert(backend_key)).await.unwrap();
         let mut params = CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-            prf_type: CkMechanismType::SHA256.0,
+            prf_type: CkMechanismType::SHA256,
             data_params: vec![PrfDataParam {
                 type_: CK_SP800_108_KEY_HANDLE,
                 value: virtual_key.0.to_ne_bytes().to_vec().into(),
@@ -921,7 +925,7 @@ mod tests {
         let ctx = make_ctx(&ctx_mgr);
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let mut params = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CkMechanismType::SHA256.0,
+            prf_type: CkMechanismType::SHA256,
             data_params: vec![PrfDataParam {
                 type_: CK_SP800_108_KEY_HANDLE,
                 value: vec![1, 2, 3].into(),
@@ -953,7 +957,7 @@ mod tests {
             .unwrap();
         let input = (virtual_key.0 as u32).to_ne_bytes().to_vec();
         let mut params = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: cryptoki_sys::CKM_SHA256_HMAC as u64,
+            prf_type: CkMechanismType(cryptoki_sys::CKM_SHA256_HMAC as u64),
             data_params: vec![PrfDataParam {
                 type_: CK_SP800_108_KEY_HANDLE,
                 value: input.clone().into(),
@@ -1004,7 +1008,7 @@ mod tests {
             .await
             .unwrap();
         let mut params = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CkMechanismType::SHA256.0,
+            prf_type: CkMechanismType::SHA256,
             data_params: vec![PrfDataParam {
                 type_: CK_SP800_108_KEY_HANDLE,
                 value: virtual_key.0.to_ne_bytes().to_vec().into(),
@@ -1067,26 +1071,26 @@ mod tests {
             iv_size_bits: 0,
             is_export: false,
             random_info: SslRandomData { client_random: vec![1; 32], server_random: vec![2; 32] },
-            prf_hash_mechanism: 0,
-            client_mac_secret_handle: 0xA1,
-            server_mac_secret_handle: 0,
-            client_key_handle: 0xA2,
-            server_key_handle: 0xA3,
+            prf_hash_mechanism: CkMechanismType(0),
+            client_mac_secret_handle: CkObjectHandle(0xA1),
+            server_mac_secret_handle: CkObjectHandle(0),
+            client_key_handle: CkObjectHandle(0xA2),
+            server_key_handle: CkObjectHandle(0xA3),
             client_iv: Vec::new().into(),
             server_iv: Vec::new().into(),
         });
         virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut ssl3).await;
         let CkMechanismParams::Ssl3KeyMat(ssl3) = &ssl3 else { unreachable!() };
-        assert_eq!(ssl3.server_mac_secret_handle, 0, "zero OUT handles stay zero");
+        assert_eq!(ssl3.server_mac_secret_handle.0, 0, "zero OUT handles stay zero");
         for (rewritten, backend) in [
             (ssl3.client_mac_secret_handle, 0xA1),
             (ssl3.client_key_handle, 0xA2),
             (ssl3.server_key_handle, 0xA3),
         ] {
-            assert_ne!(rewritten, backend, "non-zero OUT handle must be rewritten");
+            assert_ne!(rewritten.0, backend, "non-zero OUT handle must be rewritten");
             let resolved = ctx_mgr
                 .get_context(&ctx_id, |c| {
-                    c.object_handles.resolve(crate::server::handle_map::VirtualHandle(rewritten))
+                    c.object_handles.resolve(crate::server::handle_map::VirtualHandle(rewritten.0))
                 })
                 .await
                 .unwrap();
@@ -1094,25 +1098,25 @@ mod tests {
         }
 
         let mut wtls = CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
-            digest_mechanism: 0x220,
+            digest_mechanism: CkMechanismType(0x220),
             mac_size_bits: 128,
             key_size_bits: 128,
             iv_size_bits: 0,
             sequence_number: 0,
             is_export: false,
             random_info: WtlsRandomData { client_random: vec![3; 16], server_random: vec![4; 16] },
-            mac_secret_handle: 0xB1,
-            key_handle: 0,
+            mac_secret_handle: CkObjectHandle(0xB1),
+            key_handle: CkObjectHandle(0),
             iv: Vec::new(),
         });
         virtualize_key_mat_out_handles(&ctx_mgr, &ctx_id, virtual_session, false, &mut wtls).await;
         let CkMechanismParams::WtlsKeyMat(wtls) = &wtls else { unreachable!() };
-        assert_eq!(wtls.key_handle, 0);
-        assert_ne!(wtls.mac_secret_handle, 0xB1);
+        assert_eq!(wtls.key_handle.0, 0);
+        assert_ne!(wtls.mac_secret_handle.0, 0xB1);
         let resolved = ctx_mgr
             .get_context(&ctx_id, |c| {
                 c.object_handles
-                    .resolve(crate::server::handle_map::VirtualHandle(wtls.mac_secret_handle))
+                    .resolve(crate::server::handle_map::VirtualHandle(wtls.mac_secret_handle.0))
             })
             .await
             .unwrap();
@@ -1120,7 +1124,7 @@ mod tests {
 
         // Non-key-mat params are untouched.
         let mut other = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CkMechanismType::SHA256.0,
+            prf_type: CkMechanismType::SHA256,
             data_params: Vec::new(),
             additional_derived_keys: Vec::new(),
         });
@@ -1156,11 +1160,11 @@ mod tests {
             iv_size_bits: 0,
             is_export: false,
             random_info: SslRandomData { client_random: vec![1; 32], server_random: vec![2; 32] },
-            prf_hash_mechanism: 0,
-            client_mac_secret_handle: 0,
-            server_mac_secret_handle: 0,
-            client_key_handle: 0xA2,
-            server_key_handle: 0,
+            prf_hash_mechanism: CkMechanismType(0),
+            client_mac_secret_handle: CkObjectHandle(0),
+            server_mac_secret_handle: CkObjectHandle(0),
+            client_key_handle: CkObjectHandle(0xA2),
+            server_key_handle: CkObjectHandle(0),
             client_iv: Vec::new().into(),
             server_iv: Vec::new().into(),
         });
@@ -1170,11 +1174,11 @@ mod tests {
 
         // SP800-108 additional derived-key handle unknown to the mock backend.
         let mut kdf = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CkMechanismType::SHA256.0,
+            prf_type: CkMechanismType::SHA256,
             data_params: Vec::new(),
             additional_derived_keys: vec![Sp800108DerivedKey {
                 template: Vec::new(),
-                key_handle: 0xC1,
+                key_handle: CkObjectHandle(0xC1),
             }],
         });
         virtualize_sp800_108_additional_handles(&ctx_mgr, &ctx_id, virtual_session, &mut kdf).await;
@@ -1187,7 +1191,7 @@ mod tests {
             let recorded = ctx_mgr
                 .get_context(&ctx_id, |c| {
                     c.object_private
-                        .get(&crate::server::handle_map::VirtualHandle(virtual_handle))
+                        .get(&crate::server::handle_map::VirtualHandle(virtual_handle.0))
                         .copied()
                 })
                 .await
@@ -1202,7 +1206,7 @@ mod tests {
                     &ctx,
                     &ctx_id,
                     virtual_session.0,
-                    virtual_handle,
+                    virtual_handle.0,
                     CkSessionHandle(77),
                     CkObjectHandle(backend_handle),
                 )
@@ -1237,16 +1241,16 @@ mod tests {
             .unwrap();
 
         let mut kdf = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CkMechanismType::SHA256.0,
+            prf_type: CkMechanismType::SHA256,
             data_params: Vec::new(),
             additional_derived_keys: vec![
-                Sp800108DerivedKey { template: Vec::new(), key_handle: 0xC1 },
+                Sp800108DerivedKey { template: Vec::new(), key_handle: CkObjectHandle(0xC1) },
                 Sp800108DerivedKey {
                     template: vec![CkAttribute {
                         attr_type: CkAttributeType::TOKEN,
                         value: Some(CkAttributeValue::Bool(true)),
                     }],
-                    key_handle: 0xC2,
+                    key_handle: CkObjectHandle(0xC2),
                 },
             ],
         });
@@ -1261,11 +1265,11 @@ mod tests {
             iv_size_bits: 0,
             is_export: false,
             random_info: SslRandomData { client_random: vec![1; 32], server_random: vec![2; 32] },
-            prf_hash_mechanism: 0,
-            client_mac_secret_handle: 0,
-            server_mac_secret_handle: 0,
-            client_key_handle: 0xA2,
-            server_key_handle: 0,
+            prf_hash_mechanism: CkMechanismType(0),
+            client_mac_secret_handle: CkObjectHandle(0),
+            server_mac_secret_handle: CkObjectHandle(0),
+            client_key_handle: CkObjectHandle(0xA2),
+            server_key_handle: CkObjectHandle(0),
             client_iv: Vec::new().into(),
             server_iv: Vec::new().into(),
         });
@@ -1283,8 +1287,8 @@ mod tests {
             let (resolved, recorded) = ctx_mgr
                 .get_context(&ctx_id, |c| {
                     (
-                        c.object_handles.resolve(VirtualHandle(virtual_handle)),
-                        c.object_private.get(&VirtualHandle(virtual_handle)).copied(),
+                        c.object_handles.resolve(VirtualHandle(virtual_handle.0)),
+                        c.object_private.get(&VirtualHandle(virtual_handle.0)).copied(),
                     )
                 })
                 .await
@@ -1304,8 +1308,8 @@ mod tests {
             let (resolved, recorded) = ctx_mgr
                 .get_context(&ctx_id, |c| {
                     (
-                        c.object_handles.resolve(VirtualHandle(virtual_handle)),
-                        c.object_private.get(&VirtualHandle(virtual_handle)).copied(),
+                        c.object_handles.resolve(VirtualHandle(virtual_handle.0)),
+                        c.object_private.get(&VirtualHandle(virtual_handle.0)).copied(),
                     )
                 })
                 .await
@@ -1330,7 +1334,7 @@ mod tests {
             .await
             .unwrap();
         let (_, backend_object) =
-            resolve_session_and_object(&ctx, &ctx_id, fresh_session.0, v_session_key)
+            resolve_session_and_object(&ctx, &ctx_id, fresh_session.0, v_session_key.0)
                 .await
                 .unwrap();
         assert_eq!(
@@ -1340,7 +1344,7 @@ mod tests {
         );
         // ... while the surviving private token key still refuses.
         assert_eq!(
-            resolve_session_and_object(&ctx, &ctx_id, fresh_session.0, v_token_key).await,
+            resolve_session_and_object(&ctx, &ctx_id, fresh_session.0, v_token_key.0).await,
             Err(CkRv::USER_NOT_LOGGED_IN),
             "surviving private token key must still refuse logged-out USE"
         );

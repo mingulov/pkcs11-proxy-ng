@@ -7,7 +7,7 @@ use super::{
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_proto::convert::message_effects::MessageEffects;
 use pkcs11_proxy_ng_proto::convert::message_params::{MessageParameter, MessageParameterShape};
-use pkcs11_proxy_ng_types::{CkResult, CkRv, SecretBytes};
+use pkcs11_proxy_ng_types::{CkObjectHandle, CkResult, CkRv, SecretBytes};
 
 #[test]
 fn exact_query_parameter_effect_rejection_is_transactional() {
@@ -1285,10 +1285,10 @@ fn write_mechanism_output_params_writes_tls12_pversion() {
             ulServerRandomLen: 0,
         },
         pVersion: &mut version,
-        prfHashMechanism: CkMechanismType::SHA256.0 as _,
+        prfHashMechanism: CkMechanismType::SHA256.0,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0 as _,
+        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_TLS12_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
     };
@@ -1297,7 +1297,7 @@ fn write_mechanism_output_params_writes_tls12_pversion() {
         random_info: SslRandomData { client_random: vec![], server_random: vec![] },
         version_major: 3,
         version_minor: 3, // TLS 1.2
-        prf_hash_mechanism: CkMechanismType::SHA256.0 as _,
+        prf_hash_mechanism: CkMechanismType::SHA256,
     });
 
     unsafe {
@@ -1327,7 +1327,7 @@ fn write_mechanism_output_params_writes_pbe_init_vector() {
         ulIteration: 1000,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::PBE_SHA1_DES3_EDE_CBC.0 as _,
+        mechanism: CkMechanismType::PBE_SHA1_DES3_EDE_CBC.0,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
     };
@@ -1365,7 +1365,7 @@ fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
         ulIteration: 1,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::PBA_SHA1_WITH_SHA1_HMAC.0 as _,
+        mechanism: CkMechanismType::PBA_SHA1_WITH_SHA1_HMAC.0,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
     };
@@ -1398,10 +1398,10 @@ fn write_mechanism_output_params_tls12_safe_when_pversion_null() {
             ulServerRandomLen: 0,
         },
         pVersion: std::ptr::null_mut(),
-        prfHashMechanism: CkMechanismType::SHA256.0 as _,
+        prfHashMechanism: CkMechanismType::SHA256.0,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0 as _,
+        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_TLS12_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
     };
@@ -1410,7 +1410,7 @@ fn write_mechanism_output_params_tls12_safe_when_pversion_null() {
         random_info: SslRandomData { client_random: vec![], server_random: vec![] },
         version_major: 3,
         version_minor: 3,
-        prf_hash_mechanism: CkMechanismType::SHA256.0 as _,
+        prf_hash_mechanism: CkMechanismType::SHA256,
     });
 
     unsafe {
@@ -1431,7 +1431,7 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
     let mut server_random = [0xB1u8, 0xB2];
     let mut version = 1u8;
     let mut params = CK_WTLS_MASTER_KEY_DERIVE_PARAMS {
-        DigestMechanism: CkMechanismType::SHA256.0 as _,
+        DigestMechanism: CkMechanismType::SHA256.0,
         RandomInfo: CK_WTLS_RANDOM_DATA {
             pClientRandom: client_random.as_mut_ptr(),
             ulClientRandomLen: client_random.len() as CK_ULONG,
@@ -1451,7 +1451,7 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
         .expect("wtls params")
     {
         CkMechanismParams::WtlsMasterKeyDerive(params) => {
-            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.random_info.client_random, client_random);
             assert_eq!(params.random_info.server_random, server_random);
             assert_eq!(params.version, 1);
@@ -1460,7 +1460,7 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
     }
 
     let mech_out = CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
-        digest_mechanism: CkMechanismType::SHA256.0 as _,
+        digest_mechanism: CkMechanismType::SHA256,
         random_info: WtlsRandomData {
             client_random: client_random.to_vec(),
             server_random: server_random.to_vec(),
@@ -1487,7 +1487,7 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
     let mut iv = [0u8; 4];
     let mut key_mat_out = CK_WTLS_KEY_MAT_OUT { hMacSecret: 0, hKey: 0, pIV: iv.as_mut_ptr() };
     let mut params = CK_WTLS_KEY_MAT_PARAMS {
-        DigestMechanism: CkMechanismType::SHA256.0 as _,
+        DigestMechanism: CkMechanismType::SHA256.0,
         ulMacSizeInBits: 160,
         ulKeySizeInBits: 128,
         ulIVSizeInBits: 32,
@@ -1512,7 +1512,7 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         .expect("wtls key material params")
     {
         CkMechanismParams::WtlsKeyMat(params) => {
-            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.mac_size_bits, 160);
             assert_eq!(params.key_size_bits, 128);
             assert_eq!(params.iv_size_bits, 32);
@@ -1520,15 +1520,15 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             assert!(params.is_export);
             assert_eq!(params.random_info.client_random, client_random);
             assert_eq!(params.random_info.server_random, server_random);
-            assert_eq!(params.mac_secret_handle, 0);
-            assert_eq!(params.key_handle, 0);
+            assert_eq!(params.mac_secret_handle.0, 0);
+            assert_eq!(params.key_handle.0, 0);
             assert_eq!(params.iv, [0u8; 4]);
         }
         other => panic!("unexpected WTLS key material params: {other:?}"),
     }
 
     let mech_out = CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
-        digest_mechanism: CkMechanismType::SHA256.0 as _,
+        digest_mechanism: CkMechanismType::SHA256,
         mac_size_bits: 160,
         key_size_bits: 128,
         iv_size_bits: 32,
@@ -1538,8 +1538,8 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             client_random: client_random.to_vec(),
             server_random: server_random.to_vec(),
         },
-        mac_secret_handle: 101,
-        key_handle: 202,
+        mac_secret_handle: CkObjectHandle(101),
+        key_handle: CkObjectHandle(202),
         iv: vec![0xA1, 0xA2, 0xA3, 0xA4],
     });
     unsafe {
@@ -1585,7 +1585,7 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             ulServerRandomLen: server_random.len() as CK_ULONG,
         },
         pReturnedKeyMaterial: &mut key_mat_out,
-        prfHashMechanism: CkMechanismType::SHA256.0 as _,
+        prfHashMechanism: CkMechanismType::SHA256.0,
     };
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_TLS12_KEY_AND_MAC_DERIVE,
@@ -1604,11 +1604,11 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             assert!(!params.is_export);
             assert_eq!(params.random_info.client_random, client_random);
             assert_eq!(params.random_info.server_random, server_random);
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as u64);
-            assert_eq!(params.client_mac_secret_handle, 0);
-            assert_eq!(params.server_mac_secret_handle, 0);
-            assert_eq!(params.client_key_handle, 0);
-            assert_eq!(params.server_key_handle, 0);
+            assert_eq!(params.prf_hash_mechanism.0, CkMechanismType::SHA256.0 as u64);
+            assert_eq!(params.client_mac_secret_handle.0, 0);
+            assert_eq!(params.server_mac_secret_handle.0, 0);
+            assert_eq!(params.client_key_handle.0, 0);
+            assert_eq!(params.server_key_handle.0, 0);
             assert_eq!(params.client_iv, SecretBytes::copy_from_slice(&[0u8; 4]));
             assert_eq!(params.server_iv, SecretBytes::copy_from_slice(&[0u8; 4]));
         }
@@ -1624,11 +1624,11 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             client_random: client_random.to_vec(),
             server_random: server_random.to_vec(),
         },
-        prf_hash_mechanism: CkMechanismType::SHA256.0 as _,
-        client_mac_secret_handle: 101,
-        server_mac_secret_handle: 102,
-        client_key_handle: 201,
-        server_key_handle: 202,
+        prf_hash_mechanism: CkMechanismType::SHA256,
+        client_mac_secret_handle: CkObjectHandle(101),
+        server_mac_secret_handle: CkObjectHandle(102),
+        client_key_handle: CkObjectHandle(201),
+        server_key_handle: CkObjectHandle(202),
         client_iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
         server_iv: vec![0xB1, 0xB2, 0xB3, 0xB4].into(),
     });

@@ -4915,3 +4915,47 @@ fn class1_dispatch_sites_use_classified_input_reader() {
         }
     }
 }
+
+/// W1-L4-11: every `CkMechanismParams` variant and every official
+/// parameter-requiring mechanism must resolve to a default TOML shape.
+/// Known residuals are pinned as explicit exclusions in the inventory; any new
+/// gap (e.g. removing a `[[params]]` entry) fails this gate.
+#[test]
+fn oasis_inventory_default_toml_shape_coverage_has_no_gaps() {
+    let root = workspace_root();
+    let Some(inventory) = oasis_inventory_json(&root) else {
+        return;
+    };
+    let coverage = &inventory["default_shape_coverage"];
+
+    let variant_gaps = coverage["param_variants_missing_default_shape"]
+        .as_array()
+        .expect("param_variants_missing_default_shape should be an array");
+    assert!(
+        variant_gaps.is_empty(),
+        "every CkMechanismParams variant should have a default TOML shape: {variant_gaps:?}"
+    );
+
+    let mechanism_gaps = coverage["official_param_mechanisms_missing_default_shape"]
+        .as_array()
+        .expect("official_param_mechanisms_missing_default_shape should be an array");
+    assert!(
+        mechanism_gaps.is_empty(),
+        "every official param-requiring mechanism should have a default TOML shape: {mechanism_gaps:?}"
+    );
+
+    // The check must actually measure coverage, not vacuously pass.
+    assert!(
+        coverage["toml_shape_count"].as_u64().unwrap_or(0) > 0,
+        "default TOML should define shapes"
+    );
+    assert!(
+        coverage["rust_variant_count"].as_u64().unwrap_or(0) > 0,
+        "CkMechanismParams variants should be enumerated"
+    );
+    // Pinned residuals stay documented, not silently dropped.
+    assert!(
+        coverage["variant_exclusions"]["Raw"].is_string(),
+        "Raw fallback exclusion should stay documented"
+    );
+}

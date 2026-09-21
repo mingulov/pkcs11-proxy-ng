@@ -545,16 +545,10 @@ message Sp800108FeedbackKdfParams {
   repeated Sp800108DerivedKey additional_derived_keys = 4;
 }
 
-// CK_SP800_108_COUNTER_FORMAT
-message Sp800108CounterFormat {
-  uint64 width_in_bits = 1;
-}
-
-// CK_SP800_108_DKM_LENGTH_FORMAT
-message Sp800108DkmLengthFormat {
-  uint64 dkm_length_method = 1;
-  uint64 width_in_bits = 2;
-}
+// W1-C9-12 removal note: CK_SP800_108_COUNTER_FORMAT /
+// CK_SP800_108_DKM_LENGTH_FORMAT messages were defined here but never used in
+// a oneof or conversion. Their payloads ride opaquely in PrfDataParam bytes;
+// see the matching note in crates/types/src/mechanism.rs.
 
 // ---------------------------------------------------------------------------
 // Signal Protocol
