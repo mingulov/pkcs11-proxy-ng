@@ -57,6 +57,24 @@ pub(super) async fn create_object(
         }));
     }
 
+    // W1-L7-05: mint-time class gate — a class-confined principal must not
+    // persist a denied-class object (the USE-time gate alone leaves the
+    // object on the token). Denied before the backend runs.
+    if !super::super::authorization::class_mint_permitted(
+        ctx,
+        &ctx_id,
+        req.session_handle,
+        template_view,
+        None,
+    )
+    .await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
+            ck_rv: CkRv::ATTRIBUTE_VALUE_INVALID.0,
+            object_handle: 0,
+        }));
+    }
+
     // Classify before the template is moved into the backend call: a session
     // object's handle is evicted when its session closes; a token object's
     // handle persists across sessions (B2). The privacy bit is recorded for
@@ -132,6 +150,23 @@ pub(super) async fn copy_object(
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
             ck_rv: rv.0,
+            new_object_handle: 0,
+        }));
+    }
+
+    // W1-L7-05: mint-time class gate (see create_object). A copy without a
+    // class override inherits its (USE-allowed) source's class.
+    if !super::super::authorization::class_mint_permitted(
+        ctx,
+        &ctx_id,
+        req.session_handle,
+        template_view,
+        None,
+    )
+    .await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
+            ck_rv: CkRv::ATTRIBUTE_VALUE_INVALID.0,
             new_object_handle: 0,
         }));
     }

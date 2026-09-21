@@ -497,6 +497,17 @@ pub struct ContextManager {
     /// `C_DestroyObject` and `C_InitToken` — so a cross-client backend handle
     /// recycling event can never validate a stale cached entry.
     authz_generation: AtomicU64,
+    /// Outstanding per-principal session-quota reservations (W1-L6-04):
+    /// opens that passed the quota check but have not registered yet.
+    /// The quota check-and-reserve is atomic under this mutex, so
+    /// concurrent opens cannot exceed the cap. Entries are removed when
+    /// their count reaches zero, keeping the map bounded by the number of
+    /// principals with in-flight opens.
+    ///
+    /// Lock order: quota mutex OUTER, contexts-DashMap shard guards INNER
+    /// (transient, inside `session_count_for_principal`). Never acquire
+    /// this mutex while holding a contexts guard.
+    session_quota_reservations: Arc<std::sync::Mutex<HashMap<String, usize>>>,
 }
 
 /// Maximum age of a cached `(label, serial)` before an authorization check
@@ -541,6 +552,38 @@ impl Drop for OperationGuardInner {
     }
 }
 
+/// One outstanding per-principal session-quota slot (W1-L6-04), minted by
+/// [`ContextManager::try_reserve_session_for_principal`]. Dropping it
+/// releases the slot (the entry is removed at zero, bounding the map).
+pub(crate) struct SessionQuotaReservation {
+    reservations: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    principal: String,
+}
+
+impl Drop for SessionQuotaReservation {
+    fn drop(&mut self) {
+        let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = reservations.get_mut(&self.principal) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                reservations.remove(&self.principal);
+            }
+        }
+    }
+}
+
+/// Outcome of [`ContextManager::remove_context_if_idle`].
+pub enum RemoveIfIdleOutcome {
+    /// The context was removed; the caller owns teardown. Boxed: the
+    /// instance is large and the other variants are fieldless.
+    Removed(Box<LogicalClientInstance>),
+    /// The context exists but has foreign operations in flight; it was
+    /// left in place and the caller should refuse busy (retryable).
+    Busy,
+    /// No such context.
+    Missing,
+}
+
 impl ContextManager {
     pub fn new(lease_duration: std::time::Duration, max_contexts: usize) -> Self {
         Self {
@@ -551,6 +594,7 @@ impl ContextManager {
             token_info_cache: Arc::new(DashMap::new()),
             login_locks: Arc::new(DashMap::new()),
             authz_generation: AtomicU64::new(0),
+            session_quota_reservations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -1101,16 +1145,49 @@ impl ContextManager {
         self.contexts.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
     }
 
+    /// Atomically check the per-principal session quota and reserve one
+    /// slot when under `max` (W1-L6-04). Returns `None` (at cap) or
+    /// `Some(reservation)`; the reservation counts toward the cap until
+    /// dropped. `open_session` drops it once the session registers (the
+    /// live count then covers it) or when the open fails — every return
+    /// path releases, so the cap cannot leak.
+    ///
+    /// Lock order: quota mutex OUTER, contexts-DashMap shard guards INNER
+    /// (transient). Never call while holding a contexts guard.
+    ///
+    /// Not `async`: mutex + DashMap reads need no `.await` (L5).
+    pub(crate) fn try_reserve_session_for_principal(
+        &self,
+        principal_key: &str,
+        max: usize,
+    ) -> Option<SessionQuotaReservation> {
+        let mut reservations =
+            self.session_quota_reservations.lock().unwrap_or_else(|e| e.into_inner());
+        let live = self.session_count_for_principal(principal_key);
+        let outstanding = reservations.get(principal_key).copied().unwrap_or(0);
+        if live + outstanding >= max {
+            return None;
+        }
+        *reservations.entry(principal_key.to_owned()).or_insert(0) += 1;
+        Some(SessionQuotaReservation {
+            reservations: Arc::clone(&self.session_quota_reservations),
+            principal: principal_key.to_owned(),
+        })
+    }
+
     /// Sum of open sessions across ALL contexts whose principal key equals
     /// `principal_key`. A context's principal key is its `authenticated_identity`
     /// when set; otherwise the context-id string itself (mirrors the derivation
     /// used at the dispatch seam so authenticated principals aggregate across
     /// their contexts and unauthenticated contexts are counted individually).
     ///
+    /// Counts LIVE sessions only; in-flight opens hold
+    /// [`SessionQuotaReservation`]s which count toward the same cap (W1-L6-04).
+    /// Quota callers must use [`Self::try_reserve_session_for_principal`],
+    /// not a bare read of this count (check-then-act races the cap).
+    ///
     /// Not `async`: iterates the DashMap with shared shard guards, no await
-    /// needed (L5). Called from `open_session` BEFORE opening the backend
-    /// session — leak-proof because it reads live bookkeeping rather than
-    /// maintaining a separate reserve/release counter.
+    /// needed (L5).
     pub fn session_count_for_principal(&self, principal_key: &str) -> usize {
         self.contexts
             .iter()
@@ -1126,6 +1203,43 @@ impl ContextManager {
     // Not `async`: a DashMap remove needs no `.await` (L5).
     pub fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
         self.contexts.remove(id).map(|(_k, v)| v)
+    }
+
+    /// Remove `id` only when no FOREIGN backend operation is in flight
+    /// (W1-L6-02): the check + remove are atomic under the DashMap shard
+    /// write lock (same TOCTOU discipline as eviction's `remove_if`), so a
+    /// concurrent op that began before the removal is never cut off
+    /// mid-backend-call — `begin_operation` increments under the shard read
+    /// lock, which is mutually exclusive with this write lock.
+    ///
+    /// `own_guards` is the number of in-flight guards held by the caller
+    /// itself (finalize holds exactly one via dispatch scoping): removal
+    /// proceeds when `in_flight <= own_guards`.
+    ///
+    /// Lock order: contexts-DashMap shard lock only, held transiently;
+    /// never acquire any other lock (quota mutex, slot login locks) while
+    /// holding it, and never call this while holding one.
+    ///
+    /// Not `async`: a DashMap predicate-remove needs no `.await` (L5).
+    pub fn remove_context_if_idle(
+        &self,
+        id: &ClientContextId,
+        own_guards: i64,
+    ) -> RemoveIfIdleOutcome {
+        if let Some((_, ctx)) = self
+            .contexts
+            .remove_if(id, |_, ctx| ctx.in_flight.load(Ordering::Relaxed) <= own_guards)
+        {
+            return RemoveIfIdleOutcome::Removed(Box::new(ctx));
+        }
+        if self.contexts.contains_key(id) {
+            // Still present: the predicate refused it, so a foreign op is
+            // in flight. (A concurrent remover winning the race reports
+            // Missing instead — equally correct for the caller.)
+            RemoveIfIdleOutcome::Busy
+        } else {
+            RemoveIfIdleOutcome::Missing
+        }
     }
 
     /// True when any live context holds logical login for `slot`.

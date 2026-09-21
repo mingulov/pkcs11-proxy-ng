@@ -107,4 +107,21 @@ impl Pkcs11Client {
     fn context_id(&self) -> CkResult<String> {
         self.context_id.clone().ok_or(CkRv::CRYPTOKI_NOT_INITIALIZED)
     }
+
+    /// The stored logical-context id, if this client initialized one.
+    /// Used to preserve the session across a transport reconnect: the new
+    /// channel serves the SAME server-side context (W1-L6-29).
+    pub fn context_id_opt(&self) -> Option<String> {
+        self.context_id.clone()
+    }
+
+    /// Restore a logical-context id after a transport reconnect
+    /// (W1-L6-29). The replacement channel serves the same server-side
+    /// context, so sessions and handles stay valid; a mid-session
+    /// reconnect that dropped the id would orphan the server context
+    /// (later calls, including `finalize`, would short-circuit locally
+    /// and never reach the daemon).
+    pub fn restore_context_id(&mut self, context_id: Option<String>) {
+        self.context_id = context_id;
+    }
 }

@@ -189,6 +189,18 @@ async fn build_service(
     Ok((grpc_service, context_manager, registry_source))
 }
 
+/// Apply the configured transport concurrency limits to a tonic server
+/// builder (W1-L6-20). Shared by every listener so TCP and Unix get
+/// identical flood bounds: per-connection request cap + HTTP/2 max
+/// concurrent streams + load shedding (reject-over-limit with
+/// `RESOURCE_EXHAUSTED` instead of buffering unboundedly).
+fn apply_transport_limits(builder: Server, config: &config::DaemonConfig) -> Server {
+    builder
+        .concurrency_limit_per_connection(config.proxy.grpc_concurrency_limit_per_connection)
+        .max_concurrent_streams(config.proxy.grpc_max_concurrent_streams)
+        .load_shed(config.proxy.grpc_load_shed)
+}
+
 /// Apply the configured HTTP/2 keepalive settings to a tonic server builder.
 /// Shared by every listener so TCP and Unix get identical keepalive behaviour.
 fn apply_http2_keepalive(builder: Server, config: &config::DaemonConfig) -> Server {
@@ -209,6 +221,36 @@ fn apply_http2_keepalive(builder: Server, config: &config::DaemonConfig) -> Serv
 /// Resolves when the OS-signal task flips the watch value (or drops the sender).
 async fn listener_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.changed().await;
+}
+
+type ServeFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
+>;
+
+/// Wait for every listener to drain after the shutdown signal, bounded by
+/// `proxy.shutdown_grace_secs` (W1-L6-07).
+///
+/// Returns `Some(outcome)` when `try_join_all` finishes in time (errors
+/// propagate unchanged); returns `None` when the grace expires first — the
+/// serve futures are then dropped, aborting in-flight connections, and the
+/// caller proceeds with forced shutdown (socket cleanup, audit flush,
+/// backend finalize) instead of pinning SIGTERM forever on a wedged
+/// backend.
+async fn serve_with_grace(
+    serve_futures: Vec<ServeFuture>,
+    grace: std::time::Duration,
+) -> Option<Result<Vec<()>, tonic::transport::Error>> {
+    match tokio::time::timeout(grace, futures::future::try_join_all(serve_futures)).await {
+        Ok(outcome) => Some(outcome),
+        Err(_elapsed) => {
+            tracing::error!(
+                grace_secs = grace.as_secs(),
+                "shutdown grace expired with listeners still draining; \
+                 forcing shutdown (in-flight connections aborted)"
+            );
+            None
+        }
+    }
 }
 
 /// G3-PR1: refuse to start when per-object authorization is configured but the
@@ -563,9 +605,6 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // probe report SERVING but their connect was refused because tonic hadn't
     // bound yet. Binding here makes the SERVING flip below truthful: by the
     // time external probes can see it, accept() is already running.
-    type ServeFuture = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
-    >;
     let mut serve_futures: Vec<ServeFuture> = Vec::new();
 
     // TCP listener (mTLS / insecure-tcp), when [listener.remote] is configured.
@@ -579,7 +618,7 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         {
             builder = builder.tls_config(tls_config)?;
         }
-        let router = apply_http2_keepalive(builder, &config)
+        let router = apply_transport_limits(apply_http2_keepalive(builder, &config), &config)
             .layer(server::trace_id::TraceIdLayer)
             // ADR-0013 pre-decode validation inside the trace layer so
             // rejections inherit the request_id span. First `.layer()` is
@@ -602,15 +641,16 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     #[cfg(unix)]
     if let Some(ref uds_cfg) = config.listener.local {
         let listener = server::transport::bind_unix_listener(&uds_cfg.path)?;
-        let router = apply_http2_keepalive(Server::builder(), &config)
-            .layer(server::trace_id::TraceIdLayer)
-            // ADR-0013 pre-decode validation (see the TCP listener above for
-            // the layer-order rationale).
-            .layer(server::protected_decode::ProtectedDecodeLayer::new(
-                config.proxy.max_message_bytes,
-            ))
-            .add_service(health_service.clone())
-            .add_service(svc.clone());
+        let router =
+            apply_transport_limits(apply_http2_keepalive(Server::builder(), &config), &config)
+                .layer(server::trace_id::TraceIdLayer)
+                // ADR-0013 pre-decode validation (see the TCP listener above for
+                // the layer-order rationale).
+                .layer(server::protected_decode::ProtectedDecodeLayer::new(
+                    config.proxy.max_message_bytes,
+                ))
+                .add_service(health_service.clone())
+                .add_service(svc.clone());
         let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
         let shutdown = listener_shutdown(shutdown_rx.clone());
         tracing::info!(path = %uds_cfg.path.display(), auth = ?uds_cfg.auth, "listening on unix socket");
@@ -637,13 +677,24 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         max_contexts = config.proxy.max_contexts,
         http2_keepalive_interval_secs = config.proxy.http2_keepalive_interval_secs,
         http2_keepalive_timeout_secs = config.proxy.http2_keepalive_timeout_secs,
+        grpc_concurrency_limit_per_connection = config.proxy.grpc_concurrency_limit_per_connection,
+        grpc_max_concurrent_streams = config.proxy.grpc_max_concurrent_streams,
+        grpc_load_shed = config.proxy.grpc_load_shed,
         "Starting gRPC server"
     );
     // NOTE: No tonic server-level .timeout() — request timeouts are handled
     // inside spawn_backend() via tokio::time::timeout. A tonic-level timeout
     // would cancel the handler Future before spawn_backend can decrement
     // IN_FLIGHT, causing circuit breaker leaks under heavy load.
-    let serve_result = futures::future::try_join_all(serve_futures).await;
+    // W1-L6-07: the drain honors proxy.shutdown_grace_secs (previously the
+    // validated knob was never read and a wedged backend pinned SIGTERM
+    // forever). On expiry the serve futures are dropped (aborting
+    // in-flight connections) and shutdown proceeds forced.
+    let serve_result = serve_with_grace(
+        serve_futures,
+        std::time::Duration::from_secs(config.proxy.shutdown_grace_secs),
+    )
+    .await;
 
     // Best-effort: remove the Unix socket file on shutdown so a restart can
     // rebind cleanly (the path persists in the filesystem after the fd closes).
@@ -651,7 +702,9 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     if let Some(ref uds_cfg) = config.listener.local {
         let _ = std::fs::remove_file(&uds_cfg.path);
     }
-    serve_result?;
+    if let Some(result) = serve_result {
+        result?;
+    }
 
     // Flush the audit log before finalising the backend.
     if let Some(ref s) = audit_sink
@@ -846,5 +899,45 @@ auth = "peer_cred"
         let policy = no_objects_policy();
         check_per_object_version_requirement(&policy, &mock)
             .expect("v2.40 backend without per-object policy must start");
+    }
+
+    /// W1-L6-07: listeners that drain within the grace return their
+    /// `try_join_all` outcome unchanged.
+    #[tokio::test]
+    async fn serve_with_grace_returns_outcome_when_drained_in_time() {
+        let futures: Vec<ServeFuture> =
+            vec![Box::pin(async { Ok(()) }), Box::pin(async { Ok(()) })];
+        let outcome = serve_with_grace(futures, std::time::Duration::from_secs(30)).await;
+        assert!(matches!(outcome, Some(Ok(_))), "drained listeners must propagate Ok");
+    }
+
+    /// W1-L6-07: a wedged listener (never resolves) must not pin SIGTERM
+    /// forever — the grace bounds the wait, then the serve futures are
+    /// dropped (aborting in-flight connections) and shutdown proceeds.
+    #[tokio::test]
+    async fn serve_with_grace_bounds_a_wedged_listener() {
+        let futures: Vec<ServeFuture> =
+            vec![Box::pin(async { Ok(()) }), Box::pin(std::future::pending())];
+        let start = std::time::Instant::now();
+        let outcome = serve_with_grace(futures, std::time::Duration::from_millis(50)).await;
+        assert!(outcome.is_none(), "wedged listeners must time out to forced shutdown");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "grace wait must be bounded, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// W1-L6-07: a serve error within the grace still propagates (the
+    /// timeout only swallows the never-resolving case).
+    #[tokio::test]
+    async fn serve_with_grace_propagates_serve_errors() {
+        // try_join_all short-circuits on the first error; a ready error
+        // must surface even with ample grace left. (A malformed endpoint
+        // URI is the cheapest way to fabricate a transport::Error.)
+        let err = tonic::transport::Endpoint::from_shared("http://exa mple.com").unwrap_err();
+        let futures: Vec<ServeFuture> = vec![Box::pin(async move { Err(err) })];
+        let outcome = serve_with_grace(futures, std::time::Duration::from_secs(30)).await;
+        assert!(matches!(outcome, Some(Err(_))), "serve errors must propagate");
     }
 }

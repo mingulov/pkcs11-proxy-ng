@@ -1218,3 +1218,88 @@ async fn terminal_old_close_completion_cannot_remove_recycled_session_binding() 
         .unwrap();
     assert_eq!(state, (None, None, Some(backend), Some(new)));
 }
+
+/// W1-L6-04: concurrent reservers cannot exceed the cap — the
+/// check-and-reserve is atomic under one lock.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_quota_reservation_hammer_never_exceeds_cap() {
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let ctx_id = mgr.create_context(Some("hammer-principal".to_owned())).await.unwrap();
+    let _ctx_id = ctx_id;
+
+    const MAX: usize = 8;
+    const RACERS: usize = 32;
+    let barrier = Arc::new(tokio::sync::Barrier::new(RACERS));
+    let handles: Vec<_> = (0..RACERS)
+        .map(|_| {
+            let mgr = Arc::clone(&mgr);
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                mgr.try_reserve_session_for_principal("hammer-principal", MAX)
+            })
+        })
+        .collect();
+    let mut granted = Vec::new();
+    for handle in handles {
+        if let Some(reservation) = handle.await.unwrap() {
+            granted.push(reservation);
+        }
+    }
+    assert_eq!(granted.len(), MAX, "exactly MAX concurrent reservations must be granted, no more");
+    // Still at cap while all are held.
+    assert!(
+        mgr.try_reserve_session_for_principal("hammer-principal", MAX).is_none(),
+        "cap must hold while every reservation is outstanding"
+    );
+    drop(granted);
+    // Released reservations free the cap again.
+    assert!(
+        mgr.try_reserve_session_for_principal("hammer-principal", MAX).is_some(),
+        "dropping reservations must free quota"
+    );
+}
+
+/// W1-L6-04: live sessions count toward the same cap as reservations.
+#[tokio::test]
+async fn session_quota_reservation_accounts_live_sessions() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let ctx_id = mgr.create_context(Some("live-principal".to_owned())).await.unwrap();
+    let slot = BackendSlotId(CkSlotId(0));
+    mgr.get_context(&ctx_id, |ctx| {
+        ctx.register_session(BackendHandle(11), slot);
+        ctx.register_session(BackendHandle(12), slot);
+    })
+    .await
+    .unwrap();
+
+    // Two live sessions: max=2 admits nothing further…
+    assert!(
+        mgr.try_reserve_session_for_principal("live-principal", 2).is_none(),
+        "live sessions must count toward the cap"
+    );
+    // …max=3 admits exactly one reservation…
+    let reservation =
+        mgr.try_reserve_session_for_principal("live-principal", 3).expect("one slot free");
+    assert!(mgr.try_reserve_session_for_principal("live-principal", 3).is_none());
+    // …and releasing it re-opens that slot.
+    drop(reservation);
+    assert!(mgr.try_reserve_session_for_principal("live-principal", 3).is_some());
+}
+
+/// W1-L6-04: reservations are per-principal — one principal at cap does
+/// not affect another.
+#[tokio::test]
+async fn session_quota_reservations_are_per_principal() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let _a = mgr.create_context(Some("quota-alice".to_owned())).await.unwrap();
+    let _b = mgr.create_context(Some("quota-bob".to_owned())).await.unwrap();
+
+    let held = mgr.try_reserve_session_for_principal("quota-alice", 1).expect("alice slot");
+    assert!(mgr.try_reserve_session_for_principal("quota-alice", 1).is_none());
+    assert!(
+        mgr.try_reserve_session_for_principal("quota-bob", 1).is_some(),
+        "bob must be unaffected by alice's exhausted quota"
+    );
+    drop(held);
+}

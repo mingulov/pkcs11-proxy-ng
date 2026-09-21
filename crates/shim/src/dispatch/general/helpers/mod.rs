@@ -25,6 +25,16 @@ macro_rules! with_client {
         if !crate::state::is_initialized() {
             return rv_err(pkcs11_proxy_ng_types::CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
+        // W1-L6-29: consume the reconnect flag on the steady-state data
+        // plane. A transport failure on an earlier call (client-crate
+        // hook), a fork, or C_Finalize marks the cached channel stale;
+        // without this the flag was honored only across
+        // C_Initialize/probe, so steady-state calls never re-dialed (no
+        // DNS re-resolve, no recovery). Runs OUTSIDE block_on (the slow
+        // path block_ons itself); the fast path is two atomic loads.
+        // Best-effort: on failure the call below proceeds with the
+        // cached client and the RPC surfaces the transport error.
+        let _ = crate::state::ensure_client_connected();
         let __result = crate::state::runtime().block_on(async {
             // Take a cheap clone of the shared client and drop the
             // mutex guard before the RPC. `Pkcs11Client` wraps a tonic

@@ -490,6 +490,27 @@ pub struct ProxyConfig {
     /// shared slots. Default 10 seconds.
     #[serde(default = "default_login_lock_timeout_secs")]
     pub login_lock_timeout_secs: u64,
+    /// Maximum concurrent in-flight gRPC requests per transport connection
+    /// (W1-L6-20; tonic `concurrency_limit_per_connection`). Bounds the
+    /// per-connection tower buffer so a transport flood cannot queue
+    /// unboundedly; requests past the limit are rejected immediately with
+    /// `RESOURCE_EXHAUSTED` when `grpc_load_shed` is on (the default).
+    /// Applies to both the TCP and Unix listeners. Default 256 — far above
+    /// plausible per-process concurrency; the global backend breaker
+    /// (`max_concurrent_backend_calls`) remains the primary gate.
+    #[serde(default = "default_grpc_concurrency_limit_per_connection")]
+    pub grpc_concurrency_limit_per_connection: usize,
+    /// HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS` per connection (W1-L6-20;
+    /// tonic `max_concurrent_streams`). Caps multiplexed streams at the
+    /// protocol layer, complementing the request limit above. Default 256.
+    #[serde(default = "default_grpc_max_concurrent_streams")]
+    pub grpc_max_concurrent_streams: u32,
+    /// Reject (vs buffer) requests past
+    /// `grpc_concurrency_limit_per_connection` (W1-L6-20; tonic
+    /// `load_shed`). Default true — buffering a flood only delays the
+    /// rejection while burning memory.
+    #[serde(default = "default_grpc_load_shed")]
+    pub grpc_load_shed: bool,
 }
 
 /// Whether the daemon should self-exit given the stuck-call gauge and the
@@ -520,6 +541,9 @@ impl Default for ProxyConfig {
             sanitize_inputs: false,
             max_stuck_backend_calls: None,
             login_lock_timeout_secs: default_login_lock_timeout_secs(),
+            grpc_concurrency_limit_per_connection: default_grpc_concurrency_limit_per_connection(),
+            grpc_max_concurrent_streams: default_grpc_max_concurrent_streams(),
+            grpc_load_shed: default_grpc_load_shed(),
         }
     }
 }
@@ -570,6 +594,15 @@ fn default_backend_health_consecutive_failures() -> u32 {
 }
 fn default_login_lock_timeout_secs() -> u64 {
     10
+}
+fn default_grpc_concurrency_limit_per_connection() -> usize {
+    256
+}
+fn default_grpc_max_concurrent_streams() -> u32 {
+    256
+}
+fn default_grpc_load_shed() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1125,6 +1158,12 @@ impl DaemonConfig {
             return Err("proxy.backend_health_consecutive_failures must be > 0 \
                  (the readiness gate cannot trip on zero failures)"
                 .into());
+        }
+        if self.proxy.grpc_concurrency_limit_per_connection == 0 {
+            return Err("proxy.grpc_concurrency_limit_per_connection must be > 0".into());
+        }
+        if self.proxy.grpc_max_concurrent_streams == 0 {
+            return Err("proxy.grpc_max_concurrent_streams must be > 0".into());
         }
         // Validate the mechanism-registry config path if set.
         if let Some(path) = &self.mechanisms.config_path

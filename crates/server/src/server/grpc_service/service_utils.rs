@@ -1,10 +1,12 @@
 use crate::server::slot_map::{BackendSlotId, VirtualSlotId};
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
+use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tonic::Status;
 
@@ -25,9 +27,24 @@ static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();
 static LOGIN_LOCK_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static HEALTH_EVENT_TX: OnceLock<mpsc::Sender<BackendHealthEvent>> = OnceLock::new();
+/// In-flight backend calls per TCP peer address (W1-L7-28): the
+/// per-connection admission budget under the global `IN_FLIGHT`
+/// breaker. Entries are removed when their count drains to zero, so
+/// the table stays bounded by the number of connections with
+/// in-flight backend calls.
+static PEER_IN_FLIGHT: LazyLock<DashMap<SocketAddr, Arc<AtomicUsize>>> =
+    LazyLock::new(DashMap::new);
 
 tokio::task_local! {
     static CONTEXT_OPERATION_GUARD: Option<OperationGuard>;
+}
+
+tokio::task_local! {
+    /// This request's TCP peer address (W1-L7-28), published by
+    /// `run_context_scoped` from `request.remote_addr()`. `None` on UDS
+    /// (no peer address) and wherever dispatch did not publish one —
+    /// those calls run unadmitted under the global breaker only.
+    static CURRENT_PEER: Option<SocketAddr>;
 }
 
 /// Scope one already-admitted context operation around a service handler.
@@ -42,6 +59,18 @@ where
 
 pub(super) fn current_context_operation_guard() -> Option<OperationGuard> {
     CONTEXT_OPERATION_GUARD.try_with(|guard| guard.clone()).ok().flatten()
+}
+
+/// Publish this request's peer address around a service handler (W1-L7-28).
+pub(super) async fn scope_peer_admission<T, F>(peer: Option<SocketAddr>, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    CURRENT_PEER.scope(peer, future).await
+}
+
+pub(super) fn current_peer() -> Option<SocketAddr> {
+    CURRENT_PEER.try_with(|peer| *peer).ok().flatten()
 }
 /// Tracks whether the LAST sent health event was `Success`. Initialized
 /// to `true` because the health-gate task assumes the daemon starts in
@@ -125,6 +154,21 @@ pub(super) fn per_context_max_in_flight() -> usize {
     (max_concurrent_backend_calls() / 4).max(1)
 }
 
+/// Per-connection in-flight cap (W1-L7-28): a quarter of the global
+/// backend-call budget (at least 1), mirroring the per-context M2
+/// fraction. Under the global circuit breaker, this stops a single
+/// connection from draining the whole budget and tipping every other
+/// tenant into DEVICE_ERROR. Scales with the configured global limit.
+pub(super) fn per_connection_max_in_flight() -> usize {
+    (max_concurrent_backend_calls() / 4).max(1)
+}
+
+/// Number of live per-peer admission entries (W1-L7-28 tests only).
+#[cfg(test)]
+pub(super) fn peer_admission_table_size_for_test() -> usize {
+    PEER_IN_FLIGHT.len()
+}
+
 /// Current number of in-flight backend calls (for health checks / metrics).
 pub fn backend_in_flight() -> usize {
     IN_FLIGHT.load(Ordering::Relaxed)
@@ -185,6 +229,54 @@ fn try_acquire_backend_call(
             Ordering::Relaxed,
         ) {
             Ok(_) => return Some(InFlightGuard { counter }),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+/// RAII slot for one peer's admission budget (W1-L7-28). Moved into the
+/// blocking task alongside the global [`InFlightGuard`] so the peer slot
+/// is held for the TRUE backend-call lifetime; on drop the count
+/// decrements and a drained entry is removed (bounded table).
+struct PeerAdmissionGuard {
+    peer: SocketAddr,
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for PeerAdmissionGuard {
+    fn drop(&mut self) {
+        let previous = self.counter.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(previous >= 1, "peer admission count must not underflow");
+        if previous == 1 {
+            // Last slot released: remove the entry so the table cannot
+            // grow with stale peers. The predicate re-checks under the
+            // shard lock — a racing admission (count back above zero, or
+            // a recycled Arc) keeps the entry.
+            let mine = Arc::clone(&self.counter);
+            PEER_IN_FLIGHT.remove_if(&self.peer, |_, count| {
+                Arc::ptr_eq(count, &mine) && count.load(Ordering::Relaxed) == 0
+            });
+        }
+    }
+}
+
+/// Admit one backend call for `peer` under `max_in_flight` (W1-L7-28).
+/// CAS-exact like the global acquire; `None` when the peer is at cap.
+fn try_admit_peer(peer: SocketAddr, max_in_flight: usize) -> Option<PeerAdmissionGuard> {
+    let counter =
+        PEER_IN_FLIGHT.entry(peer).or_insert_with(|| Arc::new(AtomicUsize::new(0))).clone();
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current >= max_in_flight {
+            return None;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Some(PeerAdmissionGuard { peer, counter }),
             Err(actual) => current = actual,
         }
     }
@@ -309,6 +401,28 @@ where
         report_backend_outcome(false);
         return Ok(Err(CkRv::DEVICE_ERROR));
     };
+    // W1-L7-28: per-connection admission UNDER the global breaker, after
+    // the global slot is held (a peer rejection below drops it again).
+    // One connection cannot exhaust the shared budget. Distinct layer
+    // from the L6-20 transport knobs (which bound buffering) and the
+    // per-context M2 cap (which binds earlier for single-context
+    // connections). No health event on rejection: a per-peer trip
+    // reflects one noisy client and must not flip daemon readiness (M1).
+    let peer_guard = match current_peer() {
+        Some(peer) => match try_admit_peer(peer, per_connection_max_in_flight()) {
+            Some(guard) => Some(guard),
+            None => {
+                tracing::warn!(
+                    peer = %peer,
+                    max = per_connection_max_in_flight(),
+                    "per-connection backend-call budget exhausted — rejecting"
+                );
+                return Ok(Err(CkRv::DEVICE_ERROR));
+            }
+        },
+        // UDS / unpublished transport: global breaker only.
+        None => None,
+    };
     let context_operation_guard = current_context_operation_guard();
 
     // Set when the caller's timeout fires: tells the task's completion
@@ -321,6 +435,7 @@ where
         // exactly when the FFI returns (even if the caller timed out or
         // the gRPC future was cancelled long before).
         let _guard = guard;
+        let _peer_guard = peer_guard;
         let _context_operation_guard = context_operation_guard;
         let result = operation();
         if timed_out_task.load(Ordering::Acquire) {
@@ -964,6 +1079,22 @@ pub(super) async fn resolve_session_and_two_objects(
 /// object, whose handle persists across the application's sessions and must NOT
 /// be evicted on session close. The bool may arrive as a typed `Bool`, a raw
 /// `CK_BBOOL` byte, or a ulong, so all encodings are accepted (B2).
+/// The `CKA_CLASS` declared by `template`, if any (W1-L7-05).
+/// Server-side templates arrive through proto conversion, which decodes
+/// `CKA_CLASS` to `Ulong`; any other encoding is treated as undeclared
+/// (the mint gate falls through to the backend verdict for it).
+pub(super) fn template_declared_class(template: &[CkAttribute]) -> Option<CkObjectClass> {
+    template.iter().find_map(|attr| {
+        if attr.attr_type != CkAttributeType::CLASS {
+            return None;
+        }
+        match &attr.value {
+            Some(CkAttributeValue::Ulong(class)) => Some(CkObjectClass(*class)),
+            _ => None,
+        }
+    })
+}
+
 pub(super) fn template_declares_token_object(template: &[CkAttribute]) -> bool {
     template.iter().any(|attr| {
         attr.attr_type == CkAttributeType::TOKEN
@@ -2745,5 +2876,135 @@ mod tests {
             login_lock_timeout().as_millis() > 0,
             "login_lock_timeout() must return a positive duration"
         );
+    }
+
+    // --- W1-L7-28: per-connection admission under the global breaker ---
+
+    fn test_peer(octet: u8, port: u16) -> std::net::SocketAddr {
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, octet)),
+            port,
+        )
+    }
+
+    /// Park `n` backend calls holding `peer`'s admission slots. Returns the
+    /// join handles plus one releaser per call; each parked call signals
+    /// `entered_tx` once its slot is held. All releasers must be fired (or
+    /// dropped) or the test binary hangs on teardown.
+    async fn park_peer_calls(
+        peer: std::net::SocketAddr,
+        n: usize,
+        entered_tx: tokio::sync::mpsc::Sender<()>,
+    ) -> (
+        Vec<tokio::task::JoinHandle<Result<CkResult<u8>, Status>>>,
+        Vec<std::sync::mpsc::Sender<()>>,
+    ) {
+        let mut parked = Vec::with_capacity(n);
+        let mut releasers = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            releasers.push(release_tx);
+            let entered_tx = entered_tx.clone();
+            parked.push(tokio::spawn(async move {
+                scope_peer_admission(Some(peer), async move {
+                    spawn_backend(move || {
+                        entered_tx.blocking_send(()).expect("entered signal");
+                        release_rx.recv().expect("released");
+                        Ok::<u8, CkRv>(7)
+                    })
+                    .await
+                })
+                .await
+            }));
+        }
+        (parked, releasers)
+    }
+
+    /// W1-L7-28: a peer at its cap is rejected (breaker class) without
+    /// running the backend call; released slots admit again and the empty
+    /// entry is removed (bounded table).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_connection_admission_rejects_over_cap() {
+        let peer = test_peer(51, 40051);
+        let cap = per_connection_max_in_flight();
+        assert!(cap >= 1, "per-connection cap must be at least 1");
+
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::channel::<()>(cap + 1);
+        let (parked, releasers) = park_peer_calls(peer, cap, entered_tx).await;
+        for _ in 0..cap {
+            entered_rx.recv().await.expect("each parked call holds a slot");
+        }
+
+        // Over cap: rejected as DEVICE_ERROR (breaker class), backend never runs.
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_clone = Arc::clone(&ran);
+        let rejected = scope_peer_admission(Some(peer), async move {
+            spawn_backend(move || {
+                ran_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok::<u8, CkRv>(9)
+            })
+            .await
+        })
+        .await;
+        assert_eq!(
+            rejected.expect("admission rejection is a ck_rv, not a transport error"),
+            Err(CkRv::DEVICE_ERROR)
+        );
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst), "rejected call must not run");
+
+        // Release everything: slots free and the table entry is removed.
+        for tx in releasers {
+            tx.send(()).expect("release parked call");
+        }
+        for handle in parked {
+            let result = handle.await.expect("parked task joins").expect("no transport error");
+            assert_eq!(result, Ok(7u8));
+        }
+        assert_eq!(
+            peer_admission_table_size_for_test(),
+            0,
+            "drained peer entries must be removed (bounded table)"
+        );
+
+        // The freed cap admits again.
+        let again =
+            scope_peer_admission(Some(peer), async { spawn_backend(|| Ok::<u8, CkRv>(1)).await })
+                .await;
+        assert_eq!(again.expect("no transport error"), Ok(1u8));
+    }
+
+    /// W1-L7-28: the cap is per peer — an unrelated connection is unaffected
+    /// by another peer's exhausted budget.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_connection_admission_is_per_peer() {
+        let busy = test_peer(52, 40052);
+        let idle = test_peer(53, 40053);
+        let cap = per_connection_max_in_flight();
+
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::channel::<()>(cap + 1);
+        let (parked, releasers) = park_peer_calls(busy, cap, entered_tx).await;
+        for _ in 0..cap {
+            entered_rx.recv().await.expect("each parked call holds a slot");
+        }
+
+        let other =
+            scope_peer_admission(Some(idle), async { spawn_backend(|| Ok::<u8, CkRv>(3)).await })
+                .await;
+        assert_eq!(other.expect("no transport error"), Ok(3u8), "idle peer must be admitted");
+
+        for tx in releasers {
+            tx.send(()).expect("release parked call");
+        }
+        for handle in parked {
+            handle.await.expect("parked task joins").expect("no transport error").unwrap();
+        }
+    }
+
+    /// W1-L7-28 characterization: without a scoped peer (UDS / unknown
+    /// transport) backend calls run unadmitted, as before.
+    #[tokio::test]
+    async fn per_connection_admission_skipped_without_peer() {
+        let result = spawn_backend(|| Ok::<u8, CkRv>(5)).await;
+        assert_eq!(result.expect("no transport error"), Ok(5u8));
     }
 }

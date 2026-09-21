@@ -14,7 +14,9 @@ use super::super::auth::request_identity::identity_from_request;
 use super::super::context_manager::{ClientContextId, ContextManager, ObjectMetadata};
 use super::super::handle_map::VirtualHandle;
 use super::HandlerContext;
-use super::service_utils::{context_exists, resolve_object_authz_context, spawn_backend};
+use super::service_utils::{
+    context_exists, resolve_object_authz_context, spawn_backend, template_declared_class,
+};
 
 pub(super) async fn context_identity(
     ctx_mgr: &Arc<ContextManager>,
@@ -266,6 +268,43 @@ pub(super) async fn mechanism_permitted(
         return false; // fail-closed: context/slot/token unavailable
     };
     ctx.token_policy.allows_mechanism(&identity, &label, &serial, mech)
+}
+
+/// Whether the principal may MINT an object of the template's class
+/// (W1-L7-05): the mint-time companion to the USE-time class gate in
+/// `gate_object_handle`, closing the "persist a denied-class token
+/// object, use it never" hole.
+///
+/// `template` is the mint template view; `default_class` is the
+/// operation's implied class when its templates conventionally omit
+/// `CKA_CLASS` (`generate_key`/`derive_key` → `SECRET_KEY`;
+/// `generate_key_pair` checks each template with `PUBLIC_KEY` /
+/// `PRIVATE_KEY`). `create`/`copy` pass `None`: a copy without a class
+/// override inherits its (USE-allowed) source's class, and a create
+/// without `CKA_CLASS` is rejected by the backend itself
+/// (`CKR_TEMPLATE_INCOMPLETE`) — nothing persists either way, so an
+/// unknowable class falls through to the backend verdict instead of
+/// inventing a refusal (transparency; the USE-time gate fail-closes on
+/// unknown class regardless).
+pub(super) async fn class_mint_permitted(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    virtual_session: u64,
+    template: &[CkAttribute],
+    default_class: Option<CkObjectClass>,
+) -> bool {
+    if !ctx.token_policy.per_class_active() {
+        return true; // transparent when no class grants configured
+    }
+    let Some(class) = template_declared_class(template).or(default_class) else {
+        return true; // unknowable class: backend decides (see above)
+    };
+    let Some((identity, label, serial)) =
+        resolve_object_authz_context(ctx, ctx_id, virtual_session).await
+    else {
+        return false; // fail-closed: context/slot/token unavailable
+    };
+    ctx.token_policy.allows_class(&identity, &label, &serial, class)
 }
 
 /// A2 ownership gate (pure core): decide whether a request bearing a
@@ -967,6 +1006,135 @@ mod tests {
         assert!(!policy.per_mechanism_active());
         let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
         assert!(mechanism_permitted(&ctx, &ctx_id, session, CkMechanismType::AES_GCM).await);
+    }
+
+    // --- class_mint_permitted (W1-L7-05) ---
+
+    fn policy_with_class_grant(identity: &str, classes: Vec<String>) -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: identity.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: Some(classes),
+                    mechanisms: None,
+                    extract: ExtractPolicyConfig::Allow,
+                    objects: None,
+                })]),
+            }],
+        })
+        .unwrap()
+    }
+
+    fn class_template(class: CkObjectClass) -> Vec<CkAttribute> {
+        vec![CkAttribute {
+            attr_type: CkAttributeType::CLASS,
+            value: Some(CkAttributeValue::Ulong(class.0)),
+        }]
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_denies_unlisted_class() {
+        let policy = policy_with_class_grant(MTLS_IDENTITY, vec!["secret_key".into()]);
+        assert!(policy.per_class_active());
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            !class_mint_permitted(
+                &ctx,
+                &ctx_id,
+                session,
+                &class_template(CkObjectClass::DATA),
+                None
+            )
+            .await,
+            "class outside the grant must be denied at mint"
+        );
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_allows_listed_class() {
+        let policy = policy_with_class_grant(MTLS_IDENTITY, vec!["secret_key".into()]);
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            class_mint_permitted(
+                &ctx,
+                &ctx_id,
+                session,
+                &class_template(CkObjectClass::SECRET_KEY),
+                None
+            )
+            .await,
+            "listed class must be permitted at mint"
+        );
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_uses_default_when_template_has_no_class() {
+        // Generate/derive templates often omit CKA_CLASS; the operation's
+        // implied class (the default) is checked instead.
+        let policy = policy_with_class_grant(MTLS_IDENTITY, vec!["secret_key".into()]);
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            class_mint_permitted(&ctx, &ctx_id, session, &[], Some(CkObjectClass::SECRET_KEY))
+                .await,
+            "allowed default class must be permitted"
+        );
+        assert!(
+            !class_mint_permitted(&ctx, &ctx_id, session, &[], Some(CkObjectClass::PRIVATE_KEY))
+                .await,
+            "denied default class must be refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_no_class_no_default_allows_backend_to_decide() {
+        // No knowable class (e.g. create without CKA_CLASS): the backend
+        // rejects the malformed mint itself (nothing persists), so the
+        // gate stays transparent instead of inventing its own refusal.
+        let policy = policy_with_class_grant(MTLS_IDENTITY, vec!["secret_key".into()]);
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            class_mint_permitted(&ctx, &ctx_id, session, &[], None).await,
+            "unknowable class must fall through to the backend verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_transparent_when_gate_off() {
+        let policy = TokenPolicy::from_config(&AuthConfig::default()).unwrap();
+        assert!(!policy.per_class_active());
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            class_mint_permitted(
+                &ctx,
+                &ctx_id,
+                session,
+                &class_template(CkObjectClass::DATA),
+                None
+            )
+            .await,
+            "gate off must permit any class"
+        );
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_unauthenticated_always_true() {
+        let policy = policy_with_class_grant(MTLS_IDENTITY, vec!["secret_key".into()]);
+        assert!(policy.per_class_active());
+        let (ctx, ctx_id, session) = setup_extract_test(policy, None).await;
+        assert!(
+            class_mint_permitted(
+                &ctx,
+                &ctx_id,
+                session,
+                &class_template(CkObjectClass::DATA),
+                None
+            )
+            .await,
+            "unauthenticated peer must always be permitted (class grants are opt-in)"
+        );
     }
 
     // --- fetch_object_metadata ---

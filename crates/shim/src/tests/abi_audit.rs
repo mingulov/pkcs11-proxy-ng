@@ -696,7 +696,8 @@ fn per_export_runtime_panic_boundary() {
     // at the top of `catch_panics`, before any export body reads its arguments,
     // so all-null/zero dummy args are never dereferenced.
     let _guard = shim_state_test_guard();
-    let cases: Vec<(&str, fn() -> CK_RV)> = vec![
+    type PanicCase<'a> = (&'a str, fn() -> CK_RV);
+    let cases: Vec<PanicCase<'_>> = vec![
         ("c_init_token", || unsafe {
             dispatch::general::c_init_token(0, std::ptr::null_mut(), 0, std::ptr::null_mut())
         }),

@@ -39,6 +39,14 @@ backend_health_consecutive_failures = 3
 # OFF by default (ADR-0010 transparent forwarding). Enable for modules that crash on them.
 # sanitize_inputs = true
 
+# Transport flood bounds (W1-L6-20): per-connection concurrent-request cap,
+# HTTP/2 max concurrent streams, and load shedding (reject-over-limit with
+# RESOURCE_EXHAUSTED instead of buffering unboundedly). The global backend
+# breaker (max_concurrent_backend_calls) remains the primary gate.
+# grpc_concurrency_limit_per_connection = 256
+# grpc_max_concurrent_streams = 256
+# grpc_load_shed = true
+
 # Other timeouts and pool sizes use the documented ProxyConfig
 # defaults; see crates/server/src/config.rs.
 

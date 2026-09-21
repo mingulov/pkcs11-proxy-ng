@@ -199,6 +199,10 @@ pub unsafe extern "C" fn c_get_info(p_info: CK_INFO_PTR) -> CK_RV {
         if !state::is_initialized() {
             return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
+        // W1-L6-29: same steady-state reconnect consumption as with_client!
+        // (this export hand-rolls its runtime/client access). Best-effort:
+        // on failure the call below proceeds as before.
+        let _ = state::ensure_client_connected();
         let rt = state::runtime();
         rt.block_on(async {
             let mut client = state::client().lock().await;

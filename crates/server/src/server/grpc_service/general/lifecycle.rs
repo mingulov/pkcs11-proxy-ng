@@ -6,7 +6,10 @@ use tracing::debug;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
 
-use super::super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::super::auth::identity::AuthenticatedIdentity;
+use super::super::super::context_manager::{ClientContextId, ContextManager, RemoveIfIdleOutcome};
+use super::super::super::rate_limit;
+use super::super::service_utils::current_context_operation_guard;
 
 pub(super) async fn initialize(
     ctx_mgr: &Arc<ContextManager>,
@@ -20,6 +23,11 @@ pub(super) async fn initialize(
         tcp_auth_mode,
         unix_auth_mode,
     )?;
+    // W1-L7-03: throttle unauthenticated context creation per IP BEFORE
+    // minting the context, so an unauthenticated peer cannot flood to the
+    // max_contexts cap. Reuses the per-IP limiter (shared budget with
+    // GetBackendInterfaces; active iff the operator enabled it).
+    check_init_throttle(&identity, request.remote_addr().map(|addr| addr.ip()))?;
     let ctx_id = match ctx_mgr.create_context(Some(identity.to_string())).await {
         Ok(id) => id,
         Err(rv) => {
@@ -36,6 +44,30 @@ pub(super) async fn initialize(
     }))
 }
 
+/// W1-L7-03: per-IP admission for unauthenticated initialize.
+/// Authenticated peers (mTLS/peer-cred) bypass — they already present a
+/// strong identity — as do callers with no TCP peer address (local IPC).
+/// Over-budget peers get a loud `RESOURCE_EXHAUSTED` (mirrors the
+/// discovery path) before any context is minted.
+fn check_init_throttle(
+    identity: &AuthenticatedIdentity,
+    peer: Option<std::net::IpAddr>,
+) -> Result<(), Status> {
+    if !matches!(identity, AuthenticatedIdentity::Unauthenticated) {
+        return Ok(());
+    }
+    let Some(ip) = peer else {
+        return Ok(());
+    };
+    match rate_limit::check(ip) {
+        Ok(()) => Ok(()),
+        Err(retry_after) => Err(Status::resource_exhausted(format!(
+            "initialize rate limit exceeded for peer; retry after {} ms",
+            retry_after.as_millis()
+        ))),
+    }
+}
+
 pub(super) async fn finalize(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
@@ -44,9 +76,17 @@ pub(super) async fn finalize(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let maybe_ctx = ctx_mgr.remove_context(&ctx_id);
-    let ck_rv = match maybe_ctx {
-        Some(mut ctx) => {
+    // W1-L6-02: honor in_flight — refuse busy instead of removing the
+    // context from underneath a concurrent op's backend call. Dispatch
+    // scopes exactly one guard for this finalize itself; only guards
+    // beyond that one count as foreign.
+    let own_guards =
+        match current_context_operation_guard().filter(|g| g.belongs_to(ctx_mgr, &ctx_id)) {
+            Some(_) => 1,
+            None => 0,
+        };
+    let ck_rv = match ctx_mgr.remove_context_if_idle(&ctx_id, own_guards) {
+        RemoveIfIdleOutcome::Removed(mut ctx) => {
             // D6(2)/D9 shared teardown path: refcount-checked session reaping
             // plus last-holder backend logout (best-effort; never fails the
             // Finalize itself and never disturbs live tenants).
@@ -62,7 +102,262 @@ pub(super) async fn finalize(
             );
             CkRv::OK.0
         }
-        None => CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+        RemoveIfIdleOutcome::Busy => {
+            // Transient and retryable (same class as the breaker trip and
+            // the login-lock contention refusal): the concurrent op drains
+            // and a retried finalize proceeds.
+            debug!(context_id = %ctx_id.0, "Finalize refused: operations in flight");
+            CkRv::DEVICE_ERROR.0
+        }
+        RemoveIfIdleOutcome::Missing => CkRv::CRYPTOKI_NOT_INITIALIZED.0,
     };
     Ok(Response::new(pkcs11_proxy_ng_proto::FinalizeResponse { ck_rv }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tonic::Request;
+
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    use pkcs11_proxy_ng_types::*;
+
+    use crate::server::context_manager::{ClientContextId, ContextManager};
+    use crate::server::grpc_service::service_utils::scope_context_operation;
+
+    fn test_ctx_mgr() -> Arc<ContextManager> {
+        Arc::new(ContextManager::new(Duration::from_secs(300), 0))
+    }
+
+    fn test_backend() -> Arc<dyn Pkcs11Backend> {
+        let mock = MockBackend::default_test();
+        mock.initialize().unwrap();
+        Arc::new(mock)
+    }
+
+    fn finalize_request(
+        ctx_id: &ClientContextId,
+    ) -> Request<pkcs11_proxy_ng_proto::FinalizeRequest> {
+        Request::new(pkcs11_proxy_ng_proto::FinalizeRequest { client_context_id: ctx_id.0.clone() })
+    }
+
+    /// W1-L6-02: finalize must refuse (busy) when a foreign backend operation
+    /// is in flight instead of removing the context from underneath it.
+    #[tokio::test]
+    async fn finalize_refuses_busy_context() {
+        let ctx_mgr = test_ctx_mgr();
+        let backend = test_backend();
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        // Simulate a concurrent op: an operation guard NOT owned by this
+        // finalize (no task-local scope), so in_flight = 1 foreign.
+        let _foreign_guard = Arc::clone(&ctx_mgr).begin_operation(&ctx_id).expect("context exists");
+
+        let resp = super::finalize(&ctx_mgr, &backend, finalize_request(&ctx_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::DEVICE_ERROR.0,
+            "finalize during a foreign in-flight op must refuse busy"
+        );
+        assert!(
+            ctx_mgr.get_context(&ctx_id, |_| ()).await.is_some(),
+            "refused finalize must leave the context in place"
+        );
+    }
+
+    /// W1-L6-02: a refused-busy finalize succeeds on retry once the
+    /// in-flight op drains (no latch).
+    #[tokio::test]
+    async fn finalize_busy_then_idle_retry_succeeds() {
+        let ctx_mgr = test_ctx_mgr();
+        let backend = test_backend();
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        let foreign_guard = Arc::clone(&ctx_mgr).begin_operation(&ctx_id).expect("context exists");
+        let busy = super::finalize(&ctx_mgr, &backend, finalize_request(&ctx_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(busy.ck_rv, CkRv::DEVICE_ERROR.0);
+        drop(foreign_guard);
+
+        let retry = super::finalize(&ctx_mgr, &backend, finalize_request(&ctx_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(retry.ck_rv, CkRv::OK.0, "idle retry must finalize");
+        assert!(
+            ctx_mgr.get_context(&ctx_id, |_| ()).await.is_none(),
+            "successful finalize must remove the context"
+        );
+    }
+
+    /// W1-L6-02: finalize's OWN dispatch guard must not count as foreign —
+    /// an otherwise-idle context finalizes normally through the scoped path.
+    #[tokio::test]
+    async fn finalize_with_only_own_dispatch_guard_succeeds() {
+        let ctx_mgr = test_ctx_mgr();
+        let backend = test_backend();
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        // Mirror dispatch: the scoped guard is finalize's own (in_flight = 1).
+        let own_guard = Arc::clone(&ctx_mgr).begin_operation(&ctx_id).expect("context exists");
+        let resp = scope_context_operation(Some(own_guard), async {
+            super::finalize(&ctx_mgr, &backend, finalize_request(&ctx_id)).await
+        })
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::OK.0,
+            "finalize holding only its own dispatch guard must succeed"
+        );
+        assert!(ctx_mgr.get_context(&ctx_id, |_| ()).await.is_none());
+    }
+
+    /// W1-L6-02: own dispatch guard + one foreign op is still busy.
+    #[tokio::test]
+    async fn finalize_with_own_guard_plus_foreign_op_refuses() {
+        let ctx_mgr = test_ctx_mgr();
+        let backend = test_backend();
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        let _foreign_guard = Arc::clone(&ctx_mgr).begin_operation(&ctx_id).expect("context exists");
+        let own_guard = Arc::clone(&ctx_mgr).begin_operation(&ctx_id).expect("context exists");
+        let resp = scope_context_operation(Some(own_guard), async {
+            super::finalize(&ctx_mgr, &backend, finalize_request(&ctx_id)).await
+        })
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.ck_rv, CkRv::DEVICE_ERROR.0);
+        assert!(ctx_mgr.get_context(&ctx_id, |_| ()).await.is_some());
+    }
+
+    /// W1-L7-03: an unauthenticated peer flooding initialize from one IP
+    /// is throttled before context creation (loud RESOURCE_EXHAUSTED, no
+    /// context minted). Uses a dedicated TEST-NET IP so the process-once
+    /// limiter configuration cannot interact with other tests.
+    #[tokio::test]
+    async fn initialize_throttles_unauthenticated_flood_per_ip() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        crate::server::rate_limit::configure(std::time::Duration::from_secs(60), 2);
+        let ctx_mgr = test_ctx_mgr();
+        let backend = test_backend();
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44)), 1234);
+        let request = || {
+            let mut req = Request::new(pkcs11_proxy_ng_proto::InitializeRequest {
+                client_context_id: String::new(),
+            });
+            req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
+                local_addr: None,
+                remote_addr: Some(peer),
+            });
+            req
+        };
+
+        for _ in 0..2 {
+            let resp = super::initialize(
+                &ctx_mgr,
+                &backend,
+                request(),
+                crate::config::TcpAuthMode::None,
+                crate::config::UnixAuthMode::None,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(resp.ck_rv, CkRv::OK.0, "in-budget initializes must pass");
+        }
+        assert_eq!(ctx_mgr.context_count(), 2);
+        let err = super::initialize(
+            &ctx_mgr,
+            &backend,
+            request(),
+            crate::config::TcpAuthMode::None,
+            crate::config::UnixAuthMode::None,
+        )
+        .await
+        .expect_err("over-budget initialize must be throttled");
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+        assert_eq!(ctx_mgr.context_count(), 2, "throttled initialize must mint no context");
+    }
+
+    /// W1-L7-03: initializes without a TCP peer (local IPC) bypass the
+    /// throttle — legitimate local initializes always pass.
+    #[tokio::test]
+    async fn initialize_without_peer_bypasses_throttle() {
+        let ctx_mgr = test_ctx_mgr();
+        let backend = test_backend();
+        for _ in 0..5 {
+            let resp = super::initialize(
+                &ctx_mgr,
+                &backend,
+                Request::new(pkcs11_proxy_ng_proto::InitializeRequest {
+                    client_context_id: String::new(),
+                }),
+                crate::config::TcpAuthMode::None,
+                crate::config::UnixAuthMode::None,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(resp.ck_rv, CkRv::OK.0);
+        }
+        assert_eq!(ctx_mgr.context_count(), 5);
+    }
+
+    /// W1-L7-03: authenticated peers bypass the initialize throttle (they
+    /// already present a strong identity) however the limiter is configured.
+    #[test]
+    fn init_throttle_bypasses_authenticated_peer() {
+        use crate::server::auth::identity::AuthenticatedIdentity;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let peer = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 45)));
+        for identity in [
+            AuthenticatedIdentity::PeerCred { uid: 1000 },
+            AuthenticatedIdentity::Mtls {
+                issuer: "CN=ca".into(),
+                subject: "CN=client".into(),
+                spki_sha256: String::new(),
+            },
+        ] {
+            assert!(
+                super::check_init_throttle(&identity, peer).is_ok(),
+                "authenticated initialize must bypass the throttle"
+            );
+        }
+        // …as does an unauthenticated caller with no peer address.
+        assert!(super::check_init_throttle(&AuthenticatedIdentity::Unauthenticated, None).is_ok());
+    }
+
+    /// Idle finalize is unchanged (characterization).
+    #[tokio::test]
+    async fn finalize_idle_context_unchanged() {
+        let ctx_mgr = test_ctx_mgr();
+        let backend = test_backend();
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+
+        let resp = super::finalize(&ctx_mgr, &backend, finalize_request(&ctx_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert!(ctx_mgr.get_context(&ctx_id, |_| ()).await.is_none());
+
+        // Second finalize on the gone context answers NOT_INITIALIZED.
+        let again = super::finalize(&ctx_mgr, &backend, finalize_request(&ctx_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(again.ck_rv, CkRv::CRYPTOKI_NOT_INITIALIZED.0);
+    }
 }

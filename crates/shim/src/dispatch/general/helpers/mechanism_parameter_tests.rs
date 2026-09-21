@@ -2442,7 +2442,7 @@ fn misaligned_rsa_aes_key_wrap_reads_byte_identical_values() {
     // Deterministic misalignment: some offset in 0..8 always misses 8-byte
     // alignment, regardless of the stack address.
     let offset = (0..8usize)
-        .find(|o| (buf_addr + o) % ulong_size != 0)
+        .find(|o| !(buf_addr + o).is_multiple_of(ulong_size))
         .expect("a misaligned offset always exists");
     let base = buf.as_mut_ptr().wrapping_add(offset);
     assert_ne!(base as usize % ulong_size, 0, "test setup must be misaligned");
@@ -2489,7 +2489,7 @@ fn misaligned_sign_additional_context_reads_byte_identical_values() {
         let mut buf = [0u8; 64];
         let buf_addr = buf.as_mut_ptr() as usize;
         let offset = (0..8usize)
-            .find(|o| (buf_addr + o) % ulong_size != 0)
+            .find(|o| !(buf_addr + o).is_multiple_of(ulong_size))
             .expect("a misaligned offset always exists");
         let base = buf.as_mut_ptr().wrapping_add(offset);
         assert_ne!(base as usize % ulong_size, 0, "test setup must be misaligned");

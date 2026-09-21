@@ -217,12 +217,19 @@ fn acquire_principal_op_guard(
 ///   stays un-evictable for the whole handler AND backend tasks cloned from
 ///   the guard keep it alive past timeout/cancel.
 ///
+/// `peer` is the caller's TCP address for per-connection admission
+/// (W1-L7-28): published task-locally for the whole future so
+/// `spawn_backend` admits each backend call under the peer budget.
+/// `None` (UDS / unknown transport) runs unadmitted under the global
+/// breaker only.
+///
 /// Callers must run `check_context_owner` BEFORE this (a rejected identity
 /// must not consume a cap slot) and acquire the per-principal guard INSIDE
-/// `fut`. Final order: owner → M2 → scope → per-principal → handler.
+/// `fut`. Final order: owner → M2 → scope → peer → per-principal → handler.
 async fn run_context_scoped<T, F>(
     ctx: &HandlerContext,
     client_context_id: &str,
+    peer: Option<std::net::SocketAddr>,
     fut: F,
 ) -> Result<T, Status>
 where
@@ -244,7 +251,11 @@ where
             return Err(Status::resource_exhausted("per-context concurrency limit exceeded"));
         }
     };
-    service_utils::scope_context_operation(operation_guard, fut).await
+    service_utils::scope_context_operation(
+        operation_guard,
+        service_utils::scope_peer_admission(peer, fut),
+    )
+    .await
 }
 
 // ── Dispatch rate-quota tests (G2-PR3) ────────────────────────────────────────
@@ -673,7 +684,7 @@ mod scoped_dispatch_tests {
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         assert!(service_utils::current_context_operation_guard().is_none());
 
-        let seen = run_context_scoped(&ctx, &ctx_id.0, async {
+        let seen = run_context_scoped(&ctx, &ctx_id.0, None, async {
             Result::<bool, Status>::Ok(service_utils::current_context_operation_guard().is_some())
         })
         .await
@@ -707,7 +718,7 @@ mod scoped_dispatch_tests {
 
         let polled = Arc::new(AtomicBool::new(false));
         let mark = Arc::clone(&polled);
-        let err = run_context_scoped(&ctx, &ctx_id.0, async move {
+        let err = run_context_scoped(&ctx, &ctx_id.0, None, async move {
             mark.store(true, Ordering::Relaxed);
             Result::<(), Status>::Ok(())
         })
@@ -728,12 +739,48 @@ mod scoped_dispatch_tests {
         let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
         let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
 
-        let ran_none = run_context_scoped(&ctx, "no-such-context", async {
+        let ran_none = run_context_scoped(&ctx, "no-such-context", None, async {
             Result::<bool, Status>::Ok(service_utils::current_context_operation_guard().is_none())
         })
         .await
         .expect("missing context must run the future");
         assert!(ran_none, "missing context scopes a None guard");
+    }
+
+    /// W1-L7-28: `run_context_scoped` publishes the caller's peer address
+    /// task-locally for the whole future (so `spawn_backend` can admit
+    /// per-connection) and releases it afterwards. `None` (UDS / unknown
+    /// transport) propagates as `None` (unadmitted, global breaker only).
+    #[tokio::test]
+    async fn scoped_helper_publishes_peer_for_spawn_admission() {
+        use std::net::SocketAddr;
+
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        let mock = MockBackend::default_test();
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        assert!(service_utils::current_peer().is_none());
+
+        let peer: SocketAddr = "192.0.2.60:1234".parse().unwrap();
+        let seen = run_context_scoped(&ctx, &ctx_id.0, Some(peer), async {
+            Result::<Option<SocketAddr>, Status>::Ok(service_utils::current_peer())
+        })
+        .await
+        .expect("admitted under cap");
+        assert_eq!(seen, Some(peer), "peer must be visible inside the scoped future");
+
+        let seen_none = run_context_scoped(&ctx, &ctx_id.0, None, async {
+            Result::<Option<SocketAddr>, Status>::Ok(service_utils::current_peer())
+        })
+        .await
+        .expect("admitted under cap");
+        assert_eq!(seen_none, None, "None peer must propagate as None");
+        assert!(
+            service_utils::current_peer().is_none(),
+            "peer scope must release after the future completes"
+        );
     }
 }
 
@@ -768,7 +815,9 @@ macro_rules! impl_proxy_service {
                 // W1-L6-01: same M2 admission + scope as the macro-generated
                 // RPCs (order: owner → M2 → scope → per-principal → handler).
                 let client_context_id = request.get_ref().client_context_id.clone();
-                run_context_scoped(&self.ctx, &client_context_id, async {
+                // W1-L7-28: publish the TCP peer for per-connection admission.
+                let peer_addr = request.remote_addr();
+                run_context_scoped(&self.ctx, &client_context_id, peer_addr, async {
                     // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
                     let _pguard =
                         acquire_principal_op_guard(&self.ctx, &client_context_id)?;
@@ -792,7 +841,9 @@ macro_rules! impl_proxy_service {
                 // W1-L6-01: same M2 admission + scope as the macro-generated
                 // RPCs (order: owner → M2 → scope → per-principal → handler).
                 let client_context_id = request.get_ref().client_context_id.clone();
-                run_context_scoped(&self.ctx, &client_context_id, async {
+                // W1-L7-28: publish the TCP peer for per-connection admission.
+                let peer_addr = request.remote_addr();
+                run_context_scoped(&self.ctx, &client_context_id, peer_addr, async {
                     // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
                     let _pguard =
                         acquire_principal_op_guard(&self.ctx, &client_context_id)?;
@@ -816,7 +867,9 @@ macro_rules! impl_proxy_service {
                 // W1-L6-01: same M2 admission + scope as the macro-generated
                 // RPCs (order: owner → M2 → scope → per-principal → handler).
                 let client_context_id = request.get_ref().client_context_id.clone();
-                run_context_scoped(&self.ctx, &client_context_id, async {
+                // W1-L7-28: publish the TCP peer for per-connection admission.
+                let peer_addr = request.remote_addr();
+                run_context_scoped(&self.ctx, &client_context_id, peer_addr, async {
                     // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
                     let _pguard =
                         acquire_principal_op_guard(&self.ctx, &client_context_id)?;
@@ -840,7 +893,9 @@ macro_rules! impl_proxy_service {
                 // W1-L6-01: same M2 admission + scope as the macro-generated
                 // RPCs (order: owner → M2 → scope → per-principal → handler).
                 let client_context_id = request.get_ref().client_context_id.clone();
-                run_context_scoped(&self.ctx, &client_context_id, async {
+                // W1-L7-28: publish the TCP peer for per-connection admission.
+                let peer_addr = request.remote_addr();
+                run_context_scoped(&self.ctx, &client_context_id, peer_addr, async {
                     // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
                     let _pguard =
                         acquire_principal_op_guard(&self.ctx, &client_context_id)?;
@@ -864,7 +919,9 @@ macro_rules! impl_proxy_service {
                 // W1-L6-01: same M2 admission + scope as the macro-generated
                 // RPCs (order: owner → M2 → scope → per-principal → handler).
                 let client_context_id = request.get_ref().client_context_id.clone();
-                run_context_scoped(&self.ctx, &client_context_id, async {
+                // W1-L7-28: publish the TCP peer for per-connection admission.
+                let peer_addr = request.remote_addr();
+                run_context_scoped(&self.ctx, &client_context_id, peer_addr, async {
                     // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
                     let _pguard =
                         acquire_principal_op_guard(&self.ctx, &client_context_id)?;
@@ -910,7 +967,9 @@ macro_rules! impl_proxy_service {
                 // blocking wait (CKF_DONT_BLOCK omitted) must not be reaped
                 // mid-call.
                 let client_context_id = request.get_ref().client_context_id.clone();
-                run_context_scoped(&self.ctx, &client_context_id, async {
+                // W1-L7-28: publish the TCP peer for per-connection admission.
+                let peer_addr = request.remote_addr();
+                run_context_scoped(&self.ctx, &client_context_id, peer_addr, async {
                     // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
                     let _pguard =
                         acquire_principal_op_guard(&self.ctx, &client_context_id)?;
@@ -934,7 +993,9 @@ macro_rules! impl_proxy_service {
                 // W1-L6-01: same M2 admission + scope as the macro-generated
                 // RPCs (order: owner → M2 → scope → per-principal → handler).
                 let client_context_id = request.get_ref().client_context_id.clone();
-                run_context_scoped(&self.ctx, &client_context_id, async {
+                // W1-L7-28: publish the TCP peer for per-connection admission.
+                let peer_addr = request.remote_addr();
+                run_context_scoped(&self.ctx, &client_context_id, peer_addr, async {
                     // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
                     let _pguard =
                         acquire_principal_op_guard(&self.ctx, &client_context_id)?;
@@ -952,7 +1013,9 @@ macro_rules! impl_proxy_service {
                 // W1-L6-01: same M2 admission + scope as the macro-generated
                 // RPCs (order: owner → M2 → scope → per-principal → handler).
                 let client_context_id = request.get_ref().client_context_id.clone();
-                run_context_scoped(&self.ctx, &client_context_id, async {
+                // W1-L7-28: publish the TCP peer for per-connection admission.
+                let peer_addr = request.remote_addr();
+                run_context_scoped(&self.ctx, &client_context_id, peer_addr, async {
                     // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
                     let _pguard =
                         acquire_principal_op_guard(&self.ctx, &client_context_id)?;
@@ -976,7 +1039,9 @@ macro_rules! impl_proxy_service {
                 // W1-L6-01: same M2 admission + scope as the macro-generated
                 // RPCs (order: owner → M2 → scope → per-principal → handler).
                 let client_context_id = request.get_ref().client_context_id.clone();
-                run_context_scoped(&self.ctx, &client_context_id, async {
+                // W1-L7-28: publish the TCP peer for per-connection admission.
+                let peer_addr = request.remote_addr();
+                run_context_scoped(&self.ctx, &client_context_id, peer_addr, async {
                     // G2-PR3: per-principal in-flight cap (opt-in; no-op when unset).
                     let _pguard =
                         acquire_principal_op_guard(&self.ctx, &client_context_id)?;
@@ -1001,7 +1066,9 @@ macro_rules! impl_proxy_service {
                     // hand-written RPCs (W1-L6-01). Order: owner → M2 → scope →
                     // per-principal → handler.
                     let client_context_id = request.get_ref().client_context_id.clone();
-                    run_context_scoped(&self.ctx, &client_context_id, async {
+                    // W1-L7-28: publish the TCP peer for per-connection admission.
+                    let peer_addr = request.remote_addr();
+                    run_context_scoped(&self.ctx, &client_context_id, peer_addr, async {
                         // G2-PR3: per-principal in-flight cap (opt-in; zero-cost
                         // no-op when per_principal_max_in_flight is unset →
                         // byte-identical to the pre-quota path). Acquired AFTER

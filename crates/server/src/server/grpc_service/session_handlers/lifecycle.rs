@@ -12,7 +12,7 @@ use super::super::super::auth::policy::TokenPolicy;
 use super::super::super::context_manager::{
     ClientContextId, CloseSessionBeginError, ContextManager,
 };
-use super::super::super::handle_map::VirtualHandle;
+use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::authorization;
 use super::super::service_utils::{
     ck_rv_only, context_exists, current_context_operation_guard, login_lock_timeout,
@@ -74,16 +74,27 @@ pub(super) async fn open_session(
     // principal_key is derived only when the quota is active to avoid an
     // unconditional DashMap lookup + String clone on every open_session call
     // in the common (limit-unset) path.
-    if let Some(max) = crate::server::rate_quota::per_principal_max_sessions() {
+    // W1-L6-04: the check-and-reserve is atomic under the quota mutex, and
+    // the reservation counts toward the cap until the session registers
+    // (released on every failure path by drop), so concurrent opens cannot
+    // exceed the cap.
+    let quota_reservation = if let Some(max) =
+        crate::server::rate_quota::per_principal_max_sessions()
+    {
         let principal_key = ctx_mgr.context_identity(&ctx_id).unwrap_or_else(|| ctx_id.0.clone());
-        if ctx_mgr.session_count_for_principal(&principal_key) >= max {
-            crate::server::resilience::record_session_quota_rejected();
-            return Ok(Response::new(pkcs11_proxy_ng_proto::OpenSessionResponse {
-                ck_rv: CkRv::SESSION_COUNT.0,
-                session_handle: 0,
-            }));
+        match ctx_mgr.try_reserve_session_for_principal(&principal_key, max) {
+            Some(reservation) => Some(reservation),
+            None => {
+                crate::server::resilience::record_session_quota_rejected();
+                return Ok(Response::new(pkcs11_proxy_ng_proto::OpenSessionResponse {
+                    ck_rv: CkRv::SESSION_COUNT.0,
+                    session_handle: 0,
+                }));
+            }
         }
-    }
+    } else {
+        None
+    };
 
     let flags = CkSessionFlags(req.flags as u64);
     let backend = backend_ref.clone();
@@ -93,6 +104,10 @@ pub(super) async fn open_session(
         Ok(backend_session) => {
             match register_session_handle(ctx_mgr, &ctx_id, backend_session, backend_slot).await {
                 Some(virtual_handle) => {
+                    // W1-L6-04: the live count now covers this session —
+                    // release the reservation (failure paths below release
+                    // by drop at return).
+                    drop(quota_reservation);
                     debug!(
                         context_id = %ctx_id.0,
                         slot = req.slot_id,
@@ -311,26 +326,60 @@ pub(super) async fn close_all_sessions(
     // ADR-0002 §7: close only THIS client's sessions for the target slot.
     // We MUST NOT call backend.close_all_sessions() — that would close
     // sessions belonging to other logical client instances.
-    // D6(2): snapshot the held login first — remove_sessions_for_slot drops
-    // it, and last-context-out must then release the backend login too.
+    // W1-L6-03: suspend-then-close (mirror of the singular suspend path):
+    // mappings stay until the backend close confirms, and a transient
+    // failure reactivates them instead of leaking live backend sessions
+    // with no mappings. The logical login is likewise dropped only when
+    // the closes settle terminal.
+    // D6(2): snapshot the held login first; the last-holder logout below
+    // excludes this context (T5F analogue of the singular pre-close path)
+    // because the own login is still held across the batch close.
     let held_login = ctx_mgr
         .get_context(&ctx_id, |ctx| ctx.login_state.contains_key(&backend_slot))
         .await
         .unwrap_or(false);
-    let backend_sessions = ctx_mgr
-        .get_context(&ctx_id, |ctx| ctx.remove_sessions_for_slot(backend_slot))
+    let virtual_sessions: Vec<VirtualHandle> = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.session_slots
+                .iter()
+                .filter(|(_, slot)| **slot == backend_slot)
+                .map(|(vh, _)| *vh)
+                .collect()
+        })
         .await
         .unwrap_or_default();
+    let mut transitions = Vec::with_capacity(virtual_sessions.len());
+    for vh in virtual_sessions {
+        match ctx_mgr.begin_close_session_with_guard(&ctx_id, vh, None) {
+            Ok(transition) => transitions.push(transition),
+            Err(CloseSessionBeginError::ContextMissing) => {
+                return Ok(Response::new(pkcs11_proxy_ng_proto::CloseAllSessionsResponse {
+                    ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+                }));
+            }
+            Err(CloseSessionBeginError::SessionMissing) => {
+                // Already suspended by a concurrent singular close, which
+                // owns its completion — skip it here.
+            }
+        }
+    }
+    let backend_sessions: Vec<BackendHandle> =
+        transitions.iter().map(|t| t.backend_handle()).collect();
 
     // m-5: attempt the last-holder logout BEFORE the batch close, using one
     // of the closing sessions as the preferred carrier (ADR-0002 §7: the
     // logout rides a still-open session and runs before the departing
-    // context's backend sessions close). The logical login is already
-    // removed above, so the last-holder check observes only other live
-    // contexts. No routine WARN on the ordinary logged-in close-all.
+    // context's backend sessions close). The own login is still held, so
+    // the excluding variant keeps the last-holder check exact (T5F). No
+    // routine WARN on the ordinary logged-in close-all.
     if held_login && let Some(carrier) = backend_sessions.first() {
         ctx_mgr
-            .backend_logout_if_last_holder_out(backend_ref, backend_slot, Some(carrier.0 as u64))
+            .backend_logout_if_last_holder_out_excluding(
+                backend_ref,
+                backend_slot,
+                Some(carrier.0 as u64),
+                &ctx_id,
+            )
             .await;
     }
 
@@ -338,11 +387,26 @@ pub(super) async fn close_all_sessions(
     let ck_rv = if backend_sessions.is_empty() {
         CkRv::OK.0
     } else {
-        // Single spawn_backend call to close all sessions in batch.
+        // Single spawn_backend call to close all sessions in batch. The
+        // transitions move into the blocking closure (singular-path
+        // discipline): a timeout/cancellation cannot strand or prematurely
+        // reactivate the suspended handles, and every transition settles
+        // against the one batch outcome.
         let sessions: Vec<CkSessionHandle> =
             backend_sessions.iter().map(|bh| CkSessionHandle(bh.0 as u64)).collect();
         let backend = backend_ref.clone();
-        let result = spawn_backend(move || backend.close_sessions(&sessions)).await?;
+        let result = spawn_backend(move || {
+            let mut transitions = transitions;
+            for transition in &mut transitions {
+                transition.mark_started();
+            }
+            let result = backend.close_sessions(&sessions);
+            for transition in &mut transitions {
+                transition.settle(&result);
+            }
+            result
+        })
+        .await?;
         match result {
             Ok(()) => CkRv::OK.0,
             Err(rv) => rv.0,
@@ -350,10 +414,12 @@ pub(super) async fn close_all_sessions(
     };
     // D6(2): post-close fallback for the race where a held login lost its
     // last own session to a concurrent close between the snapshot and the
-    // removal above (login implies a session, so this is normally
-    // unreachable): retry via any live session, as before.
+    // suspend above (login implies a session, so this is normally
+    // unreachable): retry via any live session, excluding self as above.
     if held_login && backend_sessions.is_empty() {
-        ctx_mgr.backend_logout_if_last_holder_out(backend_ref, backend_slot, None).await;
+        ctx_mgr
+            .backend_logout_if_last_holder_out_excluding(backend_ref, backend_slot, None, &ctx_id)
+            .await;
     }
 
     debug!(

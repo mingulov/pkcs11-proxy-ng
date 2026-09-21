@@ -945,3 +945,48 @@ fn out_of_scope_3_2_stubs_return_function_not_supported() {
         );
     }
 }
+
+/// W1-L6-29: a steady-state data-plane call consumes the reconnect flag
+/// via a fresh dial series. Pre-fix `with_client!` cloned the cached
+/// channel without `ensure_client_connected`, so the flag set by a
+/// transport failure was never honored outside C_Initialize/probe (no
+/// re-dial, no DNS re-resolve, no recovery) — this observed zero new
+/// dial series.
+#[test]
+fn steady_state_call_consumes_reconnect_flag() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedConnectEnv::capture();
+    // Guaranteed-refused loopback endpoint: the re-dial fails fast and
+    // still counts exactly one series; the call then proceeds with the
+    // cached (or absent) client and surfaces a transport error.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral loopback port")
+        .local_addr()
+        .expect("listener addr")
+        .port();
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", format!("http://127.0.0.1:{port}"));
+        std::env::remove_var("PKCS11_PROXY_SOCKET");
+        std::env::set_var("PKCS11_PROXY_CONNECT_ATTEMPTS", "1");
+    }
+    crate::state::mark_finalized();
+    crate::interface_probe::clear_cache();
+    crate::state::clear_pre_init_connect_failure();
+    crate::state::mark_client_reconnect_required();
+    assert!(!crate::state::is_initialized(), "test requires pre-init state");
+    assert!(crate::state::mark_initialized(), "test must own the init flag");
+
+    let before = crate::state::connect_series_count();
+    let mut slot_count: CK_ULONG = 0;
+    // NULL list + valid count: reaches with_client! (count query), fails
+    // the RPC on the refused endpoint without further dials.
+    let _rv = unsafe {
+        dispatch::general::c_get_slot_list(CK_FALSE, std::ptr::null_mut(), &mut slot_count)
+    };
+    crate::state::mark_finalized();
+    assert_eq!(
+        crate::state::connect_series_count() - before,
+        1,
+        "one steady-state call must run exactly one fresh dial series"
+    );
+}

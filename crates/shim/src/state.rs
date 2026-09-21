@@ -687,9 +687,17 @@ pub fn ensure_client_connected() -> Result<(), CkRv> {
         if !CLIENT_RECONNECT_REQUIRED.load(Ordering::Acquire) {
             return Ok(());
         }
-        let client = connect_client_from_env()?;
+        let mut client = connect_client_from_env()?;
         runtime().block_on(async {
-            *existing.lock().await = client;
+            let mut guard = existing.lock().await;
+            // W1-L6-29: preserve the logical session across the swap. The
+            // reconnect may run mid-session (steady-state data plane), and
+            // a fresh client carries no context id — dropping it would
+            // orphan the server context (later calls, including finalize,
+            // short-circuit locally and never reach the daemon).
+            let context_id = guard.context_id_opt();
+            client.restore_context_id(context_id);
+            *guard = client;
         });
         CLIENT_RECONNECT_REQUIRED.store(false, Ordering::Release);
         return Ok(());

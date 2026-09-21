@@ -4162,3 +4162,38 @@ fn shim_async_complete_null_buffer_returns_required_length() {
 
     drop(shim);
 }
+
+/// W1-L6-29: a mid-session reconnect preserves the logical context — the
+/// fresh channel serves the SAME server-side context, so the session's
+/// finalize still removes it (no orphan). Without preservation the swap
+/// dropped the id, later calls (including finalize) short-circuited
+/// locally on the empty id, and the server context leaked.
+#[test]
+fn steady_state_reconnect_preserves_client_context() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+    let live_contexts = || daemon.block_on(async { daemon.context_manager.context_ids().len() });
+    assert_eq!(live_contexts(), 1, "setup: one live context for this session");
+    let ctx_before =
+        state::runtime().block_on(async { state::client().lock().await.context_id_opt() });
+    assert!(ctx_before.is_some(), "setup: client holds a context id");
+
+    // Force the steady-state reconnect path on the next data-plane call.
+    state::mark_client_reconnect_required();
+    let mut slot_count: CK_ULONG = 0;
+    let rv = unsafe {
+        dispatch::general::c_get_slot_list(CK_FALSE, std::ptr::null_mut(), &mut slot_count)
+    };
+    assert_eq!(rv, CKR_OK as CK_RV, "data call across the reconnect must succeed");
+
+    // The id survived the swap and no extra context was minted.
+    let ctx_after =
+        state::runtime().block_on(async { state::client().lock().await.context_id_opt() });
+    assert_eq!(ctx_after, ctx_before, "reconnect must preserve the context id");
+    assert_eq!(live_contexts(), 1, "reconnect must mint no extra context");
+
+    // …and the session's finalize removes that one context (no orphan).
+    drop(shim);
+    assert_eq!(live_contexts(), 0, "finalize after reconnect must remove the context");
+}

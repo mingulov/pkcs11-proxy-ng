@@ -5,10 +5,10 @@ use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::{
-    CkMechanismParams, CkObjectHandle, CkRv, CkSessionHandle, Sp800108DerivedKey,
+    CkMechanismParams, CkObjectClass, CkObjectHandle, CkRv, CkSessionHandle, Sp800108DerivedKey,
 };
 
-use super::super::authorization::mechanism_permitted;
+use super::super::authorization::{class_mint_permitted, mechanism_permitted};
 use super::super::convert_template_opt;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
@@ -160,6 +160,21 @@ async fn generate_key_pair_impl(
         {
             return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
                 ck_rv: rv.0,
+                public_key_handle: 0,
+                private_key_handle: 0,
+            }));
+        }
+    }
+
+    // W1-L7-05: mint-time class gate per template (implied PUBLIC_KEY /
+    // PRIVATE_KEY when CKA_CLASS is omitted). Either half denied denies
+    // the whole mint, before the backend runs.
+    for (template, default) in
+        [(public_view, CkObjectClass::PUBLIC_KEY), (private_view, CkObjectClass::PRIVATE_KEY)]
+    {
+        if !class_mint_permitted(ctx, &ctx_id, req.session_handle, template, Some(default)).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyPairResponse {
+                ck_rv: CkRv::ATTRIBUTE_VALUE_INVALID.0,
                 public_key_handle: 0,
                 private_key_handle: 0,
             }));
@@ -318,6 +333,24 @@ async fn generate_key_impl(
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
             ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }));
+    }
+
+    // W1-L7-05: mint-time class gate (implied SECRET_KEY when CKA_CLASS is
+    // omitted), before the backend runs.
+    if !class_mint_permitted(
+        ctx,
+        &ctx_id,
+        req.session_handle,
+        template_view,
+        Some(CkObjectClass::SECRET_KEY),
+    )
+    .await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
+            ck_rv: CkRv::ATTRIBUTE_VALUE_INVALID.0,
             key_handle: 0,
             mechanism_out: None,
         }));
@@ -509,6 +542,24 @@ async fn derive_key_impl(
     {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
             ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }));
+    }
+
+    // W1-L7-05: mint-time class gate (implied SECRET_KEY when CKA_CLASS is
+    // omitted), before the backend runs.
+    if !class_mint_permitted(
+        ctx,
+        &ctx_id,
+        req.session_handle,
+        template_view,
+        Some(CkObjectClass::SECRET_KEY),
+    )
+    .await
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+            ck_rv: CkRv::ATTRIBUTE_VALUE_INVALID.0,
             key_handle: 0,
             mechanism_out: None,
         }));

@@ -1686,3 +1686,46 @@ fn ip_binds_still_validate() {
         assert!(config.validate().is_ok(), "bind {bind} must validate");
     }
 }
+
+/// W1-L6-20: transport concurrency knobs ship with safe bounded defaults.
+#[test]
+fn parse_transport_limits_defaults() {
+    let toml = r#"
+[backend]
+module = "."
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(config.proxy.grpc_concurrency_limit_per_connection, 256);
+    assert_eq!(config.proxy.grpc_max_concurrent_streams, 256);
+    assert!(config.proxy.grpc_load_shed);
+}
+
+/// W1-L6-20: operators can tune the transport concurrency knobs.
+#[test]
+fn parse_transport_limits_when_set() {
+    let toml = r#"
+[backend]
+module = "."
+
+[proxy]
+grpc_concurrency_limit_per_connection = 64
+grpc_max_concurrent_streams = 128
+grpc_load_shed = false
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(config.proxy.grpc_concurrency_limit_per_connection, 64);
+    assert_eq!(config.proxy.grpc_max_concurrent_streams, 128);
+    assert!(!config.proxy.grpc_load_shed);
+}
+
+/// W1-L6-20: zero transport limits are rejected (a zero limit would
+/// either refuse everything or silently restore the unbounded default).
+#[test]
+fn validate_zero_transport_limits_rejected() {
+    for field in ["grpc_concurrency_limit_per_connection", "grpc_max_concurrent_streams"] {
+        let toml = format!("[backend]\nmodule = \".\"\n\n[proxy]\n{field} = 0\n");
+        let config: DaemonConfig = toml::from_str(&toml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains(field), "error should mention field: {err}");
+    }
+}
