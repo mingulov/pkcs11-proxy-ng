@@ -334,10 +334,38 @@ pub(crate) fn catch_panics<F>(f: F) -> CK_RV
 where
     F: FnOnce() -> CK_RV + std::panic::UnwindSafe,
 {
-    match std::panic::catch_unwind(f) {
+    match std::panic::catch_unwind(|| {
+        // W1-C7-04 forced-panic injection: fires before the export body runs,
+        // inside the boundary's own `catch_unwind`. Test builds only.
+        #[cfg(test)]
+        if panic_inject_enabled_for_test() {
+            panic!("W1-C7-04 injected panic at the extern \"C\" boundary");
+        }
+        f()
+    }) {
         Ok(rv) => rv,
         Err(_) => rv_err(CkRv::GENERAL_ERROR),
     }
+}
+
+// Thread-local forced-panic injection for the per-export runtime boundary
+// test (W1-C7-04). Thread-local (not global) so arming it cannot perturb
+// exports called concurrently by other test threads — several
+// early-return tests call exports without holding the shared state guard.
+// `#[cfg(test)]` throughout: zero impact on shipped builds.
+#[cfg(test)]
+thread_local! {
+    static PANIC_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_panic_inject_for_test(enabled: bool) {
+    PANIC_INJECT.with(|flag| flag.set(enabled));
+}
+
+#[cfg(test)]
+pub(crate) fn panic_inject_enabled_for_test() -> bool {
+    PANIC_INJECT.with(|flag| flag.get())
 }
 
 /// Maximum mechanism **parameter-struct** byte length.  No standard PKCS#11

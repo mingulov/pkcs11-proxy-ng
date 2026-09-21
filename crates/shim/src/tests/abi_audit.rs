@@ -642,6 +642,646 @@ fn catch_panics_gate_trips_on_ungated_export() {
     );
 }
 
+/// Pinned count of non-stub `extern "C"` exports. Bumped only together with a
+/// new row in `per_export_runtime_panic_boundary` (the source-walk set check
+/// below fails otherwise, so a new export cannot silently dodge the test).
+const EXPECTED_NON_STUB_EXPORT_COUNT: usize = 104;
+
+/// RAII arming of the thread-local panic injection flag: enables on creation,
+/// disables on drop — including drops during unwinding, so a boundary
+/// violation can never leak an armed flag into a later export.
+struct PanicInjectGuard;
+
+impl PanicInjectGuard {
+    fn arm() -> Self {
+        dispatch::general::helpers::set_panic_inject_for_test(true);
+        PanicInjectGuard
+    }
+}
+
+impl Drop for PanicInjectGuard {
+    fn drop(&mut self) {
+        dispatch::general::helpers::set_panic_inject_for_test(false);
+    }
+}
+
+/// Invoke one export with panic injection armed and verify the real `extern
+/// "C"` boundary held: the call must return (no unwind escaped — the process
+/// is alive to run the next export) with `CKR_GENERAL_ERROR`, which proves a
+/// panic fired inside the export and `catch_panics` converted it. Returns the
+/// violation description otherwise.
+fn check_export_catches_panic(name: &str, invoke: fn() -> CK_RV) -> Result<(), String> {
+    let _armed = PanicInjectGuard::arm();
+    // The test-side `catch_unwind` only OBSERVES an escaping unwind so it can
+    // be reported as a boundary violation; it never masks one.
+    match std::panic::catch_unwind(invoke) {
+        Ok(rv) => {
+            if rv == CKR_GENERAL_ERROR as CK_RV {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{name}: returned {rv:#x} under injected panic, expected CKR_GENERAL_ERROR \
+                     (panic not routed through catch_panics)"
+                ))
+            }
+        }
+        Err(_) => Err(format!("{name}: panic unwound across the extern \"C\" boundary")),
+    }
+}
+
+#[test]
+fn per_export_runtime_panic_boundary() {
+    // W1-C7-04: every non-stub export must survive a forced panic inside
+    // without unwinding across the real `extern "C"` boundary. Injection fires
+    // at the top of `catch_panics`, before any export body reads its arguments,
+    // so all-null/zero dummy args are never dereferenced.
+    let _guard = shim_state_test_guard();
+    let cases: Vec<(&str, fn() -> CK_RV)> = vec![
+        ("c_init_token", || unsafe {
+            dispatch::general::c_init_token(0, std::ptr::null_mut(), 0, std::ptr::null_mut())
+        }),
+        ("c_init_pin", || unsafe { dispatch::general::c_init_pin(0, std::ptr::null_mut(), 0) }),
+        ("c_set_pin", || unsafe {
+            dispatch::general::c_set_pin(0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0)
+        }),
+        ("c_async_complete", || unsafe {
+            dispatch::general::c_async_complete(0, std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("c_async_get_id", || unsafe {
+            dispatch::general::c_async_get_id(0, std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("c_async_join", || unsafe {
+            dispatch::general::c_async_join(0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0)
+        }),
+        ("c_wrap_key_authenticated", || unsafe {
+            dispatch::general::c_wrap_key_authenticated(
+                0,
+                std::ptr::null_mut(),
+                0,
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_unwrap_key_authenticated", || unsafe {
+            dispatch::general::c_unwrap_key_authenticated(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_digest_encrypt_update", || unsafe {
+            dispatch::general::c_digest_encrypt_update(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_decrypt_digest_update", || unsafe {
+            dispatch::general::c_decrypt_digest_update(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_sign_encrypt_update", || unsafe {
+            dispatch::general::c_sign_encrypt_update(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_decrypt_verify_update", || unsafe {
+            dispatch::general::c_decrypt_verify_update(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_digest_init", || unsafe { dispatch::general::c_digest_init(0, std::ptr::null_mut()) }),
+        ("c_digest", || unsafe {
+            dispatch::general::c_digest(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_digest_update", || unsafe {
+            dispatch::general::c_digest_update(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_digest_key", || unsafe { dispatch::general::c_digest_key(0, 0) }),
+        ("c_digest_final", || unsafe {
+            dispatch::general::c_digest_final(0, std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("c_encrypt_init", || unsafe {
+            dispatch::general::c_encrypt_init(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_encrypt", || unsafe {
+            dispatch::general::c_encrypt(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_encrypt_update", || unsafe {
+            dispatch::general::c_encrypt_update(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_encrypt_final", || unsafe {
+            dispatch::general::c_encrypt_final(0, std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("c_decrypt_init", || unsafe {
+            dispatch::general::c_decrypt_init(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_decrypt", || unsafe {
+            dispatch::general::c_decrypt(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_decrypt_update", || unsafe {
+            dispatch::general::c_decrypt_update(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_decrypt_final", || unsafe {
+            dispatch::general::c_decrypt_final(0, std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("c_initialize", || unsafe { dispatch::general::c_initialize(std::ptr::null_mut()) }),
+        ("c_finalize", || unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) }),
+        ("c_get_info", || unsafe { dispatch::general::c_get_info(std::ptr::null_mut()) }),
+        ("c_encapsulate_key", || unsafe {
+            dispatch::general::c_encapsulate_key(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_decapsulate_key", || unsafe {
+            dispatch::general::c_decapsulate_key(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_wrap_key", || unsafe {
+            dispatch::general::c_wrap_key(
+                0,
+                std::ptr::null_mut(),
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_unwrap_key", || unsafe {
+            dispatch::general::c_unwrap_key(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_derive_key", || unsafe {
+            dispatch::general::c_derive_key(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_generate_key", || unsafe {
+            dispatch::general::c_generate_key(
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_generate_key_pair", || unsafe {
+            dispatch::general::c_generate_key_pair(
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_seed_random", || unsafe {
+            dispatch::general::c_seed_random(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_generate_random", || unsafe {
+            dispatch::general::c_generate_random(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_message_encrypt_init", || unsafe {
+            dispatch::general::c_message_encrypt_init(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_message_encrypt_final", || unsafe { dispatch::general::c_message_encrypt_final(0) }),
+        ("c_message_decrypt_init", || unsafe {
+            dispatch::general::c_message_decrypt_init(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_message_decrypt_final", || unsafe { dispatch::general::c_message_decrypt_final(0) }),
+        ("c_message_sign_init", || unsafe {
+            dispatch::general::c_message_sign_init(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_message_sign_final", || unsafe { dispatch::general::c_message_sign_final(0) }),
+        ("c_message_verify_init", || unsafe {
+            dispatch::general::c_message_verify_init(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_message_verify_final", || unsafe { dispatch::general::c_message_verify_final(0) }),
+        ("c_encrypt_message", || unsafe {
+            dispatch::general::c_encrypt_message(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_encrypt_message_begin", || unsafe {
+            dispatch::general::c_encrypt_message_begin(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        }),
+        ("c_encrypt_message_next", || unsafe {
+            dispatch::general::c_encrypt_message_next(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            )
+        }),
+        ("c_decrypt_message", || unsafe {
+            dispatch::general::c_decrypt_message(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_decrypt_message_begin", || unsafe {
+            dispatch::general::c_decrypt_message_begin(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        }),
+        ("c_decrypt_message_next", || unsafe {
+            dispatch::general::c_decrypt_message_next(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            )
+        }),
+        ("c_sign_message", || unsafe {
+            dispatch::general::c_sign_message(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_sign_message_begin", || unsafe {
+            dispatch::general::c_sign_message_begin(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_sign_message_next", || unsafe {
+            dispatch::general::c_sign_message_next(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_verify_message", || unsafe {
+            dispatch::general::c_verify_message(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        }),
+        ("c_verify_message_begin", || unsafe {
+            dispatch::general::c_verify_message_begin(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_verify_message_next", || unsafe {
+            dispatch::general::c_verify_message_next(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        }),
+        ("c_find_objects_init", || unsafe {
+            dispatch::general::c_find_objects_init(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_find_objects", || unsafe {
+            dispatch::general::c_find_objects(0, std::ptr::null_mut(), 0, std::ptr::null_mut())
+        }),
+        ("c_find_objects_final", || unsafe { dispatch::general::c_find_objects_final(0) }),
+        ("c_get_attribute_value", || unsafe {
+            dispatch::general::c_get_attribute_value(0, 0, std::ptr::null_mut(), 0)
+        }),
+        ("c_create_object", || unsafe {
+            dispatch::general::c_create_object(0, std::ptr::null_mut(), 0, std::ptr::null_mut())
+        }),
+        ("c_copy_object", || unsafe {
+            dispatch::general::c_copy_object(0, 0, std::ptr::null_mut(), 0, std::ptr::null_mut())
+        }),
+        ("c_destroy_object", || unsafe { dispatch::general::c_destroy_object(0, 0) }),
+        ("c_get_object_size", || unsafe {
+            dispatch::general::c_get_object_size(0, 0, std::ptr::null_mut())
+        }),
+        ("c_set_attribute_value", || unsafe {
+            dispatch::general::c_set_attribute_value(0, 0, std::ptr::null_mut(), 0)
+        }),
+        ("c_open_session", || unsafe {
+            dispatch::general::c_open_session(
+                0,
+                0,
+                std::ptr::null_mut(),
+                None,
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_close_session", || unsafe { dispatch::general::c_close_session(0) }),
+        ("c_close_all_sessions", || unsafe { dispatch::general::c_close_all_sessions(0) }),
+        ("c_get_session_info", || unsafe {
+            dispatch::general::c_get_session_info(0, std::ptr::null_mut())
+        }),
+        ("c_login", || unsafe { dispatch::general::c_login(0, 0, std::ptr::null_mut(), 0) }),
+        ("c_logout", || unsafe { dispatch::general::c_logout(0) }),
+        ("c_get_function_status", || unsafe { dispatch::general::c_get_function_status(0) }),
+        ("c_cancel_function", || unsafe { dispatch::general::c_cancel_function(0) }),
+        ("c_login_user", || unsafe {
+            dispatch::general::c_login_user(0, 0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0)
+        }),
+        ("c_session_cancel", || unsafe { dispatch::general::c_session_cancel(0, 0) }),
+        ("c_get_session_validation_flags", || unsafe {
+            dispatch::general::c_get_session_validation_flags(0, 0, std::ptr::null_mut())
+        }),
+        ("c_sign_init", || unsafe { dispatch::general::c_sign_init(0, std::ptr::null_mut(), 0) }),
+        ("c_sign", || unsafe {
+            dispatch::general::c_sign(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_sign_update", || unsafe {
+            dispatch::general::c_sign_update(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_sign_final", || unsafe {
+            dispatch::general::c_sign_final(0, std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("c_verify_init", || unsafe {
+            dispatch::general::c_verify_init(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_verify", || unsafe {
+            dispatch::general::c_verify(0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0)
+        }),
+        ("c_verify_update", || unsafe {
+            dispatch::general::c_verify_update(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_verify_final", || unsafe {
+            dispatch::general::c_verify_final(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_sign_recover_init", || unsafe {
+            dispatch::general::c_sign_recover_init(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_sign_recover", || unsafe {
+            dispatch::general::c_sign_recover(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_verify_recover_init", || unsafe {
+            dispatch::general::c_verify_recover_init(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_verify_recover", || unsafe {
+            dispatch::general::c_verify_recover(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        }),
+        ("c_get_slot_list", || unsafe {
+            dispatch::general::c_get_slot_list(0, std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("c_get_slot_info", || unsafe {
+            dispatch::general::c_get_slot_info(0, std::ptr::null_mut())
+        }),
+        ("c_get_token_info", || unsafe {
+            dispatch::general::c_get_token_info(0, std::ptr::null_mut())
+        }),
+        ("c_get_mechanism_list", || unsafe {
+            dispatch::general::c_get_mechanism_list(0, std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("c_get_mechanism_info", || unsafe {
+            dispatch::general::c_get_mechanism_info(0, 0, std::ptr::null_mut())
+        }),
+        ("c_wait_for_slot_event", || unsafe {
+            dispatch::general::c_wait_for_slot_event(0, std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("c_get_operation_state", || unsafe {
+            dispatch::general::c_get_operation_state(0, std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("c_set_operation_state", || unsafe {
+            dispatch::general::c_set_operation_state(0, std::ptr::null_mut(), 0, 0, 0)
+        }),
+        ("c_verify_signature_init", || unsafe {
+            dispatch::general::c_verify_signature_init(
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+            )
+        }),
+        ("c_verify_signature", || unsafe {
+            dispatch::general::c_verify_signature(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_verify_signature_update", || unsafe {
+            dispatch::general::c_verify_signature_update(0, std::ptr::null_mut(), 0)
+        }),
+        ("c_verify_signature_final", || unsafe { dispatch::general::c_verify_signature_final(0) }),
+        ("C_GetFunctionList", || unsafe { C_GetFunctionList(std::ptr::null_mut()) }),
+        ("C_GetInterfaceList", || unsafe {
+            C_GetInterfaceList(std::ptr::null_mut(), std::ptr::null_mut())
+        }),
+        ("C_GetInterface", || unsafe {
+            C_GetInterface(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), 0)
+        }),
+    ];
+
+    // No silent omission: the table must name every non-stub export defined in
+    // the source tree, exactly (both directions), and match the pinned count.
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let tests_dir = src_dir.join("tests");
+    let mut files = Vec::new();
+    collect_rs_files(&src_dir, &mut files);
+    files.retain(|p| !p.starts_with(&tests_dir));
+    let mut defined: Vec<String> = files
+        .iter()
+        .map(|p| std::fs::read_to_string(p).expect("read shim source"))
+        .flat_map(|src| source_export_names(&src))
+        .collect();
+    defined.sort();
+    let mut tabled: Vec<String> = cases.iter().map(|(name, _)| name.to_string()).collect();
+    tabled.sort();
+    assert_eq!(tabled, defined, "panic table must cover every non-stub export exactly");
+    assert_eq!(
+        cases.len(),
+        EXPECTED_NON_STUB_EXPORT_COUNT,
+        "pinned export count must match the table"
+    );
+
+    // Run every export under injection; collect all violations for one report.
+    let mut failures = Vec::new();
+    for (name, invoke) in &cases {
+        if let Err(violation) = check_export_catches_panic(name, *invoke) {
+            failures.push(violation);
+        }
+    }
+    // The process reaching this assert proves it survived every injected panic.
+    assert!(failures.is_empty(), "per-export panic boundary violations:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn panic_gate_trips_on_unwrapped_export() {
+    // W1-C7-04 negative control: the checker must fail an export that panics
+    // without `catch_panics` (unwind escapes) and one that never panics at all
+    // (wrong RV — proves the main test is not vacuous).
+    let _guard = shim_state_test_guard();
+
+    fn unwrapped_panicking() -> CK_RV {
+        if crate::dispatch::general::helpers::panic_inject_enabled_for_test() {
+            panic!("simulated inner panic in an un-wrapped export");
+        }
+        CKR_OK as CK_RV
+    }
+    let err = check_export_catches_panic("unwrapped_fixture", unwrapped_panicking)
+        .expect_err("gate must fail an un-wrapped export that panics");
+    assert!(err.contains("unwound across"), "unexpected violation text: {err}");
+
+    fn unwrapped_quiet() -> CK_RV {
+        CKR_OK as CK_RV
+    }
+    let err = check_export_catches_panic("quiet_fixture", unwrapped_quiet)
+        .expect_err("gate must fail an export that never panics");
+    assert!(err.contains("expected CKR_GENERAL_ERROR"), "unexpected violation text: {err}");
+}
+
+/// Non-stub `extern "C"` export names defined in one source file (same
+/// stub-exemption rule as `catch_panics_counts`: `c_not_supported*` only).
+fn source_export_names(src: &str) -> Vec<String> {
+    src.lines()
+        .filter(|line| {
+            line.contains("pub unsafe extern \"C\" fn") && !line.contains("c_not_supported")
+        })
+        .filter_map(|line| {
+            let after_fn = line.split("fn ").nth(1)?;
+            let name = after_fn.split('(').next()?.trim();
+            if name.is_empty() { None } else { Some(name.to_string()) }
+        })
+        .collect()
+}
+
 #[test]
 fn shim_source_never_formats_pin_data() {
     // H5: walk the WHOLE dispatch tree (not a hardcoded file list) so a new
