@@ -691,6 +691,33 @@ fn shim_source_never_formats_pin_data() {
     }
 }
 
+#[test]
+fn pin_gate_trips_on_debug_format_sigil() {
+    // W1-C7-03 negative control: Debug-format interpolation of a secret
+    // (`{pin:?}`) leaks the value just like `{pin}`; the gate must trip on
+    // it for every secret ident.
+    for id in ["pin", "so_pin", "new_pin", "old_pin", "password"] {
+        assert!(
+            logs_secret_sigil(&format!("info!(\"v={{{id}:?}}\")"), id),
+            "gate must trip on Debug-format sigil {{{id}:?}}",
+        );
+        assert!(
+            logs_secret_sigil(&format!("info!(\"v={{{id}:#?}}\")"), id),
+            "gate must trip on alternate Debug sigil {{{id}:#?}}",
+        );
+        assert!(
+            logs_secret_sigil(&format!("info!(\"v={{{id}}}\")"), id),
+            "gate must keep tripping on Display sigil {{{id}}}",
+        );
+    }
+
+    // Clean code passes: secret-adjacent lines without value capture.
+    assert!(!logs_secret_sigil("let pin = read_pin_ptr(p_pin, pin_len);", "pin"));
+    assert!(!logs_secret_sigil("info!(\"pin len={}\", pin.len());", "pin"));
+    // A longer identifier sharing the prefix must not trip.
+    assert!(!logs_secret_sigil("info!(\"{pin_hash}\");", "pin"));
+}
+
 /// Recursively collect `.rs` files under `dir`.
 fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -723,7 +750,8 @@ fn contains_ident_token(text: &str, ident: &str) -> bool {
 }
 
 /// True if `line` captures the value of `ident` via a tracing sigil (`?ident`,
-/// `%ident`) or interpolates it (`{ident}`), with `ident` as a whole token.
+/// `%ident`) or interpolates it (`{ident}`, `{ident:?}`, `{ident:#?}`, or any
+/// other `{ident:...}` format spec), with `ident` as a whole token.
 fn logs_secret_sigil(line: &str, ident: &str) -> bool {
     let bytes = line.as_bytes();
     for sigil in ['?', '%'] {
@@ -738,7 +766,21 @@ fn logs_secret_sigil(line: &str, ident: &str) -> bool {
             from = start + 1;
         }
     }
-    line.contains(&format!("{{{ident}}}"))
+    // Inline-format interpolation: `{ident}` and any `{ident:...}` spec (all
+    // evaluate the secret — Display and every Debug/width/precision form).
+    // The char after the ident must close or continue the spec (`}`/`:`) so
+    // a longer identifier such as `{pin_hash}` does not trip for `pin`.
+    let open_pat = format!("{{{ident}");
+    let mut from = 0;
+    while let Some(rel) = line[from..].find(&open_pat) {
+        let start = from + rel;
+        let end = start + open_pat.len();
+        if end < bytes.len() && (bytes[end] == b'}' || bytes[end] == b':') {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
 }
 
 fn is_ident_char(b: u8) -> bool {
