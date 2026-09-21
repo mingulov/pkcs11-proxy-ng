@@ -1448,6 +1448,7 @@ dependencies = [
  "tower",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

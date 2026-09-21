@@ -48,7 +48,7 @@ thiserror = "2"
 clap = { version = "4", features = ["derive", "env"] }
 libloading = "0.8"
 cryptoki-sys = "0.5"
-nix = { version = "0.31", features = ["socket", "user", "fs"] }
+nix = { version = "0.31", features = ["socket", "user", "fs", "mman"] }
 dashmap = "6"
 x509-parser = "0.18"
 tonic-build = "0.14"
@@ -74,3 +74,17 @@ zeroize = { version = "1", features = ["derive"] }
 lto = "thin"
 strip = "symbols"
 codegen-units = 1
+
+# W1-L12-03 (closes FOLLOWUP-clippy-print-deny) + W1-L2-08: `println!` /
+# `eprintln!` / `dbg!` bypass `tracing` entirely, so the `pin_leak_test`
+# tracing capture cannot see them. Deny all three sinks workspace-wide so
+# a new print/dbg sink fails `cargo clippy --all-targets --all-features`
+# (these lints are allow-by-default, so CI's `-D warnings` alone does not
+# enable them). Every member opts in with `[lints] workspace = true`;
+# the enumerated legitimate sinks carry targeted `allow`s, audited by
+# `crates/server/tests/print_sink_gate.rs` (exact allow-file set + a
+# per-file sink/allow match, both with negative controls).
+[workspace.lints.clippy]
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"

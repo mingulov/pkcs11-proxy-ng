@@ -1,3 +1,6 @@
+// W1-L12-03: test/bench report lines go to stdout by design; the
+// workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stdout)]
 //! Throughput at varying queue depth.
 //!
 //! Drives sustained C_Sign load with N concurrent client tasks

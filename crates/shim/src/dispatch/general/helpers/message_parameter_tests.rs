@@ -1593,6 +1593,7 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
     };
 
     match unsafe { super::read_mechanism_with_shape(&mechanism, Some("wtls_master_key_derive")) }
+        .expect("read mechanism")
         .params
         .expect("wtls params")
     {
@@ -1654,6 +1655,7 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
     };
 
     match unsafe { super::read_mechanism_with_shape(&mechanism, Some("wtls_key_mat")) }
+        .expect("read mechanism")
         .params
         .expect("wtls key material params")
     {
@@ -1740,6 +1742,7 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
     };
 
     match unsafe { super::read_mechanism_with_shape(&mechanism, Some("ssl3_key_mat")) }
+        .expect("read mechanism")
         .params
         .expect("ssl3/tls key material params")
     {

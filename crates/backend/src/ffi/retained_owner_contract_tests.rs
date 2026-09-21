@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Retention observations through a deliberately retaining native provider.
 //!
 //! The oracle crate (`tests/ffi_oracles/retained_mechanisms`) is a dual

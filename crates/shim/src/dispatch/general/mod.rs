@@ -44,6 +44,10 @@ pub use session_3x::*;
 pub use sign_verify::*;
 pub use slot::*;
 pub use state_ops::*;
-#[allow(unused_imports)]
+// W1-L12-05: test-only — the unsupported stubs have no production
+// consumers (every function-list slot wires a real `c_*`); they are
+// exercised by `crate::tests::interface`. Scoped instead of
+// `#[allow(unused_imports)]` so no allow-paired glob remains.
+#[cfg(test)]
 pub use unsupported::*;
 pub use verify_signature::*;

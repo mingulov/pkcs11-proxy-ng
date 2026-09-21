@@ -30,3 +30,9 @@ pkcs11-proxy-ng = { path = "../server" }
 pkcs11-proxy-ng-backend = { path = "../backend" }
 tokio-stream = "0.1"
 tonic = { workspace = true, features = ["server"] }
+# W1-L2-10: client PIN-wipe canary tests pin the `ZeroizeOnDrop` contract
+# of the request types the session methods construct.
+zeroize = { workspace = true }
+
+[lints]
+workspace = true

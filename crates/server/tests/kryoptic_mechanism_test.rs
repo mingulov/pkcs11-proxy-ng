@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Comprehensive parameterized mechanism integration tests against Kryoptic.
 //!
 //! Each test proves a different mechanism parameter shape works through the full

@@ -35,3 +35,6 @@ tokio-stream = "0.1"
 tonic = { workspace = true, features = ["server"] }
 tempfile = "3"
 rcgen = "0.14"
+
+[lints]
+workspace = true

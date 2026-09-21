@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Row-19 constructor-domain gates (C3M.6 order item 19, in-process subset).
 //!
 //! One live project-managed provider chain per embedding process: a second

@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! PIN-leak integration test.
 //!
 //! Drives the daemon at TRACE level with deliberately unique PIN canary
@@ -13,10 +16,14 @@
 //!     C_Logout, C_InitPIN, C_SetPIN, C_LoginUser. These are the
 //!     PIN-bearing PKCS#11 calls.
 //!
-//! Out of scope here (covered by code review / `cargo clippy`, not this test):
+//! Out of scope here (covered by a compiler-enforced gate, not this test):
 //!   - Direct `println!`/`eprintln!`/`dbg!` writes — not captured by
-//!     tracing-subscriber. Code review and `cargo clippy` must catch
-//!     those.
+//!     tracing-subscriber. W1-L12-03 + W1-L2-08 deny those sinks
+//!     workspace-wide via `[workspace.lints.clippy]` in the root
+//!     `Cargo.toml`, so a new sink fails `cargo clippy --all-targets
+//!     --all-features`; `print_sink_gate.rs` (same directory) audits the
+//!     enumerated allow set and every sink/allow pair under plain `cargo
+//!     test`, with negative controls. No review carve-out remains.
 //!   - PINs that leave the daemon over the gRPC response wire — handled
 //!     by transport-layer mTLS; not in scope for this test.
 

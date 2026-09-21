@@ -1,8 +1,7 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{catch_panics, dispatch_byte_output_exact};
 
 pub unsafe extern "C" fn c_digest_encrypt_update(
     h_session: CK_SESSION_HANDLE,

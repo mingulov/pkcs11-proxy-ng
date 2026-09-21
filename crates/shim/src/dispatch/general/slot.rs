@@ -3,8 +3,7 @@ use pkcs11_proxy_ng_types::*;
 
 use crate::state;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{catch_panics, rv_err, rv_ok, with_client};
 
 pub unsafe extern "C" fn c_get_slot_list(
     token_present: CK_BBOOL,

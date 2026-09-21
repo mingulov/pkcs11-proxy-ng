@@ -1,3 +1,6 @@
+// W1-L12-03: report lines go to stdout/stderr by design; the workspace
+// lint table denies these sinks elsewhere.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Latency histogram for shim→daemon→shim overhead.
 //!
 //! Runs N C_Sign operations against a real gRPC daemon backed by

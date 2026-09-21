@@ -79,3 +79,6 @@ harness = false
 [[bench]]
 name = "registry_payload_size"
 harness = false
+
+[lints]
+workspace = true

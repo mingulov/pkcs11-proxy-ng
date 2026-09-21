@@ -1427,3 +1427,77 @@ fn logs_secret_sigil(line: &str, ident: &str) -> bool {
 fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
+
+/// Code lines of a source file with `//` comments stripped (a commented
+/// mention of an attribute or import is not one).
+fn code_lines(src: &str) -> Vec<&str> {
+    src.lines().map(|line| line.split("//").next().unwrap_or_default()).collect()
+}
+
+/// True when the file pairs `#[allow(unused_imports)]` with a glob import
+/// (`use ...::*`), hiding unused names instead of importing explicitly.
+fn has_allow_paired_glob(src: &str) -> bool {
+    let code = code_lines(src);
+    if !code.iter().any(|line| line.contains("allow(unused_imports)")) {
+        return false;
+    }
+    code.iter().any(|line| {
+        let rest =
+            line.trim().strip_prefix("pub use ").or_else(|| line.trim().strip_prefix("use "));
+        rest.is_some_and(|path| path.contains("::*"))
+    })
+}
+
+#[test]
+fn dispatch_has_no_allow_paired_glob_imports() {
+    // W1-L12-05: every dispatch file imports explicitly — no
+    // `use super::*` (or other glob) hiding behind
+    // `#[allow(unused_imports)]`, and no such allow left anywhere in the
+    // dispatch tree. The walk covers the whole tree so a reintroduced
+    // pair in any file (old or new) trips.
+    let dispatch_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dispatch");
+    let mut files = Vec::new();
+    collect_rs_files(&dispatch_dir, &mut files);
+    assert!(!files.is_empty(), "no dispatch sources found under {}", dispatch_dir.display());
+
+    let mut paired = Vec::new();
+    let mut bare_allows = Vec::new();
+    for path in &files {
+        let src = std::fs::read_to_string(path).expect("read dispatch source");
+        if has_allow_paired_glob(&src) {
+            paired.push(path.display().to_string());
+        } else if code_lines(&src).iter().any(|line| line.contains("allow(unused_imports)")) {
+            bare_allows.push(path.display().to_string());
+        }
+    }
+    assert!(
+        paired.is_empty(),
+        "allow(unused_imports)-paired glob imports remain in dispatch (W1-L12-05): {paired:?}"
+    );
+    assert!(
+        bare_allows.is_empty(),
+        "bare allow(unused_imports) remains in dispatch (W1-L12-05 hygiene): {bare_allows:?}"
+    );
+}
+
+#[test]
+fn import_gate_trips_on_allow_paired_glob() {
+    // W1-L12-05 negative control: the exact pre-fix shape must trip.
+    assert!(has_allow_paired_glob(
+        "#[allow(unused_imports)]\nuse super::*;\nfn f() { helper(); }\n"
+    ));
+    assert!(has_allow_paired_glob("#[allow(unused_imports)]\npub use unsupported::*;\n"));
+    // A glob without the allow is not this gate's target (other globs
+    // such as `use super::helpers::*;` are out of scope for W1-L12-05).
+    assert!(!has_allow_paired_glob("use super::helpers::*;\nfn f() { helper(); }\n"));
+    // Explicit imports pass, with or without an unrelated allow nearby.
+    assert!(!has_allow_paired_glob("use super::helpers::{a, b};\nfn f() { a(); b(); }\n"));
+    // A commented-out glob is not an import.
+    assert!(!has_allow_paired_glob("#[allow(unused_imports)]\n// use super::*;\nfn f() {}\n"));
+    // A commented mention of the allow next to a real glob is not a pair
+    // (the mod.rs justification comment shape).
+    assert!(!has_allow_paired_glob(
+        "// Scoped instead of #[allow(unused_imports)] so no pair remains.\n\
+         #[cfg(test)]\npub use unsupported::*;\n"
+    ));
+}

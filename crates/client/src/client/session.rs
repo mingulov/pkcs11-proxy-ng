@@ -1,15 +1,25 @@
 //! Client session methods.
 //!
-//! PIN/secret handling note (E3): the PIN bytes a caller passes here are copied
-//! once, into the prost-generated request struct, and that struct is then moved
-//! into the tonic client to be encoded and sent. From that point the client no
-//! longer owns the copy, so it cannot wipe it; and the prost field type is
-//! deliberately kept a plain `Vec<u8>` (see `crates/proto/build.rs`) rather than
-//! a wiping newtype. Wrapping the request field in `Zeroizing` here would only
-//! add a second copy without wiping the one tonic holds, so it is intentionally
-//! omitted. This is the send-side mirror of the documented receive-side
-//! limitation (tonic's transport buffers are not reachable for zeroization); the
-//! application owns its own PIN buffer and is responsible for wiping it.
+//! PIN/secret handling note (E3, revised W1-L2-10): the PIN bytes a caller
+//! passes here are copied once, into the prost-generated request struct,
+//! which is then moved into the tonic client to be encoded and sent. That
+//! single client-owned copy IS wiped: the five PIN-bearing request
+//! messages (`LoginRequest`, `LoginUserRequest`, `InitTokenRequest`,
+//! `InitPinRequest`, `SetPinRequest`) derive `Zeroize` + `ZeroizeOnDrop`
+//! at codegen time (see `crates/proto/build.rs`, W1-C8-11), so the PIN
+//! fields are overwritten when the request drops after encoding instead
+//! of being freed plain. The prost field type stays a plain `Vec<u8>` by
+//! design — `bytes::Bytes` has no `Zeroize` impl — and the whole-message
+//! derive is what covers it, so wrapping the field in `Zeroizing` here
+//! would only add a second copy and stays omitted. Pinned by
+//! `crates/client/tests/client_pin_zeroize.rs` (canaries + drop bounds)
+//! alongside the proto-side `pin_zeroize.rs`.
+//!
+//! Residuals: the application owns its own PIN buffer (the shim passes a
+//! borrow of caller memory; wiping it stays the caller's job), and
+//! tonic's encoded wire buffers are unreachable for zeroization — the
+//! send-side mirror of the documented receive-side transport-buffer
+//! limitation.
 
 use pkcs11_proxy_ng_types::*;
 

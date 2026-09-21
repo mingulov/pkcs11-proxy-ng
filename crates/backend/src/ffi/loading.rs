@@ -520,6 +520,9 @@ fn ffi_query(
 }
 
 #[cfg(test)]
+// W1-L12-03: test-only skip notices on stderr; production code in this
+// file stays under the workspace deny.
+#[allow(clippy::print_stderr)]
 mod tests {
     /// T7: the factored stop-fire condition preserves the guard's
     /// `Poison + holds_registry_slot` truth table exactly. The `Drop`

@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Optional provider-matrix coverage for non-SoftHSM backends.
 //!
 //! These tests are env-driven because NSS softokn and Kryoptic provisioning is

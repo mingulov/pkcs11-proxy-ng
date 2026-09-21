@@ -5,8 +5,10 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{
+    MAX_TEMPLATE_COUNT, catch_panics, ck_attrs_to_rust_checked, null_preserving_template, rv_err,
+    rv_ok, unit_result_to_rv, with_client, write_object_handle_output,
+};
 
 pub unsafe extern "C" fn c_find_objects_init(
     h_session: CK_SESSION_HANDLE,

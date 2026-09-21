@@ -3,6 +3,10 @@
 //! - `C_LoginUser`
 //! - `C_SessionCancel`
 //! - `C_GetSessionValidationFlags`
+//!
+//! PIN handling: see the E3 note in `session.rs` — `LoginUserRequest`
+//! (PIN + username) likewise derives `ZeroizeOnDrop`, so the single
+//! client-owned copy wipes when the request drops after encoding.
 
 use pkcs11_proxy_ng_types::*;
 

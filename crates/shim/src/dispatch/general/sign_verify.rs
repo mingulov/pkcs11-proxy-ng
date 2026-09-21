@@ -3,8 +3,11 @@ use pkcs11_proxy_ng_types::*;
 
 use crate::state;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{
+    catch_panics, classify_input, dispatch_byte_output_exact, dispatch_byte_output_exact_no_input,
+    input_buf_to_ck_in_buf, read_mechanism, rv_err, rv_ok, unit_result_to_rv, validate_mechanism,
+    with_client,
+};
 
 pub unsafe extern "C" fn c_sign_init(
     h_session: CK_SESSION_HANDLE,
@@ -25,7 +28,10 @@ pub unsafe extern "C" fn c_sign_init(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         let result = with_client!(client => client.sign_init(
             CkSessionHandle(h_session as u64),
             &mech,
@@ -110,7 +116,10 @@ pub unsafe extern "C" fn c_verify_init(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         unit_result_to_rv(with_client!(client => client.verify_init(
             CkSessionHandle(h_session as u64),
             &mech,
@@ -203,7 +212,10 @@ pub unsafe extern "C" fn c_sign_recover_init(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         let result = with_client!(client => client.sign_recover_init(
             CkSessionHandle(h_session as u64),
             &mech,
@@ -256,7 +268,10 @@ pub unsafe extern "C" fn c_verify_recover_init(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         let result = with_client!(client => client.verify_recover_init(
             CkSessionHandle(h_session as u64),
             &mech,

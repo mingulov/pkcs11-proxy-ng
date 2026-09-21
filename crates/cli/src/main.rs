@@ -1,3 +1,8 @@
+// W1-L12-03: the CLI's whole job is user output on stdout/stderr
+// (allowed once at the bin root, covering `handlers/`); secret display
+// itself is W1-L2-12 (P3), not this gate.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+
 use clap::Parser;
 use pkcs11_proxy_ng_client::{Pkcs11Client, tls::ClientTlsFiles};
 

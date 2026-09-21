@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! W1-C5-01 real-backend proof: SSL3 master-key derive through NSS
 //! softokn delivers the provider-written version in `mechanism_out`
 //! end to end (client → gRPC → server → FFI → NSS → back).

@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! End-to-end shim C ABI coverage for HSM-mutated mechanism parameters.
 //!
 //! This test loads `libpkcs11_proxy_ng_shim.so` with `dlopen`, calls through

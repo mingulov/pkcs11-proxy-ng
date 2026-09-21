@@ -85,6 +85,86 @@ fn log_format_warning(raw: Option<&str>) -> Option<String> {
     }
 }
 
+/// Outcome of the daemon's startup memory-lock attempt (W1-L2-07).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MemoryLockOutcome {
+    /// `mlockall(MCL_CURRENT | MCL_FUTURE)` succeeded: PIN/key pages are
+    /// pinned in RAM and cannot be swapped to disk.
+    Locked,
+    /// The lock was denied (typical cause: unprivileged process without
+    /// `CAP_IPC_LOCK`, or a restrictive `RLIMIT_MEMLOCK`). Carries the
+    /// errno description. The daemon still starts — loudly warned.
+    Denied(String),
+    /// Non-Unix platform: no `mlockall` equivalent. Loudly warned.
+    /// (Constructed only by the non-Unix `lock_process_memory` and by
+    /// tests, hence the Unix-only dead-code allow.)
+    #[cfg_attr(unix, allow(dead_code))]
+    Unsupported,
+}
+
+/// Attempt to lock all current and future process pages against swap
+/// (W1-L2-07). Called once at daemon startup, after tracing init (so the
+/// outcome is logged) and before the backend loads (so key material is
+/// covered from the start; `MCL_FUTURE` pins later allocations too).
+/// Never fails the startup: denial is reported, not fatal.
+#[cfg(unix)]
+fn lock_process_memory() -> MemoryLockOutcome {
+    use nix::sys::mman::{MlockAllFlags, mlockall};
+    match mlockall(MlockAllFlags::MCL_CURRENT | MlockAllFlags::MCL_FUTURE) {
+        Ok(()) => MemoryLockOutcome::Locked,
+        Err(errno) => MemoryLockOutcome::Denied(errno.to_string()),
+    }
+}
+
+/// Non-Unix: no `mlockall` equivalent exists.
+#[cfg(not(unix))]
+fn lock_process_memory() -> MemoryLockOutcome {
+    MemoryLockOutcome::Unsupported
+}
+
+/// Loud operator guidance for a denied or unsupported memory lock
+/// (W1-L2-07). `None` when locked.
+///
+/// Swap-residual note: without the lock, PIN/key pages the daemon holds
+/// (request buffers, backend argument frames, allocator freelists) can be
+/// paged to disk under memory pressure and survive there past process
+/// exit. The `SecretBytes`/`ZeroizeOnDrop` wiping still clears the live
+/// copies on drop — it cannot reach already-swapped pages. Operators who
+/// need the guarantee should grant `CAP_IPC_LOCK` (e.g. systemd
+/// `LimitMEMLOCK=infinity` + `CapabilityBoundingSet=CAP_IPC_LOCK`, or
+/// `setcap cap_ipc_lock+ep` on the binary) and confirm the startup log
+/// shows the pages-locked line.
+fn memory_lock_warning(outcome: &MemoryLockOutcome) -> Option<String> {
+    match outcome {
+        MemoryLockOutcome::Locked => None,
+        MemoryLockOutcome::Denied(errno) => Some(format!(
+            "mlockall failed ({errno}): daemon memory is NOT locked — PIN/key pages can swap \
+             to disk under memory pressure and survive past process exit (swap residual). \
+             Grant the process privilege to lock memory (CAP_IPC_LOCK, e.g. systemd \
+             LimitMEMLOCK=infinity) and restart to clear this warning"
+        )),
+        MemoryLockOutcome::Unsupported => Some(
+            "mlockall is unavailable on this platform: daemon memory is NOT locked — PIN/key \
+             pages can swap to disk under memory pressure (swap residual). Prefer a Unix \
+             deployment with memory locking for secret-handling workloads"
+                .to_string(),
+        ),
+    }
+}
+
+/// Log the startup memory-lock outcome: info when locked, loud warn
+/// otherwise. The daemon starts either way.
+fn report_memory_lock(outcome: &MemoryLockOutcome) {
+    match memory_lock_warning(outcome) {
+        None => tracing::info!("mlockall: daemon pages locked against swap"),
+        Some(warning) => tracing::warn!("{warning}"),
+    }
+}
+
+// W1-L12-03: pre-tracing warnings — tracing is not initialized yet, so
+// stderr is the only channel (the two `eprintln!`s below are the only
+// print sinks in production daemon code).
+#[allow(clippy::print_stderr)]
 fn init_tracing() {
     // Default to INFO when RUST_LOG is unset: from_default_env() falls
     // back to ERROR, which suppressed every startup line and left a
@@ -524,10 +604,20 @@ fn main() -> Result<(), BoxError> {
     // Parse early so --print-env-vars doesn't pull in JSON tracing.
     let args = Args::parse();
     if args.print_env_vars {
-        print!("{}", config::env_var_help());
+        // W1-L12-03: `--print-env-vars` help text goes to stdout by design
+        // (the allow sits on the block: attributes on the `print!`
+        // invocation itself are ignored).
+        #[allow(clippy::print_stdout)]
+        {
+            print!("{}", config::env_var_help());
+        }
         return Ok(());
     }
     init_tracing();
+
+    // W1-L2-07: pin daemon pages against swap when permitted; denial is
+    // loud but never fatal.
+    report_memory_lock(&lock_process_memory());
 
     let config = config::DaemonConfig::load(&args.config)?;
     validate_runtime_listener_support(&config)?;
@@ -1101,5 +1191,55 @@ auth = "peer_cred"
             matches!(outcome, Some(Ok(_))),
             "post-signal drain inside the grace must propagate Ok"
         );
+    }
+
+    #[test]
+    fn memory_lock_warning_locked_is_silent() {
+        // W1-L2-07: a successful lock reports nothing.
+        assert_eq!(memory_lock_warning(&MemoryLockOutcome::Locked), None);
+    }
+
+    #[test]
+    fn memory_lock_warning_denied_is_loud_about_swap_residual() {
+        // W1-L2-07: denial must name the cause, the swap residual, and the
+        // privilege remedy — the daemon keeps running, so the operator
+        // must see exactly what protection was lost.
+        let warning = memory_lock_warning(&MemoryLockOutcome::Denied(
+            "EPERM: Operation not permitted".into(),
+        ))
+        .expect("denial must warn");
+        for needle in ["mlock", "swap", "CAP_IPC_LOCK", "privileg"] {
+            assert!(warning.contains(needle), "denial warning must mention {needle:?}: {warning}");
+        }
+    }
+
+    #[test]
+    fn memory_lock_warning_unsupported_names_residual() {
+        // W1-L2-07: platforms without mlockall get the same loud residual.
+        let warning =
+            memory_lock_warning(&MemoryLockOutcome::Unsupported).expect("unsupported must warn");
+        for needle in ["mlock", "swap"] {
+            assert!(
+                warning.contains(needle),
+                "unsupported warning must mention {needle:?}: {warning}"
+            );
+        }
+    }
+
+    #[test]
+    fn lock_process_memory_reports_a_well_formed_outcome() {
+        // W1-L2-07: the syscall wrapper never panics; on Unix it reports
+        // Locked when privileged or Denied when not (the common
+        // unprivileged-container case — this exercises the real denied
+        // path end to end wherever the test runs unprivileged).
+        let outcome = lock_process_memory();
+        let _ = memory_lock_warning(&outcome);
+        #[cfg(unix)]
+        assert!(
+            matches!(outcome, MemoryLockOutcome::Locked | MemoryLockOutcome::Denied(_)),
+            "unexpected outcome: {outcome:?}"
+        );
+        #[cfg(not(unix))]
+        assert_eq!(outcome, MemoryLockOutcome::Unsupported);
     }
 }

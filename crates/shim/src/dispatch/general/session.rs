@@ -2,8 +2,10 @@ use cryptoki_sys::*;
 use pkcs11_proxy_ng_client::MessageCallErrorOrigin;
 use pkcs11_proxy_ng_types::*;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{
+    catch_panics, rv_err, rv_ok, try_read_optional_bytes, unit_result_to_rv, with_client,
+    write_session_handle_output,
+};
 
 pub unsafe extern "C" fn c_open_session(
     slot_id: CK_SLOT_ID,

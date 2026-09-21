@@ -3,8 +3,7 @@ use pkcs11_proxy_ng_types::*;
 
 use crate::state;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{catch_panics, rv_err, rv_ok};
 
 use std::path::PathBuf;
 

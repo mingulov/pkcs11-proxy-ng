@@ -1,8 +1,7 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{catch_panics, rv_err, rv_ok, try_read_optional_bytes, with_client};
 
 pub unsafe extern "C" fn c_init_token(
     slot_id: CK_SLOT_ID,

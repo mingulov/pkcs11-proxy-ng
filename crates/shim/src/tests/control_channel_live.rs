@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Live control-channel test (TO26b group 3).
 //!
 //! Drives the hook-gated daemon control plane end to end over its Unix

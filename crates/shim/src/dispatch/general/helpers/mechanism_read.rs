@@ -92,7 +92,7 @@ pub(crate) unsafe fn validate_mechanism(p_mechanism: *const CK_MECHANISM) -> CK_
 /// `p_mechanism` must point to a valid `CK_MECHANISM`. If the mechanism has
 /// parameters, `pParameter` must point to a valid buffer of at least
 /// `ulParameterLen` bytes containing the appropriate C struct.
-pub(crate) unsafe fn read_mechanism(p_mechanism: *const CK_MECHANISM) -> CkMechanism {
+pub(crate) unsafe fn read_mechanism(p_mechanism: *const CK_MECHANISM) -> CkResult<CkMechanism> {
     let c_mech = unsafe { &*p_mechanism };
     // Hold the Arc until after we have copied the shape string out — the
     // returned `&str` borrows from the Arc, so dropping it before the call
@@ -102,7 +102,9 @@ pub(crate) unsafe fn read_mechanism(p_mechanism: *const CK_MECHANISM) -> CkMecha
     unsafe { read_mechanism_with_shape(c_mech, shape) }
 }
 
-pub(crate) unsafe fn read_wrap_key_mechanism(p_mechanism: *const CK_MECHANISM) -> CkMechanism {
+pub(crate) unsafe fn read_wrap_key_mechanism(
+    p_mechanism: *const CK_MECHANISM,
+) -> CkResult<CkMechanism> {
     let c_mech = unsafe { &*p_mechanism };
     let param_len = c_mech.ulParameterLen as usize;
     let registry = crate::state::mechanism_registry();
@@ -117,11 +119,11 @@ pub(crate) unsafe fn read_wrap_key_mechanism(p_mechanism: *const CK_MECHANISM) -
 pub(crate) unsafe fn read_mechanism_with_shape(
     c_mech: &CK_MECHANISM,
     shape: Option<&str>,
-) -> CkMechanism {
+) -> CkResult<CkMechanism> {
     let mech_type = CkMechanismType(c_mech.mechanism as u64);
 
     if c_mech.pParameter.is_null() || c_mech.ulParameterLen == 0 {
-        return CkMechanism { mechanism_type: mech_type, params: None };
+        return Ok(CkMechanism { mechanism_type: mech_type, params: None });
     }
 
     let param_ptr = c_mech.pParameter;
@@ -138,7 +140,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("rsa_pss") => {
             if param_len < std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: caller guarantees pParameter points to a valid
@@ -155,7 +157,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("rsa_oaep") => {
             if param_len < std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: caller guarantees pParameter points to a valid
@@ -164,7 +166,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 if missing_embedded_pointer(oaep.pSourceData, oaep.ulSourceDataLen)
                     || !embedded_payload_len_ok(oaep.ulSourceDataLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let source_data = if oaep.pSourceData.is_null() || oaep.ulSourceDataLen == 0 {
                         Vec::new()
@@ -195,7 +197,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("gcm") => {
             if param_len < std::mem::size_of::<CK_GCM_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_GCM_PARAMS.
@@ -205,7 +207,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(gcm.ulIvLen)
                     || !embedded_payload_len_ok(gcm.ulAADLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let iv = if gcm.pIv.is_null() || gcm.ulIvLen == 0 {
                         Vec::new()
@@ -237,7 +239,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ccm") => {
             if param_len < std::mem::size_of::<CK_CCM_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_CCM_PARAMS.
@@ -247,7 +249,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(ccm.ulNonceLen)
                     || !embedded_payload_len_ok(ccm.ulAADLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let nonce = if ccm.pNonce.is_null() || ccm.ulNonceLen == 0 {
                         Vec::new()
@@ -274,7 +276,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ecdh1_derive") => {
             if param_len < std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_ECDH1_DERIVE_PARAMS.
@@ -284,7 +286,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(ecdh.ulSharedDataLen)
                     || !embedded_payload_len_ok(ecdh.ulPublicDataLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let shared_data = if ecdh.pSharedData.is_null() || ecdh.ulSharedDataLen == 0 {
                         Vec::new()
@@ -320,7 +322,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("aes_ctr") => {
             if param_len < std::mem::size_of::<CK_AES_CTR_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_AES_CTR_PARAMS.
@@ -335,7 +337,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("camellia_ctr") => {
             if param_len < std::mem::size_of::<CK_CAMELLIA_CTR_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_CAMELLIA_CTR_PARAMS.
@@ -350,7 +352,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("hkdf") => {
             if param_len < std::mem::size_of::<CK_HKDF_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_HKDF_PARAMS.
@@ -360,7 +362,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(hkdf.ulSaltLen)
                     || !embedded_payload_len_ok(hkdf.ulInfoLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let salt = if hkdf.pSalt.is_null() || hkdf.ulSaltLen == 0 {
                         Vec::new()
@@ -390,7 +392,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("eddsa") => {
             if param_len < std::mem::size_of::<CK_EDDSA_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_EDDSA_PARAMS.
@@ -398,7 +400,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 if missing_embedded_pointer(eddsa.pContextData, eddsa.ulContextDataLen)
                     || !embedded_payload_len_ok(eddsa.ulContextDataLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let context_data =
                         if eddsa.pContextData.is_null() || eddsa.ulContextDataLen == 0 {
@@ -423,7 +425,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("chacha20") => {
             if param_len < std::mem::size_of::<CK_CHACHA20_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_CHACHA20_PARAMS.
@@ -434,7 +436,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 // equals MAX_SERIALIZABLE_BYTES exactly, so `>` is unreachable and
                 // the guard would wild-read at the boundary (i686 SIGSEGV).
                 if bc_bytes >= MAX_SERIALIZABLE_BYTES || nonce_bytes >= MAX_SERIALIZABLE_BYTES {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let block_counter = if ch.pBlockCounter.is_null() {
                         Vec::new()
@@ -463,7 +465,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("salsa20") => {
             if param_len < std::mem::size_of::<CK_SALSA20_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let salsa = unsafe { &*(param_ptr as *const CK_SALSA20_PARAMS) };
@@ -475,7 +477,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || missing_embedded_pointer(salsa.pNonce, salsa.ulNonceBits)
                     || nonce_bytes >= MAX_SERIALIZABLE_BYTES
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let block_counter =
                         unsafe { std::slice::from_raw_parts(salsa.pBlockCounter, 8) }.to_vec();
@@ -497,7 +499,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("salsa20_chacha20_poly1305") => {
             if param_len < std::mem::size_of::<CK_SALSA20_CHACHA20_POLY1305_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid
@@ -508,7 +510,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(sp.ulNonceLen)
                     || !embedded_payload_len_ok(sp.ulAADLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let nonce = if sp.pNonce.is_null() || sp.ulNonceLen == 0 {
                         Vec::new()
@@ -532,7 +534,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("aes_cbc_encrypt_data") => {
             if param_len < std::mem::size_of::<CK_AES_CBC_ENCRYPT_DATA_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid
@@ -540,7 +542,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 let s = unsafe { &*(param_ptr as *const CK_AES_CBC_ENCRYPT_DATA_PARAMS) };
                 if missing_embedded_pointer(s.pData, s.length) || !embedded_payload_len_ok(s.length)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let data = if s.pData.is_null() || s.length == 0 {
                         Vec::new()
@@ -558,7 +560,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("des_cbc_encrypt_data") => {
             if param_len < std::mem::size_of::<CK_DES_CBC_ENCRYPT_DATA_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid
@@ -566,7 +568,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 let s = unsafe { &*(param_ptr as *const CK_DES_CBC_ENCRYPT_DATA_PARAMS) };
                 if missing_embedded_pointer(s.pData, s.length) || !embedded_payload_len_ok(s.length)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let data = if s.pData.is_null() || s.length == 0 {
                         Vec::new()
@@ -584,7 +586,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("camellia_cbc_encrypt_data") => {
             if param_len < std::mem::size_of::<CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid
@@ -592,7 +594,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 let s = unsafe { &*(param_ptr as *const CK_CAMELLIA_CBC_ENCRYPT_DATA_PARAMS) };
                 if missing_embedded_pointer(s.pData, s.length) || !embedded_payload_len_ok(s.length)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let data = if s.pData.is_null() || s.length == 0 {
                         Vec::new()
@@ -610,7 +612,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("aria_cbc_encrypt_data") => {
             if param_len < std::mem::size_of::<CK_ARIA_CBC_ENCRYPT_DATA_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid
@@ -618,7 +620,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 let s = unsafe { &*(param_ptr as *const CK_ARIA_CBC_ENCRYPT_DATA_PARAMS) };
                 if missing_embedded_pointer(s.pData, s.length) || !embedded_payload_len_ok(s.length)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let data = if s.pData.is_null() || s.length == 0 {
                         Vec::new()
@@ -636,7 +638,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("seed_cbc_encrypt_data") => {
             if param_len < std::mem::size_of::<CK_SEED_CBC_ENCRYPT_DATA_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid
@@ -644,7 +646,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 let s = unsafe { &*(param_ptr as *const CK_SEED_CBC_ENCRYPT_DATA_PARAMS) };
                 if missing_embedded_pointer(s.pData, s.length) || !embedded_payload_len_ok(s.length)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let data = if s.pData.is_null() || s.length == 0 {
                         Vec::new()
@@ -662,7 +664,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("mac_general") => {
             if param_len < std::mem::size_of::<CK_MAC_GENERAL_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a CK_MAC_GENERAL_PARAMS
@@ -675,7 +677,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("object_handle") => {
             if param_len < std::mem::size_of::<CK_OBJECT_HANDLE>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a CK_OBJECT_HANDLE
@@ -690,7 +692,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("extract") => {
             if param_len < std::mem::size_of::<CK_EXTRACT_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let val = unsafe { *(param_ptr as *const CK_EXTRACT_PARAMS) };
@@ -701,7 +703,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("key_derivation_string") => {
             if param_len < std::mem::size_of::<CK_KEY_DERIVATION_STRING_DATA>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid
@@ -710,7 +712,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 if missing_embedded_pointer(kds.pData, kds.ulLen)
                     || !embedded_payload_len_ok(kds.ulLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let data = if kds.pData.is_null() || kds.ulLen == 0 {
                         Vec::new()
@@ -728,7 +730,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("gcm_wrap") => {
             if param_len < std::mem::size_of::<CK_GCM_WRAP_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_GCM_WRAP_PARAMS.
@@ -738,7 +740,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(gw.ulIvLen)
                     || !embedded_payload_len_ok(gw.ulAADLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let iv = if gw.pIv.is_null() || gw.ulIvLen == 0 {
                         Vec::new()
@@ -765,7 +767,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ccm_wrap") => {
             if param_len < std::mem::size_of::<CK_CCM_WRAP_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_CCM_WRAP_PARAMS.
@@ -775,7 +777,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(cw.ulNonceLen)
                     || !embedded_payload_len_ok(cw.ulAADLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let nonce = if cw.pNonce.is_null() || cw.ulNonceLen == 0 {
                         Vec::new()
@@ -804,7 +806,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("rc5") => {
             if param_len < std::mem::size_of::<CK_RC5_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_RC5_PARAMS.
@@ -819,7 +821,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("rc5_mac_general") => {
             if param_len < std::mem::size_of::<CK_RC5_MAC_GENERAL_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let rc5 = unsafe { &*(param_ptr as *const CK_RC5_MAC_GENERAL_PARAMS) };
@@ -834,14 +836,14 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("rc5_cbc") => {
             if param_len < std::mem::size_of::<CK_RC5_CBC_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let rc5 = unsafe { &*(param_ptr as *const CK_RC5_CBC_PARAMS) };
                 if missing_embedded_pointer(rc5.pIv, rc5.ulIvLen)
                     || !embedded_payload_len_ok(rc5.ulIvLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let iv = if rc5.pIv.is_null() || rc5.ulIvLen == 0 {
                         Vec::new()
@@ -861,7 +863,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("rc2_cbc") => {
             if param_len < std::mem::size_of::<CK_RC2_CBC_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_RC2_CBC_PARAMS.
@@ -876,7 +878,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("rc2_mac_general") => {
             if param_len < std::mem::size_of::<CK_RC2_MAC_GENERAL_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let rc2 = unsafe { &*(param_ptr as *const CK_RC2_MAC_GENERAL_PARAMS) };
@@ -890,7 +892,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("xeddsa") => {
             if param_len < std::mem::size_of::<CK_XEDDSA_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_XEDDSA_PARAMS.
@@ -904,7 +906,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("tls_mac") => {
             if param_len < std::mem::size_of::<CK_TLS_MAC_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: pParameter points to a valid CK_TLS_MAC_PARAMS.
@@ -925,7 +927,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 std::mem::size_of::<CK_ULONG>() + std::mem::size_of::<*mut std::ffi::c_void>();
             if param_len < expected_size {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Safety: param_ptr is valid for at least expected_size bytes.
@@ -939,7 +941,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 };
                 if oaep_ptr.is_null() {
                     Some(CkMechanismParams::Raw(RawMechanismParams {
-                        data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                        data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                     }))
                 } else {
                     // Safety: oaep_ptr is non-null and points to a valid
@@ -948,7 +950,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     if missing_embedded_pointer(oaep.pSourceData as *const u8, oaep.ulSourceDataLen)
                         || !embedded_payload_len_ok(oaep.ulSourceDataLen)
                     {
-                        Some(raw_mechanism_params(param_ptr, param_len))
+                        Some(raw_mechanism_params(param_ptr, param_len)?)
                     } else {
                         let source_data = if oaep.pSourceData.is_null() || oaep.ulSourceDataLen == 0
                         {
@@ -989,7 +991,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
             let hash_size = base_size + std::mem::size_of::<CK_ULONG>();
             if param_len < base_size {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 // Unaligned-safe: see the rsa_aes_key_wrap arm above (W1-C6-03,
@@ -1002,7 +1004,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 let ctx_len =
                     unsafe { (param_ptr.add(len_offset) as *const CK_ULONG).read_unaligned() };
                 if missing_embedded_pointer(ctx_ptr, ctx_len) || !embedded_payload_len_ok(ctx_len) {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let context = if ctx_ptr.is_null() || ctx_len == 0 {
                         Vec::new()
@@ -1029,7 +1031,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("kmac") => {
             if param_len < std::mem::size_of::<CkKmacParams>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CkKmacParams) };
@@ -1038,7 +1040,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     p.ul_customization_string_len,
                 ) || !embedded_payload_len_ok(p.ul_customization_string_len)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let customization_string = if p.p_customization_string.is_null()
                         || p.ul_customization_string_len == 0
@@ -1065,7 +1067,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("mu_gen") => {
             if param_len < std::mem::size_of::<CkMuGenParams>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CkMuGenParams) };
@@ -1074,7 +1076,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ul_tr_len)
                     || !embedded_payload_len_ok(p.ul_ctx_len)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let tr = if p.p_tr.is_null() || p.ul_tr_len == 0 {
                         Vec::new()
@@ -1099,7 +1101,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("pkcs5_pbkd2") => {
             if param_len < std::mem::size_of::<CK_PKCS5_PBKD2_PARAMS2>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_PKCS5_PBKD2_PARAMS2) };
@@ -1110,7 +1112,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulPrfDataLen)
                     || !embedded_payload_len_ok(p.ulPasswordLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let salt_source_data =
                         if p.pSaltSourceData.is_null() || p.ulSaltSourceDataLen == 0 {
@@ -1156,7 +1158,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("wtls_master_key_derive") => {
             if param_len < std::mem::size_of::<CK_WTLS_MASTER_KEY_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_WTLS_MASTER_KEY_DERIVE_PARAMS) };
@@ -1169,7 +1171,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 ) || !embedded_payload_len_ok(p.RandomInfo.ulClientRandomLen)
                     || !embedded_payload_len_ok(p.RandomInfo.ulServerRandomLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let client_random = if p.RandomInfo.pClientRandom.is_null()
                         || p.RandomInfo.ulClientRandomLen == 0
@@ -1211,7 +1213,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("wtls_prf") => {
             if param_len < std::mem::size_of::<CK_WTLS_PRF_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_WTLS_PRF_PARAMS) };
@@ -1220,7 +1222,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulSeedLen)
                     || !embedded_payload_len_ok(p.ulLabelLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let seed = if p.pSeed.is_null() || p.ulSeedLen == 0 {
                         Vec::new()
@@ -1255,7 +1257,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("wtls_key_mat") => {
             if param_len < std::mem::size_of::<CK_WTLS_KEY_MAT_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_WTLS_KEY_MAT_PARAMS) };
@@ -1271,12 +1273,12 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.RandomInfo.ulClientRandomLen)
                     || !embedded_payload_len_ok(p.RandomInfo.ulServerRandomLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let iv_len = requested_iv_len;
                     let output = unsafe { &*p.pReturnedKeyMaterial };
                     if missing_embedded_pointer(output.pIV, iv_len as CK_ULONG) {
-                        Some(raw_mechanism_params(param_ptr, param_len))
+                        Some(raw_mechanism_params(param_ptr, param_len)?)
                     } else {
                         let client_random = if p.RandomInfo.pClientRandom.is_null()
                             || p.RandomInfo.ulClientRandomLen == 0
@@ -1329,7 +1331,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("tls12_master_key_derive") => {
             if param_len < std::mem::size_of::<CK_TLS12_MASTER_KEY_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_TLS12_MASTER_KEY_DERIVE_PARAMS) };
@@ -1342,7 +1344,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 ) || !embedded_payload_len_ok(p.RandomInfo.ulClientRandomLen)
                     || !embedded_payload_len_ok(p.RandomInfo.ulServerRandomLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let client_random = if p.RandomInfo.pClientRandom.is_null()
                         || p.RandomInfo.ulClientRandomLen == 0
@@ -1389,7 +1391,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("tls_prf") => {
             if param_len < std::mem::size_of::<CK_TLS_PRF_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_TLS_PRF_PARAMS) };
@@ -1398,7 +1400,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulSeedLen)
                     || !embedded_payload_len_ok(p.ulLabelLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let seed = if p.pSeed.is_null() || p.ulSeedLen == 0 {
                         Vec::new()
@@ -1432,7 +1434,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("tls_kdf") => {
             if param_len < std::mem::size_of::<CK_TLS_KDF_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_TLS_KDF_PARAMS) };
@@ -1451,7 +1453,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.RandomInfo.ulServerRandomLen)
                     || !embedded_payload_len_ok(p.ulContextDataLength)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let label = if p.pLabel.is_null() || p.ulLabelLength == 0 {
                         Vec::new()
@@ -1509,7 +1511,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ssl3_master_key_derive") => {
             if param_len < std::mem::size_of::<CK_SSL3_MASTER_KEY_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_SSL3_MASTER_KEY_DERIVE_PARAMS) };
@@ -1522,7 +1524,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 ) || !embedded_payload_len_ok(p.RandomInfo.ulClientRandomLen)
                     || !embedded_payload_len_ok(p.RandomInfo.ulServerRandomLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let client_random = if p.RandomInfo.pClientRandom.is_null()
                         || p.RandomInfo.ulClientRandomLen == 0
@@ -1568,7 +1570,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("tls12_extended_master_key_derive") => {
             if param_len < std::mem::size_of::<CK_TLS12_EXTENDED_MASTER_KEY_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p =
@@ -1576,10 +1578,10 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 if missing_embedded_pointer(p.pSessionHash, p.ulSessionHashLen)
                     || !embedded_payload_len_ok(p.ulSessionHashLen)
                 {
-                    return CkMechanism {
+                    return Ok(CkMechanism {
                         mechanism_type: mech_type,
-                        params: Some(raw_mechanism_params(param_ptr, param_len)),
-                    };
+                        params: Some(raw_mechanism_params(param_ptr, param_len)?),
+                    });
                 }
                 let session_hash = if p.pSessionHash.is_null() || p.ulSessionHashLen == 0 {
                     Vec::new()
@@ -1613,7 +1615,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
             let tls12_size = std::mem::size_of::<CK_TLS12_KEY_MAT_PARAMS>();
             if param_len < ssl3_size {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_SSL3_KEY_MAT_PARAMS) };
@@ -1627,14 +1629,14 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                 ) || p.pReturnedKeyMaterial.is_null()
                     || requested_iv_len > MAX_SERIALIZABLE_BYTES
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let output = unsafe { &*p.pReturnedKeyMaterial };
                     let iv_len = requested_iv_len;
                     if missing_embedded_pointer(output.pIVClient, iv_len as CK_ULONG)
                         || missing_embedded_pointer(output.pIVServer, iv_len as CK_ULONG)
                     {
-                        Some(raw_mechanism_params(param_ptr, param_len))
+                        Some(raw_mechanism_params(param_ptr, param_len)?)
                     } else {
                         let client_random = if p.RandomInfo.pClientRandom.is_null()
                             || p.RandomInfo.ulClientRandomLen == 0
@@ -1704,14 +1706,14 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("pbe") => {
             if param_len < std::mem::size_of::<CK_PBE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_PBE_PARAMS) };
                 if !embedded_payload_len_ok(p.ulPasswordLen)
                     || !embedded_payload_len_ok(p.ulSaltLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let init_vector = if p.pInitVector.is_null() {
                         Vec::new()
@@ -1745,14 +1747,14 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ecdh_aes_key_wrap") => {
             if param_len < std::mem::size_of::<CK_ECDH_AES_KEY_WRAP_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_ECDH_AES_KEY_WRAP_PARAMS) };
                 if missing_embedded_pointer(p.pSharedData, p.ulSharedDataLen)
                     || !embedded_payload_len_ok(p.ulSharedDataLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let shared_data = if p.pSharedData.is_null() || p.ulSharedDataLen == 0 {
                         Vec::new()
@@ -1774,7 +1776,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ecdh2_derive") => {
             if param_len < std::mem::size_of::<CK_ECDH2_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_ECDH2_DERIVE_PARAMS) };
@@ -1785,7 +1787,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulPublicDataLen)
                     || !embedded_payload_len_ok(p.ulPublicDataLen2)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let shared_data = if p.pSharedData.is_null() || p.ulSharedDataLen == 0 {
                         Vec::new()
@@ -1826,7 +1828,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ecmqv_derive") => {
             if param_len < std::mem::size_of::<CK_ECMQV_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_ECMQV_DERIVE_PARAMS) };
@@ -1837,7 +1839,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulPublicDataLen)
                     || !embedded_payload_len_ok(p.ulPublicDataLen2)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let shared_data = if p.pSharedData.is_null() || p.ulSharedDataLen == 0 {
                         Vec::new()
@@ -1879,7 +1881,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("x942_dh1_derive") => {
             if param_len < std::mem::size_of::<CK_X9_42_DH1_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_X9_42_DH1_DERIVE_PARAMS) };
@@ -1888,7 +1890,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulOtherInfoLen)
                     || !embedded_payload_len_ok(p.ulPublicDataLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let other_info = if p.pOtherInfo.is_null() || p.ulOtherInfoLen == 0 {
                         Vec::new()
@@ -1918,7 +1920,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("x942_dh2_derive") => {
             if param_len < std::mem::size_of::<CK_X9_42_DH2_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_X9_42_DH2_DERIVE_PARAMS) };
@@ -1929,7 +1931,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulPublicDataLen)
                     || !embedded_payload_len_ok(p.ulPublicDataLen2)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let other_info = if p.pOtherInfo.is_null() || p.ulOtherInfoLen == 0 {
                         Vec::new()
@@ -1970,7 +1972,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("x942_mqv_derive") => {
             if param_len < std::mem::size_of::<CK_X9_42_MQV_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_X9_42_MQV_DERIVE_PARAMS) };
@@ -1981,7 +1983,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulPublicDataLen)
                     || !embedded_payload_len_ok(p.ulPublicDataLen2)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let other_info = if p.OtherInfo.is_null() || p.ulOtherInfoLen == 0 {
                         Vec::new()
@@ -2023,7 +2025,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("gostr3410_derive") => {
             if param_len < std::mem::size_of::<CK_GOSTR3410_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_GOSTR3410_DERIVE_PARAMS) };
@@ -2032,7 +2034,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulPublicDataLen)
                     || !embedded_payload_len_ok(p.ulUKMLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let public_data = if p.pPublicData.is_null() || p.ulPublicDataLen == 0 {
                         Vec::new()
@@ -2059,7 +2061,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("gostr3410_key_wrap") => {
             if param_len < std::mem::size_of::<CK_GOSTR3410_KEY_WRAP_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_GOSTR3410_KEY_WRAP_PARAMS) };
@@ -2068,7 +2070,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulWrapOIDLen)
                     || !embedded_payload_len_ok(p.ulUKMLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let wrap_oid = if p.pWrapOID.is_null() || p.ulWrapOIDLen == 0 {
                         Vec::new()
@@ -2093,12 +2095,12 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("key_wrap_set_oaep") => {
             if param_len < std::mem::size_of::<CK_KEY_WRAP_SET_OAEP_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_KEY_WRAP_SET_OAEP_PARAMS) };
                 if missing_embedded_pointer(p.pX, p.ulXLen) || !embedded_payload_len_ok(p.ulXLen) {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let x = if p.pX.is_null() || p.ulXLen == 0 {
                         Vec::new()
@@ -2116,14 +2118,14 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("kea_derive") => {
             if param_len < std::mem::size_of::<CK_KEA_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_KEA_DERIVE_PARAMS) };
                 if !embedded_payload_len_ok(p.ulRandomLen)
                     || !embedded_payload_len_ok(p.ulPublicDataLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let random_len = p.ulRandomLen as usize;
                     let random_a = if p.RandomA.is_null() || random_len == 0 {
@@ -2157,7 +2159,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ike_prf_derive") => {
             if param_len < std::mem::size_of::<CK_IKE_PRF_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_IKE_PRF_DERIVE_PARAMS) };
@@ -2166,7 +2168,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulNiLen)
                     || !embedded_payload_len_ok(p.ulNrLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let ni = if p.pNi.is_null() || p.ulNiLen == 0 {
                         Vec::new()
@@ -2193,7 +2195,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ike1_prf_derive") => {
             if param_len < std::mem::size_of::<CK_IKE1_PRF_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_IKE1_PRF_DERIVE_PARAMS) };
@@ -2202,7 +2204,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulCKYiLen)
                     || !embedded_payload_len_ok(p.ulCKYrLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let ckyi = if p.pCKYi.is_null() || p.ulCKYiLen == 0 {
                         Vec::new()
@@ -2232,14 +2234,14 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ike1_extended_derive") => {
             if param_len < std::mem::size_of::<CK_IKE1_EXTENDED_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_IKE1_EXTENDED_DERIVE_PARAMS) };
                 if missing_embedded_pointer(p.pExtraData, p.ulExtraDataLen)
                     || !embedded_payload_len_ok(p.ulExtraDataLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let extra_data = if p.pExtraData.is_null() || p.ulExtraDataLen == 0 {
                         Vec::new()
@@ -2262,14 +2264,14 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("ike2_prf_plus_derive") => {
             if param_len < std::mem::size_of::<CK_IKE2_PRF_PLUS_DERIVE_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_IKE2_PRF_PLUS_DERIVE_PARAMS) };
                 if missing_embedded_pointer(p.pSeedData, p.ulSeedDataLen)
                     || !embedded_payload_len_ok(p.ulSeedDataLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let seed_data = if p.pSeedData.is_null() || p.ulSeedDataLen == 0 {
                         Vec::new()
@@ -2290,7 +2292,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("kip") => {
             if param_len < std::mem::size_of::<CK_KIP_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_KIP_PARAMS) };
@@ -2306,9 +2308,9 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || missing_embedded_pointer(p.pSeed, p.ulSeedLen)
                     || !embedded_payload_len_ok(p.ulSeedLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
-                    let mechanism = unsafe { read_mechanism(p.pMechanism) };
+                    let mechanism = unsafe { read_mechanism(p.pMechanism) }?;
                     let seed = if p.pSeed.is_null() || p.ulSeedLen == 0 {
                         Vec::new()
                     } else {
@@ -2327,14 +2329,14 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("otp") => {
             if param_len < std::mem::size_of::<CK_OTP_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_OTP_PARAMS) };
                 if missing_embedded_pointer(p.pParams, p.ulCount)
                     || p.ulCount as usize > MAX_TEMPLATE_COUNT
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else if p.pParams.is_null() || p.ulCount == 0 {
                     Some(CkMechanismParams::Otp(OtpParams { params: Vec::new() }))
                 } else {
@@ -2344,7 +2346,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         missing_embedded_pointer(param.pValue as *const u8, param.ulValueLen)
                             || !embedded_payload_len_ok(param.ulValueLen)
                     }) {
-                        Some(raw_mechanism_params(param_ptr, param_len))
+                        Some(raw_mechanism_params(param_ptr, param_len)?)
                     } else {
                         Some(CkMechanismParams::Otp(OtpParams {
                             params: params
@@ -2373,7 +2375,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("skipjack_private_wrap") => {
             if param_len < std::mem::size_of::<CK_SKIPJACK_PRIVATE_WRAP_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_SKIPJACK_PRIVATE_WRAP_PARAMS) };
@@ -2389,7 +2391,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulPAndGLen)
                     || !embedded_payload_len_ok(p.ulQLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let password = if p.pPassword.is_null() || p.ulPasswordLen == 0 {
                         Vec::new()
@@ -2445,7 +2447,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("skipjack_relayx") => {
             if param_len < std::mem::size_of::<CK_SKIPJACK_RELAYX_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_SKIPJACK_RELAYX_PARAMS) };
@@ -2464,7 +2466,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                     || !embedded_payload_len_ok(p.ulNewPublicDataLen)
                     || !embedded_payload_len_ok(p.ulNewRandomLen)
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let old_wrapped_x = if p.pOldWrappedX.is_null() || p.ulOldWrappedXLen == 0 {
                         Vec::new()
@@ -2546,7 +2548,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("sp800_108_kdf") => {
             if param_len < std::mem::size_of::<CK_SP800_108_KDF_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_SP800_108_KDF_PARAMS) };
@@ -2557,7 +2559,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             p.ulAdditionalDerivedKeys,
                         )
                 } {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
                         prf_type: CkMechanismType(p.prfType as u64),
@@ -2578,7 +2580,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         Some("sp800_108_feedback_kdf") => {
             if param_len < std::mem::size_of::<CK_SP800_108_FEEDBACK_KDF_PARAMS>() {
                 Some(CkMechanismParams::Raw(RawMechanismParams {
-                    data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+                    data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
                 let p = unsafe { &*(param_ptr as *const CK_SP800_108_FEEDBACK_KDF_PARAMS) };
@@ -2592,7 +2594,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             )
                     }
                 {
-                    Some(raw_mechanism_params(param_ptr, param_len))
+                    Some(raw_mechanism_params(param_ptr, param_len)?)
                 } else {
                     let iv = if p.pIV.is_null() || p.ulIVLen == 0 {
                         Vec::new()
@@ -2619,11 +2621,11 @@ pub(crate) unsafe fn read_mechanism_with_shape(
         // Unknown shape or no shape registered: preserve raw bytes so they
         // can still reach the server for forwarding.
         Some(_) | None => Some(CkMechanismParams::Raw(RawMechanismParams {
-            data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
+            data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
         })),
     };
 
-    CkMechanism { mechanism_type: mech_type, params }
+    Ok(CkMechanism { mechanism_type: mech_type, params })
 }
 
 pub(crate) fn gcm_iv_buffer_len(gcm: &CK_GCM_PARAMS) -> u64 {
@@ -2738,22 +2740,30 @@ pub(crate) fn missing_embedded_pointer<T>(ptr: *const T, len: CK_ULONG) -> bool 
 pub(crate) fn raw_mechanism_params(
     param_ptr: *mut std::ffi::c_void,
     param_len: usize,
-) -> CkMechanismParams {
-    CkMechanismParams::Raw(RawMechanismParams {
-        data: unsafe { read_raw_bytes(param_ptr, param_len).into() },
-    })
+) -> CkResult<CkMechanismParams> {
+    Ok(CkMechanismParams::Raw(RawMechanismParams {
+        data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
+    }))
 }
 
 /// Read raw bytes from a C void pointer into a Vec.
 ///
+/// Lengths above `MAX_MECHANISM_PARAM_STRUCT_LEN` are an explicit
+/// `MECHANISM_PARAM_INVALID` error (W1-L12-06: never conflate overlong
+/// with empty). The `validate_mechanism` entry gate already rejects such
+/// lengths, so the error arm is unreachable in production and exists as
+/// defense-in-depth at the API boundary.
+///
 /// # Safety
 ///
-/// `ptr` must point to a readable buffer of at least `len` bytes.
-pub(crate) unsafe fn read_raw_bytes(ptr: *mut std::ffi::c_void, len: usize) -> Vec<u8> {
+/// `ptr` must point to a readable buffer of at least `len` bytes, except
+/// that no memory is accessed when `len` is overlong (the error returns
+/// before any dereference) or zero.
+pub(crate) unsafe fn read_raw_bytes(ptr: *mut std::ffi::c_void, len: usize) -> CkResult<Vec<u8>> {
     if len > MAX_MECHANISM_PARAM_STRUCT_LEN {
-        return Vec::new(); // Validated earlier; defense-in-depth
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
     }
-    unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }.to_vec()
+    Ok(unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }.to_vec())
 }
 
 // ---------------------------------------------------------------------------

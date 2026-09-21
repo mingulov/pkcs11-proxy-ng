@@ -1,6 +1,8 @@
 //! Captured caller destinations and transactional exact attribute writeback.
 use super::*;
 
+use super::super::helpers::{MAX_SERIALIZABLE_BYTES, MAX_TEMPLATE_COUNT};
+
 pub(super) struct AttributeCall {
     pub query: CkAttributeQuery,
     value: CK_VOID_PTR,

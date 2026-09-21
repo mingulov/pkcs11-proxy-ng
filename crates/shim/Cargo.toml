@@ -37,3 +37,6 @@ tempfile = "3"
 # Dev-only: the cross_width_smoke example loads the built shim module through
 # the public C ABI (C_GetFunctionList), exactly like a host application.
 libloading.workspace = true
+
+[lints]
+workspace = true

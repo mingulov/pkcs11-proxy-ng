@@ -4,8 +4,10 @@ use pkcs11_proxy_ng_types::*;
 
 use crate::state;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{
+    catch_panics, classify_input, dispatch_byte_output_exact_no_input, input_buf_to_ck_in_buf,
+    rv_err, rv_ok, unit_result_to_rv, with_client,
+};
 
 pub unsafe extern "C" fn c_wait_for_slot_event(
     flags: CK_FLAGS,
