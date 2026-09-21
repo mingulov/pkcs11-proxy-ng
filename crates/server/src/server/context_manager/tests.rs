@@ -396,6 +396,87 @@ async fn evict_expired_keeps_recently_active_context() {
 }
 
 #[tokio::test]
+async fn evict_expired_bounded_under_wedged_backend() {
+    // W1-C2-03: a backend wedged on logout AND close must not stall lease
+    // reaping — eviction completes within the teardown bound and the
+    // context does not accumulate.
+    use pkcs11_proxy_ng_backend::MockBackend;
+    use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    mock.initialize().unwrap();
+    // Wedge both teardown calls far beyond the test timeout. (The test
+    // runtime waits for parked blocking threads, so keep the wedge short.)
+    mock.set_close_session_delay(std::time::Duration::from_secs(3));
+    mock.set_logout_delay(std::time::Duration::from_secs(3));
+    let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = Arc::clone(&mock) as _;
+
+    let mgr = ContextManager::new(std::time::Duration::from_secs(0), 0);
+    mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let id = mgr.create_context(None).await.unwrap();
+    // Give the context a backend session and a login so teardown has both
+    // a session to close and a last-holder logout to attempt.
+    let session =
+        mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+    mock.login(session, CkUserType::User, Some(b"1234")).unwrap();
+    mgr.get_context(&id, |ctx| {
+        ctx.register_session(
+            BackendHandle(session.0),
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        );
+        ctx.login_state
+            .insert(crate::server::slot_map::BackendSlotId(CkSlotId(0)), LoginState::User);
+    })
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let start = std::time::Instant::now();
+    let evicted =
+        mgr.evict_expired_with_timeout(&backend, std::time::Duration::from_millis(100)).await;
+    let elapsed = start.elapsed();
+
+    assert!(evicted.contains(&id), "wedged context must still be reaped");
+    assert!(mgr.get_context(&id, |_| ()).await.is_none(), "reaped context must not accumulate");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "eviction must be bounded, took {elapsed:?} against a 3s-wedged backend"
+    );
+    mock.clear_close_session_delay();
+    mock.clear_logout_delay();
+}
+
+#[tokio::test]
+async fn evict_expired_closes_backend_sessions() {
+    // W1-C2-03 (no-regression): bounded teardown still reaps backend
+    // sessions on a healthy backend.
+    use pkcs11_proxy_ng_backend::MockBackend;
+    use pkcs11_proxy_ng_backend::Pkcs11Backend as _;
+
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    mock.initialize().unwrap();
+    let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = Arc::clone(&mock) as _;
+
+    let mgr = ContextManager::new(std::time::Duration::from_secs(0), 0);
+    mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let id = mgr.create_context(None).await.unwrap();
+    let session =
+        mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+    mgr.get_context(&id, |ctx| {
+        ctx.register_session(
+            BackendHandle(session.0),
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        );
+    })
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let evicted = mgr.evict_expired(&backend).await;
+    assert!(evicted.contains(&id));
+    assert_eq!(mock.open_session_count(), 0, "backend session must be reaped");
+    assert_eq!(mock.close_session_call_count(), 1);
+}
+
+#[tokio::test]
 async fn evict_expired_skips_context_with_in_flight_operation() {
     use pkcs11_proxy_ng_backend::MockBackend;
     use pkcs11_proxy_ng_types::CkMechanismType;

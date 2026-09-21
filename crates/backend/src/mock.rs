@@ -162,6 +162,10 @@ pub struct MockBackend {
     /// Optional blocking delay before `close_session` settles, used to prove
     /// timeout-safe lifecycle completion without a real slow provider.
     close_session_delay: Mutex<Option<std::time::Duration>>,
+    /// Optional blocking delay before `logout` settles. The `close_session`
+    /// analogue for teardown tests (W1-C2-03): wedges the last-holder
+    /// logout so eviction boundedness is provable without a real stuck HSM.
+    logout_delay: Mutex<Option<std::time::Duration>>,
     /// Error that `login` specifically returns (before `login_impl`). Used to
     /// simulate PIN failures (e.g. CKR_PIN_INCORRECT) so tests can exercise
     /// the per-slot failed-login budget without a real PKCS#11 module.
@@ -353,6 +357,7 @@ impl MockBackend {
             injected_error: Mutex::new(None),
             injected_close_error: Mutex::new(None),
             close_session_delay: Mutex::new(None),
+            logout_delay: Mutex::new(None),
             injected_login_rv: Mutex::new(None),
             encrypt_init_output: Mutex::new(None),
             encrypt_operation_output: Mutex::new(None),
@@ -730,6 +735,28 @@ impl MockBackend {
 
     pub fn close_session_call_count(&self) -> usize {
         self.close_session_calls.load(Ordering::SeqCst)
+    }
+
+    /// Block `logout` for `delay` before settling. The `close_session`
+    /// analogue for teardown tests (W1-C2-03).
+    pub fn set_logout_delay(&self, delay: std::time::Duration) {
+        *self.logout_delay.lock().unwrap() = Some(delay);
+    }
+
+    pub fn clear_logout_delay(&self) {
+        *self.logout_delay.lock().unwrap() = None;
+    }
+
+    /// Number of currently open backend sessions. Leak accounting for
+    /// stress/eviction tests (W1-C2-03, W1-C2-07).
+    pub fn open_session_count(&self) -> usize {
+        self.state.lock().unwrap().open_sessions.len()
+    }
+
+    /// Number of live backend objects. Leak accounting for stress tests
+    /// (W1-C2-07).
+    pub fn live_object_count(&self) -> usize {
+        self.state.lock().unwrap().live_objects.len()
     }
 
     /// Make subsequent `login` calls return `rv` instead of the normal

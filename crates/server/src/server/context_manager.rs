@@ -6,7 +6,7 @@ use pkcs11_proxy_ng_types::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use uuid::Uuid;
 
@@ -1216,7 +1216,14 @@ impl ContextManager {
         slot: BackendSlotId,
         preferred_session: Option<u64>,
     ) -> bool {
-        self.backend_logout_if_last_holder_out_inner(backend, slot, preferred_session, None).await
+        self.backend_logout_if_last_holder_out_inner(
+            backend,
+            slot,
+            preferred_session,
+            None,
+            TEARDOWN_BACKEND_TIMEOUT,
+        )
+        .await
     }
 
     /// Same as [`Self::backend_logout_if_last_holder_out`], but the
@@ -1236,6 +1243,7 @@ impl ContextManager {
             slot,
             preferred_session,
             Some(exclude),
+            TEARDOWN_BACKEND_TIMEOUT,
         )
         .await
     }
@@ -1246,6 +1254,7 @@ impl ContextManager {
         slot: BackendSlotId,
         preferred_session: Option<u64>,
         exclude: Option<&ClientContextId>,
+        timeout: Duration,
     ) -> bool {
         // Fast path without the lock: observing any live holder means no logout.
         if self.slot_login_held(slot, exclude) {
@@ -1284,8 +1293,14 @@ impl ContextManager {
         }
         for via in carriers {
             let backend = backend.clone();
-            let result =
-                tokio::task::spawn_blocking(move || backend.logout(CkSessionHandle(via))).await;
+            // W1-C2-03: route through spawn_backend so a wedged backend
+            // times out (breaker slot + stuck accounting included) instead
+            // of stalling the caller — eviction or session close — forever.
+            let result = crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
+                timeout,
+                move || backend.logout(CkSessionHandle(via)),
+            )
+            .await;
             match result {
                 Ok(Ok(())) => {
                     tracing::debug!("last-holder backend logout succeeded");
@@ -1302,11 +1317,11 @@ impl ContextManager {
                     );
                     return false;
                 }
-                Err(join_error) => {
+                Err(status) => {
                     tracing::warn!(
                         slot = slot.0.0,
-                        error = %join_error,
-                        "last-holder backend logout join failed; backend may stay logged in with no holder"
+                        error = %status,
+                        "last-holder backend logout spawn failed; backend may stay logged in with no holder"
                     );
                     return false;
                 }
@@ -1338,6 +1353,18 @@ impl ContextManager {
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
         plans: Vec<ContextTeardownPlan>,
     ) {
+        self.execute_teardown_plans_with_timeout(backend, plans, TEARDOWN_BACKEND_TIMEOUT).await;
+    }
+
+    /// [`Self::execute_teardown_plans`] with an explicit per-call backend
+    /// timeout. Tests drive wedged-backend boundedness through this; all
+    /// production callers use the default via [`Self::execute_teardown_plans`].
+    pub(crate) async fn execute_teardown_plans_with_timeout(
+        &self,
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        plans: Vec<ContextTeardownPlan>,
+        timeout: Duration,
+    ) {
         let mut logouts: HashMap<BackendSlotId, u64> = HashMap::new();
         let mut closes: Vec<u64> = Vec::new();
         for plan in plans {
@@ -1347,9 +1374,16 @@ impl ContextManager {
             closes.extend(plan.sessions_to_close);
         }
         for (slot, via_session) in logouts {
-            self.backend_logout_if_last_holder_out(backend, slot, Some(via_session)).await;
+            self.backend_logout_if_last_holder_out_inner(
+                backend,
+                slot,
+                Some(via_session),
+                None,
+                timeout,
+            )
+            .await;
         }
-        Self::close_backend_sessions(backend, closes).await;
+        Self::close_backend_sessions(backend, closes, timeout).await;
     }
 
     /// Evict expired contexts (called periodically). Returns the contexts
@@ -1360,6 +1394,17 @@ impl ContextManager {
     pub async fn evict_expired(
         &self,
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+    ) -> Vec<ClientContextId> {
+        self.evict_expired_with_timeout(backend, TEARDOWN_BACKEND_TIMEOUT).await
+    }
+
+    /// [`Self::evict_expired`] with an explicit per-call backend timeout for
+    /// the teardown phase. Tests drive wedged-backend boundedness through
+    /// this; the background reaper uses the default via [`Self::evict_expired`].
+    pub(crate) async fn evict_expired_with_timeout(
+        &self,
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        timeout: Duration,
     ) -> Vec<ClientContextId> {
         let now = Instant::now();
         let expired = self.collect_expired_context_ids(now);
@@ -1382,7 +1427,7 @@ impl ContextManager {
                 plans.push(self.plan_removed_context_teardown(&mut ctx));
             }
         }
-        self.execute_teardown_plans(backend, plans).await;
+        self.execute_teardown_plans_with_timeout(backend, plans, timeout).await;
         evicted
     }
 
@@ -1405,19 +1450,32 @@ impl ContextManager {
     async fn close_backend_sessions(
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
         backend_sessions: Vec<u64>,
+        timeout: Duration,
     ) {
-        if backend_sessions.is_empty() {
-            return;
+        // W1-C2-03: one bounded spawn_backend call per session (not one
+        // unbounded batch) so a wedged backend stalls reaping by at most
+        // `timeout` per session while a slow-but-live backend still drains.
+        // Best-effort: every outcome is ignored — teardown must not fail.
+        for handle in backend_sessions {
+            let backend = backend.clone();
+            let _ = crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
+                timeout,
+                move || {
+                    let _ = backend.close_session(CkSessionHandle(handle));
+                    Ok(())
+                },
+            )
+            .await;
         }
-        let backend = backend.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            for handle in backend_sessions {
-                let _ = backend.close_session(CkSessionHandle(handle as u64));
-            }
-        })
-        .await;
     }
 }
+
+/// Per-call backend timeout for context-teardown work (W1-C2-03): session
+/// closes and last-holder logouts during eviction/finalize. Teardown is
+/// best-effort background reaping, so it gets a shorter bound than the
+/// data-plane `proxy.request_timeout_secs` default — a wedged backend must
+/// not stall lease reaping (or session close) beyond this per call.
+const TEARDOWN_BACKEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
 mod tests;

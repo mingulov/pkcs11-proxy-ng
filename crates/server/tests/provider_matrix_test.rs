@@ -40,34 +40,30 @@ const UNSUPPORTED_PROBES: &[MechanismProbe] = &[
     MechanismProbe { name: "vendor probe 0x8FFFFF02", mechanism: CkMechanismType(0x8FFF_FF02) },
 ];
 
-async fn optional_nss_fixture() -> Result<Option<ProviderFixture>, String> {
+/// W1-C2-06: these tests are `#[ignore]`d, so they only run when explicitly
+/// selected (`--ignored` or by name). A missing artifact is therefore a
+/// hard failure naming the artifact — never a silent green `Ok(())`.
+fn missing_artifact(reason: SkipReason, detail: String) -> String {
+    record_skip!(reason.clone());
+    format!("{reason}: {detail}")
+}
+
+async fn require_nss_fixture() -> Result<ProviderFixture, String> {
     if std::env::var_os("PKCS11_PROXY_NSS_MODULE").is_some() {
-        match ProviderFixture::nss_from_env().await {
-            Ok(fixture) => Ok(Some(fixture)),
-            Err(_reason) => {
-                record_skip!(SkipReason::ProviderMissing("NSS softokn (env-configured)"));
-                Ok(None)
-            }
-        }
+        ProviderFixture::nss_from_env().await.map_err(|detail| {
+            missing_artifact(SkipReason::ProviderMissing("NSS softokn (env-configured)"), detail)
+        })
     } else {
-        match ProviderFixture::nss_softokn().await {
-            Ok(fixture) => Ok(Some(fixture)),
-            Err(_reason) => {
-                record_skip!(SkipReason::ProviderMissing("NSS softokn (auto-detected)"));
-                Ok(None)
-            }
-        }
+        ProviderFixture::nss_softokn().await.map_err(|detail| {
+            missing_artifact(SkipReason::ProviderMissing("NSS softokn (auto-detected)"), detail)
+        })
     }
 }
 
-async fn optional_kryoptic_fixture() -> Result<Option<ProviderFixture>, String> {
-    match ProviderFixture::kryoptic_from_env().await {
-        Ok(fixture) => Ok(Some(fixture)),
-        Err(_reason) => {
-            record_skip!(SkipReason::ProviderMissing("Kryoptic (env-configured)"));
-            Ok(None)
-        }
-    }
+async fn require_kryoptic_fixture() -> Result<ProviderFixture, String> {
+    ProviderFixture::kryoptic_from_env().await.map_err(|detail| {
+        missing_artifact(SkipReason::ProviderMissing("Kryoptic (env-configured)"), detail)
+    })
 }
 
 fn first_unadvertised_probe(mechanisms: &[CkMechanismType]) -> Result<MechanismProbe, String> {
@@ -255,35 +251,69 @@ async fn run_provider_capability_matrix(fixture: ProviderFixture) -> Result<(), 
 #[tokio::test]
 #[ignore] // optional: auto-detects system NSS softokn or uses PKCS11_PROXY_NSS_*
 async fn nss_softokn_smoke_suite() -> Result<(), String> {
-    let Some(fixture) = optional_nss_fixture().await? else {
-        return Ok(());
-    };
+    let fixture = require_nss_fixture().await?;
     run_optional_backend_smoke(fixture).await
 }
 
 #[tokio::test]
 #[ignore] // optional: requires PKCS11_PROXY_KRYOPTIC_MODULE
 async fn kryoptic_smoke_suite() -> Result<(), String> {
-    let Some(fixture) = optional_kryoptic_fixture().await? else {
-        return Ok(());
-    };
+    let fixture = require_kryoptic_fixture().await?;
     run_optional_backend_smoke(fixture).await
 }
 
 #[tokio::test]
 #[ignore] // optional: auto-detects system NSS softokn or uses PKCS11_PROXY_NSS_*
 async fn nss_provider_capability_matrix() -> Result<(), String> {
-    let Some(fixture) = optional_nss_fixture().await? else {
-        return Ok(());
-    };
+    let fixture = require_nss_fixture().await?;
     run_provider_capability_matrix(fixture).await
 }
 
 #[tokio::test]
 #[ignore] // optional: requires PKCS11_PROXY_KRYOPTIC_MODULE
 async fn kryoptic_provider_capability_matrix() -> Result<(), String> {
-    let Some(fixture) = optional_kryoptic_fixture().await? else {
-        return Ok(());
-    };
+    let fixture = require_kryoptic_fixture().await?;
     run_provider_capability_matrix(fixture).await
+}
+
+/// W1-C2-06: an ignored provider test run explicitly with its artifact
+/// missing must FAIL (not green-Ok), so an `--ignored` run tests
+/// something. Proven by re-running this binary's Kryoptic smoke test in
+/// a child process with the provider env stripped: nonzero exit plus a
+/// reason naming the missing artifact.
+#[tokio::test]
+async fn missing_artifact_fails_under_explicit_ignored_run() {
+    let exe = std::env::current_exe().expect("current test binary");
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        tokio::process::Command::new(exe)
+            .arg("--exact")
+            .arg("kryoptic_smoke_suite")
+            .arg("--ignored")
+            .env_remove("PKCS11_PROXY_KRYOPTIC_MODULE")
+            .env_remove("PKCS11_PROXY_KRYOPTIC_TOKEN_LABEL")
+            .env_remove("PKCS11_PROXY_KRYOPTIC_USER_PIN")
+            .env_remove("PKCS11_PROXY_KRYOPTIC_SO_PIN")
+            .env_remove("PKCS11_PROXY_KRYOPTIC_INIT_TOKEN")
+            .output(),
+    )
+    .await
+    .expect("child test run must finish")
+    .expect("spawn child test run");
+    assert!(
+        !output.status.success(),
+        "missing-artifact ignored test must FAIL under explicit --ignored run, but exited {}",
+        output.status
+    );
+    // libtest reports the failure (including our Err text) on stdout; the
+    // record_skip! line lands on stderr. Either must name the artifact.
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Kryoptic"),
+        "failure must name the missing artifact; child output:\n{combined}"
+    );
 }

@@ -207,8 +207,10 @@ where
 
 /// Testable variant of [`spawn_backend`] with an explicit timeout.  It uses
 /// the same breaker/completion machinery; production callers use the
-/// configured timeout through `spawn_backend`.
-pub(super) async fn spawn_backend_with_timeout<T, F>(
+/// configured timeout through `spawn_backend`. Also used by
+/// `context_manager` eviction teardown (W1-C2-03) so a wedged backend
+/// cannot stall lease reaping.
+pub(crate) async fn spawn_backend_with_timeout<T, F>(
     timeout: Duration,
     operation: F,
 ) -> Result<CkResult<T>, Status>

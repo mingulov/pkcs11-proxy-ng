@@ -246,6 +246,12 @@ impl MockBackend {
     }
 
     pub(super) fn logout_impl(&self, session: CkSessionHandle) -> CkResult<()> {
+        // W1-C2-03 test hook: wedge the logout like `close_session_delay`
+        // wedges closes (delay read before the state lock, mirroring close).
+        let delay = *self.logout_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            std::thread::sleep(delay);
+        }
         let mut state = self.state.lock().unwrap();
         let slot_id = match state.session_record(session) {
             Some((slot_id, _)) => slot_id,

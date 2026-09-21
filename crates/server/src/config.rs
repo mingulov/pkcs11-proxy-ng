@@ -691,6 +691,19 @@ impl AuditConfig {
     /// Validate derived invariants.  Returns `Err` if the configuration is
     /// self-inconsistent; the message is human-readable for operator display.
     pub fn validate(&self) -> Result<(), String> {
+        // W1-C2-05: zero rotation knobs are never valid — 0 keep disables
+        // pruning (unbounded disk growth) and 0 max-bytes rotates on every
+        // record (fsync+rename storm). Reject loudly at load, not silently.
+        if self.rotate_max_bytes == 0 {
+            return Err("audit.rotate_max_bytes must be > 0 \
+                 (0 would rotate the audit log on every record)"
+                .into());
+        }
+        if self.rotate_keep_files == 0 {
+            return Err("audit.rotate_keep_files must be > 0 \
+                 (0 disables pruning; audit logs would grow without bound)"
+                .into());
+        }
         if self.channel_capacity == 0 {
             return Err("audit.channel_capacity must be > 0 \
                  (tokio::sync::mpsc::channel(0) panics at startup)"
