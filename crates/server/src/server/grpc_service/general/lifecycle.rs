@@ -25,8 +25,8 @@ pub(super) async fn initialize(
     )?;
     // W1-L7-03: throttle unauthenticated context creation per IP BEFORE
     // minting the context, so an unauthenticated peer cannot flood to the
-    // max_contexts cap. Reuses the per-IP limiter (shared budget with
-    // GetBackendInterfaces; active iff the operator enabled it).
+    // max_contexts cap. Uses the dedicated always-on initialize budget
+    // (decoupled from the opt-in discovery limiter).
     check_init_throttle(&identity, request.remote_addr().map(|addr| addr.ip()))?;
     let ctx_id = match ctx_mgr.create_context(Some(identity.to_string())).await {
         Ok(id) => id,
@@ -59,7 +59,7 @@ fn check_init_throttle(
     let Some(ip) = peer else {
         return Ok(());
     };
-    match rate_limit::check(ip) {
+    match rate_limit::check_init(ip) {
         Ok(()) => Ok(()),
         Err(retry_after) => Err(Status::resource_exhausted(format!(
             "initialize rate limit exceeded for peer; retry after {} ms",
@@ -240,18 +240,24 @@ mod tests {
         assert!(ctx_mgr.get_context(&ctx_id, |_| ()).await.is_some());
     }
 
-    /// W1-L7-03: an unauthenticated peer flooding initialize from one IP
-    /// is throttled before context creation (loud RESOURCE_EXHAUSTED, no
-    /// context minted). Uses a dedicated TEST-NET IP so the process-once
-    /// limiter configuration cannot interact with other tests.
+    /// W1-L7-03 fix round: an unauthenticated peer flooding initialize
+    /// from one IP is throttled before context creation (loud
+    /// RESOURCE_EXHAUSTED, no context minted) under DEFAULT configuration
+    /// — no explicit limiter setup. Uses a dedicated TEST-NET IP so the
+    /// shared always-on budget cannot interact with other tests.
     #[tokio::test]
     async fn initialize_throttles_unauthenticated_flood_per_ip() {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-        crate::server::rate_limit::configure(std::time::Duration::from_secs(60), 2);
+        use crate::server::auth::identity::AuthenticatedIdentity;
+
+        // NOTE: no rate_limit::configure — this test pins default-config
+        // behavior. The initialize budget is always on and decoupled
+        // from the (opt-in) discovery limiter.
         let ctx_mgr = test_ctx_mgr();
         let backend = test_backend();
-        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44)), 1234);
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 46));
+        let peer = SocketAddr::new(ip, 1234);
         let request = || {
             let mut req = Request::new(pkcs11_proxy_ng_proto::InitializeRequest {
                 client_context_id: String::new(),
@@ -263,6 +269,7 @@ mod tests {
             req
         };
 
+        // Legitimate initializes pass.
         for _ in 0..2 {
             let resp = super::initialize(
                 &ctx_mgr,
@@ -277,6 +284,21 @@ mod tests {
             assert_eq!(resp.ck_rv, CkRv::OK.0, "in-budget initializes must pass");
         }
         assert_eq!(ctx_mgr.context_count(), 2);
+        // Fill the rest of the always-on budget directly (2 units were
+        // consumed by the initializes above); the next check trips the
+        // throttle — no explicit limiter setup anywhere in this path.
+        for _ in 0..(crate::server::rate_limit::INIT_THROTTLE_MAX_PER_WINDOW - 2) {
+            assert!(
+                super::check_init_throttle(&AuthenticatedIdentity::Unauthenticated, Some(ip))
+                    .is_ok(),
+                "in-budget checks must pass"
+            );
+        }
+        assert!(
+            super::check_init_throttle(&AuthenticatedIdentity::Unauthenticated, Some(ip)).is_err(),
+            "default-config flood must be throttled"
+        );
+        // …and a further initialize is loudly rejected without minting.
         let err = super::initialize(
             &ctx_mgr,
             &backend,

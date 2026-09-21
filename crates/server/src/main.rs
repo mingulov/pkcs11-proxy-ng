@@ -227,29 +227,56 @@ type ServeFuture = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
 >;
 
-/// Wait for every listener to drain after the shutdown signal, bounded by
+/// Serve until the shutdown signal, then drain bounded by
 /// `proxy.shutdown_grace_secs` (W1-L6-07).
 ///
-/// Returns `Some(outcome)` when `try_join_all` finishes in time (errors
-/// propagate unchanged); returns `None` when the grace expires first — the
-/// serve futures are then dropped, aborting in-flight connections, and the
+/// The grace clock starts at **signal receipt**, not at startup: the join
+/// over the serve futures races the `signal` future, and only the
+/// post-signal drain runs under `timeout(grace, …)`. Pre-signal serve
+/// time is unbounded (a listener that never exits and no signal means
+/// the daemon keeps serving); a join that completes on its own
+/// (listener error exit) propagates immediately without waiting for
+/// the signal.
+///
+/// Returns `Some(outcome)` when the join finishes — either before the
+/// signal or inside the post-signal grace (errors propagate unchanged);
+/// returns `None` when the post-signal grace expires first — the serve
+/// futures are then dropped, aborting in-flight connections, and the
 /// caller proceeds with forced shutdown (socket cleanup, audit flush,
 /// backend finalize) instead of pinning SIGTERM forever on a wedged
 /// backend.
 async fn serve_with_grace(
     serve_futures: Vec<ServeFuture>,
+    signal: impl std::future::Future<Output = ()>,
     grace: std::time::Duration,
 ) -> Option<Result<Vec<()>, tonic::transport::Error>> {
-    match tokio::time::timeout(grace, futures::future::try_join_all(serve_futures)).await {
-        Ok(outcome) => Some(outcome),
-        Err(_elapsed) => {
-            tracing::error!(
-                grace_secs = grace.as_secs(),
-                "shutdown grace expired with listeners still draining; \
-                 forcing shutdown (in-flight connections aborted)"
-            );
-            None
-        }
+    let mut drain = Box::pin(futures::future::try_join_all(serve_futures));
+    tokio::pin!(signal);
+    // Phase 1 (unbounded): serve until the listeners exit on their own
+    // or the shutdown signal arrives, whichever comes first. Biased
+    // toward the listener outcome so a concurrent listener error still
+    // propagates as the exit cause.
+    let pre_signal_outcome = tokio::select! {
+        biased;
+        outcome = &mut drain => Some(outcome),
+        () = &mut signal => None,
+    };
+    // Phase 2 (bounded): only after the signal, drain under the grace.
+    // (A separate step rather than a third select branch so `drain`
+    // moves into the timeout cleanly once the phase-1 borrows end.)
+    match pre_signal_outcome {
+        Some(outcome) => Some(outcome),
+        None => match tokio::time::timeout(grace, drain).await {
+            Ok(outcome) => Some(outcome),
+            Err(_elapsed) => {
+                tracing::error!(
+                    grace_secs = grace.as_secs(),
+                    "shutdown grace expired with listeners still draining; \
+                     forcing shutdown (in-flight connections aborted)"
+                );
+                None
+            }
+        },
     }
 }
 
@@ -504,6 +531,8 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // Configure per-peer rate limiter for GetBackendInterfaces.
     // Disabled by default (max_per_window=0); production deployments
     // can set proxy.rate_limit_get_backend_interfaces to enable.
+    // (Unauthenticated Initialize has its own always-on per-IP budget —
+    // W1-L7-03 — which needs no configuration.)
     server::rate_limit::configure(
         std::time::Duration::from_secs(config.proxy.rate_limit_window_secs),
         config.proxy.rate_limit_get_backend_interfaces,
@@ -686,12 +715,15 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // inside spawn_backend() via tokio::time::timeout. A tonic-level timeout
     // would cancel the handler Future before spawn_backend can decrement
     // IN_FLIGHT, causing circuit breaker leaks under heavy load.
-    // W1-L6-07: the drain honors proxy.shutdown_grace_secs (previously the
-    // validated knob was never read and a wedged backend pinned SIGTERM
-    // forever). On expiry the serve futures are dropped (aborting
-    // in-flight connections) and shutdown proceeds forced.
+    // W1-L6-07: the post-signal drain honors proxy.shutdown_grace_secs
+    // (previously the validated knob was never read and a wedged backend
+    // pinned SIGTERM forever). The grace clock starts when the shared
+    // signal channel flips — pre-signal serve time is unbounded — and on
+    // expiry the serve futures are dropped (aborting in-flight
+    // connections) and shutdown proceeds forced.
     let serve_result = serve_with_grace(
         serve_futures,
+        listener_shutdown(shutdown_rx),
         std::time::Duration::from_secs(config.proxy.shutdown_grace_secs),
     )
     .await;
@@ -901,25 +933,31 @@ auth = "peer_cred"
             .expect("v2.40 backend without per-object policy must start");
     }
 
-    /// W1-L6-07: listeners that drain within the grace return their
-    /// `try_join_all` outcome unchanged.
+    /// W1-L6-07: listeners that exit on their own (pre-signal) return
+    /// their `try_join_all` outcome unchanged, without waiting for the
+    /// signal.
     #[tokio::test]
     async fn serve_with_grace_returns_outcome_when_drained_in_time() {
         let futures: Vec<ServeFuture> =
             vec![Box::pin(async { Ok(()) }), Box::pin(async { Ok(()) })];
-        let outcome = serve_with_grace(futures, std::time::Duration::from_secs(30)).await;
+        let outcome =
+            serve_with_grace(futures, std::future::pending(), std::time::Duration::from_secs(30))
+                .await;
         assert!(matches!(outcome, Some(Ok(_))), "drained listeners must propagate Ok");
     }
 
-    /// W1-L6-07: a wedged listener (never resolves) must not pin SIGTERM
-    /// forever — the grace bounds the wait, then the serve futures are
-    /// dropped (aborting in-flight connections) and shutdown proceeds.
+    /// W1-L6-07: after the signal, a wedged listener (never resolves)
+    /// must not pin SIGTERM forever — the grace bounds the post-signal
+    /// drain, then the serve futures are dropped (aborting in-flight
+    /// connections) and shutdown proceeds.
     #[tokio::test]
     async fn serve_with_grace_bounds_a_wedged_listener() {
         let futures: Vec<ServeFuture> =
             vec![Box::pin(async { Ok(()) }), Box::pin(std::future::pending())];
         let start = std::time::Instant::now();
-        let outcome = serve_with_grace(futures, std::time::Duration::from_millis(50)).await;
+        let outcome =
+            serve_with_grace(futures, std::future::ready(()), std::time::Duration::from_millis(50))
+                .await;
         assert!(outcome.is_none(), "wedged listeners must time out to forced shutdown");
         assert!(
             start.elapsed() < std::time::Duration::from_secs(5),
@@ -928,8 +966,9 @@ auth = "peer_cred"
         );
     }
 
-    /// W1-L6-07: a serve error within the grace still propagates (the
-    /// timeout only swallows the never-resolving case).
+    /// W1-L6-07: a pre-signal serve error propagates immediately (the
+    /// daemon must exit on listener failure without waiting for a
+    /// signal that may never come).
     #[tokio::test]
     async fn serve_with_grace_propagates_serve_errors() {
         // try_join_all short-circuits on the first error; a ready error
@@ -937,7 +976,57 @@ auth = "peer_cred"
         // URI is the cheapest way to fabricate a transport::Error.)
         let err = tonic::transport::Endpoint::from_shared("http://exa mple.com").unwrap_err();
         let futures: Vec<ServeFuture> = vec![Box::pin(async move { Err(err) })];
-        let outcome = serve_with_grace(futures, std::time::Duration::from_secs(30)).await;
+        let outcome =
+            serve_with_grace(futures, std::future::pending(), std::time::Duration::from_secs(30))
+                .await;
         assert!(matches!(outcome, Some(Err(_))), "serve errors must propagate");
+    }
+
+    /// W1-L6-07 fix round: the grace clock must start at signal receipt,
+    /// not at startup. With no signal and no listener exit, the helper
+    /// stays pending far past the grace (pre-signal serve time is
+    /// unbounded) — the daemon must not force-exit `grace` after boot.
+    #[tokio::test]
+    async fn serve_with_grace_does_not_bound_pre_signal_uptime() {
+        let futures: Vec<ServeFuture> = vec![Box::pin(std::future::pending())];
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            serve_with_grace(futures, std::future::pending(), std::time::Duration::from_millis(50)),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "pre-signal serve must stay pending past the grace (10x overrun)"
+        );
+    }
+
+    /// W1-L6-07 fix round: post-signal drain obeys the grace the other
+    /// way — a drain that finishes inside the grace returns its outcome
+    /// (the wedged-listener test above pins the expiry way).
+    #[tokio::test]
+    async fn serve_with_grace_returns_post_signal_drain_outcome() {
+        let (tx, mut signal_rx) = tokio::sync::watch::channel(false);
+        let mut serve_rx = tx.subscribe();
+        // Signal future: resolves when the "SIGTERM" flips the channel.
+        let signal = async move {
+            let _ = signal_rx.changed().await;
+        };
+        // Serve future: drains only after the signal, then succeeds
+        // inside the grace.
+        let serve: ServeFuture = Box::pin(async move {
+            let _ = serve_rx.changed().await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Ok(())
+        });
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let _ = tx.send(true);
+        });
+        let outcome =
+            serve_with_grace(vec![serve], signal, std::time::Duration::from_secs(5)).await;
+        assert!(
+            matches!(outcome, Some(Ok(_))),
+            "post-signal drain inside the grace must propagate Ok"
+        );
     }
 }
