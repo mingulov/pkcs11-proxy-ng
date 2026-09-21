@@ -67,6 +67,11 @@ pub(crate) enum Commands {
         key_label: String,
         #[arg(long)]
         mechanism: String,
+        /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
+        /// RSA_PKCS_PSS family (e.g. {"iv_hex": "...", "tag_bits": 128}
+        /// for GCM). Required for those mechanisms; rejected otherwise.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        params_file: Option<PathBuf>,
         #[arg(long)]
         input: String,
     },
@@ -75,6 +80,11 @@ pub(crate) enum Commands {
         slot_id: u64,
         #[arg(long)]
         mechanism: String,
+        /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
+        /// RSA_PKCS_PSS family (e.g. {"iv_hex": "...", "tag_bits": 128}
+        /// for GCM). Required for those mechanisms; rejected otherwise.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        params_file: Option<PathBuf>,
         #[arg(long)]
         input: String,
     },
@@ -87,6 +97,11 @@ pub(crate) enum Commands {
         key_label: String,
         #[arg(long)]
         mechanism: String,
+        /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
+        /// RSA_PKCS_PSS family (e.g. {"iv_hex": "...", "tag_bits": 128}
+        /// for GCM). Required for those mechanisms; rejected otherwise.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        params_file: Option<PathBuf>,
         #[arg(long)]
         input: String,
     },
@@ -99,6 +114,11 @@ pub(crate) enum Commands {
         key_label: String,
         #[arg(long)]
         mechanism: String,
+        /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
+        /// RSA_PKCS_PSS family (e.g. {"iv_hex": "...", "tag_bits": 128}
+        /// for GCM). Required for those mechanisms; rejected otherwise.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        params_file: Option<PathBuf>,
         #[arg(long)]
         input: String,
     },
@@ -135,6 +155,11 @@ pub(crate) enum Commands {
         pin: String,
         #[arg(long)]
         mechanism: String,
+        /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
+        /// RSA_PKCS_PSS family (e.g. {"iv_hex": "...", "tag_bits": 128}
+        /// for GCM). Required for those mechanisms; rejected otherwise.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        params_file: Option<PathBuf>,
         #[arg(long)]
         wrapping_key_handle: u64,
         #[arg(long)]
@@ -147,6 +172,11 @@ pub(crate) enum Commands {
         pin: String,
         #[arg(long)]
         mechanism: String,
+        /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
+        /// RSA_PKCS_PSS family (e.g. {"iv_hex": "...", "tag_bits": 128}
+        /// for GCM). Required for those mechanisms; rejected otherwise.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        params_file: Option<PathBuf>,
         #[arg(long)]
         unwrapping_key_handle: u64,
         #[arg(long)]
@@ -161,6 +191,11 @@ pub(crate) enum Commands {
         pin: String,
         #[arg(long)]
         mechanism: String,
+        /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
+        /// RSA_PKCS_PSS family (e.g. {"iv_hex": "...", "tag_bits": 128}
+        /// for GCM). Required for those mechanisms; rejected otherwise.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        params_file: Option<PathBuf>,
         #[arg(long)]
         base_key_handle: u64,
         #[arg(long)]
@@ -173,8 +208,15 @@ pub(crate) enum Commands {
         pin: String,
         #[arg(long)]
         mechanism: String,
+        /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
+        /// RSA_PKCS_PSS family (e.g. {"iv_hex": "...", "tag_bits": 128}
+        /// for GCM). Required for those mechanisms; rejected otherwise.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        params_file: Option<PathBuf>,
         #[arg(long)]
         label: String,
+        /// Key size in bits (must be a multiple of 8); sent as
+        /// CKA_VALUE_LEN in bytes.
         #[arg(long)]
         key_size: Option<u64>,
     },
@@ -185,10 +227,22 @@ pub(crate) enum Commands {
         pin: String,
         #[arg(long)]
         mechanism: String,
+        /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
+        /// RSA_PKCS_PSS family (e.g. {"iv_hex": "...", "tag_bits": 128}
+        /// for GCM). Required for those mechanisms; rejected otherwise.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        params_file: Option<PathBuf>,
         #[arg(long)]
         label: String,
+        /// Key size in bits for RSA (sent as CKA_MODULUS_BITS);
+        /// EC keygen uses --ec-params instead.
         #[arg(long)]
         key_size: Option<u64>,
+        /// EC curve for EC keygen: prime256v1, secp384r1, secp521r1,
+        /// secp256k1, or hex-encoded DER ECParameters. Sent as
+        /// CKA_EC_PARAMS.
+        #[arg(long)]
+        ec_params: Option<String>,
     },
     /// Probe the daemon's gRPC health endpoint. Exits 0 if SERVING,
     /// non-zero otherwise. Use as an `exec`-based k8s readiness probe
@@ -252,6 +306,11 @@ pub(crate) enum Commands {
         key_label: String,
         #[arg(long)]
         mechanism: String,
+        /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
+        /// RSA_PKCS_PSS family (e.g. {"iv_hex": "...", "tag_bits": 128}
+        /// for GCM). Required for those mechanisms; rejected otherwise.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        params_file: Option<PathBuf>,
         #[arg(long)]
         data: String,
         #[arg(long)]

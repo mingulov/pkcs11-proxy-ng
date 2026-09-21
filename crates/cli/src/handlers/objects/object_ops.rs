@@ -3,7 +3,18 @@ use pkcs11_proxy_ng_types::*;
 
 use super::super::{CliResult, close_session, login_if_present, login_user, open_session};
 use super::output::print_verbose_object;
-use crate::pkcs11_names::{attr_type_name, parse_attr_type};
+use crate::pkcs11_names::{attr_type_name, object_class_name, parse_attr_type};
+
+/// Render a typed `Ulong` attribute value (W1-C11-07): CLASS prints
+/// symbolically (matching the verbose decoder); every other ulong
+/// attr prints its decoded number.
+fn format_ulong_attribute(attr_type: CkAttributeType, value: u64) -> String {
+    if attr_type == CkAttributeType::CLASS {
+        format!("{} ({value})", object_class_name(value))
+    } else {
+        value.to_string()
+    }
+}
 
 pub(crate) async fn find_objects(
     client: &mut Pkcs11Client,
@@ -28,10 +39,8 @@ pub(crate) async fn find_objects(
         .find_objects_init(session, Some(&template))
         .await
         .map_err(crate::handlers::cli_err("C_FindObjectsInit"))?;
-    let objects = client
-        .find_objects(session, 100)
-        .await
-        .map_err(crate::handlers::cli_err("C_FindObjects"))?;
+    // W1-C11-13: page to exhaustion instead of capping at 100.
+    let objects = crate::handlers::find_all_paged(client, session).await?;
     client
         .find_objects_final(session)
         .await
@@ -178,7 +187,9 @@ pub(crate) async fn get_attribute(
                     println!("  {}: 0x{}", name, hex::encode(raw));
                 }
             }),
-            Some(CkAttributeValue::Ulong(value)) => println!("  {}: {}", name, value),
+            Some(CkAttributeValue::Ulong(value)) => {
+                println!("  {}: {}", name, format_ulong_attribute(attribute.attr_type, *value))
+            }
             Some(CkAttributeValue::Bool(value)) => println!("  {}: {}", name, value),
             Some(CkAttributeValue::String(value)) => {
                 value.expose(|raw| println!("  {}: \"{}\"", name, String::from_utf8_lossy(raw)))
@@ -192,4 +203,22 @@ pub(crate) async fn get_attribute(
 
     close_session(client, session, pin.is_some()).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_ulong_attribute;
+    use pkcs11_proxy_ng_types::CkAttributeType;
+
+    // W1-C11-07: CLASS renders symbolically from the now-typed Ulong
+    // value; other ulong attrs render decoded (no raw-LE-hex fallback).
+    #[test]
+    fn class_renders_symbolically() {
+        assert_eq!(format_ulong_attribute(CkAttributeType::CLASS, 2), "public-key (2)".to_string());
+    }
+
+    #[test]
+    fn non_class_ulong_renders_decoded_number() {
+        assert_eq!(format_ulong_attribute(CkAttributeType::VALUE_LEN, 32), "32".to_string());
+    }
 }

@@ -23,6 +23,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 hex = "0.4"
 base64 = "0.22"
+serde_json.workspace = true
 x509-parser.workspace = true
 
 # Test-only: spin an in-process mock daemon so handler tests cover the full

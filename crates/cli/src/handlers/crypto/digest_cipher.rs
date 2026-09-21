@@ -2,20 +2,24 @@ use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::{CliResult, close_session, find_key_by_label, login_user, open_session};
-use crate::mechanisms::parse_mechanism;
 
-fn parameterless_mechanism(name: &str) -> Result<CkMechanism, Box<dyn core::error::Error>> {
-    let mechanism_type = parse_mechanism(name)?;
-    Ok(CkMechanism { mechanism_type: CkMechanismType(mechanism_type), params: None })
+// W1-C11-09 (Task 16): this thin wrapper is still triplicated across
+// sign_verify.rs/digest_cipher.rs/key_ops.rs; dedupe there.
+fn cli_mechanism(
+    name: &str,
+    params_file: Option<&std::path::Path>,
+) -> Result<CkMechanism, Box<dyn core::error::Error>> {
+    crate::mech_params::build_mechanism(name, params_file)
 }
 
 pub(crate) async fn digest(
     client: &mut Pkcs11Client,
     slot_id: u64,
     mechanism: String,
+    params_file: Option<std::path::PathBuf>,
     input: String,
 ) -> CliResult {
-    let mechanism = parameterless_mechanism(&mechanism)?;
+    let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
     let data = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
@@ -37,9 +41,10 @@ pub(crate) async fn encrypt(
     pin: String,
     key_label: String,
     mechanism: String,
+    params_file: Option<std::path::PathBuf>,
     input: String,
 ) -> CliResult {
-    let mechanism = parameterless_mechanism(&mechanism)?;
+    let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
     login_user(client, session, &pin).await?;
@@ -63,9 +68,10 @@ pub(crate) async fn decrypt(
     pin: String,
     key_label: String,
     mechanism: String,
+    params_file: Option<std::path::PathBuf>,
     input: String,
 ) -> CliResult {
-    let mechanism = parameterless_mechanism(&mechanism)?;
+    let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
     login_user(client, session, &pin).await?;

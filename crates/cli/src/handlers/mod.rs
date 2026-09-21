@@ -12,6 +12,21 @@ use crate::pkcs11_names::object_class_name;
 
 pub(crate) type CliResult = Result<(), Box<dyn core::error::Error>>;
 
+/// Sentinel for `verify` reporting `CKR_SIGNATURE_INVALID` (W1-C11-12):
+/// the handler releases its session and returns this instead of
+/// `process::exit`-ing, so `main` can finalize and exit with a code
+/// distinct from generic failures.
+#[derive(Debug)]
+pub(crate) struct VerifyInvalid;
+
+impl core::fmt::Display for VerifyInvalid {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "signature INVALID (CKR_SIGNATURE_INVALID)")
+    }
+}
+
+impl core::error::Error for VerifyInvalid {}
+
 /// Format a `CkRv` from a named PKCS#11 entry point as a CLI-facing error.
 /// Use with `.map_err(cli_err("C_FooName"))?`. Centralises the
 /// `"C_FooName failed: CKR 0x{...}"` shape that was copy-pasted at 37+ sites.
@@ -56,14 +71,30 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
         Commands::ImportCertificate { slot_id, pin, label, file } => {
             objects::import_certificate(client, slot_id, pin, label, file).await
         }
-        Commands::WrapKey { slot_id, pin, mechanism, wrapping_key_handle, key_handle } => {
-            objects::wrap_key(client, slot_id, pin, mechanism, wrapping_key_handle, key_handle)
-                .await
+        Commands::WrapKey {
+            slot_id,
+            pin,
+            mechanism,
+            params_file,
+            wrapping_key_handle,
+            key_handle,
+        } => {
+            objects::wrap_key(
+                client,
+                slot_id,
+                pin,
+                mechanism,
+                params_file,
+                wrapping_key_handle,
+                key_handle,
+            )
+            .await
         }
         Commands::UnwrapKey {
             slot_id,
             pin,
             mechanism,
+            params_file,
             unwrapping_key_handle,
             wrapped_key,
             label,
@@ -73,35 +104,65 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
                 slot_id,
                 pin,
                 mechanism,
+                params_file,
                 unwrapping_key_handle,
                 wrapped_key,
                 label,
             )
             .await
         }
-        Commands::DeriveKey { slot_id, pin, mechanism, base_key_handle, label } => {
-            objects::derive_key(client, slot_id, pin, mechanism, base_key_handle, label).await
+        Commands::DeriveKey { slot_id, pin, mechanism, params_file, base_key_handle, label } => {
+            objects::derive_key(
+                client,
+                slot_id,
+                pin,
+                mechanism,
+                params_file,
+                base_key_handle,
+                label,
+            )
+            .await
         }
-        Commands::GenerateKey { slot_id, pin, mechanism, label, key_size } => {
-            objects::generate_key(client, slot_id, pin, mechanism, label, key_size).await
+        Commands::GenerateKey { slot_id, pin, mechanism, params_file, label, key_size } => {
+            objects::generate_key(client, slot_id, pin, mechanism, params_file, label, key_size)
+                .await
         }
-        Commands::GenerateKeyPair { slot_id, pin, mechanism, label, key_size } => {
-            objects::generate_key_pair(client, slot_id, pin, mechanism, label, key_size).await
+        Commands::GenerateKeyPair {
+            slot_id,
+            pin,
+            mechanism,
+            params_file,
+            label,
+            key_size,
+            ec_params,
+        } => {
+            objects::generate_key_pair(
+                client,
+                slot_id,
+                pin,
+                mechanism,
+                params_file,
+                label,
+                key_size,
+                ec_params,
+            )
+            .await
         }
-        Commands::Sign { slot_id, pin, key_label, mechanism, input } => {
-            crypto::sign(client, slot_id, pin, key_label, mechanism, input).await
+        Commands::Sign { slot_id, pin, key_label, mechanism, params_file, input } => {
+            crypto::sign(client, slot_id, pin, key_label, mechanism, params_file, input).await
         }
-        Commands::Digest { slot_id, mechanism, input } => {
-            crypto::digest(client, slot_id, mechanism, input).await
+        Commands::Digest { slot_id, mechanism, params_file, input } => {
+            crypto::digest(client, slot_id, mechanism, params_file, input).await
         }
-        Commands::Encrypt { slot_id, pin, key_label, mechanism, input } => {
-            crypto::encrypt(client, slot_id, pin, key_label, mechanism, input).await
+        Commands::Encrypt { slot_id, pin, key_label, mechanism, params_file, input } => {
+            crypto::encrypt(client, slot_id, pin, key_label, mechanism, params_file, input).await
         }
-        Commands::Decrypt { slot_id, pin, key_label, mechanism, input } => {
-            crypto::decrypt(client, slot_id, pin, key_label, mechanism, input).await
+        Commands::Decrypt { slot_id, pin, key_label, mechanism, params_file, input } => {
+            crypto::decrypt(client, slot_id, pin, key_label, mechanism, params_file, input).await
         }
-        Commands::Verify { slot_id, pin, key_label, mechanism, data, signature } => {
-            crypto::verify(client, slot_id, pin, key_label, mechanism, data, signature).await
+        Commands::Verify { slot_id, pin, key_label, mechanism, params_file, data, signature } => {
+            crypto::verify(client, slot_id, pin, key_label, mechanism, params_file, data, signature)
+                .await
         }
         Commands::InitToken { slot_id, so_pin, label } => {
             admin::init_token(client, slot_id, so_pin, label).await
@@ -156,6 +217,29 @@ pub(crate) async fn close_session(
     let _ = client.close_session(session).await;
 }
 
+/// Page size for `find_objects` listing loops (W1-C11-13).
+pub(crate) const FIND_PAGE_SIZE: u32 = 100;
+
+/// Fetch every handle of an active find operation (W1-C11-13): loop
+/// `find_objects` to exhaustion (a short/empty batch ends the search)
+/// instead of capping the listing at one page.
+pub(crate) async fn find_all_paged(
+    client: &mut Pkcs11Client,
+    session: CkSessionHandle,
+) -> Result<Vec<CkObjectHandle>, Box<dyn core::error::Error>> {
+    let mut objects = Vec::new();
+    loop {
+        let batch =
+            client.find_objects(session, FIND_PAGE_SIZE).await.map_err(cli_err("C_FindObjects"))?;
+        let exhausted = batch.len() < FIND_PAGE_SIZE as usize;
+        objects.extend(batch);
+        if exhausted {
+            break;
+        }
+    }
+    Ok(objects)
+}
+
 pub(crate) async fn find_key_by_label(
     client: &mut Pkcs11Client,
     session: CkSessionHandle,
@@ -172,7 +256,7 @@ pub(crate) async fn find_key_by_label(
     }
     for class in classes {
         if let Some(handle) =
-            find_first_by_label_and_class(client, session, key_label, class).await?
+            find_unique_by_label_and_class(client, session, key_label, class).await?
         {
             return Ok(handle);
         }
@@ -181,7 +265,10 @@ pub(crate) async fn find_key_by_label(
     Err(format!("No {} found with label '{key_label}'", object_class_name(class.0)).into())
 }
 
-async fn find_first_by_label_and_class(
+/// Resolve one key by label+class (W1-C11-14): `CKA_LABEL` is not
+/// unique, so fetch every match and error loudly on ambiguity (listing
+/// the handles) instead of taking whatever comes first.
+async fn find_unique_by_label_and_class(
     client: &mut Pkcs11Client,
     session: CkSessionHandle,
     key_label: &str,
@@ -201,12 +288,23 @@ async fn find_first_by_label_and_class(
         .find_objects_init(session, Some(&template))
         .await
         .map_err(crate::handlers::cli_err("C_FindObjectsInit"))?;
-    let objects =
-        client.find_objects(session, 1).await.map_err(crate::handlers::cli_err("C_FindObjects"))?;
+    let objects = find_all_paged(client, session).await?;
     client
         .find_objects_final(session)
         .await
         .map_err(crate::handlers::cli_err("C_FindObjectsFinal"))?;
 
-    Ok(objects.into_iter().next())
+    match objects.len() {
+        0 => Ok(None),
+        1 => Ok(objects.into_iter().next()),
+        _ => {
+            let handles = objects.iter().map(|h| h.0.to_string()).collect::<Vec<_>>().join(", ");
+            Err(format!(
+                "Multiple {} objects found with label '{key_label}' (handles: {handles}); \
+                 CKA_LABEL is not unique — delete or relabel duplicates, or select by handle",
+                object_class_name(class.0)
+            )
+            .into())
+        }
+    }
 }

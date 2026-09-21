@@ -2,6 +2,8 @@ mod certificates;
 mod key_ops;
 mod object_ops;
 mod output;
+#[cfg(test)]
+mod tests;
 
 pub(crate) use certificates::import_certificate;
 pub(crate) use key_ops::{derive_key, generate_key, generate_key_pair, unwrap_key, wrap_key};

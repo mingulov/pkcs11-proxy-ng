@@ -1422,6 +1422,7 @@ dependencies = [
  "pkcs11-proxy-ng-proto",
  "pkcs11-proxy-ng-types",
  "rcgen",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-stream",

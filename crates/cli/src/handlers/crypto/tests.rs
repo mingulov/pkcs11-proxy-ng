@@ -90,10 +90,69 @@ struct Fixture {
 /// Create a daemon with a single `object_class` key labelled `label`, served
 /// by find only when the search template asks for that class.
 async fn fixture(object_class: CkObjectClass, label: &str) -> Fixture {
+    fixture_with_mechanisms(
+        object_class,
+        label,
+        vec![CkMechanismType::AES_ECB, CkMechanismType(0x0000_0251)],
+    )
+    .await
+}
+
+/// `fixture` with `count` same-label keys (W1-C11-14: `count = 2`
+/// exercises the duplicate-label ambiguity error).
+async fn fixture_with_count(object_class: CkObjectClass, label: &str, count: usize) -> Fixture {
     let backend = Arc::new(MockBackend::new(
         vec![CkSlotId(0)],
         vec![CkMechanismType::AES_ECB, CkMechanismType(0x0000_0251)],
     ));
+    let (endpoint, shutdown) = mock_daemon(backend.clone()).await;
+    let mut client = Pkcs11Client::connect(&endpoint).await.unwrap();
+    client.initialize().await.unwrap();
+    let slots = client.get_slot_list(false).await.unwrap();
+    let setup_session = client
+        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
+        .await
+        .unwrap();
+    let mut keys = Vec::with_capacity(count);
+    for _ in 0..count {
+        keys.push(
+            client
+                .create_object(
+                    setup_session,
+                    Some(&[
+                        CkAttribute {
+                            attr_type: CkAttributeType::CLASS,
+                            value: Some(CkAttributeValue::Ulong(object_class.0)),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String(label.to_string().into())),
+                        },
+                    ]),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    backend.set_find_objects_result(keys);
+    backend.set_find_template_gate(move |t| template_has_class(t, object_class.0));
+    Fixture {
+        backend,
+        client,
+        slot: slots[0].0,
+        _shutdown: shutdown,
+        _setup_session: setup_session,
+    }
+}
+
+/// `fixture` with an explicit advertised-mechanism list (W1-C11-08: the
+/// mock rejects init for unadvertised mechanisms with MECHANISM_INVALID).
+async fn fixture_with_mechanisms(
+    object_class: CkObjectClass,
+    label: &str,
+    mechanisms: Vec<CkMechanismType>,
+) -> Fixture {
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], mechanisms));
     let (endpoint, shutdown) = mock_daemon(backend.clone()).await;
     let mut client = Pkcs11Client::connect(&endpoint).await.unwrap();
     client.initialize().await.unwrap();
@@ -159,6 +218,7 @@ async fn encrypt_resolves_secret_key_by_label() {
         PIN.to_string(),
         SECRET_LABEL.to_string(),
         "AES_ECB".to_string(),
+        None,
         DATA_HEX.to_string(),
     )
     .await
@@ -175,6 +235,7 @@ async fn decrypt_resolves_secret_key_by_label() {
         PIN.to_string(),
         SECRET_LABEL.to_string(),
         "AES_ECB".to_string(),
+        None,
         DATA_HEX.to_string(),
     )
     .await
@@ -191,6 +252,7 @@ async fn sign_resolves_secret_key_by_label() {
         PIN.to_string(),
         SECRET_LABEL.to_string(),
         "SHA256_HMAC".to_string(),
+        None,
         DATA_HEX.to_string(),
     )
     .await
@@ -207,6 +269,7 @@ async fn verify_resolves_secret_key_by_label() {
         Some(PIN.to_string()),
         SECRET_LABEL.to_string(),
         "SHA256_HMAC".to_string(),
+        None,
         DATA_HEX.to_string(),
         mock_signature_hex(),
     )
@@ -232,6 +295,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
                 PIN.to_string(),
                 label.to_string(),
                 "AES_ECB".to_string(),
+                None,
                 DATA_HEX.to_string(),
             )
             .await
@@ -243,6 +307,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
                 PIN.to_string(),
                 label.to_string(),
                 "AES_ECB".to_string(),
+                None,
                 DATA_HEX.to_string(),
             )
             .await
@@ -254,6 +319,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
                 PIN.to_string(),
                 label.to_string(),
                 "SHA256_HMAC".to_string(),
+                None,
                 DATA_HEX.to_string(),
             )
             .await
@@ -265,12 +331,117 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
                 Some(PIN.to_string()),
                 label.to_string(),
                 "SHA256_HMAC".to_string(),
+                None,
                 DATA_HEX.to_string(),
                 mock_signature_hex(),
             )
             .await
         }
     }
+}
+
+// W1-C11-08: bare AES_GCM must error with a CLI hint,
+// not sail through parameterless to a bare backend CKR.
+#[tokio::test]
+async fn bare_gcm_encrypt_errors_with_cli_hint() {
+    let mut fx = fixture(CkObjectClass::SECRET_KEY, SECRET_LABEL).await;
+    let err = encrypt(
+        &mut fx.client,
+        fx.slot,
+        PIN.to_string(),
+        SECRET_LABEL.to_string(),
+        "AES_GCM".to_string(),
+        None,
+        DATA_HEX.to_string(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("requires parameters"), "no hint: {err}");
+    assert!(err.contains("--params-file"), "no hint: {err}");
+}
+
+// W1-C11-12: the INVALID path releases the session (logout+close)
+// and returns the VerifyInvalid sentinel (which main maps to exit 2)
+// instead of process::exit-ing past cleanup.
+#[tokio::test]
+async fn verify_invalid_releases_session() {
+    let mut fx = fixture(CkObjectClass::SECRET_KEY, SECRET_LABEL).await;
+    let baseline = fx.backend.open_session_count();
+    let err = verify(
+        &mut fx.client,
+        fx.slot,
+        Some(PIN.to_string()),
+        SECRET_LABEL.to_string(),
+        "SHA256_HMAC".to_string(),
+        None,
+        DATA_HEX.to_string(),
+        "00".to_string(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.downcast_ref::<super::super::VerifyInvalid>().is_some(),
+        "INVALID must return the VerifyInvalid sentinel, got: {err}"
+    );
+    assert_eq!(
+        fx.backend.open_session_count(),
+        baseline,
+        "INVALID path must close the session it opened"
+    );
+}
+
+// W1-C11-08: a parameterized mechanism succeeds end to end (CLI ->
+// gRPC -> backend) once a params file supplies the params.
+#[tokio::test]
+async fn encrypt_accepts_gcm_params_file() {
+    let mut fx = fixture_with_mechanisms(
+        CkObjectClass::SECRET_KEY,
+        SECRET_LABEL,
+        vec![CkMechanismType::AES_GCM],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let params_path = dir.path().join("gcm.json");
+    std::fs::write(
+        &params_path,
+        r#"{"iv_hex": "00112233445566778899aabb", "aad_hex": "aabb", "tag_bits": 128}"#,
+    )
+    .unwrap();
+    encrypt(
+        &mut fx.client,
+        fx.slot,
+        PIN.to_string(),
+        SECRET_LABEL.to_string(),
+        "AES_GCM".to_string(),
+        Some(params_path),
+        DATA_HEX.to_string(),
+    )
+    .await
+    .expect("encrypt with AES_GCM + params file must succeed");
+}
+
+// W1-C11-14: duplicate labels error loudly, listing the matches,
+// instead of silently resolving to an arbitrary key.
+#[tokio::test]
+async fn duplicate_label_errors_listing_matches() {
+    let mut fx = fixture_with_count(CkObjectClass::SECRET_KEY, SECRET_LABEL, 2).await;
+    let err = encrypt(
+        &mut fx.client,
+        fx.slot,
+        PIN.to_string(),
+        SECRET_LABEL.to_string(),
+        "AES_ECB".to_string(),
+        None,
+        DATA_HEX.to_string(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("Multiple"), "must flag ambiguity: {err}");
+    assert!(err.contains(SECRET_LABEL), "must name the label: {err}");
+    assert!(err.contains("secret-key"), "must name the class: {err}");
+    assert!(err.contains("handles:"), "must list matches: {err}");
 }
 
 #[tokio::test]

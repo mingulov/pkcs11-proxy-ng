@@ -8,6 +8,7 @@ use pkcs11_proxy_ng_client::{Pkcs11Client, tls::ClientTlsFiles};
 
 mod cli;
 mod handlers;
+mod mech_params;
 mod mechanisms;
 mod pkcs11_names;
 
@@ -105,14 +106,40 @@ async fn main() -> Result<(), Box<dyn core::error::Error>> {
 
     let _ = client.finalize().await;
 
+    // W1-C11-12: signature-INVALID exits 2 (after finalize) so scripts
+    // can distinguish it from generic failures (exit 1). The handler
+    // already printed the verdict and released its session.
+    if let Err(err) = &result
+        && let Some(code) = exit_code_for_error(err.as_ref())
+    {
+        std::process::exit(code);
+    }
+
     result
+}
+
+/// Map a CLI error to an explicit process exit code (W1-C11-12):
+/// `VerifyInvalid` → 2; anything else → `None` (the runtime reports
+/// `Err` with exit code 1).
+fn exit_code_for_error(err: &(dyn core::error::Error + 'static)) -> Option<i32> {
+    if err.downcast_ref::<handlers::VerifyInvalid>().is_some() { Some(2) } else { None }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_health_endpoint;
+    use super::{build_health_endpoint, exit_code_for_error};
     use pkcs11_proxy_ng_client::tls::ClientTlsFiles;
     use std::path::PathBuf;
+
+    // W1-C11-12: signature-INVALID exits 2 (distinct from generic
+    // failures, which exit 1 via the runtime).
+    #[test]
+    fn verify_invalid_maps_to_exit_2() {
+        let invalid: Box<dyn core::error::Error> = Box::new(crate::handlers::VerifyInvalid);
+        assert_eq!(exit_code_for_error(invalid.as_ref()), Some(2));
+        let generic: Box<dyn core::error::Error> = std::io::Error::other("boom").into();
+        assert_eq!(exit_code_for_error(generic.as_ref()), None);
+    }
 
     #[test]
     fn health_endpoint_without_tls_flags_stays_plaintext() {
