@@ -5,7 +5,7 @@ use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 
 use pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1 as v1_proto;
 use pkcs11_proxy_ng_types::{
-    ByteOutputFunction, CkAttribute, CkAttributeQuery, CkAttributeQueryResult, CkInBuf,
+    ByteOutputFunction, CkAttribute, CkAttributeQuery, CkAttributeQueryResult, CkFlags, CkInBuf,
     CkMechanism, CkMechanismParams, CkObjectHandle, CkOutputAndHandleResult, CkOutputBufferResult,
     CkOutputBufferSpec, CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv,
     CkSessionHandle, ParameterOutputFunction, SecretBytes,
@@ -91,7 +91,7 @@ fn decode_parameter_output_exact_response(
                             function,
                             ParameterOutputFunction::EncryptMessage
                                 | ParameterOutputFunction::DecryptMessage
-                        ) || flags & 1 != 0,
+                        ) || flags & CkFlags::END_OF_MESSAGE != 0,
                         rv: output.ck_rv,
                     },
                 )
