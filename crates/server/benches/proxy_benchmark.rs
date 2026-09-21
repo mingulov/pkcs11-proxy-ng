@@ -88,7 +88,7 @@ fn bench_sign(c: &mut Criterion) {
         let key = c.create_object(session, Some(&[])).await.unwrap();
         Arc::new(Mutex::new((c, session, key)))
     });
-    let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };
+    let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
 
     c.bench_function("sign_init_sign", |b| {
         b.iter(|| {
@@ -113,7 +113,7 @@ fn bench_encrypt_decrypt(c: &mut Criterion) {
         let key = c.create_object(session, Some(&[])).await.unwrap();
         Arc::new(Mutex::new((c, session, key)))
     });
-    let mech = CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None };
+    let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
 
     c.bench_function("encrypt_decrypt_roundtrip", |b| {
         b.iter(|| {

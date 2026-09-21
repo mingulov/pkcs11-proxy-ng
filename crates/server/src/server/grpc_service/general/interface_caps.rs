@@ -116,7 +116,9 @@ pub(super) async fn get_backend_interfaces(
     let backend_id = Arc::as_ptr(backend_ref) as *const () as usize;
     // Take a snapshot of the registry payload up-front so the cache key
     // and the response below need no extra RwLock acquisition.
-    let registry_payload = registry_source.current();
+    // W1-C3-26: a poisoned registry lock fails closed with Internal,
+    // never an expect-panic on the request path.
+    let registry_payload = registry_source.current().map_err(Status::internal)?;
     let now = Instant::now();
 
     // W1-L13-22: serve a fresh cached rendering when the backend and the

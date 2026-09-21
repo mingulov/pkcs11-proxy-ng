@@ -262,7 +262,12 @@ async fn build_service(
     let registry_source = MechanismRegistrySource::load(config.mechanisms.config_path.as_deref())
         .map_err(|e| format!("Mechanism registry load failed: {e}"))?;
     {
-        let payload = registry_source.current();
+        // W1-C3-26: fail closed with a startup error, never a panic
+        // (the lock is freshly constructed here, so poison is
+        // unreachable — but the accessor is fallible by contract).
+        let payload = registry_source
+            .current()
+            .map_err(|e| format!("Mechanism registry unavailable at startup: {e}"))?;
         tracing::info!(
             revision = %payload.revision,
             discovery_mode = %payload.discovery_mode,

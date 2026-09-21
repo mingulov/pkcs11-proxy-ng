@@ -142,7 +142,10 @@ fn validate_message_init_contract(
     let requested_shape = MessageParameterShape::try_from_proto_i32(
         wire_shape.ok_or(CkRv::MECHANISM_PARAM_INVALID)?,
     )?;
-    let registry = ctx.mechanism_registry_source.current_registry();
+    // W1-C3-26: a poisoned registry lock fails closed with
+    // DEVICE_ERROR (internal daemon fault), never a panic.
+    let registry =
+        ctx.mechanism_registry_source.current_registry().map_err(|_| CkRv::DEVICE_ERROR)?;
     let derived_shape =
         MessageParameterShape::from_registry_name(registry.param_shape(mechanism_type.0));
     if requested_shape != derived_shape {
@@ -545,16 +548,28 @@ async fn message_encrypt_init_with_timeout(
 
         let backend = Arc::clone(backend_ref);
         let init_param_for_response = init_param.clone();
-        let installed_shape = contract.as_ref().map_or_else(
-            || {
+        // W1-C3-26: a poisoned registry lock fails closed with
+        // DEVICE_ERROR (internal daemon fault), never a panic. The lock
+        // is still only acquired when no contract supplied the shape.
+        let installed_shape = match contract.as_ref() {
+            Some(contract) => contract.shape,
+            None => {
+                let registry = match ctx.mechanism_registry_source.current_registry() {
+                    Ok(registry) => registry,
+                    Err(_) => {
+                        return Ok(Response::new(
+                            pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                                ck_rv: CkRv::DEVICE_ERROR.0,
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                };
                 MessageParameterShape::from_registry_name(
-                    ctx.mechanism_registry_source
-                        .current_registry()
-                        .param_shape(mechanism.mechanism_type.0),
+                    registry.param_shape(mechanism.mechanism_type.0),
                 )
-            },
-            |contract| contract.shape,
-        );
+            }
+        };
         let mut transition = MessageOperationTransition::begin(operation);
         let result = if let Some(ref contract) = contract {
             let provider_spec = contract.provider_spec.clone();
@@ -878,16 +893,28 @@ async fn message_decrypt_init_with_timeout(
 
         let backend = Arc::clone(backend_ref);
         let init_param_for_response = init_param.clone();
-        let installed_shape = contract.as_ref().map_or_else(
-            || {
+        // W1-C3-26: a poisoned registry lock fails closed with
+        // DEVICE_ERROR (internal daemon fault), never a panic. The lock
+        // is still only acquired when no contract supplied the shape.
+        let installed_shape = match contract.as_ref() {
+            Some(contract) => contract.shape,
+            None => {
+                let registry = match ctx.mechanism_registry_source.current_registry() {
+                    Ok(registry) => registry,
+                    Err(_) => {
+                        return Ok(Response::new(
+                            pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                                ck_rv: CkRv::DEVICE_ERROR.0,
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                };
                 MessageParameterShape::from_registry_name(
-                    ctx.mechanism_registry_source
-                        .current_registry()
-                        .param_shape(mechanism.mechanism_type.0),
+                    registry.param_shape(mechanism.mechanism_type.0),
                 )
-            },
-            |contract| contract.shape,
-        );
+            }
+        };
         let mut transition = MessageOperationTransition::begin(operation);
         let result = if let Some(ref contract) = contract {
             let provider_spec = contract.provider_spec.clone();

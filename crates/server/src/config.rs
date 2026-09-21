@@ -311,7 +311,7 @@ pub struct ObjectAclRichConfig {
 /// Token-access specification in `[[auth.policy]]`.
 ///
 /// Three valid forms:
-/// - `tokens = "all"` — blanket access to all tokens.
+/// - `tokens = "all"` (or `"*"`, an accepted alias) — blanket access to all tokens.
 /// - `tokens = ["label:X", "serial:Y"]` — list of bare selector strings.
 /// - `tokens = [{ token = "label:X", classes = [...], mechanisms = [...], extract = "deny" }]`
 ///   — list of rich grant tables (may be mixed with bare strings).
@@ -1364,27 +1364,26 @@ impl DaemonConfig {
                 continue;
             }
 
-            let configured = if sources.is_empty() {
-                "no authenticated listeners; auth = 'none' bypasses auth policy".to_string()
-            } else {
-                sources
-                    .iter()
-                    .map(|source| source.listener_setting())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let expected = if sources.is_empty() {
-                "enable listener.local.auth = 'peer_cred' for uid=<numeric-uid> identities or \
-                 listener.remote.auth = 'mtls' for x509:spki=<fingerprint> or \
-                 x509:issuer=<issuer-dn>;subject=<subject-dn> identities"
-                    .to_string()
-            } else {
-                sources
-                    .iter()
-                    .map(|source| source.expected_format())
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            };
+            // W1-C3-16: `sources` is never empty here. A non-empty policy
+            // with zero (or zero authenticated) listeners trips an earlier
+            // return — the no-listeners reject, or the generic
+            // policy+auth=none reject this case folds into — before
+            // validate() reaches this fn, so the old "no authenticated
+            // listeners" arm was unreachable dead code and is deleted.
+            debug_assert!(
+                !sources.is_empty(),
+                "policy present but no authenticated listener reached identity validation"
+            );
+            let configured = sources
+                .iter()
+                .map(|source| source.listener_setting())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let expected = sources
+                .iter()
+                .map(|source| source.expected_format())
+                .collect::<Vec<_>>()
+                .join(" or ");
 
             return Err(format!(
                 "auth.policy[{index}].identity = '{}' cannot be produced by configured listeners \

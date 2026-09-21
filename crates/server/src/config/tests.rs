@@ -1207,6 +1207,31 @@ fn rate_limit_per_slot_failed_login_budget_zero_is_rejected() {
     assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
 }
 
+// W1-C3-21: per_slot_failed_login_cooldown_secs=Some(0) arms an
+// already-expired lockout, silently neutering the failed-login budget —
+// reject it like the other three rate_limit fields. (Pin: the validate()
+// rejection predates this task via Task 9 W1-L8-16; the regression test
+// was missing.)
+#[test]
+fn rate_limit_per_slot_failed_login_cooldown_zero_is_rejected() {
+    let toml = rate_limit_toml("[rate_limit]\nper_slot_failed_login_cooldown_secs = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("per_slot_failed_login_cooldown_secs"),
+        "error must name the field, got: {err}"
+    );
+    assert!(err.contains("> 0"), "error must say must be > 0, got: {err}");
+}
+
+#[test]
+fn rate_limit_per_slot_failed_login_cooldown_nonzero_validates_ok() {
+    let toml = rate_limit_toml("[rate_limit]\nper_slot_failed_login_cooldown_secs = 5\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    assert!(cfg.validate().is_ok(), "positive cooldown must validate OK");
+    assert_eq!(cfg.rate_limit.per_slot_failed_login_cooldown_secs, Some(5));
+}
+
 #[test]
 fn rate_limit_absent_fields_validate_ok() {
     // All rate_limit fields absent (None) is the opt-out default; must be valid.
@@ -1548,6 +1573,26 @@ fn generic_policy_with_none_listener_still_rejected() {
     );
 }
 
+// W1-C3-16: a policy with no authenticated listener behind it must hit
+// the generic policy+auth=none reject above — the "no authenticated
+// listeners" arm inside validate_policy_identities is unreachable (every
+// such config trips an earlier return) and must never surface.
+#[test]
+fn policy_with_no_authenticated_listeners_hits_generic_reject() {
+    let toml = "\
+[backend]\nmodule = \".\"\n[listener.local]\npath = \"/run/p.sock\"\nauth = \"none\"\nallow_insecure_unix = true\n[auth]\nallow_all_authenticated = false\n[[auth.policy]]\nidentity = \"uid=1000\"\ntokens = [\"label:MyToken\"]\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("cannot apply to unauthenticated peers"),
+        "must hit the generic reject, got: {err}"
+    );
+    assert!(
+        !err.contains("no authenticated listeners"),
+        "unreachable dead-branch message must never surface, got: {err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // W1-C3-06: policy identity uid forms must be normalized so accepted
 // identities can match runtime keys (uid=01000 vs uid=1000).
@@ -1774,6 +1819,46 @@ fn documented_env_vars() -> Vec<(String, String)> {
         }
     }
     vars
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-15: the apply_env_overrides doc list must name every var the body
+// reads, including PKCS11_PROXY_ALLOW_INSECURE (it drives
+// listener.remote.allow_insecure_tcp in both listener branches). (Pin:
+// the entry itself predates this task via P0/P1 W1-L8-01.)
+// ---------------------------------------------------------------------------
+
+/// This crate's own `config.rs` source, for doc-sync pins.
+fn own_config_source() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config.rs");
+    std::fs::read_to_string(&path).expect("read own src/config.rs")
+}
+
+#[test]
+fn env_override_doc_list_names_allow_insecure() {
+    let text = own_config_source();
+    let doc = section_between(&text, "/// Documented env vars:", "pub fn apply_env_overrides");
+    assert!(
+        doc.contains("PKCS11_PROXY_ALLOW_INSECURE"),
+        "env doc list must name PKCS11_PROXY_ALLOW_INSECURE:\n{doc}"
+    );
+    assert!(
+        doc.contains("listener.remote.allow_insecure_tcp"),
+        "env doc list must map ALLOW_INSECURE to listener.remote.allow_insecure_tcp:\n{doc}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-19: tokens = "*" is accepted as an alias of "all" (pinned by
+// from_config_with_all_access); the TokenAccessSpec schema docs must say so.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tokens_star_alias_documented_in_schema_docs() {
+    let text = own_config_source();
+    let doc = section_between(&text, "Three valid forms:", "pub enum TokenAccessSpec");
+    assert!(doc.contains("\"all\""), "schema docs must document tokens = \"all\":\n{doc}");
+    assert!(doc.contains("\"*\""), "schema docs must document the tokens = \"*\" alias:\n{doc}");
 }
 
 // ---------------------------------------------------------------------------
