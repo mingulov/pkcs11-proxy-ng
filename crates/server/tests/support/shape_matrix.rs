@@ -590,6 +590,7 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                     seed: vec![0x01; 32].into(),
                     label: vec![0x6D, 0x61, 0x73, 0x74].into(), // "mast"
                     output_len: 48,
+                    output: Vec::new().into(),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,
@@ -711,6 +712,7 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                     seed: vec![0xAA; 20].into(),
                     label: vec![0xBB; 10].into(),
                     output_len: 32,
+                    output: Vec::new().into(),
                 })),
             },
             key: ShapeKeyHint::GenericSecret,

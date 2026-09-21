@@ -25,25 +25,7 @@ fn backend_with_oracle_provider() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_
     functions.C_CloseSession = Some(oracle::provider::close_session);
     functions.C_EncryptInit = Some(oracle::provider::encrypt_init);
     functions.C_Encrypt = Some(oracle::provider::encrypt);
-    let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
-        func_list: functions.as_mut(),
-        func_list_3_0: None,
-        func_list_3_2: None,
-        initialize_args: None,
-        mech_cache: dashmap::DashMap::new(),
-        last_init_family: dashmap::DashMap::new(),
-        session_slot_map: dashmap::DashMap::new(),
-        slot_sessions: dashmap::DashMap::new(),
-        object_cleanup: Default::default(),
-        // Test-local backend: bypasses the process reservation without
-        // consuming it; never backs production dispatch (C3M.4).
-        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-        lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
-    };
+    let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
     (backend, functions)
 }
 

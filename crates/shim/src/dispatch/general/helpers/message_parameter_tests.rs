@@ -1382,6 +1382,152 @@ fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
 }
 
 #[test]
+fn write_mechanism_output_params_writes_tls_prf_output() {
+    // W1-C5-01: the daemon-returned PRF bytes land in the caller's
+    // pOutput buffer and *pulOutputLen reports the written length.
+    use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, TlsPrfParams};
+
+    let mut out_buf = [0u8; 48];
+    let mut out_len = out_buf.len() as CK_ULONG;
+    let mut params = CK_TLS_PRF_PARAMS {
+        pSeed: std::ptr::null_mut(),
+        ulSeedLen: 0,
+        pLabel: std::ptr::null_mut(),
+        ulLabelLen: 0,
+        pOutput: out_buf.as_mut_ptr(),
+        pulOutputLen: &mut out_len,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::TLS_PRF.0,
+        pParameter: &mut params as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
+    };
+
+    let prf_bytes = vec![0x5Au8; 32];
+    let mech_out = CkMechanismParams::TlsPrf(TlsPrfParams {
+        seed: Vec::new().into(),
+        label: Vec::new().into(),
+        output_len: 32,
+        output: prf_bytes.clone().into(),
+    });
+
+    unsafe {
+        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+    }
+
+    assert_eq!(&out_buf[..32], prf_bytes.as_slice());
+    assert!(out_buf[32..].iter().all(|&b| b == 0), "tail untouched");
+    assert_eq!(out_len, 32);
+}
+
+#[test]
+fn write_mechanism_output_params_writes_wtls_prf_output() {
+    // W1-C5-01: WTLS PRF has the same OUT contract as TLS PRF.
+    use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, WtlsPrfParams};
+
+    let mut out_buf = [0u8; 20];
+    let mut out_len = out_buf.len() as CK_ULONG;
+    let mut params = CK_WTLS_PRF_PARAMS {
+        DigestMechanism: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        pSeed: std::ptr::null_mut(),
+        ulSeedLen: 0,
+        pLabel: std::ptr::null_mut(),
+        ulLabelLen: 0,
+        pOutput: out_buf.as_mut_ptr(),
+        pulOutputLen: &mut out_len,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::WTLS_PRF.0,
+        pParameter: &mut params as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_WTLS_PRF_PARAMS>() as CK_ULONG,
+    };
+
+    let prf_bytes = vec![0xA5u8; 20];
+    let mech_out = CkMechanismParams::WtlsPrf(WtlsPrfParams {
+        digest_mechanism: CkMechanismType::SHA256,
+        seed: Vec::new().into(),
+        label: Vec::new().into(),
+        output_len: 20,
+        output: prf_bytes.clone().into(),
+    });
+
+    unsafe {
+        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+    }
+
+    assert_eq!(&out_buf[..], prf_bytes.as_slice());
+    assert_eq!(out_len, 20);
+}
+
+#[test]
+fn write_mechanism_output_params_prf_safe_when_output_null() {
+    // W1-C5-01: NULL pOutput/pulOutputLen is a no-op, never a NULL deref.
+    use pkcs11_proxy_ng_types::{CkMechanismParams, CkMechanismType, TlsPrfParams};
+
+    let mut params = CK_TLS_PRF_PARAMS {
+        pSeed: std::ptr::null_mut(),
+        ulSeedLen: 0,
+        pLabel: std::ptr::null_mut(),
+        ulLabelLen: 0,
+        pOutput: std::ptr::null_mut(),
+        pulOutputLen: std::ptr::null_mut(),
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::TLS_PRF.0,
+        pParameter: &mut params as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
+    };
+    let mech_out = CkMechanismParams::TlsPrf(TlsPrfParams {
+        seed: Vec::new().into(),
+        label: Vec::new().into(),
+        output_len: 8,
+        output: vec![0x5Au8; 8].into(),
+    });
+    unsafe {
+        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+    }
+    // Did not crash, did not write through NULL.
+}
+
+#[test]
+fn write_mechanism_output_params_writes_ssl3_master_key_version() {
+    // W1-C5-01: mirrors the TLS 1.2 pVersion writeback for the SSL3
+    // master-key-derive shape.
+    use pkcs11_proxy_ng_types::{
+        CkMechanismParams, CkMechanismType, Ssl3MasterKeyDeriveParams, SslRandomData,
+    };
+
+    let mut version = CK_VERSION { major: 0, minor: 0 };
+    let mut params = CK_SSL3_MASTER_KEY_DERIVE_PARAMS {
+        RandomInfo: CK_SSL3_RANDOM_DATA {
+            pClientRandom: std::ptr::null_mut(),
+            ulClientRandomLen: 0,
+            pServerRandom: std::ptr::null_mut(),
+            ulServerRandomLen: 0,
+        },
+        pVersion: &mut version,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::SSL3_MASTER_KEY_DERIVE.0,
+        pParameter: &mut params as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_SSL3_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
+    };
+
+    let mech_out = CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
+        random_info: SslRandomData { client_random: vec![], server_random: vec![] },
+        version_major: 3,
+        version_minor: 0,
+    });
+
+    unsafe {
+        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+    }
+
+    assert_eq!(version.major, 3);
+    assert_eq!(version.minor, 0);
+}
+
+#[test]
 fn write_mechanism_output_params_tls12_safe_when_pversion_null() {
     // The TLS12 writeback path is a no-op when pVersion is NULL —
     // matching the spec which says the caller may pass NULL to

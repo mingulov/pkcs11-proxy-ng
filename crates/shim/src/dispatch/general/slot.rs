@@ -48,8 +48,8 @@ pub unsafe extern "C" fn c_get_slot_info(slot_id: CK_SLOT_ID, p_info: CK_SLOT_IN
             Ok(info) => {
                 unsafe {
                     let out = &mut *p_info;
-                    pad_string(&mut out.slotDescription, &info.slot_description);
-                    pad_string(&mut out.manufacturerID, &info.manufacturer_id);
+                    space_pad_into(&mut out.slotDescription, &info.slot_description);
+                    space_pad_into(&mut out.manufacturerID, &info.manufacturer_id);
                     out.flags = info.flags.0 as CK_FLAGS;
                     out.hardwareVersion = CK_VERSION {
                         major: info.hardware_version.0,
@@ -90,10 +90,10 @@ pub unsafe extern "C" fn c_get_token_info(slot_id: CK_SLOT_ID, p_info: CK_TOKEN_
             Ok(info) => {
                 unsafe {
                     let out = &mut *p_info;
-                    pad_string(&mut out.label, &info.label);
-                    pad_string(&mut out.manufacturerID, &info.manufacturer_id);
-                    pad_string(&mut out.model, &info.model);
-                    pad_string(&mut out.serialNumber, &info.serial_number);
+                    space_pad_into(&mut out.label, &info.label);
+                    space_pad_into(&mut out.manufacturerID, &info.manufacturer_id);
+                    space_pad_into(&mut out.model, &info.model);
+                    space_pad_into(&mut out.serialNumber, &info.serial_number);
                     out.flags = info.flags.0 as CK_FLAGS;
                     out.ulMaxSessionCount = token_info_field(info.max_session_count);
                     out.ulSessionCount = token_info_field(info.session_count);
@@ -115,7 +115,7 @@ pub unsafe extern "C" fn c_get_token_info(slot_id: CK_SLOT_ID, p_info: CK_TOKEN_
                         major: info.firmware_version.0,
                         minor: info.firmware_version.1,
                     };
-                    pad_string(&mut out.utcTime, &info.utc_time);
+                    space_pad_into(&mut out.utcTime, &info.utc_time);
                 }
                 rv_ok()
             }

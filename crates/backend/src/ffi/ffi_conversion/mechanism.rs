@@ -364,6 +364,48 @@ impl FfiMechanism {
                     additional_derived_keys: derived_keys.output_keys(),
                 }))
             }
+            FfiParamBacking::TlsPrf(_tls, seed, label, output, output_len) => {
+                // SAFETY: backing is borrowed alive; the copies carry no provenance.
+                let output_len = unsafe { output_len.snapshot() };
+                // `pOutput`/`*pulOutputLen` are OUT — the provider writes
+                // the PRF bytes and the written length (W1-C5-01). Clamp
+                // a misbehaving length to the buffer we allocated.
+                let written = (output_len as usize).min(output.len());
+                Some(CkMechanismParams::TlsPrf(TlsPrfParams {
+                    seed: seed.to_vec().into(),
+                    label: label.to_vec().into(),
+                    output_len: written as u64,
+                    output: output[..written].to_vec().into(),
+                }))
+            }
+            FfiParamBacking::WtlsPrf(wtls, seed, label, output, output_len) => {
+                // SAFETY: backing is borrowed alive; the copies carry no provenance.
+                let wtls = unsafe { wtls.snapshot() };
+                let output_len = unsafe { output_len.snapshot() };
+                let written = (output_len as usize).min(output.len());
+                Some(CkMechanismParams::WtlsPrf(WtlsPrfParams {
+                    digest_mechanism: CkMechanismType(wtls.DigestMechanism as u64),
+                    seed: seed.to_vec().into(),
+                    label: label.to_vec().into(),
+                    output_len: written as u64,
+                    output: output[..written].to_vec().into(),
+                }))
+            }
+            FfiParamBacking::Ssl3MasterKeyDerive(_ssl3, client_random, server_random, version) => {
+                // SAFETY: backing is borrowed alive; the copy carries no provenance.
+                let version = unsafe { version.snapshot() };
+                // CK_SSL3_MASTER_KEY_DERIVE_PARAMS.pVersion is OUT —
+                // the provider writes the negotiated CK_VERSION here
+                // (W1-C5-01; mirrors the TLS 1.2 arm above).
+                Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
+                    random_info: pkcs11_proxy_ng_types::SslRandomData {
+                        client_random: client_random.clone().to_vec(),
+                        server_random: server_random.clone().to_vec(),
+                    },
+                    version_major: version.major as u32,
+                    version_minor: version.minor as u32,
+                }))
+            }
             FfiParamBacking::Pbe(pbe, init_vector, _password, _salt) => {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let pbe = unsafe { pbe.snapshot() };

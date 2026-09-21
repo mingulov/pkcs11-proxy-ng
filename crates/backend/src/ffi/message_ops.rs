@@ -2769,26 +2769,8 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
         functions.C_EncryptMessageBegin = Some(counted_encrypt_message_begin);
         functions.C_DecryptMessageBegin = Some(counted_encrypt_message_begin);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: base.as_mut(),
-            func_list_3_0: Some(functions.as_ref()),
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions.as_ref()), None);
         (backend, base, functions)
     }
 
@@ -2804,26 +2786,8 @@ mod tests {
         functions.C_VerifyMessage = Some(counted_verify_message);
         functions.C_VerifyMessageBegin = Some(counted_verify_message_begin);
         functions.C_VerifyMessageNext = Some(counted_verify_message_next);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: base.as_mut(),
-            func_list_3_0: Some(functions.as_ref()),
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions.as_ref()), None);
         (backend, base, functions)
     }
 
@@ -2841,26 +2805,8 @@ mod tests {
         functions.C_DecryptMessage = Some(counted_structured_decrypt_message);
         functions.C_DecryptMessageBegin = Some(counted_structured_decrypt_begin);
         functions.C_DecryptMessageNext = Some(counted_structured_decrypt_next);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: base.as_mut(),
-            func_list_3_0: Some(functions.as_ref()),
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions.as_ref()), None);
         (backend, base, functions)
     }
 
@@ -2872,26 +2818,8 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
         functions.C_MessageEncryptInit = Some(mutating_encrypt_init);
         functions.C_MessageDecryptInit = Some(mutating_decrypt_init);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: base.as_mut(),
-            func_list_3_0: Some(functions.as_ref()),
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions.as_ref()), None);
         (backend, base, functions)
     }
 
@@ -3990,26 +3918,8 @@ mod tests {
         let mut functions_3_0 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
         functions_3_0.C_MessageEncryptInit = Some(message_init_ok);
         functions_3_0.C_MessageDecryptInit = Some(message_init_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: base.as_mut(),
-            func_list_3_0: Some(functions_3_0.as_ref()),
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions_3_0.as_ref()), None);
         // Message paths are ordinary: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
 

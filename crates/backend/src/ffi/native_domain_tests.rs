@@ -266,23 +266,11 @@ fn native_domain_global_serial_constructor_race_exactly_one_wins() {
 #[test]
 fn native_domain_arc_clones_share_one_lifecycle_domain() {
     let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
-    let backend = FfiBackend {
-        _lib: super::loading::test_library_handle(),
-        func_list: functions.as_mut() as *mut cryptoki_sys::CK_FUNCTION_LIST,
-        func_list_3_0: None,
-        func_list_3_2: None,
-        initialize_args: None,
-        mech_cache: dashmap::DashMap::new(),
-        last_init_family: dashmap::DashMap::new(),
-        session_slot_map: dashmap::DashMap::new(),
-        slot_sessions: dashmap::DashMap::new(),
-        object_cleanup: Default::default(),
-        retirement_sentinel: RetirementSentinel::unmanaged_test_only(),
-        construction: ConstructionPermit::unmanaged_test_only(),
-        lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-    };
+    let backend = FfiBackend::test_backend_with_tables(
+        functions.as_mut() as *mut cryptoki_sys::CK_FUNCTION_LIST,
+        None,
+        None,
+    );
     let first = std::sync::Arc::new(backend);
     let second = std::sync::Arc::clone(&first);
     assert!(std::sync::Arc::ptr_eq(&first, &second), "clones share one allocation");
@@ -558,6 +546,8 @@ fn native_domain_global_serial_release_drop_recycles_after_full_retirement() {
     let first_epoch = permit.epoch;
     {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        // Deliberately NOT `test_backend_with_tables` (W1-L11-13): this
+        // test owns a real managed construction permit + sentinel pair.
         let backend = FfiBackend {
             _lib: super::loading::test_library_handle(),
             func_list: functions.as_mut() as *mut cryptoki_sys::CK_FUNCTION_LIST,

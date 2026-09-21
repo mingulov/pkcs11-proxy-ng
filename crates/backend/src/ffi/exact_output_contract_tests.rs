@@ -232,25 +232,7 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
     table.C_EncapsulateKey = Some(kem_error);
-    let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
-        func_list: base.as_mut(),
-        func_list_3_0: None,
-        func_list_3_2: Some(table.as_ref()),
-        initialize_args: None,
-        mech_cache: DashMap::new(),
-        last_init_family: DashMap::new(),
-        session_slot_map: DashMap::new(),
-        slot_sessions: DashMap::new(),
-        object_cleanup: Default::default(),
-        // Test-local backend: bypasses the process reservation without
-        // consuming it; never backs production dispatch (C3M.4).
-        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-        lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
-    };
+    let backend = FfiBackend::test_backend_with_tables(base.as_mut(), None, Some(table.as_ref()));
     // Exact paths are ordinary: establish post-Initialize state.
     backend.lifecycle_domain.open_for_tests();
     for (present, missing) in [(true, false), (false, false), (true, true), (false, true)] {
@@ -311,25 +293,7 @@ fn exact_parameter_error_preserves_only_defined_initialized_effects() {
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
     table.C_EncryptMessage = Some(message_error);
-    let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
-        func_list: base.as_mut(),
-        func_list_3_0: Some(table.as_ref()),
-        func_list_3_2: None,
-        initialize_args: None,
-        mech_cache: DashMap::new(),
-        last_init_family: DashMap::new(),
-        session_slot_map: DashMap::new(),
-        slot_sessions: DashMap::new(),
-        object_cleanup: Default::default(),
-        // Test-local backend: bypasses the process reservation without
-        // consuming it; never backs production dispatch (C3M.4).
-        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-        lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
-    };
+    let backend = FfiBackend::test_backend_with_tables(base.as_mut(), Some(table.as_ref()), None);
     // Exact paths are ordinary: establish post-Initialize state.
     backend.lifecycle_domain.open_for_tests();
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
@@ -403,25 +367,7 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
     table.C_EncryptMessageBegin = Some(begin_error);
-    let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
-        func_list: base.as_mut(),
-        func_list_3_0: Some(table.as_ref()),
-        func_list_3_2: None,
-        initialize_args: None,
-        mech_cache: DashMap::new(),
-        last_init_family: DashMap::new(),
-        session_slot_map: DashMap::new(),
-        slot_sessions: DashMap::new(),
-        object_cleanup: Default::default(),
-        // Test-local backend: bypasses the process reservation without
-        // consuming it; never backs production dispatch (C3M.4).
-        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-        lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
-    };
+    let backend = FfiBackend::test_backend_with_tables(base.as_mut(), Some(table.as_ref()), None);
     // Exact paths are ordinary: establish post-Initialize state.
     backend.lifecycle_domain.open_for_tests();
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {

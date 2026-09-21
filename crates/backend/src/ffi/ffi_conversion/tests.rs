@@ -14,9 +14,10 @@ mod mechanism_to_ffi_tests {
         DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams, IvParams,
         KeyDerivationStringData, KmacParams, KyberParams, MuGenParams, ObjectHandleParam,
         PbeParams, Pkcs5Pbkd2Params, RawMechanismParams, RsaAesKeyWrapParams, RsaPkcsOaepParams,
-        RsaPkcsPssParams, SecretBytes, SignAdditionalContext, Ssl3KeyMatParams, SslRandomData,
-        VendorObjectExtractParams, VendorObjectInsertParams, WtlsKeyMatParams,
-        WtlsMasterKeyDeriveParams, WtlsRandomData,
+        RsaPkcsPssParams, SecretBytes, SignAdditionalContext, Ssl3KeyMatParams,
+        Ssl3MasterKeyDeriveParams, SslRandomData, TlsPrfParams, VendorObjectExtractParams,
+        VendorObjectInsertParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams,
+        WtlsRandomData,
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
@@ -519,6 +520,119 @@ mod mechanism_to_ffi_tests {
                 assert_eq!(params.random_info.client_random, [0xA1, 0xA2]);
                 assert_eq!(params.random_info.server_random, [0xB1, 0xB2]);
                 assert_eq!(params.version, 2);
+            }
+            other => panic!("unexpected output params: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tls_prf_output_params_surface_provider_written_output() {
+        // W1-C5-01: the provider writes the PRF output bytes into
+        // `pOutput` and the written length into `*pulOutputLen`;
+        // `output_params()` must surface both, not drop via `_ => None`.
+        let ffi = convert(
+            CkMechanismType::TLS_PRF,
+            CkMechanismParams::TlsPrf(TlsPrfParams {
+                seed: vec![0xA1, 0xA2, 0xA3].into(),
+                label: vec![0xB1, 0xB2].into(),
+                output_len: 48,
+                output: Vec::new().into(),
+            }),
+        );
+
+        let tls = unsafe {
+            &mut *(ffi.ck_mechanism().pParameter as *mut cryptoki_sys::CK_TLS_PRF_PARAMS)
+        };
+        assert!(!tls.pOutput.is_null());
+        assert!(!tls.pulOutputLen.is_null());
+        // Provider-style write: 32 of the 48 requested bytes.
+        let written = [0x5Au8; 32];
+        unsafe {
+            std::ptr::copy_nonoverlapping(written.as_ptr(), tls.pOutput, written.len());
+            *tls.pulOutputLen = written.len() as cryptoki_sys::CK_ULONG;
+        }
+
+        match ffi.output_params() {
+            Some(CkMechanismParams::TlsPrf(params)) => {
+                assert_eq!(params.seed, vec![0xA1, 0xA2, 0xA3].into());
+                assert_eq!(params.label, vec![0xB1, 0xB2].into());
+                assert_eq!(params.output_len, 32, "provider-written length");
+                assert_eq!(params.output, vec![0x5A; 32].into(), "provider-written bytes");
+            }
+            other => panic!("unexpected output params: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wtls_prf_output_params_surface_provider_written_output() {
+        // W1-C5-01: same provider-write contract as TLS PRF, plus the
+        // echoed digest mechanism.
+        let ffi = convert(
+            CkMechanismType::WTLS_PRF,
+            CkMechanismParams::WtlsPrf(WtlsPrfParams {
+                digest_mechanism: CkMechanismType::SHA256,
+                seed: vec![0xC1, 0xC2].into(),
+                label: vec![0xD1].into(),
+                output_len: 20,
+                output: Vec::new().into(),
+            }),
+        );
+
+        let wtls = unsafe {
+            &mut *(ffi.ck_mechanism().pParameter as *mut cryptoki_sys::CK_WTLS_PRF_PARAMS)
+        };
+        assert!(!wtls.pOutput.is_null());
+        assert!(!wtls.pulOutputLen.is_null());
+        let written = [0xA5u8; 20];
+        unsafe {
+            std::ptr::copy_nonoverlapping(written.as_ptr(), wtls.pOutput, written.len());
+            *wtls.pulOutputLen = written.len() as cryptoki_sys::CK_ULONG;
+        }
+
+        match ffi.output_params() {
+            Some(CkMechanismParams::WtlsPrf(params)) => {
+                assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0);
+                assert_eq!(params.seed, vec![0xC1, 0xC2].into());
+                assert_eq!(params.label, vec![0xD1].into());
+                assert_eq!(params.output_len, 20, "provider-written length");
+                assert_eq!(params.output, vec![0xA5; 20].into(), "provider-written bytes");
+            }
+            other => panic!("unexpected output params: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssl3_master_key_derive_output_params_surface_negotiated_version() {
+        // W1-C5-01: `pVersion` is OUT — the provider writes the
+        // negotiated version (mirrors the Tls12MasterKeyDerive arm).
+        let ffi = convert(
+            CkMechanismType::SSL3_MASTER_KEY_DERIVE,
+            CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
+                random_info: SslRandomData {
+                    client_random: vec![0x11; 32],
+                    server_random: vec![0x22; 32],
+                },
+                version_major: 3,
+                version_minor: 0,
+            }),
+        );
+
+        let ssl3 = unsafe {
+            &mut *(ffi.ck_mechanism().pParameter
+                as *mut cryptoki_sys::CK_SSL3_MASTER_KEY_DERIVE_PARAMS)
+        };
+        assert!(!ssl3.pVersion.is_null());
+        unsafe {
+            (*ssl3.pVersion).major = 3;
+            (*ssl3.pVersion).minor = 3;
+        }
+
+        match ffi.output_params() {
+            Some(CkMechanismParams::Ssl3MasterKeyDerive(params)) => {
+                assert_eq!(params.random_info.client_random, [0x11; 32]);
+                assert_eq!(params.random_info.server_random, [0x22; 32]);
+                assert_eq!(params.version_major, 3);
+                assert_eq!(params.version_minor, 3, "provider-negotiated version");
             }
             other => panic!("unexpected output params: {other:?}"),
         }
@@ -1103,8 +1217,15 @@ mod mechanism_to_ffi_tests {
 
 #[cfg(test)]
 mod utf8_trim_tests {
-    use super::{session_state_from_ck, space_pad, utf8_trim};
-    use pkcs11_proxy_ng_types::CkSessionState;
+    use super::{session_state_from_ck, utf8_trim};
+    use pkcs11_proxy_ng_types::{CkSessionState, space_pad_into};
+
+    // W1-L11-12: local pad helper over the shared implementation.
+    fn space_pad<const N: usize>(value: &str) -> [u8; N] {
+        let mut padded = [0u8; N];
+        space_pad_into(&mut padded, value);
+        padded
+    }
 
     #[test]
     fn space_padded_field() {
@@ -1224,6 +1345,22 @@ mod utf8_trim_tests {
     #[test]
     fn space_pad_truncates_overlong_value() {
         assert_eq!(&space_pad::<4>("ABCDEFG"), b"ABCD");
+    }
+
+    // W1-L11-12 pin: vectors mirrored from the shim's `pad_string`
+    // tests — both implementations must produce byte-identical
+    // outputs before unification, and the shared helper after.
+    #[test]
+    fn space_pad_matches_shim_pad_string_vectors() {
+        assert_eq!(&space_pad::<8>("hi"), b"hi      ");
+        assert_eq!(&space_pad::<4>("ABCD"), b"ABCD");
+        assert_eq!(&space_pad::<6>(""), b"      ");
+        assert_eq!(&space_pad::<4>("ABCDEFGH"), b"ABCD");
+        // Byte-wise copy: a multibyte char may split at the edge.
+        assert_eq!(&space_pad::<4>("héllo"), &[0x68, 0xC3, 0xA9, 0x6C]);
+        let label = space_pad::<32>("My Test Token");
+        assert_eq!(&label[..13], b"My Test Token");
+        assert!(label[13..].iter().all(|&b| b == b' '));
     }
 
     #[test]

@@ -879,6 +879,12 @@ pub struct TlsPrfParams {
     pub seed: SecretBytes,
     pub label: SecretBytes,
     pub output_len: u64,
+    /// Provider-written PRF output (W1-C5-01). Empty on the request
+    /// path — the shim sizes the daemon buffer from `output_len` —
+    /// and populated from `pOutput`/`*pulOutputLen` on the
+    /// mechanism-out path so the shim can write it back into the
+    /// caller's buffer.
+    pub output: SecretBytes,
 }
 
 /// CK_TLS_KDF_PARAMS
@@ -955,6 +961,10 @@ pub struct WtlsPrfParams {
     pub seed: SecretBytes,
     pub label: SecretBytes,
     pub output_len: u64,
+    /// Provider-written PRF output (W1-C5-01). Empty on the request
+    /// path; populated from `pOutput`/`*pulOutputLen` on the
+    /// mechanism-out path for shim writeback.
+    pub output: SecretBytes,
 }
 
 /// CK_WTLS_KEY_MAT_PARAMS
@@ -1762,6 +1772,7 @@ mod tests {
             seed: empty.clone(),
             label: empty.clone(),
             output_len: 0,
+            output: empty.clone(),
         };
         assert_eq!(p.digest_mechanism.0, 0x250);
 

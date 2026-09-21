@@ -331,15 +331,6 @@ pub(crate) unsafe fn empty_message_parameter_roundtrip_spec(
     unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) }
 }
 
-pub(crate) fn pad_string(dest: &mut [CK_UTF8CHAR], src: &str) {
-    let bytes = src.as_bytes();
-    let copy_len = bytes.len().min(dest.len());
-    dest[..copy_len].copy_from_slice(&bytes[..copy_len]);
-    for b in dest[copy_len..].iter_mut() {
-        *b = b' ';
-    }
-}
-
 pub(crate) fn catch_panics<F>(f: F) -> CK_RV
 where
     F: FnOnce() -> CK_RV + std::panic::UnwindSafe,
@@ -400,20 +391,20 @@ pub(crate) use template_input::*;
 
 #[cfg(test)]
 mod tests {
-    use super::pad_string;
     use cryptoki_sys::{CK_RV, CK_ULONG};
+    use pkcs11_proxy_ng_types::space_pad_into;
 
     #[test]
     fn short_src_pads_remainder_with_spaces() {
         let mut buf = [0u8; 8];
-        pad_string(&mut buf, "hi");
+        space_pad_into(&mut buf, "hi");
         assert_eq!(&buf, b"hi      ");
     }
 
     #[test]
     fn exact_length_src_no_padding_needed() {
         let mut buf = [0u8; 4];
-        pad_string(&mut buf, "ABCD");
+        space_pad_into(&mut buf, "ABCD");
         assert_eq!(&buf, b"ABCD");
     }
 
@@ -436,21 +427,21 @@ mod tests {
     #[test]
     fn longer_src_truncated_to_dest_len() {
         let mut buf = [0u8; 4];
-        pad_string(&mut buf, "ABCDEFGH");
+        space_pad_into(&mut buf, "ABCDEFGH");
         assert_eq!(&buf, b"ABCD");
     }
 
     #[test]
     fn empty_src_fills_all_spaces() {
         let mut buf = [0u8; 6];
-        pad_string(&mut buf, "");
+        space_pad_into(&mut buf, "");
         assert_eq!(&buf, b"      ");
     }
 
     #[test]
     fn no_null_terminator_written() {
         let mut buf = [0xFFu8; 6];
-        pad_string(&mut buf, "ab");
+        space_pad_into(&mut buf, "ab");
         assert_eq!(buf[0], b'a');
         assert_eq!(buf[1], b'b');
         for &b in &buf[2..] {
@@ -461,7 +452,7 @@ mod tests {
     #[test]
     fn full_32_byte_token_label_field() {
         let mut label = [0u8; 32];
-        pad_string(&mut label, "My Test Token");
+        space_pad_into(&mut label, "My Test Token");
         assert_eq!(&label[..13], b"My Test Token");
         assert!(label[13..].iter().all(|&b| b == b' '));
     }
@@ -470,8 +461,18 @@ mod tests {
     fn overlong_label_truncated_at_32_bytes() {
         let mut label = [0u8; 32];
         let long = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBB";
-        pad_string(&mut label, long);
+        space_pad_into(&mut label, long);
         assert!(label.iter().all(|&b| b == b'A'));
+    }
+
+    // W1-L11-12 pin: byte-wise copy splits a multibyte char at the
+    // edge — mirrored in the backend's `space_pad` vectors; both must
+    // agree before unification and the shared helper after.
+    #[test]
+    fn multibyte_src_truncates_by_bytes() {
+        let mut buf = [0u8; 4];
+        space_pad_into(&mut buf, "héllo");
+        assert_eq!(buf, [0x68, 0xC3, 0xA9, 0x6C]);
     }
 
     #[test]

@@ -1244,6 +1244,9 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         seed: seed.into(),
                         label: label.into(),
                         output_len,
+                        // W1-C5-01: `pOutput` is OUT — never read the
+                        // caller's uninitialized buffer into the request.
+                        output: Vec::new().into(),
                     }))
                 }
             }
@@ -1418,6 +1421,9 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                         seed: seed.into(),
                         label: label.into(),
                         output_len,
+                        // W1-C5-01: `pOutput` is OUT — never read the
+                        // caller's uninitialized buffer into the request.
+                        output: Vec::new().into(),
                     }))
                 }
             }

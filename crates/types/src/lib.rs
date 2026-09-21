@@ -54,3 +54,47 @@ pub use session::{
     CkFlags, CkSessionFlags, CkSessionHandle, CkSessionInfo, CkSessionState, CkUserType,
 };
 pub use slot::{CkSlotFlags, CkSlotId, CkSlotInfo, CkTokenFlags, CkTokenInfo};
+
+/// Copy `src` into the fixed-width PKCS#11 field `dest`, space-padding
+/// the remainder (W1-L11-12). Overlong values truncate by bytes — a
+/// multibyte char may split at the edge, matching the historical
+/// backend `space_pad` / shim `pad_string` behavior both crates
+/// shared byte-for-byte. This is the single padding implementation;
+/// both crates call it directly.
+pub fn space_pad_into(dest: &mut [u8], src: &str) {
+    let bytes = src.as_bytes();
+    let copy_len = bytes.len().min(dest.len());
+    dest[..copy_len].copy_from_slice(&bytes[..copy_len]);
+    for b in dest[copy_len..].iter_mut() {
+        *b = b' ';
+    }
+}
+
+#[cfg(test)]
+mod space_pad_tests {
+    use super::space_pad_into;
+
+    #[test]
+    fn shared_padding_vectors() {
+        // Mirrors the backend/shim pins: byte-identical by construction.
+        let mut buf = [0u8; 8];
+        space_pad_into(&mut buf, "hi");
+        assert_eq!(&buf, b"hi      ");
+        let mut buf = [0u8; 4];
+        space_pad_into(&mut buf, "ABCD");
+        assert_eq!(&buf, b"ABCD");
+        let mut buf = [0u8; 6];
+        space_pad_into(&mut buf, "");
+        assert_eq!(&buf, b"      ");
+        let mut buf = [0u8; 4];
+        space_pad_into(&mut buf, "ABCDEFGH");
+        assert_eq!(&buf, b"ABCD");
+        let mut buf = [0u8; 4];
+        space_pad_into(&mut buf, "héllo");
+        assert_eq!(buf, [0x68, 0xC3, 0xA9, 0x6C]);
+        let mut label = [0u8; 32];
+        space_pad_into(&mut label, "My Test Token");
+        assert_eq!(&label[..13], b"My Test Token");
+        assert!(label[13..].iter().all(|&b| b == b' '));
+    }
+}

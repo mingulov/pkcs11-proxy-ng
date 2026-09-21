@@ -67,6 +67,7 @@ impl From<&TlsPrfParams> for v1_proto::TlsPrfParams {
             seed: secret_to_plain(&p.seed),
             label: secret_to_plain(&p.label),
             output_len: p.output_len,
+            output: secret_to_plain(&p.output),
         }
     }
 }
@@ -77,6 +78,7 @@ impl From<&v1_proto::TlsPrfParams> for TlsPrfParams {
             seed: SecretBytes::copy_from_slice(&p.seed),
             label: SecretBytes::copy_from_slice(&p.label),
             output_len: p.output_len,
+            output: SecretBytes::copy_from_slice(&p.output),
         }
     }
 }
@@ -270,6 +272,7 @@ impl From<&WtlsPrfParams> for v1_proto::WtlsPrfParams {
             seed: secret_to_plain(&p.seed),
             label: secret_to_plain(&p.label),
             output_len: p.output_len,
+            output: secret_to_plain(&p.output),
         }
     }
 }
@@ -281,6 +284,7 @@ impl From<&v1_proto::WtlsPrfParams> for WtlsPrfParams {
             seed: SecretBytes::copy_from_slice(&p.seed),
             label: SecretBytes::copy_from_slice(&p.label),
             output_len: p.output_len,
+            output: SecretBytes::copy_from_slice(&p.output),
         }
     }
 }

@@ -100,6 +100,51 @@ pub(crate) unsafe fn write_mechanism_output_params(
                 version.minor = tls12_out.version_minor as cryptoki_sys::CK_BYTE;
             }
         }
+        CkMechanismParams::TlsPrf(prf_out) => {
+            // `CK_TLS_PRF_PARAMS.pOutput`/`*pulOutputLen` are OUT
+            // (W1-C5-01): copy the daemon-returned PRF bytes into the
+            // caller's buffer and report the written length. The copy
+            // is clamped to the caller's entry capacity (`*pulOutputLen`
+            // still holds it — the shim never overwrote it), so a
+            // faulty daemon cannot overflow the caller.
+            if mechanism.ulParameterLen < std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG
+                || mechanism.pParameter.is_null()
+            {
+                return;
+            }
+            let prf = unsafe { &mut *(mechanism.pParameter as *mut CK_TLS_PRF_PARAMS) };
+            if prf.pOutput.is_null() || prf.pulOutputLen.is_null() {
+                return;
+            }
+            let capacity = (unsafe { *prf.pulOutputLen } as usize).min(MAX_SERIALIZABLE_BYTES);
+            let copy_len = prf_out.output.len().min(capacity);
+            if copy_len > 0 {
+                prf_out.output.expose(|raw| unsafe {
+                    std::ptr::copy_nonoverlapping(raw.as_ptr(), prf.pOutput, copy_len);
+                });
+            }
+            unsafe {
+                *prf.pulOutputLen = copy_len as CK_ULONG;
+            }
+        }
+        CkMechanismParams::Ssl3MasterKeyDerive(ssl3_out) => {
+            // `CK_SSL3_MASTER_KEY_DERIVE_PARAMS.pVersion` is OUT —
+            // the provider writes the negotiated CK_VERSION here
+            // (W1-C5-01; mirrors the TLS 1.2 arm above).
+            if mechanism.ulParameterLen
+                < std::mem::size_of::<CK_SSL3_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG
+                || mechanism.pParameter.is_null()
+            {
+                return;
+            }
+            let ssl3 =
+                unsafe { &mut *(mechanism.pParameter as *mut CK_SSL3_MASTER_KEY_DERIVE_PARAMS) };
+            if !ssl3.pVersion.is_null() {
+                let version = unsafe { &mut *ssl3.pVersion };
+                version.major = ssl3_out.version_major as cryptoki_sys::CK_BYTE;
+                version.minor = ssl3_out.version_minor as cryptoki_sys::CK_BYTE;
+            }
+        }
         CkMechanismParams::WtlsMasterKeyDerive(wtls_out) => {
             if mechanism.ulParameterLen
                 < std::mem::size_of::<cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG
@@ -114,6 +159,28 @@ pub(crate) unsafe fn write_mechanism_output_params(
                 unsafe {
                     *wtls.pVersion = wtls_out.version as cryptoki_sys::CK_BYTE;
                 }
+            }
+        }
+        CkMechanismParams::WtlsPrf(prf_out) => {
+            // Same OUT contract as the TLS PRF arm above (W1-C5-01).
+            if mechanism.ulParameterLen < std::mem::size_of::<CK_WTLS_PRF_PARAMS>() as CK_ULONG
+                || mechanism.pParameter.is_null()
+            {
+                return;
+            }
+            let prf = unsafe { &mut *(mechanism.pParameter as *mut CK_WTLS_PRF_PARAMS) };
+            if prf.pOutput.is_null() || prf.pulOutputLen.is_null() {
+                return;
+            }
+            let capacity = (unsafe { *prf.pulOutputLen } as usize).min(MAX_SERIALIZABLE_BYTES);
+            let copy_len = prf_out.output.len().min(capacity);
+            if copy_len > 0 {
+                prf_out.output.expose(|raw| unsafe {
+                    std::ptr::copy_nonoverlapping(raw.as_ptr(), prf.pOutput, copy_len);
+                });
+            }
+            unsafe {
+                *prf.pulOutputLen = copy_len as CK_ULONG;
             }
         }
         CkMechanismParams::WtlsKeyMat(wtls_out) => {

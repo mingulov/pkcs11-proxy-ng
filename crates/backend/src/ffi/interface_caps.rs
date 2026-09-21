@@ -102,26 +102,8 @@ mod tests {
         base.version = cryptoki_sys::CK_VERSION { major: 2, minor: 40 };
         let mut table_3 = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
         table_3.version = cryptoki_sys::CK_VERSION { major, minor };
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: base.as_mut(),
-            func_list_3_0: Some(table_3.as_ref()),
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(table_3.as_ref()), None);
         (backend, base, table_3)
     }
 

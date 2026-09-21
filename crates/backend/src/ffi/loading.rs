@@ -118,12 +118,33 @@ impl FfiBackend {
         // 3.0-only dispatch (e.g. `C_SessionCancel`) wrongly returns
         // `CKR_FUNCTION_NOT_SUPPORTED` through the proxy on such modules.
         //
-        let func_list_3_0 = get_iface_sym
-            .and_then(|sym| select_versioned(&mut ffi_query(sym), 3, 0))
+        // W1-C4-06: a malformed interface answer during versioned
+        // discovery is a loud load error (poisoned reservation), not a
+        // silent downgrade to the primary fallback.
+        let queried_3_0 = match get_iface_sym {
+            Some(sym) => match select_versioned(&mut ffi_query(sym), 3, 0) {
+                Ok(ptr) => ptr,
+                Err(e) => {
+                    permit.poison();
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let func_list_3_0 = queried_3_0
             .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 0))
             .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_0);
-        let func_list_3_2 = get_iface_sym
-            .and_then(|sym| select_versioned(&mut ffi_query(sym), 3, 2))
+        let queried_3_2 = match get_iface_sym {
+            Some(sym) => match select_versioned(&mut ffi_query(sym), 3, 2) {
+                Ok(ptr) => ptr,
+                Err(e) => {
+                    permit.poison();
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let func_list_3_2 = queried_3_2
             // 3.2-only fields are valid only on an actual >= 3.2 list, so this
             // fallback is gated on the stricter version than the 3.0 one above.
             .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 2))
@@ -336,15 +357,61 @@ impl Drop for FfiBackend {
 }
 
 /// One `C_GetInterface` answer as the module reported it.
+#[derive(Debug)]
 pub(crate) struct InterfaceAnswer {
     pub name: Option<Vec<u8>>,
     pub func_list: *mut std::ffi::c_void,
 }
 
-type InterfaceQuery<'a> =
-    dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer> + 'a;
+type InterfaceQuery<'a> = dyn FnMut(
+        Option<&[u8]>,
+        Option<cryptoki_sys::CK_VERSION>,
+    ) -> Result<Option<InterfaceAnswer>, String>
+    + 'a;
 
 const STANDARD_NAME: &[u8] = b"PKCS 11";
+
+/// Maximum `pInterfaceName` length accepted from a provider's
+/// `C_GetInterface` answer (W1-C4-06). Interface names are short
+/// display strings ("PKCS 11", vendor tags); anything without a NUL
+/// in the first 256 bytes is malformed, and scanning further would
+/// risk an unbounded over-read of provider memory.
+const MAX_INTERFACE_NAME_LEN: usize = 256;
+
+/// Bounded copy of a provider-owned NUL-terminated interface name
+/// (W1-C4-06). Returns the bytes before the first NUL, or a loud
+/// error when no NUL appears within [`MAX_INTERFACE_NAME_LEN`]
+/// bytes — the loader fails instead of over-reading.
+///
+/// # Safety
+/// `ptr` must be non-null. The provider must keep the name readable
+/// for at least the scanned prefix (up to the first NUL or the
+/// bound, whichever comes first); the scan never reads past the
+/// bound even for unterminated input.
+unsafe fn bounded_interface_name(ptr: *const std::ffi::c_char) -> Result<Vec<u8>, String> {
+    // Byte-wise scan: stop at the first NUL or the bound. Never
+    // `CStr::from_ptr` — it would scan unboundedly into provider
+    // memory on an unterminated name.
+    let mut len = 0usize;
+    while len < MAX_INTERFACE_NAME_LEN {
+        // SAFETY: `ptr` is non-null per the contract and the scan
+        // stays within the readable prefix it guarantees.
+        if unsafe { *ptr.add(len) } == 0 {
+            break;
+        }
+        len += 1;
+    }
+    if len == MAX_INTERFACE_NAME_LEN {
+        return Err(format!(
+            "C_GetInterface returned an interface name with no NUL terminator in the first \
+             {MAX_INTERFACE_NAME_LEN} bytes; refusing to load an untrustworthy provider"
+        ));
+    }
+    // SAFETY: the `len` bytes before the NUL were just scanned
+    // readable one by one.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
+    Ok(bytes.to_vec())
+}
 
 /// §6a acceptance rule, applied uniformly to named and unnamed answers:
 /// only an interface named exactly "PKCS 11" with a non-NULL function
@@ -364,7 +431,9 @@ fn select_primary(
 ) -> Result<(*mut cryptoki_sys::CK_FUNCTION_LIST, bool), String> {
     if let Some(q) = query {
         for name in [Some(STANDARD_NAME), None] {
-            if let Some(ans) = q(name, None)
+            // A malformed answer (W1-C4-06) propagates as a loud load
+            // error: no silent fall-through to the next query or legacy.
+            if let Some(ans) = q(name, None)?
                 && accepts_standard(&ans)
             {
                 return Ok((ans.func_list as *mut cryptoki_sys::CK_FUNCTION_LIST, true));
@@ -387,17 +456,17 @@ fn select_versioned(
     q: &mut InterfaceQuery<'_>,
     major: u8,
     minor: u8,
-) -> Option<*mut std::ffi::c_void> {
+) -> Result<Option<*mut std::ffi::c_void>, String> {
     let version = cryptoki_sys::CK_VERSION { major, minor };
     for name in [Some(STANDARD_NAME), None] {
-        if let Some(ans) = q(name, Some(version))
+        if let Some(ans) = q(name, Some(version))?
             && accepts_standard(&ans)
             && answer_version_at_least(&ans, major, minor)
         {
-            return Some(ans.func_list);
+            return Ok(Some(ans.func_list));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Leading-version guard for [`select_versioned`]: the answer's table must
@@ -414,7 +483,8 @@ fn answer_version_at_least(ans: &InterfaceAnswer, major: u8, minor: u8) -> bool 
 /// answer out of module-owned memory.
 fn ffi_query(
     get_interface: GetInterfaceFn,
-) -> impl FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer> {
+) -> impl FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Result<Option<InterfaceAnswer>, String>
+{
     move |name, version| {
         // NUL-terminated storage must outlive the call.
         let name_buf: Vec<u8>;
@@ -431,21 +501,21 @@ fn ffi_query(
         let mut interface_ptr: *mut cryptoki_sys::CK_INTERFACE = std::ptr::null_mut();
         let rv = unsafe { get_interface(name_ptr, version_ptr, &mut interface_ptr, 0) };
         if rv != 0 || interface_ptr.is_null() {
-            return None;
+            return Ok(None);
         }
         let iface = unsafe { &*interface_ptr };
         let name = if iface.pInterfaceName.is_null() {
             None
         } else {
-            Some(
-                unsafe {
-                    std::ffi::CStr::from_ptr(iface.pInterfaceName as *const std::os::raw::c_char)
-                }
-                .to_bytes()
-                .to_vec(),
-            )
+            // W1-C4-06: bounded scan — an unterminated/overlong name is
+            // a loud load error, never an unbounded `CStr::from_ptr`.
+            // SAFETY: non-null per the branch; the provider owns the
+            // answer storage for the duration of this synchronous call.
+            Some(unsafe {
+                bounded_interface_name(iface.pInterfaceName as *const std::ffi::c_char)
+            }?)
         };
-        Some(InterfaceAnswer { name, func_list: iface.pFunctionList })
+        Ok(Some(InterfaceAnswer { name, func_list: iface.pFunctionList }))
     }
 }
 
@@ -703,7 +773,7 @@ mod tests {
     /// symbol existence, which this test would catch).
     #[test]
     fn provenance_is_false_when_queries_fail_and_legacy_succeeds() {
-        let mut q = |_: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| None;
+        let mut q = |_: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| Ok(None);
         let expected = dangling_list();
         let mut legacy = || Ok(expected);
         let (list, from_interface) =
@@ -716,8 +786,8 @@ mod tests {
     #[test]
     fn unnamed_vendor_interface_is_rejected_and_falls_through_to_legacy() {
         let mut q = |name: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| match name {
-            Some(_) => None,                      // named standard query fails
-            None => Some(answer(b"ACME Vendor")), // unnamed returns a vendor interface
+            Some(_) => Ok(None),                      // named standard query fails
+            None => Ok(Some(answer(b"ACME Vendor"))), // unnamed returns a vendor interface
         };
         let expected = dangling_list();
         let mut legacy = || Ok(expected);
@@ -731,8 +801,8 @@ mod tests {
         let std_answer = answer(b"PKCS 11");
         let expected = std_answer.func_list as *mut cryptoki_sys::CK_FUNCTION_LIST;
         let mut q = |name: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| match name {
-            Some(_) => None,
-            None => Some(answer(b"PKCS 11")),
+            Some(_) => Ok(None),
+            None => Ok(Some(answer(b"PKCS 11"))),
         };
         let mut legacy = || -> Result<*mut cryptoki_sys::CK_FUNCTION_LIST, String> {
             panic!("legacy must not be consulted when the unnamed standard answer is valid")
@@ -746,20 +816,104 @@ mod tests {
     #[test]
     fn versioned_unnamed_vendor_is_rejected_standard_is_accepted() {
         let mut vendor_q = |name: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| match name {
-            Some(_) => None,
-            None => Some(answer(b"ACME Vendor")),
+            Some(_) => Ok(None),
+            None => Ok(Some(answer(b"ACME Vendor"))),
         };
-        assert!(select_versioned(&mut vendor_q, 3, 0).is_none());
+        assert!(select_versioned(&mut vendor_q, 3, 0).unwrap().is_none());
 
         // The version guard reads the table's leading CK_VERSION, so the
         // accepted answer needs real version storage behind the pointer.
         let v30 = Box::new(cryptoki_sys::CK_VERSION { major: 3, minor: 0 });
         let v30_ptr = (&*v30 as *const cryptoki_sys::CK_VERSION).cast_mut().cast();
         let mut std_q = |name: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| match name {
-            Some(_) => None,
-            None => Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v30_ptr }),
+            Some(_) => Ok(None),
+            None => {
+                Ok(Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v30_ptr }))
+            }
         };
-        assert!(select_versioned(&mut std_q, 3, 0).is_some());
+        assert!(select_versioned(&mut std_q, 3, 0).unwrap().is_some());
+    }
+
+    // -- W1-C4-06: bounded provider-name scan ---------------------------
+    // A fake `C_GetInterface` whose answer points at thread-local,
+    // test-owned storage (lives across the synchronous query call).
+    // Each test installs its own answer; libtest threads never share.
+    std::thread_local! {
+        static FAKE_ANSWER: std::cell::RefCell<*mut cryptoki_sys::CK_INTERFACE> =
+            const { std::cell::RefCell::new(std::ptr::null_mut()) };
+    }
+
+    unsafe extern "C" fn fake_get_interface(
+        _name: *mut cryptoki_sys::CK_UTF8CHAR,
+        _version: *mut cryptoki_sys::CK_VERSION,
+        iface: *mut *mut cryptoki_sys::CK_INTERFACE,
+        _flags: cryptoki_sys::CK_FLAGS,
+    ) -> cryptoki_sys::CK_RV {
+        let answer = FAKE_ANSWER.with(|a| *a.borrow());
+        if answer.is_null() || iface.is_null() {
+            return cryptoki_sys::CKR_GENERAL_ERROR;
+        }
+        unsafe {
+            *iface = answer;
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    /// Install a fake provider answer for the duration of `f`: `name`
+    /// is the raw `pInterfaceName` byte string (caller controls NUL
+    /// placement). Returns whatever `f` returns.
+    fn with_fake_provider_name<T>(name: Vec<u8>, f: impl FnOnce() -> T) -> T {
+        let mut name = name.into_boxed_slice();
+        let mut table = Box::new(cryptoki_sys::CK_VERSION { major: 3, minor: 0 });
+        let mut iface = Box::new(cryptoki_sys::CK_INTERFACE {
+            pInterfaceName: name.as_mut_ptr(),
+            pFunctionList: (&mut *table as *mut cryptoki_sys::CK_VERSION).cast(),
+            flags: 0,
+        });
+        FAKE_ANSWER.with(|a| *a.borrow_mut() = &mut *iface as *mut cryptoki_sys::CK_INTERFACE);
+        let result = f();
+        FAKE_ANSWER.with(|a| *a.borrow_mut() = std::ptr::null_mut());
+        result
+    }
+
+    /// W1-C4-06: a valid provider name reads back byte-identically.
+    #[test]
+    fn bounded_name_accepts_valid_provider_name() {
+        with_fake_provider_name(b"PKCS 11\0".to_vec(), || {
+            let mut q = super::ffi_query(fake_get_interface);
+            let ans = q(Some(b"PKCS 11"), None).expect("valid name is accepted").expect("answer");
+            assert_eq!(ans.name.as_deref(), Some(b"PKCS 11".as_slice()));
+        });
+    }
+
+    /// W1-C4-06: no NUL within the bound is a loud load-path error, not
+    /// an unbounded over-read (300 non-NUL bytes + a late NUL).
+    #[test]
+    fn bounded_name_rejects_overlong_provider_name() {
+        let mut overlong = vec![b'A'; 300];
+        overlong.push(0);
+        with_fake_provider_name(overlong, || {
+            let mut q = super::ffi_query(fake_get_interface);
+            let err = q(Some(b"PKCS 11"), None).expect_err("overlong name must fail loudly");
+            assert!(err.contains("256"), "error names the bound: {err}");
+        });
+    }
+
+    /// W1-C4-06: a malformed interface name fails selection with that
+    /// error — the loader must not silently fall through to legacy.
+    #[test]
+    fn malformed_name_error_propagates_without_legacy_fallback() {
+        let mut overlong = vec![b'B'; 300];
+        overlong.push(0);
+        with_fake_provider_name(overlong, || {
+            let mut q = super::ffi_query(fake_get_interface);
+            let mut legacy = || -> Result<*mut cryptoki_sys::CK_FUNCTION_LIST, String> {
+                panic!("legacy must not be consulted after a malformed interface answer")
+            };
+            let err = select_primary(Some(&mut q), &mut legacy)
+                .expect_err("malformed name fails load cleanly");
+            assert!(err.contains("256"), "error names the bound: {err}");
+        });
     }
 
     /// F5: a module that answers a 3.2 query with a 3.0 table (rv=0) must
@@ -770,23 +924,23 @@ mod tests {
         let v30 = Box::new(cryptoki_sys::CK_VERSION { major: 3, minor: 0 });
         let v30_ptr = (&*v30 as *const cryptoki_sys::CK_VERSION).cast_mut().cast();
         let mut downgrading = |_: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| {
-            Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v30_ptr })
+            Ok(Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v30_ptr }))
         };
         assert!(
-            select_versioned(&mut downgrading, 3, 2).is_none(),
+            select_versioned(&mut downgrading, 3, 2).unwrap().is_none(),
             "3.0 table must not satisfy a 3.2 query"
         );
         assert!(
-            select_versioned(&mut downgrading, 3, 0).is_some(),
+            select_versioned(&mut downgrading, 3, 0).unwrap().is_some(),
             "3.0 table still satisfies a 3.0 query"
         );
 
         let v32 = Box::new(cryptoki_sys::CK_VERSION { major: 3, minor: 2 });
         let v32_ptr = (&*v32 as *const cryptoki_sys::CK_VERSION).cast_mut().cast();
         let mut current = |_: Option<&[u8]>, _: Option<cryptoki_sys::CK_VERSION>| {
-            Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v32_ptr })
+            Ok(Some(InterfaceAnswer { name: Some(b"PKCS 11".to_vec()), func_list: v32_ptr }))
         };
-        assert!(select_versioned(&mut current, 3, 2).is_some());
-        assert!(select_versioned(&mut current, 3, 0).is_some());
+        assert!(select_versioned(&mut current, 3, 2).unwrap().is_some());
+        assert!(select_versioned(&mut current, 3, 0).unwrap().is_some());
     }
 }

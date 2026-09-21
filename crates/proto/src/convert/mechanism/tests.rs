@@ -1167,12 +1167,15 @@ fn tls_prf_params_round_trip() {
         seed: vec![0x01; 32].into(),
         label: vec![0x6D, 0x61, 0x73, 0x74].into(), // "mast"
         output_len: 48,
+        // W1-C5-01: the provider-written output must survive the trip.
+        output: vec![0x5A; 48].into(),
     }));
     match p {
         CkMechanismParams::TlsPrf(v) => {
             assert_eq!(v.seed.len(), 32);
             assert_eq!(v.label, vec![0x6D, 0x61, 0x73, 0x74].into());
             assert_eq!(v.output_len, 48);
+            assert_eq!(v.output, vec![0x5A; 48].into());
         }
         _ => panic!("wrong variant"),
     }
@@ -1435,6 +1438,8 @@ fn wtls_prf_params_round_trip() {
         seed: vec![0xAA; 20].into(),
         label: vec![0xBB; 10].into(),
         output_len: 32,
+        // W1-C5-01: the provider-written output must survive the trip.
+        output: vec![0xA5; 32].into(),
     }));
     match p {
         CkMechanismParams::WtlsPrf(v) => {
@@ -1442,6 +1447,7 @@ fn wtls_prf_params_round_trip() {
             assert_eq!(v.seed.len(), 20);
             assert_eq!(v.label.len(), 10);
             assert_eq!(v.output_len, 32);
+            assert_eq!(v.output, vec![0xA5; 32].into());
         }
         _ => panic!("wrong variant"),
     }
