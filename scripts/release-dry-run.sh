@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/version-mirrors.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/version-mirrors.sh"
 TARGET_ROOT="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
 PREFIX=""
 SKIP_BUILD=0
@@ -104,18 +106,7 @@ for package in "${packages[@]}"; do
     test "$(cargo pkgid -p "$package" | sed -E 's/.*@//')" = "$release_version"
 done
 
-for mirror in \
-    ".gitlab-ci.yml:$(sed -nE 's/^  APP_VERSION: \"([^\"]+)\"$/\1/p' .gitlab-ci.yml)" \
-    "packaging/alpine/APKBUILD:$(sed -nE 's/^pkgver=([^[:space:]]+)$/\1/p' packaging/alpine/APKBUILD)" \
-    "packaging/amazon/pkcs11-proxy-ng.spec:$(sed -nE 's/^Version:[[:space:]]+([^[:space:]]+)[[:space:]]*$/\1/p' packaging/amazon/pkcs11-proxy-ng.spec)" \
-    "packaging/amazon/Dockerfile.amazon:$(sed -nE 's/^ARG APP_VERSION=([^[:space:]]+)$/\1/p' packaging/amazon/Dockerfile.amazon)"; do
-    mirror_path="${mirror%%:*}"
-    mirror_version="${mirror#*:}"
-    [[ "$mirror_version" == "$release_version" ]] || {
-        echo "$mirror_path version $mirror_version does not match Cargo $release_version" >&2
-        exit 1
-    }
-done
+check_version_mirrors "$release_version" || exit 1
 
 if grep -Eq 'pkcs11-proxy-ng-[0-9]+\.[0-9]+\.[0-9]+' packaging/amazon/Dockerfile.amazon; then
     echo "Amazon Dockerfile versioned paths must derive from APP_VERSION" >&2

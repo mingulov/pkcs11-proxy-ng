@@ -17,6 +17,9 @@
 #   pass-paren     one gate 'pass (x)' detail suffix -> 1 (anchored verdict refusal)
 #   multiline-gate duplicate gate line (multiline value) -> 1 (verdict refusal)
 #   exact-pass     every gate exactly 'pass' -> 0
+#   version-param-v030  GITHUB_REF_NAME=v0.3.0 resolves the v0.3.0 receipt -> 0
+#   version-param-suffix GITHUB_REF_NAME=v0.3.0-rc1 resolves v0.3.0 receipt -> 0
+#   version-param-missing tag v0.3.0 with only a v0.2.0 receipt -> 1 (missing)
 #   code-in-delta  top diff touches a code file -> 1 (delta refusal)
 #   missing-receipt no receipt file -> 1 (missing refusal)
 #
@@ -40,7 +43,17 @@ trap cleanup_fixtures EXIT
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="$REPO/.github/workflows/release.yml"
 STEP_NAME="Verify quality receipt"
+# W1-L17-02: the step derives the receipt path from GITHUB_REF_NAME, so the
+# battery pins the tag per case (default v0.2.0) and derives the receipt
+# path the same way (strip leading v and any -suffix).
+FIXTURE_TAG="v0.2.0"
 RECEIPT_REL="doc/release/v0.2.0-quality-receipt.md"
+set_fixture_tag() {
+  FIXTURE_TAG="$1"
+  local version="${FIXTURE_TAG#v}"
+  version="${version%%-*}"
+  RECEIPT_REL="doc/release/v${version}-quality-receipt.md"
+}
 
 extract_step() {
   awk -v name="$STEP_NAME" '
@@ -99,7 +112,7 @@ write_receipt() {
 }
 
 run_step() {
-  (cd "$1" && bash -c "$STEP")
+  (cd "$1" && GITHUB_REF_NAME="$FIXTURE_TAG" bash -c "$STEP")
 }
 
 PASS=0
@@ -231,6 +244,43 @@ write_receipt "$D" "$C1"
 sed -i -E "s/^(fmt|check|test|clippy|msrv|audit|deny|release_dry_run): .*$/\1: pass/" "$D/$RECEIPT_REL"
 g -C "$D" add "$RECEIPT_REL" && g -C "$D" commit -qm "refresh"
 expect "exact-pass" 0 "quality receipt verified for subject" "$D"
+
+# Case: version-parameterized receipt — a v0.3.0-style tag resolves its own
+# receipt path (and delta allowlist) with no workflow edit.
+set_fixture_tag v0.3.0
+D="$(new_repo)"
+mkdir -p "$D/doc/release"
+echo "v1" >"$D/src.rs"
+g -C "$D" add src.rs && g -C "$D" commit -qm "content"
+C1="$(g -C "$D" rev-parse HEAD)"
+write_receipt "$D" "$C1"
+g -C "$D" add "$RECEIPT_REL" && g -C "$D" commit -qm "refresh"
+expect "version-param-v030" 0 "quality receipt verified for subject" "$D"
+
+# Case: suffixed tag — v0.3.0-rc1 resolves the v0.3.0 receipt (suffix
+# stripped, same rule as verify-release-subject.sh).
+set_fixture_tag v0.3.0-rc1
+D="$(new_repo)"
+mkdir -p "$D/doc/release"
+echo "v1" >"$D/src.rs"
+g -C "$D" add src.rs && g -C "$D" commit -qm "content"
+C1="$(g -C "$D" rev-parse HEAD)"
+write_receipt "$D" "$C1"
+g -C "$D" add "$RECEIPT_REL" && g -C "$D" commit -qm "refresh"
+expect "version-param-suffix" 0 "quality receipt verified for subject" "$D"
+
+# Case: wrong-version receipt only — tag v0.3.0 with just a v0.2.0 receipt
+# present must refuse (missing), proving the path follows the tag.
+set_fixture_tag v0.3.0
+D="$(new_repo)"
+mkdir -p "$D/doc/release"
+echo "v1" >"$D/src.rs"
+g -C "$D" add src.rs && g -C "$D" commit -qm "content"
+C1="$(g -C "$D" rev-parse HEAD)"
+RECEIPT_REL="doc/release/v0.2.0-quality-receipt.md" write_receipt "$D" "$C1"
+g -C "$D" add doc/release/v0.2.0-quality-receipt.md && g -C "$D" commit -qm "refresh"
+expect "version-param-missing" 1 "is missing; refusing to release" "$D"
+set_fixture_tag v0.2.0
 
 # Case: code file in the tag-commit delta — SHA and gates fine.
 D="$(new_repo)"

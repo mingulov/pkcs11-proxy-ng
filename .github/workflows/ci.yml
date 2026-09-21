@@ -18,6 +18,10 @@
 # rust-toolchain.toml channel (MSRV keeps 1.88); protoc is setup-protoc at
 # the mise.toml version (36.1). All cargo builds/tests run --locked.
 #
+# Job hygiene (W1-L17-07): every job sets timeout-minutes — none inherits
+# the 6h default. The local_quality_gate_test ci_jobs_all_set_timeouts gate
+# enforces this per-PR.
+#
 # See .github/workflows/nightly.yml for Tier 2-3 provider-matrix and
 # consumer interoperability jobs (scheduled, not per-PR).
 
@@ -37,6 +41,7 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install pinned toolchain with rustfmt
@@ -54,6 +59,7 @@ jobs:
   audit:
     name: Cargo Audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: fmt
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -91,6 +97,7 @@ jobs:
   deny:
     name: Cargo Deny
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: fmt
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -119,10 +126,29 @@ jobs:
       - name: cargo deny check (standalone test workspaces)
         run: scripts/audit-test-workspaces.sh deny
 
+  # ── Tier 0b3: packaging smoke (APK/RPM mirrors + syntax) ───────────────────
+  # W1-L17-05: full carrier-image builds run in external GitLab by design
+  # (.gitlab-ci.yml header records the split); this job is the fast per-PR
+  # signal — version-mirror agreement plus APKBUILD/spec shape — so
+  # packaging regressions fail on the PR, not in external GitLab.
+  # Checkout + bash only (the smoke reads Cargo.toml directly, needs no
+  # Rust toolchain).
+  packaging-smoke:
+    name: Packaging smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: fmt
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: packaging mirrors + syntax
+        run: scripts/packaging-smoke.sh
+
   # ── Tier 0c: build, test, clippy ──────────────────────────────────────────
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [fmt, audit, deny]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -178,6 +204,7 @@ jobs:
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     needs: fmt
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -222,6 +249,7 @@ jobs:
   narrow-client-i686:
     name: Narrow CK_ULONG targets (i686)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: fmt
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -272,6 +300,7 @@ jobs:
   windows-client-llp64:
     name: Windows client shim (LLP64, cargo-xwin)
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     needs: fmt
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -325,6 +354,7 @@ jobs:
   musl-x86_64:
     name: musl build (x86_64 static + dynamic)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: fmt
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc

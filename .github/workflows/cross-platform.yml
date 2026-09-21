@@ -172,6 +172,12 @@ jobs:
       # exclusion is provider/framework-side only — proven red WITHOUT the
       # proxy in the loop (direct-phase red, provider crash, or
       # direct==proxied parity); proxy bugs are never excluded.
+      # W1-L17-09: this list is gated — local_quality_gate_test
+      # xplat_exclusion_list_matches_pinned_record pins all 20 atoms, so
+      # any add/remove fails until the pinned record + justification move
+      # together (exclusion edits trip review). The KAT-only residual stays
+      # narrowed explicitly (see scripts/ci-direct-vs-proxy.py); the
+      # silent-pass class must shrink, never widen.
       # Per-item record (what + why + provider-side evidence):
       # - test_ckr_digest/_keygen/_sign/_verify, test_arithmetic_overflow,
       #   test_cve_regression, test_ffi_length_boundary, test_padding_oracle,

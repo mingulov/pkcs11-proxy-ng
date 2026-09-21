@@ -46,7 +46,8 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo audit
 cargo deny check
-cargo +1.88.0 build --workspace --locked
+cargo +1.88.0 build --workspace --locked --all-targets
+cargo +1.88.0 test --workspace --locked
 scripts/release-dry-run.sh
 ```
 

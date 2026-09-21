@@ -19,6 +19,8 @@ const CI_TIER0_COMMANDS: &[&str] = &[
     "cargo build --workspace --locked",
     "cargo test --workspace --locked",
     "cargo clippy --workspace --locked --all-targets --all-features -- -D warnings",
+    // W1-L17-05: the packaging smoke is part of Tier 0 (CI job + matrix).
+    "scripts/packaging-smoke.sh",
 ];
 
 struct IgnoredTestLane {
@@ -465,6 +467,442 @@ fn dockerfile_test_references_current_workspace_crates() {
             "Dockerfile.test should build package `{package_name}` by name or build the workspace"
         );
     }
+}
+
+// ── W1-L17 (Task 23): release determinism + consumer-tier honesty ──────────
+
+/// Body of a named workflow step: the de-indented `run` lines between
+/// `      - name: <name>` and the next step header.
+fn workflow_step_body(workflow: &str, name: &str) -> String {
+    let header = format!("      - name: {name}");
+    let mut body = String::new();
+    let mut in_step = false;
+    for line in workflow.lines() {
+        if line == header {
+            in_step = true;
+            continue;
+        }
+        if in_step {
+            if line.starts_with("      - name: ") {
+                break;
+            }
+            if let Some(code) = line.strip_prefix("          ") {
+                body.push_str(code);
+                body.push('\n');
+            }
+        }
+    }
+    assert!(!body.is_empty(), "workflow step `{name}` should exist with a run body");
+    body
+}
+
+/// Body of a top-level shell function: from `<name>() {` through the closing
+/// `}` at column 0.
+fn shell_function_body(script: &str, name: &str) -> String {
+    let header = format!("{name}() {{");
+    let mut body = String::new();
+    let mut in_function = false;
+    for line in script.lines() {
+        if line == header {
+            in_function = true;
+        }
+        if in_function {
+            body.push_str(line);
+            body.push('\n');
+            if line == "}" {
+                break;
+            }
+        }
+    }
+    assert!(!body.is_empty(), "shell function `{name}` should exist");
+    body
+}
+
+#[test]
+fn ci_locked_builds_match_documented_gate_set() {
+    // W1-L17-01: Task 22 (L16-06) put --locked on every CI build/test/check/
+    // clippy line; this gate confirms that coverage holds and that
+    // doc/development.md's G-7 gate text (notably the MSRV lines) matches
+    // the enforced CI commands.
+    const GATED_VERBS: &[&str] = &[
+        "cargo build",
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+        "cargo xwin",
+        "cargo install",
+    ];
+    let root = workspace_root();
+    let ci_workflow = fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml should be readable");
+    for line in ci_workflow.lines() {
+        let trimmed = line.trim();
+        // Comments describe gates; step names label them; neither executes.
+        if trimmed.starts_with('#')
+            || trimmed.starts_with("- name:")
+            || trimmed.starts_with("name:")
+        {
+            continue;
+        }
+        if GATED_VERBS.iter().any(|verb| trimmed.contains(verb)) {
+            assert!(trimmed.contains("--locked"), "CI cargo line should run --locked: `{trimmed}`");
+        }
+    }
+
+    let development = fs::read_to_string(root.join("doc/development.md"))
+        .expect("doc/development.md should be readable");
+    let mut in_fence = false;
+    for line in development.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            continue;
+        }
+        if GATED_VERBS.iter().any(|verb| line.contains(verb)) {
+            assert!(
+                line.contains("--locked"),
+                "development.md cargo line should run --locked: `{line}`"
+            );
+        }
+    }
+    // The MSRV lines must mirror the enforced CI MSRV job (locked
+    // all-targets build plus the locked test suite), not a bare build.
+    for msrv_command in [
+        "cargo +1.88.0 build --workspace --locked --all-targets",
+        "cargo +1.88.0 test --workspace --locked",
+    ] {
+        assert!(
+            development.contains(msrv_command),
+            "development.md should document the enforced MSRV command `{msrv_command}`"
+        );
+    }
+    assert!(
+        ci_workflow.contains("cargo build --workspace --locked --all-targets"),
+        "CI MSRV job should keep the locked all-targets build"
+    );
+    assert!(
+        ci_workflow.contains("cargo test --workspace --locked"),
+        "CI MSRV job should keep the locked test suite"
+    );
+}
+
+#[test]
+fn release_receipt_path_is_version_parameterized() {
+    // W1-L17-02: the G-3 receipt step derives the receipt path (and the
+    // tag-delta allowlist) from the tag version, so a new version needs no
+    // workflow edit. Behavioral proof lives in
+    // scripts/test-verify-quality-receipt.sh (v0.3.0 fixtures); this pins
+    // the parameterization statically per-PR.
+    let root = workspace_root();
+    let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect(".github/workflows/release.yml should be readable");
+    let step = workflow_step_body(&release, "Verify quality receipt");
+    assert!(
+        step.contains("GITHUB_REF_NAME"),
+        "receipt step should derive the receipt path from the tag version"
+    );
+    assert!(!step.contains("v0.2.0"), "receipt step should not hardcode a release version");
+}
+
+#[test]
+fn release_tarball_sets_gzip_n() {
+    // W1-L17-04: the Linux bundle tarball suppresses the gzip header
+    // timestamp/name (GZIP=-n), byte-reproducible like the Windows ZIP.
+    let root = workspace_root();
+    let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect(".github/workflows/release.yml should be readable");
+    let step = workflow_step_body(&release, "Package release tarball + checksums");
+    assert!(step.contains("tar "), "tarball step should invoke tar");
+    assert!(
+        step.contains("GZIP=-n"),
+        "tarball step should set GZIP=-n for byte-reproducible gzip output"
+    );
+}
+
+#[test]
+fn packaging_split_is_explicit_with_per_pr_smoke() {
+    // W1-L17-05: full APK/RPM carrier builds stay in external GitLab by
+    // design; the split is documented there and GitHub runs a per-PR
+    // packaging smoke (mirror + syntax) instead.
+    let root = workspace_root();
+    let gitlab =
+        fs::read_to_string(root.join(".gitlab-ci.yml")).expect(".gitlab-ci.yml should be readable");
+    assert!(
+        gitlab.contains("packaging-smoke"),
+        ".gitlab-ci.yml should document the by-design split and name the GitHub per-PR smoke"
+    );
+    let ci_workflow = fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml should be readable");
+    assert!(
+        ci_workflow.contains("scripts/packaging-smoke.sh"),
+        "CI should run the per-PR packaging smoke"
+    );
+    let smoke = root.join("scripts/packaging-smoke.sh");
+    assert!(smoke.is_file(), "scripts/packaging-smoke.sh should exist");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&smoke)
+            .expect("packaging smoke script should be readable")
+            .permissions()
+            .mode();
+        assert!(mode & 0o111 != 0, "scripts/packaging-smoke.sh should be executable");
+    }
+}
+
+#[test]
+fn ci_jobs_all_set_timeouts() {
+    // W1-L17-07: every ci.yml job sets timeout-minutes; none inherits the
+    // 6h default.
+    let root = workspace_root();
+    let ci_workflow = fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml should be readable");
+    let mut jobs: Vec<(String, bool)> = Vec::new();
+    let mut in_jobs = false;
+    for line in ci_workflow.lines() {
+        if line == "jobs:" {
+            in_jobs = true;
+            continue;
+        }
+        if !in_jobs {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if line.starts_with("  ")
+            && !line.starts_with("   ")
+            && line.ends_with(':')
+            && !trimmed.starts_with('#')
+        {
+            jobs.push((trimmed.trim_end_matches(':').to_string(), false));
+            continue;
+        }
+        if let Some(current) = jobs.last_mut()
+            && !current.1
+            && let Some(value) = line.strip_prefix("    timeout-minutes: ")
+        {
+            let minutes: u32 = value.trim().parse().expect("timeout-minutes should be numeric");
+            assert!(
+                (5..=120).contains(&minutes),
+                "timeout-minutes should be a bounded non-default value, got {minutes}"
+            );
+            current.1 = true;
+        }
+    }
+    assert!(!jobs.is_empty(), "expected ci.yml jobs");
+    for (name, has_timeout) in &jobs {
+        assert!(has_timeout, "ci.yml job `{name}` should set timeout-minutes");
+    }
+}
+
+/// Inner texts of every `(not ...)` atom in a pkcs11-check `--match`
+/// expression, via paren matching.
+fn not_atoms(match_expr: &str) -> Vec<String> {
+    let bytes = match_expr.as_bytes();
+    let mut atoms = Vec::new();
+    let mut i = 0;
+    while i + 5 <= bytes.len() {
+        if bytes[i..i + 5] == *b"(not " {
+            let mut depth = 1;
+            let mut j = i + 5;
+            while j < bytes.len() && depth > 0 {
+                match bytes[j] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            assert_eq!(depth, 0, "unbalanced parens in exclusion expression");
+            atoms.push(match_expr[i + 5..j - 1].to_string());
+            i = j;
+        } else {
+            i += match_expr[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        }
+    }
+    atoms
+}
+
+// W1-L17-09: the cross-platform exclusion record. Every exclusion is
+// provider/framework-side only (proven red WITHOUT the proxy); proxy bugs
+// are never excluded. Changing the workflow list requires updating this
+// record + its justification together, so exclusion edits trip review.
+const XPLAT_PINNED_EXCLUSIONS: &[&str] = &[
+    "test_ckr_digest",
+    "test_ckr_keygen",
+    "test_ckr_sign",
+    "test_ckr_verify",
+    "test_arithmetic_overflow",
+    "test_cve_regression",
+    "test_ffi_length_boundary",
+    "test_padding_oracle",
+    "test_parameter_validation",
+    "test_scalar_attr_length_extended",
+    "test_tookan",
+    "test_mech_negative",
+    "test_operation_termination",
+    "test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails",
+    "test_verify_operability",
+    "(test_ckr_decrypt and test_key_type_inconsistent)",
+    "(test_ckr_encrypt and test_key_size_range)",
+    "test_bad_mechanism_with_bad_key_size",
+    "(test_null_template_nonzero_count and C_GenerateKey)",
+    "test_dh_rejects_tiny_prime",
+];
+
+#[test]
+fn xplat_exclusion_list_matches_pinned_record() {
+    // W1-L17-09: the exclusion list is gated — any add/remove fails here
+    // until the pinned record + justification move together. The KAT-only
+    // residual itself stays narrowed explicitly (gate-script docstring),
+    // never widened silently.
+    let root = workspace_root();
+    let xplat = fs::read_to_string(root.join(".github/workflows/cross-platform.yml"))
+        .expect(".github/workflows/cross-platform.yml should be readable");
+    assert!(
+        xplat.contains("Owner rule:"),
+        "cross-platform.yml should keep the exclusion owner rule"
+    );
+    assert!(
+        xplat.contains("xplat_exclusion_list_matches_pinned_record"),
+        "cross-platform.yml should point exclusion edits at the pinned-record gate test"
+    );
+    let match_line = xplat
+        .lines()
+        .find(|line| line.contains("EXTRA_P11CHECK_ARGS"))
+        .expect("cross-platform.yml should set EXTRA_P11CHECK_ARGS");
+    let mut atoms = not_atoms(match_line);
+    atoms.sort();
+    let mut pinned: Vec<String> = XPLAT_PINNED_EXCLUSIONS.iter().map(ToString::to_string).collect();
+    pinned.sort();
+    assert_eq!(
+        atoms, pinned,
+        "EXTRA_P11CHECK_ARGS exclusions should match the pinned record (update both + justification together)"
+    );
+    let gate = fs::read_to_string(root.join("scripts/ci-direct-vs-proxy.py"))
+        .expect("scripts/ci-direct-vs-proxy.py should be readable");
+    assert!(
+        gate.contains("Known residual"),
+        "gate script should keep documenting the KAT-only residual scope"
+    );
+}
+
+#[test]
+fn version_mirror_check_is_shared() {
+    // W1-L17-10: one 4-mirror version definition, sourced by all three
+    // release scripts (plus the L17-05 packaging smoke).
+    let root = workspace_root();
+    let lib = fs::read_to_string(root.join("scripts/lib/version-mirrors.sh"))
+        .expect("scripts/lib/version-mirrors.sh should exist");
+    assert!(
+        lib.contains("check_version_mirrors"),
+        "shared lib should define check_version_mirrors"
+    );
+    for mirror in [
+        ".gitlab-ci.yml",
+        "packaging/alpine/APKBUILD",
+        "packaging/amazon/pkcs11-proxy-ng.spec",
+        "packaging/amazon/Dockerfile.amazon",
+    ] {
+        assert!(lib.contains(mirror), "shared lib should define the {mirror} mirror");
+    }
+    // The Dockerfile-ARG extraction program is the canary: it must exist in
+    // exactly one place (the lib), never inlined per script.
+    let mut definitions = lib.matches("ARG APP_VERSION=([^[:space:]]+)").count();
+    for script in [
+        "scripts/release-dry-run.sh",
+        "scripts/release-windows.sh",
+        "scripts/verify-release-subject.sh",
+        "scripts/packaging-smoke.sh",
+    ] {
+        let text =
+            fs::read_to_string(root.join(script)).expect("release script should be readable");
+        assert!(
+            text.contains("version-mirrors.sh"),
+            "{script} should source the shared mirror check"
+        );
+        definitions += text.matches("ARG APP_VERSION=([^[:space:]]+)").count();
+    }
+    assert_eq!(definitions, 1, "the 4-mirror definition should live in exactly one place");
+}
+
+#[test]
+fn nss_fixture_lane_runs_by_default() {
+    // W1-L17-11: the NSS fixture lane runs in a default test-matrix run;
+    // the opt-out is a real --skip-nss-fixtures flag, not an unset var.
+    let root = workspace_root();
+    let matrix = fs::read_to_string(root.join("scripts/test-matrix.sh"))
+        .expect("scripts/test-matrix.sh should be readable");
+    assert!(
+        matrix.contains("test-nss-fixtures.sh"),
+        "test-matrix.sh should wire the NSS fixture lane"
+    );
+    assert!(
+        matrix.contains("--skip-nss-fixtures"),
+        "test-matrix.sh should offer a real --skip-nss-fixtures flag"
+    );
+    assert!(
+        matrix.matches("--skip-nss-fixtures").count() >= 2,
+        "--skip-nss-fixtures should appear in both usage and the parser"
+    );
+    assert!(matrix.contains("run_nss_fixtures=1"), "NSS fixture lane should default on");
+    assert!(!matrix.contains("RUN_NSS_FIXTURES"), "NSS lane should not gate on an env var");
+    assert!(
+        !matrix.contains("--run-nss-fixtures"),
+        "test-matrix.sh should not cite a nonexistent flag"
+    );
+    // The lane's old Docker hang was certutil -S reading an infinite -z
+    // noise file (NSS reads to EOF; /dev/urandom never EOFs): pin the
+    // finite-noise fix.
+    let fixtures = fs::read_to_string(root.join("scripts/test-nss-fixtures.sh"))
+        .expect("scripts/test-nss-fixtures.sh should be readable");
+    assert!(
+        !fixtures.contains("-z /dev/urandom"),
+        "fixture cert seeding must use a finite noise file, never /dev/urandom"
+    );
+}
+
+#[test]
+fn consumer_tier_fails_on_pkcs11test_failure() {
+    // W1-L17-23: a failing pkcs11test fails the consumer tier; its output
+    // is captured to a per-tag log, not discarded with || true.
+    let root = workspace_root();
+    let consumers = fs::read_to_string(root.join("scripts/test-consumers.sh"))
+        .expect("scripts/test-consumers.sh should be readable");
+    let suite = shell_function_body(&consumers, "run_pkcs11test_suite");
+    let code: String = suite
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!code.contains("|| true"), "pkcs11test must not force success with || true");
+    assert!(
+        suite.contains("pkcs11test-$tag.log"),
+        "pkcs11test output should be captured to a per-tag log"
+    );
+    assert!(
+        suite.contains("return \"$rc\""),
+        "pkcs11test failure should propagate its exit status"
+    );
+}
+
+#[test]
+fn consumer_tier_daemon_boot_uses_readiness_probe() {
+    // W1-L17-24: daemon boot waits on a readiness probe (port + liveness),
+    // not a fixed sleep.
+    let root = workspace_root();
+    let consumers = fs::read_to_string(root.join("scripts/test-consumers.sh"))
+        .expect("scripts/test-consumers.sh should be readable");
+    assert!(!consumers.contains("sleep 1"), "daemon boot should not use a fixed sleep");
+    assert!(
+        consumers.contains("wait_for_daemon() {"),
+        "test-consumers.sh should define a daemon readiness probe"
+    );
+    assert!(
+        consumers.contains("wait_for_daemon \"$daemon_pid\" \"$PORT\""),
+        "daemon boot should wait on the readiness probe"
+    );
 }
 
 #[test]

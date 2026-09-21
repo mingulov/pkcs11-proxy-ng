@@ -65,7 +65,16 @@ jobs:
       - name: Verify quality receipt
         run: |
           set -euo pipefail
-          RECEIPT="doc/release/v0.2.0-quality-receipt.md"
+          # W1-L17-02: the receipt path follows the tag version (suffix
+          # stripped, same rule as verify-release-subject.sh), so a new
+          # version needs no workflow edit.
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${TAG_VERSION%%-*}"
+          if [[ ! "$TAG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$GITHUB_REF_NAME' does not name a MAJOR.MINOR.PATCH version; refusing to release."
+            exit 1
+          fi
+          RECEIPT="doc/release/v${TAG_VERSION}-quality-receipt.md"
           if [[ ! -f "$RECEIPT" ]]; then
             echo "::error::quality receipt $RECEIPT is missing; refusing to release."
             exit 1
@@ -91,7 +100,7 @@ jobs:
           while IFS= read -r path; do
             if [[ -z "$path" ]]; then continue; fi
             case "$path" in
-              doc/release/v0.2.0-quality-receipt.md|CHANGELOG.md) ;;
+              "$RECEIPT"|CHANGELOG.md) ;;
               *)
                 echo "::error::tag commit '$TAG_COMMIT' changes '$path', outside the receipt/CHANGELOG bookkeeping delta; refusing to release."
                 exit 1
@@ -154,7 +163,9 @@ jobs:
           strip "dist/${BUNDLE}/bin/"* "dist/${BUNDLE}/lib/pkcs11/"*.so
 
           TAG_DATE="$(git log -1 --format=%cI "$GITHUB_REF_NAME")"
-          ( cd dist && tar --owner=0 --group=0 --mtime="$TAG_DATE" \
+          # W1-L17-04: GZIP=-n suppresses the gzip header timestamp/name so
+          # the tarball is byte-reproducible like the Windows ZIP.
+          ( cd dist && GZIP=-n tar --owner=0 --group=0 --mtime="$TAG_DATE" \
                   -czf "${BUNDLE}.tar.gz" "${BUNDLE}" )
           ( cd dist && sha256sum "${BUNDLE}.tar.gz" > SHA256SUMS )
 
