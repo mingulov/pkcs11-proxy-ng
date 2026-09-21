@@ -476,10 +476,14 @@ ConfigMap and per-pod values need late-binding.
 
 | Variable | TOML field | Notes |
 | --- | --- | --- |
-| `PKCS11_PROXY_BIND` | `listener.remote.bind` | Creates an insecure-TCP listener if `[listener.remote]` is absent in the TOML; mTLS / auth still come from TOML. |
-| `PKCS11_PROXY_BACKEND_MODULE` | `backend.module` | Absolute path to the backend `.so`. |
-| `PKCS11_PROXY_BACKEND_ARGS` | `backend.initialize_args` | Backend-specific `C_Initialize` args (e.g. NSS config-dir spec). |
-| `PKCS11_PROXY_MECHANISMS_CONFIG` | `mechanisms.config_path` | Path to the mechanism registry served to shims. |
+| `PKCS11_PROXY_BIND` | `listener.remote.bind` | TCP listen address; with no `[listener.remote]` block it creates an unauthenticated listener only if `PKCS11_PROXY_ALLOW_INSECURE=1`. |
+| `PKCS11_PROXY_BACKEND_MODULE` | `backend.module` | Absolute path to the backend PKCS#11 `.so` the daemon dlopens. |
+| `PKCS11_PROXY_BACKEND_ARGS` | `backend.initialize_args` | Backend-specific `C_Initialize` args string (e.g. NSS config dir spec). |
+| `PKCS11_PROXY_MECHANISMS_CONFIG` | `mechanisms.config_path` | Path to the mechanism_params.toml registry served to shims. |
+| `PKCS11_PROXY_ALLOW_INSECURE` | `listener.remote.allow_insecure_tcp` | Set to 1 to let `PKCS11_PROXY_BIND` create an unauthenticated TCP listener. |
+| `PKCS11_PROXY_RESILIENCE_METRICS_SOCKET` | `resilience.metrics_socket` | Unix-domain metrics endpoint path; serves Prometheus text on GET /metrics (mode 0600). |
+| `PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD` | `resilience.find_result_warn_threshold` | `C_FindObjects` result size above which a pathological-population event is counted and logged. |
+| `PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET` | `test_hooks.control_socket` | Hook-gated control endpoint path (mode 0600); requires a native-owner-test-hooks build, default builds fail closed. |
 
 **Precedence (lowest → highest):** TOML defaults < TOML file < environment.
 
@@ -505,6 +509,7 @@ controls which proxy the shim connects to and how.
 | `PKCS11_PROXY_ENDPOINT` | gRPC endpoint URL, e.g. `http://daemon:7512` or `https://daemon:7512` | Canonical. Wins over `PKCS11_PROXY_SOCKET` if both are set. |
 | `PKCS11_PROXY_SOCKET` | Back-compat with the original C `pkcs11-proxy`. Accepts only `tcp://host:port`; `tls://` is **not** supported (use mTLS via `PKCS11_PROXY_ENDPOINT=https://…` + `PKCS11_PROXY_TLS_*`). | `tls://` is a loud error that fails the connection (never falls back to the default endpoint); other non-`tcp://` values log a warning and use the default. |
 | `PKCS11_PROXY_CONNECT_TIMEOUT` | Connect timeout, seconds. Default `5`. | Plain integer. |
+| `PKCS11_PROXY_CONNECT_ATTEMPTS` | Max gRPC connect attempts per `C_Initialize` (bounded backoff + jitter). Default `10`. | Lower it to fail fast on an unreachable daemon; clamped to `1..=10` — it cannot raise the cap. |
 
 ### mTLS (client side)
 
@@ -515,8 +520,10 @@ controls which proxy the shim connects to and how.
 | `PKCS11_PROXY_TLS_CLIENT_KEY` | Path to the shim's client private key PEM. |
 | `PKCS11_PROXY_TLS_DOMAIN` | SNI / cert-name override; usually unnecessary when the endpoint hostname matches the cert. |
 
-All four are required together for mTLS; setting just one is an
-error.
+The first three are required together — setting only one or two is
+an error that fails the connection. `PKCS11_PROXY_TLS_DOMAIN` is
+optional: an SNI / server-cert-name override for when the endpoint
+hostname does not match the certificate.
 
 ### Mechanism registry
 

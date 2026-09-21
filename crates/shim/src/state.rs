@@ -583,15 +583,33 @@ pub fn runtime() -> &'static Runtime {
     fresh
 }
 
+/// Loud warning when `PKCS11_PROXY_CONNECT_TIMEOUT` is set but not a
+/// valid second count (W1-L8-15). Returns `None` when the var is unset
+/// or parses — the call site logs `Some` via `tracing::warn!` and the
+/// value still falls back to the 5 s default, but never silently.
+pub(crate) fn connect_timeout_warning(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None => None,
+        Some(value) => match value.parse::<u64>() {
+            Ok(_) => None,
+            Err(_) => Some(format!(
+                "PKCS11_PROXY_CONNECT_TIMEOUT={value:?} is not a valid number of seconds; \
+                 using default 5"
+            )),
+        },
+    }
+}
+
 fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {
     // W1-L8-02: a malformed endpoint (e.g. tls:// socket) fails the
     // connect outright — never dial a fallback on the caller's behalf.
     // The parse error is already logged loudly by the resolver.
     let endpoint = resolve_endpoint_from_env().map_err(|_| CkRv::DEVICE_ERROR)?;
-    let timeout_secs: u64 = std::env::var("PKCS11_PROXY_CONNECT_TIMEOUT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5);
+    let timeout_raw = std::env::var("PKCS11_PROXY_CONNECT_TIMEOUT").ok();
+    if let Some(warning) = connect_timeout_warning(timeout_raw.as_deref()) {
+        tracing::warn!("{warning}");
+    }
+    let timeout_secs: u64 = timeout_raw.as_deref().and_then(|s| s.parse().ok()).unwrap_or(5);
     let tls_files =
         pkcs11_proxy_ng_client::tls::ClientTlsFiles::from_env().map_err(|_| CkRv::DEVICE_ERROR)?;
     let rt = runtime();
@@ -796,6 +814,24 @@ pub(crate) fn connect_attempts_from_value(raw: Option<&str>) -> u32 {
         .unwrap_or(MAX_ATTEMPTS)
 }
 
+/// Loud warning when `PKCS11_PROXY_CONNECT_ATTEMPTS` is set but not a
+/// valid attempt count (W1-L8-15). The parse predicate matches
+/// [`connect_attempts_from_value`] exactly (trimmed `u32`), so the
+/// warning fires exactly when the default engages. Clamping is
+/// documented behavior and stays silent.
+pub(crate) fn connect_attempts_warning(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None => None,
+        Some(value) => match value.trim().parse::<u32>() {
+            Ok(_) => None,
+            Err(_) => Some(format!(
+                "PKCS11_PROXY_CONNECT_ATTEMPTS={value:?} is not a valid attempt count; \
+                 using default {MAX_ATTEMPTS}"
+            )),
+        },
+    }
+}
+
 async fn connect_with_retry(
     endpoint: &str,
     tls_files: Option<pkcs11_proxy_ng_client::tls::ClientTlsFiles>,
@@ -804,8 +840,11 @@ async fn connect_with_retry(
     #[cfg(test)]
     CONNECT_SERIES.fetch_add(1, Ordering::Relaxed);
     let connect_timeout = Duration::from_secs(timeout_secs);
-    let max_attempts =
-        connect_attempts_from_value(std::env::var("PKCS11_PROXY_CONNECT_ATTEMPTS").ok().as_deref());
+    let attempts_raw = std::env::var("PKCS11_PROXY_CONNECT_ATTEMPTS").ok();
+    if let Some(warning) = connect_attempts_warning(attempts_raw.as_deref()) {
+        tracing::warn!("{warning}");
+    }
+    let max_attempts = connect_attempts_from_value(attempts_raw.as_deref());
 
     for attempt in 0..max_attempts {
         let delay = backoff_for_attempt(attempt);
@@ -949,5 +988,50 @@ mod backoff_tests {
                 base + band,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod env_warning_tests {
+    use super::*;
+
+    // W1-L8-15: an invalid PKCS11_PROXY_CONNECT_TIMEOUT must produce a
+    // loud naming warning (the value still falls back to the default,
+    // but never silently).
+    #[test]
+    fn connect_timeout_warning_names_invalid_value() {
+        let warning =
+            connect_timeout_warning(Some("junk")).expect("invalid timeout must warn loudly");
+        assert!(
+            warning.contains("PKCS11_PROXY_CONNECT_TIMEOUT") && warning.contains("junk"),
+            "warning must name the var and the value, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn connect_timeout_warning_silent_when_valid_or_unset() {
+        assert_eq!(connect_timeout_warning(None), None);
+        assert_eq!(connect_timeout_warning(Some("10")), None);
+    }
+
+    // W1-L8-15: same loud-warning contract for
+    // PKCS11_PROXY_CONNECT_ATTEMPTS. Clamping (0 → 1, >max → max) is
+    // documented behavior and stays silent; only unparseable values warn.
+    #[test]
+    fn connect_attempts_warning_names_invalid_value() {
+        let warning =
+            connect_attempts_warning(Some("junk")).expect("invalid attempts must warn loudly");
+        assert!(
+            warning.contains("PKCS11_PROXY_CONNECT_ATTEMPTS") && warning.contains("junk"),
+            "warning must name the var and the value, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn connect_attempts_warning_silent_when_valid_unset_or_clamped() {
+        assert_eq!(connect_attempts_warning(None), None);
+        assert_eq!(connect_attempts_warning(Some("3")), None);
+        assert_eq!(connect_attempts_warning(Some("0")), None);
+        assert_eq!(connect_attempts_warning(Some("50")), None);
     }
 }

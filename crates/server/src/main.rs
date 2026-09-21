@@ -62,15 +62,55 @@ fn parse_log_format(raw: Option<&str>) -> LogFormat {
     }
 }
 
+/// Warning text when `RUST_LOG` is set but fails to parse (W1-L8-15).
+/// Emitted via `eprintln!` (tracing is not initialized yet) naming the
+/// var and the offending value; the filter still falls back to "info".
+fn invalid_rust_log_warning(value: &str) -> String {
+    format!("RUST_LOG={value:?} is not a valid tracing filter; using default \"info\"")
+}
+
+/// Warning text when `LOG_FORMAT` is set to an unrecognized value
+/// (W1-L8-15). `None` when unset or a documented value (`plain`/`json`,
+/// case-insensitive); the fallback format itself is unchanged (JSON).
+fn log_format_warning(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None => None,
+        Some(value) => match value.trim().to_lowercase().as_str() {
+            "plain" | "json" => None,
+            _ => Some(format!(
+                "LOG_FORMAT={value:?} is not a recognized log format \
+                 (expected \"plain\" or \"json\"); using default \"json\""
+            )),
+        },
+    }
+}
+
 fn init_tracing() {
     // Default to INFO when RUST_LOG is unset: from_default_env() falls
     // back to ERROR, which suppressed every startup line and left a
     // healthy daemon with a 0-byte log. An explicit RUST_LOG still wins.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // W1-L8-15: a set-but-invalid RUST_LOG warns loudly on stderr
+    // (tracing is not up yet) instead of silently falling back.
+    let rust_log_raw = std::env::var("RUST_LOG").ok();
+    let filter = match EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(_) => {
+            if let Some(value) = rust_log_raw.as_deref() {
+                eprintln!("pkcs11-proxy-ng: {}", invalid_rust_log_warning(value));
+            }
+            EnvFilter::new("info")
+        }
+    };
     // LOG_FORMAT=plain selects human-readable lines (README dev flow);
     // unset or anything else keeps the historical JSON default that the
     // prod/staging examples and compose files already set explicitly.
-    match parse_log_format(std::env::var("LOG_FORMAT").ok().as_deref()) {
+    // W1-L8-15: an unrecognized value warns loudly on stderr instead of
+    // silently falling back.
+    let log_format_raw = std::env::var("LOG_FORMAT").ok();
+    if let Some(warning) = log_format_warning(log_format_raw.as_deref()) {
+        eprintln!("pkcs11-proxy-ng: {warning}");
+    }
+    match parse_log_format(log_format_raw.as_deref()) {
         LogFormat::Plain => {
             tracing_subscriber::fmt().with_env_filter(filter).init();
         }
@@ -916,6 +956,39 @@ auth = "peer_cred"
         assert_eq!(parse_log_format(Some("  PLAIN  ")), LogFormat::Plain);
         assert_eq!(parse_log_format(Some("xml")), LogFormat::Json);
         assert_eq!(parse_log_format(Some("")), LogFormat::Json);
+    }
+
+    // W1-L8-15: an invalid RUST_LOG falls back to "info" (unchanged), but
+    // the fallback must be loud — the warning names the var and value.
+    #[test]
+    fn invalid_rust_log_warning_names_var_and_value() {
+        let warning = invalid_rust_log_warning("!!!not-a-filter!!!");
+        assert!(
+            warning.contains("RUST_LOG") && warning.contains("!!!not-a-filter!!!"),
+            "warning must name the var and the value, got: {warning}"
+        );
+    }
+
+    // W1-L8-15: an unrecognized LOG_FORMAT still falls back to JSON
+    // (pinned above), but the fallback must be loud. Unset/plain/json
+    // stay silent.
+    #[test]
+    fn log_format_warning_names_invalid_value() {
+        let warning = log_format_warning(Some("xml")).expect("invalid LOG_FORMAT must warn");
+        assert!(
+            warning.contains("LOG_FORMAT") && warning.contains("xml"),
+            "warning must name the var and the value, got: {warning}"
+        );
+        assert!(log_format_warning(Some("")).is_some(), "empty LOG_FORMAT must warn");
+    }
+
+    #[test]
+    fn log_format_warning_silent_when_valid_or_unset() {
+        assert_eq!(log_format_warning(None), None);
+        assert_eq!(log_format_warning(Some("json")), None);
+        assert_eq!(log_format_warning(Some("plain")), None);
+        assert_eq!(log_format_warning(Some("  PLAIN  ")), None);
+        assert_eq!(log_format_warning(Some("JSON")), None);
     }
 
     #[test]

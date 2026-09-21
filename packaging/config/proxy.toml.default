@@ -4,9 +4,17 @@
 # is a placeholder — the daemon refuses to start until you replace it
 # with a real path to a PKCS#11 .so on the host.
 #
-# Every value below can also be overridden at runtime by an env var
-# (PKCS11_PROXY_*), so this file is suitable for use as a Kubernetes
-# ConfigMap with secrets/paths injected by the deployment.
+# Eight values in this file can also be overridden at runtime by env
+# vars (each marked with an "Override:" comment below; the full list is
+# printed by `pkcs11-proxy-ng --print-env-vars`):
+#   PKCS11_PROXY_BIND, PKCS11_PROXY_BACKEND_MODULE,
+#   PKCS11_PROXY_BACKEND_ARGS, PKCS11_PROXY_MECHANISMS_CONFIG,
+#   PKCS11_PROXY_ALLOW_INSECURE,
+#   PKCS11_PROXY_RESILIENCE_METRICS_SOCKET,
+#   PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD,
+#   PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET
+# Everything else comes from this file. It is suitable for use as a
+# Kubernetes ConfigMap with secrets/paths injected by the deployment.
 
 [backend]
 # REQUIRED. Path to the backend PKCS#11 module (HSM driver, SoftHSM2,
@@ -74,11 +82,21 @@ allow_insecure_tcp = true
 [auth]
 # Token-level identity ACL is bypassed under auth="none". Configure
 # [[auth.policy]] entries only when running with auth="mtls".
+#
+# Key policy entries by the client's SPKI fingerprint (primary form —
+# stable across reissues with the same key):
+# [[auth.policy]]
+# identity = "x509:spki=<hex-sha256-of-client-public-key>"
+# tokens = ["label:token-label"]
+# The legacy x509:issuer=<dn>;subject=<dn> form still works but is
+# deprecated (the daemon logs a per-key migration warning).
 
 [mechanisms]
 # Path to the mechanism parameter registry served to shims over the
-# GetBackendInterfaces RPC. Leave unset to serve the daemon's embedded
-# default (compiled from mechanism_params_default.toml in the types
-# crate).
+# GetBackendInterfaces RPC (unset = embedded default, compiled from
+# mechanism_params_default.toml in the types crate). Set it only when
+# layering vendor extensions (see
+# packaging/config/mechanism_params.cloudhsm.toml.example). A set path
+# must exist — the daemon refuses to start on a missing file.
 # Override:  PKCS11_PROXY_MECHANISMS_CONFIG="/etc/pkcs11-proxy-ng/mechanism_params.toml"
-config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"
+# config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"

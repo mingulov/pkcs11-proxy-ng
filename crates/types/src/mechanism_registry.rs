@@ -62,7 +62,12 @@ pub struct MechanismRegistry {
 // ─── TOML schema ───────────────────────────────────────────────────────────
 
 /// Top-level TOML document.
+///
+/// W1-L8-06: unknown keys are rejected loudly. A silently ignored typo
+/// (e.g. `discovery_modes`) would leave the operator believing the
+/// setting applied while the registry behaved otherwise.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlConfig {
     discovery_mode: Option<DiscoveryMode>,
     #[serde(default)]
@@ -80,7 +85,12 @@ struct TomlConfig {
 }
 
 /// A `[[params]]` table: one shape name → list of mechanism type values.
+/// Unknown keys are rejected loudly (W1-L8-06); in particular a
+/// `parameterless` list placed after a `[[params]]` header is
+/// TOML-attached to that table (not top-level) and must fail here
+/// rather than silently drop its mechanisms.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlParamsEntry {
     shape: String,
     mechanisms: Vec<u64>,
@@ -128,9 +138,14 @@ impl MechanismRegistry {
             let content = std::fs::read_to_string(path).map_err(|e| {
                 format!("failed to read mechanism override {}: {e}", path.display())
             })?;
+            // W1-L8-06: the shape-name allowlist is exactly the shapes the
+            // embedded default names (vendor overrides may only reuse
+            // implemented shapes; new shapes need code changes).
+            let known: HashSet<String> = param_shapes.values().cloned().collect();
             Self::merge_override_content(
                 &content,
                 path.parent().unwrap_or_else(|| Path::new(".")),
+                &known,
                 &mut param_shapes,
                 &mut parameterless,
                 &mut disabled,
@@ -158,9 +173,12 @@ impl MechanismRegistry {
     pub fn load_from_content(content: &str, base_dir: &Path) -> Result<Self, String> {
         let (mut param_shapes, mut parameterless, mut disabled, mut discovery_mode) =
             Self::load_base()?;
+        // W1-L8-06: shape-name allowlist (see `load`).
+        let known: HashSet<String> = param_shapes.values().cloned().collect();
         Self::merge_override_content(
             content,
             base_dir,
+            &known,
             &mut param_shapes,
             &mut parameterless,
             &mut disabled,
@@ -175,6 +193,38 @@ impl MechanismRegistry {
         })
     }
 
+    /// Reject every `[[params]]` shape name in `config` that the proxy
+    /// does not implement (W1-L8-06). `known` is the shape-name allowlist
+    /// — exactly the shapes named by the embedded default registry — and
+    /// `source` names the file/content for the error. A typo'd shape
+    /// previously loaded, hashed a revision, and served while enforcement
+    /// silently differed from operator intent; it now fails load naming
+    /// the shape.
+    fn check_shapes_known(
+        config: &TomlConfig,
+        known: &HashSet<String>,
+        source: &str,
+    ) -> Result<(), String> {
+        for entry in &config.params {
+            if !known.contains(entry.shape.as_str()) {
+                let mechs = entry
+                    .mechanisms
+                    .iter()
+                    .map(|m| format!("0x{m:08X}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "unknown mechanism parameter shape \"{}\" in {source} (mechanisms \
+                     [{mechs}]); the shape must be one the proxy implements (see the \
+                     embedded mechanism_params_default.toml) — a genuinely new shape \
+                     needs code changes per AGENTS.md rule 12, not just a TOML entry",
+                    entry.shape
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Parse override TOML and merge it (plus its single-level includes)
     /// into the running registry state. Shared by [`Self::load`] and
     /// [`Self::load_from_content`] so both parse identically.
@@ -182,6 +232,7 @@ impl MechanismRegistry {
     fn merge_override_content(
         content: &str,
         base_dir: &Path,
+        known: &HashSet<String>,
         param_shapes: &mut HashMap<u64, String>,
         parameterless: &mut HashSet<u64>,
         disabled: &mut HashSet<u64>,
@@ -189,6 +240,7 @@ impl MechanismRegistry {
     ) -> Result<(), String> {
         let over: TomlConfig = toml::from_str(content)
             .map_err(|e| format!("failed to parse mechanism override config: {e}"))?;
+        Self::check_shapes_known(&over, known, "mechanism override config")?;
 
         // Process includes (single-level, no recursion).
         for include_path_str in &over.include {
@@ -204,6 +256,11 @@ impl MechanismRegistry {
             let inc_config: TomlConfig = toml::from_str(&inc_content).map_err(|e| {
                 format!("failed to parse included mechanism config {}: {e}", resolved.display())
             })?;
+            Self::check_shapes_known(
+                &inc_config,
+                known,
+                &format!("included mechanism config {}", resolved.display()),
+            )?;
             // Merge included config (ignore its `include` field — no recursion).
             Self::merge_config(&inc_config, param_shapes, parameterless, disabled, discovery_mode);
         }
@@ -244,6 +301,9 @@ impl MechanismRegistry {
         if let Some(toml_str) = override_toml {
             let over: TomlConfig = toml::from_str(toml_str)
                 .map_err(|e| format!("failed to parse mechanism override config: {e}"))?;
+            // W1-L8-06: shape-name allowlist (see `load`).
+            let known: HashSet<String> = param_shapes.values().cloned().collect();
+            Self::check_shapes_known(&over, &known, "mechanism override config")?;
             Self::merge_config(
                 &over,
                 &mut param_shapes,
@@ -845,15 +905,23 @@ mod tests {
         assert!(result.unwrap_err().contains("failed to parse mechanism override config"));
     }
 
+    // W1-L8-06 contract change: this test previously pinned that an
+    // override could introduce a brand-new shape name ("vendor_special").
+    // Unknown shapes degraded to Raw-then-rejected at runtime while load
+    // looked healthy, so the strict loader now rejects them loudly at
+    // load (new shapes need code changes per AGENTS.md rule 12).
     #[test]
-    fn override_adds_new_shape() {
+    fn override_rejects_new_shape() {
         let override_toml = r#"
             [[params]]
             shape = "vendor_special"
             mechanisms = [0x80AABBCC]
         "#;
-        let reg = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap();
-        assert_eq!(reg.param_shape(0x80AABBCC), Some("vendor_special"));
+        let err = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap_err();
+        assert!(
+            err.contains("vendor_special"),
+            "unknown override shape must fail load naming the shape, got: {err}"
+        );
     }
 
     #[test]
@@ -1309,7 +1377,7 @@ mod tests {
             f,
             r#"
             [[params]]
-            shape = "first"
+            shape = "gcm"
             mechanisms = [0x800000AA]
         "#
         )
@@ -1321,7 +1389,7 @@ mod tests {
             f,
             r#"
             [[params]]
-            shape = "second"
+            shape = "iv"
             mechanisms = [0x800000AA]
         "#
         )
@@ -1332,7 +1400,7 @@ mod tests {
         write!(f, r#"include = ["first.toml", "second.toml"]"#).unwrap();
 
         let reg = MechanismRegistry::load(Some(&main_path)).unwrap();
-        assert_eq!(reg.param_shape(0x800000AA), Some("second"));
+        assert_eq!(reg.param_shape(0x800000AA), Some("iv"));
     }
 
     #[test]
@@ -1348,7 +1416,7 @@ mod tests {
             f,
             r#"
             [[params]]
-            shape = "from_include"
+            shape = "gcm"
             mechanisms = [0x800000BB]
         "#
         )
@@ -1362,14 +1430,14 @@ mod tests {
             include = ["vendor.toml"]
 
             [[params]]
-            shape = "local_override"
+            shape = "iv"
             mechanisms = [0x800000BB]
         "#
         )
         .unwrap();
 
         let reg = MechanismRegistry::load(Some(&main_path)).unwrap();
-        assert_eq!(reg.param_shape(0x800000BB), Some("local_override"));
+        assert_eq!(reg.param_shape(0x800000BB), Some("iv"));
     }
 
     #[test]
@@ -1645,5 +1713,156 @@ mod tests {
             assert_eq!(reg.param_shape(mech), None, "mechanism {mech:#06x} must stay opt-in");
             assert_eq!(reg.check_operation(mech, true), Err(CkRv::MECHANISM_PARAM_INVALID));
         }
+    }
+
+    // W1-L8-06: a typo'd [[params]] shape name must fail load loudly,
+    // naming the shape — never ship silently with a healthy-looking
+    // "mechanism registry ready" line while enforcement differs from
+    // operator intent.
+    #[test]
+    fn override_rejects_typo_shape_naming_shape() {
+        let override_toml = r#"
+            [[params]]
+            shape = "gmc"
+            mechanisms = [0x1087]
+        "#;
+        let err = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap_err();
+        assert!(err.contains("gmc"), "typo'd shape must fail load naming the shape, got: {err}");
+    }
+
+    // W1-L8-06: an unknown top-level key (e.g. a typo'd `discovery_mode`)
+    // must fail load loudly instead of being silently ignored while the
+    // operator believes it applied.
+    #[test]
+    fn override_rejects_unknown_top_level_key() {
+        let override_toml = r#"
+            discovery_modes = "filtered"
+        "#;
+        let err = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap_err();
+        assert!(
+            err.contains("discovery_modes"),
+            "unknown top-level key must fail load naming the key, got: {err}"
+        );
+    }
+
+    // W1-L8-06: an unknown key inside [[params]] (e.g. singular
+    // `mechanism`) must fail load loudly — a silently dropped mechanism
+    // list would leave the entry shaping nothing.
+    #[test]
+    fn override_rejects_unknown_params_key() {
+        // NOTE: the valid `mechanisms` key is present, so only
+        // deny_unknown_fields can reject the stray `mechanism` key —
+        // a missing-field error must not mask the assertion.
+        let override_toml = r#"
+            [[params]]
+            shape = "gcm"
+            mechanisms = [0x80001087]
+            mechanism = [0x80001087]
+        "#;
+        let err = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap_err();
+        assert!(
+            err.contains("mechanism"),
+            "unknown [[params]] key must fail load naming the key, got: {err}"
+        );
+    }
+
+    // W1-L8-06: the shape allowlist also covers `include`d files — an
+    // unknown shape smuggled in via include must fail the same way.
+    #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
+    fn include_with_unknown_shape_fails_loudly() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let included_path = dir.path().join("bad-shape.toml");
+        let mut f = std::fs::File::create(&included_path).unwrap();
+        write!(
+            f,
+            r#"
+            [[params]]
+            shape = "not_a_shape"
+            mechanisms = [0x80001087]
+        "#
+        )
+        .unwrap();
+
+        let content = r#"
+            include = ["bad-shape.toml"]
+        "#;
+        let err = MechanismRegistry::load_from_content(content, dir.path()).unwrap_err();
+        assert!(
+            err.contains("not_a_shape"),
+            "unknown shape via include must fail load naming the shape, got: {err}"
+        );
+    }
+
+    // W1-L8-06: every shipped registry file must still load under the
+    // strict loader (deny_unknown_fields + shape allowlist). Pinned via
+    // `include_str!` (hermetic); the read_dir sweep below forces triage
+    // when a new vendors/*.toml appears instead of silent omission.
+    #[test]
+    fn all_shipped_registries_load() {
+        let pinned: &[(&str, &str)] = &[
+            ("cloudhsm-mechanisms", include_str!("../../../examples/cloudhsm-mechanisms.toml")),
+            (
+                "fips/mechanism_params",
+                include_str!("../../../examples/configs/fips/mechanism_params.toml"),
+            ),
+            (
+                "packaging-cloudhsm-example",
+                include_str!("../../../packaging/config/mechanism_params.cloudhsm.toml.example"),
+            ),
+            ("aws-cloudhsm", include_str!("../../../examples/vendors/aws-cloudhsm.toml")),
+            ("bouncyhsm-blake2b", include_str!("../../../examples/vendors/bouncyhsm-blake2b.toml")),
+            ("entrust-nshield", include_str!("../../../examples/vendors/entrust-nshield.toml")),
+            ("google-cloudkms", include_str!("../../../examples/vendors/google-cloudkms.toml")),
+            ("ibm-ep11", include_str!("../../../examples/vendors/ibm-ep11.toml")),
+            ("mozilla-nss", include_str!("../../../examples/vendors/mozilla-nss.toml")),
+            (
+                "opencryptoki-ecdh-x-cof",
+                include_str!("../../../examples/vendors/opencryptoki-ecdh-x-cof.toml"),
+            ),
+            ("russian-gost", include_str!("../../../examples/vendors/russian-gost.toml")),
+            ("thales-luna", include_str!("../../../examples/vendors/thales-luna.toml")),
+            ("yubico-yubihsm", include_str!("../../../examples/vendors/yubico-yubihsm.toml")),
+        ];
+        for (name, content) in pinned {
+            MechanismRegistry::load_with_override_str(Some(content))
+                .unwrap_or_else(|e| panic!("shipped registry {name} must still load: {e}"));
+        }
+        // Completeness: every examples/vendors/*.toml must be pinned above.
+        let vendors_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/vendors");
+        let mut unpinned = Vec::new();
+        for entry in std::fs::read_dir(&vendors_dir).expect("vendors dir must read") {
+            let path = entry.expect("vendor entry must read").path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                let stem =
+                    path.file_stem().expect("vendor file must have a stem").to_string_lossy();
+                if !pinned.iter().any(|(name, _)| *name == stem) {
+                    unpinned.push(stem.into_owned());
+                }
+            }
+        }
+        assert!(unpinned.is_empty(), "unpinned vendor registries (add them above): {unpinned:?}");
+        // Spot-checks that the restructured files actually register what
+        // they claim (a nested `parameterless` key after [[params]] is
+        // TOML-attached to that table and — pre-strictness — silently
+        // dropped; it must now be top-level and effective).
+        let by_name = |want: &str| {
+            pinned.iter().find(|(name, _)| *name == want).expect("pinned file present").1
+        };
+        let yubico = MechanismRegistry::load_with_override_str(Some(by_name("yubico-yubihsm")))
+            .expect("yubico overlay loads");
+        assert!(
+            yubico.is_parameterless(0xD9554202),
+            "yubico CKM_YUBICO_RSA_WRAP must register as parameterless"
+        );
+        let mozilla = MechanismRegistry::load_with_override_str(Some(by_name("mozilla-nss")))
+            .expect("nss overlay loads");
+        assert!(
+            mozilla.is_parameterless(0xCE534351),
+            "nss CKM_NSS_AES_KEY_WRAP must register as parameterless"
+        );
     }
 }

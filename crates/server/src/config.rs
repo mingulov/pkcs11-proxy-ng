@@ -1118,6 +1118,15 @@ impl DaemonConfig {
                  omit the field to disable the limit (0 would block all requests)"
                 .into());
         }
+        // W1-L8-16: a zero cooldown arms an already-expired lockout, so
+        // the budget counts failures without ever locking out — a
+        // silently neutered budget. Omit the field for the 60 s default.
+        if self.rate_limit.per_slot_failed_login_cooldown_secs == Some(0) {
+            return Err("rate_limit.per_slot_failed_login_cooldown_secs must be > 0; \
+                 omit the field to use the 60 s default (0 expires the cooldown \
+                 immediately, so the budget never locks out)"
+                .into());
+        }
         if self.proxy.max_concurrent_backend_calls > self.proxy.max_blocking_threads {
             return Err(format!(
                 "proxy.max_concurrent_backend_calls ({}) must be <= proxy.max_blocking_threads ({}). \
@@ -1128,6 +1137,20 @@ impl DaemonConfig {
         // Validate eviction_interval_secs
         if self.proxy.eviction_interval_secs == 0 {
             return Err("proxy.eviction_interval_secs must be > 0".into());
+        }
+        // W1-L8-16: a zero rate window resets on every call, so the
+        // per-peer limiter never trips while appearing configured.
+        if self.proxy.rate_limit_window_secs == 0 {
+            return Err("proxy.rate_limit_window_secs must be > 0 (0 resets the window \
+                 on every call, so the per-peer limiter never trips)"
+                .into());
+        }
+        // W1-L8-16: a zero login-lock timeout elapses immediately, so
+        // every login/logout/close-session lock acquisition fails.
+        if self.proxy.login_lock_timeout_secs == 0 {
+            return Err("proxy.login_lock_timeout_secs must be > 0 (0 fails every \
+                 login-lock acquisition immediately)"
+                .into());
         }
         // Refuse to start if backend.module is still the shipped
         // placeholder — fail loud at startup rather than at first call.
