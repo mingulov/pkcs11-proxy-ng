@@ -238,9 +238,7 @@ fn supply_chain_pins_are_consistent() {
     let root = workspace_root();
     let workflows_dir = root.join(".github/workflows");
     let mut workflow_texts = Vec::new();
-    for entry in
-        fs::read_dir(&workflows_dir).expect("workflows directory should be readable")
-    {
+    for entry in fs::read_dir(&workflows_dir).expect("workflows directory should be readable") {
         let path = entry.expect("workflow entry should be readable").path();
         if path.extension().is_some_and(|extension| extension == "yml") {
             workflow_texts.push(fs::read_to_string(&path).expect("workflow should be readable"));
@@ -260,8 +258,8 @@ fn supply_chain_pins_are_consistent() {
             "workflows should use pinned setup-protoc, not distro protobuf-compiler"
         );
     }
-    let dockerfile =
-        fs::read_to_string(root.join("Dockerfile.test")).expect("Dockerfile.test should be readable");
+    let dockerfile = fs::read_to_string(root.join("Dockerfile.test"))
+        .expect("Dockerfile.test should be readable");
     assert!(
         !dockerfile.contains("protobuf-compiler"),
         "Dockerfile.test should use pinned protoc, not distro protobuf-compiler"
@@ -314,7 +312,8 @@ fn supply_chain_pins_are_consistent() {
     // Actions: pinned to SHAs, never floating major tags.
     for text in &workflow_texts {
         for line in text.lines().map(str::trim) {
-            let Some(pinned) = line.strip_prefix("- uses: ").or_else(|| line.strip_prefix("uses: "))
+            let Some(pinned) =
+                line.strip_prefix("- uses: ").or_else(|| line.strip_prefix("uses: "))
             else {
                 continue;
             };
@@ -374,14 +373,8 @@ fn ci_workflow_runs_cargo_audit_before_build_and_test() {
     );
     assert!(ci_workflow.contains("cargo audit"), "CI should run cargo audit");
     // W1-L16-07: the deny policy gate blocks the main leg like audit does.
-    assert!(
-        ci_workflow.contains("name: Cargo Deny"),
-        "CI should have a dedicated cargo deny job"
-    );
-    assert!(
-        ci_workflow.contains("cargo deny check"),
-        "CI should run cargo deny check"
-    );
+    assert!(ci_workflow.contains("name: Cargo Deny"), "CI should have a dedicated cargo deny job");
+    assert!(ci_workflow.contains("cargo deny check"), "CI should run cargo deny check");
     assert!(
         ci_workflow.contains("needs: [fmt, audit, deny]"),
         "build-and-test should depend on fmt, audit, and deny"
