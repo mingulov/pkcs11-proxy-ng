@@ -126,7 +126,7 @@ pub(crate) async fn encrypt_init(
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptInitResponse { ck_rv, mechanism_out }))
 }
 
-// NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn encrypt(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptRequest>,
@@ -175,7 +175,7 @@ pub(crate) async fn encrypt(
     }))
 }
 
-// NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn encrypt_update(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptUpdateRequest>,
@@ -211,6 +211,7 @@ pub(crate) async fn encrypt_update(
     }))
 }
 
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn encrypt_final(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptFinalRequest>,
@@ -360,7 +361,7 @@ pub(crate) async fn decrypt_init(
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptInitResponse { ck_rv, mechanism_out }))
 }
 
-// NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn decrypt(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptRequest>,
@@ -408,7 +409,7 @@ pub(crate) async fn decrypt(
     }))
 }
 
-// NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn decrypt_update(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptUpdateRequest>,
@@ -443,6 +444,7 @@ pub(crate) async fn decrypt_update(
     }))
 }
 
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn decrypt_final(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptFinalRequest>,

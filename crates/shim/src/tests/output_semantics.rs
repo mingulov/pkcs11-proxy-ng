@@ -4313,3 +4313,25 @@ fn steady_state_reconnect_preserves_client_context() {
     drop(shim);
     assert_eq!(live_contexts(), 0, "finalize after reconnect must remove the context");
 }
+
+/// W1-L11-11 pin: the initialize/finalize context-id lifecycle on the
+/// shared client. `c_initialize` must store the id (later data-plane
+/// calls clone it) and `c_finalize` must clear it (no released context
+/// retained). Must hold identically before AND after the
+/// clone-before-RPC migration — a naive clone without propagation would
+/// leave the shared id empty after init (breaking every later call) or
+/// stale after finalize.
+#[test]
+fn initialize_finalize_context_id_lifecycle() {
+    let _guard = shim_state_test_guard();
+    let _daemon = TestDaemon::shared();
+    {
+        let _shim = ShimSession::new();
+        let ctx =
+            state::runtime().block_on(async { state::client().lock().await.context_id_opt() });
+        assert!(ctx.is_some(), "c_initialize must store the context id on the shared client");
+    }
+    // ShimSession::drop ran c_finalize: the shared client's id is cleared.
+    let ctx = state::runtime().block_on(async { state::client().lock().await.context_id_opt() });
+    assert!(ctx.is_none(), "c_finalize must clear the context id on the shared client");
+}

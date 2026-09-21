@@ -1031,6 +1031,113 @@ fn steady_state_call_consumes_reconnect_flag() {
     );
 }
 
+/// W1-L11-17: the hand-rolled `c_get_info` data-plane path consumes the
+/// reconnect flag exactly like `with_client!`, so the next-call rebuild
+/// promise holds on every steady-state path — not just the macro one.
+/// (Task 4 wired both halves; this pins the hand-rolled half. Removing
+/// the `ensure_client_connected` call from `c_get_info` fails this with
+/// zero new dial series.)
+#[test]
+fn get_info_consumes_reconnect_flag() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedConnectEnv::capture();
+    // Guaranteed-refused loopback endpoint: the re-dial fails fast and
+    // still counts exactly one series; the call then proceeds with the
+    // cached (or absent) client and surfaces a transport error.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral loopback port")
+        .local_addr()
+        .expect("listener addr")
+        .port();
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", format!("http://127.0.0.1:{port}"));
+        std::env::remove_var("PKCS11_PROXY_SOCKET");
+        std::env::set_var("PKCS11_PROXY_CONNECT_ATTEMPTS", "1");
+    }
+    crate::state::mark_finalized();
+    crate::interface_probe::clear_cache();
+    crate::state::clear_pre_init_connect_failure();
+    crate::state::mark_client_reconnect_required();
+    assert!(!crate::state::is_initialized(), "test requires pre-init state");
+    assert!(crate::state::mark_initialized(), "test must own the init flag");
+
+    let before = crate::state::connect_series_count();
+    let mut info: CK_INFO = unsafe { std::mem::zeroed() };
+    let _rv = unsafe { dispatch::general::c_get_info(&mut info) };
+    crate::state::mark_finalized();
+    assert_eq!(
+        crate::state::connect_series_count() - before,
+        1,
+        "one c_get_info call must run exactly one fresh dial series"
+    );
+}
+
+/// W1-L11-24: every forced reconnect re-reads the endpoint from the
+/// environment and runs a fresh dial series — the shim-side mechanism by
+/// which a long-lived process follows a daemon whose address changed
+/// (each dial builds a fresh `Endpoint::from_shared`, so DNS is
+/// re-resolved per reconnect rather than cached with the old `Channel`).
+/// A true DNS A-record test needs a DNS rig (per the R2 writeup); this
+/// pins what the shim controls: re-resolve inputs are re-read and
+/// re-dialed per reconnect, never cached.
+///
+/// The failure-cache key folds the endpoint string the dial actually
+/// used, so observing the second endpoint's key proves the second dial
+/// used the re-read value — not a cached copy of the first.
+#[test]
+fn reconnect_rereads_endpoint_and_redials() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedConnectEnv::capture();
+    let port_a = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral loopback port")
+        .local_addr()
+        .expect("listener addr")
+        .port();
+    let port_b = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind second ephemeral loopback port")
+        .local_addr()
+        .expect("listener addr")
+        .port();
+    assert_ne!(port_a, port_b, "the two refused endpoints must differ");
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", format!("http://127.0.0.1:{port_a}"));
+        std::env::remove_var("PKCS11_PROXY_SOCKET");
+        std::env::set_var("PKCS11_PROXY_CONNECT_ATTEMPTS", "1");
+    }
+    crate::state::mark_finalized();
+    crate::interface_probe::clear_cache();
+    crate::state::clear_pre_init_connect_failure();
+
+    let before = crate::state::connect_series_count();
+    crate::state::mark_client_reconnect_required();
+    let first = crate::state::ensure_client_connected();
+    assert!(first.is_err(), "re-dial against a refused endpoint must fail");
+    assert!(
+        crate::state::pre_init_connect_failed(),
+        "the first dial must record its endpoint's failure key"
+    );
+
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", format!("http://127.0.0.1:{port_b}"));
+    }
+    assert!(
+        !crate::state::pre_init_connect_failed(),
+        "a changed endpoint must miss the first dial's failure key"
+    );
+    crate::state::mark_client_reconnect_required();
+    let second = crate::state::ensure_client_connected();
+    assert!(second.is_err(), "re-dial against the second refused endpoint must fail");
+    assert!(
+        crate::state::pre_init_connect_failed(),
+        "the second dial must record the re-read endpoint's failure key"
+    );
+    assert_eq!(
+        crate::state::connect_series_count() - before,
+        2,
+        "each forced reconnect must run its own fresh dial series"
+    );
+}
+
 /// Panic-safe override for PKCS11_PROXY_DISABLE_SERVER_REGISTRY (restored
 /// on drop even when an assertion fails, so later tests keep a clean env).
 struct SavedDisableRegistry {

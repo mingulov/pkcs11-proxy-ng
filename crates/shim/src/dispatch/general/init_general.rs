@@ -80,12 +80,15 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
         }
 
         // Mark the cached gRPC channel for reconnect ONLY on genuine
-        // transport failures (FOLLOWUP-dns-reresolve: follow a daemon whose
-        // address changed). Registered before any RPC; idempotent. The hook
-        // fires inside the client's transport-Status mapping, so a backend
-        // `ck_rv` — e.g. kryoptic's CKR_DEVICE_ERROR (OpenSSL catch-all) or
-        // CKR_GENERAL_ERROR (internal catch-all), which arrive as ordinary
-        // results — never triggers a spurious reconnect.
+        // transport failures (FOLLOWUP-dns-reresolve, resolved by
+        // W1-L11-24: follow a daemon whose address changed — every
+        // reconnect re-reads the endpoint and re-resolves DNS via a
+        // fresh `Endpoint`). Registered before any RPC; idempotent. The
+        // hook fires inside the client's transport-Status mapping, so a
+        // backend `ck_rv` — e.g. kryoptic's CKR_DEVICE_ERROR (OpenSSL
+        // catch-all) or CKR_GENERAL_ERROR (internal catch-all), which
+        // arrive as ordinary results — never triggers a spurious
+        // reconnect.
         pkcs11_proxy_ng_client::set_transport_failure_hook(|| {
             crate::interface_probe::invalidate_pointer_safe_message_parameters();
             state::mark_client_reconnect_required()
@@ -123,8 +126,16 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
 
         let rt = state::runtime();
         let rv = rt.block_on(async {
-            let mut client = state::client().lock().await;
-            match client.initialize().await {
+            // W1-L11-11: clone-before-RPC (with_client! convention) — no
+            // guard held across the await. initialize() stores the
+            // context id on the clone, so propagate just the id back
+            // under a short lock; a full client writeback could clobber
+            // a concurrent reconnect swap's fresh channel.
+            let mut client = state::client().lock().await.clone();
+            let result = client.initialize().await;
+            let context_id = client.context_id_opt();
+            state::client().lock().await.restore_context_id(context_id);
+            match result {
                 Ok(()) => rv_ok(),
                 Err(e) => rv_err(e),
             }
@@ -143,9 +154,14 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
             if let Err(e) = crate::interface_probe::reprobe() {
                 tracing::error!(error = %e, "C_Initialize refused: incompatible backend ABI");
                 // Best-effort: release the daemon-side context we created.
+                // W1-L11-11: clone-before-RPC; propagate the cleared id so
+                // the shared client never retains a released context.
                 let _ = state::runtime().block_on(async {
-                    let mut client = state::client().lock().await;
-                    client.finalize().await
+                    let mut client = state::client().lock().await.clone();
+                    let result = client.finalize().await;
+                    let context_id = client.context_id_opt();
+                    state::client().lock().await.restore_context_id(context_id);
+                    result
                 });
                 state::mark_finalized();
                 // The cached channel points at the refused daemon; force the
@@ -173,8 +189,21 @@ pub unsafe extern "C" fn c_finalize(p_reserved: CK_VOID_PTR) -> CK_RV {
 
         let rt = state::runtime();
         let rv = rt.block_on(async {
-            let mut client = state::client().lock().await;
-            match client.finalize().await {
+            // W1-L11-11: clone-before-RPC (with_client! convention) — no
+            // guard held across the await. Propagate the resulting id
+            // (cleared on success, kept on transport failure) so the
+            // shared client's lifecycle matches the guarded version
+            // exactly; a full writeback could clobber a concurrent
+            // reconnect swap's fresh channel.
+            // (No ensure_client_connected here: finalize is teardown —
+            // re-dialing a stale channel just to say goodbye would add
+            // latency for no benefit; the reconnect flag set below
+            // forces the next C_Initialize onto a fresh channel.)
+            let mut client = state::client().lock().await.clone();
+            let result = client.finalize().await;
+            let context_id = client.context_id_opt();
+            state::client().lock().await.restore_context_id(context_id);
+            match result {
                 Ok(()) => rv_ok(),
                 Err(e) => rv_err(e),
             }
@@ -205,7 +234,10 @@ pub unsafe extern "C" fn c_get_info(p_info: CK_INFO_PTR) -> CK_RV {
         let _ = state::ensure_client_connected();
         let rt = state::runtime();
         rt.block_on(async {
-            let mut client = state::client().lock().await;
+            // W1-L11-11: clone-before-RPC (with_client! convention) — no
+            // guard held across the await. get_info only reads the
+            // context id, so no state propagates back.
+            let mut client = state::client().lock().await.clone();
             match client.get_info().await {
                 Ok(info) => {
                     unsafe {

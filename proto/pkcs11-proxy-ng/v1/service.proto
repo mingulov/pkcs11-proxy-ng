@@ -5,6 +5,35 @@ package pkcs11_proxy_ng.v1;
 import "pkcs11-proxy-ng/v1/types.proto";
 
 service Pkcs11Proxy {
+  // Legacy per-function retention (W1-L11-21) - BEGIN
+  //
+  // The shim sends every byte-output call through the Exact family
+  // (ByteOutputExact, ParameterOutputExact, EncapsulateKeyExact,
+  // GetAttributeValueExact). The 19 per-function byte-output RPCs below
+  // are shim-dead but RETAINED for the CLI and older clients, which call
+  // them directly (e.g. `client.sign/digest/encrypt`):
+  //
+  //   Sign, SignFinal, SignRecover, VerifyRecover,
+  //   Digest, DigestFinal,
+  //   Encrypt, EncryptUpdate, EncryptFinal,
+  //   Decrypt, DecryptUpdate, DecryptFinal,
+  //   DigestEncryptUpdate, DecryptDigestUpdate,
+  //   SignEncryptUpdate, DecryptVerifyUpdate,
+  //   GetOperationState, WrapKey, EncapsulateKey.
+  //
+  // Server handlers for these carry the uniform legacy marker and do not
+  // forward the NULL-input class (ADR-0010 Scope 2 covers the *_exact
+  // paths instead). The unit-result per-function RPCs (SignUpdate,
+  // Verify, VerifyUpdate, VerifyFinal, DigestUpdate, DigestKey, all
+  // Init/Cancel, message/3.2 RPCs) have no Exact equivalent and are NOT
+  // legacy — the shim calls them directly.
+  //
+  // Removal scheduled no earlier than v0.4.0, and only after the CLI
+  // migrates to the Exact client methods. Do NOT add new per-function
+  // byte-output RPCs; extend the Exact family instead.
+  //
+  // Legacy per-function retention (W1-L11-21) - END
+
   // General
   rpc Initialize(InitializeRequest) returns (InitializeResponse);
   rpc Finalize(FinalizeRequest) returns (FinalizeResponse);
@@ -34,8 +63,10 @@ service Pkcs11Proxy {
 
   // Signing / Verification
   rpc SignInit(SignInitRequest) returns (SignInitResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc Sign(SignRequest) returns (SignResponse);
   rpc SignUpdate(SignUpdateRequest) returns (SignUpdateResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc SignFinal(SignFinalRequest) returns (SignFinalResponse);
   rpc VerifyInit(VerifyInitRequest) returns (VerifyInitResponse);
   rpc Verify(VerifyRequest) returns (VerifyResponse);
@@ -51,31 +82,45 @@ service Pkcs11Proxy {
 
   // Digest (hashing)
   rpc DigestInit(DigestInitRequest) returns (DigestInitResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc Digest(DigestRequest) returns (DigestResponse);
   rpc DigestUpdate(DigestUpdateRequest) returns (DigestUpdateResponse);
   rpc DigestKey(DigestKeyRequest) returns (DigestKeyResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc DigestFinal(DigestFinalRequest) returns (DigestFinalResponse);
 
   // Encryption / Decryption
   rpc EncryptInit(EncryptInitRequest) returns (EncryptInitResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc Encrypt(EncryptRequest) returns (EncryptResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc EncryptUpdate(EncryptUpdateRequest) returns (EncryptUpdateResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc EncryptFinal(EncryptFinalRequest) returns (EncryptFinalResponse);
   rpc DecryptInit(DecryptInitRequest) returns (DecryptInitResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc Decrypt(DecryptRequest) returns (DecryptResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc DecryptUpdate(DecryptUpdateRequest) returns (DecryptUpdateResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc DecryptFinal(DecryptFinalRequest) returns (DecryptFinalResponse);
 
   // Combined operations
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc DigestEncryptUpdate(DigestEncryptUpdateRequest) returns (DigestEncryptUpdateResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc DecryptDigestUpdate(DecryptDigestUpdateRequest) returns (DecryptDigestUpdateResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc SignEncryptUpdate(SignEncryptUpdateRequest) returns (SignEncryptUpdateResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc DecryptVerifyUpdate(DecryptVerifyUpdateRequest) returns (DecryptVerifyUpdateResponse);
 
   // Recovery signatures
   rpc SignRecoverInit(SignRecoverInitRequest) returns (SignRecoverInitResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc SignRecover(SignRecoverRequest) returns (SignRecoverResponse);
   rpc VerifyRecoverInit(VerifyRecoverInitRequest) returns (VerifyRecoverInitResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc VerifyRecover(VerifyRecoverRequest) returns (VerifyRecoverResponse);
 
   // Legacy parallel function status (PKCS#11 2.40)
@@ -86,6 +131,7 @@ service Pkcs11Proxy {
   rpc WaitForSlotEvent(WaitForSlotEventRequest) returns (WaitForSlotEventResponse);
 
   // State management
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc GetOperationState(GetOperationStateRequest) returns (GetOperationStateResponse);
   rpc SetOperationState(SetOperationStateRequest) returns (SetOperationStateResponse);
 
@@ -97,6 +143,7 @@ service Pkcs11Proxy {
   // Key management / RNG
   rpc GenerateKey(GenerateKeyRequest) returns (GenerateKeyResponse);
   rpc DeriveKey(DeriveKeyRequest) returns (DeriveKeyResponse);
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses ByteOutputExact.
   rpc WrapKey(WrapKeyRequest) returns (WrapKeyResponse);
   rpc UnwrapKey(UnwrapKeyRequest) returns (UnwrapKeyResponse);
   rpc GenerateKeyPair(GenerateKeyPairRequest) returns (GenerateKeyPairResponse);
@@ -136,6 +183,7 @@ service Pkcs11Proxy {
   rpc MessageVerifyFinal(MessageVerifyFinalRequest) returns (MessageVerifyFinalResponse);
 
   // PKCS#11 3.2 — KEM
+  // Legacy (W1-L11-21): retained for CLI/compat; shim uses EncapsulateKeyExact.
   rpc EncapsulateKey(EncapsulateKeyRequest) returns (EncapsulateKeyResponse);
   rpc DecapsulateKey(DecapsulateKeyRequest) returns (DecapsulateKeyResponse);
 

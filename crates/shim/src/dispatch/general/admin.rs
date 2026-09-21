@@ -16,10 +16,17 @@ pub unsafe extern "C" fn c_init_token(
             Err(e) => return rv_err(e),
         };
         // PKCS#11 label is 32 bytes, space-padded; trim trailing spaces for client.
+        // W1-L11-10: fallible read like the PIN sites (also rejects an
+        // address-range overflow the old panicking reader never checked).
         let label = if p_label.is_null() {
             String::new()
         } else {
-            let raw = unsafe { read_input_slice(p_label, 32) };
+            let raw = match unsafe { try_read_optional_bytes(p_label, 32) } {
+                Ok(Some(raw)) => raw,
+                // Unreachable for a non-null pointer with a constant
+                // in-bounds length, except a hostile near-TOP address.
+                Ok(None) | Err(_) => return rv_err(CkRv::ARGUMENTS_BAD),
+            };
             String::from_utf8_lossy(raw).trim_end().to_string()
         };
         match with_client!(client => client.init_token(CkSlotId(slot_id as u64), so_pin, &label)) {

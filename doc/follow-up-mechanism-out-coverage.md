@@ -114,17 +114,14 @@ them.
 
 ## Remaining items (not bugs)
 
-### 5. `panic!()` for oversized buffers in shim helpers (style only)
+### 5. ✅ `panic!()` for oversized buffers in shim helpers — closed by W1-L11-10
 
-`crates/shim/src/dispatch/general/helpers/mod.rs` (`read_input_slice`/`write_output_slice`) panics when the
-caller passes a buffer length above `MAX_SERIALIZABLE_BYTES` (512 MiB).
-The panic is caught by `catch_panics` and converted to
-`CKR_GENERAL_ERROR`, so there's no UB risk despite the red-team
-agent's initial concern.  Cleaner style would be to return
-`CKR_ARGUMENTS_BAD` directly.
-
-**Impact:** none — purely stylistic.  Left as documented hygiene
-item; safe to refactor if anyone touches that file.
+The panicking `read_input_slice` in
+`crates/shim/src/dispatch/general/helpers/mod.rs` was removed once every
+call site (PIN/username/label readers) migrated to the fallible
+`classify_input` / `try_read_optional_bytes` paths, which return
+`CKR_ARGUMENTS_BAD` directly for lengths above `MAX_SERIALIZABLE_BYTES`
+(512 MiB). No TooLarge panic arm remains.
 
 ## False positives confirmed during triage
 

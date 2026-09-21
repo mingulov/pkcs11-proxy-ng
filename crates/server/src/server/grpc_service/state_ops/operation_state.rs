@@ -71,6 +71,7 @@ async fn resolve_state_handles(
     Ok((CkSessionHandle(backend_session.0 as u64), encryption_key, authentication_key))
 }
 
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(super) async fn get_operation_state(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,

@@ -46,25 +46,15 @@ pub unsafe extern "C" fn c_sign(
     p_signature: CK_BYTE_PTR,
     pul_signature_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::Sign,
-            &spec,
-            data,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_signature, pul_signature_len) },
-            Err(e) => rv_err(e),
-        }
+            p_data,
+            ul_data_len,
+            p_signature,
+            pul_signature_len,
+        )
     })
 }
 
@@ -89,21 +79,13 @@ pub unsafe extern "C" fn c_sign_final(
     p_signature: CK_BYTE_PTR,
     pul_signature_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact_no_input(
+            h_session,
             ByteOutputFunction::SignFinal,
-            &spec,
-            CkInBuf::Bytes(&[]),
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_signature, pul_signature_len) },
-            Err(e) => rv_err(e),
-        }
+            p_signature,
+            pul_signature_len,
+        )
     })
 }
 
@@ -242,25 +224,15 @@ pub unsafe extern "C" fn c_sign_recover(
     p_signature: CK_BYTE_PTR,
     pul_signature_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::SignRecover,
-            &spec,
-            data,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_signature, pul_signature_len) },
-            Err(e) => rv_err(e),
-        }
+            p_data,
+            ul_data_len,
+            p_signature,
+            pul_signature_len,
+        )
     })
 }
 
@@ -305,27 +277,15 @@ pub unsafe extern "C" fn c_verify_recover(
     p_data: CK_BYTE_PTR,
     pul_data_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let signature = match input_buf_to_ck_in_buf(unsafe {
-            classify_input(p_signature, ul_signature_len)
-        }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_data, pul_data_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::VerifyRecover,
-            &spec,
-            signature,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_data, pul_data_len) },
-            Err(e) => rv_err(e),
-        }
+            p_signature,
+            ul_signature_len,
+            p_data,
+            pul_data_len,
+        )
     })
 }
 

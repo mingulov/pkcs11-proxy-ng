@@ -113,6 +113,100 @@ fn c_set_pin_valid_pins_reach_client_state() {
 }
 
 #[test]
+fn c_login_rejects_unserializable_pin_length_before_client_use() {
+    // W1-L11-10: same TooLarge class as the L3-03 PIN sites — oversize
+    // C_Login PIN is ARGUMENTS_BAD, never a panic surfaced as
+    // GENERAL_ERROR via the old panicking reader.
+    let _guard = shim_state_test_guard();
+    let pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let rv = unsafe { dispatch::general::c_login(0, CKU_SO, pin, CK_ULONG::MAX) };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_login_user_rejects_unserializable_pin_length_before_client_use() {
+    // W1-L11-10: oversize C_LoginUser PIN is ARGUMENTS_BAD even when the
+    // username is valid.
+    let _guard = shim_state_test_guard();
+    let pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let username = *b"alice";
+    let rv = unsafe {
+        dispatch::general::c_login_user(
+            0,
+            CKU_USER,
+            pin,
+            CK_ULONG::MAX,
+            username.as_ptr() as *mut _,
+            5,
+        )
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_login_user_rejects_unserializable_username_length_before_client_use() {
+    // W1-L11-10: oversize C_LoginUser username is ARGUMENTS_BAD even when
+    // the PIN is valid.
+    let _guard = shim_state_test_guard();
+    let pin = *b"1234";
+    let username = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let rv = unsafe {
+        dispatch::general::c_login_user(
+            0,
+            CKU_USER,
+            pin.as_ptr() as *mut _,
+            4,
+            username,
+            CK_ULONG::MAX,
+        )
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_login_valid_pin_reaches_client_state() {
+    // W1-L11-10 pin: valid C_Login PIN is unaffected — parsing passes
+    // through to the client gate.
+    let _guard = shim_state_test_guard();
+    let pin = *b"1234";
+    let rv = unsafe { dispatch::general::c_login(0, CKU_SO, pin.as_ptr() as *mut _, 4) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
+fn c_login_user_valid_inputs_reach_client_state() {
+    // W1-L11-10 pin: valid C_LoginUser PIN/username are unaffected —
+    // parsing passes through to the client gate.
+    let _guard = shim_state_test_guard();
+    let pin = *b"1234";
+    let username = *b"alice";
+    let rv = unsafe {
+        dispatch::general::c_login_user(
+            0,
+            CKU_USER,
+            pin.as_ptr() as *mut _,
+            4,
+            username.as_ptr() as *mut _,
+            5,
+        )
+    };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
+fn c_init_token_valid_label_reaches_client_state() {
+    // W1-L11-10 pin: the fixed-32 label read is unaffected by the
+    // fallible-reader migration — parsing passes through.
+    let _guard = shim_state_test_guard();
+    let mut label = [b' '; 32];
+    label[..8].copy_from_slice(b"test tok");
+    let rv = unsafe {
+        dispatch::general::c_init_token(0, std::ptr::null_mut(), 0, label.as_ptr() as *mut _)
+    };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
 fn c_get_info_null_p_info_returns_bad_args() {
     let rv = unsafe { dispatch::general::c_get_info(std::ptr::null_mut()) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);

@@ -4959,3 +4959,138 @@ fn oasis_inventory_default_toml_shape_coverage_has_no_gaps() {
         "Raw fallback exclusion should stay documented"
     );
 }
+
+/// W1-L11-21: the shim-dead per-function byte-output RPCs are retained
+/// for CLI/compat under ONE documented decision — not silently.
+///
+/// * `service.proto` carries the retention notice: it names every legacy
+///   RPC plus the removal version (delimited BEGIN/END block).
+/// * Every corresponding server handler carries the uniform legacy
+///   marker (same text everywhere = handled consistently).
+///
+/// Covering a new per-function RPC with the Exact family without
+/// retiring it or listing it here fails this gate.
+#[test]
+fn legacy_per_function_rpcs_have_documented_retention() {
+    // (rpc name, handler source file, handler fn anchor)
+    const LEGACY: &[(&str, &str, &str)] = &[
+        ("Sign", "crates/server/src/server/grpc_service/sign_verify/sign.rs", "async fn sign("),
+        (
+            "SignFinal",
+            "crates/server/src/server/grpc_service/sign_verify/sign.rs",
+            "async fn sign_final(",
+        ),
+        (
+            "SignRecover",
+            "crates/server/src/server/grpc_service/sign_verify/sign.rs",
+            "async fn sign_recover(",
+        ),
+        (
+            "VerifyRecover",
+            "crates/server/src/server/grpc_service/sign_verify/verify.rs",
+            "async fn verify_recover(",
+        ),
+        (
+            "Digest",
+            "crates/server/src/server/grpc_service/digest_cipher/digest.rs",
+            "async fn digest(",
+        ),
+        (
+            "DigestFinal",
+            "crates/server/src/server/grpc_service/digest_cipher/digest.rs",
+            "async fn digest_final(",
+        ),
+        (
+            "Encrypt",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn encrypt(",
+        ),
+        (
+            "EncryptUpdate",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn encrypt_update(",
+        ),
+        (
+            "EncryptFinal",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn encrypt_final(",
+        ),
+        (
+            "Decrypt",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn decrypt(",
+        ),
+        (
+            "DecryptUpdate",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn decrypt_update(",
+        ),
+        (
+            "DecryptFinal",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn decrypt_final(",
+        ),
+        (
+            "DigestEncryptUpdate",
+            "crates/server/src/server/grpc_service/combined/sign_encrypt.rs",
+            "async fn digest_encrypt_update(",
+        ),
+        (
+            "SignEncryptUpdate",
+            "crates/server/src/server/grpc_service/combined/sign_encrypt.rs",
+            "async fn sign_encrypt_update(",
+        ),
+        (
+            "DecryptDigestUpdate",
+            "crates/server/src/server/grpc_service/combined/decrypt_digest.rs",
+            "async fn decrypt_digest_update(",
+        ),
+        (
+            "DecryptVerifyUpdate",
+            "crates/server/src/server/grpc_service/combined/decrypt_digest.rs",
+            "async fn decrypt_verify_update(",
+        ),
+        (
+            "GetOperationState",
+            "crates/server/src/server/grpc_service/state_ops/operation_state.rs",
+            "async fn get_operation_state(",
+        ),
+        (
+            "WrapKey",
+            "crates/server/src/server/grpc_service/key_ops/wrapping.rs",
+            "async fn wrap_key(",
+        ),
+        (
+            "EncapsulateKey",
+            "crates/server/src/server/grpc_service/key_ops/kem.rs",
+            "async fn encapsulate_key(",
+        ),
+    ];
+    const MARKER: &str = "NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto)";
+
+    let root = workspace_root();
+    let proto = fs::read_to_string(root.join("proto/pkcs11-proxy-ng/v1/service.proto"))
+        .expect("service.proto should be readable");
+    let begin = proto
+        .find("Legacy per-function retention (W1-L11-21) - BEGIN")
+        .expect("service.proto must carry the legacy retention notice block");
+    let end = proto
+        .find("Legacy per-function retention (W1-L11-21) - END")
+        .expect("service.proto retention notice must be delimited");
+    assert!(begin < end, "retention notice delimiters out of order");
+    let notice = &proto[begin..end];
+    assert!(notice.contains("v0.4.0"), "retention notice must state the removal version");
+    for (rpc, _, _) in LEGACY {
+        assert!(notice.contains(rpc), "retention notice must name the legacy rpc {rpc}");
+    }
+
+    for (rpc, file, anchor) in LEGACY {
+        let src = fs::read_to_string(root.join(file)).expect("handler source readable");
+        let at = src.find(anchor).unwrap_or_else(|| panic!("{file} must define {anchor}"));
+        let window_start = at.saturating_sub(600);
+        assert!(
+            src[window_start..at].contains(MARKER),
+            "{file} handler for legacy rpc {rpc} must carry the uniform legacy marker"
+        );
+    }
+}

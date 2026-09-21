@@ -27,16 +27,16 @@ pub unsafe extern "C" fn c_login_user(
         };
         // W1-C6-07: preserve caller-NULL pin/username as None (the
         // `c_login` convention) so a protected-path login reaches the
-        // backend as NULL, not as an empty slice.
-        let pin = if p_pin.is_null() {
-            None
-        } else {
-            Some(unsafe { read_input_slice(p_pin, ul_pin_len) })
+        // backend as NULL, not as an empty slice. W1-L11-10: the
+        // fallible reader keeps that mapping and answers TooLarge with
+        // ARGUMENTS_BAD instead of panicking.
+        let pin = match unsafe { try_read_optional_bytes(p_pin, ul_pin_len) } {
+            Ok(pin) => pin,
+            Err(e) => return rv_err(e),
         };
-        let username = if p_username.is_null() {
-            None
-        } else {
-            Some(unsafe { read_input_slice(p_username, ul_username_len) })
+        let username = match unsafe { try_read_optional_bytes(p_username, ul_username_len) } {
+            Ok(username) => username,
+            Err(e) => return rv_err(e),
         };
         unit_result_to_rv(
             with_client!(client => client.login_user(CkSessionHandle(h_session as u64), ut, username, pin)),

@@ -14,7 +14,7 @@ use super::super::{
     service_utils::{resolve_session, spawn_backend},
 };
 
-// NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(super) async fn decrypt_digest_update(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptDigestUpdateRequest>,
@@ -44,7 +44,7 @@ pub(super) async fn decrypt_digest_update(
     }))
 }
 
-// NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(super) async fn decrypt_verify_update(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptVerifyUpdateRequest>,

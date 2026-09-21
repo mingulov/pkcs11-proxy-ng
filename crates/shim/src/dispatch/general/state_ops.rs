@@ -59,23 +59,13 @@ pub unsafe extern "C" fn c_get_operation_state(
     p_operation_state: CK_BYTE_PTR,
     pul_operation_state_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let spec = unsafe { output_buffer_spec(p_operation_state, pul_operation_state_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact_no_input(
+            h_session,
             ByteOutputFunction::GetOperationState,
-            &spec,
-            CkInBuf::Bytes(&[]),
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe {
-                write_exact_output(&spec, &r, p_operation_state, pul_operation_state_len)
-            },
-            Err(e) => rv_err(e),
-        }
+            p_operation_state,
+            pul_operation_state_len,
+        )
     })
 }
 
