@@ -22,7 +22,7 @@
 //! be distinguished from legitimate pruning by this verifier alone — only the
 //! retained suffix is cryptographically anchored.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -32,6 +32,15 @@ use crate::AuditError;
 use crate::chain::{GENESIS_HASH, record_hash};
 use crate::record::{AuditRecord, from_jsonl};
 use crate::sign::{Checkpoint, Verifier};
+
+/// Maximum number of missing seqs materialized into [`VerifyReport::gaps`].
+///
+/// The seq span `first_seq..=last_seq` is attacker-controlled (a 2-line log
+/// can claim `{0, u64::MAX}`), so gap enumeration must never iterate the span
+/// itself (W1-C12-03). The verifier scans sorted-adjacent records instead and
+/// keeps at most this many sample gap seqs; anything more sets
+/// [`VerifyReport::gaps_truncated`].
+pub const MAX_VERIFY_GAPS: usize = 10_000;
 
 /// Summary produced by [`verify_dir`].
 #[derive(Debug)]
@@ -49,7 +58,16 @@ pub struct VerifyReport {
     pub chain_ok: bool,
     /// Missing sequence numbers in the retained range `first_seq..=last_seq`.
     /// A pruned prefix (seqs below `first_seq`) is **not** a gap.
+    ///
+    /// At most [`MAX_VERIFY_GAPS`] entries are materialized; when more seqs
+    /// are missing, the oldest samples are kept and [`Self::gaps_truncated`]
+    /// is set. `chain_ok` is `false` whenever any seq is missing, truncated
+    /// or not.
     pub gaps: Vec<u64>,
+    /// `true` when more than [`MAX_VERIFY_GAPS`] seqs are missing, i.e.
+    /// [`Self::gaps`] holds only the first samples (W1-C12-03). Always `false`
+    /// when [`Self::gaps`] is complete.
+    pub gaps_truncated: bool,
     /// Number of checkpoints that both verified (signature, if checked) and
     /// bound to the replayed chain head at their seq.
     pub checkpoints_verified: u64,
@@ -102,8 +120,10 @@ struct ReplayOutcome {
     links_ok: bool,
     /// The retained range `first_seq..=last_seq` had no missing seqs.
     contiguous: bool,
-    /// Missing seqs within the retained range.
+    /// Missing seqs within the retained range (at most [`MAX_VERIFY_GAPS`]).
     gaps: Vec<u64>,
+    /// `true` when more than [`MAX_VERIFY_GAPS`] seqs are missing.
+    gaps_truncated: bool,
     /// Replayed chain head hash keyed by record seq (for checkpoint binding).
     seq_to_hash: HashMap<u64, String>,
     /// The chain head after replaying the last retained record.
@@ -155,7 +175,7 @@ pub fn verify_dir(dir: &Path, public_key_hex: Option<&str>) -> Result<VerifyRepo
         (all_records[0].seq, all_records[all_records.len() - 1].seq)
     };
 
-    let replay = replay_chain(&all_records, first_seq, last_seq);
+    let replay = replay_chain(&all_records);
 
     // Tally dropped data-plane records from gap-sentinel entries.
     // A sentinel is any record whose `dropped_count` is `Some(n)`.
@@ -187,6 +207,7 @@ pub fn verify_dir(dir: &Path, public_key_hex: Option<&str>) -> Result<VerifyRepo
         last_seq,
         chain_ok,
         gaps: replay.gaps,
+        gaps_truncated: replay.gaps_truncated,
         checkpoints_verified,
         checkpoints_failed,
         signature_checked,
@@ -228,13 +249,16 @@ fn is_audit_log(name: &str) -> bool {
 ///
 /// The baseline is the **first retained record's stored `prev_hash`** — not
 /// [`GENESIS_HASH`] — so a legitimately pruned prefix does not fail the replay.
-/// Gaps are computed over `first_seq..=last_seq` only.
-fn replay_chain(records: &[AuditRecord], first_seq: u64, last_seq: u64) -> ReplayOutcome {
+/// Gaps are detected over `first_seq..=last_seq` only, via an O(n)
+/// sorted-adjacent scan — the untrusted span itself is never iterated
+/// (W1-C12-03: `{0, u64::MAX}` would hang/OOM a span enumeration).
+fn replay_chain(records: &[AuditRecord]) -> ReplayOutcome {
     if records.is_empty() {
         return ReplayOutcome {
             links_ok: true,
             contiguous: true,
             gaps: Vec::new(),
+            gaps_truncated: false,
             seq_to_hash: HashMap::new(),
             head: GENESIS_HASH.to_string(),
         };
@@ -263,11 +287,35 @@ fn replay_chain(records: &[AuditRecord], first_seq: u64, last_seq: u64) -> Repla
         expected_prev = h;
     }
 
-    let seq_set: HashSet<u64> = records.iter().map(|r| r.seq).collect();
-    let gaps: Vec<u64> = (first_seq..=last_seq).filter(|s| !seq_set.contains(s)).collect();
-    let contiguous = gaps.is_empty();
+    // Gap detection without span enumeration (W1-C12-03): `first_seq` and
+    // `last_seq` come from untrusted record seqs, so `(first..=last)` may
+    // cover ~2^64 values. Instead, scan sorted-adjacent pairs (O(n) in the
+    // record count) and count missing seqs arithmetically, materializing at
+    // most MAX_VERIFY_GAPS sample seqs. Duplicate seqs collapse exactly as
+    // the old set-membership scan: they hide no missing seqs.
+    let mut gaps: Vec<u64> = Vec::new();
+    let mut missing_total: u64 = 0;
+    for pair in records.windows(2) {
+        let (a, b) = (pair[0].seq, pair[1].seq);
+        if b <= a {
+            continue;
+        }
+        // a < b, so `b - a - 1` cannot underflow and `a + 1` cannot overflow.
+        let missing = b - a - 1;
+        if missing == 0 {
+            continue;
+        }
+        missing_total = missing_total.saturating_add(missing);
+        let mut s = a + 1;
+        while s < b && gaps.len() < MAX_VERIFY_GAPS {
+            gaps.push(s);
+            s += 1; // s < b <= u64::MAX, so this cannot overflow
+        }
+    }
+    let gaps_truncated = missing_total > gaps.len() as u64;
+    let contiguous = missing_total == 0;
 
-    ReplayOutcome { links_ok, contiguous, gaps, seq_to_hash, head: expected_prev }
+    ReplayOutcome { links_ok, contiguous, gaps, gaps_truncated, seq_to_hash, head: expected_prev }
 }
 
 /// Reads `dir/audit.checkpoints.jsonl`, binds each in-range checkpoint to the
@@ -1051,6 +1099,108 @@ mod tests {
         let report = verify_dir(&dir, None).unwrap();
         assert!(!report.head_matches_anchor, "tampered anchor must not match; got: {report:?}");
         assert!(!report.chain_ok, "tampered anchor must fail verification; got: {report:?}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // W1-C12-03: bound gap enumeration (never iterate untrusted first..=last)
+    // -----------------------------------------------------------------------
+
+    /// An adversarial `first..=last` span must not hang the verifier. Two
+    /// records `{0, u64::MAX}` made gap enumeration iterate ~2^64 entries
+    /// (hang/OOM). Gap materialization is now capped: this must return fast
+    /// with a bounded gap list and `chain_ok == false`.
+    #[test]
+    fn huge_span_gap_enumeration_is_bounded() {
+        let dir = temp_dir("huge-span");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut r0 = rec("C_Op", 0);
+        r0.seq = 0;
+        r0.prev_hash = GENESIS_HASH.to_string();
+        let mut r1 = rec("C_Op", 0);
+        r1.seq = u64::MAX;
+        r1.prev_hash = record_hash(&r0.prev_hash, &r0);
+
+        fs::write(dir.join("audit.jsonl"), format!("{}{}", to_jsonl(&r0), to_jsonl(&r1))).unwrap();
+
+        // Must return (pre-fix this iterated 0..=u64::MAX forever).
+        let report = verify_dir(&dir, None).unwrap();
+        assert_eq!(report.first_seq, 0);
+        assert_eq!(report.last_seq, u64::MAX);
+        assert!(
+            report.gaps.len() <= MAX_VERIFY_GAPS,
+            "gap list must be capped at {MAX_VERIFY_GAPS}; got {}",
+            report.gaps.len()
+        );
+        assert!(report.gaps_truncated, "huge span must set gaps_truncated; got: {report:?}");
+        assert!(!report.chain_ok, "huge gap must fail chain_ok; got: {report:?}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A span with more missing seqs than the cap (but small enough to
+    /// enumerate naively) must stop materializing at the cap and flag it.
+    #[test]
+    fn gap_samples_stop_at_cap() {
+        let dir = temp_dir("gap-cap");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut r0 = rec("C_Op", 0);
+        r0.seq = 0;
+        r0.prev_hash = GENESIS_HASH.to_string();
+        let mut r1 = rec("C_Op", 0);
+        r1.seq = (2 * MAX_VERIFY_GAPS + 1) as u64;
+        r1.prev_hash = record_hash(&r0.prev_hash, &r0);
+
+        fs::write(dir.join("audit.jsonl"), format!("{}{}", to_jsonl(&r0), to_jsonl(&r1))).unwrap();
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert_eq!(
+            report.gaps.len(),
+            MAX_VERIFY_GAPS,
+            "over-cap span must materialize exactly the cap; got {}",
+            report.gaps.len()
+        );
+        assert!(report.gaps_truncated, "over-cap span must set gaps_truncated; got: {report:?}");
+        assert!(!report.chain_ok, "over-cap gap must fail chain_ok; got: {report:?}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Gating pin: legitimate small gaps are still enumerated fully, with no
+    /// truncation flag.
+    #[test]
+    fn small_gaps_enumerated_fully() {
+        let dir = temp_dir("small-gap");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut recs: Vec<AuditRecord> = (0..5).map(|_| rec("C_Op", 0)).collect();
+        for r in recs.iter_mut() {
+            st.append(r);
+        }
+        // Drop seq 2 → retained seqs {0,1,3,4} with one missing seq.
+        fs::write(
+            dir.join("audit.jsonl"),
+            format!(
+                "{}{}{}{}",
+                to_jsonl(&recs[0]),
+                to_jsonl(&recs[1]),
+                to_jsonl(&recs[3]),
+                to_jsonl(&recs[4]),
+            ),
+        )
+        .unwrap();
+
+        let report = verify_dir(&dir, None).unwrap();
+        assert_eq!(report.gaps, vec![2], "small gap must be enumerated fully; got: {report:?}");
+        assert!(!report.gaps_truncated, "small gap must not truncate; got: {report:?}");
+        assert!(!report.chain_ok, "gap must fail chain_ok; got: {report:?}");
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -27,7 +27,11 @@ pub(crate) fn verify(dir: &Path, public_key_hex: Option<&str>) -> CliResult {
     }
     println!("  chain_ok    : {}", report.chain_ok);
     println!("  anchor      : {}", if report.head_matches_anchor { "matches" } else { "MISMATCH" });
-    println!("  gaps        : {}", report.gaps.len());
+    println!(
+        "  gaps        : {}{}",
+        report.gaps.len(),
+        if report.gaps_truncated { " (truncated — showing first samples only)" } else { "" }
+    );
     if !report.gaps.is_empty() {
         println!("  gap seqs    : {:?}", report.gaps);
     }
