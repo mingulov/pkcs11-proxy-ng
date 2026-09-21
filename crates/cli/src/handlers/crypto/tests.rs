@@ -215,7 +215,7 @@ async fn encrypt_resolves_secret_key_by_label() {
     encrypt(
         &mut fx.client,
         fx.slot,
-        PIN.to_string(),
+        SecretBytes::from(PIN),
         SECRET_LABEL.to_string(),
         "AES_ECB".to_string(),
         None,
@@ -232,7 +232,7 @@ async fn decrypt_resolves_secret_key_by_label() {
     decrypt(
         &mut fx.client,
         fx.slot,
-        PIN.to_string(),
+        SecretBytes::from(PIN),
         SECRET_LABEL.to_string(),
         "AES_ECB".to_string(),
         None,
@@ -249,7 +249,7 @@ async fn sign_resolves_secret_key_by_label() {
     sign(
         &mut fx.client,
         fx.slot,
-        PIN.to_string(),
+        SecretBytes::from(PIN),
         SECRET_LABEL.to_string(),
         "SHA256_HMAC".to_string(),
         None,
@@ -266,7 +266,7 @@ async fn verify_resolves_secret_key_by_label() {
     verify(
         &mut fx.client,
         fx.slot,
-        Some(PIN.to_string()),
+        Some(SecretBytes::from(PIN)),
         SECRET_LABEL.to_string(),
         "SHA256_HMAC".to_string(),
         None,
@@ -292,7 +292,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
             encrypt(
                 client,
                 slot,
-                PIN.to_string(),
+                SecretBytes::from(PIN),
                 label.to_string(),
                 "AES_ECB".to_string(),
                 None,
@@ -304,7 +304,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
             decrypt(
                 client,
                 slot,
-                PIN.to_string(),
+                SecretBytes::from(PIN),
                 label.to_string(),
                 "AES_ECB".to_string(),
                 None,
@@ -316,7 +316,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
             sign(
                 client,
                 slot,
-                PIN.to_string(),
+                SecretBytes::from(PIN),
                 label.to_string(),
                 "SHA256_HMAC".to_string(),
                 None,
@@ -328,7 +328,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
             verify(
                 client,
                 slot,
-                Some(PIN.to_string()),
+                Some(SecretBytes::from(PIN)),
                 label.to_string(),
                 "SHA256_HMAC".to_string(),
                 None,
@@ -348,7 +348,7 @@ async fn bare_gcm_encrypt_errors_with_cli_hint() {
     let err = encrypt(
         &mut fx.client,
         fx.slot,
-        PIN.to_string(),
+        SecretBytes::from(PIN),
         SECRET_LABEL.to_string(),
         "AES_GCM".to_string(),
         None,
@@ -371,7 +371,7 @@ async fn verify_invalid_releases_session() {
     let err = verify(
         &mut fx.client,
         fx.slot,
-        Some(PIN.to_string()),
+        Some(SecretBytes::from(PIN)),
         SECRET_LABEL.to_string(),
         "SHA256_HMAC".to_string(),
         None,
@@ -411,7 +411,7 @@ async fn encrypt_accepts_gcm_params_file() {
     encrypt(
         &mut fx.client,
         fx.slot,
-        PIN.to_string(),
+        SecretBytes::from(PIN),
         SECRET_LABEL.to_string(),
         "AES_GCM".to_string(),
         Some(params_path),
@@ -429,7 +429,7 @@ async fn duplicate_label_errors_listing_matches() {
     let err = encrypt(
         &mut fx.client,
         fx.slot,
-        PIN.to_string(),
+        SecretBytes::from(PIN),
         SECRET_LABEL.to_string(),
         "AES_ECB".to_string(),
         None,

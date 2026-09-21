@@ -11,6 +11,7 @@ mod handlers;
 mod mech_params;
 mod mechanisms;
 mod pkcs11_names;
+mod secrets;
 
 use cli::{AuditCmd, Cli, Commands};
 use handlers::run_command;

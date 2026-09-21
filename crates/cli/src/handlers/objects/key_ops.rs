@@ -1,16 +1,7 @@
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
 
-use super::super::{CliResult, close_session, login_user, open_session};
-
-// W1-C11-09 (Task 16): this thin wrapper is still triplicated across
-// sign_verify.rs/digest_cipher.rs/key_ops.rs; dedupe there.
-fn cli_mechanism(
-    name: &str,
-    params_file: Option<&std::path::Path>,
-) -> Result<CkMechanism, Box<dyn core::error::Error>> {
-    crate::mech_params::build_mechanism(name, params_file)
-}
+use super::super::{CliResult, cli_mechanism, close_session, login_user, open_session};
 
 /// Convert `--key-size` (bits) to `CKA_VALUE_LEN` bytes (W1-C11-10):
 /// exact division, rejecting non-multiples-of-8 instead of silently
@@ -101,7 +92,7 @@ fn public_size_attr(
 pub(crate) async fn wrap_key(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: String,
+    pin: SecretBytes,
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
     wrapping_key_handle: u64,
@@ -110,7 +101,7 @@ pub(crate) async fn wrap_key(
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
-    login_user(client, session, &pin).await?;
+    login_user(client, session, pin).await?;
     let wrapped = client
         .wrap_key(
             session,
@@ -128,7 +119,7 @@ pub(crate) async fn wrap_key(
 pub(crate) async fn unwrap_key(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: String,
+    pin: SecretBytes,
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
     unwrapping_key_handle: u64,
@@ -142,7 +133,7 @@ pub(crate) async fn unwrap_key(
         CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
     )
     .await?;
-    login_user(client, session, &pin).await?;
+    login_user(client, session, pin).await?;
 
     let wrapped_key = hex::decode(&wrapped_key).map_err(|e| format!("Invalid hex: {e}"))?;
     let mut template = vec![
@@ -180,7 +171,7 @@ pub(crate) async fn unwrap_key(
 pub(crate) async fn derive_key(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: String,
+    pin: SecretBytes,
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
     base_key_handle: u64,
@@ -193,7 +184,7 @@ pub(crate) async fn derive_key(
         CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
     )
     .await?;
-    login_user(client, session, &pin).await?;
+    login_user(client, session, pin).await?;
 
     let mut template = vec![CkAttribute {
         attr_type: CkAttributeType::TOKEN,
@@ -218,7 +209,7 @@ pub(crate) async fn derive_key(
 pub(crate) async fn generate_key(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: String,
+    pin: SecretBytes,
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
     label: String,
@@ -231,7 +222,7 @@ pub(crate) async fn generate_key(
         CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
     )
     .await?;
-    login_user(client, session, &pin).await?;
+    login_user(client, session, pin).await?;
 
     let mut template = vec![
         CkAttribute {
@@ -270,7 +261,7 @@ pub(crate) async fn generate_key(
 pub(crate) async fn generate_key_pair(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: String,
+    pin: SecretBytes,
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
     label: String,
@@ -284,7 +275,7 @@ pub(crate) async fn generate_key_pair(
         CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
     )
     .await?;
-    login_user(client, session, &pin).await?;
+    login_user(client, session, pin).await?;
 
     let mut public_template = vec![
         CkAttribute {

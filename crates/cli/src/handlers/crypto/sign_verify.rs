@@ -2,22 +2,14 @@ use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::{
-    CliResult, close_session, find_key_by_label, login_if_present, login_user, open_session,
+    CliResult, cli_mechanism, close_session, find_key_by_label, login_if_present, login_user,
+    open_session,
 };
-
-// W1-C11-09 (Task 16): this thin wrapper is still triplicated across
-// sign_verify.rs/digest_cipher.rs/key_ops.rs; dedupe there.
-fn cli_mechanism(
-    name: &str,
-    params_file: Option<&std::path::Path>,
-) -> Result<CkMechanism, Box<dyn core::error::Error>> {
-    crate::mech_params::build_mechanism(name, params_file)
-}
 
 pub(crate) async fn sign(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: String,
+    pin: SecretBytes,
     key_label: String,
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
@@ -26,7 +18,7 @@ pub(crate) async fn sign(
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
-    login_user(client, session, &pin).await?;
+    login_user(client, session, pin).await?;
     let key = find_key_by_label(client, session, &key_label, CkObjectClass::PRIVATE_KEY).await?;
     let data = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
 
@@ -44,7 +36,7 @@ pub(crate) async fn sign(
 pub(crate) async fn verify(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: Option<String>,
+    pin: Option<SecretBytes>,
     key_label: String,
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
@@ -56,7 +48,10 @@ pub(crate) async fn verify(
     let signature = hex::decode(&signature).map_err(|e| format!("Invalid hex signature: {e}"))?;
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
-    login_if_present(client, session, pin.as_deref()).await?;
+    // By-value PIN (W1-L2-11): consume it into login, keep only the
+    // logged-in flag for session teardown.
+    let logged_in = pin.is_some();
+    login_if_present(client, session, pin).await?;
     let key = find_key_by_label(client, session, &key_label, CkObjectClass::PUBLIC_KEY).await?;
 
     client
@@ -70,11 +65,11 @@ pub(crate) async fn verify(
             // return a sentinel so main finalizes and exits 2 —
             // never exit(1) past cleanup like a generic error.
             eprintln!("Signature INVALID (CKR_SIGNATURE_INVALID)");
-            close_session(client, session, pin.is_some()).await;
+            close_session(client, session, logged_in).await;
             return Err(Box::new(super::super::VerifyInvalid));
         }
         Err(error) => return Err(crate::handlers::cli_err("C_Verify")(error)),
     }
-    close_session(client, session, pin.is_some()).await;
+    close_session(client, session, logged_in).await;
     Ok(())
 }

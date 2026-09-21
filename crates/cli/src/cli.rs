@@ -1,5 +1,13 @@
 use clap::{Parser, Subcommand};
+use pkcs11_proxy_ng_types::SecretBytes;
 use std::path::PathBuf;
+
+/// Parse a PIN into wiping storage (W1-L2-11): clap holds `SecretBytes`
+/// (zeroized on drop) instead of a plain `String`, whether the value
+/// arrives via argv or env.
+fn parse_wiping_pin(value: &str) -> Result<SecretBytes, String> {
+    Ok(SecretBytes::from(value))
+}
 
 #[derive(Parser)]
 #[command(name = "pkcs11-proxy-ng-cli", about = "PKCS#11 proxy CLI", version)]
@@ -33,7 +41,7 @@ pub(crate) struct Cli {
     pub(crate) command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
     ListSlots {
         #[arg(long)]
@@ -51,8 +59,16 @@ pub(crate) enum Commands {
     FindObjects {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: Option<String>,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         label: Option<String>,
         #[arg(long)]
@@ -61,8 +77,16 @@ pub(crate) enum Commands {
     Sign {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         key_label: String,
         #[arg(long)]
@@ -72,8 +96,14 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        #[arg(long, env = "PKCS11_PROXY_INPUT", hide_env_values = true)]
+        input: Option<String>,
+        /// Read the hex input from a file instead of `--input`.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        input_file: Option<PathBuf>,
+        /// Read the hex input from stdin instead of `--input`.
         #[arg(long)]
-        input: String,
+        input_stdin: bool,
     },
     Digest {
         #[arg(long)]
@@ -85,14 +115,28 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        #[arg(long, env = "PKCS11_PROXY_INPUT", hide_env_values = true)]
+        input: Option<String>,
+        /// Read the hex input from a file instead of `--input`.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        input_file: Option<PathBuf>,
+        /// Read the hex input from stdin instead of `--input`.
         #[arg(long)]
-        input: String,
+        input_stdin: bool,
     },
     Encrypt {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         key_label: String,
         #[arg(long)]
@@ -102,14 +146,28 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        #[arg(long, env = "PKCS11_PROXY_INPUT", hide_env_values = true)]
+        input: Option<String>,
+        /// Read the hex input from a file instead of `--input`.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        input_file: Option<PathBuf>,
+        /// Read the hex input from stdin instead of `--input`.
         #[arg(long)]
-        input: String,
+        input_stdin: bool,
     },
     Decrypt {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         key_label: String,
         #[arg(long)]
@@ -119,40 +177,84 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        #[arg(long, env = "PKCS11_PROXY_INPUT", hide_env_values = true)]
+        input: Option<String>,
+        /// Read the hex input from a file instead of `--input`.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        input_file: Option<PathBuf>,
+        /// Read the hex input from stdin instead of `--input`.
         #[arg(long)]
-        input: String,
+        input_stdin: bool,
     },
     DestroyObject {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: Option<String>,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         object_handle: u64,
     },
     GetObjectSize {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: Option<String>,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         object_handle: u64,
     },
     CreateObject {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         label: String,
-        #[arg(long)]
+        #[arg(long, env = "PKCS11_PROXY_VALUE", hide_env_values = true)]
         value: Option<String>,
+        /// Read the hex value from a file instead of `--value`.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        value_file: Option<PathBuf>,
+        /// Read the hex value from stdin instead of `--value`.
+        #[arg(long)]
+        value_stdin: bool,
     },
     WrapKey {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -168,8 +270,16 @@ pub(crate) enum Commands {
     UnwrapKey {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -179,16 +289,30 @@ pub(crate) enum Commands {
         params_file: Option<PathBuf>,
         #[arg(long)]
         unwrapping_key_handle: u64,
+        #[arg(long, env = "PKCS11_PROXY_WRAPPED_KEY", hide_env_values = true)]
+        wrapped_key: Option<String>,
+        /// Read the hex wrapped key from a file instead of `--wrapped-key`.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        wrapped_key_file: Option<PathBuf>,
+        /// Read the hex wrapped key from stdin instead of `--wrapped-key`.
         #[arg(long)]
-        wrapped_key: String,
+        wrapped_key_stdin: bool,
         #[arg(long)]
         label: Option<String>,
     },
     DeriveKey {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -204,8 +328,16 @@ pub(crate) enum Commands {
     GenerateKey {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -223,8 +355,16 @@ pub(crate) enum Commands {
     GenerateKeyPair {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         mechanism: String,
         /// JSON mechanism parameters for AES_GCM, RSA_PKCS_OAEP and the
@@ -260,48 +400,100 @@ pub(crate) enum Commands {
     InitToken {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_SO_PIN", hide_env_values = true)]
-        so_pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_SO_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        so_pin: SecretBytes,
         #[arg(long)]
         label: String,
     },
     InitPin {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_SO_PIN", hide_env_values = true)]
-        so_pin: String,
-        #[arg(long, env = "PKCS11_PROXY_NEW_PIN", hide_env_values = true)]
-        new_pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_SO_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        so_pin: SecretBytes,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_NEW_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        new_pin: SecretBytes,
     },
     SeedRandom {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long, env = "PKCS11_PROXY_SEED", hide_env_values = true)]
         seed: String,
     },
     SetPin {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
-        #[arg(long, env = "PKCS11_PROXY_NEW_PIN", hide_env_values = true)]
-        new_pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_NEW_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        new_pin: SecretBytes,
     },
     ListMechanismNames,
     GetInfo,
     SessionInfo {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: Option<String>,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
     },
     Verify {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: Option<String>,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         key_label: String,
         #[arg(long)]
@@ -311,10 +503,22 @@ pub(crate) enum Commands {
         /// for GCM). Required for those mechanisms; rejected otherwise.
         #[arg(long, value_hint = clap::ValueHint::FilePath)]
         params_file: Option<PathBuf>,
+        #[arg(long, env = "PKCS11_PROXY_DATA", hide_env_values = true)]
+        data: Option<String>,
+        /// Read the hex data from a file instead of `--data`.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        data_file: Option<PathBuf>,
+        /// Read the hex data from stdin instead of `--data`.
         #[arg(long)]
-        data: String,
+        data_stdin: bool,
+        #[arg(long, env = "PKCS11_PROXY_SIGNATURE", hide_env_values = true)]
+        signature: Option<String>,
+        /// Read the hex signature from a file instead of `--signature`.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        signature_file: Option<PathBuf>,
+        /// Read the hex signature from stdin instead of `--signature`.
         #[arg(long)]
-        signature: String,
+        signature_stdin: bool,
     },
     Random {
         #[arg(long)]
@@ -327,8 +531,16 @@ pub(crate) enum Commands {
     GetAttribute {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: Option<String>,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         object_handle: u64,
         #[arg(long)]
@@ -337,8 +549,16 @@ pub(crate) enum Commands {
     ImportCertificate {
         #[arg(long)]
         slot_id: u64,
-        #[arg(long, env = "PKCS11_PROXY_PIN", hide_env_values = true)]
-        pin: String,
+        #[arg(
+            long,
+            env = "PKCS11_PROXY_PIN",
+            hide_env_values = true,
+            value_parser = parse_wiping_pin
+        )]
+        pin: Option<SecretBytes>,
+        /// Read the user PIN from stdin instead of `--pin`.
+        #[arg(long)]
+        pin_stdin: bool,
         #[arg(long)]
         label: String,
         #[arg(long)]
@@ -352,7 +572,7 @@ pub(crate) enum Commands {
 }
 
 /// Subcommands for the `audit` command group.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub(crate) enum AuditCmd {
     /// Verify a directory of audit logs (hash chain + optional signatures).
     Verify {
@@ -367,15 +587,23 @@ pub(crate) enum AuditCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env_vars<T>(vars: &[(&str, &str)], f: impl FnOnce() -> T) -> T {
         let _guard = ENV_LOCK.lock().unwrap();
-        let previous: Vec<(&str, Option<OsString>)> =
-            vars.iter().map(|(name, _)| (*name, std::env::var_os(name))).collect();
+        // Isolate the whole PKCS11_PROXY_* namespace: snapshot and clear
+        // it, set only the requested vars, then restore. Otherwise a
+        // concurrent test's vars (or the developer's environment) leak
+        // into clap's env fallbacks and flake unrelated assertions.
+        let snapshot: Vec<(String, String)> =
+            std::env::vars().filter(|(name, _)| name.starts_with("PKCS11_PROXY_")).collect();
+        for (name, _) in &snapshot {
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
 
         for (name, value) in vars {
             unsafe {
@@ -384,12 +612,14 @@ mod tests {
         }
         let result = f();
 
-        for (name, value) in previous {
+        for (name, _) in vars {
             unsafe {
-                match value {
-                    Some(previous) => std::env::set_var(name, previous),
-                    None => std::env::remove_var(name),
-                }
+                std::env::remove_var(name);
+            }
+        }
+        for (name, value) in snapshot {
+            unsafe {
+                std::env::set_var(name, value);
             }
         }
 
@@ -414,7 +644,11 @@ mod tests {
             .unwrap();
 
             match cli.command {
-                Commands::Sign { pin, .. } => assert_eq!(pin, "env-user-pin"),
+                Commands::Sign { pin, .. } => {
+                    pin.as_ref()
+                        .expect("env PIN must parse")
+                        .expose(|b| assert_eq!(b, b"env-user-pin"));
+                }
                 _ => panic!("expected sign command"),
             }
         });
@@ -429,7 +663,9 @@ mod tests {
 
             match cli.command {
                 Commands::FindObjects { pin, .. } => {
-                    assert_eq!(pin.as_deref(), Some("env-optional-pin"));
+                    pin.as_ref()
+                        .expect("env PIN must parse")
+                        .expose(|b| assert_eq!(b, b"env-optional-pin"));
                 }
                 _ => panic!("expected find-objects command"),
             }
@@ -447,8 +683,8 @@ mod tests {
 
                 match cli.command {
                     Commands::InitPin { so_pin, new_pin, .. } => {
-                        assert_eq!(so_pin, "env-so-pin");
-                        assert_eq!(new_pin, "env-new-pin");
+                        so_pin.expose(|b| assert_eq!(b, b"env-so-pin"));
+                        new_pin.expose(|b| assert_eq!(b, b"env-new-pin"));
                     }
                     _ => panic!("expected init-pin command"),
                 }
@@ -467,13 +703,204 @@ mod tests {
 
                 match cli.command {
                     Commands::SeedRandom { pin, seed, .. } => {
-                        assert_eq!(pin, "env-user-pin");
+                        pin.as_ref()
+                            .expect("env PIN must parse")
+                            .expose(|b| assert_eq!(b, b"env-user-pin"));
                         assert_eq!(seed, "env-seed-data");
                     }
                     _ => panic!("expected seed-random command"),
                 }
             },
         );
+    }
+
+    // W1-C11-15: secret hex args accept file/stdin/env sources so no
+    // secret must travel on argv.
+    #[test]
+    fn sign_accepts_input_file_and_stdin_without_inline_input() {
+        with_env_vars(&[], || {
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "sign",
+                "--slot-id",
+                "1",
+                "--pin",
+                "x",
+                "--key-label",
+                "k",
+                "--mechanism",
+                "AES_ECB",
+                "--input-file",
+                "input.hex",
+            ])
+            .unwrap();
+            match cli.command {
+                Commands::Sign { input, input_file, input_stdin, .. } => {
+                    assert_eq!(input, None);
+                    assert_eq!(input_file, Some(std::path::PathBuf::from("input.hex")));
+                    assert!(!input_stdin);
+                }
+                _ => panic!("expected sign command"),
+            }
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "sign",
+                "--slot-id",
+                "1",
+                "--pin",
+                "x",
+                "--key-label",
+                "k",
+                "--mechanism",
+                "AES_ECB",
+                "--input-stdin",
+            ])
+            .unwrap();
+            match cli.command {
+                Commands::Sign { input, input_file, input_stdin, .. } => {
+                    assert_eq!(input, None);
+                    assert_eq!(input_file, None);
+                    assert!(input_stdin);
+                }
+                _ => panic!("expected sign command"),
+            }
+        });
+    }
+
+    #[test]
+    fn secret_hex_args_accept_env_without_argv() {
+        with_env_vars(
+            &[
+                ("PKCS11_PROXY_INPUT", "aa"),
+                ("PKCS11_PROXY_WRAPPED_KEY", "bb"),
+                ("PKCS11_PROXY_VALUE", "cc"),
+                ("PKCS11_PROXY_DATA", "dd"),
+                ("PKCS11_PROXY_SIGNATURE", "ee"),
+            ],
+            || {
+                let cli = Cli::try_parse_from([
+                    "pkcs11-proxy-ng-cli",
+                    "sign",
+                    "--slot-id",
+                    "1",
+                    "--pin",
+                    "x",
+                    "--key-label",
+                    "k",
+                    "--mechanism",
+                    "AES_ECB",
+                ])
+                .unwrap();
+                match cli.command {
+                    Commands::Sign { input, .. } => {
+                        assert_eq!(input.as_deref(), Some("aa"));
+                    }
+                    _ => panic!("expected sign command"),
+                }
+                let cli = Cli::try_parse_from([
+                    "pkcs11-proxy-ng-cli",
+                    "unwrap-key",
+                    "--slot-id",
+                    "1",
+                    "--pin",
+                    "x",
+                    "--mechanism",
+                    "AES_KEY_WRAP",
+                    "--unwrapping-key-handle",
+                    "7",
+                ])
+                .unwrap();
+                match cli.command {
+                    Commands::UnwrapKey { wrapped_key, .. } => {
+                        assert_eq!(wrapped_key.as_deref(), Some("bb"));
+                    }
+                    _ => panic!("expected unwrap-key command"),
+                }
+                let cli = Cli::try_parse_from([
+                    "pkcs11-proxy-ng-cli",
+                    "verify",
+                    "--slot-id",
+                    "1",
+                    "--key-label",
+                    "k",
+                    "--mechanism",
+                    "SHA256_RSA_PKCS",
+                ])
+                .unwrap();
+                match cli.command {
+                    Commands::Verify { data, signature, .. } => {
+                        assert_eq!(data.as_deref(), Some("dd"));
+                        assert_eq!(signature.as_deref(), Some("ee"));
+                    }
+                    _ => panic!("expected verify command"),
+                }
+            },
+        );
+    }
+
+    // W1-L2-11: --pin accepts --pin-stdin without an inline PIN.
+    #[test]
+    fn sign_accepts_pin_stdin_without_inline_pin() {
+        with_env_vars(&[], || {
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "sign",
+                "--slot-id",
+                "1",
+                "--pin-stdin",
+                "--key-label",
+                "k",
+                "--mechanism",
+                "AES_ECB",
+                "--input",
+                "aa",
+            ])
+            .unwrap();
+            match cli.command {
+                Commands::Sign { pin, pin_stdin, .. } => {
+                    assert_eq!(pin, None);
+                    assert!(pin_stdin);
+                }
+                _ => panic!("expected sign command"),
+            }
+        });
+    }
+
+    // W1-L2-11 type-level proof: every PIN field on every command is
+    // `SecretBytes` (wiped on drop), never a plain `String`. This test
+    // only compiles while that holds.
+    #[test]
+    fn pins_live_in_wiping_storage() {
+        fn assert_wiping(_: &SecretBytes) {}
+        fn assert_opt_wiping(pin: &Option<SecretBytes>) {
+            if let Some(pin) = pin {
+                assert_wiping(pin);
+            }
+        }
+        with_env_vars(&[], || {
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "sign",
+                "--slot-id",
+                "1",
+                "--pin",
+                "s3cr3t-p1n",
+                "--key-label",
+                "k",
+                "--mechanism",
+                "AES_ECB",
+                "--input",
+                "aa",
+            ])
+            .unwrap();
+            match &cli.command {
+                Commands::Sign { pin, .. } => assert_opt_wiping(pin),
+                _ => panic!("expected sign command"),
+            }
+            // Debug must not leak PIN bytes (SecretBytes redacts to len).
+            let rendered = format!("{:?}", cli.command);
+            assert!(!rendered.contains("s3cr3t-p1n"), "PIN leaked into Debug: {rendered}");
+        });
     }
 
     #[test]

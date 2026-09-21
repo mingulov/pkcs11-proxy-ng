@@ -81,11 +81,14 @@ pub(crate) async fn get_info(client: &mut Pkcs11Client) -> CliResult {
 pub(crate) async fn session_info(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: Option<String>,
+    pin: Option<SecretBytes>,
 ) -> CliResult {
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
-    login_if_present(client, session, pin.as_deref()).await?;
+    // By-value PIN (W1-L2-11): consume it into login, keep only the
+    // logged-in flag for session teardown.
+    let logged_in = pin.is_some();
+    login_if_present(client, session, pin).await?;
     let info = client
         .get_session_info(session)
         .await
@@ -102,7 +105,7 @@ pub(crate) async fn session_info(
     println!("  State:        {state_name}");
     println!("  Flags:        0x{:08X}", info.flags.0);
     println!("  Device error: 0x{:08X}", info.device_error);
-    close_session(client, session, pin.is_some()).await;
+    close_session(client, session, logged_in).await;
     Ok(())
 }
 

@@ -109,7 +109,7 @@ async fn seed_visible_objects(fx: &mut Fixture, count: usize) {
 async fn find_objects_pages_past_100_handles() {
     let mut fx = fixture().await;
     seed_visible_objects(&mut fx, 250).await;
-    find_objects(&mut fx.client, fx.slot, Some("1234".to_string()), None, false)
+    find_objects(&mut fx.client, fx.slot, Some(SecretBytes::from("1234")), None, false)
         .await
         .expect("find-objects must succeed");
     assert_eq!(
@@ -124,7 +124,7 @@ async fn find_objects_pages_past_100_handles() {
 async fn small_listing_uses_single_find_call() {
     let mut fx = fixture().await;
     seed_visible_objects(&mut fx, 2).await;
-    find_objects(&mut fx.client, fx.slot, Some("1234".to_string()), None, false)
+    find_objects(&mut fx.client, fx.slot, Some(SecretBytes::from("1234")), None, false)
         .await
         .expect("find-objects must succeed");
     assert_eq!(fx.backend.find_objects_call_count(), 1);

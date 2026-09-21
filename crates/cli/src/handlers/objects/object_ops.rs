@@ -19,13 +19,16 @@ fn format_ulong_attribute(attr_type: CkAttributeType, value: u64) -> String {
 pub(crate) async fn find_objects(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: Option<String>,
+    pin: Option<SecretBytes>,
     label: Option<String>,
     verbose: bool,
 ) -> CliResult {
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
-    login_if_present(client, session, pin.as_deref()).await?;
+    // By-value PIN (W1-L2-11): consume it into login, keep only the
+    // logged-in flag for session teardown.
+    let logged_in = pin.is_some();
+    login_if_present(client, session, pin).await?;
 
     let mut template = Vec::new();
     if let Some(label) = label {
@@ -58,14 +61,14 @@ pub(crate) async fn find_objects(
         }
     }
 
-    close_session(client, session, pin.is_some()).await;
+    close_session(client, session, logged_in).await;
     Ok(())
 }
 
 pub(crate) async fn destroy_object(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: Option<String>,
+    pin: Option<SecretBytes>,
     object_handle: u64,
 ) -> CliResult {
     let session = open_session(
@@ -74,38 +77,40 @@ pub(crate) async fn destroy_object(
         CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
     )
     .await?;
-    login_if_present(client, session, pin.as_deref()).await?;
+    let logged_in = pin.is_some();
+    login_if_present(client, session, pin).await?;
     client
         .destroy_object(session, CkObjectHandle(object_handle))
         .await
         .map_err(crate::handlers::cli_err("C_DestroyObject"))?;
     println!("Object {} destroyed.", object_handle);
-    close_session(client, session, pin.is_some()).await;
+    close_session(client, session, logged_in).await;
     Ok(())
 }
 
 pub(crate) async fn get_object_size(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: Option<String>,
+    pin: Option<SecretBytes>,
     object_handle: u64,
 ) -> CliResult {
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
-    login_if_present(client, session, pin.as_deref()).await?;
+    let logged_in = pin.is_some();
+    login_if_present(client, session, pin).await?;
     let size = client
         .get_object_size(session, CkObjectHandle(object_handle))
         .await
         .map_err(crate::handlers::cli_err("C_GetObjectSize"))?;
     println!("Object {} size: {} bytes", object_handle, size);
-    close_session(client, session, pin.is_some()).await;
+    close_session(client, session, logged_in).await;
     Ok(())
 }
 
 pub(crate) async fn create_object(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: String,
+    pin: SecretBytes,
     label: String,
     value: Option<String>,
 ) -> CliResult {
@@ -115,7 +120,7 @@ pub(crate) async fn create_object(
         CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
     )
     .await?;
-    login_user(client, session, &pin).await?;
+    login_user(client, session, pin).await?;
 
     let mut template = vec![
         CkAttribute {
@@ -151,13 +156,14 @@ pub(crate) async fn create_object(
 pub(crate) async fn get_attribute(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: Option<String>,
+    pin: Option<SecretBytes>,
     object_handle: u64,
     attr: Vec<String>,
 ) -> CliResult {
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
-    login_if_present(client, session, pin.as_deref()).await?;
+    let logged_in = pin.is_some();
+    login_if_present(client, session, pin).await?;
 
     let attr_types: Vec<CkAttributeType> =
         attr.iter().map(|attr| parse_attr_type(attr)).collect::<Result<Vec<_>, _>>()?;
@@ -201,7 +207,7 @@ pub(crate) async fn get_attribute(
         }
     }
 
-    close_session(client, session, pin.is_some()).await;
+    close_session(client, session, logged_in).await;
     Ok(())
 }
 

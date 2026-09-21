@@ -7,7 +7,7 @@ use super::super::{CliResult, close_session, login_user, open_session};
 pub(crate) async fn import_certificate(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: String,
+    pin: SecretBytes,
     label: String,
     file: std::path::PathBuf,
 ) -> CliResult {
@@ -28,7 +28,7 @@ pub(crate) async fn import_certificate(
         CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
     )
     .await?;
-    login_user(client, session, &pin).await?;
+    login_user(client, session, pin).await?;
 
     let (_, certificate) = x509_parser::parse_x509_certificate(&der)
         .map_err(|e| format!("Failed to parse X.509 certificate: {e}"))?;
