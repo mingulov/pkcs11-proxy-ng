@@ -3,6 +3,12 @@ use pkcs11_proxy_ng_types::*;
 
 use crate::error::MessageCallError;
 
+pub use deadline::DEFAULT_RPC_TIMEOUT;
+use deadline::RpcDeadline;
+// W1-C10-06: downstream crates name these from the crate root.
+pub use key_ops::DeriveKeyMechanismOutResult;
+pub use lifecycle::{BackendProbe, ConnectError};
+
 macro_rules! pkcs11_template {
     ($template:expr) => {{ $template.iter().map(pkcs11_proxy_ng_proto::Attribute::from).collect::<Vec<_>>() }};
 }
@@ -77,6 +83,7 @@ where
 
 mod async_ops;
 mod crypto;
+pub(crate) mod deadline;
 mod discovery;
 mod kem;
 mod key_ops;
@@ -88,7 +95,7 @@ mod session_3x;
 
 /// Tracks how the gRPC channel was established so `reconnect` knows whether
 /// it can re-dial.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum ConnectionSource {
     /// Created via `connect(endpoint)` or `connect_with_tls_files(...)` — reconnectable.
     Endpoint { endpoint: String, tls_files: Option<crate::tls::ClientTlsFiles> },
@@ -106,12 +113,22 @@ enum ConnectionSource {
 /// data. Cloning lets multiple concurrent shim calls each hold an
 /// owned `Pkcs11Client` and multiplex over the same HTTP/2 connection
 /// instead of serializing on a `Mutex`.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Pkcs11Client {
     exact_effects_version: std::sync::Arc<std::sync::atomic::AtomicU32>,
-    grpc: GrpcClient<tonic::transport::Channel>,
+    /// Cached `pointer_safe_authenticated_parameters` capability (W1-C10-03):
+    /// 0 = unknown (probe), 1 = no, 2 = yes. Shared across clones; every
+    /// fresh probe overwrites it and reconnect resets it to unknown.
+    typed_auth_capability: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    grpc: GrpcClient<RpcDeadline<tonic::transport::Channel>>,
+    /// The channel wrapped by `grpc`, kept so [`Pkcs11Client::set_rpc_timeout`]
+    /// and [`reconnect`][Pkcs11Client::reconnect] can rebuild the gRPC client
+    /// around the same connection (tonic 0.14 generated clients expose no
+    /// inner-service accessor). Cheap to clone (`Channel` is `Arc`d).
+    channel: tonic::transport::Channel,
     context_id: Option<String>,
     source: ConnectionSource,
+    rpc_timeout: std::time::Duration,
 }
 
 impl Pkcs11Client {
@@ -256,6 +273,89 @@ mod tests {
             pkcs11_unary_ok!(err_call(tonic::Code::Unavailable), true)
         }
         assert_eq!(run().await.unwrap_err(), CkRv::DEVICE_ERROR);
+    }
+
+    // W1-C10-04: transport-error scope-flag taxonomy over EVERY
+    // `pkcs11_unary_*` call site in the crate (see `RpcKind` in error.rs):
+    // `true` (session-scoped → DEVICE_ERROR) everywhere except the
+    // slot/token family, which passes `false` (→ TOKEN_NOT_PRESENT).
+    // `open_session` is session-scoped (`RpcKind::Session` names
+    // `C_OpenSession`); `close_all_sessions` stays slot-scoped (takes a
+    // slot id, no session); `wait_for_slot_event` keeps its pre-existing
+    // `true` (changing the C_WaitForSlotEvent transport RV is out of
+    // scope for this item). Every prod macro invocation carries its flag
+    // on the invocation line, so the scan is exact per line.
+    #[test]
+    fn scope_flags_match_session_taxonomy() {
+        const SOURCES: &[(&str, &str)] = &[
+            ("async_ops.rs", include_str!("async_ops.rs")),
+            ("deadline.rs", include_str!("deadline.rs")),
+            ("discovery.rs", include_str!("discovery.rs")),
+            ("kem.rs", include_str!("kem.rs")),
+            ("key_ops.rs", include_str!("key_ops.rs")),
+            ("lifecycle.rs", include_str!("lifecycle.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("object.rs", include_str!("object.rs")),
+            ("raw_output.rs", include_str!("raw_output.rs")),
+            ("session.rs", include_str!("session.rs")),
+            ("session_3x.rs", include_str!("session_3x.rs")),
+            ("crypto/authenticated_typed.rs", include_str!("crypto/authenticated_typed.rs")),
+            ("crypto/authenticated_wrap.rs", include_str!("crypto/authenticated_wrap.rs")),
+            ("crypto/combined.rs", include_str!("crypto/combined.rs")),
+            ("crypto/digest_cipher.rs", include_str!("crypto/digest_cipher.rs")),
+            ("crypto/message_crypto.rs", include_str!("crypto/message_crypto.rs")),
+            ("crypto/mod.rs", include_str!("crypto/mod.rs")),
+            ("crypto/sign_verify.rs", include_str!("crypto/sign_verify.rs")),
+            ("crypto/verify_signature.rs", include_str!("crypto/verify_signature.rs")),
+        ];
+        // The only methods allowed a `false` (slot/token-scoped) flag.
+        const FALSE_FAMILY: &[&str] = &[
+            "get_info",
+            "get_slot_list",
+            "get_slot_info",
+            "get_token_info",
+            "get_mechanism_list",
+            "get_mechanism_info",
+            "close_all_sessions",
+        ];
+        let mut sites = 0;
+        let mut false_seen = vec![];
+        for (name, source) in SOURCES {
+            let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+            for (lineno, line) in prod.lines().enumerate() {
+                if !(line.contains("pkcs11_unary_") && line.contains("self.grpc.")) {
+                    continue;
+                }
+                let after = line.split("self.grpc.").nth(1).unwrap();
+                let method = after.split('(').next().unwrap();
+                let flag = if line.contains(", true)") || line.contains(", true,") {
+                    true
+                } else if line.contains(", false)") || line.contains(", false,") {
+                    false
+                } else {
+                    panic!("{name}:{}: scope flag not on invocation line: {line}", lineno + 1);
+                };
+                sites += 1;
+                if method == "open_session" {
+                    assert!(
+                        flag,
+                        "{name}:{}: open_session must be session-scoped (true)",
+                        lineno + 1
+                    );
+                } else if FALSE_FAMILY.contains(&method) {
+                    assert!(!flag, "{name}:{lineno}: {method} must be slot-scoped (false)");
+                    if !false_seen.contains(&method) {
+                        false_seen.push(method);
+                    }
+                } else {
+                    assert!(flag, "{name}:{}: {method} must be session-scoped (true)", lineno + 1);
+                }
+            }
+        }
+        assert!(sites > 50, "taxonomy scan must see the whole crate, saw {sites} sites");
+        for method in FALSE_FAMILY {
+            assert!(false_seen.contains(method), "slot-scoped pin for {method} must be exercised");
+        }
     }
 
     // W1-L3-06: a backend-RETURNED DEVICE_ERROR must still pass through

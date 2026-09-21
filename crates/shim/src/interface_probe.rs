@@ -615,7 +615,7 @@ fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
             let mut client = state::client().lock().await;
             client.get_backend_interfaces().await
         })
-        .map_err(ProbeFailure::Transient)?;
+        .map_err(|e| ProbeFailure::Transient(e.to_string()))?;
 
     // Record the backend CK_ULONG width/byte order for the value bridge
     // (ADR-0011 D2/D6) before anything else uses it. A refusal here is

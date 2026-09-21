@@ -28,7 +28,9 @@ impl Pkcs11Client {
             slot_id: slot_id.0,
             flags: flags.0,
         };
-        let resp = pkcs11_unary_call!(self.grpc.open_session(req), false);
+        // Session-scoped (W1-C10-04): `RpcKind::Session` names
+        // `C_OpenSession` explicitly — transport failure is DEVICE_ERROR.
+        let resp = pkcs11_unary_call!(self.grpc.open_session(req), true);
         Ok(CkSessionHandle(resp.session_handle))
     }
 
@@ -194,6 +196,21 @@ mod tests {
         assert_eq!(close_err.origin, MessageCallErrorOrigin::Transport);
         // Refused loopback maps Unavailable -> session-scoped -> DEVICE_ERROR.
         assert_eq!(close_err.ck_rv, CkRv::DEVICE_ERROR);
+    }
+
+    // W1-C10-04: open_session is session-scoped per the crate taxonomy
+    // (`RpcKind::Session` names `C_OpenSession` explicitly), so a transport
+    // failure must map to DEVICE_ERROR, not TOKEN_NOT_PRESENT.
+    // Recorded pre-fix state: `open_session(req), false`.
+    #[tokio::test]
+    async fn open_session_transport_failure_is_session_scoped() {
+        let mut client = dead_channel_client();
+        client.restore_context_id(Some("c10-04-open-session".into()));
+        let err = client
+            .open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
+            .await
+            .unwrap_err();
+        assert_eq!(err, CkRv::DEVICE_ERROR);
     }
 
     // W1-L3-06: twin of the discovery.rs scan for the 5th absent-info site
