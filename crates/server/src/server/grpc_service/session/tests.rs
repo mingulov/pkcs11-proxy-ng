@@ -247,8 +247,13 @@ async fn second_context_login_returns_backend_already_faithfully_without_minting
     );
 }
 
+/// W1-L13-11 + W1-L7-15: a same-client re-login short-circuits locally —
+/// ALREADY with no redundant backend C_Login. (The old
+/// backend-authoritative expectation — every re-login reaches the
+/// provider — was challenged and rejected in adjudication; the re-login
+/// RV itself is unchanged.)
 #[tokio::test]
-async fn repeated_login_in_same_logical_client_reaches_backend() {
+async fn repeated_login_in_same_logical_client_short_circuits_locally() {
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -265,8 +270,8 @@ async fn repeated_login_in_same_logical_client_reaches_backend() {
     );
     assert_eq!(
         mock.login_call_count(),
-        2,
-        "same logical client repeat login must preserve backend/provider behavior"
+        1,
+        "same-client re-login must short-circuit locally without a backend call (W1-L13-11)"
     );
 }
 

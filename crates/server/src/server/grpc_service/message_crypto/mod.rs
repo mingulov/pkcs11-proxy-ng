@@ -521,6 +521,16 @@ async fn message_encrypt_init_with_timeout(
             }
         };
 
+        // Mechanism policy gate (G3-PR3 Task 3).
+        // W1-C1-13: the gate runs before remap on every init handler so identical
+        // dual-defect requests yield the same RV regardless of op.
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+                ..Default::default()
+            }));
+        }
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
         if let Err(rv) =
@@ -529,14 +539,6 @@ async fn message_encrypt_init_with_timeout(
         {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
                 ck_rv: rv.0,
-                ..Default::default()
-            }));
-        }
-
-        // Mechanism policy gate (G3-PR3 Task 3).
-        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
-                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
                 ..Default::default()
             }));
         }
@@ -852,6 +854,16 @@ async fn message_decrypt_init_with_timeout(
             }
         };
 
+        // Mechanism policy gate (G3-PR3 Task 3).
+        // W1-C1-13: the gate runs before remap on every init handler so identical
+        // dual-defect requests yield the same RV regardless of op.
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+                ..Default::default()
+            }));
+        }
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
         if let Err(rv) =
@@ -860,14 +872,6 @@ async fn message_decrypt_init_with_timeout(
         {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
                 ck_rv: rv.0,
-                ..Default::default()
-            }));
-        }
-
-        // Mechanism policy gate (G3-PR3 Task 3).
-        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
-                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
                 ..Default::default()
             }));
         }
@@ -1138,6 +1142,15 @@ pub(crate) async fn message_sign_init(
             }
         };
 
+        // Mechanism policy gate (G3-PR3 Task 3).
+        // W1-C1-13: the gate runs before remap on every init handler so identical
+        // dual-defect requests yield the same RV regardless of op.
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+            }));
+        }
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
         if let Err(rv) =
@@ -1146,13 +1159,6 @@ pub(crate) async fn message_sign_init(
         {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
                 ck_rv: rv.0,
-            }));
-        }
-
-        // Mechanism policy gate (G3-PR3 Task 3).
-        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
-                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -1319,6 +1325,15 @@ pub(crate) async fn message_verify_init(
             }
         };
 
+        // Mechanism policy gate (G3-PR3 Task 3).
+        // W1-C1-13: the gate runs before remap on every init handler so identical
+        // dual-defect requests yield the same RV regardless of op.
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+            }));
+        }
+
         // B1: remap object handles embedded in the mechanism parameters;
         // gate each through per-object authz when active (C1).
         if let Err(rv) =
@@ -1327,13 +1342,6 @@ pub(crate) async fn message_verify_init(
         {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
                 ck_rv: rv.0,
-            }));
-        }
-
-        // Mechanism policy gate (G3-PR3 Task 3).
-        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
-                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
