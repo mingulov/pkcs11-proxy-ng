@@ -50,11 +50,24 @@ not capabilities supplied by this documentation change.
 ## 1. Install (first deploy)
 
 ```bash
-# 1) Build / pull the carrier image.
-docker pull <registry>/pkcs11-proxy-ng:<version>-alpine3.23
+# 1) Build and publish a runnable daemon image to your registry.
+#    The APK carrier image (packaging/alpine/Dockerfile.alpine) is
+#    FROM scratch — it only stages APKs at /apk and cannot run.
+#    Likewise tests/r2_resilience/Dockerfile.daemon builds a test-only
+#    fixture (weak PINs, auth="none"): use it as the pattern for your
+#    runtime Dockerfile, not as a release image.
+docker build --build-arg ALPINE_VER=3.23 \
+  -f packaging/alpine/Dockerfile.alpine \
+  -t pkcs11-proxy-ng:test-alpine3.23 .
+docker build -f <your-runtime-Dockerfile> \
+  -t <registry>/pkcs11-proxy-ng:<version>-alpine3.23 .
+docker push <registry>/pkcs11-proxy-ng:<version>-alpine3.23
 
-# 2) Apply the reference manifests (or your Helm overlay).
+# 2) Apply the reference manifests (or your Helm overlay), pointed at
+#    the image you just published.
 kubectl apply -f pkcs11-proxy-ng/examples/k8s/
+kubectl -n pkcs11-proxy-demo set image deploy/daemon \
+  daemon=<registry>/pkcs11-proxy-ng:<version>-alpine3.23
 
 # 3) Edit the ConfigMap to point at your backend module.
 kubectl -n pkcs11-proxy-demo edit configmap daemon-config

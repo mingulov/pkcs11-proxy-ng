@@ -278,7 +278,7 @@ preserve the value across the gRPC hop.
 | `CKR_DEVICE_MEMORY` | 0x31 | HSM ran out of internal storage. |
 | `CKR_DEVICE_REMOVED` | 0x32 | HSM yanked. Folded into health gate. |
 | `CKR_TOKEN_NOT_PRESENT` | 0xE0 | Token not in slot. Folded into health gate. |
-| `CKR_FUNCTION_FAILED` | 0x06 | Backend's catch-all for non-specific failures. **Operator action:** check daemon log for the corresponding `backend call returned RV=…` line for the underlying cause; some backends bury more specific codes in their own logs. **Also originated by the proxy** for backend-call timeouts (see proxy-originated section). |
+| `CKR_FUNCTION_FAILED` | 0x06 | Backend's catch-all for non-specific failures. **Operator action:** run the daemon with debug logging (`RUST_LOG=pkcs11_proxy_ng=debug`) and check for the corresponding per-call `backend outcome classified` line for the underlying cause; some backends bury more specific codes in their own logs. **Also originated by the proxy** for backend-call timeouts (see proxy-originated section). |
 | `CKR_FUNCTION_CANCELED` | 0x50 | Backend cancelled a long-running op. |
 | `CKR_FUNCTION_NOT_PARALLEL` | 0x51 | Backend rejects concurrent ops on a single session. |
 | `CKR_PIN_INCORRECT` | 0xA0 | Wrong PIN at `C_Login`. The proxy **never** logs the PIN itself (CLAUDE.md rule 4); only the RV is logged. |
@@ -298,21 +298,25 @@ preserve the value across the gRPC hop.
 | `CKR_ATTRIBUTE_TYPE_INVALID` | 0x12 | Unknown attribute type. |
 | `CKR_NO_EVENT` | 0x08 | `C_WaitForSlotEvent` in non-blocking mode with nothing pending. |
 
-For each of these the **operator action** is: check the daemon's
-`backend call returned RV=…` line to confirm the value came from
-the backend and not from a transport layer; if it did, the issue
-is in the backend (HSM driver, PIN policy, mechanism availability)
-or the application.
+For each of these the **operator action** is: enable debug logging
+(`RUST_LOG` defaults to `info`) and check the daemon's per-call
+`backend outcome classified` debug line — it carries the request's
+`request_id` — to confirm the value came from the backend and not
+from a transport layer; if it did, the issue is in the backend
+(HSM driver, PIN policy, mechanism availability) or the
+application. Backend-down RVs additionally log
+`backend outcome: unhealthy` with the RV.
 
 ## Quick triage flow
 
 1. **Application reports any CK_RV** → check the daemon's structured
    log at the matching request_id (the request-scoped trace-id
    middleware emits `request_id` in every span).
-2. The log line `backend call returned RV=0x<hex>` proves the RV
-   came from the backend, not from transport. If absent, the
-   proxy's transport/timeout layer originated it (see proxy-
-   originated section above).
+2. The debug line `backend outcome classified` at that `request_id`
+   proves the RV came from the backend, not from transport (enable
+   `RUST_LOG=pkcs11_proxy_ng=debug` first — the default is `info`).
+   If absent, the proxy's transport/timeout layer originated it
+   (see proxy-originated section above).
 3. If the same RV is repeated and folded into the unhealthy set
    (HOST_MEMORY / DEVICE_REMOVED / TOKEN_NOT_PRESENT / DEVICE_ERROR),
    watch for `backend exceeded failure threshold; flipping
