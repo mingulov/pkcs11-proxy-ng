@@ -80,9 +80,9 @@ jobs:
           for gate in fmt check test clippy msrv audit deny release_dry_run; do
             value="$(sed -nE "s/^${gate}: (.*)$/\1/p" "$RECEIPT")"
             case "$value" in
-              pass*) ;;
+              pass) ;;
               *)
-                echo "::error::quality receipt gate '$gate' is not pass-prefixed (got '$value'); refusing to release."
+                echo "::error::quality receipt gate '$gate' verdict is not exactly 'pass' (got '$value'); refusing to release."
                 exit 1
                 ;;
             esac
