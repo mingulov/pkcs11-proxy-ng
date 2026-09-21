@@ -50,6 +50,7 @@ http-body = "1"
 http-body-util = "0.1"
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 pkcs11-proxy-ng-client = { path = "../client" }
 hyper = { version = "1", features = ["client", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

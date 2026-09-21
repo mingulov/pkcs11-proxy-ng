@@ -15,7 +15,7 @@ use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::ck_result_to_rv;
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, ensure_private_use_allowed, gate_object_handle, input_from_wire,
-    spawn_backend, spawn_backend_with_optional_timeout,
+    resolve_session, spawn_backend, spawn_backend_with_optional_timeout,
 };
 use crate::server::grpc_service::HandlerContext;
 
@@ -26,6 +26,16 @@ async fn resolve_state_handles(
     encryption_key_handle: u64,
     authentication_key_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle, CkObjectHandle), CkRv> {
+    // W1-L11-06: the session leg goes through the shared
+    // service_utils::resolve_session (context-gone →
+    // CRYPTOKI_NOT_INITIALIZED, unknown session → SESSION_HANDLE_INVALID).
+    // The key legs keep their W1-C1-01 loud-fail mapping below.
+    resolve_session(ctx_mgr, ctx_id, session_handle).await?;
+    // Second transient read for the key legs. The session mapping is
+    // re-checked here so a session evicted between the two reads still
+    // fails closed with SESSION_HANDLE_INVALID (single-read semantics
+    // preserved); a context lost between the reads maps to
+    // CRYPTOKI_NOT_INITIALIZED exactly as the single read did.
     let resolved: Option<(Option<BackendHandle>, Option<BackendHandle>, Option<BackendHandle>)> =
         ctx_mgr
             .get_context(ctx_id, |ctx| {
@@ -399,6 +409,49 @@ mod tests {
             vec![Some(MessageParameterShape::Unmodeled); 4],
             "failed restore must preserve server message shapes",
         );
+    }
+
+    #[tokio::test]
+    async fn t7_set_operation_state_rejects_unknown_session_and_context() {
+        // W1-L11-06 characterization: the session leg of set_operation_state
+        // must map unknown-context / unknown-session exactly like the shared
+        // resolve_session. Must pass before AND after the resolver DRY.
+        let (ctx_mgr, _mock, backend, ctx_id, _virtual_session) = setup_message_shapes().await;
+        let handler = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let response = set_operation_state(
+            &handler,
+            false,
+            Request::new(pkcs11_proxy_ng_proto::SetOperationStateRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: 9_999_999,
+                operation_state: vec![0xC9, 0xEA, 2],
+                encryption_key_handle: 0,
+                authentication_key_handle: 0,
+                operation_state_null_len: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.ck_rv, CkRv::SESSION_HANDLE_INVALID.0);
+
+        let response = set_operation_state(
+            &handler,
+            false,
+            Request::new(pkcs11_proxy_ng_proto::SetOperationStateRequest {
+                client_context_id: "t7-gone".into(),
+                session_handle: 1,
+                operation_state: vec![0xC9, 0xEA, 2],
+                encryption_key_handle: 0,
+                authentication_key_handle: 0,
+                operation_state_null_len: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.ck_rv, CkRv::CRYPTOKI_NOT_INITIALIZED.0);
     }
 
     #[tokio::test]

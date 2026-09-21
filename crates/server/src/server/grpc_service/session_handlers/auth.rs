@@ -1,4 +1,3 @@
-use crate::server::slot_map::BackendSlotId;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -8,8 +7,9 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::super::context_manager::{ClientContextId, ContextManager, LoginState};
-use super::super::super::handle_map::VirtualHandle;
-use super::super::service_utils::{login_lock_timeout, spawn_backend};
+use super::super::service_utils::{
+    acquire_slot_login_lock, resolve_session_slot_login, spawn_backend,
+};
 
 pub(crate) fn login_state_for_user_type(user_type: CkUserType) -> Option<LoginState> {
     match user_type {
@@ -24,35 +24,6 @@ pub(crate) fn already_logged_in_rv(current: LoginState, requested: LoginState) -
         CkRv::USER_ALREADY_LOGGED_IN
     } else {
         CkRv::USER_ANOTHER_ALREADY_LOGGED_IN
-    }
-}
-
-/// Resolve a virtual session to its backend session, owning slot, and current
-/// login state in a single context-locked read (shared by login/logout — M7).
-/// Returns the CK_RV the caller should surface when the context is gone
-/// (`CRYPTOKI_NOT_INITIALIZED`) or the session handle is unknown
-/// (`SESSION_HANDLE_INVALID`).
-pub(crate) async fn resolve_session_slot_login(
-    ctx_mgr: &Arc<ContextManager>,
-    ctx_id: &ClientContextId,
-    session_handle: u64,
-) -> Result<(CkSessionHandle, BackendSlotId, Option<LoginState>), CkRv> {
-    let resolved = ctx_mgr
-        .get_context(ctx_id, |ctx| {
-            let virtual_session = VirtualHandle(session_handle);
-            let backend_session = ctx.session_handles.resolve(virtual_session);
-            let slot = ctx.session_slots.get(&virtual_session).copied();
-            let current_login_state = slot.and_then(|slot| ctx.login_state.get(&slot).copied());
-            (backend_session, slot, current_login_state)
-        })
-        .await;
-
-    match resolved {
-        None => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
-        Some((Some(backend_session), Some(slot), current_login_state)) => {
-            Ok((CkSessionHandle(backend_session.0 as u64), slot, current_login_state))
-        }
-        Some(_) => Err(CkRv::SESSION_HANDLE_INVALID),
     }
 }
 
@@ -92,21 +63,10 @@ pub(super) async fn login(
     // insert. Otherwise two clients racing the first login on the shared token
     // both see "no other login" and both take the real-login path, and the
     // second is answered USER_ALREADY_LOGGED_IN instead of the logical OK.
-    //
-    // Bounded acquisition (G2/V11): refuse rather than queue unboundedly when
-    // a slow/wedged backend C_Login pins the lock. CKR_DEVICE_ERROR signals a
-    // transient token-serialization failure the client can retry.
-    let login_guard = ctx_mgr.slot_login_lock(slot);
-    let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
+    let _login_lock = match acquire_slot_login_lock(ctx_mgr, slot).await {
         Ok(guard) => guard,
-        Err(_elapsed) => {
-            // Another tenant holds the per-slot login lock past the configured
-            // bound (slow/wedged backend login on the shared token). Refuse
-            // rather than queue unboundedly; CKR_DEVICE_ERROR is a transient
-            // token-serialization failure the client can retry.
-            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-                ck_rv: CkRv::DEVICE_ERROR.0,
-            }));
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse { ck_rv: rv.0 }));
         }
     };
 
@@ -288,19 +248,11 @@ pub(super) async fn logout(
 
     // Serialize logout against concurrent login/logout on the same slot (M5),
     // so the cross-context scan and the login_state removal stay atomic.
-    //
-    // Bounded acquisition (G2/V11): same cross-tenant DoS bound as login.
-    let login_guard = ctx_mgr.slot_login_lock(slot);
-    let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
+    // Same cross-tenant DoS bound as login (shared acquisition helper).
+    let _login_lock = match acquire_slot_login_lock(ctx_mgr, slot).await {
         Ok(guard) => guard,
-        Err(_elapsed) => {
-            // Another tenant holds the per-slot login lock past the configured
-            // bound (slow/wedged backend login on the shared token). Refuse
-            // rather than queue unboundedly; CKR_DEVICE_ERROR is a transient
-            // token-serialization failure the client can retry.
-            return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse {
-                ck_rv: CkRv::DEVICE_ERROR.0,
-            }));
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv: rv.0 }));
         }
     };
 
@@ -633,5 +585,62 @@ mod tests {
                 "PIN holder leaks secret byte {byte} via Debug: {rendered}"
             );
         }
+    }
+
+    /// W1-L11-07 characterization: login and logout must refuse identically
+    /// (CKR_DEVICE_ERROR) when the per-slot lock is held past the bound.
+    /// Paused time fast-forwards the (seconds-long) acquisition timeout.
+    /// Must pass before AND after the lock-acquisition DRY.
+    #[tokio::test]
+    async fn t7_login_and_logout_refuse_device_error_when_slot_lock_held() {
+        tokio::time::pause();
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(BackendHandle(backend_session.0), backend_slot)
+            })
+            .await
+            .unwrap();
+
+        // Wedge the per-slot login lock; both handlers must time out on it.
+        let slot_lock = ctx_mgr.slot_login_lock(backend_slot);
+        let _held = slot_lock.lock().await;
+
+        let login_rv = super::login(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh.0,
+                user_type: CkUserType::User as u64,
+                pin: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+        assert_eq!(login_rv, CkRv::DEVICE_ERROR.0, "login must refuse with DEVICE_ERROR");
+
+        let logout_rv = super::logout(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::LogoutRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh.0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+        assert_eq!(logout_rv, CkRv::DEVICE_ERROR.0, "logout must refuse with DEVICE_ERROR");
     }
 }

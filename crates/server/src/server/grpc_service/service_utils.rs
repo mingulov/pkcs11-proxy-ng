@@ -110,6 +110,29 @@ pub fn login_lock_timeout() -> Duration {
     *LOGIN_LOCK_TIMEOUT.get().unwrap_or(&Duration::from_secs(10))
 }
 
+/// Bounded per-slot login-lock acquisition (W1-L11-07, G2/V11): serialize
+/// login/logout on a slot, refusing with `CKR_DEVICE_ERROR` rather than
+/// queueing unboundedly when a slow/wedged backend pins the lock. One
+/// acquisition site shared by login and logout; the caller must hold the
+/// returned guard across its critical section. `OwnedMutexGuard` (not the
+/// borrowed guard) so the lock can be acquired inside this helper.
+pub(super) async fn acquire_slot_login_lock(
+    ctx_mgr: &Arc<ContextManager>,
+    slot: BackendSlotId,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, CkRv> {
+    let login_guard = ctx_mgr.slot_login_lock(slot);
+    match tokio::time::timeout(login_lock_timeout(), login_guard.lock_owned()).await {
+        Ok(guard) => Ok(guard),
+        Err(_elapsed) => {
+            // Another tenant holds the per-slot login lock past the configured
+            // bound (slow/wedged backend login on the shared token). Refuse
+            // rather than queue unboundedly; CKR_DEVICE_ERROR is a transient
+            // token-serialization failure the client can retry.
+            Err(CkRv::DEVICE_ERROR)
+        }
+    }
+}
+
 /// Wire up the channel that `spawn_backend` uses to report outcomes
 /// to the health-gating task. Called once at startup. If never called,
 /// backend outcomes are silently dropped — health gating is disabled
@@ -683,6 +706,39 @@ pub(super) async fn resolve_session(
     Ok(CkSessionHandle(backend_session.0 as u64))
 }
 
+/// Resolve a virtual session to its backend session, owning slot, and current
+/// login state in a single context-locked read (shared by login/logout — M7).
+/// Returns the CK_RV the caller should surface when the context is gone
+/// (`CRYPTOKI_NOT_INITIALIZED`) or the session handle is unknown
+/// (`SESSION_HANDLE_INVALID`).
+///
+/// W1-L11-16: the shared home for this triple read (moved out of auth.rs so
+/// auth routes through the service_utils resolve_* helpers); the
+/// single-locked-read semantics are unchanged.
+pub(super) async fn resolve_session_slot_login(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    session_handle: u64,
+) -> Result<(CkSessionHandle, BackendSlotId, Option<LoginState>), CkRv> {
+    let resolved = ctx_mgr
+        .get_context(ctx_id, |ctx| {
+            let virtual_session = VirtualHandle(session_handle);
+            let backend_session = ctx.session_handles.resolve(virtual_session);
+            let slot = ctx.session_slots.get(&virtual_session).copied();
+            let current_login_state = slot.and_then(|slot| ctx.login_state.get(&slot).copied());
+            (backend_session, slot, current_login_state)
+        })
+        .await;
+
+    match resolved {
+        None => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
+        Some((Some(backend_session), Some(slot), current_login_state)) => {
+            Ok((CkSessionHandle(backend_session.0 as u64), slot, current_login_state))
+        }
+        Some(_) => Err(CkRv::SESSION_HANDLE_INVALID),
+    }
+}
+
 /// Resolve the caller's identity and the token `(label, serial)` for the
 /// session that owns `virtual_session`.
 ///
@@ -938,56 +994,11 @@ pub(super) async fn resolve_session_and_object(
     session_handle: u64,
     object_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
-    let Some((session, object)) = ctx
-        .context_manager
-        .get_context(ctx_id, |c| {
-            (
-                c.session_handles.resolve(VirtualHandle(session_handle)),
-                c.object_handles.resolve(VirtualHandle(object_handle)),
-            )
-        })
-        .await
-    else {
-        return Err(CkRv::CRYPTOKI_NOT_INITIALIZED);
-    };
-
-    let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
-    // Forward CK_INVALID_HANDLE to backend when object is unknown — see
-    // resolve_session_and_key for rationale.
-    let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
-    // D6(1): refuse private-object USE while logically logged out (authn
-    // before authz; unknown handles skip — the backend decides their error).
-    if backend_object.0 != 0 {
-        ensure_private_use_allowed(
-            ctx,
-            ctx_id,
-            session_handle,
-            object_handle,
-            CkSessionHandle(backend_session.0),
-            backend_object,
-        )
-        .await?;
-    }
-    // Per-object / per-class gate: see gate_object_handle for the invisible-denial
-    // contract. Zero-overhead when both per_object_active() and per_class_active()
-    // are false.
-    let backend_object = if (ctx.token_policy.per_object_active()
-        || ctx.token_policy.per_class_active())
-        && backend_object.0 != 0
-    {
-        gate_object_handle(
-            ctx,
-            ctx_id,
-            session_handle,
-            object_handle,
-            backend_session,
-            backend_object,
-        )
-        .await
-    } else {
-        backend_object
-    };
-    Ok((CkSessionHandle(backend_session.0 as u64), backend_object))
+    // W1-L11-05: the key and object resolvers were line-identical modulo
+    // parameter names (same forward-0, D6(1) authn, and per-object/class
+    // gate); the object entry point delegates to the key implementation so
+    // there is exactly one. Both names are kept for call-site clarity.
+    resolve_session_and_key(ctx, ctx_id, session_handle, object_handle).await
 }
 
 pub(super) async fn resolve_session_and_two_objects(
@@ -2101,6 +2112,105 @@ mod tests {
         let (_, backend_obj) = resolve_session_and_object(&ctx, &ctx_id, vs.0, vo.0).await.unwrap();
         // Gate is inactive → real backend handle returned unchanged.
         assert_eq!(backend_obj, CkObjectHandle(42), "inactive gate must return real handle");
+    }
+
+    #[tokio::test]
+    async fn t7_session_key_and_object_resolvers_agree() {
+        // W1-L11-05 characterization: resolve_session_and_key and
+        // resolve_session_and_object must return identical results for
+        // identical inputs (ok, forward-0, unknown session, unknown
+        // context). Must pass before AND after the delegation DRY.
+        use pkcs11_proxy_ng_backend::MockBackend;
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> =
+            Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend); // default policy: no grants
+        let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
+        let (vs, vo) = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                let vs = c.register_session(
+                    BackendHandle(77),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
+                let vo = c.object_handles.insert(BackendHandle(42));
+                (vs, vo)
+            })
+            .await
+            .unwrap();
+
+        // Known session + known handle: identical (session, object).
+        let via_key = resolve_session_and_key(&ctx, &ctx_id, vs.0, vo.0).await;
+        let via_object = resolve_session_and_object(&ctx, &ctx_id, vs.0, vo.0).await;
+        assert_eq!(via_key, via_object, "ok-case results must match");
+        assert_eq!(via_object.unwrap(), (CkSessionHandle(77), CkObjectHandle(42)));
+
+        // Unknown handle: both forward CK_INVALID_HANDLE (0) to the backend.
+        let via_key = resolve_session_and_key(&ctx, &ctx_id, vs.0, 9_999_999).await;
+        let via_object = resolve_session_and_object(&ctx, &ctx_id, vs.0, 9_999_999).await;
+        assert_eq!(via_key, via_object, "forward-0 results must match");
+        assert_eq!(via_object.unwrap().1, CkObjectHandle(0));
+
+        // Unknown session: both SESSION_HANDLE_INVALID.
+        let via_key = resolve_session_and_key(&ctx, &ctx_id, 9_999_999, vo.0).await;
+        let via_object = resolve_session_and_object(&ctx, &ctx_id, 9_999_999, vo.0).await;
+        assert_eq!(via_key, via_object, "unknown-session errors must match");
+        assert_eq!(via_object.unwrap_err(), CkRv::SESSION_HANDLE_INVALID);
+
+        // Unknown context: both CRYPTOKI_NOT_INITIALIZED.
+        let gone = ClientContextId("t7-gone".into());
+        let via_key = resolve_session_and_key(&ctx, &gone, vs.0, vo.0).await;
+        let via_object = resolve_session_and_object(&ctx, &gone, vs.0, vo.0).await;
+        assert_eq!(via_key, via_object, "unknown-context errors must match");
+        assert_eq!(via_object.unwrap_err(), CkRv::CRYPTOKI_NOT_INITIALIZED);
+    }
+
+    #[tokio::test]
+    async fn t7_resolve_session_slot_login_pins_triple_read() {
+        // W1-L11-16 characterization: pin the (session, slot, login-state)
+        // triple read and its RV mapping. Moved here with the helper from
+        // auth.rs; assertions unchanged — the single-locked-read semantics
+        // must survive the shared-helper routing.
+        use pkcs11_proxy_ng_backend::MockBackend;
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(BackendHandle(backend_session.0), backend_slot)
+            })
+            .await
+            .unwrap();
+
+        // Unknown context → CRYPTOKI_NOT_INITIALIZED.
+        let gone = ClientContextId("t7-gone".into());
+        assert_eq!(
+            resolve_session_slot_login(&ctx_mgr, &gone, session_vh.0).await.unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+        // Unknown session → SESSION_HANDLE_INVALID.
+        assert_eq!(
+            resolve_session_slot_login(&ctx_mgr, &ctx_id, 9_999_999).await.unwrap_err(),
+            CkRv::SESSION_HANDLE_INVALID
+        );
+        // Known session, nobody logged in → (backend session, slot, None).
+        assert_eq!(
+            resolve_session_slot_login(&ctx_mgr, &ctx_id, session_vh.0).await.unwrap(),
+            (CkSessionHandle(backend_session.0), backend_slot, None)
+        );
+        // Logged-in slot → current login state is reported.
+        ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.login_state.insert(backend_slot, LoginState::User);
+            })
+            .await;
+        assert_eq!(
+            resolve_session_slot_login(&ctx_mgr, &ctx_id, session_vh.0).await.unwrap(),
+            (CkSessionHandle(backend_session.0), backend_slot, Some(LoginState::User))
+        );
     }
 
     #[tokio::test]

@@ -115,7 +115,7 @@ async fn login_user_inner(
     // locking) to discover the owning slot for lock selection. The handle and
     // login state from this read are NOT used: the authoritative resolve
     // happens under the slot lock below (W1-L6-25).
-    let slot = match super::session::auth::resolve_session_slot_login(
+    let slot = match super::service_utils::resolve_session_slot_login(
         ctx_mgr,
         &ctx_id,
         req.session_handle,
@@ -154,7 +154,7 @@ async fn login_user_inner(
     // Close takes the same lock around suspend, so a session closed between
     // the pre-resolve and here now resolves to None — fail cleanly instead
     // of driving the backend with a stale handle.
-    let (session, current_login_state) = match super::session::auth::resolve_session_slot_login(
+    let (session, current_login_state) = match super::service_utils::resolve_session_slot_login(
         ctx_mgr,
         &ctx_id,
         req.session_handle,
@@ -220,7 +220,7 @@ async fn login_user_inner(
             // lock, same as `C_Login`: lock-free mapping removers (close-all,
             // eviction) may have dropped/recycled the mapping mid-call. Mint
             // nothing for a handle we no longer track.
-            match super::session::auth::resolve_session_slot_login(
+            match super::service_utils::resolve_session_slot_login(
                 ctx_mgr,
                 &ctx_id,
                 req.session_handle,

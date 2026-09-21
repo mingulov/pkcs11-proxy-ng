@@ -14,7 +14,7 @@
 use pkcs11_proxy_ng_types::*;
 
 use super::Pkcs11Client;
-use crate::error::{MessageCallError, grpc_status_to_ck_rv};
+use crate::error::MessageCallError;
 
 impl Pkcs11Client {
     pub async fn open_session(
@@ -45,16 +45,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
         };
-        let response = self
-            .grpc
-            .close_session(req)
-            .await
-            .map_err(|status| {
-                MessageCallError::transport(grpc_status_to_ck_rv(status.code(), true))
-            })?
-            .into_inner();
-        let rv = CkRv(response.ck_rv);
-        if rv.is_ok() { Ok(()) } else { Err(MessageCallError::backend(rv)) }
+        super::stateful_unit_call(self.grpc.close_session(req), |response| response.ck_rv).await
     }
 
     pub async fn close_all_sessions(&mut self, slot_id: CkSlotId) -> CkResult<()> {
@@ -160,5 +151,47 @@ impl Pkcs11Client {
             session_handle: session.0,
         };
         pkcs11_unary_ok!(self.grpc.cancel_function(req), true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::MessageCallErrorOrigin;
+
+    fn dead_channel_client() -> Pkcs11Client {
+        // 127.0.0.1:9 (discard) is never served in tests; `connect_lazy`
+        // defers the failure to the first RPC, which surfaces as a
+        // transport error (same pattern as authenticated_typed tests).
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        Pkcs11Client::from_channel(channel)
+    }
+
+    // W1-L11-08 characterization: close_session_stateful and
+    // session_cancel_stateful must behave identically (same error shape
+    // for the same failure). Must pass before AND after the core DRY.
+
+    #[tokio::test]
+    async fn t7_stateful_unit_parity_without_context() {
+        let mut client = dead_channel_client();
+        let close_err = client.close_session_stateful(CkSessionHandle(1)).await.unwrap_err();
+        let cancel_err =
+            client.session_cancel_stateful(CkSessionHandle(1), CkFlags(0)).await.unwrap_err();
+        assert_eq!(close_err, cancel_err, "both stateful unit calls must fail identically");
+        assert_eq!(close_err.ck_rv, CkRv::CRYPTOKI_NOT_INITIALIZED);
+        assert_eq!(close_err.origin, MessageCallErrorOrigin::Backend);
+    }
+
+    #[tokio::test]
+    async fn t7_stateful_unit_parity_on_transport_failure() {
+        let mut client = dead_channel_client();
+        client.restore_context_id(Some("t7-stateful-parity".into()));
+        let close_err = client.close_session_stateful(CkSessionHandle(1)).await.unwrap_err();
+        let cancel_err =
+            client.session_cancel_stateful(CkSessionHandle(1), CkFlags(0)).await.unwrap_err();
+        assert_eq!(close_err, cancel_err, "transport failure must map identically");
+        assert_eq!(close_err.origin, MessageCallErrorOrigin::Transport);
+        // Refused loopback maps Unavailable -> session-scoped -> DEVICE_ERROR.
+        assert_eq!(close_err.ck_rv, CkRv::DEVICE_ERROR);
     }
 }

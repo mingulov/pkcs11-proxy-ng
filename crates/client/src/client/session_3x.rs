@@ -7,7 +7,7 @@
 use pkcs11_proxy_ng_types::*;
 
 use super::Pkcs11Client;
-use crate::error::{MessageCallError, grpc_status_to_ck_rv};
+use crate::error::MessageCallError;
 
 impl Pkcs11Client {
     pub async fn login_user(
@@ -47,16 +47,7 @@ impl Pkcs11Client {
             session_handle: session.0,
             flags: flags.0,
         };
-        let response = self
-            .grpc
-            .session_cancel(req)
-            .await
-            .map_err(|status| {
-                MessageCallError::transport(grpc_status_to_ck_rv(status.code(), true))
-            })?
-            .into_inner();
-        let rv = CkRv(response.ck_rv);
-        if rv.is_ok() { Ok(()) } else { Err(MessageCallError::backend(rv)) }
+        super::stateful_unit_call(self.grpc.session_cancel(req), |response| response.ck_rv).await
     }
 
     pub async fn get_session_validation_flags(
