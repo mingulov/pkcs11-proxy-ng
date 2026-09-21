@@ -218,6 +218,11 @@ pub struct MockBackend {
     interface_capabilities: Mutex<Option<InterfaceCapabilities>>,
     login_calls: AtomicUsize,
     login_user_calls: AtomicUsize,
+    /// Presence-only observations of backend `login_user` (`C_LoginUser`)
+    /// calls: `(username_is_none, pin_is_none)` per call, in arrival order.
+    /// Records pointer-presence only — never secret bytes — so NULL-vs-empty
+    /// proxying (W1-C6-07) is observable without retaining credentials.
+    login_user_presence: Mutex<Vec<(bool, bool)>>,
     token_info_calls: AtomicUsize,
     /// Count of backend `find_objects` (`C_FindObjects`) calls. Used by the
     /// W1-C1-07 scan-bound test to prove bounded backend round-trips.
@@ -375,6 +380,7 @@ impl MockBackend {
             interface_capabilities: Mutex::new(None),
             login_calls: AtomicUsize::new(0),
             login_user_calls: AtomicUsize::new(0),
+            login_user_presence: Mutex::new(Vec::new()),
             token_info_calls: AtomicUsize::new(0),
             find_objects_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
@@ -578,6 +584,13 @@ impl MockBackend {
     /// analogue of [`MockBackend::login_call_count`].
     pub fn login_user_call_count(&self) -> usize {
         self.login_user_calls.load(Ordering::SeqCst)
+    }
+
+    /// Snapshot of the presence-only `login_user` observations recorded so
+    /// far: `(username_is_none, pin_is_none)` per call, in arrival order.
+    /// Presence only — no secret bytes are ever retained.
+    pub fn login_user_presence_observations(&self) -> Vec<(bool, bool)> {
+        self.login_user_presence.lock().unwrap().clone()
     }
 
     /// Number of backend `find_objects` (`C_FindObjects`) calls.
@@ -2815,10 +2828,11 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         _user_type: CkUserType,
-        _username: &[u8],
-        pin: &[u8],
+        username: Option<&[u8]>,
+        pin: Option<&[u8]>,
     ) -> CkResult<()> {
         self.login_user_calls.fetch_add(1, Ordering::SeqCst);
+        self.login_user_presence.lock().unwrap().push((username.is_none(), pin.is_none()));
         // W1-C1-02 test gate: same enter/block contract as the `login` gate —
         // clone the handles out from under the gate lock, then signal + block
         // WITHOUT holding that lock.
@@ -2839,7 +2853,9 @@ impl Pkcs11Backend for MockBackend {
         if !self.state.lock().unwrap().has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
-        if pin == b"1234" { Ok(()) } else { Err(CkRv::PIN_INCORRECT) }
+        // A NULL (protected-path) PIN carries no verifiable bytes, so the
+        // mock cannot accept it; only the exact test PIN succeeds.
+        if pin.is_some_and(|p| p == b"1234") { Ok(()) } else { Err(CkRv::PIN_INCORRECT) }
     }
 
     fn session_cancel(&self, session: CkSessionHandle, _flags: CkFlags) -> CkResult<()> {

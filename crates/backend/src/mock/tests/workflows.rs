@@ -1034,7 +1034,10 @@ fn mock_backend_supports_provider_gap_3x_workflows() {
     let key = backend.create_object(session, Some(&[])).unwrap();
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::ML_KEM, params: None };
 
-    assert_eq!(backend.login_user(session, CkUserType::User, b"alice", b"1234"), Ok(()));
+    assert_eq!(
+        backend.login_user(session, CkUserType::User, Some(b"alice"), Some(b"1234")),
+        Ok(())
+    );
     assert_eq!(backend.session_cancel(session, CkFlags(0)), Ok(()));
     assert_eq!(backend.get_session_validation_flags(session, 0), Ok(0));
 

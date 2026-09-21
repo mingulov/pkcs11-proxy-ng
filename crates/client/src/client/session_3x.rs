@@ -14,16 +14,16 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         user_type: CkUserType,
-        username: &[u8],
-        pin: &[u8],
+        username: Option<&[u8]>,
+        pin: Option<&[u8]>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::LoginUserRequest {
             client_context_id: ctx,
             session_handle: session.0,
             user_type: user_type as u64,
-            pin: pin.to_vec(),
-            username: username.to_vec(),
+            pin: pin.map(|p| p.to_vec()),
+            username: username.map(|u| u.to_vec()),
         };
         pkcs11_unary_ok!(self.grpc.login_user(req), true)
     }

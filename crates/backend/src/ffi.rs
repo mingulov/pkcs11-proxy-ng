@@ -1144,8 +1144,8 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         user_type: CkUserType,
-        username: &[u8],
-        pin: &[u8],
+        username: Option<&[u8]>,
+        pin: Option<&[u8]>,
     ) -> CkResult<()> {
         self.ffi_login_user(session, user_type, username, pin)
     }

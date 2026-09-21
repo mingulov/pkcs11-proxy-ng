@@ -3230,8 +3230,8 @@ async fn w1_l6_25_login_user_short_circuits_when_close_won() {
                     client_context_id: ctx_id.0.clone(),
                     session_handle: session,
                     user_type: CkUserType::User as u64,
-                    pin: b"1234".to_vec(),
-                    username: b"operator-7".to_vec(),
+                    pin: Some(b"1234".to_vec()),
+                    username: Some(b"operator-7".to_vec()),
                 }),
             )
             .await

@@ -214,7 +214,9 @@ async fn pins_never_appear_in_trace_logs() {
     // The mock backend rejects any pin != b"1234", so this will fail; the
     // failure path exercises both warn-level logging and the error
     // response code path. Both must redact PIN/username.
-    let _ = client.login_user(session, CkUserType::User, USERNAME_CANARY, USER_PIN_CANARY).await;
+    let _ = client
+        .login_user(session, CkUserType::User, Some(USERNAME_CANARY), Some(USER_PIN_CANARY))
+        .await;
     tokio::task::yield_now().await;
     assert_no_canary_in_logs("login_user", &buf.snapshot());
 

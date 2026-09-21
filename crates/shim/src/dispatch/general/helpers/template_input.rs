@@ -54,9 +54,14 @@ unsafe fn ck_attrs_to_rust_at_depth(
     // (Scalar ulongs already travel width-independently as a typed `ulong_value`.)
     let client_ulong_width = std::mem::size_of::<CK_ULONG>();
     let backend_ulong_width = crate::interface_probe::backend_ulong_size();
-    let slice = unsafe { std::slice::from_raw_parts(p_template, count as usize) };
-    let mut result = Vec::with_capacity(count as usize);
-    for attr in slice {
+    // W1-L1-03: caller templates are untrusted FFI input — never assume
+    // alignment. Elements are copied out with `read_unaligned` (the
+    // message/exact-path convention) instead of a `from_raw_parts` slice,
+    // which requires an aligned, non-null pointer.
+    let count = count as usize;
+    let mut result = Vec::with_capacity(count);
+    for index in 0..count {
+        let attr: CK_ATTRIBUTE = unsafe { p_template.add(index).read_unaligned() };
         let ck_type = CkAttributeType(attr.type_ as u64);
         let value = if attr.pValue.is_null() {
             if attr.ulValueLen != 0 && reject_null_nonzero_count {
@@ -94,12 +99,13 @@ unsafe fn ck_attrs_to_rust_at_depth(
                 }?;
                 Some(CkAttributeValue::NestedTemplate(subs))
             } else if ck_type.is_bool() && len == std::mem::size_of::<CK_BBOOL>() {
-                let v = unsafe { *(attr.pValue as *const CK_BBOOL) };
+                let v = unsafe { (attr.pValue as *const CK_BBOOL).read_unaligned() };
                 Some(CkAttributeValue::Bool(v != 0))
             } else if ck_type.is_ulong() && len == std::mem::size_of::<CK_ULONG>() {
                 // `CK_ULONG` is u32 on narrow (32-bit-CK_ULONG) targets; widen to
                 // the wire's u64 so the shim compiles on i686/armv7/Windows-x64.
-                let v = unsafe { *(attr.pValue as *const CK_ULONG) };
+                // Unaligned load: caller value bytes carry no alignment promise.
+                let v = unsafe { (attr.pValue as *const CK_ULONG).read_unaligned() };
                 Some(CkAttributeValue::Ulong(v as u64))
             } else if len > MAX_SERIALIZABLE_BYTES {
                 return Err(CkRv::ARGUMENTS_BAD);
@@ -186,6 +192,53 @@ mod nested_template_input_tests {
             unsafe { ck_attrs_to_rust_checked(outer.as_ptr(), 1) }.unwrap_err(),
             CkRv::ATTRIBUTE_VALUE_INVALID
         );
+    }
+
+    /// W1-L1-03: caller templates are untrusted FFI input — parsing must
+    /// not assume alignment. A `CK_ATTRIBUTE` at a misaligned address
+    /// (with a misaligned ulong value) parses byte-identically to the
+    /// aligned case. Pre-fix this aborts even natively (debug UB
+    /// precondition in `from_raw_parts`) and Miri flags the aligned
+    /// loads; post-fix both are clean.
+    /// First buffer offset (1..=`room`) whose address is misaligned for
+    /// `align`. Offsets 1..=8 cover every residue mod 8 exactly once, so a
+    /// misaligned offset always exists when `room >= 8` — the premise never
+    /// depends on the stack base address.
+    fn misaligned_offset(base: *const u8, align: usize, room: usize) -> usize {
+        (1..=room)
+            .find(|&k| unsafe { base.add(k) }.align_offset(align) != 0)
+            .expect("a misaligned offset always exists within 8 bytes")
+    }
+
+    #[test]
+    fn misaligned_template_and_value_parse_byte_identically() {
+        // Misaligned CK_ULONG value: 8 value bytes at a misaligned offset.
+        let mut value_backing = [0u8; 16];
+        let value_off = misaligned_offset(
+            value_backing.as_ptr(),
+            std::mem::align_of::<CK_ULONG>(),
+            16 - std::mem::size_of::<CK_ULONG>(),
+        );
+        let value_at = unsafe { value_backing.as_mut_ptr().add(value_off) };
+        unsafe { std::ptr::write_unaligned(value_at as *mut CK_ULONG, 4 as CK_ULONG) };
+
+        // Misaligned CK_ATTRIBUTE struct at a misaligned offset.
+        let mut struct_backing = [0u8; std::mem::size_of::<CK_ATTRIBUTE>() + 8];
+        let struct_off =
+            misaligned_offset(struct_backing.as_ptr(), std::mem::align_of::<CK_ATTRIBUTE>(), 8);
+        let struct_at = unsafe { struct_backing.as_mut_ptr().add(struct_off) };
+        let attr = CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: value_at as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        };
+        unsafe { std::ptr::write_unaligned(struct_at as *mut CK_ATTRIBUTE, attr) };
+
+        let parsed = unsafe { ck_attrs_to_rust_checked(struct_at as *const CK_ATTRIBUTE, 1) }
+            .expect("misaligned template parses");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].attr_type, CkAttributeType::CLASS);
+        assert_eq!(parsed[0].value, Some(CkAttributeValue::Ulong(4)));
     }
 
     #[test]

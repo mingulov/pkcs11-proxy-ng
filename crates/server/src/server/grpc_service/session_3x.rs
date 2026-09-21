@@ -205,13 +205,21 @@ async fn login_user_inner(
     // Hold the PIN and username in `SecretBytes`: wiped on drop and redacted
     // in Debug. DO NOT log pin or username at any tracing level.
     // (build.rs flags LoginUserRequest.username secret-bearing.)
-    let pin = SecretBytes::new(std::mem::take(&mut req.pin));
-    let username = SecretBytes::new(std::mem::take(&mut req.username));
+    let pin = std::mem::take(&mut req.pin).map(SecretBytes::new);
+    let username = std::mem::take(&mut req.username).map(SecretBytes::new);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
-        let pin = pin.into_zeroizing();
-        let username = username.into_zeroizing();
-        backend.login_user(session, user_type, &username, &pin)
+        // Transfer into wiping owners for the FFI boundary; a NULL
+        // (protected-path) pin/username stays None to the backend,
+        // exactly like `C_Login` (W1-C6-07).
+        let pin = pin.map(SecretBytes::into_zeroizing);
+        let username = username.map(SecretBytes::into_zeroizing);
+        backend.login_user(
+            session,
+            user_type,
+            username.as_deref().map(Vec::as_slice),
+            pin.as_deref().map(Vec::as_slice),
+        )
     })
     .await?;
 
@@ -598,8 +606,8 @@ mod tests {
                     client_context_id: ctx_id.0.clone(),
                     session_handle: virtual_session.0,
                     user_type: 1,
-                    pin: pin.clone(),
-                    username: username.clone(),
+                    pin: Some(pin.clone()),
+                    username: Some(username.clone()),
                 }),
             )
             .await;
@@ -719,8 +727,8 @@ mod tests {
             client_context_id: ctx_id.0.clone(),
             session_handle: session.0,
             user_type,
-            pin: pin.to_vec(),
-            username: b"operator".to_vec(),
+            pin: Some(pin.to_vec()),
+            username: Some(b"operator".to_vec()),
         })
     }
 

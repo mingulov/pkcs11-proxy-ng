@@ -807,8 +807,8 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _user_type: CkUserType,
-        _username: &[u8],
-        _pin: &[u8],
+        _username: Option<&[u8]>,
+        _pin: Option<&[u8]>,
     ) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }

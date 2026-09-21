@@ -465,11 +465,51 @@ fn all_3_0_out_of_scope_slots_are_nonnull() {
 #[test]
 fn out_of_scope_stubs_return_function_not_supported() {
     let _guard = shim_state_test_guard();
-    // C_GetFunctionStatus and C_CancelFunction are now real dispatch functions
+    // C_GetFunctionStatus and C_CancelFunction are real dispatch functions
     // (require connected client) like Message*Final; they are tested via
-    // integration tests, not stub tests.
-    //
-    // No static-error stubs remain in the 3.0 function list.
+    // integration tests, not stub tests. The remaining out-of-scope
+    // fallbacks live in dispatch::general::unsupported: non-null slot
+    // fillers with their slots' exact signatures, each answering
+    // CKR_FUNCTION_NOT_SUPPORTED. Pin every stub's RV so a vacuous pass
+    // is impossible.
+    let rvs = unsafe {
+        [
+            ("c_not_supported", dispatch::general::c_not_supported()),
+            ("c_not_supported_session", dispatch::general::c_not_supported_session(0xDEAD)),
+            (
+                "c_not_supported_msg_init",
+                dispatch::general::c_not_supported_msg_init(0xDEAD, std::ptr::null_mut(), 0xBEEF),
+            ),
+        ]
+    };
+    assert_eq!(rvs.len(), 3, "every fallback stub must be enumerated");
+    for (name, rv) in rvs {
+        assert_eq!(rv, CKR_FUNCTION_NOT_SUPPORTED as CK_RV, "{name}");
+    }
+}
+
+/// W1-L1-02: `copy_catalog` dereferences a caller buffer, so it is
+/// `unsafe` with a documented contract. This pins the contract through
+/// the direct call: a valid buffer with sufficient length is filled and
+/// the entry count returned; a short buffer fails safe (0, untouched).
+/// The `#[deny(unused_unsafe)]` proves the `unsafe` marker is
+/// load-bearing — removing it breaks this test at compile time.
+#[test]
+#[deny(unused_unsafe)]
+fn copy_catalog_contract_valid_buffer_filled_short_buffer_safe() {
+    let _guard = shim_state_test_guard();
+    crate::interface_probe::clear_cache();
+    let mut buf = [super::empty_interface(); 4];
+    let n = unsafe { crate::interface_probe::copy_catalog(buf.as_mut_ptr(), 4) };
+    assert_eq!(n, 3);
+    for entry in &buf[..3] {
+        assert!(!entry.pInterfaceName.is_null());
+        assert!(!entry.pFunctionList.is_null());
+    }
+    let mut short = [super::empty_interface(); 1];
+    let m = unsafe { crate::interface_probe::copy_catalog(short.as_mut_ptr(), 1) };
+    assert_eq!(m, 0);
+    assert!(short[0].pInterfaceName.is_null() && short[0].pFunctionList.is_null());
 }
 
 #[test]
@@ -989,4 +1029,217 @@ fn steady_state_call_consumes_reconnect_flag() {
         1,
         "one steady-state call must run exactly one fresh dial series"
     );
+}
+
+/// Panic-safe override for PKCS11_PROXY_DISABLE_SERVER_REGISTRY (restored
+/// on drop even when an assertion fails, so later tests keep a clean env).
+struct SavedDisableRegistry {
+    saved: Option<String>,
+}
+
+impl SavedDisableRegistry {
+    fn capture() -> Self {
+        Self { saved: std::env::var("PKCS11_PROXY_DISABLE_SERVER_REGISTRY").ok() }
+    }
+
+    fn set(value: Option<&str>) {
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("PKCS11_PROXY_DISABLE_SERVER_REGISTRY", v),
+                None => std::env::remove_var("PKCS11_PROXY_DISABLE_SERVER_REGISTRY"),
+            }
+        }
+    }
+}
+
+impl Drop for SavedDisableRegistry {
+    fn drop(&mut self) {
+        Self::set(self.saved.as_deref());
+    }
+}
+
+/// Shared buffer capturing tracing output for assertions. Thread-local
+/// (`with_default`): the registry-install path emits synchronously on the
+/// calling thread, so no global subscriber is needed.
+#[derive(Clone, Default)]
+struct CapturedWriter {
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for CapturedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buf.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedWriter {
+    type Writer = CapturedWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn capture_logs(f: impl FnOnce()) -> String {
+    let writer = CapturedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    String::from_utf8_lossy(&writer.buf.lock().unwrap()).to_string()
+}
+
+fn registry_payload_with_revision(rev: &str) -> pkcs11_proxy_ng_proto::MechanismRegistryPayload {
+    let mut registry =
+        pkcs11_proxy_ng_types::MechanismRegistry::load(None).expect("embedded registry loads");
+    registry.set_revision(rev.to_string());
+    (&registry).into()
+}
+
+/// Install the embedded-default registry so `mechanism_registry()` reads
+/// below never panic with "not initialized" when this test runs before
+/// any `C_Initialize` in a filtered run.
+fn ensure_registry_installed() {
+    crate::state::replace_mechanism_registry(
+        pkcs11_proxy_ng_types::MechanismRegistry::load(None).expect("embedded registry loads"),
+    );
+}
+
+/// Install `payload` and read back the global revision, retrying while a
+/// concurrent unguarded `ensure_registry()` (mechanism-parameter unit
+/// tests, which cannot see the shim state guard) clobbers the global
+/// registry between our install and read-back. Bounded: 100 consecutive
+/// clobbers is impossible without a real bug.
+fn install_and_read_back_revision(
+    payload: &pkcs11_proxy_ng_proto::MechanismRegistryPayload,
+) -> String {
+    for _ in 0..100 {
+        crate::interface_probe::maybe_install_server_registry(Some(payload));
+        let got = crate::state::mechanism_registry().revision().to_string();
+        if got == payload.revision {
+            return got;
+        }
+    }
+    panic!("global registry clobbered 100x in a row — a real bug, not a flake");
+}
+
+/// W1-C7-06: with the disable env unset, a server-published registry
+/// payload installs (the fallback is replaced) and the install is logged.
+#[test]
+fn server_registry_installs_when_disable_env_unset() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    SavedDisableRegistry::set(None);
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    let payload = registry_payload_with_revision("c7-06-install-test");
+    let output = capture_logs(|| {
+        crate::interface_probe::maybe_install_server_registry(Some(&payload));
+    });
+    assert!(
+        output.contains("mechanism registry installed from server")
+            && output.contains("c7-06-install-test"),
+        "install must be logged with the payload revision: {output:?}"
+    );
+    assert_eq!(install_and_read_back_revision(&payload), "c7-06-install-test");
+}
+
+/// W1-C7-06: with PKCS11_PROXY_DISABLE_SERVER_REGISTRY set, the server
+/// payload is ignored and the fallback registry stays (AGENTS.md §13:
+/// the env var "forces the fallback path").
+#[test]
+fn server_registry_ignored_when_disable_env_set() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    SavedDisableRegistry::set(Some("1"));
+    let ignored = registry_payload_with_revision("c7-06-must-not-install");
+    // State assertion first, retrying past concurrent unguarded
+    // `ensure_registry()` clobbers (see install_and_read_back_revision).
+    for _ in 0..100 {
+        let before = crate::state::mechanism_registry().revision().to_string();
+        crate::interface_probe::maybe_install_server_registry(Some(&ignored));
+        let after = crate::state::mechanism_registry().revision().to_string();
+        assert!(
+            after != "c7-06-must-not-install",
+            "disabled path must never install the server payload"
+        );
+        if after == before {
+            break;
+        }
+    }
+    let output = capture_logs(|| {
+        crate::interface_probe::maybe_install_server_registry(Some(&ignored));
+    });
+    assert!(
+        output.contains("ignoring server-published registry"),
+        "fallback must be logged: {output:?}"
+    );
+    assert!(
+        !output.contains("c7-06-must-not-install"),
+        "ignored payload revision must never be logged as installed: {output:?}"
+    );
+}
+
+/// W1-C7-06: consecutive installs with different revisions emit the
+/// registry-drift WARN naming both revisions (HA-daemon drift signal).
+#[test]
+fn registry_revision_drift_warns_with_both_revisions() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    SavedDisableRegistry::set(None);
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    let first = registry_payload_with_revision("c7-06-drift-a");
+    let second = registry_payload_with_revision("c7-06-drift-b");
+    let output = capture_logs(|| {
+        crate::interface_probe::maybe_install_server_registry(Some(&first));
+        crate::interface_probe::maybe_install_server_registry(Some(&second));
+    });
+    assert!(
+        output.contains("mechanism registry installed from server")
+            && output.contains("c7-06-drift-a"),
+        "first install must log INFO with its revision: {output:?}"
+    );
+    assert!(
+        output.contains("WARN") && output.contains("changed between probes"),
+        "drift must log WARN: {output:?}"
+    );
+    assert!(
+        output.contains("c7-06-drift-a") && output.contains("c7-06-drift-b"),
+        "drift WARN must name both revisions: {output:?}"
+    );
+}
+
+/// W1-C7-06: an absent payload (older daemon predating the field) leaves
+/// the registry untouched in both env states — and logs no install.
+#[test]
+fn absent_registry_payload_keeps_current_registry() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    for env in [None, Some("1")] {
+        SavedDisableRegistry::set(env);
+        let before = crate::state::mechanism_registry().revision().to_string();
+        let output = capture_logs(|| crate::interface_probe::maybe_install_server_registry(None));
+        assert!(
+            !output.contains("mechanism registry installed from server"),
+            "absent payload must not log an install (env={env:?}): {output:?}"
+        );
+        // A concurrent unguarded `ensure_registry()` may legitimately swap
+        // the global here; only our own install would be a bug, and an
+        // absent payload cannot install — so a change is tolerable only
+        // toward the embedded default, never toward a server revision.
+        let after = crate::state::mechanism_registry().revision().to_string();
+        assert!(
+            after == before || after == "embedded-default",
+            "absent payload must not install anything (env={env:?}): {before} -> {after}"
+        );
+    }
 }

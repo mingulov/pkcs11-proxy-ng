@@ -438,6 +438,54 @@ fn shim_get_attribute_value_size_query_returns_exact_length_without_copy() {
     assert_eq!(ul_value_len, 3);
 }
 
+/// W1-C6-07: `C_LoginUser` must preserve caller-NULL pin/username as None
+/// end to end (the `C_Login` convention), not flatten them to empty
+/// slices. A protected-path login (NULL, 0) must arrive at the backend as
+/// (None, None) while an explicit empty login arrives as (Some, Some) —
+/// the two pointer classes stay distinguishable, exactly like `C_Login`.
+#[test]
+fn shim_login_user_null_vs_empty_presence_reaches_backend() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+    let observations_before = daemon.backend.login_user_presence_observations().len();
+
+    // Protected-path login: NULL pin + NULL username.
+    let null_rv = unsafe {
+        dispatch::general::c_login_user(
+            shim.session,
+            CKU_USER,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    // Explicit-empty login: non-NULL pointers with zero length.
+    let mut empty = [0u8; 1];
+    let empty_rv = unsafe {
+        dispatch::general::c_login_user(
+            shim.session,
+            CKU_USER,
+            empty.as_mut_ptr(),
+            0,
+            empty.as_mut_ptr(),
+            0,
+        )
+    };
+
+    // Both fail PIN verification (the mock only accepts "1234"), but the
+    // backend must observe distinct pointer-presence classes.
+    assert_eq!(null_rv, CKR_PIN_INCORRECT as CK_RV);
+    assert_eq!(empty_rv, CKR_PIN_INCORRECT as CK_RV);
+    let fresh = &daemon.backend.login_user_presence_observations()[observations_before..];
+    assert_eq!(
+        fresh,
+        &[(true, true), (false, false)],
+        "NULL must arrive as (None, None), empty as (Some, Some)"
+    );
+}
+
 #[test]
 fn shim_get_attribute_value_null_zero_reaches_empty_query_backend() {
     let _guard = shim_state_test_guard();

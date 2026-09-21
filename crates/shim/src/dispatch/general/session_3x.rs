@@ -25,8 +25,19 @@ pub unsafe extern "C" fn c_login_user(
             Some(ut) => ut,
             None => return rv_err(CkRv::USER_TYPE_INVALID),
         };
-        let pin = unsafe { read_input_slice(p_pin, ul_pin_len) };
-        let username = unsafe { read_input_slice(p_username, ul_username_len) };
+        // W1-C6-07: preserve caller-NULL pin/username as None (the
+        // `c_login` convention) so a protected-path login reaches the
+        // backend as NULL, not as an empty slice.
+        let pin = if p_pin.is_null() {
+            None
+        } else {
+            Some(unsafe { read_input_slice(p_pin, ul_pin_len) })
+        };
+        let username = if p_username.is_null() {
+            None
+        } else {
+            Some(unsafe { read_input_slice(p_username, ul_username_len) })
+        };
         unit_result_to_rv(
             with_client!(client => client.login_user(CkSessionHandle(h_session as u64), ut, username, pin)),
         )

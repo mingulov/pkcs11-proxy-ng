@@ -129,7 +129,8 @@ fn resolve_backend_attribute_stride(stride: Option<u32>, width: usize) -> Result
 ///
 /// - D6: a byte-order mismatch is refused (`Err`) — the wire carries native
 ///   ulong bytes, so a mismatch would corrupt every multi-byte ulong. All
-///   supported targets are little-endian.
+///   supported targets are little-endian. Out-of-contract orders (anything
+///   but 1/2/absent) are likewise refused, never fallen through (W1-C7-08).
 /// - D2: a valid advertised width (4 or 8) is used; any other value is hostile
 ///   and refused.
 /// - D9: an absent width falls back to 8 (LP64) — correct for every supported
@@ -149,7 +150,16 @@ pub(crate) fn resolve_backend_ulong_size(
                         big-endian; refusing (ADR-0011 D6)"
                 .to_string());
         }
-        _ => {}
+        // Contract orders (host_abi.rs): 1 = little, 2 = big, absent =
+        // unspecified (older daemon). Anything else is out of contract
+        // and refused loudly instead of falling through (W1-C7-08).
+        None | Some(1) | Some(2) => {}
+        Some(other) => {
+            return Err(format!(
+                "backend advertised an invalid CK_ULONG byte order {other} \
+                 (expected 1 (little-endian) or 2 (big-endian); ADR-0011 D6)"
+            ));
+        }
     }
     match size {
         Some(n @ (4 | 8)) => Ok((n as usize, false)),
@@ -627,22 +637,7 @@ fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
     )
     .map_err(ProbeFailure::AbiMismatch)?;
 
-    // Install the server-published registry whenever the daemon
-    // includes one. Older daemons predate the field — in that case we
-    // keep whatever the shim's embedded-default fallback already
-    // installed (see init_general.rs).
-    if std::env::var_os("PKCS11_PROXY_DISABLE_SERVER_REGISTRY").is_none() {
-        if let Some(payload) = &probe.mechanism_registry {
-            let registry: MechanismRegistry = payload.into();
-            let new_revision = registry.revision().to_string();
-            log_registry_change(&new_revision);
-            state::replace_mechanism_registry(registry);
-        }
-    } else {
-        tracing::debug!(
-            "PKCS11_PROXY_DISABLE_SERVER_REGISTRY set; ignoring server-published registry"
-        );
-    }
+    maybe_install_server_registry(probe.mechanism_registry.as_ref());
 
     Ok(build_interface_state(&probe.interfaces, probe.pointer_safe_message_parameters))
 }
@@ -747,6 +742,37 @@ fn fixup_catalog(st: &mut InterfaceState) {
         idx += 1;
     }
     debug_assert_eq!(idx as CK_ULONG, st.count, "catalog entries must match count");
+}
+
+/// Install the server-published registry whenever the daemon includes
+/// one. Older daemons predate the field — in that case we keep whatever
+/// the shim's embedded-default fallback already installed (see
+/// init_general.rs). `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` (test/debug
+/// use, see AGENTS.md) forces the fallback path even when the daemon
+/// publishes a registry.
+pub(crate) fn maybe_install_server_registry(
+    payload: Option<&pkcs11_proxy_ng_proto::MechanismRegistryPayload>,
+) {
+    if std::env::var_os("PKCS11_PROXY_DISABLE_SERVER_REGISTRY").is_none() {
+        if let Some(payload) = payload {
+            let registry: MechanismRegistry = payload.into();
+            let new_revision = registry.revision().to_string();
+            log_registry_change(&new_revision);
+            state::replace_mechanism_registry(registry);
+        }
+    } else {
+        tracing::debug!(
+            "PKCS11_PROXY_DISABLE_SERVER_REGISTRY set; ignoring server-published registry"
+        );
+    }
+}
+
+/// Reset the revision tracker so drift tests start from a known state.
+/// Test-only; production resets (e.g. on cache clear) are Task 36's
+/// W1-C7-11, which subsumes this hook's purpose for real flows.
+#[cfg(test)]
+pub(crate) fn reset_registry_revision_for_test() {
+    *LAST_REGISTRY_REVISION.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Record the latest registry revision and emit a log line. A change
@@ -894,7 +920,17 @@ pub fn interface_count() -> CK_ULONG {
 /// Otherwise falls back to the static (all-non-null) catalog.
 ///
 /// Returns the number of entries written.
-pub fn copy_catalog(buf: *mut CK_INTERFACE, buf_len: CK_ULONG) -> CK_ULONG {
+///
+/// # Safety
+///
+/// `buf` must be non-null and valid for writes of `buf_len`
+/// `CK_INTERFACE` entries. A short buffer (`buf_len` below the catalog
+/// count) fails safe — nothing is written and 0 is returned — but a null
+/// `buf`, or a buffer smaller than the claimed `buf_len`, is immediate
+/// undefined behavior. The sole caller `C_GetInterfaceList` excludes null
+/// via its count-only path before calling. (In-callee null hardening is
+/// Task 36's W1-C7-12; until then the caller must uphold non-null.)
+pub unsafe fn copy_catalog(buf: *mut CK_INTERFACE, buf_len: CK_ULONG) -> CK_ULONG {
     let n = interface_count();
     if buf_len < n {
         return 0; // caller should have checked
@@ -1144,6 +1180,130 @@ mod backend_abi_tests {
         );
     }
 
+    /// W1-C7-05: the patched-function-list path NULLs exactly the
+    /// backend-reported slots. Non-empty `null_functions` fixtures pin the
+    /// patch branch per struct version (2.40 + 3.0 here; 3.2 below).
+    #[test]
+    fn patched_function_list_nulls_reported_slots_only() {
+        let probe = vec![
+            (2u8, 40u8, vec!["C_Encrypt".to_string(), "C_Decrypt".to_string()]),
+            (3, 0, vec!["C_LoginUser".to_string()]),
+            (3, 2, Vec::new()),
+        ];
+        let st = super::build_interface_state(&probe, false);
+        // E0793: CK lists are packed on Windows; `is_some()`/`is_none()`
+        // run on by-value copies.
+        assert!(
+            {
+                let f = st.fl_2_40.C_Encrypt;
+                f.is_none()
+            },
+            "C_Encrypt nulled"
+        );
+        assert!(
+            {
+                let f = st.fl_2_40.C_Decrypt;
+                f.is_none()
+            },
+            "C_Decrypt nulled"
+        );
+        assert!(
+            {
+                let f = st.fl_2_40.C_SignInit;
+                f.is_some()
+            },
+            "C_SignInit stays"
+        );
+        assert!(
+            {
+                let f = st.fl_3_0.C_LoginUser;
+                f.is_none()
+            },
+            "C_LoginUser nulled"
+        );
+        assert!(
+            {
+                let f = st.fl_3_0.C_SessionCancel;
+                f.is_some()
+            },
+            "C_SessionCancel stays"
+        );
+        assert!(
+            {
+                let f = st.fl_3_2.C_EncapsulateKey;
+                f.is_some()
+            },
+            "3.2 unpatched stays"
+        );
+    }
+
+    /// W1-C7-05: unknown names in `null_functions` are ignored — a newer
+    /// daemon's function names must not break an older shim's patch loop
+    /// or NULL unrelated slots.
+    #[test]
+    fn patched_function_list_ignores_unknown_names() {
+        let probe = vec![(2u8, 40u8, vec!["C_NoSuchFunction".to_string(), String::new()])];
+        let st = super::build_interface_state(&probe, false);
+        assert!(
+            {
+                let f = st.fl_2_40.C_Encrypt;
+                f.is_some()
+            },
+            "C_Encrypt stays"
+        );
+        assert!(
+            {
+                let f = st.fl_2_40.C_Login;
+                f.is_some()
+            },
+            "C_Login stays"
+        );
+        assert!(
+            {
+                let f = st.fl_3_0.C_LoginUser;
+                f.is_some()
+            },
+            "3.0 C_LoginUser stays"
+        );
+    }
+
+    /// W1-C7-05: a 3.2-without-3.0 probe (BouncyHSM class) patches the 3.2
+    /// list from its own null set and catalogs exactly {2.40, 3.2} — no
+    /// invented {3,0} entry, and {3,0} lookups honestly miss.
+    #[test]
+    fn patched_3_2_without_3_0_catalogs_exactly_two_entries() {
+        let probe = vec![(2u8, 40u8, Vec::new()), (3, 2, vec!["C_EncapsulateKey".to_string()])];
+        let mut st = super::build_interface_state(&probe, false);
+        super::fixup_catalog(&mut st);
+        assert_eq!(st.count, 2);
+        assert!(
+            {
+                let f = st.fl_3_2.C_EncapsulateKey;
+                f.is_none()
+            },
+            "3.2 patch applies"
+        );
+        assert!(
+            {
+                let f = st.fl_3_2.C_DecapsulateKey;
+                f.is_some()
+            },
+            "3.2 sibling stays"
+        );
+        let catalog = &st.catalog[..st.count as usize];
+        let name = c"PKCS 11";
+        let v32 = CK_VERSION { major: 3, minor: 2 };
+        let hit = find_interface_in_catalog(catalog, Some(name), Some(&v32), 0)
+            .expect("{3,2} must resolve when the backend offers 3.2");
+        let stamped = unsafe { *((&*hit).pFunctionList as *const CK_VERSION) };
+        assert_eq!((stamped.major, stamped.minor), (3, 2));
+        let v30 = CK_VERSION { major: 3, minor: 0 };
+        assert!(
+            find_interface_in_catalog(catalog, Some(name), Some(&v30), 0).is_none(),
+            "no invented {{3,0}} alias for a 3.2-without-3.0 backend"
+        );
+    }
+
     #[test]
     fn message_parameter_capability_is_cleared_before_reprobe() {
         record_pointer_safe_message_parameters(true);
@@ -1197,6 +1357,19 @@ mod backend_abi_tests {
         assert!(resolve_backend_ulong_size(Some(2), native_order()).is_err());
         assert!(resolve_backend_ulong_size(Some(16), native_order()).is_err());
         assert!(resolve_backend_ulong_size(Some(0), native_order()).is_err());
+    }
+
+    /// W1-C7-08: out-of-contract byte orders are refused loudly — the
+    /// contract is 1 (little) / 2 (big) / unspecified only (host_abi.rs).
+    /// Falling through as "unspecified" would silently accept garbage.
+    #[test]
+    fn out_of_contract_byte_orders_refused() {
+        for order in [0, 3, 99, u32::MAX] {
+            let result = resolve_backend_ulong_size(Some(8), Some(order));
+            assert!(result.is_err(), "order {order} is out of contract and must be refused");
+            let err = result.unwrap_err();
+            assert!(err.contains("byte order"), "refusal must name the field: {err}");
+        }
     }
 
     #[test]

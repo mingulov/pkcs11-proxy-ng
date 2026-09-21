@@ -19,12 +19,6 @@ fn assert_canary_nonempty(label: &str, bytes: &[u8]) {
     assert!(bytes.iter().any(|&byte| byte != 0), "{label} canary must be nonzero before zeroize");
 }
 
-/// `Vec::zeroize` overwrites every element plus the spare capacity, then
-/// clears: after the call nothing secret remains reachable in any form.
-fn assert_wiped(label: &str, bytes: &[u8]) {
-    assert!(bytes.is_empty(), "{label} must not retain secret bytes after zeroize");
-}
-
 #[test]
 fn pin_request_messages_zeroize_wipes_secrets() {
     // All fields spelled out: struct-update syntax cannot move fields out
@@ -45,14 +39,19 @@ fn pin_request_messages_zeroize_wipes_secrets() {
         client_context_id: "ctx".to_string(),
         session_handle: 1,
         user_type: 1,
-        pin: vec![0x5Au8; 16],
-        username: vec![0x55u8; 8],
+        pin: Some(vec![0x5Au8; 16]),
+        username: Some(vec![0x55u8; 8]),
     };
-    assert_canary_nonempty("LoginUserRequest.pin", &login_user.pin);
-    assert_canary_nonempty("LoginUserRequest.username", &login_user.username);
+    assert_canary_nonempty("LoginUserRequest.pin", login_user.pin.as_deref().unwrap_or_default());
+    assert_canary_nonempty(
+        "LoginUserRequest.username",
+        login_user.username.as_deref().unwrap_or_default(),
+    );
     login_user.zeroize();
-    assert_wiped("LoginUserRequest.pin", &login_user.pin);
-    assert_wiped("LoginUserRequest.username", &login_user.username);
+    // `Option::zeroize` wipes the inner buffer, then clears presence: no
+    // secret bytes remain reachable in any form (same as `LoginRequest`).
+    assert!(login_user.pin.is_none(), "LoginUserRequest.pin must not survive zeroize");
+    assert!(login_user.username.is_none(), "LoginUserRequest.username must not survive zeroize");
 
     let mut init_token = InitTokenRequest {
         client_context_id: "ctx".to_string(),

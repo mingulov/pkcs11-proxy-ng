@@ -108,7 +108,14 @@ async fn login_user_valid_pin() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
-    let result = client.login_user(session, CkUserType::User, b"testuser", b"1234").await;
+    let result = client
+        .login_user(
+            session,
+            CkUserType::User,
+            Some(b"testuser".as_slice()),
+            Some(b"1234".as_slice()),
+        )
+        .await;
     assert!(result.is_ok(), "login_user with PIN 1234 should succeed");
 }
 
@@ -125,8 +132,15 @@ async fn login_user_wrong_pin() {
     let slots = client.get_slot_list(false).await.unwrap();
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
 
-    let err =
-        client.login_user(session, CkUserType::User, b"testuser", b"wrong").await.unwrap_err();
+    let err = client
+        .login_user(
+            session,
+            CkUserType::User,
+            Some(b"testuser".as_slice()),
+            Some(b"wrong".as_slice()),
+        )
+        .await
+        .unwrap_err();
     assert_eq!(
         err,
         CkRv::PIN_INCORRECT,

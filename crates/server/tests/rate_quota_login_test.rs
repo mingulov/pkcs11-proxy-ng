@@ -267,7 +267,12 @@ async fn per_slot_failed_login_budget_end_to_end() {
 
         for i in 1_usize..=3 {
             let rv = client
-                .login_user(session, CkUserType::User, b"operator", b"bad")
+                .login_user(
+                    session,
+                    CkUserType::User,
+                    Some(b"operator".as_slice()),
+                    Some(b"bad".as_slice()),
+                )
                 .await
                 .unwrap_err();
             assert_eq!(
@@ -282,8 +287,15 @@ async fn per_slot_failed_login_budget_end_to_end() {
             );
         }
 
-        let rv4 =
-            client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
+        let rv4 = client
+            .login_user(
+                session,
+                CkUserType::User,
+                Some(b"operator".as_slice()),
+                Some(b"bad".as_slice()),
+            )
+            .await
+            .unwrap_err();
         assert_eq!(
             rv4,
             CkRv::PIN_LOCKED,
@@ -324,7 +336,12 @@ async fn per_slot_failed_login_budget_end_to_end() {
 
         for _ in 0..2 {
             let rv = client
-                .login_user(session, CkUserType::User, b"operator", b"bad")
+                .login_user(
+                    session,
+                    CkUserType::User,
+                    Some(b"operator".as_slice()),
+                    Some(b"bad".as_slice()),
+                )
                 .await
                 .unwrap_err();
             assert_eq!(rv, CkRv::PIN_INCORRECT, "pre-success fail must be PIN_INCORRECT");
@@ -332,12 +349,25 @@ async fn per_slot_failed_login_budget_end_to_end() {
         assert_eq!(mock_e.login_user_call_count(), 2, "two failures must each reach the backend");
 
         // Successful login_user (mock PIN is b"1234") resets the counter.
-        client.login_user(session, CkUserType::User, b"operator", b"1234").await.unwrap();
+        client
+            .login_user(
+                session,
+                CkUserType::User,
+                Some(b"operator".as_slice()),
+                Some(b"1234".as_slice()),
+            )
+            .await
+            .unwrap();
         assert_eq!(mock_e.login_user_call_count(), 3, "success must reach the backend");
 
         for i in 1_usize..=3 {
             let rv = client
-                .login_user(session, CkUserType::User, b"operator", b"bad")
+                .login_user(
+                    session,
+                    CkUserType::User,
+                    Some(b"operator".as_slice()),
+                    Some(b"bad".as_slice()),
+                )
                 .await
                 .unwrap_err();
             assert_eq!(
@@ -352,8 +382,15 @@ async fn per_slot_failed_login_budget_end_to_end() {
             "three post-reset fails + one success + two pre-success fails = 6 backend calls"
         );
 
-        let rv_reject =
-            client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
+        let rv_reject = client
+            .login_user(
+                session,
+                CkUserType::User,
+                Some(b"operator".as_slice()),
+                Some(b"bad".as_slice()),
+            )
+            .await
+            .unwrap_err();
         assert_eq!(
             rv_reject,
             CkRv::PIN_LOCKED,
@@ -397,8 +434,15 @@ async fn per_slot_failed_login_budget_end_to_end() {
         assert_eq!(mock_f.login_call_count(), 2, "two C_Login fails must reach the backend");
 
         // Third strike via C_LoginUser: trips the shared budget.
-        let rv3 =
-            client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
+        let rv3 = client
+            .login_user(
+                session,
+                CkUserType::User,
+                Some(b"operator".as_slice()),
+                Some(b"bad".as_slice()),
+            )
+            .await
+            .unwrap_err();
         assert_eq!(
             rv3,
             CkRv::PIN_INCORRECT,
@@ -407,8 +451,15 @@ async fn per_slot_failed_login_budget_end_to_end() {
         assert_eq!(mock_f.login_user_call_count(), 1, "3rd strike must reach the backend");
 
         // Budget tripped: the next C_LoginUser is fast-rejected.
-        let rv4 =
-            client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
+        let rv4 = client
+            .login_user(
+                session,
+                CkUserType::User,
+                Some(b"operator".as_slice()),
+                Some(b"bad".as_slice()),
+            )
+            .await
+            .unwrap_err();
         assert_eq!(
             rv4,
             CkRv::PIN_LOCKED,
