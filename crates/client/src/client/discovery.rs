@@ -7,7 +7,8 @@ impl Pkcs11Client {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::GetInfoRequest { client_context_id: ctx };
         let resp = pkcs11_unary_call!(self.grpc.get_info(req), false);
-        let info = resp.info.ok_or(CkRv::DEVICE_ERROR)?;
+        // Absent info = uninterpretable daemon payload (W1-L3-06).
+        let info = resp.info.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         Ok(CkInfo::try_from(&info)?)
     }
 
@@ -26,7 +27,8 @@ impl Pkcs11Client {
             slot_id: slot_id.0,
         };
         let resp = pkcs11_unary_call!(self.grpc.get_slot_info(req), false);
-        let info = resp.info.ok_or(CkRv::DEVICE_ERROR)?;
+        // Absent info = uninterpretable daemon payload (W1-L3-06).
+        let info = resp.info.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         Ok(CkSlotInfo::try_from(&info)?)
     }
 
@@ -37,7 +39,8 @@ impl Pkcs11Client {
             slot_id: slot_id.0,
         };
         let resp = pkcs11_unary_call!(self.grpc.get_token_info(req), false);
-        let info = resp.info.ok_or(CkRv::DEVICE_ERROR)?;
+        // Absent info = uninterpretable daemon payload (W1-L3-06).
+        let info = resp.info.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         Ok(CkTokenInfo::try_from(&info)?)
     }
 
@@ -66,7 +69,31 @@ impl Pkcs11Client {
             mechanism_type: mech.0,
         };
         let resp = pkcs11_unary_call!(self.grpc.get_mechanism_info(req), false);
-        let info = resp.info.ok_or(CkRv::DEVICE_ERROR)?;
+        // Absent info = uninterpretable daemon payload (W1-L3-06).
+        let info = resp.info.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         Ok(CkMechanismInfo::from(&info))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // W1-L3-06: an absent `info` payload on an otherwise-OK discovery
+    // response (malformed/older daemon) must map to FUNCTION_NOT_SUPPORTED —
+    // the exact-path convention for uninterpretable daemon payloads — never
+    // DEVICE_ERROR, which collides with backend errors. The mapping is
+    // inline at each call site (no seam for a mock), so this pins all 4
+    // discovery sites by source scan; the 5th absent-info site
+    // (get_session_info) is pinned by the twin scan in session.rs.
+    // Recorded pre-fix state: all 4 sites used `ok_or(CkRv::DEVICE_ERROR)`.
+    #[test]
+    fn absent_info_maps_to_function_not_supported() {
+        let source = include_str!("discovery.rs");
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(!prod.contains("DEVICE_ERROR"), "no absent-info site may map to DEVICE_ERROR");
+        assert_eq!(
+            prod.matches("ok_or(CkRv::FUNCTION_NOT_SUPPORTED)").count(),
+            4,
+            "all 4 discovery absent-info sites must map to FUNCTION_NOT_SUPPORTED"
+        );
     }
 }

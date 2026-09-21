@@ -3153,7 +3153,7 @@ mod lifecycle_transition_tests {
                     (
                         MockMessageLifecycleAction::Delay(Duration::from_millis(60), CkRv::OK),
                         Some(Duration::from_millis(5)),
-                        Ok(CkRv::DEVICE_ERROR.0),
+                        Ok(CkRv::FUNCTION_FAILED.0),
                         None,
                     ),
                     (
@@ -3162,7 +3162,7 @@ mod lifecycle_transition_tests {
                             CkRv::FUNCTION_FAILED,
                         ),
                         Some(Duration::from_millis(5)),
-                        Ok(CkRv::DEVICE_ERROR.0),
+                        Ok(CkRv::FUNCTION_FAILED.0),
                         Some(MessageParameterShape::Gcm),
                     ),
                     (MockMessageLifecycleAction::Panic, None, Err(()), None),
@@ -3215,7 +3215,7 @@ mod lifecycle_transition_tests {
                 (
                     MockMessageLifecycleAction::Delay(Duration::from_millis(60), CkRv::OK),
                     Some(Duration::from_millis(5)),
-                    Some(CkRv::DEVICE_ERROR),
+                    Some(CkRv::FUNCTION_FAILED),
                     Some(MessageParameterShape::Gcm),
                 ),
                 (
@@ -3224,7 +3224,7 @@ mod lifecycle_transition_tests {
                         CkRv::FUNCTION_FAILED,
                     ),
                     Some(Duration::from_millis(5)),
-                    Some(CkRv::DEVICE_ERROR),
+                    Some(CkRv::FUNCTION_FAILED),
                     Some(MessageParameterShape::Ccm),
                 ),
                 (MockMessageLifecycleAction::Panic, None, None, None),
@@ -3364,7 +3364,7 @@ mod lifecycle_transition_tests {
         )
         .await
         .unwrap();
-        assert_eq!(rv, CkRv::DEVICE_ERROR.0);
+        assert_eq!(rv, CkRv::FUNCTION_FAILED.0);
         assert_eq!(
             ctx.context_manager
                 .get_context(&context_id, |context| {

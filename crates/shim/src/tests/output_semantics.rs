@@ -322,7 +322,7 @@ fn write_exact_output_rejects_value_larger_than_declared_buffer_without_copy() {
         )
     };
 
-    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
     assert_eq!(declared_len, 2);
     assert_eq!(backing, [0xAA; 4]);
 }
@@ -340,7 +340,7 @@ fn write_exact_output_validates_all_effects_before_any_store() {
     let rv = unsafe {
         dispatch::general::write_exact_output(&spec, &result, backing.as_mut_ptr(), &mut length)
     };
-    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
     assert_eq!(length, 8, "validation must precede all caller stores");
     assert_eq!(backing, [0xa5; 8]);
 }
@@ -384,7 +384,7 @@ fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
         )
     };
 
-    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
     assert_eq!(declared_len, 2);
     assert_eq!(backing, [0xAA; 4]);
 }
@@ -1264,6 +1264,7 @@ fn malformed_post_provider_ack_returns_device_error_and_clears_shim_shape() {
         )
     };
 
+    // W1-L3-05: DEVICE_ERROR is the unified exact-output violation RV.
     assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
     assert_eq!(daemon.backend.message_parameter_call_count(), calls_before + 1);
     assert_eq!(
@@ -4067,6 +4068,36 @@ fn generate_random_returns_exact_requested_length() {
     let mut empty = [0_u8; 0];
     let rv3 = unsafe { dispatch::general::c_generate_random(shim.session, empty.as_mut_ptr(), 0) };
     assert_eq!(rv3, CKR_OK as CK_RV, "C_GenerateRandom(0)");
+
+    drop(shim);
+}
+
+#[test]
+fn generate_random_wrong_length_daemon_response_returns_general_error() {
+    // W1-L3-08: a daemon response whose length differs from the requested
+    // length is a protocol violation, not a backend failure: it must map to
+    // CKR_GENERAL_ERROR, never the CKR_DEVICE_ERROR catch-all. Recorded
+    // pre-fix state: both short and long responses returned DEVICE_ERROR.
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+
+    // Short response: 4 bytes for a 16-byte request.
+    daemon.backend.set_next_random_bytes(vec![0x42; 4]);
+    let mut buf = [0xA5_u8; 16];
+    let rv = unsafe {
+        dispatch::general::c_generate_random(shim.session, buf.as_mut_ptr(), buf.len() as CK_ULONG)
+    };
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV, "short daemon response");
+    assert_eq!(buf, [0xA5; 16], "short response must not write output");
+
+    // Long response: 20 bytes for a 16-byte request.
+    daemon.backend.set_next_random_bytes(vec![0x42; 20]);
+    let rv = unsafe {
+        dispatch::general::c_generate_random(shim.session, buf.as_mut_ptr(), buf.len() as CK_ULONG)
+    };
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV, "long daemon response");
+    assert_eq!(buf, [0xA5; 16], "long response must not write output");
 
     drop(shim);
 }

@@ -57,7 +57,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
     // With budget = 3:
     //   • Attempts 1-3 reach the backend and return CKR_PIN_INCORRECT
     //     (transparency — the real RV is forwarded verbatim).
-    //   • Attempt 4 is fast-rejected with CKR_DEVICE_ERROR WITHOUT a backend
+    //   • Attempt 4 is fast-rejected with CKR_PIN_LOCKED WITHOUT a backend
     //     call (assert login_call_count stays at 3).
     {
         let mock_a = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
@@ -93,12 +93,12 @@ async fn per_slot_failed_login_budget_end_to_end() {
             );
         }
 
-        // Attempt 4: fast-reject — no backend call, CKR_DEVICE_ERROR.
+        // Attempt 4: fast-reject — no backend call, CKR_PIN_LOCKED.
         let rv4 = client.login(session, CkUserType::User, Some(b"wrongpin")).await.unwrap_err();
         assert_eq!(
             rv4,
-            CkRv::DEVICE_ERROR,
-            "4th attempt must be fast-rejected with CKR_DEVICE_ERROR (cooldown active)"
+            CkRv::PIN_LOCKED,
+            "4th attempt must be fast-rejected with CKR_PIN_LOCKED (cooldown active)"
         );
         assert_eq!(
             mock_a.login_call_count(),
@@ -176,7 +176,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
         let rv_reject = client.login(session, CkUserType::User, Some(b"bad")).await.unwrap_err();
         assert_eq!(
             rv_reject,
-            CkRv::DEVICE_ERROR,
+            CkRv::PIN_LOCKED,
             "post-reset 4th failure must be fast-rejected (budget tripped again)"
         );
         assert_eq!(mock_b.login_call_count(), 6, "fast-reject must not call the backend");
@@ -217,7 +217,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
 
         // Confirm we are in cooldown: the next attempt is fast-rejected.
         let rv_cold = client.login(session, CkUserType::User, Some(b"bad")).await.unwrap_err();
-        assert_eq!(rv_cold, CkRv::DEVICE_ERROR, "slot must be in cooldown immediately after trip");
+        assert_eq!(rv_cold, CkRv::PIN_LOCKED, "slot must be in cooldown immediately after trip");
         assert_eq!(mock_c.login_call_count(), 3, "cooldown fast-reject must not call backend");
 
         // Wait for the cooldown to expire (configured at 1 second; add 200 ms margin).
@@ -247,7 +247,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
     // W1-L7-01: wrong-PIN C_LoginUser attempts must count toward the per-slot
     // budget exactly like C_Login attempts (no evasion). With budget = 3:
     // attempts 1-3 reach the backend and return transparent CKR_PIN_INCORRECT;
-    // attempt 4 is fast-rejected with CKR_DEVICE_ERROR without a backend call.
+    // attempt 4 is fast-rejected with CKR_PIN_LOCKED without a backend call.
     {
         let mock_d = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock_d.initialize().unwrap();
@@ -286,8 +286,8 @@ async fn per_slot_failed_login_budget_end_to_end() {
             client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
         assert_eq!(
             rv4,
-            CkRv::DEVICE_ERROR,
-            "login_user 4th attempt must be fast-rejected with CKR_DEVICE_ERROR (cooldown active)"
+            CkRv::PIN_LOCKED,
+            "login_user 4th attempt must be fast-rejected with CKR_PIN_LOCKED (cooldown active)"
         );
         assert_eq!(
             mock_d.login_user_call_count(),
@@ -356,7 +356,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
             client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
         assert_eq!(
             rv_reject,
-            CkRv::DEVICE_ERROR,
+            CkRv::PIN_LOCKED,
             "post-reset 4th failure must be fast-rejected (budget tripped again)"
         );
         assert_eq!(mock_e.login_user_call_count(), 6, "fast-reject must not call the backend");
@@ -411,7 +411,7 @@ async fn per_slot_failed_login_budget_end_to_end() {
             client.login_user(session, CkUserType::User, b"operator", b"bad").await.unwrap_err();
         assert_eq!(
             rv4,
-            CkRv::DEVICE_ERROR,
+            CkRv::PIN_LOCKED,
             "post-trip C_LoginUser must be fast-rejected (shared budget)"
         );
         assert_eq!(mock_f.login_user_call_count(), 1, "fast-reject must not call the backend");

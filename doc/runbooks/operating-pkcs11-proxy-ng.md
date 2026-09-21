@@ -296,8 +296,11 @@ volumes:
 ### CKR_DEVICE_ERROR (0x30)
 
 **Most likely cause — ambiguous, two sources.** Either (a) a transport-level
-failure to the daemon — pod restart, network partition, daemon overload
-(circuit-breaker trip); or (b) a **backend-reported error** forwarded unchanged.
+failure to the daemon — pod restart, network partition; or (b) a
+**backend-reported error** forwarded unchanged. (Daemon overload /
+circuit-breaker trips surface as `CKR_HOST_MEMORY`, and backend-call
+timeouts as `CKR_FUNCTION_FAILED` — see `doc/error-reference.md`
+for the full proxy-originated mapping.)
 Some modules use `CKR_DEVICE_ERROR` as a catch-all: e.g. kryoptic returns it for its
 crypto-backend (OpenSSL) path, so a rejected `C_Verify`, an integrity failure, or an
 unmapped crypto error surfaces here too. The proxy does not invent a "network error"

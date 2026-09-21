@@ -43,12 +43,18 @@ impl CkOutputBufferResult {
 
     /// Validate every byte/scalar effect before any caller memory is changed.
     /// Generic lengths are integers: all-ones is not an attribute sentinel here.
+    ///
+    /// Every violation class fails closed with `CKR_DEVICE_ERROR` (W1-L3-05):
+    /// the daemon-side exact-output validators use the same RV for the same
+    /// violation class, so one violation yields one RV on both layers. The
+    /// shim keys its outcome-ambiguity handling off this value, which is why
+    /// the unified RV is `DEVICE_ERROR` rather than `GENERAL_ERROR`.
     pub fn validate_for(&self, spec: &CkOutputBufferSpec, ulong_max: u64) -> Result<(), CkRv> {
         if self.ck_rv.0 > ulong_max
             || self.returned_len.is_some_and(|n| n > ulong_max)
             || (spec.length_pointer_null && (self.returned_len.is_some() || self.value.is_some()))
         {
-            return Err(CkRv::GENERAL_ERROR);
+            return Err(CkRv::DEVICE_ERROR);
         }
         if let Some(value) = &self.value
             && (!spec.buffer_present
@@ -56,7 +62,7 @@ impl CkOutputBufferResult {
                 || self.returned_len != Some(value.len() as u64)
                 || value.len() as u64 > spec.buffer_len)
         {
-            return Err(CkRv::GENERAL_ERROR);
+            return Err(CkRv::DEVICE_ERROR);
         }
         Ok(())
     }
@@ -219,4 +225,68 @@ pub struct CkAttributeQueryResult {
     pub value: Option<SecretBytes>,
     pub ck_rv: Option<CkRv>,
     pub nested: Option<Vec<CkAttributeQueryResult>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn size_query_spec() -> CkOutputBufferSpec {
+        CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false }
+    }
+
+    fn data_query_spec(len: u64) -> CkOutputBufferSpec {
+        CkOutputBufferSpec { buffer_present: true, buffer_len: len, length_pointer_null: false }
+    }
+
+    // W1-L3-05: both validate_for violation arms fail closed with
+    // CKR_DEVICE_ERROR — the unified exact-output violation RV shared with
+    // the daemon-side validators (parameter_output_exact.rs). Was
+    // CKR_GENERAL_ERROR on this layer; the daemon side keeps DEVICE_ERROR
+    // because the shim's ambiguity protocol keys off it.
+    #[test]
+    fn validate_for_shape_violations_yield_device_error() {
+        // Value arm: value bytes for a caller spec with no buffer.
+        let spec = size_query_spec();
+        let result = CkOutputBufferResult {
+            ck_rv: CkRv::OK,
+            returned_len: Some(4),
+            value: Some(SecretBytes::copy_from_slice(&[1, 2, 3, 4])),
+        };
+        assert_eq!(result.validate_for(&spec, u64::MAX), Err(CkRv::DEVICE_ERROR));
+
+        // Value arm: returned_len disagreeing with the value length.
+        let spec = data_query_spec(8);
+        let result = CkOutputBufferResult {
+            ck_rv: CkRv::OK,
+            returned_len: Some(8),
+            value: Some(SecretBytes::copy_from_slice(&[1, 2, 3, 4])),
+        };
+        assert_eq!(result.validate_for(&spec, u64::MAX), Err(CkRv::DEVICE_ERROR));
+
+        // Scalar arm: overflow past the caller's CK_ULONG width.
+        let result = CkOutputBufferResult {
+            ck_rv: CkRv::OK,
+            returned_len: Some(u64::from(u32::MAX) + 1),
+            value: None,
+        };
+        assert_eq!(result.validate_for(&spec, u32::MAX as u64), Err(CkRv::DEVICE_ERROR));
+
+        // Scalar arm: effects for a call whose length pointer was NULL.
+        let null_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: true };
+        let result = CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(0), value: None };
+        assert_eq!(result.validate_for(&null_spec, u64::MAX), Err(CkRv::DEVICE_ERROR));
+    }
+
+    #[test]
+    fn validate_for_accepts_consistent_effects() {
+        let spec = data_query_spec(4);
+        let result = CkOutputBufferResult {
+            ck_rv: CkRv::OK,
+            returned_len: Some(4),
+            value: Some(SecretBytes::copy_from_slice(&[1, 2, 3, 4])),
+        };
+        assert_eq!(result.validate_for(&spec, u64::MAX), Ok(()));
+    }
 }

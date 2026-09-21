@@ -111,11 +111,12 @@ pub fn login_lock_timeout() -> Duration {
 }
 
 /// Bounded per-slot login-lock acquisition (W1-L11-07, G2/V11): serialize
-/// login/logout on a slot, refusing with `CKR_DEVICE_ERROR` rather than
-/// queueing unboundedly when a slow/wedged backend pins the lock. One
-/// acquisition site shared by login and logout; the caller must hold the
-/// returned guard across its critical section. `OwnedMutexGuard` (not the
-/// borrowed guard) so the lock can be acquired inside this helper.
+/// login/logout on a slot, refusing with `CKR_GENERAL_ERROR` (W1-L3-01:
+/// proxy serialization refusal, backend untouched) rather than queueing
+/// unboundedly when a slow/wedged backend pins the lock. One acquisition
+/// site shared by login and logout; the caller must hold the returned
+/// guard across its critical section. `OwnedMutexGuard` (not the borrowed
+/// guard) so the lock can be acquired inside this helper.
 pub(super) async fn acquire_slot_login_lock(
     ctx_mgr: &Arc<ContextManager>,
     slot: BackendSlotId,
@@ -126,9 +127,10 @@ pub(super) async fn acquire_slot_login_lock(
         Err(_elapsed) => {
             // Another tenant holds the per-slot login lock past the configured
             // bound (slow/wedged backend login on the shared token). Refuse
-            // rather than queue unboundedly; CKR_DEVICE_ERROR is a transient
-            // token-serialization failure the client can retry.
-            Err(CkRv::DEVICE_ERROR)
+            // rather than queue unboundedly; CKR_GENERAL_ERROR is a transient
+            // proxy-serialization failure the client can retry (W1-L3-01:
+            // distinct from the backend DEVICE_ERROR catch-all).
+            Err(CkRv::GENERAL_ERROR)
         }
     }
 }
@@ -172,7 +174,7 @@ fn max_concurrent_backend_calls() -> usize {
 /// Per-context in-flight cap: a quarter of the global backend-call budget (at
 /// least 1). Under the global circuit breaker, this stops a single noisy logical
 /// client from draining the whole budget and tipping every other tenant into
-/// DEVICE_ERROR (M2). Scales with the configured global limit.
+/// HOST_MEMORY (M2). Scales with the configured global limit.
 pub(super) fn per_context_max_in_flight() -> usize {
     (max_concurrent_backend_calls() / 4).max(1)
 }
@@ -181,7 +183,7 @@ pub(super) fn per_context_max_in_flight() -> usize {
 /// backend-call budget (at least 1), mirroring the per-context M2
 /// fraction. Under the global circuit breaker, this stops a single
 /// connection from draining the whole budget and tipping every other
-/// tenant into DEVICE_ERROR. Scales with the configured global limit.
+/// tenant into HOST_MEMORY. Scales with the configured global limit.
 pub(super) fn per_connection_max_in_flight() -> usize {
     (max_concurrent_backend_calls() / 4).max(1)
 }
@@ -420,9 +422,10 @@ where
         // A flood of breaker trips means the daemon is overloaded (or the
         // backend is wedged and every slot is held by a stuck call) and
         // downstream traffic should be diverted — count as a failure
-        // for the health gate.
+        // for the health gate. Caller-visible CKR_HOST_MEMORY (W1-L3-01):
+        // the daemon cannot accept more work; the backend was untouched.
         report_backend_outcome(false);
-        return Ok(Err(CkRv::DEVICE_ERROR));
+        return Ok(Err(CkRv::HOST_MEMORY));
     };
     // W1-L7-28: per-connection admission UNDER the global breaker, after
     // the global slot is held (a peer rejection below drops it again).
@@ -440,7 +443,8 @@ where
                     max = per_connection_max_in_flight(),
                     "per-connection backend-call budget exhausted — rejecting"
                 );
-                return Ok(Err(CkRv::DEVICE_ERROR));
+                // Same breaker class as the global trip above (W1-L3-01).
+                return Ok(Err(CkRv::HOST_MEMORY));
             }
         },
         // UDS / unpublished transport: global breaker only.
@@ -489,11 +493,14 @@ where
             );
             // A timeout is a transport-level failure of the daemon's own making.
             // Report it to the readiness gauge HERE, then return early, so the
-            // ck_rv classifier never sees this proxy-generated DEVICE_ERROR and
-            // can treat a backend-RETURNED DEVICE_ERROR as a per-request
-            // response rather than a daemon-health signal (M1).
+            // ck_rv classifier never sees this proxy-generated FUNCTION_FAILED
+            // and can treat a backend-RETURNED DEVICE_ERROR as a per-request
+            // response rather than a daemon-health signal (M1). The timeout RV
+            // is FUNCTION_FAILED (W1-L3-01): outcome-ambiguous, the backend
+            // call may still complete — matching the client-side mapping of a
+            // gRPC DeadlineExceeded (ADR-0003 §3).
             report_backend_outcome(false);
-            return Ok(Err(CkRv::DEVICE_ERROR));
+            return Ok(Err(CkRv::FUNCTION_FAILED));
         }
     };
 
@@ -509,9 +516,9 @@ where
 /// (false) from the daemon-level readiness gauge's perspective.
 ///
 /// Transport failures are classified separately from provider responses:
-///   * timeouts (reported before returning proxy-generated DEVICE_ERROR),
+///   * timeouts (reported before returning proxy-generated FUNCTION_FAILED),
 ///   * `spawn_blocking` panics (`Err(Status)`),
-///   * circuit-breaker trips (also `Ok(Err(CkRv::DEVICE_ERROR))` —
+///   * circuit-breaker trips (also `Ok(Err(..))` — `CKR_HOST_MEMORY`,
 ///     reported separately by `spawn_backend` before this function is
 ///     called).
 ///
@@ -1669,8 +1676,8 @@ mod tests {
         .await;
         assert_eq!(
             result.expect("no transport error").unwrap_err(),
-            CkRv::DEVICE_ERROR,
-            "caller sees the timeout as DEVICE_ERROR"
+            CkRv::FUNCTION_FAILED,
+            "W1-L3-01: caller sees the timeout as FUNCTION_FAILED (was DEVICE_ERROR)"
         );
         assert_eq!(
             STUCK_TEST_COUNTER.load(Ordering::Relaxed),
@@ -1828,8 +1835,9 @@ mod tests {
         // M1: a backend-RETURNED CKR_DEVICE_ERROR (kryoptic's request-specific
         // catch-all) or CKR_TOKEN_NOT_PRESENT is a per-request response, not a
         // daemon-health signal — they must NOT flip readiness, or one noisy
-        // client could evict the pod. The daemon's own timeout/breaker DEVICE_ERROR
-        // is reported separately in spawn_backend before classification.
+        // client could evict the pod. The daemon's own timeout/breaker RVs
+        // (FUNCTION_FAILED / HOST_MEMORY) are reported separately in
+        // spawn_backend before classification.
         for rv in [CkRv::DEVICE_ERROR, CkRv::TOKEN_NOT_PRESENT] {
             let result: Result<CkResult<()>, Status> = Ok(Err(rv));
             assert!(
@@ -1873,7 +1881,11 @@ mod tests {
 
         let result = spawn_backend(|| Ok(())).await;
         let inner = result.expect("spawn_backend should not return Status error");
-        assert_eq!(inner.unwrap_err(), CkRv::DEVICE_ERROR);
+        assert_eq!(
+            inner.unwrap_err(),
+            CkRv::HOST_MEMORY,
+            "W1-L3-01: breaker trip surfaces HOST_MEMORY (was DEVICE_ERROR)"
+        );
 
         // Restore previous value so other tests are not affected.
         IN_FLIGHT.store(previous, Ordering::Relaxed);
@@ -3045,7 +3057,7 @@ mod tests {
             entered_rx.recv().await.expect("each parked call holds a slot");
         }
 
-        // Over cap: rejected as DEVICE_ERROR (breaker class), backend never runs.
+        // Over cap: rejected as HOST_MEMORY (breaker class), backend never runs.
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ran_clone = Arc::clone(&ran);
         let rejected = scope_peer_admission(Some(peer), async move {
@@ -3058,7 +3070,8 @@ mod tests {
         .await;
         assert_eq!(
             rejected.expect("admission rejection is a ck_rv, not a transport error"),
-            Err(CkRv::DEVICE_ERROR)
+            Err(CkRv::HOST_MEMORY),
+            "W1-L3-01: per-peer breaker trip surfaces HOST_MEMORY (was DEVICE_ERROR)"
         );
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst), "rejected call must not run");
 

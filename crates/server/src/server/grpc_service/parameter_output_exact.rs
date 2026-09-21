@@ -215,6 +215,9 @@ pub(super) async fn parameter_output_exact(
                                         provider_rv = output.ck_rv.0,
                                         "native exact authenticated parameter contract violation"
                                     );
+                                    // W1-L3-05: DEVICE_ERROR is the unified exact-output
+                                    // violation RV (see validate_for); the shim keys its
+                                    // ambiguity handling off this value.
                                     return Err(CkRv::DEVICE_ERROR);
                                 }
                                 let ack = CkParameterRoundtripResult {
@@ -465,6 +468,7 @@ pub(super) async fn parameter_output_exact(
                                             "native exact parameter contract violation"
                                         );
                                         transition.settle_ambiguous();
+                                        // W1-L3-05: unified violation RV (see validate_for).
                                         Err(CkRv::DEVICE_ERROR)
                                     }
                                     Err(error) => {
@@ -533,6 +537,7 @@ pub(super) async fn parameter_output_exact(
                                         }
                                         Ok(_) => {
                                             transition.settle_ambiguous();
+                                            // W1-L3-05: unified violation RV (see validate_for).
                                             Err(CkRv::DEVICE_ERROR)
                                         }
                                         Err(error) => {
@@ -640,6 +645,7 @@ pub(super) async fn parameter_output_exact(
                                     }
                                     Ok(_) => {
                                         transition.settle_ambiguous();
+                                        // W1-L3-05: unified violation RV (see validate_for).
                                         Err(CkRv::DEVICE_ERROR)
                                     }
                                     Err(error) => {
@@ -1098,7 +1104,8 @@ mod ambiguity_tests {
         assert_eq!(
             response.output_result.unwrap().ck_rv,
             CkRv::DEVICE_ERROR.0,
-            "post-provider contract failure must be exposed as outcome ambiguity",
+            "W1-L3-05: post-provider contract failure fails closed with DEVICE_ERROR, \
+             the unified exact-output violation RV shared with validate_for",
         );
         assert_eq!(mock.message_parameter_call_count(), calls_before + 1);
         assert_eq!(operation.lock().await.shape, None);

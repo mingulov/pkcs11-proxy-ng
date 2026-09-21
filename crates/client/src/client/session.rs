@@ -64,7 +64,8 @@ impl Pkcs11Client {
             session_handle: session.0,
         };
         let resp = pkcs11_unary_call!(self.grpc.get_session_info(req), true);
-        let info = resp.info.ok_or(CkRv::DEVICE_ERROR)?;
+        // Absent info = uninterpretable daemon payload (W1-L3-06).
+        let info = resp.info.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         Ok(CkSessionInfo::from(&info))
     }
 
@@ -193,5 +194,22 @@ mod tests {
         assert_eq!(close_err.origin, MessageCallErrorOrigin::Transport);
         // Refused loopback maps Unavailable -> session-scoped -> DEVICE_ERROR.
         assert_eq!(close_err.ck_rv, CkRv::DEVICE_ERROR);
+    }
+
+    // W1-L3-06: twin of the discovery.rs scan for the 5th absent-info site
+    // (get_session_info). Recorded pre-fix state: `ok_or(CkRv::DEVICE_ERROR)`.
+    #[test]
+    fn absent_session_info_maps_to_function_not_supported() {
+        let source = include_str!("session.rs");
+        let prod = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            !prod.contains("ok_or(CkRv::DEVICE_ERROR)"),
+            "get_session_info must not map absent info to DEVICE_ERROR"
+        );
+        assert_eq!(
+            prod.matches("ok_or(CkRv::FUNCTION_NOT_SUPPORTED)").count(),
+            1,
+            "get_session_info must map absent info to FUNCTION_NOT_SUPPORTED"
+        );
     }
 }

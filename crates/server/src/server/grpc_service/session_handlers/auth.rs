@@ -101,11 +101,13 @@ pub(super) async fn login(
     // cooldown window without touching the backend — the proxy stops feeding
     // the backend's shared PIN-lockout counter. Inert (always false) when
     // `per_slot_failed_login_budget` is unset → byte-identical to today.
-    // Indistinguishable from the lock-timeout DEVICE_ERROR above; the app
-    // already handles transient DEVICE_ERROR as a retriable failure.
+    // Caller-visible CKR_PIN_LOCKED (W1-L3-01): the proxy refuses to forward
+    // further PIN attempts for now — the app must stop trying PINs, the same
+    // action a backend lockout demands. Distinct from the GENERAL_ERROR
+    // lock-timeout above.
     if crate::server::rate_quota::login_slot_in_cooldown(slot) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-            ck_rv: CkRv::DEVICE_ERROR.0,
+            ck_rv: CkRv::PIN_LOCKED.0,
         }));
     }
 
@@ -588,11 +590,11 @@ mod tests {
     }
 
     /// W1-L11-07 characterization: login and logout must refuse identically
-    /// (CKR_DEVICE_ERROR) when the per-slot lock is held past the bound.
-    /// Paused time fast-forwards the (seconds-long) acquisition timeout.
-    /// Must pass before AND after the lock-acquisition DRY.
+    /// (W1-L3-01: CKR_GENERAL_ERROR, was CKR_DEVICE_ERROR) when the per-slot
+    /// lock is held past the bound. Paused time fast-forwards the
+    /// (seconds-long) acquisition timeout.
     #[tokio::test]
-    async fn t7_login_and_logout_refuse_device_error_when_slot_lock_held() {
+    async fn t7_login_and_logout_refuse_general_error_when_slot_lock_held() {
         tokio::time::pause();
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -627,7 +629,7 @@ mod tests {
         .unwrap()
         .into_inner()
         .ck_rv;
-        assert_eq!(login_rv, CkRv::DEVICE_ERROR.0, "login must refuse with DEVICE_ERROR");
+        assert_eq!(login_rv, CkRv::GENERAL_ERROR.0, "login must refuse with GENERAL_ERROR");
 
         let logout_rv = super::logout(
             &ctx_mgr,
@@ -641,6 +643,6 @@ mod tests {
         .unwrap()
         .into_inner()
         .ck_rv;
-        assert_eq!(logout_rv, CkRv::DEVICE_ERROR.0, "logout must refuse with DEVICE_ERROR");
+        assert_eq!(logout_rv, CkRv::GENERAL_ERROR.0, "logout must refuse with GENERAL_ERROR");
     }
 }

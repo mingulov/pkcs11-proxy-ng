@@ -138,14 +138,15 @@ async fn login_user_inner(
     // contexts-DashMap guards (cross-context scan, login_state insert).
     // Never acquire the slot lock while holding a contexts guard.
     //
-    // Bounded acquisition (G2/V11): refuse with CKR_DEVICE_ERROR rather than
-    // queue unboundedly when a slow/wedged backend pins the lock.
+    // Bounded acquisition (G2/V11): refuse with CKR_GENERAL_ERROR (W1-L3-01:
+    // proxy serialization refusal, same as `C_Login`) rather than queue
+    // unboundedly when a slow/wedged backend pins the lock.
     let login_guard = ctx_mgr.slot_login_lock(slot);
     let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
         Ok(guard) => guard,
         Err(_elapsed) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::LoginUserResponse {
-                ck_rv: CkRv::DEVICE_ERROR.0,
+                ck_rv: CkRv::GENERAL_ERROR.0,
             }));
         }
     };
@@ -178,11 +179,11 @@ async fn login_user_inner(
     };
 
     // G2-PR3: per-slot aggregate failed-login budget. Fast-reject during the
-    // cooldown window without touching the backend (same DEVICE_ERROR as
-    // `C_Login`, indistinguishable from the lock-timeout above).
+    // cooldown window without touching the backend (same CKR_PIN_LOCKED as
+    // `C_Login`, W1-L3-01).
     if crate::server::rate_quota::login_slot_in_cooldown(slot) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::LoginUserResponse {
-            ck_rv: CkRv::DEVICE_ERROR.0,
+            ck_rv: CkRv::PIN_LOCKED.0,
         }));
     }
 
@@ -526,7 +527,7 @@ mod tests {
             (
                 MockMessageLifecycleAction::Delay(std::time::Duration::from_millis(60), CkRv::OK),
                 Some(std::time::Duration::from_millis(5)),
-                Some(CkRv::DEVICE_ERROR),
+                Some(CkRv::FUNCTION_FAILED),
                 None,
             ),
             (
@@ -535,7 +536,7 @@ mod tests {
                     CkRv::FUNCTION_FAILED,
                 ),
                 Some(std::time::Duration::from_millis(5)),
-                Some(CkRv::DEVICE_ERROR),
+                Some(CkRv::FUNCTION_FAILED),
                 Some(MessageParameterShape::Unmodeled),
             ),
             (MockMessageLifecycleAction::Panic, None, None, None),

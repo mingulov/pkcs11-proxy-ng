@@ -1487,8 +1487,8 @@ async fn slot_wait_nonblocking_hang_abnormal_stop() {
         .expect("waiter task must not panic");
     assert_eq!(
         outcome.expect("no transport error").unwrap_err(),
-        CkRv::DEVICE_ERROR,
-        "a hung waiter surfaces the timeout promptly"
+        CkRv::FUNCTION_FAILED,
+        "a hung waiter surfaces the timeout promptly (W1-L3-01)"
     );
     assert_eq!(HANG_GAUGE.load(Ordering::Relaxed), 1, "the still-parked call counts as stuck");
 
@@ -1614,7 +1614,11 @@ async fn timed_out_close_settles_terminal_completion_after_handler_returns() {
     .unwrap()
     .into_inner()
     .ck_rv;
-    assert_eq!(rv, CkRv::DEVICE_ERROR.0, "handler timeout is outcome-ambiguous");
+    assert_eq!(
+        rv,
+        CkRv::FUNCTION_FAILED.0,
+        "handler timeout is outcome-ambiguous (W1-L3-01: FUNCTION_FAILED, was DEVICE_ERROR)"
+    );
     assert_eq!(mock.close_session_call_count(), calls_before + 1);
 
     let in_flight = ctx_mgr
@@ -1693,7 +1697,11 @@ async fn timed_out_close_settles_transient_completion_after_handler_returns() {
     .unwrap()
     .into_inner()
     .ck_rv;
-    assert_eq!(rv, CkRv::DEVICE_ERROR.0, "handler timeout is outcome-ambiguous");
+    assert_eq!(
+        rv,
+        CkRv::FUNCTION_FAILED.0,
+        "handler timeout is outcome-ambiguous (W1-L3-01: FUNCTION_FAILED, was DEVICE_ERROR)"
+    );
 
     let settled = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -1786,7 +1794,7 @@ async fn timed_out_close_holds_context_in_flight_and_reaper_cannot_close_twice()
     .unwrap()
     .into_inner()
     .ck_rv;
-    assert_eq!(rv, CkRv::DEVICE_ERROR.0);
+    assert_eq!(rv, CkRv::FUNCTION_FAILED.0, "handler timeout surfaces FUNCTION_FAILED (W1-L3-01)");
 
     let expired = ctx_mgr.evict_expired(&backend).await;
     assert!(
@@ -1850,7 +1858,7 @@ async fn production_scoped_close_reuses_one_capped_context_guard() {
     .unwrap()
     .into_inner()
     .ck_rv;
-    assert_eq!(rv, CkRv::DEVICE_ERROR.0);
+    assert_eq!(rv, CkRv::FUNCTION_FAILED.0, "handler timeout surfaces FUNCTION_FAILED (W1-L3-01)");
     assert_eq!(
         ctx_mgr
             .get_context(&ctx_id, |context| {

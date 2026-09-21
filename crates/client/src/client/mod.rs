@@ -257,4 +257,16 @@ mod tests {
         }
         assert_eq!(run().await.unwrap_err(), CkRv::DEVICE_ERROR);
     }
+
+    // W1-L3-06: a backend-RETURNED DEVICE_ERROR must still pass through
+    // distinctly — only the absent-info mapping moves to
+    // FUNCTION_NOT_SUPPORTED. Guards against over-correction.
+    #[tokio::test]
+    async fn unary_call_passes_backend_device_error_through() {
+        async fn run() -> CkResult<FakeUnaryResponse> {
+            let response = pkcs11_unary_call!(ok_call(CkRv::DEVICE_ERROR.0), false);
+            Ok(response)
+        }
+        assert_eq!(run().await.unwrap_err(), CkRv::DEVICE_ERROR);
+    }
 }

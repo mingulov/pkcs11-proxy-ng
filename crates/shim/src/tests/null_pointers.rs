@@ -399,6 +399,29 @@ fn c_find_objects_null_outputs_returns_bad_args() {
 }
 
 #[test]
+fn c_find_objects_rejects_max_count_above_wire_width_before_client_use() {
+    // W1-L3-07: ulMaxObjectCount wider than the u32 wire field must be
+    // rejected with CKR_DATA_LEN_RANGE (the c_generate_random convention),
+    // never truncated via `as u32`. Recorded pre-fix state: the count was
+    // truncated and the call proceeded to the client (NOT_INITIALIZED here).
+    if CK_ULONG::BITS <= u32::BITS {
+        return;
+    }
+
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let mut object: CK_OBJECT_HANDLE = CK_INVALID_HANDLE;
+    let mut count: CK_ULONG = 0;
+    let too_large = (u32::MAX as u64 + 1) as CK_ULONG;
+
+    let rv = unsafe { dispatch::general::c_find_objects(0, &mut object, too_large, &mut count) };
+
+    assert_eq!(rv, CKR_DATA_LEN_RANGE as CK_RV);
+    assert_eq!(count, 0, "rejected call must not write the count");
+    assert_eq!(object, CK_INVALID_HANDLE, "rejected call must not write handles");
+}
+
+#[test]
 fn c_get_attribute_value_null_template_returns_bad_args() {
     let rv = unsafe { dispatch::general::c_get_attribute_value(0, 0, std::ptr::null_mut(), 1) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);

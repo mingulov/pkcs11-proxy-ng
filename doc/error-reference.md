@@ -28,13 +28,23 @@ Specifically:
 - gRPC transport failure (daemon unreachable, TLS handshake fail) on a
   **session-scoped** call. For lifecycle calls the same transport failure maps
   to `CKR_GENERAL_ERROR`, and for slot/token calls to `CKR_TOKEN_NOT_PRESENT`.
-- Daemon's `spawn_backend` timeout (`proxy.request_timeout_secs`). Note the
-  **client-side** gRPC request timeout (`DeadlineExceeded`) instead maps to
-  `CKR_FUNCTION_FAILED` ("the operation may not have executed").
+- Exact-output contract violation detected by the proxy (W1-L3-05): the
+  daemon fails closed with this code when the native provider returns
+  effects its own RV/shape forbids, and the shim fails closed with the
+  same code when the daemon's response effects violate the caller's
+  buffer spec. One violation class, one RV on both layers. The shim
+  also treats this code on the message path as outcome-ambiguous and
+  clears its local operation state.
 - `classify_backend_outcome` widens this to fold `HOST_MEMORY`,
   `DEVICE_REMOVED`, `TOKEN_NOT_PRESENT` into the health-gate's
   unhealthy set, but the **return value to the caller is still the
   exact backend RV** (per CLAUDE.md rule 2).
+
+Daemon transport/capacity failures that formerly shared this code now
+have distinct values (W1-L3-01): backend-call timeout →
+`CKR_FUNCTION_FAILED`, circuit-breaker trip → `CKR_HOST_MEMORY`,
+per-slot login-lock contention → `CKR_GENERAL_ERROR`, failed-login
+cooldown → `CKR_PIN_LOCKED`. See those sections.
 
 **Operator action.** Check `kubectl -n <ns> logs deploy/<daemon>`
 for `backend exceeded failure threshold; flipping readiness to
@@ -52,15 +62,73 @@ typically when the shim cannot complete the
 `C_Initialize`-time backend probe (`GetBackendInterfaces`) because
 the daemon is unreachable, returns a malformed response, or the
 shim hits a panic that `catch_panics` converts (FFI safety rule).
+Also originated by the proxy for:
+- Per-slot login-lock contention (W1-L3-01): another tenant holds the
+  slot's login serialization lock past the configured bound. The
+  backend was untouched; retry.
+- Daemon wrong-length response to `C_GenerateRandom` (W1-L3-08): the
+  daemon returned a byte count differing from the requested length.
+  A protocol violation, failed closed before any caller memory is
+  written.
 
 **Operator action.** Verify the daemon is reachable at the URL
 configured by `PKCS11_PROXY_ENDPOINT` and that mTLS files (if any)
 are readable by the shim's user. Inspect daemon logs for crashes
-during `GetBackendInterfaces`.
+during `GetBackendInterfaces`. For login-lock refusals, look for a
+slow or wedged backend login pinning the slot. For wrong-length
+random, the daemon or backend is misbehaving — investigate the
+provider and file a bug.
 
 **Application action.** Same as `CKR_DEVICE_ERROR`. Some
 applications retry `C_Initialize` on `CKR_GENERAL_ERROR`; that's
 safe with this proxy.
+
+### `CKR_FUNCTION_FAILED` (0x06)
+
+**Cause.** The daemon's `spawn_backend` call exceeded
+`proxy.request_timeout_secs` (W1-L3-01; formerly `CKR_DEVICE_ERROR`).
+Outcome-ambiguous: the backend call keeps running and may still
+complete — the same meaning as the **client-side** gRPC request
+timeout (`DeadlineExceeded`), which already mapped to this code.
+
+**Operator action.** Check whether the backend (HSM) is slow or
+wedged: look for `Backend call timed out` lines and a rising
+`stuck_calls` count. Consider raising
+`proxy.request_timeout_secs` or investigating HSM responsiveness.
+
+**Application action.** Treat as transient and retriable, but the
+operation may already have executed — use an idempotent retry or
+reconcile state first where the PKCS#11 call is not idempotent.
+
+### `CKR_HOST_MEMORY` (0x02)
+
+**Cause.** The daemon's circuit breaker tripped (W1-L3-01; formerly
+`CKR_DEVICE_ERROR`): global in-flight budget exhausted, or the
+per-connection budget exhausted. The backend was untouched — the
+daemon shed load. Same "cannot accept more work" meaning as
+ADR-0003's `RESOURCE_EXHAUSTED` row and the context-limit refusal.
+
+**Operator action.** Same triage as the old breaker signal: check
+backend (HSM) capacity vs. `proxy.max_concurrent_backend_calls`,
+look for `Backend circuit breaker tripped` lines, and scale the
+daemon or relieve the noisy tenant.
+
+**Application action.** Back off and retry. If it persists, the
+daemon is saturated — surface as an operator alert.
+
+### `CKR_PIN_LOCKED` (0xA4)
+
+**Cause.** The daemon fast-rejected a `C_Login`/`C_LoginUser` because
+the slot's aggregate failed-login budget tripped and the cooldown
+window is active (W1-L3-01; formerly `CKR_DEVICE_ERROR`). The proxy
+stops feeding the backend's shared PIN-lockout counter. The app must
+stop trying PINs — the same action a backend lockout demands.
+
+**Operator action.** None unless unexpected: repeated trips mean a
+client is guessing PINs. Check audit logs for the failing identity.
+
+**Application action.** Do not retry the PIN until the cooldown
+expires; tell the user the PIN is temporarily refused.
 
 ### `CKR_CRYPTOKI_NOT_INITIALIZED` (0x190)
 
@@ -184,7 +252,11 @@ the spec / vendor docs.
 
 **Cause.** The shim called a function that the backend's
 `CK_FUNCTION_LIST` reports as null. The proxy never fabricates an
-implementation.
+implementation. Also returned when a discovery/session-info response
+arrives with its `info` payload absent (W1-L3-06; formerly
+`CKR_DEVICE_ERROR`): a malformed or older daemon spoke a contract
+the client cannot interpret. A backend-RETURNED `CKR_DEVICE_ERROR`
+still passes through as `CKR_DEVICE_ERROR`.
 
 **Operator action.** Confirm the backend version supports the
 function; some HSMs ship truncated function lists for older
@@ -202,11 +274,11 @@ preserve the value across the gRPC hop.
 
 | CK_RV | Hex | Typical cause |
 | --- | --- | --- |
-| `CKR_HOST_MEMORY` | 0x02 | Backend exhausted heap. **Also folded into the daemon's backend-health gate** alongside DEVICE_ERROR. |
+| `CKR_HOST_MEMORY` | 0x02 | Backend exhausted heap. **Also folded into the daemon's backend-health gate** alongside DEVICE_ERROR. **Also originated by the proxy** for circuit-breaker trips (see proxy-originated section). |
 | `CKR_DEVICE_MEMORY` | 0x31 | HSM ran out of internal storage. |
 | `CKR_DEVICE_REMOVED` | 0x32 | HSM yanked. Folded into health gate. |
 | `CKR_TOKEN_NOT_PRESENT` | 0xE0 | Token not in slot. Folded into health gate. |
-| `CKR_FUNCTION_FAILED` | 0x06 | Backend's catch-all for non-specific failures. **Operator action:** check daemon log for the corresponding `backend call returned RV=…` line for the underlying cause; some backends bury more specific codes in their own logs. |
+| `CKR_FUNCTION_FAILED` | 0x06 | Backend's catch-all for non-specific failures. **Operator action:** check daemon log for the corresponding `backend call returned RV=…` line for the underlying cause; some backends bury more specific codes in their own logs. **Also originated by the proxy** for backend-call timeouts (see proxy-originated section). |
 | `CKR_FUNCTION_CANCELED` | 0x50 | Backend cancelled a long-running op. |
 | `CKR_FUNCTION_NOT_PARALLEL` | 0x51 | Backend rejects concurrent ops on a single session. |
 | `CKR_PIN_INCORRECT` | 0xA0 | Wrong PIN at `C_Login`. The proxy **never** logs the PIN itself (CLAUDE.md rule 4); only the RV is logged. |
@@ -220,7 +292,7 @@ preserve the value across the gRPC hop.
 | `CKR_SESSION_COUNT` | 0xB1 | Token's session limit hit. |
 | `CKR_SIGNATURE_INVALID` | 0xC0 | Bad signature at `C_Verify`. |
 | `CKR_DATA_INVALID` | 0x20 | Bad input format. |
-| `CKR_DATA_LEN_RANGE` | 0x21 | Input length outside mechanism's permitted range. |
+| `CKR_DATA_LEN_RANGE` | 0x21 | Input length outside mechanism's permitted range. **Also originated by the shim** when a 64-bit count/length argument (e.g. `C_FindObjects` `ulMaxObjectCount`, W1-L3-07) exceeds the u32 wire width. |
 | `CKR_TEMPLATE_INCONSISTENT` | 0xD1 | Object create/set template invalid. |
 | `CKR_ATTRIBUTE_SENSITIVE` | 0x11 | `C_GetAttributeValue` on a sensitive attribute. |
 | `CKR_ATTRIBUTE_TYPE_INVALID` | 0x12 | Unknown attribute type. |

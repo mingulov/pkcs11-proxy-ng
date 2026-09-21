@@ -158,7 +158,8 @@ mod tests {
             )
         };
 
-        assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+        // W1-L3-05: unified exact-output violation RV (was GENERAL_ERROR).
+        assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
         assert_eq!(ciphertext_canary, 0xa5);
         assert_eq!(key_handle, handle_canary);
     }

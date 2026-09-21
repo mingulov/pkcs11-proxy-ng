@@ -292,8 +292,11 @@ pub unsafe extern "C" fn c_generate_random(
         match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), random_len))
         {
             Ok(data) => {
+                // W1-L3-08: a daemon response with the wrong length is a
+                // protocol violation, not a backend failure — fail closed
+                // with GENERAL_ERROR before touching caller memory.
                 if data.len() != random_len as usize {
-                    return rv_err(CkRv::DEVICE_ERROR);
+                    return rv_err(CkRv::GENERAL_ERROR);
                 }
                 unsafe {
                     std::ptr::copy_nonoverlapping(data.as_ptr(), p_random_data, data.len());

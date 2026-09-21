@@ -253,6 +253,10 @@ pub struct MockBackend {
     /// One-shot structured response override for server contract tests. The
     /// next structured Begin/one-shot/Next call consumes it.
     next_message_parameter_response: Mutex<Option<MessageParameter>>,
+    /// One-shot random-bytes override for wrong-length contract tests
+    /// (W1-L3-08). The next `generate_random` call consumes it verbatim,
+    /// even when the length differs from the requested one.
+    next_random_bytes: Mutex<Option<Vec<u8>>>,
     close_session_calls: AtomicUsize,
     /// Count of `C_GetAttributeValue` calls reaching the backend (regular path).
     /// Used by R2 coalescer tests to assert whether the backend was bypassed on
@@ -383,6 +387,7 @@ impl MockBackend {
             message_parameter_calls: AtomicUsize::new(0),
             next_message_parameter_ack: Mutex::new(None),
             next_message_parameter_response: Mutex::new(None),
+            next_random_bytes: Mutex::new(None),
             close_session_calls: AtomicUsize::new(0),
             attr_get_calls: AtomicUsize::new(0),
             attr_get_exact_calls: AtomicUsize::new(0),
@@ -630,6 +635,10 @@ impl MockBackend {
 
     pub fn set_next_message_parameter_response(&self, parameter: MessageParameter) {
         *self.next_message_parameter_response.lock().unwrap() = Some(parameter);
+    }
+
+    pub fn set_next_random_bytes(&self, bytes: Vec<u8>) {
+        *self.next_random_bytes.lock().unwrap() = Some(bytes);
     }
 
     fn next_message_parameter_response_or(&self, default: MessageParameter) -> MessageParameter {

@@ -528,7 +528,7 @@ mod tests {
             (
                 MockMessageLifecycleAction::Delay(std::time::Duration::from_millis(60), CkRv::OK),
                 Some(std::time::Duration::from_millis(5)),
-                Some(CkRv::DEVICE_ERROR),
+                Some(CkRv::FUNCTION_FAILED),
                 None,
             ),
             (
@@ -537,7 +537,7 @@ mod tests {
                     CkRv::FUNCTION_FAILED,
                 ),
                 Some(std::time::Duration::from_millis(5)),
-                Some(CkRv::DEVICE_ERROR),
+                Some(CkRv::FUNCTION_FAILED),
                 Some(MessageParameterShape::Unmodeled),
             ),
             (MockMessageLifecycleAction::Panic, None, None, None),

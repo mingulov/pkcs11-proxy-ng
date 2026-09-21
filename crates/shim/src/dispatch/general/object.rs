@@ -36,9 +36,16 @@ pub unsafe extern "C" fn c_find_objects(
         if ph_object.is_null() || pul_object_count.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        // W1-L3-07: the wire field is u32; reject an unrepresentable count
+        // with DATA_LEN_RANGE (c_generate_random convention), never `as u32`
+        // truncation.
+        let max_count = match u32::try_from(ul_max_object_count) {
+            Ok(count) => count,
+            Err(_) => return rv_err(CkRv::DATA_LEN_RANGE),
+        };
         match with_client!(client => client.find_objects(
             CkSessionHandle(h_session as u64),
-            ul_max_object_count as u32,
+            max_count,
         )) {
             Ok(handles) => {
                 let count = handles.len().min(ul_max_object_count as usize);
