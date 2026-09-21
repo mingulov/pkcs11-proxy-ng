@@ -537,13 +537,15 @@ pub async fn test_rsa_oaep_encrypt_decrypt(
     public_key: CkObjectHandle,
     private_key: CkObjectHandle,
 ) -> Result<(), String> {
+    // Empty label as (NULL, 0): SoftHSM2 rejects any non-NULL pSourceData
+    // ("pSourceData must be NULL", SoftHSM.cpp), even with zero length.
     let oaep_params = RsaPkcsOaepParams {
         hash_alg: CKM_SHA_1,
         mgf: CKG_MGF1_SHA1,
         source: CKZ_DATA_SPECIFIED,
         source_data: Vec::new().into(),
 
-        source_null: false,
+        source_null: true,
     };
     let oaep_mechanism = CkMechanism {
         mechanism_type: CkMechanismType::RSA_PKCS_OAEP,

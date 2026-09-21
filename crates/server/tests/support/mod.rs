@@ -5,6 +5,7 @@ mod daemon;
 mod mechanism_tests;
 mod ops;
 mod providers;
+mod shape_matrix;
 mod skip;
 
 #[allow(unused_imports)]
@@ -24,5 +25,7 @@ pub use mechanism_tests::{
 #[allow(unused_imports)]
 pub use ops::*;
 pub use providers::*;
+#[allow(unused_imports)]
+pub use shape_matrix::*;
 #[allow(unused_imports)]
 pub use skip::*;

@@ -139,14 +139,6 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
         requirements: &["NSS softokn libsoftokn3.so and certutil"],
     },
     IgnoredTestLane {
-        file: "crates/server/tests/parameterized_mechanism_test.rs",
-        reason: "SoftHSM2-backed parameterized mechanism coverage",
-        commands: &[
-            "cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --ignored --test-threads=1",
-        ],
-        requirements: &["SoftHSM2 module and softhsm2-util"],
-    },
-    IgnoredTestLane {
         file: "crates/server/tests/provider_matrix_test.rs",
         reason: "Optional NSS and Kryoptic provider matrix smoke coverage",
         commands: &[
