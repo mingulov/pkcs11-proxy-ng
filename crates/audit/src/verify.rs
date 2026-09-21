@@ -53,9 +53,12 @@ pub struct VerifyReport {
     /// Number of checkpoints that both verified (signature, if checked) and
     /// bound to the replayed chain head at their seq.
     pub checkpoints_verified: u64,
-    /// Number of checkpoints that failed signature or content-binding.
+    /// Number of checkpoints that failed signature or content-binding. A
+    /// missing/empty/entirely-out-of-range sidecar with a key supplied counts
+    /// as one failure (fail closed, W1-C12-01).
     pub checkpoints_failed: u64,
-    /// `true` if signature checking was attempted (key supplied + sidecar present).
+    /// `true` if a public key was supplied, i.e. signature verification was
+    /// requested (regardless of whether the sidecar was usable).
     pub signature_checked: bool,
     /// `true` if there is no anchor, or the anchor matches the replayed head
     /// and last seq. `false` is a tamper signal (e.g. the tail was altered).
@@ -266,6 +269,10 @@ fn replay_chain(records: &[AuditRecord], first_seq: u64, last_seq: u64) -> Repla
 ///   are **skipped** — not counted as failures.
 /// - An in-range checkpoint counts as verified only when the signature (if
 ///   checked) **and** the content-binding both hold; otherwise it is a failure.
+/// - Fail-closed (W1-C12-01): when a key is supplied and records are present
+///   but **zero** checkpoints could be evaluated — sidecar missing, empty, or
+///   entirely out of range — that counts as one failure instead of verifying
+///   OK with 0 verified / 0 failed.
 ///
 /// Returns `(verified, failed, signature_checked)`.
 fn check_checkpoints(
@@ -278,7 +285,12 @@ fn check_checkpoints(
 ) -> Result<(u64, u64, bool), AuditError> {
     let cp_path = dir.join("audit.checkpoints.jsonl");
     if !cp_path.exists() {
-        return Ok((0, 0, false));
+        // Fail closed only when signature verification was requested against a
+        // non-empty log; an unsigned or empty log keeps the previous verdict.
+        if public_key_hex.is_some() && records_present {
+            return Ok((0, 1, true));
+        }
+        return Ok((0, 0, public_key_hex.is_some()));
     }
 
     let verifier = match public_key_hex {
@@ -290,6 +302,7 @@ fn check_checkpoints(
 
     let mut verified = 0u64;
     let mut failed = 0u64;
+    let mut evaluated = 0u64;
 
     for line in content.lines() {
         if line.is_empty() {
@@ -302,6 +315,7 @@ fn check_checkpoints(
         if !records_present || cl.seq < first_seq || cl.seq > last_seq {
             continue;
         }
+        evaluated += 1;
 
         // (a) Signature — only when a key was supplied.
         let sig_ok = match &verifier {
@@ -325,6 +339,12 @@ fn check_checkpoints(
         } else {
             failed += 1;
         }
+    }
+
+    // Fail closed: a key was supplied but no checkpoint bound to anything
+    // (empty sidecar, or every entry skipped as out of range).
+    if verifier.is_some() && records_present && evaluated == 0 {
+        failed += 1;
     }
 
     Ok((verified, failed, signature_checked))
@@ -823,6 +843,102 @@ mod tests {
             "wrong-key checkpoint failure must set chain_ok = false; got: {report:?}"
         );
         assert!(report.signature_checked, "signature checking must have been attempted");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // W1-C12-01: fail closed on a bad sidecar when a key is supplied.
+    // -----------------------------------------------------------------------
+
+    /// Build a 3-record chained log in a fresh temp dir; returns the dir.
+    /// Caller chooses whether to create a checkpoint sidecar.
+    fn chained_log_no_sidecar(tag: &str) -> std::path::PathBuf {
+        let dir = temp_dir(tag);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut st = ChainState::genesis();
+        let mut recs: Vec<AuditRecord> = (0..3).map(|_| rec("C_Op", 0)).collect();
+        for r in recs.iter_mut() {
+            st.append(r);
+        }
+        fs::write(
+            dir.join("audit.jsonl"),
+            format!("{}{}{}", to_jsonl(&recs[0]), to_jsonl(&recs[1]), to_jsonl(&recs[2])),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// Missing sidecar + key supplied must fail closed (chain_ok=false, failed>0
+    /// → CLI exits nonzero) instead of verifying OK with 0 verified / 0 failed.
+    #[test]
+    fn sidecar_missing_fails_closed_with_key() {
+        const SEED: [u8; 32] = [7u8; 32];
+
+        let dir = chained_log_no_sidecar("sidecar-missing");
+        // No audit.checkpoints.jsonl created.
+
+        let public_hex = Signer::from_seed_bytes(&SEED).unwrap().public_hex();
+        let report = verify_dir(&dir, Some(&public_hex)).unwrap();
+
+        assert!(!report.chain_ok, "missing sidecar with key must fail closed; got: {report:?}");
+        assert!(
+            report.checkpoints_failed > 0,
+            "missing sidecar with key must count a failure; got: {report:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Empty sidecar + key supplied must fail closed.
+    #[test]
+    fn sidecar_empty_fails_closed_with_key() {
+        const SEED: [u8; 32] = [7u8; 32];
+
+        let dir = chained_log_no_sidecar("sidecar-empty");
+        fs::write(dir.join("audit.checkpoints.jsonl"), "").unwrap();
+
+        let public_hex = Signer::from_seed_bytes(&SEED).unwrap().public_hex();
+        let report = verify_dir(&dir, Some(&public_hex)).unwrap();
+
+        assert!(!report.chain_ok, "empty sidecar with key must fail closed; got: {report:?}");
+        assert!(
+            report.checkpoints_failed > 0,
+            "empty sidecar with key must count a failure; got: {report:?}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// All-out-of-range sidecar + key supplied must fail closed: skipped
+    /// checkpoints bind nothing, so 0 verified / 0 failed must not verify OK.
+    #[test]
+    fn sidecar_out_of_range_fails_closed_with_key() {
+        const SEED: [u8; 32] = [7u8; 32];
+
+        let dir = chained_log_no_sidecar("sidecar-oor");
+        // Log holds seqs 0..=2; the only checkpoint is beyond the retained tail.
+        let signer = Signer::from_seed_bytes(&SEED).unwrap();
+        let cp = Checkpoint {
+            seq: 999,
+            chain_head_hash: "00".repeat(32),
+            ts_unix_ms: 1,
+            record_count: 3,
+        };
+        write_checkpoint(&dir, &signer, &cp);
+
+        let report = verify_dir(&dir, Some(&signer.public_hex())).unwrap();
+
+        assert!(
+            !report.chain_ok,
+            "all-out-of-range sidecar with key must fail closed; got: {report:?}"
+        );
+        assert!(
+            report.checkpoints_failed > 0,
+            "all-out-of-range sidecar with key must count a failure; got: {report:?}"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }
