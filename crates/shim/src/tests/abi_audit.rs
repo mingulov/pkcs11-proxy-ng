@@ -543,45 +543,103 @@ fn all_function_list_pointers_are_non_null() {
 
 #[test]
 fn catch_panics_source_coverage() {
-    let shim_export_files: &[(&str, &str)] = &[
-        ("lib.rs", include_str!("../lib.rs")),
-        ("admin.rs", include_str!("../dispatch/general/admin.rs")),
-        ("async_ops.rs", include_str!("../dispatch/general/async_ops.rs")),
-        ("authenticated_wrap.rs", include_str!("../dispatch/general/authenticated_wrap.rs")),
-        ("combined.rs", include_str!("../dispatch/general/combined.rs")),
-        ("digest_cipher.rs", include_str!("../dispatch/general/digest_cipher.rs")),
-        ("init_general.rs", include_str!("../dispatch/general/init_general.rs")),
-        ("kem.rs", include_str!("../dispatch/general/kem.rs")),
-        ("key_ops.rs", include_str!("../dispatch/general/key_ops.rs")),
-        ("message_crypto.rs", include_str!("../dispatch/general/message_crypto.rs")),
-        ("object.rs", include_str!("../dispatch/general/object.rs")),
-        ("session.rs", include_str!("../dispatch/general/session.rs")),
-        ("session_3x.rs", include_str!("../dispatch/general/session_3x.rs")),
-        ("sign_verify.rs", include_str!("../dispatch/general/sign_verify.rs")),
-        ("slot.rs", include_str!("../dispatch/general/slot.rs")),
-        ("state_ops.rs", include_str!("../dispatch/general/state_ops.rs")),
-        ("unsupported.rs", include_str!("../dispatch/general/unsupported.rs")),
-        ("verify_signature.rs", include_str!("../dispatch/general/verify_signature.rs")),
-    ];
+    // W1-C7-02: walk the WHOLE src tree (not a hardcoded file list) so a new
+    // handler cannot slip an un-gated export past this gate. Mirrors the H5
+    // whole-tree walk in `shim_source_never_formats_pin_data` (same
+    // `collect_rs_files` helper, sources read from disk).
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let tests_dir = src_dir.join("tests");
+    let mut files = Vec::new();
+    collect_rs_files(&src_dir, &mut files);
+    // Test-only `extern "C"` items (dummy callbacks, fn-pointer casts, gate
+    // fixtures) are not shipped FFI exports; audit real sources only.
+    files.retain(|p| !p.starts_with(&tests_dir));
+    assert!(!files.is_empty(), "no shim sources found under {}", src_dir.display());
 
-    for (name, src) in shim_export_files {
-        let real_fns: Vec<&str> = src
-            .lines()
-            .filter(|line| {
-                line.contains("pub unsafe extern \"C\" fn") && !line.contains("c_not_supported")
-            })
-            .collect();
-
-        let catch_calls = src.matches("catch_panics(").count();
-        assert_eq!(
-            real_fns.len(),
-            catch_calls,
-            "{name}: every non-stub extern \"C\" fn must use catch_panics \
-             ({} real fns, {} catch_panics calls)",
-            real_fns.len(),
-            catch_calls
-        );
+    let mut checked = 0;
+    for path in &files {
+        let src = std::fs::read_to_string(path).expect("read shim source");
+        if let Some(violation) = catch_panics_violation(&path.display().to_string(), &src) {
+            panic!("{violation}");
+        }
+        if catch_panics_counts(&src).is_some() {
+            checked += 1;
+        }
     }
+    assert!(checked > 0, "gate must cover at least one export file");
+}
+
+/// Per-file `catch_panics` check shared by the gate and its negative control.
+/// Returns `None` when the file defines no exports or every non-stub export
+/// is wrapped; otherwise a human-readable violation.
+fn catch_panics_violation(name: &str, src: &str) -> Option<String> {
+    let (real_fns, catch_calls) = catch_panics_counts(src)?;
+    if real_fns == catch_calls {
+        None
+    } else {
+        Some(format!(
+            "{name}: every non-stub extern \"C\" fn must use catch_panics \
+             ({real_fns} real fns, {catch_calls} catch_panics calls)"
+        ))
+    }
+}
+
+/// Count non-stub `pub unsafe extern "C"` exports and `catch_panics(` calls in
+/// one source file. Returns `None` when the file defines no exports (nothing
+/// for the gate to check — e.g. the `catch_panics` definition site and its
+/// unit tests); otherwise `Some((exports, calls))`.
+fn catch_panics_counts(src: &str) -> Option<(usize, usize)> {
+    let real_fns = src
+        .lines()
+        .filter(|line| {
+            line.contains("pub unsafe extern \"C\" fn") && !line.contains("c_not_supported")
+        })
+        .count();
+    if real_fns == 0 {
+        return None;
+    }
+    let catch_calls = src.matches("catch_panics(").count();
+    Some((real_fns, catch_calls))
+}
+
+#[test]
+fn catch_panics_gate_trips_on_ungated_export() {
+    // W1-C7-02 negative control: a newly-added handler file with an un-gated
+    // export must trip the gate. The old hardcoded file list missed new files
+    // entirely; the whole-tree walk plus this per-file check closes that hole.
+    let ungated = "pub unsafe extern \"C\" fn c_new_handler() -> CK_RV {\n    CKR_OK as CK_RV\n}\n";
+    assert!(
+        catch_panics_violation("new_handler.rs", ungated).is_some(),
+        "gate must trip on a newly-added un-gated extern \"C\" export"
+    );
+
+    // A gated export passes.
+    let gated = "pub unsafe extern \"C\" fn c_new_handler() -> CK_RV {\n    catch_panics(|| {\n        CKR_OK as CK_RV\n    })\n}\n";
+    assert!(
+        catch_panics_violation("new_handler.rs", gated).is_none(),
+        "gate must pass a catch_panics-wrapped export"
+    );
+
+    // `c_not_supported` stubs stay exempt.
+    let stub = "pub unsafe extern \"C\" fn c_not_supported() -> CK_RV {\n    CKR_FUNCTION_NOT_SUPPORTED as CK_RV\n}\n";
+    assert!(
+        catch_panics_violation("unsupported.rs", stub).is_none(),
+        "gate must keep exempting c_not_supported stubs"
+    );
+
+    // The walk itself must cover the whole tree: a nested helper file (never
+    // in the old hardcoded list) and the crate root must both be visited.
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src_dir, &mut files);
+    assert!(
+        files.iter().any(|p| p.ends_with("helpers/message_params.rs")),
+        "whole-tree walk must reach nested dispatch helpers"
+    );
+    assert!(
+        files.iter().any(|p| p.ends_with("src/lib.rs")),
+        "whole-tree walk must reach the crate root"
+    );
 }
 
 #[test]
