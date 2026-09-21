@@ -1,7 +1,7 @@
 # Narrow-`CK_ULONG` Client Support & Width Bridging
 
 **Document:** ADR-0011
-**Status:** Accepted (decisions D1–D4 recorded 2026-06-28; implementation pending)
+**Status:** Accepted (decisions D1–D4 recorded 2026-06-28; D2 width advertisement implemented — server populates, shim asserts at probe; remaining bridge tasks tracked below)
 **Date:** 2026-06-28
 **Relates to:** [ADR-0006](./ADR-0006-32-64-bit-cross-platform-compatibility.md)
 (supersedes its "narrow-client NOT SUPPORTED" row for the bridged topology),
@@ -70,7 +70,8 @@ ADR-0010 carve-out is **ratified** as a scoped, representational-fidelity
 exception; D2 — **server→client backend-width advertisement**; D3 — targets
 `i686-unknown-linux-gnu` + `armv7-unknown-linux-gnueabihf` +
 `x86_64-pc-windows-msvc`; D4 — **checked, value-preserving narrowing** (reject on
-genuine `> u32::MAX` overflow). Implementation is pending.
+genuine `> u32::MAX` overflow). D2 is implemented (R3); remaining bridge tasks
+are tracked below.
 
 ---
 
@@ -525,9 +526,10 @@ assumption.
 5. **Sentinel handling, both directions (review #2).** Narrowing: truncation is
    correct. Widening: explicitly map backend all-ones → client all-ones. Add
    round-trip tests for `CK_UNAVAILABLE_INFORMATION` in *both* directions.
-6. **D2/D6 advertisement (review #9/#10):** **add** `backend_ulong_size` +
-   `byte_order` to `GetBackendInterfacesResponse` (they do not exist yet); client
-   asserts at probe; fall back to "8 / LE + warning" for older daemons.
+6. **D2/D6 advertisement (review #9/#10):** **done (R3)** — `backend_ulong_size` +
+   `backend_byte_order` (+ `backend_attribute_stride`) shipped on
+   `GetBackendInterfacesResponse`; client asserts at probe; falls back to
+   "8 / LE + warning" for older daemons.
 7. **Test on Linux CI without a 32-bit box:** a test-only **simulated narrow
    `CK_ULONG`** seam to exercise inflate/re-encode/sentinel/array/nested in both
    directions; plus a real `i686` *client* build and a cross-topology smoke test
@@ -548,10 +550,11 @@ assumption.
   exception is permitted for `CK_ULONG`-semantic attribute values on narrow
   clients (required by Rule §2 — without it narrow clients cannot be transparent).
 - **D2 — Negotiation: (b).** Server advertises its backend `sizeof(CK_ULONG)`
-  **and byte order** (D6) to the client. This requires **adding** optional
-  `backend_ulong_size` + `byte_order` fields to `GetBackendInterfacesResponse` —
-  they do **not** exist today (the message carries only `interfaces` +
-  `mechanism_registry`). The client asserts at probe; against an older daemon
+  **and byte order** (D6) to the client. This **added** optional
+  `backend_ulong_size` + `backend_byte_order` fields to
+  `GetBackendInterfacesResponse` (implemented, R3: the server populates both
+  in `interface_caps.rs`, plus `backend_attribute_stride` per the D2
+  extension). The client asserts at probe; against an older daemon
   that omits them it falls back to "8 / little-endian + warning" (D9). No
   client→server width signalling.
 - **D3 — Targets (2026-09-13 supersedes 2026-07-02 native-host scope).** Client targets:

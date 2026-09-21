@@ -22,6 +22,11 @@ use super::HandlerContext;
 mod exact_completion;
 pub(super) use exact_completion::{ExactCompletion, spawn_backend_exact};
 
+/// Global backend-call budget shared by all tenants (W1-L15-30): one noisy
+/// tenant can fill the budget and trip `CKR_HOST_MEMORY` for co-tenants.
+/// Accepted blast radius (ADR-0012): per-context (M2) and per-connection
+/// (W1-L7-28) quarter-budget caps bound a single tenant, and stuck slots free
+/// when the backend returns; per-tenant backend partitioning is out of scope.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();

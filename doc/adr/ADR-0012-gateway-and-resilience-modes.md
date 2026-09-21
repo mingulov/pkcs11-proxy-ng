@@ -328,3 +328,11 @@ GNU/musl/width receipts remain required before release.
   role/ACL model; preserves ADR-0002 (handle/session identity) and ADR-0003
   (error model); complements ADR-0007's multi-daemon isolation rather than
   replacing it.
+- **Global-breaker multi-tenant blast radius: accepted (W1-L15-30).** The
+  `IN_FLIGHT` backend-call budget is process-global: one tenant flooding slow
+  backend calls can fill it and trip `CKR_HOST_MEMORY` for co-tenants (and a
+  wedged backend holds every slot until it returns). The per-context M2 cap
+  and the per-connection W1-L7-28 cap each bound one tenant/connection to a
+  quarter of the budget, and freed slots self-recover without a restart, but
+  residual cross-tenant pressure remains by design — per-tenant backend
+  partitioning is out of scope for this daemon.

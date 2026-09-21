@@ -167,6 +167,15 @@ When adding a new mechanism parameter shape:
    unset) and are served to shims over gRPC.
    Vendor mechanisms that reuse an existing parameter shape need no code
    changes — only a TOML entry. New shapes still require steps 1–5 above.
+   Exception — intentionally undocumented mechanisms need no TOML entry:
+   `CK_CMS_SIG_PARAMS` / `CK_X3DH_*` / `CK_X2RATCHET_*` shapes carry
+   unbounded caller pointers the shim must not parse
+   (`do_not_parse_unbounded_caller_pointers_in_shim`), and working-spec
+   names without published `CKM_*` values (`CKM_KMAC128/256`,
+   `CKM_ML_DSA_EXTERNAL_MU[_GEN]`, `CKM_SHAKE_128/256`) must not get
+   project-local numbers (`do_not_assign_project_local_ckm_values`).
+   Record any new intentional omission in
+   `doc/oasis-profile-coverage.md` instead of adding a TOML shape.
 7. Add a round-trip unit test in `proto`
 8. Add a real-backend integration test if possible
 
