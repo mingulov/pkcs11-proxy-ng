@@ -128,42 +128,14 @@ impl MechanismRegistry {
             let content = std::fs::read_to_string(path).map_err(|e| {
                 format!("failed to read mechanism override {}: {e}", path.display())
             })?;
-            let over: TomlConfig = toml::from_str(&content)
-                .map_err(|e| format!("failed to parse mechanism override config: {e}"))?;
-
-            // Process includes (single-level, no recursion).
-            let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-            for include_path_str in &over.include {
-                let include_path = Path::new(include_path_str);
-                let resolved = if include_path.is_absolute() {
-                    include_path.to_path_buf()
-                } else {
-                    base_dir.join(include_path)
-                };
-                let inc_content = std::fs::read_to_string(&resolved).map_err(|e| {
-                    format!("failed to read included mechanism config {}: {e}", resolved.display())
-                })?;
-                let inc_config: TomlConfig = toml::from_str(&inc_content).map_err(|e| {
-                    format!("failed to parse included mechanism config {}: {e}", resolved.display())
-                })?;
-                // Merge included config (ignore its `include` field — no recursion).
-                Self::merge_config(
-                    &inc_config,
-                    &mut param_shapes,
-                    &mut parameterless,
-                    &mut disabled,
-                    &mut discovery_mode,
-                );
-            }
-
-            // Merge the override file's own entries last (highest priority).
-            Self::merge_config(
-                &over,
+            Self::merge_override_content(
+                &content,
+                path.parent().unwrap_or_else(|| Path::new(".")),
                 &mut param_shapes,
                 &mut parameterless,
                 &mut disabled,
                 &mut discovery_mode,
-            );
+            )?;
         }
 
         Ok(Self {
@@ -173,6 +145,72 @@ impl MechanismRegistry {
             discovery_mode,
             revision: EMBEDDED_DEFAULT_REVISION.to_string(),
         })
+    }
+
+    /// Load the registry from the embedded default plus already-read
+    /// override TOML `content`. Relative `include` paths resolve against
+    /// `base_dir` (the directory the content was read from).
+    ///
+    /// This is the single-snapshot entry point (W1-C3-02): callers that
+    /// hash the file bytes they read must parse those same bytes — not
+    /// re-read the file — so a concurrent edit cannot pair a revision
+    /// hash with different content.
+    pub fn load_from_content(content: &str, base_dir: &Path) -> Result<Self, String> {
+        let (mut param_shapes, mut parameterless, mut disabled, mut discovery_mode) =
+            Self::load_base()?;
+        Self::merge_override_content(
+            content,
+            base_dir,
+            &mut param_shapes,
+            &mut parameterless,
+            &mut disabled,
+            &mut discovery_mode,
+        )?;
+        Ok(Self {
+            param_shapes,
+            parameterless,
+            disabled,
+            discovery_mode,
+            revision: EMBEDDED_DEFAULT_REVISION.to_string(),
+        })
+    }
+
+    /// Parse override TOML and merge it (plus its single-level includes)
+    /// into the running registry state. Shared by [`Self::load`] and
+    /// [`Self::load_from_content`] so both parse identically.
+    #[allow(clippy::too_many_arguments)]
+    fn merge_override_content(
+        content: &str,
+        base_dir: &Path,
+        param_shapes: &mut HashMap<u64, String>,
+        parameterless: &mut HashSet<u64>,
+        disabled: &mut HashSet<u64>,
+        discovery_mode: &mut DiscoveryMode,
+    ) -> Result<(), String> {
+        let over: TomlConfig = toml::from_str(content)
+            .map_err(|e| format!("failed to parse mechanism override config: {e}"))?;
+
+        // Process includes (single-level, no recursion).
+        for include_path_str in &over.include {
+            let include_path = Path::new(include_path_str);
+            let resolved = if include_path.is_absolute() {
+                include_path.to_path_buf()
+            } else {
+                base_dir.join(include_path)
+            };
+            let inc_content = std::fs::read_to_string(&resolved).map_err(|e| {
+                format!("failed to read included mechanism config {}: {e}", resolved.display())
+            })?;
+            let inc_config: TomlConfig = toml::from_str(&inc_content).map_err(|e| {
+                format!("failed to parse included mechanism config {}: {e}", resolved.display())
+            })?;
+            // Merge included config (ignore its `include` field — no recursion).
+            Self::merge_config(&inc_config, param_shapes, parameterless, disabled, discovery_mode);
+        }
+
+        // Merge the override file's own entries last (highest priority).
+        Self::merge_config(&over, param_shapes, parameterless, disabled, discovery_mode);
+        Ok(())
     }
 
     /// Merge a parsed `TomlConfig` into the running state.
@@ -1176,6 +1214,39 @@ mod tests {
         // From embedded default:
         assert_eq!(reg.param_shape(CKM_AES_GCM), Some("gcm"));
         assert!(reg.is_parameterless(CKM_RSA_PKCS));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "exercises real filesystem I/O, unsupported under miri isolation")]
+    fn load_from_content_resolves_relative_includes() {
+        use std::io::Write;
+
+        // W1-C3-02 pin: the single-snapshot entry point must honor includes
+        // relative to the directory the content was read from, exactly like
+        // `load` does for the file path.
+        let dir = tempfile::tempdir().unwrap();
+        let included_path = dir.path().join("inc.toml");
+        let mut f = std::fs::File::create(&included_path).unwrap();
+        write!(
+            f,
+            r#"
+            [[params]]
+            shape = "gcm"
+            mechanisms = [0x8000C3A1]
+        "#
+        )
+        .unwrap();
+
+        let content = r#"
+            include = ["inc.toml"]
+
+            [[params]]
+            shape = "iv"
+            mechanisms = [0x8000C3A2]
+        "#;
+        let reg = MechanismRegistry::load_from_content(content, dir.path()).unwrap();
+        assert_eq!(reg.param_shape(0x8000C3A1), Some("gcm"));
+        assert_eq!(reg.param_shape(0x8000C3A2), Some("iv"));
     }
 
     #[test]

@@ -347,7 +347,8 @@ buckets:
 - **Bucket 3 — Windows OS port of the *server* (the real lift):** the Unix
   signal and file-mode paths are **already `#[cfg(unix)]`-gated**; the structural
   blockers are the **UDS listener + `SO_PEERCRED` peer-cred auth**
-  (`auth/peer_cred.rs`, `nix`) — impossible on Windows. So a Windows server is
+  (`server/auth/request_identity.rs` via tonic `UdsConnectInfo.peer_cred`,
+  `nix` for socket setup) — impossible on Windows. So a Windows server is
   **mTLS-over-TCP only** and its config **must** provide `[listener.remote]`
   (reject `[listener.local]`). Functional limitation: **SIGHUP mechanism-registry
   hot-reload is lost** (operator restarts to reload). `libloading` already loads a

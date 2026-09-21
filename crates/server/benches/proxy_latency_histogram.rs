@@ -13,47 +13,16 @@
 //! (positional arg = sample count; default 10_000).
 
 use std::env;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hdrhistogram::Histogram;
-use pkcs11_proxy_ng::server::context_manager::ContextManager;
-use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_backend::mock::MockBackend;
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
-use tokio::net::TcpListener;
-use tonic::transport::Server;
 
-fn mock_backend() -> MockBackend {
-    MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType(0x00000001)])
-}
-
-async fn start_daemon() -> (String, tokio::sync::watch::Sender<bool>) {
-    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock_backend());
-    let ctx = Arc::new(ContextManager::new(Duration::from_secs(600), 0));
-    ctx.populate_slots(&backend).await.unwrap();
-    let svc = Pkcs11ProxyService::insecure_for_tests(ctx, backend);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let endpoint = format!("http://127.0.0.1:{}", addr.port());
-    let (tx, rx) = tokio::sync::watch::channel(false);
-    let rx2 = rx.clone();
-    tokio::spawn(async move {
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-        let _ = Server::builder()
-            .add_service(pkcs11_proxy_ng_proto::Pkcs11ProxyServer::new(svc))
-            .serve_with_incoming_shutdown(incoming, async move {
-                let mut rx = rx2;
-                let _ = rx.changed().await;
-            })
-            .await;
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let _keep_alive_rx = rx;
-    (endpoint, tx)
-}
+// W1-C3-12: daemon harness shared with the sibling bench files.
+#[path = "common/mod.rs"]
+mod common;
+use common::start_daemon;
 
 fn main() {
     let n: u64 = env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(10_000);

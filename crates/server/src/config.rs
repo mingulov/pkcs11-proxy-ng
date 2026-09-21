@@ -821,6 +821,22 @@ impl TcpAuthMode {
     }
 }
 
+/// Canonicalize a `[[auth.policy]]` identity for rules-map storage (W1-C3-06).
+///
+/// Runtime peer-cred keys render canonically (`uid=1000`), but TOML accepts
+/// any `u32`-parseable spelling — `uid=01000`, `uid=+1000` — which would
+/// then never match at runtime (a silently dead grant). Parsing and
+/// re-rendering here makes every accepted uid identity matchable.
+/// Non-uid identities pass through unchanged.
+pub(crate) fn normalize_policy_identity(identity: &str) -> String {
+    if let Some(uid) = identity.strip_prefix("uid=")
+        && let Ok(n) = uid.parse::<u32>()
+    {
+        return format!("uid={n}");
+    }
+    identity.to_string()
+}
+
 #[derive(Clone, Copy)]
 enum PolicyIdentitySource {
     PeerCred,
@@ -847,7 +863,11 @@ impl PolicyIdentitySource {
     fn can_produce(self, identity: &str) -> bool {
         match self {
             Self::PeerCred => {
-                identity.strip_prefix("uid=").is_some_and(|uid| uid.parse::<u32>().is_ok())
+                // W1-C3-06: judge the normalized form so every accepted
+                // identity matches a runtime key (uid=01000 → uid=1000).
+                normalize_policy_identity(identity)
+                    .strip_prefix("uid=")
+                    .is_some_and(|uid| uid.parse::<u32>().is_ok())
             }
             Self::Mtls => {
                 // New SPKI-keyed form: x509:spki=<hash> (short) or x509:spki=<hash>;issuer=...;subject=... (enriched)
@@ -904,7 +924,7 @@ impl DaemonConfig {
             .map_err(|e| format!("Failed to read config '{}': {e}", path.display()))?;
         let mut config: Self = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse config '{}': {e}", path.display()))?;
-        config.apply_env_overrides();
+        config.apply_env_overrides()?;
         // Security: refuse to start if config file or backend module is group/world-writable
         // — a writable code-execution surface reachable by unprivileged users.
         check_not_group_or_world_writable(path, "config file")?;
@@ -934,15 +954,18 @@ impl DaemonConfig {
     /// - `PKCS11_PROXY_RESILIENCE_METRICS_SOCKET`     → `resilience.metrics_socket`
     /// - `PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD`     → `resilience.find_result_warn_threshold`
     /// - `PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET`     → `test_hooks.control_socket`
-    pub fn apply_env_overrides(&mut self) {
-        self.apply_env_overrides_with(|key| std::env::var(key).ok());
+    pub fn apply_env_overrides(&mut self) -> Result<(), String> {
+        self.apply_env_overrides_with(|key| std::env::var(key).ok())
     }
 
     /// Same as [`DaemonConfig::apply_env_overrides`] but reads from `get`
     /// instead of the process environment, so tests can exercise the override
     /// logic hermetically without `set_var` (which would race parallel tests
     /// in the same binary that call `load()`).
-    fn apply_env_overrides_with(&mut self, get: impl Fn(&str) -> Option<String>) {
+    fn apply_env_overrides_with(
+        &mut self,
+        get: impl Fn(&str) -> Option<String>,
+    ) -> Result<(), String> {
         // Keep this list in sync with env_var_help() below — both surface the
         // same canonical env-var → TOML-field mapping.
         if let Some(v) = get("PKCS11_PROXY_BACKEND_MODULE") {
@@ -991,14 +1014,24 @@ impl DaemonConfig {
         if let Some(v) = get("PKCS11_PROXY_RESILIENCE_METRICS_SOCKET") {
             self.resilience.metrics_socket = Some(std::path::PathBuf::from(v));
         }
-        if let Some(v) = get("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD")
-            && let Ok(n) = v.parse::<usize>()
-        {
-            self.resilience.find_result_warn_threshold = Some(n);
+        if let Some(v) = get("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD") {
+            // W1-C3-08: error loudly on unparseable values instead of
+            // silently keeping the TOML value (the operator would believe
+            // the override applied).
+            match v.parse::<usize>() {
+                Ok(n) => self.resilience.find_result_warn_threshold = Some(n),
+                Err(_) => {
+                    return Err(format!(
+                        "PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD='{v}' is not a valid \
+                         non-negative integer for resilience.find_result_warn_threshold"
+                    ));
+                }
+            }
         }
         if let Some(v) = get("PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET") {
             self.test_hooks.control_socket = Some(std::path::PathBuf::from(v));
         }
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -1126,10 +1159,15 @@ impl DaemonConfig {
                     }
                 }
             }
-            // Validate bind address has host:port format
-            if !tcp.bind.contains(':') {
+            // W1-C3-13: validate the bind as a real SocketAddr. A mere
+            // contains(':') check lets "localhost:50051" pass here only to
+            // die later in main.rs's `parse::<SocketAddr>()` with a confusing
+            // error. Hostnames are rejected (use an IP:port); the daemon does
+            // not resolve DNS for its listen address.
+            if let Err(e) = tcp.bind.parse::<std::net::SocketAddr>() {
                 return Err(format!(
-                    "listener.remote.bind must be in host:port format, got '{}'",
+                    "listener.remote.bind must be an IP:port SocketAddr in host:port format \
+                     (hostnames are not resolved), got '{}': {e}",
                     tcp.bind
                 ));
             }
@@ -1146,11 +1184,41 @@ impl DaemonConfig {
                 "No listeners configured. Set [listener.local] and/or [listener.remote].".into()
             );
         }
-        // An authorization policy cannot apply to an unauthenticated peer: refuse
-        // to start if any listener uses auth = "none" while [auth.policy] is set.
         let has_unauthenticated_listener =
             self.listener.local.as_ref().is_some_and(|l| !l.auth.is_authenticated())
                 || self.listener.remote.as_ref().is_some_and(|r| !r.auth.is_authenticated());
+        // M3: a per-object `objects` grant on an auth="none" listener is silently
+        // inert — `allows_object_use` returns true for Unauthenticated, so the
+        // per-object restriction is bypassed entirely. Refuse to start to prevent
+        // false security.
+        //
+        // W1-C3-04: this check MUST precede the generic policy+auth=none reject
+        // below: every M3 combo also satisfies that guard, so placing this
+        // after it would shadow the M3 error forever. Order is load-bearing;
+        // do not move this below the generic reject. All current rejects are
+        // preserved: M3 combos now hit this specific error, everything else
+        // falls through to the generic one.
+        if has_unauthenticated_listener {
+            for (index, entry) in self.auth.policy.iter().enumerate() {
+                if let TokenAccessSpec::Specific(ref grants) = entry.tokens {
+                    for grant in grants {
+                        if let GrantSpec::Rich(rich) = grant
+                            && rich.objects.is_some()
+                        {
+                            return Err(format!(
+                                "auth.policy[{index}]: per-object `objects` grant with an \
+                                 auth=\"none\" listener is silently inert — unauthenticated \
+                                 peers bypass per-object authz (allows_object_use returns \
+                                 true for Unauthenticated). Use an authenticated listener \
+                                 (peer_cred / mtls) or remove the `objects` restriction."
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // An authorization policy cannot apply to an unauthenticated peer: refuse
+        // to start if any listener uses auth = "none" while [auth.policy] is set.
         if !self.auth.policy.is_empty() && has_unauthenticated_listener {
             return Err("[auth.policy] is set but a listener uses auth = \"none\"; an \
                  authorization policy cannot apply to unauthenticated peers. Use an \
@@ -1200,29 +1268,6 @@ impl DaemonConfig {
                  and allow_all_authenticated is false. Either add [auth.policy] \
                  entries or set auth.allow_all_authenticated = true."
                 .into());
-        }
-        // M3: a per-object `objects` grant on an auth="none" listener is silently
-        // inert — `allows_object_use` returns true for Unauthenticated, so the
-        // per-object restriction is bypassed entirely. Refuse to start to prevent
-        // false security (mirror of the existing policy+auth=none guard above).
-        if has_unauthenticated_listener {
-            for (index, entry) in self.auth.policy.iter().enumerate() {
-                if let TokenAccessSpec::Specific(ref grants) = entry.tokens {
-                    for grant in grants {
-                        if let GrantSpec::Rich(rich) = grant
-                            && rich.objects.is_some()
-                        {
-                            return Err(format!(
-                                "auth.policy[{index}]: per-object `objects` grant with an \
-                                 auth=\"none\" listener is silently inert — unauthenticated \
-                                 peers bypass per-object authz (allows_object_use returns \
-                                 true for Unauthenticated). Use an authenticated listener \
-                                 (peer_cred / mtls) or remove the `objects` restriction."
-                            ));
-                        }
-                    }
-                }
-            }
         }
         // NOTE: per-mechanism (`mechanisms`) enforcement is now wired (G3 Task 3)
         // and the startup refuse-to-start guard has been removed. Mechanism grants

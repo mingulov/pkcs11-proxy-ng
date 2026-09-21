@@ -1370,10 +1370,12 @@ allow_insecure_tcp = false
 "#;
     // Env set: the override must be honored in the `Some` branch.
     let mut config: DaemonConfig = toml::from_str(toml).unwrap();
-    config.apply_env_overrides_with(fake_env(&[
-        ("PKCS11_PROXY_BIND", "0.0.0.0:9999"),
-        ("PKCS11_PROXY_ALLOW_INSECURE", "1"),
-    ]));
+    config
+        .apply_env_overrides_with(fake_env(&[
+            ("PKCS11_PROXY_BIND", "0.0.0.0:9999"),
+            ("PKCS11_PROXY_ALLOW_INSECURE", "1"),
+        ]))
+        .expect("overrides must apply");
     let tcp = config.listener.remote.as_ref().unwrap();
     assert_eq!(tcp.bind, "0.0.0.0:9999");
     assert!(
@@ -1383,17 +1385,21 @@ allow_insecure_tcp = false
     // Env set to a falsy value: env still wins (secure direction).
     let toml_true = toml.replace("allow_insecure_tcp = false", "allow_insecure_tcp = true");
     let mut config: DaemonConfig = toml::from_str(&toml_true).unwrap();
-    config.apply_env_overrides_with(fake_env(&[
-        ("PKCS11_PROXY_BIND", "0.0.0.0:9999"),
-        ("PKCS11_PROXY_ALLOW_INSECURE", "0"),
-    ]));
+    config
+        .apply_env_overrides_with(fake_env(&[
+            ("PKCS11_PROXY_BIND", "0.0.0.0:9999"),
+            ("PKCS11_PROXY_ALLOW_INSECURE", "0"),
+        ]))
+        .expect("overrides must apply");
     assert!(
         !config.listener.remote.as_ref().unwrap().allow_insecure_tcp,
         "PKCS11_PROXY_ALLOW_INSECURE=0 must override TOML allow_insecure_tcp=true"
     );
     // Env unset: the TOML value must be preserved — no insecure default.
     let mut config: DaemonConfig = toml::from_str(toml).unwrap();
-    config.apply_env_overrides_with(fake_env(&[("PKCS11_PROXY_BIND", "0.0.0.0:9999")]));
+    config
+        .apply_env_overrides_with(fake_env(&[("PKCS11_PROXY_BIND", "0.0.0.0:9999")]))
+        .expect("overrides must apply");
     let tcp = config.listener.remote.as_ref().unwrap();
     assert_eq!(tcp.bind, "0.0.0.0:9999");
     assert!(
@@ -1508,5 +1514,175 @@ fn all_example_daemon_configs_still_parse() {
             pinned_set.contains(rel),
             "daemon config {rel} exists but is not in the pinned parse list — add it"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-04: the M3 objects+auth=none guard must be reachable (not shadowed by
+// the earlier generic policy+auth=none reject), preserving all current rejects.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn m3_objects_grant_with_none_listener_hits_m3_error() {
+    let toml = "\
+[backend]\nmodule = \".\"\n[listener.local]\npath = \"/run/p.sock\"\nauth = \"none\"\nallow_insecure_unix = true\n[auth]\nallow_all_authenticated = false\n[[auth.policy]]\nidentity = \"uid=1000\"\ntokens = [{ token = \"label:MyToken\", objects = [\"aabbcc\"] }]\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("silently inert") && err.contains("objects"),
+        "M3 combo must hit the M3-specific error, got: {err}"
+    );
+}
+
+#[test]
+fn generic_policy_with_none_listener_still_rejected() {
+    // Preservation control: a non-objects policy + auth=none must still be
+    // rejected (by the generic guard) after the M3 reorder.
+    let toml = "\
+[backend]\nmodule = \".\"\n[listener.local]\npath = \"/run/p.sock\"\nauth = \"none\"\nallow_insecure_unix = true\n[auth]\nallow_all_authenticated = false\n[[auth.policy]]\nidentity = \"uid=1000\"\ntokens = [\"label:MyToken\"]\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("cannot apply to unauthenticated peers"),
+        "generic policy+none must keep the generic error, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-06: policy identity uid forms must be normalized so accepted
+// identities can match runtime keys (uid=01000 vs uid=1000).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn non_canonical_uid_identity_matches_runtime_key() {
+    // uid=01000 parses as uid 1000; the runtime key is "uid=1000", so the
+    // configured identity must match it after normalization.
+    let auth = AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![PolicyEntry {
+            identity: "uid=01000".into(),
+            tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:my-token".into())]),
+        }],
+    };
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(&auth).expect("must load");
+    let id = crate::server::auth::identity::AuthenticatedIdentity::PeerCred { uid: 1000 };
+    assert!(
+        policy.allows(&id, "my-token", "any"),
+        "normalized uid=01000 must match runtime uid=1000"
+    );
+}
+
+#[test]
+fn plus_prefixed_uid_identity_matches_runtime_key() {
+    // "+1000" parses as u32 1000 but never equals the "uid=1000" runtime key.
+    let auth = AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![PolicyEntry {
+            identity: "uid=+1000".into(),
+            tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:my-token".into())]),
+        }],
+    };
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(&auth).expect("must load");
+    let id = crate::server::auth::identity::AuthenticatedIdentity::PeerCred { uid: 1000 };
+    assert!(
+        policy.allows(&id, "my-token", "any"),
+        "normalized uid=+1000 must match runtime uid=1000"
+    );
+}
+
+#[test]
+fn canonical_uid_identity_still_matches() {
+    // Preservation control: canonical forms behave exactly as before.
+    let auth = AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![PolicyEntry {
+            identity: "uid=1000".into(),
+            tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:my-token".into())]),
+        }],
+    };
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(&auth).expect("must load");
+    let id = crate::server::auth::identity::AuthenticatedIdentity::PeerCred { uid: 1000 };
+    assert!(policy.allows(&id, "my-token", "any"));
+    let other = crate::server::auth::identity::AuthenticatedIdentity::PeerCred { uid: 2000 };
+    assert!(!policy.allows(&other, "my-token", "any"));
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-08: unparseable RESILIENCE_FIND_THRESHOLD must error loudly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unparseable_find_threshold_env_errors_loudly() {
+    let toml = r#"
+[backend]
+module = "."
+"#;
+    let mut config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config
+        .apply_env_overrides_with(fake_env(&[(
+            "PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD",
+            "not-a-number",
+        )]))
+        .unwrap_err();
+    assert!(
+        err.contains("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD"),
+        "error must name the var, got: {err}"
+    );
+    assert!(err.contains("not-a-number"), "error must name the value, got: {err}");
+}
+
+#[test]
+fn valid_find_threshold_env_still_applies() {
+    // Preservation control: valid values behave as before.
+    let toml = r#"
+[backend]
+module = "."
+"#;
+    let mut config: DaemonConfig = toml::from_str(toml).unwrap();
+    config
+        .apply_env_overrides_with(fake_env(&[("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD", "500")]))
+        .expect("valid threshold must apply");
+    assert_eq!(config.resilience.find_result_warn_threshold, Some(500));
+    // Unset: TOML value (here absent) is preserved.
+    let mut config: DaemonConfig = toml::from_str(toml).unwrap();
+    config.apply_env_overrides_with(fake_env(&[])).expect("unset var must be a no-op");
+    assert_eq!(config.resilience.find_result_warn_threshold, None);
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-13: bind must validate as a real SocketAddr, not contains(':').
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hostname_bind_rejected_at_validate_time() {
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.remote]
+bind = "localhost:50051"
+auth = "none"
+allow_insecure_tcp = true
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err();
+    assert!(
+        err.contains("localhost:50051"),
+        "error must name the offending bind value, got: {err}"
+    );
+}
+
+#[test]
+fn ip_binds_still_validate() {
+    // Preservation control: IP:port binds (v4 + v6) pass as before.
+    for bind in ["127.0.0.1:7512", "0.0.0.0:50051", "[::1]:7512"] {
+        let toml = format!(
+            "[backend]\nmodule = \".\"\n\n[listener.remote]\nbind = \"{bind}\"\nauth = \"none\"\nallow_insecure_tcp = true\n"
+        );
+        let config: DaemonConfig = toml::from_str(&toml).unwrap();
+        assert!(config.validate().is_ok(), "bind {bind} must validate");
     }
 }
