@@ -174,14 +174,16 @@ pub(super) async fn close_session_with_timeout(
             ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
         }));
     };
-    // Bounded acquisition (G2/V11): same cross-tenant DoS bound and transient
-    // DEVICE_ERROR as login. Nothing is mutated yet, so early return is safe.
+    // Bounded acquisition (G2/V11): refuse with CKR_GENERAL_ERROR (W1-L3-01:
+    // proxy serialization refusal, same as login/logout/login_user) rather
+    // than queue unboundedly when a slow/wedged backend pins the lock.
+    // Nothing is mutated yet, so early return is safe.
     let login_guard = ctx_mgr.slot_login_lock(slot);
     let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
         Ok(guard) => guard,
         Err(_elapsed) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::CloseSessionResponse {
-                ck_rv: CkRv::DEVICE_ERROR.0,
+                ck_rv: CkRv::GENERAL_ERROR.0,
             }));
         }
     };

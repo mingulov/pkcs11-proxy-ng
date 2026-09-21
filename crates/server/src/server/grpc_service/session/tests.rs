@@ -1590,6 +1590,58 @@ async fn close_session_quarantines_mapping_on_device_error() {
 }
 
 #[tokio::test]
+async fn close_session_refuses_general_error_when_slot_lock_held() {
+    // W1-L3-01 fix round: close takes the same per-slot login lock under the
+    // same bound as login/logout/login_user, so a wedged lock must refuse
+    // with the same CKR_GENERAL_ERROR (was CKR_DEVICE_ERROR). Mirrors
+    // t7_login_and_logout_refuse_general_error_when_slot_lock_held: paused
+    // time fast-forwards the (seconds-long) acquisition timeout.
+    tokio::time::pause();
+    let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    ctx_mgr.register_slot(backend_slot).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session_vh = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.register_session(
+                crate::server::handle_map::BackendHandle(backend_session.0),
+                backend_slot,
+            )
+        })
+        .await
+        .unwrap();
+
+    // Wedge the per-slot login lock; the close must time out on it.
+    let slot_lock = ctx_mgr.slot_login_lock(backend_slot);
+    let _held = slot_lock.lock().await;
+
+    let rv = super::lifecycle::close_session(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session_vh.0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(rv, CkRv::GENERAL_ERROR.0, "close must refuse with GENERAL_ERROR");
+
+    // Nothing was mutated: the mapping is intact for a retry.
+    let still = ctx_mgr
+        .get_context(&ctx_id, |c| c.session_handles.resolve(VirtualHandle(session_vh.0)))
+        .await
+        .flatten();
+    assert!(still.is_some(), "a refused close must keep the session mapping for retry");
+}
+
+#[tokio::test]
 async fn timed_out_close_settles_terminal_completion_after_handler_returns() {
     let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();

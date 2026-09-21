@@ -1299,6 +1299,43 @@ fn device_error_close_clears_authoritative_message_shapes() {
 }
 
 #[test]
+fn general_error_close_preserves_authoritative_message_shapes() {
+    // W1-L3-01 fix round: a decoded (backend-origin) GENERAL_ERROR close —
+    // e.g. the daemon's per-slot login-lock refusal, which leaves the
+    // session alive and the backend untouched — must NOT evict authoritative
+    // state (evict_authoritative flips true→false vs the old DEVICE_ERROR
+    // refusal). Contrast device_error_close_... (ambiguous → evict) and
+    // panicked_close_... (transport-ambiguous GENERAL_ERROR → evict, via the
+    // origin != Backend arm).
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+    set_test_message_shape(session, state::MessageOperation::Encrypt, MessageParameterShape::Gcm);
+
+    let daemon = TestDaemon::shared();
+    daemon.backend.inject_close_error(CkRv::GENERAL_ERROR);
+    let rv = unsafe { dispatch::general::c_close_session(session) };
+    daemon.backend.clear_close_error();
+
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "a decoded GENERAL_ERROR close refusal must preserve authoritative shape state",
+    );
+
+    // The refusal kept the handle valid (Transient settle), so a retry
+    // succeeds and then evicts authoritative state terminally.
+    let retry_rv = unsafe { dispatch::general::c_close_session(session) };
+    assert_eq!(retry_rv, CKR_OK as CK_RV);
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        None,
+        "a terminal close must evict authoritative shape state",
+    );
+}
+
+#[test]
 fn panicked_close_clears_authoritative_message_shapes() {
     let _guard = shim_state_test_guard();
     let shim = ShimSession::new();
