@@ -205,19 +205,21 @@ pub(crate) unsafe fn output_buffer_spec(
     }
 }
 
-/// Maximum caller C-string length (content bytes, excluding the NUL) the
-/// shim will scan (W1-C6-06). Interface and async function names are short
-/// literals (`"PKCS 11"`, `"C_Sign"`); anything without a NUL inside this
-/// bound is a buggy caller, answered loudly instead of scanned unboundedly.
+/// Caller C-string scan window, in bytes (W1-C6-06): at most 255 content
+/// bytes plus the NUL fit inside — a NUL at index 256 is already outside
+/// the window, so 256 content bytes are rejected. Interface and async
+/// function names are short literals (`"PKCS 11"`, `"C_Sign"`); anything
+/// without a NUL inside this bound is a buggy caller, answered loudly
+/// instead of scanned unboundedly.
 /// Mirrors the backend's `MAX_INTERFACE_NAME_LEN` (W1-C4-06).
 pub(crate) const MAX_C_STRING_LEN: usize = 256;
 
 /// Read a NUL-terminated caller string with a bounded scan (W1-C6-06).
 ///
-/// Returns `Err(CkRv::ARGUMENTS_BAD)` when no NUL appears within
-/// [`MAX_C_STRING_LEN`] content bytes — the loud error for an unterminated
-/// or overlong caller string. Never `CStr::from_ptr`: it would scan
-/// unboundedly into caller memory.
+/// Returns `Err(CkRv::ARGUMENTS_BAD)` when no NUL appears within the
+/// [`MAX_C_STRING_LEN`]-byte scan window (at most 255 content bytes plus
+/// the NUL) — the loud error for an unterminated or overlong caller string.
+/// Never `CStr::from_ptr`: it would scan unboundedly into caller memory.
 ///
 /// # Safety
 ///

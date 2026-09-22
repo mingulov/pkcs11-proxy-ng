@@ -24,8 +24,9 @@ pub unsafe extern "C" fn c_async_complete(
         }
 
         // Read the null-terminated function name string with a bounded
-        // scan (W1-C6-06): no NUL within 256 content bytes is a loud
-        // ARGUMENTS_BAD, never an unbounded `CStr::from_ptr` read.
+        // scan (W1-C6-06): no NUL within the 256-byte window (255 content
+        // bytes max) is a loud ARGUMENTS_BAD, never an unbounded
+        // `CStr::from_ptr` read.
         let function_name =
             match unsafe { read_bounded_cstr(p_function_name as *const std::ffi::c_char) } {
                 Ok(name) => name,

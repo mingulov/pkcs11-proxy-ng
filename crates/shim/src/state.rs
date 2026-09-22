@@ -842,7 +842,7 @@ mod env_warning_tests {
     }
 
     #[test]
-    fn claim_pid_slot_concurrent_claimants_exactly_one_wins() {
+    fn claim_pid_slot_concurrent_claims_terminate() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU32, Ordering};
         let slot = Arc::new(AtomicU32::new(0));

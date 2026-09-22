@@ -114,8 +114,8 @@ pub unsafe extern "C" fn C_GetInterfaceList(
 /// - If no match is found, sets `*pp_interface = NULL` and returns `CKR_OK`
 ///   (per PKCS#11 3.0 §5.4).
 /// - Requested flags must be a subset of the returned interface's advertised flags.
-/// - Names longer than 256 content bytes (no NUL in the bound) are rejected
-///   with `CKR_ARGUMENTS_BAD` (W1-C6-06).
+/// - Names with more than 255 content bytes (no NUL within the 256-byte
+///   scan window) are rejected with `CKR_ARGUMENTS_BAD` (W1-C6-06).
 ///
 /// # Safety
 /// `pp_interface` must be a valid, non-null writable pointer.
@@ -137,9 +137,10 @@ pub unsafe extern "C" fn C_GetInterface(
         let name = if p_interface_name.is_null() {
             None
         } else {
-            // W1-C6-06: bounded scan (256 content bytes) — an unterminated
-            // or overlong caller name is a loud ARGUMENTS_BAD, never an
-            // unbounded `CStr::from_ptr` read.
+            // W1-C6-06: bounded scan (255 content bytes max + NUL within
+            // the 256-byte window) — an unterminated or overlong caller
+            // name is a loud ARGUMENTS_BAD, never an unbounded
+            // `CStr::from_ptr` read.
             match unsafe {
                 crate::dispatch::general::helpers::read_bounded_cstr(
                     p_interface_name as *const std::ffi::c_char,
