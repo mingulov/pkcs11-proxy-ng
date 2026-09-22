@@ -84,12 +84,21 @@ pub(super) unsafe fn capture(
             children = Some(captured);
         }
     } else {
+        // T04: the request bridge is fallible; a widening length rescale
+        // that exceeds u64 is HOST_MEMORY (no backend buffer could ever
+        // be allocated for it), matching the template-path checked_mul
+        // above. Unreachable in practice: capacities are capped at
+        // 512 MiB above, so at most 1 GiB can be requested.
         query.buffer_len = super::super::width_bridge::bridge_request_buffer_len(
             attr_type,
             capacity,
             client_width,
             backend_width,
-        );
+        )
+        .map_err(|err| match err {
+            pkcs11_proxy_ng_types::WidthError::LengthOverflow => CkRv::HOST_MEMORY,
+            _ => CkRv::GENERAL_ERROR,
+        })?;
     }
     Ok(AttributeCall {
         query,
@@ -216,7 +225,8 @@ fn prepare_one(
             // CK_UNAVAILABLE_INFORMATION for this attribute only — value
             // dropped, canonical sentinel length — while the other attributes
             // are still returned. Only malformed bridge inputs (misaligned
-            // bytes, unsupported widths) fail the whole call.
+            // bytes, unsupported widths, T04 length overflow) fail the
+            // whole call, before any write is committed.
             (value, length) = match outcome {
                 Ok(pair) => pair,
                 Err(pkcs11_proxy_ng_types::WidthError::Overflow) => {
@@ -407,6 +417,71 @@ mod tests {
         assert_eq!(first, [0xa5; 4]);
         assert_eq!(second, [0x5a; 4]);
         assert_eq!([attrs[0].ulValueLen, attrs[1].ulValueLen], [4, 4]);
+    }
+
+    #[test]
+    fn exact_length_overflow_fails_whole_call_without_any_store() {
+        // T04: a widening length rescale that exceeds u64 is a malformed
+        // length (LengthOverflow), not a per-attribute value overflow: the
+        // whole call fails with GENERAL_ERROR and no buffer or length
+        // field is touched — including the valid first attribute's.
+        // Direction is 32-bit backend -> 64-bit client (widening); the
+        // narrowing direction cannot overflow a length, and genuine value
+        // overflow in that direction keeps its per-attribute sentinel
+        // outcome (see the next test).
+        let host = std::mem::size_of::<CK_ULONG>();
+        let stride = std::mem::size_of::<CK_ATTRIBUTE>();
+        let client_width = 8usize;
+        let backend_width = 4usize;
+        let max_elements = u64::MAX / 8;
+        let overflowing_len = (max_elements + 1) * 4;
+        let mut first_buf = [0xa5u8; 4];
+        let mut second_buf = [0x5au8; 8];
+        let mut attrs = [
+            CK_ATTRIBUTE { type_: CKA_LABEL, pValue: first_buf.as_mut_ptr().cast(), ulValueLen: 4 },
+            CK_ATTRIBUTE {
+                type_: CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE,
+                pValue: second_buf.as_mut_ptr().cast(),
+                ulValueLen: 8,
+            },
+        ];
+        let calls: Vec<_> = (0..2)
+            .map(|i| {
+                unsafe { capture(attrs.as_mut_ptr().add(i), false, host, host, stride) }.unwrap()
+            })
+            .collect();
+        let results = [
+            CkAttributeQueryResult {
+                attr_type: CkAttributeType::LABEL,
+                returned_len: 4,
+                apply_returned_len: true,
+                apply_type: false,
+                value: Some(b"test".to_vec().into()),
+                ck_rv: None,
+                nested: None,
+            },
+            // Length-only result: no value bytes to cross-check, so the
+            // astronomic length reaches the bridge and overflows there.
+            CkAttributeQueryResult {
+                attr_type: CkAttributeType::CLASS,
+                returned_len: overflowing_len,
+                apply_returned_len: true,
+                apply_type: false,
+                value: None,
+                ck_rv: None,
+                nested: None,
+            },
+        ];
+        assert!(matches!(
+            prepare(&calls, &results, CkRv::OK, client_width, backend_width, stride),
+            Err(CkRv::GENERAL_ERROR)
+        ));
+        assert_eq!(first_buf, [0xa5; 4]);
+        assert_eq!(second_buf, [0x5a; 8]);
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on by-value copies.
+        let first_len = attrs[0].ulValueLen;
+        let second_len = attrs[1].ulValueLen;
+        assert_eq!([first_len, second_len], [4, 8]);
     }
 
     #[test]
