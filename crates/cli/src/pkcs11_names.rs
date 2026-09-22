@@ -262,7 +262,7 @@ mod attr_name_tests {
         assert_eq!(parse_attr_type("ISSUER").unwrap().0, 0x81);
         assert_eq!(parse_attr_type("SERIAL_NUMBER").unwrap().0, 0x82);
         assert_eq!(parse_attr_type("KEY_GEN_MECHANISM").unwrap().0, 0x166);
-        assert_eq!(parse_attr_type("UNIQUE_ID").unwrap().0, 0x2E);
+        assert_eq!(parse_attr_type("UNIQUE_ID").unwrap().0, 0x04);
         assert_eq!(parse_attr_type("SUB_PRIME_BITS").unwrap(), CkAttributeType::SUBPRIME_BITS);
         assert_eq!(attr_type_name(CkAttributeType::SUBPRIME_BITS.0), "SUBPRIME_BITS");
         // W1-C11-25: common cert/key names plus other types-defined

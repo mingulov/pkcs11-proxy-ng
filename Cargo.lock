@@ -1481,6 +1481,7 @@ dependencies = [
 name = "pkcs11-proxy-ng-types"
 version = "0.2.0"
 dependencies = [
+ "cryptoki-sys",
  "serde",
  "tempfile",
  "toml",
