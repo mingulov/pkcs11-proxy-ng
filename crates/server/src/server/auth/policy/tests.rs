@@ -1974,9 +1974,13 @@ fn sustained_unique_spki_peers_keep_logged_set_bounded() {
 /// tracing capture: callsite-interest caching is process-global, so a
 /// capture races sibling tests emitting from the same callsite
 /// unscoped in full parallel runs (observed flake), while the scan is
-/// deterministic.
+/// deterministic. Eviction *behavior* (FIFO past the cap) is covered
+/// functionally by `log_dedup_set_evicts_oldest_past_cap`; only the
+/// log-level property stays structural (a tracing capture flaked — see
+/// the T30 report — so there is no cheap deterministic functional pin).
 #[test]
 fn l7_06_log_dedup_eviction_logs_at_debug_never_warn() {
+    // Deferred T30 M2: intentionally refactor-brittle/fail-closed — update this pin if the pinned structure moves deliberately.
     let src = include_str!("../policy.rs");
     let insert = src
         .split("fn insert(&mut self, key: String) -> bool")

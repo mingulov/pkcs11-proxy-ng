@@ -4298,6 +4298,116 @@ async fn open_session_quota_shared_per_peer_ip_for_unauthenticated() {
     assert_eq!(c3.ck_rv, CkRv::SESSION_COUNT.0, "other peer hits own quota independently");
 }
 
+/// Deferred T30 M3: `last_peer_ip` records before reserve, so even a
+/// REJECTED open re-keys attribution — pinned here with the zero-sum
+/// bound: the re-key moves the context's live sessions from the old key
+/// to the new key (per-key counts shift, total live unchanged), creates
+/// no session, and holds no slot. Same `configure` values as the quota
+/// e2e tests above (identical cfg, same `quota_mutex`) so all agree
+/// whichever wins the OnceLock race.
+#[tokio::test]
+async fn open_session_quota_rejected_open_rekeys_without_creating_quota() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let _guard = quota_mutex().lock().await;
+
+    let cfg = crate::config::RateLimitConfig {
+        per_principal_max_in_flight: None,
+        per_principal_max_sessions: Some(2),
+        per_slot_failed_login_budget: None,
+        per_slot_failed_login_cooldown_secs: None,
+    };
+    crate::server::rate_quota::configure(&cfg);
+    if crate::server::rate_quota::per_principal_max_sessions() != Some(2) {
+        // OnceLock already set otherwise by another caller — skip gracefully.
+        return;
+    }
+    const MAX: usize = 2;
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+
+    let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend.clone());
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let open_as = |cid: String, peer: SocketAddr| {
+        let svc = svc.clone();
+        let slot = virtual_slot.0;
+        async move {
+            let mut req = Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
+                client_context_id: cid,
+                slot_id: slot,
+                flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
+            });
+            req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
+                local_addr: None,
+                remote_addr: Some(peer),
+            });
+            svc.open_session(req).await.unwrap().into_inner()
+        }
+    };
+
+    let ip_x = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    let ip_y = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20));
+    let peer_x = SocketAddr::new(ip_x, 1111);
+    let peer_y = SocketAddr::new(ip_y, 2222);
+    let key_x = ip_x.to_string();
+    let key_y = ip_y.to_string();
+
+    // Fill both peer quotas to cap: ctx_a holds 2 live under X, ctx_c 2 under Y.
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_c = ctx_mgr.create_context(None).await.unwrap();
+    for (ctx, peer, label) in
+        [(&ctx_a, peer_x, "X"), (&ctx_a, peer_x, "X"), (&ctx_c, peer_y, "Y"), (&ctx_c, peer_y, "Y")]
+    {
+        let r = open_as(ctx.0.clone(), peer).await;
+        assert_eq!(r.ck_rv, CkRv::OK.0, "{label} fill open must succeed");
+    }
+    assert_eq!(ctx_mgr.session_count_for_principal(&key_x), MAX);
+    assert_eq!(ctx_mgr.session_count_for_principal(&key_y), MAX);
+
+    // Rejected open: ctx_a (2 live, keyed X) opens from Y, which is at cap.
+    let rejected = open_as(ctx_a.0.clone(), peer_y).await;
+    assert_eq!(rejected.ck_rv, CkRv::SESSION_COUNT.0, "open past Y's cap must be rejected");
+    assert_eq!(rejected.session_handle, 0, "rejected open must return handle 0");
+
+    // ...but the rejection still re-keyed ctx_a's attribution to Y.
+    let recorded = ctx_mgr.get_context(&ctx_a, |ctx| ctx.last_peer_ip).await;
+    assert_eq!(recorded, Some(Some(ip_y)), "rejected open must still record last_peer_ip");
+
+    // Zero-sum move: X freed exactly what Y absorbed; total live unchanged
+    // at 4 = k*max (k=2 source IPs) — the bound holds tight at rejection.
+    assert_eq!(ctx_mgr.session_count_for_principal(&key_x), 0, "X freed by the re-key");
+    assert_eq!(
+        ctx_mgr.session_count_for_principal(&key_y),
+        2 * MAX,
+        "Y absorbed ctx_a's live sessions (conservative over-cap)"
+    );
+    let live: usize =
+        [&key_x, &key_y].iter().map(|key| ctx_mgr.session_count_for_principal(key)).sum();
+    assert_eq!(live, 2 * MAX, "total live unchanged by the rejected open");
+    assert!(live <= 2 * MAX, "live sessions stay within k*max at rejection");
+
+    // No slot created or held by the rejection: Y (over cap via moved
+    // attribution) still rejects a fresh context...
+    let ctx_e = ctx_mgr.create_context(None).await.unwrap();
+    let r = open_as(ctx_e.0.clone(), peer_y).await;
+    assert_eq!(r.ck_rv, CkRv::SESSION_COUNT.0, "moved attribution must keep consuming Y's quota");
+    // ...while X (freed) admits one — the freed slot is usable quota, not a
+    // leak. Disclosed limitation: this re-admission pushes total live to 5,
+    // past k*max = 4 — inherent to last-peer attribution (see the T30 M3
+    // site comment); each key stays gated at admission.
+    let ctx_d = ctx_mgr.create_context(None).await.unwrap();
+    let r = open_as(ctx_d.0.clone(), peer_x).await;
+    assert_eq!(r.ck_rv, CkRv::OK.0, "X must admit after the re-key freed it");
+    let live: usize =
+        [&key_x, &key_y].iter().map(|key| ctx_mgr.session_count_for_principal(key)).sum();
+    assert_eq!(live, 2 * MAX + 1, "re-admission under the freed key is ordinary quota operation");
+}
+
 // ---------------------------------------------------------------------------
 // G2-PR3: per-slot aggregate failed-login budget
 // ---------------------------------------------------------------------------

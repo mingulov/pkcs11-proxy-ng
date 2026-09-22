@@ -436,24 +436,17 @@ fn shim_cdylib_tokio_closure_stays_minimal() {
     // not creep into the first-party manifests whose feature union
     // forms the cdylib build. Only `[dependencies]` is scanned:
     // dev/build deps (shim test harness, proto codegen) never link
-    // into the shipped cdylib. Third-party unions (tonic/hyper) are
-    // verified out-of-band via
-    // `cargo tree -p pkcs11-proxy-ng-shim -e normal` (no
+    // into the shipped cdylib. Manifests are parsed as TOML (T30 M1),
+    // not line-matched, so multi-line declarations cannot evade the
+    // scan. Third-party unions (tonic/hyper) are verified out-of-band
+    // via `cargo tree -p pkcs11-proxy-ng-shim -e normal` (no
     // signal/process/full — recheck when adding client-side deps).
-    const BANNED: &[&str] = &["full", "signal", "process", "rt-multi-thread", "fs"];
     let root = workspace_root();
 
     // Workspace base must stay featureless.
     let workspace = fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml readable");
-    let base = workspace
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("tokio = "))
-        .expect("workspace must declare shared tokio");
-    assert!(
-        base.contains("default-features = false"),
-        "workspace tokio must keep default-features = false: {base}"
-    );
+    let violations = workspace_tokio_base_violations(&workspace);
+    assert!(violations.is_empty(), "workspace tokio violations:\n{}", violations.join("\n"));
 
     // First-party crates feeding the cdylib (shim + its path deps).
     for member in [
@@ -463,29 +456,152 @@ fn shim_cdylib_tokio_closure_stays_minimal() {
         "crates/types/Cargo.toml",
     ] {
         let manifest = fs::read_to_string(root.join(member)).expect("member manifest readable");
-        let mut in_deps = false;
-        for line in manifest.lines().map(str::trim) {
-            if line.starts_with('[') {
-                in_deps = line == "[dependencies]";
-                continue;
-            }
-            if !in_deps || !line.starts_with("tokio = ") {
-                continue;
-            }
-            assert!(
-                line.contains("workspace = true") || line.contains("default-features = false"),
-                "{member}: tokio must inherit the featureless workspace base: {line}"
-            );
-            if let Some(features) = line.split_once("features") {
-                for banned in BANNED {
-                    assert!(
-                        !features.1.contains(&format!("\"{banned}\"")),
-                        "{member}: banned tokio feature \"{banned}\" in the cdylib closure: {line}"
-                    );
-                }
+        let violations = tokio_manifest_violations(&manifest, member);
+        assert!(violations.is_empty(), "{member} tokio violations:\n{}", violations.join("\n"));
+    }
+}
+
+const BANNED_TOKIO_FEATURES: &[&str] = &["full", "signal", "process", "rt-multi-thread", "fs"];
+
+/// Deferred T30 M1: violations of the cdylib tokio rules in one member
+/// manifest's `[dependencies]` tokio entry (empty = clean). Split out so
+/// synthetic fixtures can drive the gate directly. Parsed as TOML (not
+/// line-matched), so multi-line declarations (array continuations,
+/// `[dependencies.tokio]` sections) cannot evade the banned-feature
+/// scan. Unparseable manifests fail closed (reported, never skipped).
+fn tokio_manifest_violations(manifest_text: &str, member: &str) -> Vec<String> {
+    let manifest: toml::Value = match manifest_text.parse() {
+        Ok(value) => value,
+        Err(err) => return vec![format!("{member}: manifest must parse as TOML: {err}")],
+    };
+    let tokio = manifest.get("dependencies").and_then(|deps| deps.get("tokio"));
+    let Some(tokio) = tokio else { return Vec::new() };
+    let Some(table) = tokio.as_table() else {
+        // Bare `tokio = "1"` enables default features (the banned surface).
+        return vec![format!(
+            "{member}: tokio must inherit the featureless workspace base (bare version enables default features)"
+        )];
+    };
+    let mut violations = Vec::new();
+    let inherits_base = table.get("workspace").and_then(toml::Value::as_bool).unwrap_or(false)
+        || table.get("default-features").and_then(toml::Value::as_bool) == Some(false);
+    if !inherits_base {
+        violations
+            .push(format!("{member}: tokio must inherit the featureless workspace base: {tokio}"));
+    }
+    if let Some(features) = table.get("features").and_then(toml::Value::as_array) {
+        for feature in features.iter().filter_map(toml::Value::as_str) {
+            if BANNED_TOKIO_FEATURES.contains(&feature) {
+                violations.push(format!(
+                    "{member}: banned tokio feature \"{feature}\" in the cdylib closure"
+                ));
             }
         }
     }
+    violations
+}
+
+/// Deferred T30 M1: violations of the workspace tokio-base rule (empty =
+/// clean). The shared base must stay featureless so inheriting members
+/// cannot pull the server-only surface through the workspace. Parsed as
+/// TOML so a multi-line base declaration is scanned whole.
+fn workspace_tokio_base_violations(workspace_text: &str) -> Vec<String> {
+    let manifest: toml::Value = match workspace_text.parse() {
+        Ok(value) => value,
+        Err(err) => return vec![format!("workspace Cargo.toml must parse as TOML: {err}")],
+    };
+    let tokio = manifest
+        .get("workspace")
+        .and_then(|ws| ws.get("dependencies"))
+        .and_then(|deps| deps.get("tokio"));
+    let Some(table) = tokio.and_then(toml::Value::as_table) else {
+        return vec!["workspace must declare shared tokio as a featureless table".to_string()];
+    };
+    let mut violations = Vec::new();
+    if table.get("default-features").and_then(toml::Value::as_bool) != Some(false) {
+        violations.push(format!("workspace tokio must keep default-features = false: {tokio:?}"));
+    }
+    if let Some(features) = table.get("features").and_then(toml::Value::as_array) {
+        for feature in features.iter().filter_map(toml::Value::as_str) {
+            if BANNED_TOKIO_FEATURES.contains(&feature) {
+                violations.push(format!(
+                    "workspace tokio base must not enable banned feature \"{feature}\""
+                ));
+            }
+        }
+    }
+    violations
+}
+
+#[test]
+fn tokio_gate_catches_multiline_banned_feature() {
+    // Deferred T30 M1: a banned feature on a continuation line of a
+    // multi-line inline table must not evade the scan.
+    let manifest = "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+        \n[dependencies]\ntokio = { workspace = true, features = [\n  \"rt\",\n  \"signal\",\n] }\n";
+    let violations = tokio_manifest_violations(manifest, "fixture/Cargo.toml");
+    assert!(
+        violations.iter().any(|v| v.contains("signal")),
+        "multi-line banned feature must be caught, got: {violations:?}"
+    );
+    // The workspace base was line-parsed too — a multi-line base with a
+    // banned feature must be caught as well (newline inside the features
+    // array: valid TOML 1.0, invisible to the old line matcher).
+    let workspace = "[workspace]\n[workspace.dependencies]\ntokio = { version = \"1\", default-features = false, features = [\n  \"process\"\n] }\n";
+    let ws_violations = workspace_tokio_base_violations(workspace);
+    assert!(
+        ws_violations.iter().any(|v| v.contains("process")),
+        "multi-line workspace base must be scanned whole, got: {ws_violations:?}"
+    );
+}
+
+#[test]
+fn tokio_gate_catches_dependency_table_section() {
+    // Deferred T30 M1: the `[dependencies.tokio]` table form is
+    // inherently multi-line and must be scanned too.
+    let manifest = "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+        \n[dependencies.tokio]\nversion = \"1\"\ndefault-features = false\nfeatures = [\"full\"]\n";
+    let violations = tokio_manifest_violations(manifest, "fixture/Cargo.toml");
+    assert!(
+        violations.iter().any(|v| v.contains("full")),
+        "table-section banned feature must be caught, got: {violations:?}"
+    );
+}
+
+#[test]
+fn tokio_gate_accepts_clean_manifests() {
+    // Deferred T30 M1: clean declarations — single-line, multi-line, or
+    // absent tokio — must stay green.
+    for manifest in [
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+        \n[dependencies]\ntokio = { workspace = true, features = [\"rt\", \"sync\"] }\n",
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+        \n[dependencies]\ntokio = { workspace = true, features = [\n  \"rt\",\n  \"sync\",\n] }\n",
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = \"1\"\n",
+    ] {
+        assert!(
+            tokio_manifest_violations(manifest, "fixture/Cargo.toml").is_empty(),
+            "clean manifest must stay green: {manifest:?}"
+        );
+    }
+    assert!(
+        workspace_tokio_base_violations(
+            "[workspace.dependencies]\ntokio = { version = \"1\", default-features = false }\n"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn tokio_gate_catches_bare_version_enabling_default_features() {
+    // Deferred T30 M1: parity with the pre-change gate — a bare
+    // `tokio = "1"` (default features on) never inherits the
+    // featureless base.
+    let manifest = "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ntokio = \"1\"\n";
+    assert!(
+        !tokio_manifest_violations(manifest, "fixture/Cargo.toml").is_empty(),
+        "bare tokio version must be flagged"
+    );
 }
 
 #[test]

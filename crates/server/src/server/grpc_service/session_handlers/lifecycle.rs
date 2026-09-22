@@ -87,6 +87,19 @@ pub(super) async fn open_session(
             // live-session counter attributes this context's sessions to the
             // shared key. Identity-bound and peerless contexts record
             // nothing — their counting is unchanged.
+            // Deferred T30 M3: record-before-reserve is deliberate — even a
+            // REJECTED open re-keys `last_peer_ip`. Zero-sum at the moment:
+            // the rewrite moves this context's live sessions from the old
+            // key to the new key (total live unchanged; freed capacity
+            // under the old key is exactly the capacity consumed under the
+            // new key, which may read over max — conservative, fail-closed
+            // there). Absent attribution changes every key holds at most
+            // max and live total stays within k*max for k source IPs; a
+            // re-key frees the old key (re-admittable) while charging the
+            // new key, so repeated cross-IP re-keys can push total live
+            // past k*max — inherent to last-peer attribution. The rejected
+            // open itself creates no session and holds no slot. Pinned by
+            // `open_session_quota_rejected_open_rekeys_without_creating_quota`.
             if ctx_mgr.context_identity(&ctx_id).is_none()
                 && let Some(peer) = current_peer()
             {

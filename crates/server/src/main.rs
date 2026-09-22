@@ -1272,6 +1272,7 @@ auth = "peer_cred"
     #[cfg(unix)]
     #[test]
     fn sighup_reload_runs_off_the_async_worker() {
+        // Deferred T30 M2: intentionally refactor-brittle/fail-closed — update this pin if the pinned structure moves deliberately.
         let src = include_str!("main.rs");
         let helper = src
             .split("fn reload_registry_on_blocking_pool")
