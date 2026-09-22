@@ -68,6 +68,10 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     "crates/server/tests/kryoptic_mechanism_test.rs",
     "crates/server/tests/nss_mechanism_coverage_test.rs",
     "crates/server/tests/provider_matrix_test.rs",
+    // Re-entrant child-entry diagnostics (unknown-scenario / fixture
+    // reservation failures before tracing exists; exit codes are the
+    // parent-visible signal). Block-scoped allows.
+    "crates/server/tests/shutdown_lifetime_test.rs",
     "crates/server/tests/template_compat_test.rs",
     "crates/server/tests/exact_output_error/fix_round_one.rs",
     "crates/server/tests/noncontract_begin_health_test.rs",

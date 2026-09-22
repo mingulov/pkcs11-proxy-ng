@@ -298,14 +298,48 @@ unsafe impl Sync for FfiBackend {}
 
 impl FfiBackend {
     /// Test-only base constructor (W1-L11-13): the single `FfiBackend`
-    /// struct literal for stub-backed unit tests. Per-test
-    /// `backend_with_*` installers build their function-list stubs,
-    /// then delegate here for the backend half; the table `Box`es stay
-    /// caller-owned so the raw pointers cannot dangle. Unmanaged test
-    /// permit: bypasses the process reservation without consuming it;
-    /// never backs production dispatch (C3M.4).
-    #[cfg(test)]
-    pub(crate) fn test_backend_with_tables(
+    /// struct literal for stub-backed tests. Per-test `backend_with_*`
+    /// installers build their function-list stubs, then delegate here
+    /// for the backend half; the table `Box`es stay caller-owned so the
+    /// raw pointers cannot dangle. Unmanaged test permit: bypasses the
+    /// process reservation without consuming it; never backs production
+    /// dispatch (C3M.4). Visible to unit tests plus the
+    /// `native-owner-test-hooks` feature (T10 shutdown-lifetime child
+    /// tests); default builds observe no such symbol.
+    /// Managed variant of [`Self::test_backend_with_tables`] (T10): reserves
+    /// and activates the process construction slot, so the instance takes
+    /// the final-owner guard path on drop (unmanaged fixtures bypass it).
+    /// For shutdown-lifetime child tests that must prove guard behavior
+    /// (failed native Finalize → 70). The child must hold no other
+    /// backend; reservation/activation failure returns `Err`.
+    #[cfg(any(test, feature = "native-owner-test-hooks"))]
+    pub fn test_backend_managed_with_tables(
+        func_list: *mut cryptoki_sys::CK_FUNCTION_LIST,
+    ) -> Result<Self, String> {
+        let permit = native_domain::reserve_for_construction()
+            .map_err(|e| format!("reserve construction slot: {e:?}"))?;
+        permit.activate().map_err(|e| format!("activate construction slot: {e:?}"))?;
+        Ok(Self {
+            _lib: loading::test_library_handle(),
+            func_list,
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            retirement_sentinel: native_domain::RetirementSentinel::for_permit(&permit),
+            construction: permit,
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
+        })
+    }
+
+    #[cfg(any(test, feature = "native-owner-test-hooks"))]
+    pub fn test_backend_with_tables(
         func_list: *mut cryptoki_sys::CK_FUNCTION_LIST,
         func_list_3_0: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_0>,
         func_list_3_2: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_2>,
@@ -346,6 +380,66 @@ impl FfiBackend {
     fn ffi_attr_len(ffi_attrs: &FfiAttrs) -> CkResult<cryptoki_sys::CK_ULONG> {
         Self::ulong_len(ffi_attrs.attrs.len())
     }
+
+    /// Post-seal half of Finalize, shared by `finalize()` and
+    /// `finalize_with_grace()` (T10 extraction; behavior unchanged):
+    /// enter `Finalizing`, run the exclusive native `C_Finalize`, and on
+    /// success publish `Finalized` with the incarnation purge. On native
+    /// error the seal is abandoned (incarnation uncertain, bindings
+    /// kept) and the provider RV propagates. The caller holds the armed
+    /// `DeadlineGuard` across this call.
+    fn finish_finalize(&self, seal: native_domain::FinalizeTicket<'_>) -> CkResult<()> {
+        // Exclusive native call on this thread, which holds the armed
+        // `DeadlineGuard` (no spawned worker; the ticket is detached —
+        // write is NOT held across native entry, mirroring Initialize).
+        // An `enter_finalizing` failure drops the seal through the Drop
+        // backstop, abandoning the seal before the error propagates.
+        seal.enter_finalizing()?;
+        // Control choke: Finalize holds no read (the seal above took short
+        // writes only, never read) — the choke takes no guard, structurally.
+        let outcome =
+            Self::call_control_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
+                function(std::ptr::null_mut())
+            });
+        if outcome.is_err() {
+            // The failure proves nothing about provider state, so the seal
+            // is abandoned (the live incarnation keeps admitting) and every
+            // binding stays — but the incarnation is now uncertain, and a
+            // later re-initialization is refused until a successful
+            // C_Finalize (F-08).
+            self.lifecycle_domain.abandon_finalize(seal);
+            self.lifecycle.note_finalize_failed();
+            return outcome;
+        }
+        // Record the clean close BEFORE publishing: a (practically
+        // unreachable) publish failure must not leave C3M believing an
+        // incarnation is live after its provider finalized.
+        self.lifecycle.note_finalized();
+        // Publish `Finalized` with the incarnation purge INSIDE the publish
+        // write section (I2 mirror): `Finalized` implies purged, so a racing
+        // re-Initialize observes no dead bindings.
+        // This is the daemon/backend finalizer, not the per-client gRPC
+        // Finalize path. Per-client Finalize removes only that client context
+        // and closes its sessions. Once the underlying module accepts
+        // C_Finalize, every cached session binding is out of scope.
+        self.lifecycle_domain.publish_finalized_with_purge(seal, || {
+            self.drop_all_mech_cache();
+        })?;
+        Ok(())
+    }
+}
+
+/// Hooks-gated read of the stop-qualification predicate (T10 review
+/// must-fix): reports the REAL [`native_stop::NATIVE_STOP_QUALIFIED`]
+/// value instead of a hand-maintained `cfg!` mirror, so cross-target
+/// shutdown-lifetime tests (i686, aarch64, macOS, Windows) assert the
+/// same qualification the backend enforces and a leg edit cannot
+/// desync the oracle. Pure predicate read; no hook state. Visible to
+/// unit tests plus the `native-owner-test-hooks` feature; default
+/// builds observe no such symbol.
+#[cfg(any(test, feature = "native-owner-test-hooks"))]
+pub fn stop_qualified_target() -> bool {
+    native_stop::NATIVE_STOP_QUALIFIED
 }
 
 /// Map a local lifecycle refusal to its caller-visible `CK_RV` (F-08).
@@ -447,43 +541,22 @@ impl Pkcs11Backend for FfiBackend {
         // a live incarnation, so out-of-incarnation callers observe no
         // new RV.
         let seal = self.lifecycle_domain.begin_finalize()?;
-        // Exclusive native call on this thread, which holds the armed
-        // `DeadlineGuard` (no spawned worker; the ticket is detached —
-        // write is NOT held across native entry, mirroring Initialize).
-        // An `enter_finalizing` failure drops the seal through the Drop
-        // backstop, abandoning the seal before the error propagates.
-        seal.enter_finalizing()?;
-        // Control choke: Finalize holds no read (the seal above took short
-        // writes only, never read) — the choke takes no guard, structurally.
-        let outcome =
-            Self::call_control_unit(unsafe { (*self.func_list).C_Finalize }, |function| unsafe {
-                function(std::ptr::null_mut())
-            });
-        if outcome.is_err() {
-            // The failure proves nothing about provider state, so the seal
-            // is abandoned (the live incarnation keeps admitting) and every
-            // binding stays — but the incarnation is now uncertain, and a
-            // later re-initialization is refused until a successful
-            // C_Finalize (F-08).
-            self.lifecycle_domain.abandon_finalize(seal);
-            self.lifecycle.note_finalize_failed();
-            return outcome;
-        }
-        // Record the clean close BEFORE publishing: a (practically
-        // unreachable) publish failure must not leave C3M believing an
-        // incarnation is live after its provider finalized.
-        self.lifecycle.note_finalized();
-        // Publish `Finalized` with the incarnation purge INSIDE the publish
-        // write section (I2 mirror): `Finalized` implies purged, so a racing
-        // re-Initialize observes no dead bindings.
-        // This is the daemon/backend finalizer, not the per-client gRPC
-        // Finalize path. Per-client Finalize removes only that client context
-        // and closes its sessions. Once the underlying module accepts
-        // C_Finalize, every cached session binding is out of scope.
-        self.lifecycle_domain.publish_finalized_with_purge(seal, || {
-            self.drop_all_mech_cache();
-        })?;
-        Ok(())
+        self.finish_finalize(seal)
+    }
+
+    fn finalize_with_grace(&self, grace: std::time::Duration) -> CkResult<()> {
+        // T10 coordinator path: ONE absolute deadline, sampled once for
+        // the seal (`now + grace`); the controller arm takes the same
+        // `grace` but re-samples its own clock at arm time, so arm-1
+        // and the controller agree on `D` within scheduling jitter.
+        let deadline = std::time::Instant::now() + grace;
+        let _deadline = native_stop::arm_shutdown_deadline(grace);
+        let seal = self.lifecycle_domain.begin_finalize_with_deadline(deadline)?;
+        self.finish_finalize(seal)
+    }
+
+    fn finalize_is_natively_bounded(&self) -> bool {
+        native_stop::NATIVE_STOP_QUALIFIED
     }
 
     fn get_info(&self) -> CkResult<CkInfo> {

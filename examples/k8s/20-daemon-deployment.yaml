@@ -24,9 +24,11 @@ spec:
       labels:
         app: daemon
     spec:
-      # k8s terminationGracePeriodSeconds must be >= the daemon's
-      # proxy.shutdown_grace_secs (default 30) so an in-flight
-      # signing request can complete during graceful drain.
+      # k8s terminationGracePeriodSeconds must exceed the daemon's
+      # proxy.shutdown_grace_secs (default 30: the WHOLE post-signal
+      # shutdown — drain, eviction stop, audit completion, native
+      # retirement) plus the 10s runtime-teardown tail, so an
+      # in-flight signing request can complete during graceful drain.
       terminationGracePeriodSeconds: 45
       containers:
         - name: daemon

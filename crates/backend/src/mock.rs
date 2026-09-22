@@ -115,6 +115,8 @@ pub struct MockBackend {
     authenticated_unwrap_fault: Mutex<Option<CkRv>>,
     destroy_error: Mutex<Option<CkRv>>,
     destroy_calls: AtomicUsize,
+    /// Number of `finalize` trait calls (T10: finalized-exactly-once proof).
+    finalize_calls: AtomicUsize,
     mechanism_entries: Mutex<mechanism_entry::MechanismEntries>,
     pub slots: Vec<CkSlotId>,
     pub mechanisms: Vec<CkMechanismType>,
@@ -141,6 +143,16 @@ pub struct MockBackend {
     /// script backend errors (contention, sentinel RVs) the queue cannot
     /// express. Set via `set_next_wait_outcome()`.
     next_wait_outcome: Mutex<Option<CkResult<CkSlotId>>>,
+    /// One-shot `finalize` outcome override for shutdown-lifetime tests
+    /// (T10). Checked before any state change, mirroring
+    /// `next_wait_outcome`. Set via `set_next_finalize_outcome()`.
+    next_finalize_outcome: Mutex<Option<CkResult<()>>>,
+    /// When set, `finalize` parks on `finalize_condvar` until released,
+    /// simulating a wedged provider finalize for coordinator-timeout
+    /// coverage. Set via `inject_finalize_park()`, cleared (with a wake)
+    /// via `release_finalize()`.
+    park_finalize: Mutex<bool>,
+    finalize_condvar: Condvar,
     /// Count of `wait_for_slot_event` trait calls reaching the backend.
     /// Wait-matrix tests use it to prove zero-backend-entry refusals.
     wait_calls: AtomicUsize,
@@ -367,6 +379,9 @@ impl MockBackend {
             slot_event_queue: Mutex::new(std::collections::VecDeque::new()),
             hang_slot_event: Mutex::new(false),
             next_wait_outcome: Mutex::new(None),
+            next_finalize_outcome: Mutex::new(None),
+            park_finalize: Mutex::new(false),
+            finalize_condvar: Condvar::new(),
             wait_calls: AtomicUsize::new(0),
             mechanism_entries: Mutex::new(mechanism_entry::MechanismEntries::default()),
             wrap_entries: Mutex::new(Vec::new()),
@@ -374,6 +389,7 @@ impl MockBackend {
             authenticated_unwrap_fault: Mutex::new(None),
             destroy_error: Mutex::new(None),
             destroy_calls: AtomicUsize::new(0),
+            finalize_calls: AtomicUsize::new(0),
             slot_event_condvar: Condvar::new(),
             token_presence: Mutex::new(HashMap::new()),
             token_identities: Mutex::new(HashMap::new()),
@@ -591,6 +607,31 @@ impl MockBackend {
     /// refusals, sentinel RVs — the event queue cannot express.
     pub fn set_next_wait_outcome(&self, outcome: CkResult<CkSlotId>) {
         *self.next_wait_outcome.lock().unwrap() = Some(outcome);
+    }
+
+    /// Script the next `finalize` outcome (consumed one-shot, checked
+    /// before any state change). Lets shutdown-lifetime tests drive a
+    /// failed provider finalize.
+    pub fn set_next_finalize_outcome(&self, outcome: CkResult<()>) {
+        *self.next_finalize_outcome.lock().unwrap() = Some(outcome);
+    }
+
+    /// Make `finalize` park until `release_finalize` (which wakes
+    /// parked finalizers to re-check). Simulates a wedged provider
+    /// finalize for coordinator-timeout coverage.
+    pub fn inject_finalize_park(&self, park: bool) {
+        *self.park_finalize.lock().unwrap() = park;
+        self.finalize_condvar.notify_all();
+    }
+
+    /// Release a finalize parked by `inject_finalize_park(true)`.
+    pub fn release_finalize(&self) {
+        self.inject_finalize_park(false);
+    }
+
+    /// Number of `finalize` trait calls that reached the backend.
+    pub fn finalize_call_count(&self) -> usize {
+        self.finalize_calls.load(Ordering::SeqCst)
     }
 
     /// Number of `wait_for_slot_event` trait calls that reached the backend.
@@ -1654,6 +1695,7 @@ impl Pkcs11Backend for MockBackend {
     }
 
     fn finalize(&self) -> CkResult<()> {
+        self.finalize_calls.fetch_add(1, Ordering::SeqCst);
         self.finalize_backend()
     }
 

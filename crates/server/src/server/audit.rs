@@ -154,6 +154,15 @@ impl AuditSink {
         ack_rx.await.unwrap_or(Ok(()))
     }
 
+    /// T10 shutdown-lifetime fault injection (hook builds only): arm a
+    /// one-shot park on the next writer `Flush`, simulating a wedged
+    /// writer. The parked flush never acks; the thread stays parked
+    /// until process exit (child-contained in tests).
+    #[cfg(feature = "native-owner-test-hooks")]
+    pub async fn arm_flush_park_for_test(&self) {
+        let _ = self.tx.send(WriterMsg::ArmFlushPark).await;
+    }
+
     /// Number of records silently dropped due to a full channel.
     /// Only fail-open (DataPlane) records are counted here.
     pub fn dropped_count(&self) -> u64 {
@@ -175,16 +184,121 @@ enum WriterMsg {
     /// low-volume auth-only logs get sealed even if they never reach 100
     /// records (the count-based trigger).
     Checkpoint,
+    /// T10 shutdown-lifetime fault injection (hook builds only): arm a
+    /// one-shot park on the next `Flush`, simulating a wedged writer.
+    #[cfg(feature = "native-owner-test-hooks")]
+    ArmFlushPark,
 }
 
 // ---------------------------------------------------------------------------
 // Public constructor
 // ---------------------------------------------------------------------------
 
+/// Owner of the audit background tasks' join handles (T10 phase 3).
+///
+/// The writer thread exits only on channel close, and the checkpoint
+/// timer holds a sender clone — so an orderly join needs the timer
+/// aborted first (see [`AuditShutdown::shutdown`]). Created only by
+/// [`spawn_managed_audit_sink`].
+pub struct AuditShutdown {
+    writer: Option<tokio::task::JoinHandle<()>>,
+    timer: Option<tokio::task::AbortHandle>,
+}
+
+/// Failure of a bounded audit-shutdown step (T10 phase 3). The
+/// coordinator logs the reason and proceeds — a lost tail never blocks
+/// native retirement.
+#[derive(Debug)]
+pub enum AuditShutdownError {
+    /// `flush()` did not ack within the budget (wedged writer).
+    FlushTimeout,
+    /// `flush()` failed with an I/O error.
+    FlushIo(io::Error),
+    /// The writer thread did not exit within the budget after the
+    /// channel closed (wedged writer).
+    JoinTimeout,
+    /// The writer thread panicked.
+    WriterPanicked,
+}
+
+impl std::fmt::Display for AuditShutdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FlushTimeout => write!(f, "audit flush timed out"),
+            Self::FlushIo(e) => write!(f, "audit flush failed: {e}"),
+            Self::JoinTimeout => write!(f, "audit writer join timed out"),
+            Self::WriterPanicked => write!(f, "audit writer panicked"),
+        }
+    }
+}
+
+impl AuditShutdown {
+    /// T10 phase 3: bounded audit completion. `sink` is the
+    /// coordinator's own sender clone, taken by value (still open: the
+    /// flush ack needs the channel open); the caller must already have
+    /// dropped the service (`svc`) so no handler can emit past this
+    /// point.
+    ///
+    /// Order: flush within `budget`, abort the timer, drop `sink`
+    /// (last sender → channel closes), join the writer within the
+    /// leftover budget. Any step may fail with [`AuditShutdownError`];
+    /// the coordinator logs and proceeds on every variant.
+    pub async fn shutdown(
+        mut self,
+        sink: AuditSink,
+        budget: std::time::Duration,
+    ) -> Result<(), AuditShutdownError> {
+        let start = std::time::Instant::now();
+        let flush_outcome = tokio::time::timeout(budget, sink.flush()).await;
+        match flush_outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(AuditShutdownError::FlushIo(e)),
+            Err(_) => return Err(AuditShutdownError::FlushTimeout),
+        }
+        // Release the timer's sender clone so the channel can close (the
+        // audit.rs A2 prescription: an explicit cancel for the joining
+        // path). `abort()` is idempotent and sync.
+        if let Some(timer) = self.timer.take() {
+            timer.abort();
+        }
+        drop(sink);
+        let leftover = budget.saturating_sub(start.elapsed());
+        let writer = self.writer.take().expect("shutdown consumes the writer once");
+        match tokio::time::timeout(leftover, writer).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) if e.is_panic() => Err(AuditShutdownError::WriterPanicked),
+            Ok(Err(_)) => Err(AuditShutdownError::JoinTimeout),
+            Err(_) => Err(AuditShutdownError::JoinTimeout),
+        }
+    }
+}
+
+/// An audit sink plus its background-task shutdown owner (T10).
+/// Production entry point; tests that only emit keep using
+/// [`spawn_audit_sink`].
+pub struct ManagedAuditSink {
+    /// Clonable emitter handle (shared with the service).
+    pub sink: AuditSink,
+    /// Phase-3 shutdown owner (writer join + timer abort).
+    pub shutdown: AuditShutdown,
+}
+
 /// Build and start an audit sink.
 ///
 /// Returns `Ok(None)` when `cfg.dir` is `None` (audit disabled — zero behaviour
 /// change for existing deployments).
+///
+/// When `cfg.dir` is `Some`, spawns the background writer (blocking
+/// thread) and the checkpoint timer exactly like
+/// [`spawn_managed_audit_sink`], but detaches both handles: for emitters
+/// that never join (unit tests). Production shutdown uses the managed
+/// form.
+pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
+    Ok(spawn_managed_audit_sink(cfg)?.map(|managed| managed.sink))
+}
+
+/// Build and start an audit sink, retaining the background tasks'
+/// shutdown handles for the T10 coordinator.
 ///
 /// When `cfg.dir` is `Some`:
 /// 1. Creates the directory (mode 0700 on Unix) if missing.
@@ -192,8 +306,9 @@ enum WriterMsg {
 ///    32-byte seed.
 /// 3. Reconstructs the chain tip deterministically from the active log tail
 ///    (falling back to the anchor, then genesis) — see [`reconstruct_chain_state`].
-/// 4. Spawns the background writer on a blocking thread and returns the handle.
-pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
+/// 4. Spawns the background writer on a blocking thread and the checkpoint
+///    timer, retaining both handles in [`AuditShutdown`].
+pub fn spawn_managed_audit_sink(cfg: &AuditConfig) -> io::Result<Option<ManagedAuditSink>> {
     let Some(ref dir) = cfg.dir else {
         return Ok(None);
     };
@@ -217,24 +332,23 @@ pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
     )?;
     // The writer does blocking `std::fs` I/O with `sync_all()`; keep it off the
     // async worker threads by running the loop on the blocking pool and draining
-    // the tokio mpsc via `blocking_recv()`.
-    tokio::task::spawn_blocking(move || writer_task(writer, rx));
+    // the tokio mpsc via `blocking_recv()`. The JoinHandle is retained for
+    // the T10 phase-3 join (detached by `spawn_audit_sink` callers).
+    let writer_handle = tokio::task::spawn_blocking(move || writer_task(writer, rx));
 
     // A2: spawn a time-based checkpoint task so low-volume auth-only logs get
     // sealed even if they never reach CHECKPOINT_INTERVAL (100) records.
     // The task holds a Sender clone and exits when `send` fails, i.e. once the
-    // WRITER side of the channel is gone. NOTE: because this clone keeps the
-    // channel open, it does NOT unblock the writer's `blocking_recv()` on its
-    // own — today that is harmless (durability is via explicit `flush()` + the
-    // per-checkpoint anchor fsync, not a drop-based drain, and at runtime
-    // teardown the scheduler drops this task before the blocking pool is
-    // joined). If a future graceful-shutdown path drops the `AuditSink` and
-    // joins the writer, give this task an explicit cancel (shutdown Notify /
-    // select!) so it stops holding the sender independently of channel close.
+    // WRITER side of the channel is gone. That clone keeps the channel open,
+    // so the T10 phase-3 join aborts this task explicitly first (retained
+    // AbortHandle); if phase 3 is skipped, runtime teardown still drops the
+    // task while the blocking-pool join runs, so the writer observes the
+    // close there instead.
+    let mut timer_handle = None;
     if has_signer && cfg.checkpoint_interval_secs > 0 {
         let tx_timer = tx.clone();
         let interval_secs = cfg.checkpoint_interval_secs;
-        tokio::spawn(async move {
+        let timer = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
                 if tx_timer.send(WriterMsg::Checkpoint).await.is_err() {
@@ -243,13 +357,17 @@ pub fn spawn_audit_sink(cfg: &AuditConfig) -> io::Result<Option<AuditSink>> {
                 }
             }
         });
+        timer_handle = Some(timer.abort_handle());
     }
 
-    Ok(Some(AuditSink {
-        tx,
-        dropped,
-        fail_closed_reserve: cfg.fail_closed_reserve,
-        data_plane: cfg.data_plane,
+    Ok(Some(ManagedAuditSink {
+        sink: AuditSink {
+            tx,
+            dropped,
+            fail_closed_reserve: cfg.fail_closed_reserve,
+            data_plane: cfg.data_plane,
+        },
+        shutdown: AuditShutdown { writer: Some(writer_handle), timer: timer_handle },
     }))
 }
 
@@ -737,6 +855,8 @@ impl WriterState {
 /// Uses `blocking_recv()` / `try_recv()` on the mpsc receiver so the blocking
 /// `std::fs` writes and `sync_all()` calls never run on an async worker thread.
 fn writer_task(mut state: WriterState, mut rx: tokio::sync::mpsc::Receiver<WriterMsg>) {
+    #[cfg(feature = "native-owner-test-hooks")]
+    let mut flush_park_armed = false;
     while let Some(msg) = rx.blocking_recv() {
         match msg {
             WriterMsg::Record(rec) => {
@@ -744,7 +864,24 @@ fn writer_task(mut state: WriterState, mut rx: tokio::sync::mpsc::Receiver<Write
                     tracing::error!(error = %e, "audit writer: failed to write record");
                 }
             }
+            #[cfg(feature = "native-owner-test-hooks")]
+            WriterMsg::ArmFlushPark => {
+                flush_park_armed = true;
+            }
             WriterMsg::Flush(ack) => {
+                // T10 hook builds: a parked flush never acks, simulating a
+                // wedged writer. The thread stays parked until process exit
+                // (child-contained in tests).
+                #[cfg(feature = "native-owner-test-hooks")]
+                if flush_park_armed {
+                    // Park forever: `park()` may wake spuriously, so loop.
+                    // Child-contained by design; the coordinator's bounded
+                    // flush proves the timeout path, and the child exits
+                    // with this thread leaked at runtime shutdown.
+                    loop {
+                        std::thread::park();
+                    }
+                }
                 // Drain any buffered records before flushing.
                 loop {
                     match rx.try_recv() {
@@ -763,6 +900,12 @@ fn writer_task(mut state: WriterState, mut rx: tokio::sync::mpsc::Receiver<Write
                         Ok(WriterMsg::Checkpoint) => {
                             // A time-triggered checkpoint is superseded by the
                             // flush that follows — no-op here.
+                        }
+                        #[cfg(feature = "native-owner-test-hooks")]
+                        Ok(WriterMsg::ArmFlushPark) => {
+                            // Armed during the drain: applies to the next
+                            // flush, not the one already being served.
+                            flush_park_armed = true;
                         }
                         Err(_) => break,
                     }

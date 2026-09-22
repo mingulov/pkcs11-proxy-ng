@@ -63,6 +63,26 @@ pub trait Pkcs11Backend: Send + Sync {
 
     fn initialize(&self) -> CkResult<()>;
     fn finalize(&self) -> CkResult<()>;
+    /// T10 coordinator-path finalize: retire native state with the
+    /// shutdown controller armed for exactly `grace` (the coordinator's
+    /// remaining overall budget). The FFI override arms with `grace`
+    /// and seals against the same absolute deadline; backends without
+    /// native work use the default (`finalize()`), which the
+    /// coordinator bounds with its own timeout. Attempted once; no
+    /// retry (a failed attempt proves nothing about provider state).
+    fn finalize_with_grace(&self, _grace: std::time::Duration) -> CkResult<()> {
+        self.finalize()
+    }
+    /// Whether `finalize_with_grace` is bounded by the native
+    /// shutdown-deadline controller (process-stopping on overrun) as
+    /// opposed to needing the coordinator's own timeout. Trait default
+    /// `false` (mock/test/custom backends: no native work, the
+    /// coordinator's timeout applies); the FFI override returns
+    /// `NATIVE_STOP_QUALIFIED`. Pure predicate — no provider contact,
+    /// no arming, no state change.
+    fn finalize_is_natively_bounded(&self) -> bool {
+        false
+    }
     fn get_info(&self) -> CkResult<CkInfo>;
 
     fn get_slot_list(&self, token_present: bool) -> CkResult<Vec<CkSlotId>>;
