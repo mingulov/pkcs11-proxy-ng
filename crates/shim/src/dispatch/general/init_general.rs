@@ -24,6 +24,12 @@ use std::path::PathBuf;
 /// - null pInitArgs → accepted (spec allows, treated as OS-locking default)
 ///
 /// Returns `None` on success, `Some(rv)` on error.
+///
+/// # Safety
+///
+/// A null `p_init_args` is always accepted; otherwise it must point to
+/// a valid, readable `CK_C_INITIALIZE_ARGS` (fields are copied by value,
+/// never referenced in place, for packed-layout soundness).
 unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
     if p_init_args.is_null() {
         return None; // Null is always acceptable.

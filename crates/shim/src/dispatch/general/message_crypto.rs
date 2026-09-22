@@ -418,7 +418,7 @@ pub unsafe extern "C" fn c_message_verify_final(h_session: CK_SESSION_HANDLE) ->
 
 pub unsafe extern "C" fn c_encrypt_message(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_associated_data: *mut CK_BYTE,
     ul_associated_data_len: CK_ULONG,
@@ -528,7 +528,7 @@ pub unsafe extern "C" fn c_encrypt_message(
 
 pub unsafe extern "C" fn c_encrypt_message_begin(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_associated_data: *mut CK_BYTE,
     ul_associated_data_len: CK_ULONG,
@@ -610,7 +610,7 @@ pub unsafe extern "C" fn c_encrypt_message_begin(
 
 pub unsafe extern "C" fn c_encrypt_message_next(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_plaintext_part: *mut CK_BYTE,
     ul_plaintext_part_len: CK_ULONG,
@@ -713,7 +713,7 @@ pub unsafe extern "C" fn c_encrypt_message_next(
 
 pub unsafe extern "C" fn c_decrypt_message(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_associated_data: *mut CK_BYTE,
     ul_associated_data_len: CK_ULONG,
@@ -823,7 +823,7 @@ pub unsafe extern "C" fn c_decrypt_message(
 
 pub unsafe extern "C" fn c_decrypt_message_begin(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_associated_data: *mut CK_BYTE,
     ul_associated_data_len: CK_ULONG,
@@ -905,7 +905,7 @@ pub unsafe extern "C" fn c_decrypt_message_begin(
 
 pub unsafe extern "C" fn c_decrypt_message_next(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_ciphertext_part: *mut CK_BYTE,
     ul_ciphertext_part_len: CK_ULONG,
@@ -1008,7 +1008,7 @@ pub unsafe extern "C" fn c_decrypt_message_next(
 
 pub unsafe extern "C" fn c_sign_message(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_data: *mut CK_BYTE,
     ul_data_len: CK_ULONG,
@@ -1092,7 +1092,7 @@ pub unsafe extern "C" fn c_sign_message(
 
 pub unsafe extern "C" fn c_sign_message_begin(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
@@ -1148,7 +1148,7 @@ pub unsafe extern "C" fn c_sign_message_begin(
 
 pub unsafe extern "C" fn c_sign_message_next(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_data_part: *mut CK_BYTE,
     ul_data_part_len: CK_ULONG,
@@ -1276,7 +1276,7 @@ pub unsafe extern "C" fn c_sign_message_next(
 
 pub unsafe extern "C" fn c_verify_message(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_data: *mut CK_BYTE,
     ul_data_len: CK_ULONG,
@@ -1334,7 +1334,7 @@ pub unsafe extern "C" fn c_verify_message(
 
 pub unsafe extern "C" fn c_verify_message_begin(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
@@ -1376,7 +1376,7 @@ pub unsafe extern "C" fn c_verify_message_begin(
 
 pub unsafe extern "C" fn c_verify_message_next(
     h_session: CK_SESSION_HANDLE,
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
     p_data_part: *mut CK_BYTE,
     ul_data_part_len: CK_ULONG,

@@ -22,6 +22,21 @@ pub(crate) fn unit_result_to_rv(result: Result<(), CkRv>) -> CK_RV {
     }
 }
 
+/// Run a data-plane call against the shared gRPC client (W1-L11-01).
+///
+/// Looks like a plain call, but the expansion carries hidden control flow —
+/// every expansion site (all shim data-plane entries) shares this shape:
+/// - an early `return CKR_CRYPTOKI_NOT_INITIALIZED` when the shim is not
+///   initialized (callers must be `CK_RV`-returning `catch_panics` closures);
+/// - a best-effort `state::ensure_client_connected` reconnect-flag
+///   consumption outside the runtime (fast path: two atomic loads);
+/// - a `runtime().block_on` around the whole call: `$call` is an async
+///   expression awaited on the shim's current-thread runtime;
+/// - a clone-before-RPC of the shared client (the `Mutex` guard is dropped
+///   before the RPC; `$client` binds the owned clone for `$call`).
+///
+/// Evaluates to the awaited `$call` value (`__result`); transport failures
+/// surface through it, never through the flag-consumption step.
 macro_rules! with_client {
     ($client:ident => $call:expr) => {{
         if !crate::state::is_initialized() {
@@ -90,13 +105,8 @@ pub(crate) const MAX_SERIALIZABLE_BYTES: usize = 512 * 1024 * 1024;
 #[derive(Debug)]
 pub(crate) enum InputBuf<'a> {
     Bytes(&'a [u8]),
-    Null {
-        len: u64,
-    },
-    TooLarge {
-        #[allow(dead_code)]
-        len: u64,
-    },
+    Null { len: u64 },
+    TooLarge { len: u64 },
 }
 
 /// Classify a raw C input-pointer pair into a typed `InputBuf`.
@@ -126,11 +136,16 @@ pub(crate) unsafe fn classify_input<'a>(ptr: *const u8, len: CK_ULONG) -> InputB
 
 /// Convert a classified input to the backend-facing type. TooLarge is the
 /// transport-impossible class: documented stable RV (ADR-0010 Limits).
+/// The rejected length is logged (lengths carry no secret content) so the
+/// field is read at conversion, not kept by `allow(dead_code)` (W1-L12-09).
 pub(crate) fn input_buf_to_ck_in_buf(buf: InputBuf<'_>) -> Result<CkInBuf<'_>, CkRv> {
     match buf {
         InputBuf::Bytes(b) => Ok(CkInBuf::Bytes(b)),
         InputBuf::Null { len } => Ok(CkInBuf::Null { len }),
-        InputBuf::TooLarge { .. } => Err(CkRv::ARGUMENTS_BAD),
+        InputBuf::TooLarge { len } => {
+            tracing::debug!(rejected_len = len, "oversize input rejected as ARGUMENTS_BAD");
+            Err(CkRv::ARGUMENTS_BAD)
+        }
     }
 }
 
@@ -157,7 +172,10 @@ pub(crate) unsafe fn try_read_optional_bytes<'a>(
     match unsafe { classify_input(ptr, len) } {
         InputBuf::Bytes(b) => Ok(Some(b)),
         InputBuf::Null { .. } => Ok(None),
-        InputBuf::TooLarge { .. } => Err(CkRv::ARGUMENTS_BAD),
+        InputBuf::TooLarge { len } => {
+            tracing::debug!(rejected_len = len, "oversize input rejected as ARGUMENTS_BAD");
+            Err(CkRv::ARGUMENTS_BAD)
+        }
     }
 }
 
@@ -206,9 +224,7 @@ pub(crate) const MAX_C_STRING_LEN: usize = 256;
 /// `ptr` must be non-null, and the bytes from `ptr` up to and including
 /// the first NUL (or [`MAX_C_STRING_LEN`] bytes when no NUL appears
 /// sooner) must be readable for the returned borrow's lifetime.
-pub(crate) unsafe fn read_bounded_cstr<'a>(
-    ptr: *const std::os::raw::c_char,
-) -> Result<&'a CStr, CkRv> {
+pub(crate) unsafe fn read_bounded_cstr<'a>(ptr: *const std::ffi::c_char) -> Result<&'a CStr, CkRv> {
     let mut len = 0usize;
     while len < MAX_C_STRING_LEN {
         // SAFETY: non-null per the contract; the scan stays within the
@@ -461,6 +477,11 @@ mod exact_scalar_tests {
     }
 }
 
+/// Store a session handle into the caller's out-pointer (W1-L1-04).
+///
+/// # Safety
+///
+/// `p_handle` must be non-null and writable for one handle.
 pub(crate) unsafe fn write_session_handle_output(
     handle: CkSessionHandle,
     p_handle: CK_SESSION_HANDLE_PTR,
@@ -468,6 +489,11 @@ pub(crate) unsafe fn write_session_handle_output(
     unsafe { *p_handle = handle.0 as CK_SESSION_HANDLE };
 }
 
+/// Store an object handle into the caller's out-pointer (W1-L1-04).
+///
+/// # Safety
+///
+/// `p_handle` must be non-null and writable for one handle.
 pub(crate) unsafe fn write_object_handle_output(
     handle: CkObjectHandle,
     p_handle: CK_OBJECT_HANDLE_PTR,
@@ -475,6 +501,11 @@ pub(crate) unsafe fn write_object_handle_output(
     unsafe { *p_handle = handle.0 as CK_OBJECT_HANDLE };
 }
 
+/// Store a generated key pair into the caller's out-pointers (W1-L1-04).
+///
+/// # Safety
+///
+/// Both out-pointers must be non-null and writable for one handle each.
 pub(crate) unsafe fn write_object_handle_pair_output(
     public_handle: CkObjectHandle,
     private_handle: CkObjectHandle,
@@ -496,7 +527,7 @@ pub(crate) unsafe fn write_object_handle_pair_output(
 /// If `p_parameter` is non-null and `ul_parameter_len > 0`, it must point to
 /// a readable buffer of at least `ul_parameter_len` bytes.
 pub(crate) unsafe fn message_parameter_roundtrip_spec(
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
 ) -> pkcs11_proxy_ng_types::CkResult<pkcs11_proxy_ng_types::CkParameterRoundtripSpec> {
     Ok(pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
@@ -509,8 +540,13 @@ pub(crate) unsafe fn message_parameter_roundtrip_spec(
 /// Sign/Verify message parameters are empty-only. Reject a positive length
 /// before touching the caller address, then preserve the two legal zero-length
 /// pointer classes in the shared roundtrip envelope.
+///
+/// # Safety
+///
+/// No caller memory is dereferenced — `p_parameter` is only null-tested
+/// (the shared spec constructor records presence/length without reading).
 pub(crate) unsafe fn empty_message_parameter_roundtrip_spec(
-    p_parameter: *mut ::std::os::raw::c_void,
+    p_parameter: *mut ::std::ffi::c_void,
     ul_parameter_len: CK_ULONG,
 ) -> pkcs11_proxy_ng_types::CkResult<pkcs11_proxy_ng_types::CkParameterRoundtripSpec> {
     if ul_parameter_len > 0 {
@@ -579,8 +615,8 @@ pub(crate) use template_input::*;
 
 #[cfg(test)]
 mod tests {
-    use cryptoki_sys::{CK_RV, CK_ULONG};
-    use pkcs11_proxy_ng_types::space_pad_into;
+    use cryptoki_sys::{CK_RV, CK_TOKEN_INFO, CK_ULONG};
+    use pkcs11_proxy_ng_types::{PKCS11_TOKEN_LABEL_LEN, space_pad_into};
 
     #[test]
     fn short_src_pads_remainder_with_spaces() {
@@ -621,7 +657,7 @@ mod tests {
             let mut owned = content.to_vec();
             owned.push(0);
             let read =
-                unsafe { super::read_bounded_cstr(owned.as_ptr() as *const std::os::raw::c_char) };
+                unsafe { super::read_bounded_cstr(owned.as_ptr() as *const std::ffi::c_char) };
             assert_eq!(read.expect("in-bound name must parse").to_bytes(), content);
         }
     }
@@ -633,9 +669,8 @@ mod tests {
         // itself well-formed; only the bound refuses it.
         let mut owned = vec![b'A'; 300];
         owned.push(0);
-        let err =
-            unsafe { super::read_bounded_cstr(owned.as_ptr() as *const std::os::raw::c_char) }
-                .expect_err("overlong name must be refused");
+        let err = unsafe { super::read_bounded_cstr(owned.as_ptr() as *const std::ffi::c_char) }
+            .expect_err("overlong name must be refused");
         assert_eq!(err, pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD);
     }
 
@@ -666,7 +701,11 @@ mod tests {
 
     #[test]
     fn full_32_byte_token_label_field() {
-        let mut label = [0u8; 32];
+        // W1-L12-08 pin: the named width matches the authoritative
+        // `CK_TOKEN_INFO.label` field, not just the literal 32.
+        let info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+        assert_eq!(info.label.len(), PKCS11_TOKEN_LABEL_LEN);
+        let mut label = [0u8; PKCS11_TOKEN_LABEL_LEN];
         space_pad_into(&mut label, "My Test Token");
         assert_eq!(&label[..13], b"My Test Token");
         assert!(label[13..].iter().all(|&b| b == b' '));
@@ -674,7 +713,7 @@ mod tests {
 
     #[test]
     fn overlong_label_truncated_at_32_bytes() {
-        let mut label = [0u8; 32];
+        let mut label = [0u8; PKCS11_TOKEN_LABEL_LEN];
         let long = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBB";
         space_pad_into(&mut label, long);
         assert!(label.iter().all(|&b| b == b'A'));

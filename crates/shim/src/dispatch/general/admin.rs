@@ -20,7 +20,9 @@ pub unsafe extern "C" fn c_init_token(
         let label = if p_label.is_null() {
             String::new()
         } else {
-            let raw = match unsafe { try_read_optional_bytes(p_label, 32) } {
+            let raw = match unsafe {
+                try_read_optional_bytes(p_label, PKCS11_TOKEN_LABEL_LEN as CK_ULONG)
+            } {
                 Ok(Some(raw)) => raw,
                 // Unreachable for a non-null pointer with a constant
                 // in-bounds length, except a hostile near-TOP address.

@@ -1074,7 +1074,7 @@ fn find_interface_in_catalog(
         }
         if let Some(requested_name) = name {
             let iface_name = unsafe {
-                std::ffi::CStr::from_ptr(iface.pInterfaceName as *const std::os::raw::c_char)
+                std::ffi::CStr::from_ptr(iface.pInterfaceName as *const std::ffi::c_char)
             };
             if iface_name != requested_name {
                 return None;

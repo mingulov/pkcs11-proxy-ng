@@ -173,7 +173,7 @@ mod tests {
             String::from_utf8_lossy(field).trim_end_matches([' ', '\0']).to_string()
         }
         // 32-byte blank-padded label field with a significant leading space.
-        let mut raw = [b' '; 32];
+        let mut raw = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
         raw[1..6].copy_from_slice(b"Audit");
         let label = backend_decode(&raw);
         assert_eq!(label, " Audit");
@@ -182,7 +182,7 @@ mod tests {
         assert!(!TokenSelector::parse("label:Audit").unwrap().matches(&label, "x"));
         // Non-UTF8 bytes stay lossy on both sides: the backend decodes to
         // U+FFFD, and the selector compares that same lossy form.
-        let mut raw_bad = [b' '; 32];
+        let mut raw_bad = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
         raw_bad[0..3].copy_from_slice(b"Tok");
         raw_bad[3] = 0xff;
         raw_bad[4..6].copy_from_slice(b"en");

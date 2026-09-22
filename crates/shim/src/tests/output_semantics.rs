@@ -1553,7 +1553,7 @@ fn pointer_safe_message_every_entrypoint_requires_capability_before_pointer_stat
     }
 
     let poison_mechanism: CK_MECHANISM_PTR = std::ptr::dangling_mut();
-    let poison_parameter: *mut ::std::os::raw::c_void = std::ptr::dangling_mut();
+    let poison_parameter: *mut ::std::ffi::c_void = std::ptr::dangling_mut();
     let poison_bytes: CK_BYTE_PTR = std::ptr::dangling_mut();
     let poison_len: *mut CK_ULONG = std::ptr::dangling_mut();
 

@@ -81,6 +81,13 @@ impl AuthenticatedCall {
     }
 
     /// Validate all channels before writing any caller bytes or lengths.
+    ///
+    /// # Safety
+    ///
+    /// `buffer`/`length` must be the writable pointers captured in
+    /// `spec` (null exactly when the spec says so); the call's
+    /// captured `iv_target` and message-writeback snapshot must still
+    /// designate live caller memory.
     pub(crate) unsafe fn write_output(
         &self,
         spec: &CkOutputBufferSpec,
@@ -145,6 +152,14 @@ impl AuthenticatedCall {
         unsafe { write_exact_output(spec, main, buffer, length) }
     }
 
+    /// Write parameter-only output through [`write_output`](Self::write_output)
+    /// with a local zero-length size-query spec (W1-L1-04).
+    ///
+    /// # Safety
+    ///
+    /// Same captured-memory contract as `write_output`: the call's
+    /// `iv_target` and message-writeback snapshot must still designate
+    /// live caller memory.
     pub(crate) unsafe fn write_parameter(&self, output: &AuthenticatedOutput) -> CK_RV {
         let mut length = 0;
         unsafe {

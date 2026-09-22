@@ -2255,6 +2255,44 @@ fn sp800_108_kdf_null_output_handle_stays_raw() {
 }
 
 #[test]
+fn sp800_108_kdf_malformed_derived_key_template_stays_raw() {
+    // W1-L12-10: a derived-key template whose CONTENT the checked reader
+    // rejects (NULL value with nonzero length) must surface as Raw via
+    // the completed pre-validator — never a structured KDF with a silently
+    // emptied template (`unwrap_or_default`).
+    const CKM_SP800_108_COUNTER_KDF: CK_MECHANISM_TYPE = 0x0000_03AC;
+    const CKM_SHA256_HMAC: CK_MECHANISM_TYPE = 0x0000_0251;
+
+    let mut template =
+        [CK_ATTRIBUTE { type_: CKA_LABEL, pValue: std::ptr::null_mut(), ulValueLen: 4 }];
+    let mut output_handle = 0 as CK_OBJECT_HANDLE;
+    let mut additional_keys = [CK_DERIVED_KEY {
+        pTemplate: template.as_mut_ptr(),
+        ulAttributeCount: template.len() as CK_ULONG,
+        phKey: &mut output_handle,
+    }];
+    let mut params = CK_SP800_108_KDF_PARAMS {
+        prfType: CKM_SHA256_HMAC as _,
+        ulNumberOfDataParams: 0,
+        pDataParams: std::ptr::null_mut(),
+        ulAdditionalDerivedKeys: additional_keys.len() as CK_ULONG,
+        pAdditionalDerivedKeys: additional_keys.as_mut_ptr(),
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_SP800_108_COUNTER_KDF,
+        pParameter: &mut params as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_SP800_108_KDF_PARAMS>() as CK_ULONG,
+    };
+
+    match unsafe { read_ck_mechanism(&mechanism) } {
+        CkMechanismParams::Raw(raw) => {
+            assert_eq!(raw.data.len(), std::mem::size_of::<CK_SP800_108_KDF_PARAMS>());
+        }
+        other => panic!("malformed derived-key template must stay Raw, got: {other:?}"),
+    }
+}
+
+#[test]
 fn sp800_108_feedback_null_iv_with_nonzero_len_stays_raw() {
     const CKM_SP800_108_FEEDBACK_KDF: CK_MECHANISM_TYPE = 0x0000_03AD;
     const CKM_SHA256_HMAC: CK_MECHANISM_TYPE = 0x0000_0251;

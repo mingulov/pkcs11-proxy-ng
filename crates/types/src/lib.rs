@@ -70,6 +70,12 @@ pub fn space_pad_into(dest: &mut [u8], src: &str) {
     }
 }
 
+/// PKCS#11 token-label field width in bytes (`CK_TOKEN_INFO.label` is
+/// `CK_UTF8CHAR label[32]`, blank-padded; likewise the `C_InitToken`
+/// `pLabel` input). Single home for the width (W1-L12-08) — label
+/// buffers, label reads, and label pad widths all use this.
+pub const PKCS11_TOKEN_LABEL_LEN: usize = 32;
+
 #[cfg(test)]
 mod space_pad_tests {
     use super::space_pad_into;
@@ -92,7 +98,7 @@ mod space_pad_tests {
         let mut buf = [0u8; 4];
         space_pad_into(&mut buf, "héllo");
         assert_eq!(buf, [0x68, 0xC3, 0xA9, 0x6C]);
-        let mut label = [0u8; 32];
+        let mut label = [0u8; super::PKCS11_TOKEN_LABEL_LEN];
         space_pad_into(&mut label, "My Test Token");
         assert_eq!(&label[..13], b"My Test Token");
         assert!(label[13..].iter().all(|&b| b == b' '));

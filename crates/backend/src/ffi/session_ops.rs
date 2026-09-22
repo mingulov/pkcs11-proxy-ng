@@ -87,7 +87,7 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         // W1-L11-12: the shared types helper is the single padding impl.
-        let mut label_buf = [0u8; 32];
+        let mut label_buf = [0u8; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
         pkcs11_proxy_ng_types::space_pad_into(&mut label_buf, label);
         let (pin_ptr, pin_len) = match so_pin {
             Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),

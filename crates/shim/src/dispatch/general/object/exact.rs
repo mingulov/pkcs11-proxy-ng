@@ -17,6 +17,12 @@ pub(super) struct AttributeCall {
 /// caller input when preset (F7/D5): backends such as SoftHSM select the
 /// sub-query by it, so it is forwarded verbatim like a direct call instead
 /// of being forced to 0.
+///
+/// # Safety
+///
+/// `pointer` must be non-null and point to a readable `CK_ATTRIBUTE`
+/// (field reads are unaligned-safe); nested child arrays, when present,
+/// must satisfy the same contract per element.
 pub(super) unsafe fn capture(
     pointer: CK_ATTRIBUTE_PTR,
     nested: bool,
@@ -271,6 +277,12 @@ pub(super) fn prepare(
 
 /// The prepared plan owns validated bytes and captured destinations. No caller
 /// field is re-read; validation failure therefore cannot produce a partial store.
+///
+/// # Safety
+///
+/// `writes` must be the validated plan for still-live caller structs:
+/// every captured destination writable for its recorded extent, with no
+/// aliasing writes since capture.
 pub(super) unsafe fn commit(writes: Vec<AttributeWrite>) {
     for write in writes {
         if let Some(value) = write.value {

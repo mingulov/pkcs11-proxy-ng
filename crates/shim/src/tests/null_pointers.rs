@@ -198,7 +198,7 @@ fn c_init_token_valid_label_reaches_client_state() {
     // W1-L11-10 pin: the fixed-32 label read is unaffected by the
     // fallible-reader migration — parsing passes through.
     let _guard = shim_state_test_guard();
-    let mut label = [b' '; 32];
+    let mut label = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
     label[..8].copy_from_slice(b"test tok");
     let rv = unsafe {
         dispatch::general::c_init_token(0, std::ptr::null_mut(), 0, label.as_ptr() as *mut _)

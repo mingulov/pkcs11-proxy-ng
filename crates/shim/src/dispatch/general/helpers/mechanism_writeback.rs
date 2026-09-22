@@ -4,6 +4,15 @@
 
 use super::*;
 
+/// Copy daemon-returned mechanism outputs (generated IVs, derived-key
+/// handles) back into the caller's parameter structs (W1-L1-04).
+///
+/// # Safety
+///
+/// A non-null `p_mechanism` must point to a valid, caller-owned
+/// `CK_MECHANISM` that outlives the call; its `pParameter`, when the
+/// returned shape writes one, must designate a writable struct of the
+/// matching shape and length. A null pointer is a no-op.
 pub(crate) unsafe fn write_mechanism_output_params(
     p_mechanism: CK_MECHANISM_PTR,
     params: &CkMechanismParams,
@@ -304,6 +313,14 @@ pub(crate) unsafe fn write_mechanism_output_params(
     }
 }
 
+/// Write derived-key handles into the caller's `CK_DERIVED_KEY` array
+/// (W1-L1-04).
+///
+/// # Safety
+///
+/// A null `derived_keys` (or zero `count`) is a no-op; otherwise the
+/// pointer must designate `count` valid caller-owned entries, and each
+/// non-null `phKey` must be writable for one handle.
 unsafe fn write_sp800_108_derived_key_handles(
     derived_keys: *mut CK_DERIVED_KEY,
     count: CK_ULONG,

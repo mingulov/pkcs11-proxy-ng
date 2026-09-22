@@ -1,10 +1,3 @@
-// CK_ULONG-derived C types are u32 on narrow-CK_ULONG targets (i686, armv7,
-// Windows x64). Crate-wide allow so the shim (incl. its test modules, which
-// build C structs from canonical u64 constants and so cast the other way) and
-// the dispatch layer compile on every target with explicit `as`/`.into()`
-// width conversions (ADR-0011).
-#![allow(clippy::unnecessary_cast, clippy::useless_conversion)]
-
 mod dispatch;
 mod function_list;
 mod function_list_3_0;
@@ -149,7 +142,7 @@ pub unsafe extern "C" fn C_GetInterface(
             // unbounded `CStr::from_ptr` read.
             match unsafe {
                 crate::dispatch::general::helpers::read_bounded_cstr(
-                    p_interface_name as *const std::os::raw::c_char,
+                    p_interface_name as *const std::ffi::c_char,
                 )
             } {
                 Ok(name) => Some(name),

@@ -151,10 +151,17 @@ macro_rules! session_object_unit {
 }
 pub(crate) use session_object_unit;
 
-/// Dispatch a call through a 3.x function list pointer.
+/// Dispatch a call through a 3.x function list pointer (W1-L11-02).
 ///
-/// Returns `Err(CkRv::FUNCTION_NOT_SUPPORTED)` if the function list is `None`
-/// (module only supports 2.40) or if the specific function slot is `None`.
+/// Looks like a plain call, but the expansion carries two hidden early
+/// returns: `return Err(CkRv::FUNCTION_NOT_SUPPORTED)` when the function
+/// list is `None` (module only supports 2.40), and the same return when
+/// the specific function slot is `None`. The enclosing function must
+/// therefore return [`CkResult`] — using this macro in a non-`CkResult`
+/// caller fails to compile (the `return Err(..)` arms do not coerce).
+///
+/// On success the expansion evaluates to `FfiBackend::ck_result(rv)` for
+/// the native return value.
 ///
 /// # Safety
 /// The caller must ensure arguments satisfy the PKCS#11 C ABI contract for the

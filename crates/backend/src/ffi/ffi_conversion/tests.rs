@@ -1218,7 +1218,7 @@ mod mechanism_to_ffi_tests {
 #[cfg(test)]
 mod utf8_trim_tests {
     use super::{session_state_from_ck, utf8_trim};
-    use pkcs11_proxy_ng_types::{CkSessionState, space_pad_into};
+    use pkcs11_proxy_ng_types::{CkSessionState, PKCS11_TOKEN_LABEL_LEN, space_pad_into};
 
     // W1-L11-12: local pad helper over the shared implementation.
     fn space_pad<const N: usize>(value: &str) -> [u8; N] {
@@ -1295,7 +1295,7 @@ mod utf8_trim_tests {
     #[test]
     fn valid_utf8_multibyte() {
         let src = "Tëst";
-        let mut buf = [b' '; 32];
+        let mut buf = [b' '; PKCS11_TOKEN_LABEL_LEN];
         buf[..src.len()].copy_from_slice(src.as_bytes());
         assert_eq!(utf8_trim(&buf), "Tëst");
     }
@@ -1358,7 +1358,7 @@ mod utf8_trim_tests {
         assert_eq!(&space_pad::<4>("ABCDEFGH"), b"ABCD");
         // Byte-wise copy: a multibyte char may split at the edge.
         assert_eq!(&space_pad::<4>("héllo"), &[0x68, 0xC3, 0xA9, 0x6C]);
-        let label = space_pad::<32>("My Test Token");
+        let label = space_pad::<PKCS11_TOKEN_LABEL_LEN>("My Test Token");
         assert_eq!(&label[..13], b"My Test Token");
         assert!(label[13..].iter().all(|&b| b == b' '));
     }

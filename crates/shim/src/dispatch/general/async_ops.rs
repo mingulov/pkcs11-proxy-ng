@@ -27,7 +27,7 @@ pub unsafe extern "C" fn c_async_complete(
         // scan (W1-C6-06): no NUL within 256 content bytes is a loud
         // ARGUMENTS_BAD, never an unbounded `CStr::from_ptr` read.
         let function_name =
-            match unsafe { read_bounded_cstr(p_function_name as *const std::os::raw::c_char) } {
+            match unsafe { read_bounded_cstr(p_function_name as *const std::ffi::c_char) } {
                 Ok(name) => name,
                 Err(e) => return rv_err(e),
             };

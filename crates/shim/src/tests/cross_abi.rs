@@ -1,3 +1,7 @@
+// CK_ULONG is u32 on narrow targets (i686, armv7, Windows x64), so the
+// `as u64` widens below are no-ops here but required there; scoped
+// allow keeps the width conversions explicit (ADR-0011, W1-L12-07).
+#![allow(clippy::unnecessary_cast)]
 //! In-process cross-ABI topology suite (ADR-0011).
 //!
 //! Each test drives the full shim -> gRPC -> in-process daemon stack
