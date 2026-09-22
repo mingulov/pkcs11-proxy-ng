@@ -88,7 +88,7 @@ pub(crate) async fn decrypt(
         .decrypt(session, &ciphertext)
         .await
         .map_err(crate::handlers::cli_err("C_Decrypt"))?;
-    println!("{}", format_decrypt_output(&plaintext, redact));
+    println!("{}", plaintext.expose(|bytes| format_decrypt_output(bytes, redact)));
     close_session(client, session, true).await;
     Ok(())
 }

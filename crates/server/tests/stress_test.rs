@@ -164,7 +164,7 @@ async fn concurrent_clients_encrypt_decrypt_workload() {
 
                 client.decrypt_init(session, &mech, key).await.unwrap();
                 let result = client.decrypt(session, &ciphertext).await.unwrap();
-                assert_eq!(result, plaintext, "round-trip must match");
+                result.expose(|bytes| assert_eq!(bytes, &plaintext[..], "round-trip must match"));
             }
 
             client.close_session(session).await.unwrap();

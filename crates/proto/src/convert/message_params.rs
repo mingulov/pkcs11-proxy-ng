@@ -582,6 +582,46 @@ impl TryFrom<&v1_proto::MessageParameter> for MessageParameter {
     }
 }
 
+impl MessageParameter {
+    /// T13 owned entry point: identical validation to the borrowed
+    /// `TryFrom`, but the secret-classified `Raw` arm adopts the buffer
+    /// with `mem::take` instead of copying it. Structured arms convert
+    /// from the owned message with the same reviewed copies (their
+    /// destinations are FFI-shape structs, not wiping owners). The caller
+    /// must own the message.
+    pub fn try_from_owned(
+        mut p: v1_proto::MessageParameter,
+    ) -> Result<Self, pkcs11_proxy_ng_types::CkRv> {
+        // Validate structured arms through a shared borrow first (same
+        // checks, same errors as the borrowed `TryFrom` — `&mut` is not
+        // `Copy`, so the `@` bindings the borrowed form uses cannot move
+        // twice), then adopt through `&mut`: payloads cannot move out of
+        // the `ZeroizeOnDrop` oneof enum, so the secret arm adopts its
+        // buffer with `mem::take`.
+        let mut taken = p.params.take();
+        if let Some(params) = taken.as_ref()
+            && !matches!(params, v1_proto::message_parameter::Params::Raw(_))
+        {
+            validate_structured_wire_params(params)?;
+        }
+        match taken.as_mut() {
+            Some(v1_proto::message_parameter::Params::Raw(data)) => {
+                Ok(MessageParameter::Raw(SecretBytes::new(std::mem::take(data))))
+            }
+            Some(v1_proto::message_parameter::Params::GcmMessageParams(p)) => {
+                Ok(MessageParameter::GcmMessage((&*p).into()))
+            }
+            Some(v1_proto::message_parameter::Params::CcmMessageParams(p)) => {
+                Ok(MessageParameter::CcmMessage((&*p).into()))
+            }
+            Some(v1_proto::message_parameter::Params::SalsaChachaMessageParams(p)) => {
+                Ok(MessageParameter::SalaChacha((&*p).into()))
+            }
+            None => Err(super::ABSENT_MESSAGE_ONEOF_RV),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

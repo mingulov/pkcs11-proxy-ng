@@ -110,7 +110,7 @@ pub(crate) async fn wrap_key(
         )
         .await
         .map_err(crate::handlers::cli_err("C_WrapKey"))?;
-    println!("{}", hex::encode(&wrapped));
+    println!("{}", wrapped.expose(|bytes| hex::encode(bytes)));
     close_session(client, session, true).await;
     Ok(())
 }

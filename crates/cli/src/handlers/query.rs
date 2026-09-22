@@ -164,11 +164,11 @@ pub(crate) async fn random(
     match format {
         RandomFormat::Base64 => {
             use std::io::Write;
-            let encoded = BASE64_STANDARD.encode(&data);
+            let encoded = data.expose(|bytes| BASE64_STANDARD.encode(bytes));
             std::io::stdout().write_all(encoded.as_bytes()).ok();
             println!();
         }
-        RandomFormat::Hex => println!("{}", hex::encode(&data)),
+        RandomFormat::Hex => println!("{}", data.expose(|bytes| hex::encode(bytes))),
     }
     close_session(client, session, false).await;
     Ok(())

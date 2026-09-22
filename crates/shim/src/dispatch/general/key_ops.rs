@@ -338,9 +338,11 @@ pub unsafe extern "C" fn c_generate_random(
                 if data.len() != random_len as usize {
                     return rv_err(CkRv::GENERAL_ERROR);
                 }
-                unsafe {
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), p_random_data, data.len());
-                }
+                // T13: SecretBytes is closure-scoped; the length was
+                // already validated against `random_len` above.
+                data.expose(|bytes| unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), p_random_data, bytes.len());
+                });
                 rv_ok()
             }
             Err(e) => rv_err(e),

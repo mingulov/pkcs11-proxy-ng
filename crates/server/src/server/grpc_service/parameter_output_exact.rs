@@ -6,7 +6,9 @@ use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, Mess
 use pkcs11_proxy_ng_proto::convert::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
-use pkcs11_proxy_ng_proto::convert::output::parameter_output_function_from_i32;
+use pkcs11_proxy_ng_proto::convert::output::{
+    parameter_output_function_from_i32, parameter_roundtrip_spec_from_owned,
+};
 use pkcs11_proxy_ng_proto::version::{
     exact_effects_version_rejected, exact_output_effects_version_supported,
 };
@@ -136,17 +138,12 @@ pub(super) async fn parameter_output_exact(
         });
 
     // Build the parameter roundtrip spec
-    // T12: `ParameterRoundtripSpec` is `ZeroizeOnDrop`; take the owned field
-    // out with `mem::take` instead of moving it.
-    let param_out_spec = req
-        .parameter_out_spec
-        .take()
-        .map(|mut s| CkParameterRoundtripSpec {
-            buffer_present: s.buffer_present,
-            buffer_len: s.buffer_len,
-            value: std::mem::take(&mut s.value).map(SecretBytes::new),
-        })
-        .unwrap_or(CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None });
+    // T13: adopt through the shared owned entry point (identical field move;
+    // `ParameterRoundtripSpec` is `ZeroizeOnDrop`, taken out with `mem::take`).
+    let param_out_spec =
+        req.parameter_out_spec.take().map(parameter_roundtrip_spec_from_owned).unwrap_or(
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None },
+        );
 
     let input_data = SecretBytes::new(std::mem::take(&mut req.input_data));
     let input_data_null_len = req.input_data_null_len;

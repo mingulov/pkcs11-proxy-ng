@@ -259,13 +259,15 @@ async fn authenticated_typed_sdk_roundtrips_ordinary_exact_and_unwrap_over_mtls(
         assert_eq!(main.ck_rv, expected);
         assert!(matches!(output, AuthenticatedOutput::Unchanged));
     }
+    // T13: `expose` cannot lend across `.await`; materialize the input copy.
+    let wrapped_bytes = wrapped.expose(|bytes| bytes.to_vec());
     let (unwrapped, output) = client
         .unwrap_key_authenticated_typed(
             session,
             &mechanism,
             None,
             key,
-            CkInBuf::Bytes(&wrapped),
+            CkInBuf::Bytes(&wrapped_bytes),
             Some(&[]),
             CkInBuf::Bytes(&[]),
         )
