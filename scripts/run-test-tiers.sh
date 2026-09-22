@@ -12,8 +12,8 @@
 #                defect tests matched by name (*_not_wild_read,
 #                *_wider_than_native_*, cross_abi)
 #   live         env-gated real-binary harnesses (daemons + SoftHSM2 /
-#                wine); each script skips cleanly when its tooling is
-#                absent
+#                wine, retained-oracle topologies, SIGTERM drain); each
+#                script skips cleanly when its tooling is absent
 #   all          unit + integration + regression (the plain-CI surface)
 #
 # Plain `cargo test --workspace` runs everything except `live`.
@@ -55,6 +55,10 @@ run_live() {
     scripts/test-live-harness-locators.sh
     scripts/run-cross-width-live-test.sh
     scripts/run-cross-width-nss32-live-test.sh
+    # W1-L17-22: the retained-oracle topology proof and the SIGTERM
+    # mid-call drain proof ran only by hand; both are live legs now.
+    scripts/run-retained-oracle-live-test.sh
+    scripts/test-sigterm-mid-call.sh
     scripts/run-llp64-wine-smoke.sh
     scripts/run-windows-daemon-wine-smoke.sh
 }

@@ -6,6 +6,7 @@
 #
 # Checks performed:
 #   cargo fmt --check   — formatting gate
+#   shellcheck          — shell hygiene gate (all scripts/**.sh, pinned 0.11.0)
 #   cargo audit         — RustSec advisory gate (workspace + standalone locks)
 #   cargo deny check    — license/ban/source policy gate (workspace + standalone)
 #   cargo build         — compilation gate (all workspace crates)
@@ -32,6 +33,12 @@ on:
     branches: ["main", "dev"]
   pull_request:
   workflow_dispatch:
+
+# W1-L17-20: superseded PR runs cancel instead of queueing full matrices
+# behind them; main/dev pushes are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -143,6 +150,45 @@ jobs:
 
       - name: packaging mirrors + syntax
         run: scripts/packaging-smoke.sh
+
+  # ── Tier 0b4: shell hygiene (shellcheck + bash -n) ──────────────────────────
+  # W1-L17-12: mise.toml pins shellcheck 0.11.0 and G-8 requires a clean
+  # shellcheck run; this job enforces it over every scripts/**/*.sh so
+  # the release-critical scripts (verify-release-subject, release-dry-run)
+  # cannot regress unchecked. Checkout + curl only (no Rust toolchain).
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: fmt
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install shellcheck (pinned)
+        run: |
+          set -euo pipefail
+          # Single version everywhere: must match mise.toml.
+          SC_VERSION="0.11.0"
+          # TOFU-pinned 2026-09-22 from the v0.11.0 release assets (same
+          # precedent as the protoc/Kryoptic pins in Dockerfile.test).
+          SC_SHA256="8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${SC_VERSION}/shellcheck-v${SC_VERSION}.linux.x86_64.tar.xz" -o /tmp/shellcheck.tar.xz
+          echo "${SC_SHA256}  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJ -C /tmp -f /tmp/shellcheck.tar.xz
+          sudo install -m755 "/tmp/shellcheck-v${SC_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: shellcheck all scripts
+        run: |
+          set -euo pipefail
+          mapfile -t scripts < <(find scripts -name '*.sh' | sort)
+          echo "shell scripts: ${#scripts[@]}"
+          for script in "${scripts[@]}"; do
+            bash -n "$script"
+          done
+          # From scripts/ so the `# shellcheck source=lib/...`
+          # annotations resolve under -x (follow-sources).
+          ( cd scripts && shellcheck -x $(find . -name '*.sh' | sort) )
 
   # ── Tier 0c: build, test, clippy ──────────────────────────────────────────
   build-and-test:

@@ -160,6 +160,7 @@ if [[ "$RUN_MODE" == "docker" ]]; then
             "$IMAGE" \
             cargo "$@"
     }
+    # shellcheck disable=SC2086
     musl_cmd() {
         docker run --rm \
             -v "$ROOT_DIR:/workspace:ro" \
@@ -172,6 +173,7 @@ if [[ "$RUN_MODE" == "docker" ]]; then
     }
     # Same as musl_cargo but with the musl-dynamic RUSTFLAGS (expanded
     # at call time; DYNAMIC_RUSTFLAGS is set in step 2 below).
+    # shellcheck disable=SC2086
     musl_cargo_dynamic() {
         docker run --rm \
             -v "$ROOT_DIR:/workspace:ro" \
