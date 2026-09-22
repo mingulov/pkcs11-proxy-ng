@@ -84,6 +84,11 @@ where
 
         // Make the ID available to handler-side logic too, even though
         // most handlers will read it only via the tracing context.
+        // Boundary (T27-m2): insert-only-when-missing. The bounded copy
+        // above feeds the span/logs `request_id`, while a caller-supplied
+        // header — even an overlong one — is preserved as-sent for
+        // handlers reading the raw header. Do NOT rewrite the caller's
+        // header in place.
         if !req.headers().contains_key(REQUEST_ID_HEADER)
             && let Ok(val) = HeaderValue::from_str(&request_id)
         {
@@ -137,5 +142,60 @@ mod tests {
         let bounded = bound_request_id(&long);
         assert!(bounded.ends_with(TRUNCATED_MARKER), "{bounded}");
         assert!(bounded.len() <= MAX_REQUEST_ID_LEN, "{bounded}");
+    }
+
+    // T27-m2 boundary pin: an overlong caller-supplied `x-request-id`
+    // yields a bounded span/logs copy (truncated with the marker) while
+    // the raw header bytes reach the handler unchanged. Characterization
+    // of current behavior per ruling — no behavior change.
+    #[tokio::test]
+    async fn overlong_caller_header_preserved_for_handlers() {
+        use std::convert::Infallible;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct CaptureService {
+            seen: Arc<Mutex<Option<http::HeaderMap>>>,
+        }
+
+        impl Service<Request<String>> for CaptureService {
+            type Response = Response<String>;
+            type Error = Infallible;
+            type Future =
+                Pin<Box<dyn Future<Output = Result<Response<String>, Infallible>> + Send>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, req: Request<String>) -> Self::Future {
+                *self.seen.lock().unwrap() = Some(req.headers().clone());
+                Box::pin(async { Ok(Response::new(String::new())) })
+            }
+        }
+
+        let overlong = "y".repeat(MAX_REQUEST_ID_LEN + 50);
+        let req = Request::builder()
+            .uri("/svc/Method")
+            .header(REQUEST_ID_HEADER, overlong.clone())
+            .body(String::new())
+            .unwrap();
+
+        let seen = Arc::new(Mutex::new(None));
+        let mut svc = TraceIdService { inner: CaptureService { seen: seen.clone() } };
+        std::future::poll_fn(|cx| svc.poll_ready(cx)).await.unwrap();
+        svc.call(req).await.unwrap();
+
+        // Bounded copy (what the span/logs `request_id` carries).
+        let bounded = bound_request_id(&overlong);
+        assert!(bounded.ends_with(TRUNCATED_MARKER), "{bounded}");
+        assert!(bounded.len() <= MAX_REQUEST_ID_LEN, "{bounded}");
+        // Raw header preserved as-sent for handlers.
+        let headers = seen.lock().unwrap().take().unwrap();
+        assert_eq!(
+            headers.get(REQUEST_ID_HEADER).unwrap(),
+            &overlong,
+            "caller-supplied header must reach handlers unchanged"
+        );
     }
 }

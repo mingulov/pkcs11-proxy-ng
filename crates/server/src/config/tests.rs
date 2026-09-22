@@ -1862,6 +1862,33 @@ fn tokens_star_alias_documented_in_schema_docs() {
 }
 
 // ---------------------------------------------------------------------------
+// T27-m1: the TokenAccessSpec type-mismatch error must name both accepted
+// scalar forms ("all" and its "*" alias) so it agrees with the schema docs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tokens_type_mismatch_error_names_all_and_star() {
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.local]
+path = "/tmp/test.sock"
+auth = "peer_cred"
+
+[auth]
+allow_all_authenticated = false
+
+[[auth.policy]]
+identity = "uid=1000"
+tokens = 42
+"#;
+    let err = toml::from_str::<DaemonConfig>(toml).unwrap_err().to_string();
+    assert!(err.contains("\"all\""), "type-mismatch error must name \"all\": {err}");
+    assert!(err.contains("\"*\""), "type-mismatch error must name the \"*\" alias: {err}");
+}
+
+// ---------------------------------------------------------------------------
 // W1-L8-07: runbook §8a must list all 8 daemon env vars var-for-var with
 // --print-env-vars.
 // ---------------------------------------------------------------------------

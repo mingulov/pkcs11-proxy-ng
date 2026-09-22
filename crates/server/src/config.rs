@@ -336,7 +336,9 @@ impl<'de> Deserialize<'de> for TokenAccessSpec {
             type Value = TokenAccessSpec;
 
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("`\"all\"` or a list of token selectors / rich grant tables")
+                f.write_str(
+                    "`\"all\"` (or `\"*\"`) or a list of token selectors / rich grant tables",
+                )
             }
 
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
