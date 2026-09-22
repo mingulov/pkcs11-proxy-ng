@@ -117,6 +117,11 @@ fn exact_result_from_cache(
 /// class — anything outside the per-attribute ladder and OK) outrank every
 /// per-attribute classification: a native call that hits one answers it,
 /// never a per-attribute outcome.
+///
+/// Tie-break (T29 M4): two distinct call-aborting RVs share the top rank,
+/// so the FIRST argument wins. At the call site the first argument is the
+/// cache side, hence cache-abort beats backend-abort. Harmless: both sides
+/// are hard errors, so either choice fails the call loudly.
 fn merge_exact_rv(a: CkRv, b: CkRv) -> CkRv {
     fn rank(rv: CkRv) -> u8 {
         if rv == CkRv::OK {
@@ -1600,6 +1605,22 @@ mod tests {
                 "W1-L3-10: merge({a:?}, {b:?}) must follow the native ladder"
             );
         }
+    }
+
+    #[test]
+    fn merge_exact_rv_call_aborting_tie_goes_to_first_arg() {
+        // T29 M4: two distinct call-aborting RVs share the top rank, so
+        // the first argument (the cache side at the call site) wins, in
+        // both orders. Characterization: both are hard errors, so either
+        // choice fails the call loudly.
+        assert_eq!(
+            super::merge_exact_rv(CkRv::DEVICE_ERROR, CkRv::SESSION_HANDLE_INVALID),
+            CkRv::DEVICE_ERROR,
+        );
+        assert_eq!(
+            super::merge_exact_rv(CkRv::SESSION_HANDLE_INVALID, CkRv::DEVICE_ERROR),
+            CkRv::SESSION_HANDLE_INVALID,
+        );
     }
 
     fn exact_query(

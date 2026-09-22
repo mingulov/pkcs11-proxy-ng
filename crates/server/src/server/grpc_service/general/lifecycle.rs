@@ -37,14 +37,17 @@ pub(super) async fn initialize(
     // legacy v1 client. The throttle stays first so version-garbage floods
     // cannot bypass flood protection.
     let body = request.get_ref();
-    if negotiate_effects_version(
+    // T29 M2: the agreed version is deliberately discarded (overlap check
+    // only) — correct while v1 is the only version; the bump procedure in
+    // `pkcs11_proxy_ng_proto::version` names this site for plumbing on the
+    // first real bump.
+    let _negotiated = negotiate_effects_version(
         EXACT_OUTPUT_EFFECTS_VERSION_MIN,
         EXACT_OUTPUT_EFFECTS_VERSION_MAX,
         body.client_effects_version_min,
         body.client_effects_version_max,
-    )
-    .is_none()
-    {
+    );
+    if _negotiated.is_none() {
         warn!(
             client_min = ?body.client_effects_version_min,
             client_max = ?body.client_effects_version_max,

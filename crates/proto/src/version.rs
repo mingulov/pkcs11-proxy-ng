@@ -9,6 +9,13 @@
 //!   effects the older side understands;
 //! - breaking vN+1: raise BOTH `MIN` and `MAX`; mixed setups fail loudly at
 //!   `Initialize` (W1-L5-05) instead of corrupting per-RPC effects.
+//! - on the FIRST real bump (MAX > 1), plumb the agreed value to both peers:
+//!   the client currently discards it (`?`-only at the `negotiate_init_version`
+//!   call site in `crates/client/src/client/lifecycle.rs`) and the daemon
+//!   checks overlap only (`.is_none()`-only in
+//!   `crates/server/src/server/grpc_service/general/lifecycle.rs`). Discarding
+//!   is correct while v1 is the only version; a second version needs the
+//!   agreed value to select wire effects.
 //!
 //! `Initialize` exchanges `[min, max]` ranges; each side runs
 //! [`negotiate_effects_version`]. Absent bounds (`None`) mean a legacy peer
@@ -27,8 +34,11 @@ pub fn exact_output_effects_version_supported(v: u32) -> bool {
 
 /// Highest mutually-supported version, or `None` when the ranges are
 /// disjoint (fail loudly at init; never proceed with mismatched effects).
-/// `None` peer bounds = legacy peer = v1-only. Malformed ranges (inverted,
-/// degenerate-zero, half-absent-nonzero) fail closed to `None`.
+/// Each absent peer bound defaults to v1 independently (legacy peer =
+/// v1-only), so a half-absent range with a real overlap still negotiates
+/// the overlap's ceiling — e.g. `(None, Some(5))` against local `(1, 1)`
+/// yields `Some(1)`. Ranges that are disjoint after defaulting — including
+/// inverted ones like `(None, Some(0))` — fail closed to `None`.
 pub fn negotiate_effects_version(
     local_min: u32,
     local_max: u32,
@@ -109,6 +119,23 @@ mod tests {
         // Malformed peer ranges fail closed.
         assert_eq!(negotiate_effects_version(1, 1, Some(2), None), None);
         assert_eq!(negotiate_effects_version(1, 1, Some(2), Some(1)), None);
+    }
+
+    #[test]
+    fn negotiate_half_absent_bounds_default_to_v1_independently() {
+        // T29 M1: each absent bound defaults to v1 on its own; a real
+        // overlap still negotiates (the old docstring wrongly claimed
+        // every half-absent-nonzero range fails closed).
+        assert_eq!(
+            negotiate_effects_version(1, 1, None, Some(5)),
+            Some(1),
+            "half-absent peer bound with a real overlap negotiates the overlap"
+        );
+        assert_eq!(
+            negotiate_effects_version(1, 1, None, Some(0)),
+            None,
+            "half-absent range disjoint after defaulting ([1,0] inverted) fails closed"
+        );
     }
 
     #[test]

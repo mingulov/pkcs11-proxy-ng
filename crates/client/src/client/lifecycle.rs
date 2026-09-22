@@ -398,7 +398,11 @@ impl Pkcs11Client {
         }
         // W1-L5-05: validate the daemon's range before storing the context —
         // a disjoint range fails loudly here, never per-RPC later.
-        negotiate_init_version(
+        // T29 M2: the agreed version is deliberately discarded — correct
+        // while v1 is the only version; the bump procedure in
+        // `pkcs11_proxy_ng_proto::version` names this site for plumbing on
+        // the first real bump.
+        let _negotiated = negotiate_init_version(
             response.daemon_effects_version_min,
             response.daemon_effects_version_max,
         )?;
