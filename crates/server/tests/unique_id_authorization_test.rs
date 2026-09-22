@@ -31,6 +31,10 @@ use mtls_fixture::MtlsFixture;
 
 /// Literal standard attribute ID for CKA_UNIQUE_ID, from the pinned header
 /// binding — deliberately NOT the project's `CkAttributeType::UNIQUE_ID`.
+// `as u64` is identity on 64-bit targets but widens `CK_ULONG` on 32-bit
+// targets; `u64::from` is not `const`, so the cast keeps this oracle
+// portable in `const` position.
+#[allow(clippy::unnecessary_cast)]
 const ORACLE_UNIQUE_ID: u64 = cryptoki_sys::CKA_UNIQUE_ID as u64;
 
 /// The stale wrong value the project constant carried before T01. Nothing is

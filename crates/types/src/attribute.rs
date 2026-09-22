@@ -300,8 +300,11 @@ mod tests {
     use super::*;
 
     #[test]
+    // `u64::from` is identity on 64-bit targets but widens `CK_ULONG` on
+    // 32-bit targets; the conversion keeps this oracle portable.
+    #[allow(clippy::useless_conversion)]
     fn unique_id_matches_published_header() {
-        assert_eq!(CkAttributeType::UNIQUE_ID.0, cryptoki_sys::CKA_UNIQUE_ID as u64);
+        assert_eq!(CkAttributeType::UNIQUE_ID.0, u64::from(cryptoki_sys::CKA_UNIQUE_ID));
         assert_eq!(CkAttributeType::UNIQUE_ID.0, 0x04);
     }
 

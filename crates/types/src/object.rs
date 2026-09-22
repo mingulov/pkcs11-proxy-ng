@@ -213,6 +213,9 @@ mod tests {
     /// Comparisons go project-const vs binding only — never project vs
     /// project — so a shifted table cannot stay self-consistent.
     #[test]
+    // `u64::from` is identity on 64-bit targets but widens `CK_ULONG` on
+    // 32-bit targets; the conversion keeps this oracle portable.
+    #[allow(clippy::useless_conversion)]
     fn key_type_and_class_tables_match_published_headers() {
         use cryptoki_sys as ck;
         let keys: &[(CkKeyType, ck::CK_KEY_TYPE, &str)] = &[
@@ -284,7 +287,7 @@ mod tests {
             (CkKeyType::SLH_DSA, ck::CKK_SLH_DSA, "SLH_DSA"),
         ];
         for (project, binding, name) in keys {
-            assert_eq!(project.0, *binding as u64, "CkKeyType::{name}");
+            assert_eq!(project.0, u64::from(*binding), "CkKeyType::{name}");
         }
         let classes: &[(CkObjectClass, ck::CK_OBJECT_CLASS, &str)] = &[
             (CkObjectClass::DATA, ck::CKO_DATA, "DATA"),
@@ -301,7 +304,7 @@ mod tests {
             (CkObjectClass::TRUST, ck::CKO_TRUST, "TRUST"),
         ];
         for (project, binding, name) in classes {
-            assert_eq!(project.0, *binding as u64, "CkObjectClass::{name}");
+            assert_eq!(project.0, u64::from(*binding), "CkObjectClass::{name}");
         }
     }
 }
