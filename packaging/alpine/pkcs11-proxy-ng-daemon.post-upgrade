@@ -1,0 +1,27 @@
+#!/bin/sh
+# W1-L14-23: restore the operator-edited daemon TOMLs saved by
+# pre-upgrade over the freshly unpacked packaged defaults. See the
+# upgrade-behavior comment in APKBUILD daemon() for the full story.
+set -e
+
+CFG="/etc/pkcs11-proxy-ng"
+
+restored=""
+for f in proxy.toml mechanism_params.toml; do
+    if [ -f "$CFG/.$f.apk-upgrade-save" ]; then
+        mv "$CFG/.$f.apk-upgrade-save" "$CFG/$f"
+        restored="$restored $f"
+    fi
+done
+
+if [ -n "$restored" ]; then
+    cat <<'EOF'
+
+pkcs11-proxy-ng-daemon upgraded: operator config preserved (see below).
+Packaged default changes do NOT propagate to live files on upgrade —
+diff against /etc/pkcs11-proxy-ng/proxy.toml.default to adopt them.
+EOF
+    echo "preserved:$restored"
+fi
+
+exit 0
