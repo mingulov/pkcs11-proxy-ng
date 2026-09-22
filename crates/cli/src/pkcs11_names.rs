@@ -158,6 +158,9 @@ pub(crate) fn object_class_name(v: u64) -> String {
         CkObjectClass::DOMAIN_PARAMETERS => "domain-parameters",
         CkObjectClass::MECHANISM => "mechanism",
         CkObjectClass::OTP_KEY => "otp-key",
+        CkObjectClass::PROFILE => "profile",
+        CkObjectClass::VALIDATION => "validation",
+        CkObjectClass::TRUST => "trust",
         _ => return format!("0x{v:08X}"),
     };
     name.to_string()
@@ -194,8 +197,14 @@ pub(crate) fn key_type_name(v: u64) -> String {
         CkKeyType::ACTI => "ACTI",
         CkKeyType::CAMELLIA => "CAMELLIA",
         CkKeyType::ARIA => "ARIA",
-        CkKeyType::SHA512_224 => "SHA512_224",
-        CkKeyType::SHA512_256 => "SHA512_256",
+        CkKeyType::MD5_HMAC => "MD5_HMAC",
+        CkKeyType::SHA_1_HMAC => "SHA_1_HMAC",
+        CkKeyType::RIPEMD128_HMAC => "RIPEMD128_HMAC",
+        CkKeyType::RIPEMD160_HMAC => "RIPEMD160_HMAC",
+        CkKeyType::SHA256_HMAC => "SHA256_HMAC",
+        CkKeyType::SHA384_HMAC => "SHA384_HMAC",
+        CkKeyType::SHA512_HMAC => "SHA512_HMAC",
+        CkKeyType::SHA224_HMAC => "SHA224_HMAC",
         CkKeyType::SEED => "SEED",
         CkKeyType::GOSTR3410 => "GOSTR3410",
         CkKeyType::GOSTR3411 => "GOSTR3411",
@@ -203,19 +212,28 @@ pub(crate) fn key_type_name(v: u64) -> String {
         CkKeyType::CHACHA20 => "CHACHA20",
         CkKeyType::POLY1305 => "POLY1305",
         CkKeyType::AES_XTS => "AES_XTS",
-        CkKeyType::SHA3_224 => "SHA3_224",
-        CkKeyType::SHA3_256 => "SHA3_256",
-        CkKeyType::SHA3_384 => "SHA3_384",
-        CkKeyType::SHA3_512 => "SHA3_512",
-        CkKeyType::BLAKE2B_160 => "BLAKE2B_160",
-        CkKeyType::BLAKE2B_256 => "BLAKE2B_256",
-        CkKeyType::BLAKE2B_384 => "BLAKE2B_384",
-        CkKeyType::BLAKE2B_512 => "BLAKE2B_512",
+        CkKeyType::SHA3_224_HMAC => "SHA3_224_HMAC",
+        CkKeyType::SHA3_256_HMAC => "SHA3_256_HMAC",
+        CkKeyType::SHA3_384_HMAC => "SHA3_384_HMAC",
+        CkKeyType::SHA3_512_HMAC => "SHA3_512_HMAC",
+        CkKeyType::BLAKE2B_160_HMAC => "BLAKE2B_160_HMAC",
+        CkKeyType::BLAKE2B_256_HMAC => "BLAKE2B_256_HMAC",
+        CkKeyType::BLAKE2B_384_HMAC => "BLAKE2B_384_HMAC",
+        CkKeyType::BLAKE2B_512_HMAC => "BLAKE2B_512_HMAC",
         CkKeyType::SALSA20 => "SALSA20",
         CkKeyType::X2RATCHET => "X2RATCHET",
         CkKeyType::EC_EDWARDS => "EC_EDWARDS",
         CkKeyType::EC_MONTGOMERY => "EC_MONTGOMERY",
         CkKeyType::HKDF => "HKDF",
+        CkKeyType::SHA512_224_HMAC => "SHA512_224_HMAC",
+        CkKeyType::SHA512_256_HMAC => "SHA512_256_HMAC",
+        CkKeyType::SHA512_T_HMAC => "SHA512_T_HMAC",
+        CkKeyType::HSS => "HSS",
+        CkKeyType::XMSS => "XMSS",
+        CkKeyType::XMSSMT => "XMSSMT",
+        CkKeyType::ML_KEM => "ML_KEM",
+        CkKeyType::ML_DSA => "ML_DSA",
+        CkKeyType::SLH_DSA => "SLH_DSA",
         _ => return format!("0x{v:08X}"),
     };
     name.to_string()
@@ -237,7 +255,28 @@ mod object_class_name_tests {
         assert_eq!(object_class_name(6), "domain-parameters");
         assert_eq!(object_class_name(7), "mechanism");
         assert_eq!(object_class_name(8), "otp-key");
+        // T02: lowercase-hyphenated per this function's established
+        // convention (cf. "secret-key"), not the const idents.
+        assert_eq!(object_class_name(9), "profile");
+        assert_eq!(object_class_name(10), "validation");
+        assert_eq!(object_class_name(11), "trust");
         assert_eq!(object_class_name(0x8000_0001), "0x80000001");
+    }
+}
+
+#[cfg(test)]
+mod key_type_name_tests {
+    use super::*;
+
+    // T02: external numeric vectors pin the corrected key-type table. The
+    // literals are OASIS CKK_* values, not project constants, so a shifted
+    // table cannot stay self-consistent.
+    #[test]
+    fn resolves_corrected_hmac_and_modern_key_types() {
+        assert_eq!(key_type_name(0x27), "MD5_HMAC");
+        assert_eq!(key_type_name(0x40), "EC_EDWARDS");
+        assert_eq!(key_type_name(0x42), "HKDF");
+        assert_eq!(key_type_name(0x43), "SHA512_224_HMAC");
     }
 }
 
