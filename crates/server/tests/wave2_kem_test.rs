@@ -18,10 +18,7 @@ use common_3x::{init_client, mock, mock_daemon};
 /// Open a session and create an object to get a valid key handle for KEM tests.
 async fn setup_session_with_key(client: &mut Pkcs11Client) -> (CkSessionHandle, CkObjectHandle) {
     let slots = client.get_slot_list(false).await.unwrap();
-    let session = client
-        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .await
-        .unwrap();
+    let session = client.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     // Create a minimal object; the mock backend assigns a handle.
     let template = [CkAttribute {
         attr_type: CkAttributeType::CLASS,
@@ -31,7 +28,7 @@ async fn setup_session_with_key(client: &mut Pkcs11Client) -> (CkSessionHandle, 
     (session, key)
 }
 
-const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+const CKF_SERIAL: CkSessionFlags = CkSessionFlags::SERIAL_SESSION;
 
 fn test_mechanism() -> CkMechanism {
     CkMechanism { mechanism_type: CkMechanismType(0x00000001), params: None }

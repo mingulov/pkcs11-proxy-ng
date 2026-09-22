@@ -91,7 +91,7 @@ async fn open(f: &MtlsFixture, second: bool) -> Client {
         .open_session(OpenSessionRequest {
             client_context_id: context.clone(),
             slot_id: slots.slot_ids[0],
-            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
         })
         .await
         .unwrap()

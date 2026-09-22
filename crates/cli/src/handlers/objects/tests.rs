@@ -66,10 +66,8 @@ async fn fixture() -> Fixture {
     let mut client = Pkcs11Client::connect(&endpoint).await.unwrap();
     client.initialize().await.unwrap();
     let slots = client.get_slot_list(false).await.unwrap();
-    let setup_session = client
-        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .await
-        .unwrap();
+    let setup_session =
+        client.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     Fixture {
         backend,
         client,

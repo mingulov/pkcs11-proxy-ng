@@ -2059,7 +2059,7 @@ mod tests {
         use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
 
@@ -2405,7 +2405,7 @@ mod tests {
         use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
 
@@ -2521,7 +2521,7 @@ mod tests {
         // Create a backend object whose UID is OTHER_UID (NOT in the allowed list).
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
@@ -2623,7 +2623,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
@@ -2712,7 +2712,7 @@ mod tests {
         use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         mock.set_attribute(
@@ -2777,7 +2777,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // PRIVATE_KEY — denied class.
@@ -2848,7 +2848,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // SECRET_KEY — allowed class.
@@ -2926,7 +2926,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // Intentionally NO attributes (CLASS, TOKEN, UNIQUE_ID). If the gate fetches

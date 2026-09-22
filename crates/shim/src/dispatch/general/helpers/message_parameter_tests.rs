@@ -1670,7 +1670,7 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             assert_eq!(params.random_info.server_random, server_random);
             assert_eq!(params.mac_secret_handle.0, 0);
             assert_eq!(params.key_handle.0, 0);
-            assert_eq!(params.iv, [0u8; 4]);
+            assert_eq!(params.iv, SecretBytes::copy_from_slice(&[0u8; 4]));
         }
         other => panic!("unexpected WTLS key material params: {other:?}"),
     }
@@ -1688,7 +1688,7 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         },
         mac_secret_handle: CkObjectHandle(101),
         key_handle: CkObjectHandle(202),
-        iv: vec![0xA1, 0xA2, 0xA3, 0xA4],
+        iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
     });
     unsafe {
         super::write_mechanism_output_params(&mut mechanism, &mech_out);

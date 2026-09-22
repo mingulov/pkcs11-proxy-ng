@@ -26,12 +26,9 @@ pub(crate) async fn init_pin(
     so_pin: SecretBytes,
     new_pin: SecretBytes,
 ) -> CliResult {
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     let so = so_pin.into_zeroizing();
     client
         .login(session, CkUserType::So, Some(so.as_slice()))
@@ -54,8 +51,7 @@ pub(crate) async fn seed_random(
     seed: String,
 ) -> CliResult {
     let seed = hex::decode(&seed).map_err(|e| format!("Invalid hex seed: {e}"))?;
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     login_user(client, session, pin).await?;
     client
         .seed_random(session, CkInBuf::Bytes(&seed))
@@ -72,12 +68,9 @@ pub(crate) async fn set_pin(
     pin: SecretBytes,
     new_pin: SecretBytes,
 ) -> CliResult {
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     // The old PIN serves both C_Login and C_SetPIN: one wiping clone for
     // the login, then the original moves into the set-PIN call. Both
     // copies are wiped on drop.

@@ -251,11 +251,8 @@ impl FfiMechanism {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let key_mat_out = unsafe { key_mat_out.snapshot() };
                 let iv_len = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(iv.len());
-                let iv_matches = if key_mat_out.pIV.is_null() {
-                    e.iv.is_empty()
-                } else {
-                    e.iv.as_slice() == &iv[..iv_len]
-                };
+                let iv_matches =
+                    key_mat_iv_equal(&e.iv, key_mat_out.pIV.is_null(), iv.as_slice(), iv_len);
                 e.digest_mechanism == CkMechanismType(wtls.DigestMechanism as u64)
                     && e.mac_size_bits == wtls.ulMacSizeInBits as u64
                     && e.key_size_bits == wtls.ulKeySizeInBits as u64
@@ -494,8 +491,6 @@ impl FfiMechanism {
                 // SAFETY: backing is borrowed alive; the copy carries no provenance.
                 let key_mat_out = unsafe { key_mat_out.snapshot() };
                 let iv_len = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8).min(iv.len());
-                let output_iv =
-                    if key_mat_out.pIV.is_null() { Vec::new() } else { iv[..iv_len].to_vec() };
                 Some(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
                     digest_mechanism: CkMechanismType(wtls.DigestMechanism as u64),
                     mac_size_bits: wtls.ulMacSizeInBits as u64,
@@ -509,7 +504,11 @@ impl FfiMechanism {
                     },
                     mac_secret_handle: CkObjectHandle(key_mat_out.hMacSecret as u64),
                     key_handle: CkObjectHandle(key_mat_out.hKey as u64),
-                    iv: output_iv,
+                    iv: if key_mat_out.pIV.is_null() {
+                        Vec::new().into()
+                    } else {
+                        iv[..iv_len].to_vec().into()
+                    },
                 }))
             }
             FfiParamBacking::Ssl3KeyMat(
@@ -2526,7 +2525,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             let mut iv_buf = if p.iv.is_empty() {
                 Zeroizing::new(vec![0u8; iv_bytes])
             } else {
-                let mut iv = Zeroizing::new(p.iv.clone());
+                let mut iv = p.iv.expose(|b| Zeroizing::new(b.to_vec()));
                 iv.resize(iv_bytes, 0);
                 iv
             };

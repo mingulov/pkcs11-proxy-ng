@@ -328,7 +328,7 @@ mod sanitize_inputs_tests {
             Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
                 client_context_id: ctx_id.0.clone(),
                 slot_id: virtual_slot.0,
-                flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
             }),
         )
         .await

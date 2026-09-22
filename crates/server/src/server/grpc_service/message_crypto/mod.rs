@@ -2878,8 +2878,7 @@ mod lifecycle_transition_tests {
         let manager = Arc::new(ContextManager::new(lease_duration, 0));
         manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
-        let raw_session =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+        let raw_session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let virtual_session = register_session_handle(
             &manager,
             &context_id,
@@ -2912,8 +2911,7 @@ mod lifecycle_transition_tests {
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
-        let raw_session =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+        let raw_session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let virtual_session = register_session_handle(
             &manager,
             &context_id,
@@ -2938,7 +2936,7 @@ mod lifecycle_transition_tests {
         let mock = Arc::new(MockBackend::default_test());
         mock.initialize().unwrap();
         let backend_session =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+            mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
@@ -4228,12 +4226,9 @@ mod lifecycle_transition_tests {
         let context_a = manager.create_context(None).await.unwrap();
         let context_b = manager.create_context(None).await.unwrap();
 
-        let backend_a1 =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let backend_a2 =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let backend_b1 =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+        let backend_a1 = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let backend_a2 = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
+        let backend_b1 = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let session_a1 = register_session_handle(
             &manager,
             &context_a,

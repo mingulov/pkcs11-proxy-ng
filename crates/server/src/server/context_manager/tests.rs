@@ -416,8 +416,7 @@ async fn evict_expired_bounded_under_wedged_backend() {
     let id = mgr.create_context(None).await.unwrap();
     // Give the context a backend session and a login so teardown has both
     // a session to close and a last-holder logout to attempt.
-    let session =
-        mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+    let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
     mock.login(session, CkUserType::User, Some(b"1234")).unwrap();
     mgr.get_context(&id, |ctx| {
         ctx.register_session(
@@ -459,8 +458,7 @@ async fn evict_expired_closes_backend_sessions() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(0), 0);
     mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let id = mgr.create_context(None).await.unwrap();
-    let session =
-        mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+    let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
     mgr.get_context(&id, |ctx| {
         ctx.register_session(
             BackendHandle(session.0),

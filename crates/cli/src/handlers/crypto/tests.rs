@@ -109,10 +109,8 @@ async fn fixture_with_count(object_class: CkObjectClass, label: &str, count: usi
     let mut client = Pkcs11Client::connect(&endpoint).await.unwrap();
     client.initialize().await.unwrap();
     let slots = client.get_slot_list(false).await.unwrap();
-    let setup_session = client
-        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .await
-        .unwrap();
+    let setup_session =
+        client.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     let mut keys = Vec::with_capacity(count);
     for _ in 0..count {
         keys.push(
@@ -157,10 +155,8 @@ async fn fixture_with_mechanisms(
     let mut client = Pkcs11Client::connect(&endpoint).await.unwrap();
     client.initialize().await.unwrap();
     let slots = client.get_slot_list(false).await.unwrap();
-    let setup_session = client
-        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .await
-        .unwrap();
+    let setup_session =
+        client.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     let key = client
         .create_object(
             setup_session,

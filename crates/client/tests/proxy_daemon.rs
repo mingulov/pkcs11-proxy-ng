@@ -276,10 +276,7 @@ async fn get_attribute_value_preserves_scalar_types() {
     let mut client = Pkcs11Client::connect(&daemon.endpoint).await.unwrap();
     client.initialize().await.unwrap();
     let slots = client.get_slot_list(false).await.unwrap();
-    let session = client
-        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .await
-        .unwrap();
+    let session = client.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     let object = client
         .create_object(
             session,

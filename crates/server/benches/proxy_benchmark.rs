@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 mod common;
 use common::start_daemon;
 
-const CKF_SERIAL: CkSessionFlags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+const CKF_SERIAL: CkSessionFlags = CkSessionFlags::SERIAL_SESSION;
 
 fn bench_initialize_finalize(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();

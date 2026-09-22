@@ -13,8 +13,7 @@ pub(crate) async fn digest(
     input: String,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     let data = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
 
     client
@@ -38,8 +37,7 @@ pub(crate) async fn encrypt(
     input: String,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     login_user(client, session, pin).await?;
     let key = find_key_by_label(client, session, &key_label, CkObjectClass::PUBLIC_KEY).await?;
     let data = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
@@ -65,8 +63,7 @@ pub(crate) async fn decrypt(
     input: String,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     login_user(client, session, pin).await?;
     let key = find_key_by_label(client, session, &key_label, CkObjectClass::PRIVATE_KEY).await?;
     let ciphertext = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;

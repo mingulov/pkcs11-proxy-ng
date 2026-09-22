@@ -657,7 +657,7 @@ mod mechanism_to_ffi_tests {
                 },
                 mac_secret_handle: CkObjectHandle(0),
                 key_handle: CkObjectHandle(0),
-                iv: Vec::new(),
+                iv: Vec::new().into(),
             }),
         );
 
@@ -684,7 +684,7 @@ mod mechanism_to_ffi_tests {
                 assert_eq!(params.random_info.server_random, [0xD1, 0xD2]);
                 assert_eq!(params.mac_secret_handle.0, 101);
                 assert_eq!(params.key_handle.0, 202);
-                assert_eq!(params.iv, [0xA1, 0xA2, 0xA3, 0xA4]);
+                assert_eq!(params.iv, SecretBytes::copy_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4]));
             }
             other => panic!("unexpected output params: {other:?}"),
         }
@@ -1633,7 +1633,7 @@ mod output_params_equal_tests {
                     },
                     mac_secret_handle: CkObjectHandle(11),
                     key_handle: CkObjectHandle(12),
-                    iv: vec![0x07; 16],
+                    iv: vec![0x07; 16].into(),
                 }),
                 "WtlsKeyMat",
             ),

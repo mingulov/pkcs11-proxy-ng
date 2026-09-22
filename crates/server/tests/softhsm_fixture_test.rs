@@ -194,7 +194,7 @@ async fn token_reinit_clears_objects() -> Result<(), String> {
         .map_err(|rv| format!("C_InitToken failed: {rv}"))?;
 
     // Set user PIN again (required after reinit).
-    let flags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION | CkSessionFlags::RW_SESSION);
+    let flags = CkSessionFlags::SERIAL_SESSION | CkSessionFlags::RW_SESSION;
     let session2 = client.open_session(slot, flags).await.map_err(|rv| rv.to_string())?;
     client
         .login(session2, CkUserType::So, Some(fixture.so_pin.as_bytes()))
@@ -541,7 +541,7 @@ async fn close_all_sessions_clears_context_handles() -> Result<(), String> {
     // Can reopen a session on slot B — the backend sessions there are fine.
     // Note: Don't use open_user_session because the user may still be logged in
     // at the backend level after CloseAllSessions cleared virtual handles.
-    let flags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION | CkSessionFlags::RW_SESSION);
+    let flags = CkSessionFlags::SERIAL_SESSION | CkSessionFlags::RW_SESSION;
     let session_b2 = client
         .open_session(slots[1], flags)
         .await

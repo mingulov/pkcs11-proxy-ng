@@ -69,7 +69,7 @@ impl MockAbi {
             width == 8 || v <= u32::MAX as u64,
             "mock fixture value {v:#x} does not fit a {width}-byte CK_ULONG"
         );
-        pkcs11_proxy_ng_types::width::encode_native_ulong(v, width)
+        encode_native_ulong(v, width)
     }
 }
 

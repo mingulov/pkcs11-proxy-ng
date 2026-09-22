@@ -180,10 +180,7 @@ async fn authenticated_typed_sdk_roundtrips_ordinary_exact_and_unwrap_over_mtls(
     client.initialize().await.unwrap();
     let slot = client.get_slot_list(true).await.unwrap()[0];
     let session = client
-        .open_session(
-            slot,
-            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-        )
+        .open_session(slot, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
         .await
         .unwrap();
     let key = client.create_object(session, Some(&[])).await.unwrap();

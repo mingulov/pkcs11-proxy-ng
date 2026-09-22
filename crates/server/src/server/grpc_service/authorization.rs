@@ -825,7 +825,7 @@ mod tests {
 
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         mock.initialize().unwrap();
-        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
         let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
         let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
         // Make UNIQUE_ID ATTRIBUTE_SENSITIVE so uid resolution returns None.
@@ -1172,7 +1172,7 @@ mod tests {
         fn mock_with_session_and_object() -> (Arc<MockBackend>, CkSessionHandle, CkObjectHandle) {
             let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
             mock.initialize().unwrap();
-            let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+            let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
             let session = mock.open_session(CkSlotId(0), flags).unwrap();
             let object = mock.create_object(session, Some(&[])).unwrap();
             // CLASS and TOKEN are mandatory in conformant backends; set them so the

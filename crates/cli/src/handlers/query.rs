@@ -74,7 +74,7 @@ pub(crate) async fn get_info(client: &mut Pkcs11Client) -> CliResult {
     println!("Manufacturer:     {}", info.manufacturer_id);
     println!("Library:          {}", info.library_description);
     println!("Library version:  {}.{}", info.library_version.0, info.library_version.1);
-    println!("Flags:            0x{:08X}", info.flags);
+    println!("Flags:            0x{:08X}", info.flags.0);
     Ok(())
 }
 
@@ -83,8 +83,7 @@ pub(crate) async fn session_info(
     slot_id: u64,
     pin: Option<SecretBytes>,
 ) -> CliResult {
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     // By-value PIN (W1-L2-11): consume it into login, keep only the
     // logged-in flag for session teardown.
     let logged_in = pin.is_some();
@@ -104,7 +103,7 @@ pub(crate) async fn session_info(
     println!("  Slot:         {}", info.slot_id.0);
     println!("  State:        {state_name}");
     println!("  Flags:        0x{:08X}", info.flags.0);
-    println!("  Device error: 0x{:08X}", info.device_error);
+    println!("  Device error: 0x{:08X}", info.device_error.0);
     close_session(client, session, logged_in).await;
     Ok(())
 }
@@ -136,8 +135,7 @@ pub(crate) async fn random(
     // format fails fast with the valid list.
     let format =
         parse_random_format(&format).map_err(|e| -> Box<dyn core::error::Error> { e.into() })?;
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     let data = client
         .generate_random(session, len)
         .await

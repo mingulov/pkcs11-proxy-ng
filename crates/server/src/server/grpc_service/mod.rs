@@ -376,7 +376,7 @@ mod dispatch_rate_quota_tests {
             .open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
                 client_context_id: ctx_id.0.clone(),
                 slot_id: virtual_slot.0,
-                flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
             }))
             .await
             .unwrap()
@@ -432,7 +432,7 @@ mod dispatch_rate_quota_tests {
                     svc.open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
                         client_context_id: cid,
                         slot_id: virtual_slot.0,
-                        flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                        flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
                     }))
                     .await
                     .unwrap()
@@ -570,7 +570,7 @@ mod scoped_dispatch_tests {
                 .open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
                     client_context_id: client_context_id.to_owned(),
                     slot_id: slot,
-                    flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                    flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
                 }))
                 .await
                 .map(|r| r.into_inner().ck_rv),

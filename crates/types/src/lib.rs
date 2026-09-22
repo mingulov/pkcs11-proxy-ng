@@ -13,7 +13,9 @@ pub mod session;
 pub mod slot;
 pub mod width;
 
-pub use attribute::{CkAttribute, CkAttributeType, CkAttributeValue};
+pub use attribute::{
+    CkAttribute, CkAttributeType, CkAttributeValue, VALUE_BEARING_SECRET, is_value_bearing_secret,
+};
 pub use error::{CkResult, CkRv};
 pub use info::CkInfo;
 pub use input::CkInBuf;
@@ -54,6 +56,7 @@ pub use session::{
     CkFlags, CkSessionFlags, CkSessionHandle, CkSessionInfo, CkSessionState, CkUserType,
 };
 pub use slot::{CkSlotFlags, CkSlotId, CkSlotInfo, CkTokenFlags, CkTokenInfo};
+pub use width::*;
 
 /// Copy `src` into the fixed-width PKCS#11 field `dest`, space-padding
 /// the remainder (W1-L11-12). Overlong values truncate by bytes — a
@@ -102,5 +105,21 @@ mod space_pad_tests {
         space_pad_into(&mut label, "My Test Token");
         assert_eq!(&label[..13], b"My Test Token");
         assert!(label[13..].iter().all(|&b| b == b' '));
+    }
+
+    // W1-C9-15: width::* and the secret-classification helpers resolve at
+    // the crate root.
+    #[test]
+    fn w1_c9_15_root_reexports() {
+        use super::{
+            ByteOrder, CANONICAL_UNAVAILABLE, CkAttributeType, VALUE_BEARING_SECRET,
+            is_value_bearing_secret, reencode_ulong,
+        };
+        assert!(VALUE_BEARING_SECRET.contains(&CkAttributeType::VALUE));
+        assert!(is_value_bearing_secret(CkAttributeType::PRIVATE_EXPONENT));
+        assert!(!is_value_bearing_secret(CkAttributeType::LABEL));
+        assert_eq!(CANONICAL_UNAVAILABLE, u64::MAX);
+        let back = reencode_ulong(&[1, 0, 0, 0], 4, 8, ByteOrder::Little).unwrap();
+        assert_eq!(back, vec![1, 0, 0, 0, 0, 0, 0, 0]);
     }
 }

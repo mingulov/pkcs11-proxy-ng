@@ -22,12 +22,9 @@ pub(crate) async fn import_certificate(
         raw
     };
 
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     login_user(client, session, pin).await?;
 
     let (_, certificate) = x509_parser::parse_x509_certificate(&der)

@@ -531,9 +531,7 @@ mod tests {
         // TF01b `call_session_output` ordinary proof: no admission pre-Init.
         let (backend, _functions) = backend_with_open_session();
         assert_eq!(
-            backend
-                .ffi_open_session(CkSlotId(11), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-                .unwrap_err(),
+            backend.ffi_open_session(CkSlotId(11), CkSessionFlags::SERIAL_SESSION).unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
     }
@@ -647,9 +645,7 @@ mod tests {
         let (backend, _functions) = backend_with_open_session();
         backend.lifecycle_domain.open_for_tests();
         assert_eq!(
-            backend
-                .ffi_open_session(CkSlotId(11), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-                .unwrap(),
+            backend.ffi_open_session(CkSlotId(11), CkSessionFlags::SERIAL_SESSION).unwrap(),
             CkSessionHandle(41)
         );
     }

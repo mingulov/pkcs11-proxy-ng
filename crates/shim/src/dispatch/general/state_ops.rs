@@ -26,10 +26,9 @@ pub unsafe extern "C" fn c_wait_for_slot_event(
         // slot. Error paths never touch the output-only caller buffer.
         match with_client!(client => client.wait_for_slot_event(CkFlags(flags as u64))) {
             Ok(slot) => {
-                let Some(narrow) = pkcs11_proxy_ng_types::width::checked_narrow_to_width(
-                    slot.0,
-                    std::mem::size_of::<CK_SLOT_ID>(),
-                ) else {
+                let Some(narrow) =
+                    checked_narrow_to_width(slot.0, std::mem::size_of::<CK_SLOT_ID>())
+                else {
                     return rv_err(CkRv::FUNCTION_FAILED);
                 };
                 unsafe {
@@ -38,12 +37,7 @@ pub unsafe extern "C" fn c_wait_for_slot_event(
                 rv_ok()
             }
             Err(e) => {
-                if pkcs11_proxy_ng_types::width::checked_narrow_to_width(
-                    e.0,
-                    std::mem::size_of::<CK_RV>(),
-                )
-                .is_none()
-                {
+                if checked_narrow_to_width(e.0, std::mem::size_of::<CK_RV>()).is_none() {
                     return rv_err(CkRv::FUNCTION_FAILED);
                 }
                 rv_err(e)

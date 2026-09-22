@@ -289,7 +289,7 @@ mod tests {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let mut client = Pkcs11Client::from_channel(channel);
         client.restore_context_id(Some("t32-slot-event".into()));
-        let err = client.wait_for_slot_event(CkFlags(CkFlags::DONT_BLOCK)).await.unwrap_err();
+        let err = client.wait_for_slot_event(CkFlags::DONT_BLOCK).await.unwrap_err();
         assert_eq!(err, CkRv::DEVICE_ERROR);
     }
 }

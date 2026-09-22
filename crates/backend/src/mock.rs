@@ -1232,12 +1232,13 @@ impl MockBackend {
         state: &MockState,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        required_flag: u64,
+        required_flag: CkMechanismFlags,
     ) -> CkResult<()> {
         self.require_supported_mechanism_for_state(state, session, mechanism)?;
         self.validate_mechanism_param_presence(mechanism)?;
         if self.enforce_source_grounded_workflows
-            && session_ops::mock_mechanism_workflow_flags(mechanism.mechanism_type) & required_flag
+            && session_ops::mock_mechanism_workflow_flags(mechanism.mechanism_type)
+                & required_flag.0
                 == 0
         {
             return Err(CkRv::MECHANISM_INVALID);
@@ -1249,7 +1250,7 @@ impl MockBackend {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        required_flag: u64,
+        required_flag: CkMechanismFlags,
     ) -> CkResult<()> {
         let state = self.state.lock().unwrap();
         self.require_mechanism_workflow_for_state(&state, session, mechanism, required_flag)
@@ -2708,7 +2709,7 @@ impl Pkcs11Backend for MockBackend {
                 mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: true,
                 generated_stage: false,
-                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE != 0,
+                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE.0 != 0,
                 rv: output.ck_rv,
             },
         );
@@ -2750,7 +2751,7 @@ impl Pkcs11Backend for MockBackend {
                 mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: false,
                 generated_stage: false,
-                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE != 0,
+                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE.0 != 0,
                 rv: output.ck_rv,
             },
         );

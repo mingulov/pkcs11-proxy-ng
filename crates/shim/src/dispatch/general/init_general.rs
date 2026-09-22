@@ -254,7 +254,7 @@ pub unsafe extern "C" fn c_get_info(p_info: CK_INFO_PTR) -> CK_RV {
                             minor: info.cryptoki_version.1,
                         };
                         space_pad_into(&mut out.manufacturerID, &info.manufacturer_id);
-                        out.flags = info.flags as CK_FLAGS;
+                        out.flags = info.flags.0 as CK_FLAGS;
                         space_pad_into(&mut out.libraryDescription, &info.library_description);
                         out.libraryVersion = CK_VERSION {
                             major: info.library_version.0,

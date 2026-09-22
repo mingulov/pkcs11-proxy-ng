@@ -105,7 +105,7 @@ async fn setup_session() -> (Arc<ContextManager>, Arc<dyn Pkcs11Backend>, Client
         Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
             client_context_id: ctx_id.0.clone(),
             slot_id: virtual_slot.0,
-            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
         }),
     )
     .await
@@ -128,7 +128,7 @@ async fn open_test_session(
         Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
             client_context_id: ctx_id.0.clone(),
             slot_id: virtual_slot.0,
-            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
         }),
     )
     .await
@@ -383,10 +383,7 @@ async fn close_all_sessions_releases_backend_login_before_close() {
     // the daemon's own logout, not the mock's), while staying invisible to
     // the daemon's carrier scan (which reads context maps only).
     let spare = mock
-        .open_session(
-            CkSlotId(0),
-            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-        )
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
         .unwrap();
 
     let close_all = close_all_sessions(
@@ -437,10 +434,7 @@ async fn close_session_releases_backend_login_before_close() {
     // the daemon's own logout, not the mock's), while staying invisible to
     // the daemon's carrier scan (which reads context maps only).
     let spare = mock
-        .open_session(
-            CkSlotId(0),
-            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-        )
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
         .unwrap();
 
     let close = close_session(
@@ -3983,7 +3977,7 @@ async fn try_open_session(
         Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
             client_context_id: ctx_id.0.clone(),
             slot_id: virtual_slot.0,
-            flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
         }),
     )
     .await
@@ -4181,7 +4175,7 @@ async fn open_session_quota_enforced_end_to_end() {
             svc.open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
                 client_context_id: cid,
                 slot_id: slot,
-                flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
             }))
             .await
             .unwrap()
@@ -4264,7 +4258,7 @@ async fn open_session_quota_shared_per_peer_ip_for_unauthenticated() {
             let mut req = Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
                 client_context_id: cid,
                 slot_id: slot,
-                flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+                flags: (CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION).0,
             });
             req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
                 local_addr: None,
@@ -4679,10 +4673,7 @@ async fn setup_mint_test(
     ctx_mgr.cache_token_info(backend_slot, "MockToken".into(), "0001".into());
     let ctx_id = ctx_mgr.create_context(Some(MINT_MTLS_IDENTITY.into())).await.unwrap();
     let backend_session = mock
-        .open_session(
-            CkSlotId(0),
-            CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-        )
+        .open_session(CkSlotId(0), CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
         .unwrap();
     let session = ctx_mgr
         .get_context(&ctx_id, |ctx| {

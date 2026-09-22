@@ -477,7 +477,7 @@ mod tests {
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         mock.initialize().unwrap();
         let backend_session =
-            mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+            mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
         let public_key = mock.create_object(backend_session, Some(&[])).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock;
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));

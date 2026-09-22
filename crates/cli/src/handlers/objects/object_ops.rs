@@ -23,8 +23,7 @@ pub(crate) async fn find_objects(
     label: Option<String>,
     verbose: bool,
 ) -> CliResult {
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     // By-value PIN (W1-L2-11): consume it into login, keep only the
     // logged-in flag for session teardown.
     let logged_in = pin.is_some();
@@ -71,12 +70,9 @@ pub(crate) async fn destroy_object(
     pin: Option<SecretBytes>,
     object_handle: u64,
 ) -> CliResult {
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     let logged_in = pin.is_some();
     login_if_present(client, session, pin).await?;
     client
@@ -94,8 +90,7 @@ pub(crate) async fn get_object_size(
     pin: Option<SecretBytes>,
     object_handle: u64,
 ) -> CliResult {
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     let logged_in = pin.is_some();
     login_if_present(client, session, pin).await?;
     let size = client
@@ -114,12 +109,9 @@ pub(crate) async fn create_object(
     label: String,
     value: Option<String>,
 ) -> CliResult {
-    let session = open_session(
-        client,
-        slot_id,
-        CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION),
-    )
-    .await?;
+    let session =
+        open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
+            .await?;
     login_user(client, session, pin).await?;
 
     let mut template = vec![
@@ -160,8 +152,7 @@ pub(crate) async fn get_attribute(
     object_handle: u64,
     attr: Vec<String>,
 ) -> CliResult {
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     let logged_in = pin.is_some();
     login_if_present(client, session, pin).await?;
 

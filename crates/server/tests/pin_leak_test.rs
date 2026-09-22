@@ -209,10 +209,7 @@ async fn pins_never_appear_in_trace_logs() {
 
     // 2. Open SO session, login SO, init user PIN.
     let session = client
-        .open_session(
-            slot,
-            CkSessionFlags(CkSessionFlags::SERIAL_SESSION | CkSessionFlags::RW_SESSION),
-        )
+        .open_session(slot, CkSessionFlags::SERIAL_SESSION | CkSessionFlags::RW_SESSION)
         .await
         .expect("open_session");
 

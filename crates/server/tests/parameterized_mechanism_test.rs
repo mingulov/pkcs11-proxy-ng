@@ -874,7 +874,7 @@ async fn execute_shape(
     let key = keys.resolve(case.key);
     let mechanism = &case.mechanism;
 
-    if flags & CkMechanismFlags::DERIVE != 0 {
+    if flags & CkMechanismFlags::DERIVE.0 != 0 {
         let template = generic_derive_template();
         return match client.derive_key(session, mechanism, key, Some(&template)).await {
             Ok(handle) => {
@@ -884,25 +884,25 @@ async fn execute_shape(
             Err(rv) => Ok(format!("derive -> {rv}")),
         };
     }
-    if flags & CkMechanismFlags::ENCRYPT != 0 {
+    if flags & CkMechanismFlags::ENCRYPT.0 != 0 {
         return match client.encrypt_init(session, mechanism, key).await {
             Ok(mech_out) => Ok(format!("encrypt-init ok (mechanism_out: {})", mech_out.is_some())),
             Err(rv) => Ok(format!("encrypt-init -> {rv}")),
         };
     }
-    if flags & CkMechanismFlags::SIGN != 0 {
+    if flags & CkMechanismFlags::SIGN.0 != 0 {
         return match client.sign_init(session, mechanism, key).await {
             Ok(()) => Ok("sign-init ok".to_string()),
             Err(rv) => Ok(format!("sign-init -> {rv}")),
         };
     }
-    if flags & CkMechanismFlags::DIGEST != 0 {
+    if flags & CkMechanismFlags::DIGEST.0 != 0 {
         return match client.digest_init(session, mechanism).await {
             Ok(()) => Ok("digest-init ok".to_string()),
             Err(rv) => Ok(format!("digest-init -> {rv}")),
         };
     }
-    if flags & CkMechanismFlags::WRAP != 0 {
+    if flags & CkMechanismFlags::WRAP.0 != 0 {
         return match client.wrap_key(session, mechanism, key, keys.aes).await {
             Ok(wrapped) => Ok(format!("wrap ok ({} bytes)", wrapped.len())),
             Err(rv) => Ok(format!("wrap -> {rv}")),

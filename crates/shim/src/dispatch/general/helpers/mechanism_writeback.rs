@@ -213,9 +213,9 @@ pub(crate) unsafe fn write_mechanism_output_params(
                     .min(MAX_SERIALIZABLE_BYTES);
                 let copy_len = wtls_out.iv.len().min(capacity);
                 if copy_len > 0 {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(wtls_out.iv.as_ptr(), output.pIV, copy_len);
-                    }
+                    wtls_out.iv.expose(|raw| unsafe {
+                        std::ptr::copy_nonoverlapping(raw.as_ptr(), output.pIV, copy_len);
+                    });
                 }
             }
         }

@@ -7,9 +7,9 @@ use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_audit::EventClass;
-use pkcs11_proxy_ng_types::attribute::is_value_bearing_secret;
 use pkcs11_proxy_ng_types::{
     CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkRv, SecretBytes,
+    is_value_bearing_secret,
 };
 
 use super::super::super::context_manager::{CachedAttr, ClientContextId};

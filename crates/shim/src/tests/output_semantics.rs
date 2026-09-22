@@ -15,7 +15,7 @@ use pkcs11_proxy_ng_types::{
     CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkInBuf,
     CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult, CkOutputBufferSpec,
     CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSlotId,
-    GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction,
+    GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction, encode_native_ulong,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -626,10 +626,8 @@ fn raw_client_size_query_returns_length_without_bytes() {
             .into_iter()
             .next()
             .expect("slot");
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -681,10 +679,8 @@ fn raw_client_too_small_query_preserves_backend_returned_length() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -736,10 +732,8 @@ fn raw_client_exact_fit_query_returns_backend_bytes() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -791,10 +785,8 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -892,10 +884,8 @@ fn legacy_client_size_query_does_not_synthesize_attribute_bytes() {
             .into_iter()
             .next()
             .expect("slot");
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -3282,10 +3272,8 @@ fn exact_encrypt_message_size_query_returns_length() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
 
         // Set up an active message-encrypt operation so the mock can process the call.
         let mechanism = pkcs11_proxy_ng_types::CkMechanism {
@@ -3357,10 +3345,8 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
 
         let wrapping_key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
@@ -3429,10 +3415,8 @@ fn null_output_length_parameter_rpc_preserves_exact_provider_rv() {
         let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
         client.initialize().await.expect("C_Initialize");
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let wrapping_key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         let key = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
         let output_spec =
@@ -3853,10 +3837,8 @@ fn raw_client_nested_template_size_query() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         daemon.backend.set_attribute(
@@ -3906,10 +3888,8 @@ fn raw_client_nested_template_data_query() {
         client.initialize().await.expect("C_Initialize");
 
         let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
-        let session = client
-            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-            .await
-            .expect("C_OpenSession");
+        let session =
+            client.open_session(slot, CkSessionFlags::SERIAL_SESSION).await.expect("C_OpenSession");
         let object = client.create_object(session, Some(&[])).await.expect("C_CreateObject");
 
         let class_value: u64 = 3;
@@ -3971,20 +3951,17 @@ fn raw_client_nested_template_data_query() {
         assert_eq!(nested[0].attr_type, CkAttributeType::CLASS);
         assert_eq!(nested[0].returned_len, ulong_size);
         let class_bytes = nested[0].value.as_ref().expect("CLASS value");
-        assert!(class_bytes.expose(|raw| raw
-            == pkcs11_proxy_ng_types::width::encode_native_ulong(
-                class_value,
-                ulong_size as usize
-            )));
+        assert!(
+            class_bytes.expose(|raw| raw == encode_native_ulong(class_value, ulong_size as usize))
+        );
 
         assert_eq!(nested[1].attr_type, CkAttributeType::KEY_TYPE);
         assert_eq!(nested[1].returned_len, ulong_size);
         let key_type_bytes = nested[1].value.as_ref().expect("KEY_TYPE value");
-        assert!(key_type_bytes.expose(|raw| raw
-            == pkcs11_proxy_ng_types::width::encode_native_ulong(
-                key_type_value,
-                ulong_size as usize
-            )));
+        assert!(
+            key_type_bytes
+                .expose(|raw| raw == encode_native_ulong(key_type_value, ulong_size as usize))
+        );
 
         client.close_session(session).await.expect("C_CloseSession");
         client.finalize().await.expect("C_Finalize");

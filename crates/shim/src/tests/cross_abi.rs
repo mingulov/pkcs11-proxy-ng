@@ -43,10 +43,7 @@ fn assert_backend_nested_class(abi: MockAbi, object: CK_OBJECT_HANDLE, expected:
     use pkcs11_proxy_ng_types::{CkAttributeQuery, CkSessionFlags, CkSlotId};
     let daemon = TestDaemon::shared_with_abi(abi);
     let object = backend_object_handle(daemon, object);
-    let session = daemon
-        .backend
-        .open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .unwrap();
+    let session = daemon.backend.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
     let (rv, results) = daemon
         .backend
         .get_attribute_value_exact(

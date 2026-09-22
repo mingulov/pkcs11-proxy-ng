@@ -2320,9 +2320,7 @@ fn run_m10_callback_stop() -> ! {
     }
     let opened = backend.ffi_open_session(
         pkcs11_proxy_ng_types::CkSlotId(11),
-        pkcs11_proxy_ng_types::CkSessionFlags(
-            pkcs11_proxy_ng_types::CkSessionFlags::SERIAL_SESSION,
-        ),
+        pkcs11_proxy_ng_types::CkSessionFlags::SERIAL_SESSION,
     );
     if opened.is_err() {
         std::process::exit(35);
@@ -2345,9 +2343,7 @@ fn run_m10_callback_control() -> ! {
     }
     let session = match backend.ffi_open_session(
         pkcs11_proxy_ng_types::CkSlotId(11),
-        pkcs11_proxy_ng_types::CkSessionFlags(
-            pkcs11_proxy_ng_types::CkSessionFlags::SERIAL_SESSION,
-        ),
+        pkcs11_proxy_ng_types::CkSessionFlags::SERIAL_SESSION,
     ) {
         Ok(session) => session,
         Err(_) => std::process::exit(35),

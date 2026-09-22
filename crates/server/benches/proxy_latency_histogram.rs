@@ -40,8 +40,7 @@ fn main() {
         let mut c = Pkcs11Client::connect(&endpoint).await.unwrap();
         c.initialize().await.unwrap();
         let slots = c.get_slot_list(false).await.unwrap();
-        let session =
-            c.open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await.unwrap();
+        let session = c.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
         let key = c.create_object(session, Some(&[])).await.unwrap();
         (c, session, key)
     });

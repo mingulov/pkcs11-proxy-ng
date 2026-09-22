@@ -92,7 +92,7 @@ fn decode_parameter_output_exact_response(
                             function,
                             ParameterOutputFunction::EncryptMessage
                                 | ParameterOutputFunction::DecryptMessage
-                        ) || flags & CkFlags::END_OF_MESSAGE != 0,
+                        ) || flags & CkFlags::END_OF_MESSAGE.0 != 0,
                         rv: output.ck_rv,
                     },
                 )

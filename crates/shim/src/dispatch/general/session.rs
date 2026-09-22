@@ -79,7 +79,7 @@ pub unsafe extern "C" fn c_get_session_info(
                     out.slotID = info.slot_id.0 as CK_SLOT_ID;
                     out.state = info.state as CK_STATE;
                     out.flags = info.flags.0 as CK_FLAGS;
-                    out.ulDeviceError = info.device_error as CK_ULONG;
+                    out.ulDeviceError = info.device_error.0 as CK_ULONG;
                 }
                 rv_ok()
             }

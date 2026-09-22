@@ -62,10 +62,7 @@ async fn mtls_authorized_identity_can_open_session() {
     let slots = client_a.get_slot_list(true).await.unwrap();
     assert_eq!(slots.len(), 1);
 
-    let session = client_a
-        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .await
-        .unwrap();
+    let session = client_a.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     assert_ne!(session.0, 0);
 }
 

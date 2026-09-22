@@ -1337,7 +1337,7 @@ pub(crate) unsafe fn read_mechanism_with_shape(
                             random_info: WtlsRandomData { client_random, server_random },
                             mac_secret_handle: CkObjectHandle(output.hMacSecret as u64),
                             key_handle: CkObjectHandle(output.hKey as u64),
-                            iv,
+                            iv: iv.into(),
                         }))
                     }
                 }
