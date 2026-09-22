@@ -764,11 +764,14 @@ fn fixup_catalog(st: &mut InterfaceState) {
 /// Whether the server-published registry is disabled via
 /// `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` (W1-L8-19).
 ///
-/// Unset keeps the default (install the server payload). An explicit falsy
+/// Canonical value parsing (the operator runbook defers to this doc):
+/// unset keeps the default (install the server payload). An explicit falsy
 /// value (`0`, `false`, `no`, `off`, case-insensitive) re-enables the
 /// install so operators can flip the flag off without unsetting it. Any
-/// other set value — including `1`, `true`, the empty string, and
-/// unrecognized text — keeps the legacy presence-means-disabled behavior.
+/// other set value — including `1`, `true`, the empty string, unrecognized
+/// text, and non-UTF8 bytes — keeps the legacy presence-means-disabled
+/// behavior. That fail-legacy choice is deliberate: a value the parser
+/// cannot understand must not silently re-enable the install.
 pub(crate) fn server_registry_disabled() -> bool {
     match std::env::var_os("PKCS11_PROXY_DISABLE_SERVER_REGISTRY") {
         None => false,
@@ -776,8 +779,7 @@ pub(crate) fn server_registry_disabled() -> bool {
             Some(text) => {
                 !matches!(text.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
             }
-            // Non-UTF8 value: keep the legacy presence-means-disabled
-            // behavior rather than silently re-enabling.
+            // Non-UTF8 value: fail-legacy, per the doc comment above.
             None => true,
         },
     }

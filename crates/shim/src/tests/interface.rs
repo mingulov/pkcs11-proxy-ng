@@ -1455,7 +1455,7 @@ fn server_registry_ignored_for_truthy_disable_values() {
     let _saved = SavedDisableRegistry::capture();
     ensure_registry_installed();
     crate::interface_probe::reset_registry_revision_for_test();
-    for (i, value) in ["1", "true", "TRUE", "yes", ""].into_iter().enumerate() {
+    for (i, value) in ["1", "true", "TRUE", "yes", "banana", ""].into_iter().enumerate() {
         SavedDisableRegistry::set(Some(value));
         let rev = format!("l8-19-truthy-{i}");
         let ignored = registry_payload_with_revision(&rev);
@@ -1478,6 +1478,41 @@ fn server_registry_ignored_for_truthy_disable_values() {
             "disable env ={value:?} must log the fallback: {output:?}"
         );
     }
+}
+
+/// W1-L8-19 / deferred T31 m1: a non-UTF8 DISABLE value keeps the legacy
+/// disable (fail-legacy) rather than silently re-enabling the install.
+/// Direct pin of `server_registry_disabled`; the install-level truthy test
+/// above covers the UTF-8 fail-legacy values.
+#[cfg(unix)]
+#[test]
+fn server_registry_disabled_for_non_utf8_disable_value() {
+    use std::os::unix::ffi::OsStrExt;
+    let _guard = shim_state_test_guard();
+    // SavedDisableRegistry only round-trips UTF-8, so save/restore the raw
+    // OsString here (restored on drop even when the assertion fails).
+    struct SavedOs {
+        saved: Option<std::ffi::OsString>,
+    }
+    impl Drop for SavedOs {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.saved {
+                    Some(v) => std::env::set_var("PKCS11_PROXY_DISABLE_SERVER_REGISTRY", v),
+                    None => std::env::remove_var("PKCS11_PROXY_DISABLE_SERVER_REGISTRY"),
+                }
+            }
+        }
+    }
+    let _saved = SavedOs { saved: std::env::var_os("PKCS11_PROXY_DISABLE_SERVER_REGISTRY") };
+    let non_utf8 = std::ffi::OsStr::from_bytes(b"\xff\xfe");
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_DISABLE_SERVER_REGISTRY", non_utf8);
+    }
+    assert!(
+        crate::interface_probe::server_registry_disabled(),
+        "non-UTF8 DISABLE value must keep the legacy disable (fail-legacy)"
+    );
 }
 
 /// W1-C7-11: `clear_cache` (the C_Finalize path) resets the registry

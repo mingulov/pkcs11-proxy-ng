@@ -550,7 +550,7 @@ hostname does not match the certificate.
 | Variable | Purpose |
 | --- | --- |
 | `PKCS11_PROXY_MECHANISMS` | Path to a TOML override file the shim layers on top of its embedded default registry at `C_Initialize`. Used only until the server-published registry arrives via `GetBackendInterfaces`. |
-| `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` | If set (except an explicit falsy `0`/`false`/`no`/`off`, which re-enables), the shim ignores the server-published registry and uses only the embedded default + `PKCS11_PROXY_MECHANISMS` override. Test/debug use only — production should leave this unset so vendor mechanisms picked up by the daemon's `[mechanisms].config_path` are honoured. |
+| `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` | If set (except an explicit falsy `0`/`false`/`no`/`off`, which re-enables), the shim ignores the server-published registry and uses only the embedded default + `PKCS11_PROXY_MECHANISMS` override. Test/debug use only — production should leave this unset so vendor mechanisms picked up by the daemon's `[mechanisms].config_path` are honoured. Value parsing is defined by `server_registry_disabled` in `crates/shim/src/interface_probe.rs`: empty, unrecognized, and non-UTF8 values keep the legacy disable (deliberate fail-legacy). |
 
 ## 8c. Private diagnostic bundles
 

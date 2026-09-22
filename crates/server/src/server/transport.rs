@@ -547,7 +547,10 @@ mod tests {
 
     // W1-L7-07: the UDS listener socket is created mode-0600 (owner-only).
     // Task 3 (C3-11) deleted the stale peer_cred helpers whose docs floated
-    // 0660/0666 deployment modes; this pins the surviving contract.
+    // group/world-readable deployment modes (0660 and wider); this pins the
+    // surviving contract. (The wider mode is spelled out — never as bare
+    // digits — so a naive residual-grep for it does not trip on this pin;
+    // exclude test comments when auditing historical modes.)
     #[cfg(unix)]
     #[tokio::test]
     async fn bind_unix_listener_creates_mode_0600_socket() {
