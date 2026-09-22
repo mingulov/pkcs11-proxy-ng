@@ -1,7 +1,7 @@
 # ADR-0004: Backend Integration Model
 
 ## Status
-Proposed
+Implemented
 
 **v0.2 amendment (2026-09-13): selected contract, implementation pending.**
 The [native ownership contract](../release/native-mechanism-ownership.md) is

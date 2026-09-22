@@ -1,7 +1,7 @@
 # ADR-0001: Function and Mechanism Coverage Policy
 
 ## Status
-Proposed
+Implemented
 
 ## Context
 The Rust PKCS#11 Remote Proxy forwards PKCS#11 operations from clients to a
@@ -49,8 +49,7 @@ The initial seed subset is:
 | Signing/verification | `C_SignInit`, `C_Sign`, `C_SignUpdate`, `C_SignFinal`, `C_VerifyInit`, `C_Verify`, `C_VerifyUpdate`, `C_VerifyFinal` |
 | Key management / RNG | `C_GenerateKeyPair`, `C_GenerateRandom` |
 
-The following groups were initially deferred but are now implemented
-(see implementation plan docs/superpowers/plans/2026-03-14-pkcs11-3x-functions.md):
+The following groups were initially deferred but are now implemented:
 
 - `C_LoginUser`, `C_SessionCancel`, `C_GetSessionValidationFlags` (session extensions)
 - Message-based 3.0 functions (`MessageEncrypt*`, `MessageDecrypt*`, `MessageSign*`, `MessageVerify*`)
@@ -99,8 +98,7 @@ time**, not by static classification alone.
 > consume it during `interface_probe::ensure_probed()` — the shim does not
 > load registry files at `C_Initialize`. Vendor mechanisms are added via the
 > daemon override file (`PKCS11_PROXY_MECHANISMS` survives only as the shim
-> fallback override when the daemon is unreachable or omits the field). See
-> the design spec at `docs/superpowers/specs/2026-03-15-mechanism-registry-design.md`.
+> fallback override when the daemon is unreachable or omits the field).
 
 #### Parameterless use — always forwarded
 

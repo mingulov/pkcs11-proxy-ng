@@ -35,10 +35,14 @@ Specifically:
   buffer spec. One violation class, one RV on both layers. The shim
   also treats this code on the message path as outcome-ambiguous and
   clears its local operation state.
-- `classify_backend_outcome` widens this to fold `HOST_MEMORY`,
-  `DEVICE_REMOVED`, `TOKEN_NOT_PRESENT` into the health-gate's
-  unhealthy set, but the **return value to the caller is still the
-  exact backend RV** (per CLAUDE.md rule 2).
+- `classify_backend_outcome` folds only `HOST_MEMORY` and
+  `DEVICE_REMOVED` backend RVs — plus the daemon's own transport
+  failures (backend-call timeout, circuit-breaker trip,
+  blocking-pool panic) — into the health-gate's unhealthy set.
+  Backend-returned `TOKEN_NOT_PRESENT` and `CKR_DEVICE_ERROR` are
+  per-request responses and do not flip readiness, but the **return
+  value to the caller is still the exact backend RV** (per CLAUDE.md
+  rule 2).
 
 Daemon transport/capacity failures that formerly shared this code now
 have distinct values (W1-L3-01): backend-call timeout →
@@ -285,10 +289,10 @@ preserve the value across the gRPC hop.
 
 | CK_RV | Hex | Typical cause |
 | --- | --- | --- |
-| `CKR_HOST_MEMORY` | 0x02 | Backend exhausted heap. **Also folded into the daemon's backend-health gate** alongside DEVICE_ERROR. **Also originated by the proxy** for circuit-breaker trips (see proxy-originated section). |
+| `CKR_HOST_MEMORY` | 0x02 | Backend exhausted heap. **Also folded into the daemon's backend-health gate** (a backend-returned `DEVICE_ERROR`, by contrast, is a per-request response and does not flip readiness). **Also originated by the proxy** for circuit-breaker trips (see proxy-originated section). |
 | `CKR_DEVICE_MEMORY` | 0x31 | HSM ran out of internal storage. |
 | `CKR_DEVICE_REMOVED` | 0x32 | HSM yanked. Folded into health gate. |
-| `CKR_TOKEN_NOT_PRESENT` | 0xE0 | Token not in slot. Folded into health gate. |
+| `CKR_TOKEN_NOT_PRESENT` | 0xE0 | Token not in slot. Not folded into the health gate (per-request response). |
 | `CKR_FUNCTION_FAILED` | 0x06 | Backend's catch-all for non-specific failures. **Operator action:** run the daemon with debug logging (`RUST_LOG=pkcs11_proxy_ng=debug`) and check for the corresponding per-call `backend outcome classified` line for the underlying cause; some backends bury more specific codes in their own logs. **Also originated by the proxy** for backend-call timeouts (see proxy-originated section). |
 | `CKR_FUNCTION_CANCELED` | 0x50 | Backend cancelled a long-running op. |
 | `CKR_FUNCTION_NOT_PARALLEL` | 0x51 | Backend rejects concurrent ops on a single session. |
@@ -329,7 +333,7 @@ application. Backend-down RVs additionally log
    If absent, the proxy's transport/timeout layer originated it
    (see proxy-originated section above).
 3. If the same RV is repeated and folded into the unhealthy set
-   (HOST_MEMORY / DEVICE_REMOVED / TOKEN_NOT_PRESENT / DEVICE_ERROR),
+   (HOST_MEMORY / DEVICE_REMOVED),
    watch for `backend exceeded failure threshold; flipping
    readiness to NOT_SERVING`. The pod will be pulled from the
    Service after `backend_health_consecutive_failures` consecutive

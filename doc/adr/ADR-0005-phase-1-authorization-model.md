@@ -1,7 +1,7 @@
 # ADR-0005: Phase 1 Authorization Model
 
 ## Status
-Proposed
+Implemented
 
 ## Context
 

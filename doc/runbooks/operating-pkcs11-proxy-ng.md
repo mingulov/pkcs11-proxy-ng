@@ -304,6 +304,13 @@ volumes:
 #     subPath: proxy.toml
 ```
 
+### Authorization policy edits require a restart
+
+Unlike the mechanism registry above, the `[auth.policy]` token policy is
+loaded once at startup and is NOT reloaded on SIGHUP. Editing the policy
+therefore requires a daemon restart (`kubectl rollout restart`), and
+contexts already open keep the grants captured at their `C_Initialize`.
+
 ## 6. Troubleshooting common CK_RV codes
 
 ### CKR_DEVICE_ERROR (0x30)
