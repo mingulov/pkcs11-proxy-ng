@@ -19,8 +19,21 @@ const DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(5);
 /// Single-entry cache for rendered discovery responses (W1-L13-22).
 /// Keyed on (backend identity, payload revision `Arc`): repeated
 /// context-free discovery calls skip the per-call function-table walk
-/// and payload re-read. The per-response owned clone is inherent to
-/// tonic; the rate limiter remains the flood backstop.
+/// and payload re-read. The rate limiter remains the flood backstop.
+///
+/// Clone limitation (deferred T26 m1): a cache hit still clones the
+/// cached response — tonic requires an owned response per call, so
+/// removing the per-hit clone is unsatisfiable. The saving is the
+/// function-table walk + payload re-read, not the clone.
+///
+/// Keying caveat (deferred T26 m3): `backend_id` is the backend `Arc`'s
+/// allocation address, so a dropped backend whose address is later
+/// reused by a new backend could alias in theory. The payload key is
+/// the revision `Arc`'s identity (`Arc::ptr_eq`, not content) and the
+/// entry holds a clone of that `Arc` alive, so the payload side cannot
+/// alias while the entry lives — aliasing additionally requires the
+/// very same payload `Arc`. Unobserved across suite runs; documented,
+/// not redesigned, per the T26 ruling.
 #[derive(Default)]
 struct DiscoveryCache {
     entry: Option<DiscoveryCacheEntry>,
@@ -69,6 +82,9 @@ impl DiscoveryCache {
     }
 }
 
+/// Shared cache instance. Single-entry: any miss re-render overwrites
+/// the previous entry (see [`DiscoveryCache`] docs for the clone and
+/// keying limitations).
 static DISCOVERY_CACHE: LazyLock<Mutex<DiscoveryCache>> =
     LazyLock::new(|| Mutex::new(DiscoveryCache::default()));
 
@@ -359,5 +375,130 @@ mod tests {
             .await
             .expect("default-config discovery must never be throttled");
         }
+    }
+
+    /// Deferred T26 m2: same default-config pin as
+    /// `l13_22_limiter_default_allows_unlimited_discovery`, but WITH
+    /// `remote_addr` set so the `rate_limit::check` branch is actually
+    /// exercised (the sibling builds bare requests whose
+    /// `remote_addr()` is `None`, skipping the branch).
+    #[tokio::test]
+    async fn t26_m2_limiter_default_allows_discovery_with_remote_addr() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        let backend = Arc::new(MockBackend::default_test());
+        backend.initialize().expect("initialize mock backend");
+        let backend: Arc<dyn Pkcs11Backend> = backend;
+        let registry = MechanismRegistrySource::load(None).expect("load embedded registry");
+
+        // TEST-NET-1 IP unique to this test so no other test's limiter
+        // state can interact with it.
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99));
+        let peer = SocketAddr::new(ip, 4321);
+        // Pin the exercised branch directly: default config (0 =
+        // disabled/unlimited) must allow without consuming budget.
+        assert!(
+            crate::server::rate_limit::check(ip).is_ok(),
+            "default-config limiter check must allow"
+        );
+
+        for _ in 0..50 {
+            let mut req = Request::new(pkcs11_proxy_ng_proto::GetBackendInterfacesRequest {});
+            req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
+                local_addr: None,
+                remote_addr: Some(peer),
+            });
+            assert!(
+                req.remote_addr().is_some(),
+                "test setup must exercise the rate_limit::check branch"
+            );
+            get_backend_interfaces(&context_manager, &backend, &registry, req)
+                .await
+                .expect("default-config discovery with remote_addr must never be throttled");
+        }
+    }
+
+    /// Deferred T26 m1 pin: a cache hit serves the stored rendering
+    /// without a re-read/re-render (no intervening `put`), and each hit
+    /// is an owned clone — mutating one hit never corrupts the entry
+    /// (tonic requires an owned response per call, so the clone stays).
+    #[test]
+    fn t26_m1_hit_serves_without_reread_as_owned_clone() {
+        use std::time::{Duration, Instant};
+
+        use pkcs11_proxy_ng_proto::MechanismRegistryPayload;
+
+        let payload =
+            Arc::new(MechanismRegistryPayload { revision: "rev-A".into(), ..Default::default() });
+        let response = pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
+            mechanism_registry: Some((*payload).clone()),
+            ..Default::default()
+        };
+        let mut cache = super::DiscoveryCache::default();
+        let t0 = Instant::now();
+        cache.put(t0, 7, &payload, response);
+
+        // Hit #1 with no intervening re-read: served straight from the entry.
+        let mut hit1 = cache
+            .get(t0 + Duration::from_secs(1), 7, &payload)
+            .expect("hit must serve without re-read");
+        assert_eq!(hit1.mechanism_registry.as_ref().expect("payload").revision, "rev-A");
+        // Mutate the returned response: it must be an owned clone, so the
+        // cached entry is unaffected and hit #2 still serves the original.
+        hit1.mechanism_registry.as_mut().expect("payload").revision = "MUTATED".into();
+        let hit2 = cache
+            .get(t0 + Duration::from_secs(2), 7, &payload)
+            .expect("second hit must serve without re-read");
+        assert_eq!(
+            hit2.mechanism_registry.expect("payload").revision,
+            "rev-A",
+            "mutating one hit must not corrupt the cached entry: hits are owned clones"
+        );
+    }
+
+    /// Deferred T26 m3 pin: cache keys are identities, not content — a
+    /// payload-`Arc` replacement after the old `Arc` is dropped still
+    /// misses (no content-equality false hit), and a sequential backend
+    /// swap evicts (single-entry) so the old backend misses afterwards.
+    #[test]
+    fn t26_m3_post_drop_replacement_and_backend_swap_miss() {
+        use std::time::{Duration, Instant};
+
+        use pkcs11_proxy_ng_proto::MechanismRegistryPayload;
+
+        let payload_a =
+            Arc::new(MechanismRegistryPayload { revision: "rev-A".into(), ..Default::default() });
+        let response_a = pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
+            mechanism_registry: Some((*payload_a).clone()),
+            ..Default::default()
+        };
+        let mut cache = super::DiscoveryCache::default();
+        let t0 = Instant::now();
+        cache.put(t0, 7, &payload_a, response_a);
+        // Drop every caller-held clone of the old revision (the entry keeps
+        // its own clone alive); a replacement `Arc` with identical content
+        // is a different identity and must miss.
+        drop(payload_a);
+        let payload_b =
+            Arc::new(MechanismRegistryPayload { revision: "rev-A".into(), ..Default::default() });
+        assert!(
+            cache.get(t0 + Duration::from_secs(1), 7, &payload_b).is_none(),
+            "payload-Arc replacement after drop must miss: keying is Arc identity, not content"
+        );
+
+        // Sequential backend swap: re-rendering for a new backend evicts the
+        // single entry, so the old backend misses afterwards.
+        let response_b = pkcs11_proxy_ng_proto::GetBackendInterfacesResponse {
+            mechanism_registry: Some((*payload_b).clone()),
+            ..Default::default()
+        };
+        let t1 = t0 + Duration::from_secs(1);
+        cache.put(t1, 8, &payload_b, response_b);
+        assert!(
+            cache.get(t1, 7, &payload_b).is_none(),
+            "old backend must miss after a sequential backend swap evicts the single entry"
+        );
+        assert!(cache.get(t1, 8, &payload_b).is_some(), "new backend must hit after its own put");
     }
 }
