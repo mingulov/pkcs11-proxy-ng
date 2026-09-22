@@ -25,12 +25,11 @@ impl FfiBackend {
         let ck_attrs = &ffi_attrs.attrs;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attrs_len = Self::ulong_len(ck_attrs.len())?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_FindObjectsInit },
-            |function| unsafe {
-                function(h_session, Self::ffi_attr_ptr(&ffi_attrs), Self::ulong_len(ck_attrs.len()))
-            },
+            |function| unsafe { function(h_session, Self::ffi_attr_ptr(&ffi_attrs), ck_attrs_len) },
         )
     }
 
@@ -80,16 +79,12 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attrs_len = Self::ulong_len(ffi_attrs.attrs.len())?;
         let rv = Self::call_raw(
             &admission,
             unsafe { (*self.func_list).C_GetAttributeValue },
             |function| unsafe {
-                function(
-                    h_session,
-                    h_object,
-                    ffi_attrs.attrs.as_mut_ptr(),
-                    Self::ulong_len(ffi_attrs.attrs.len()),
-                )
+                function(h_session, h_object, ffi_attrs.attrs.as_mut_ptr(), ck_attrs_len)
             },
         )?;
         update_template_from_ffi(template, &ffi_attrs.attrs);
@@ -117,16 +112,12 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_queries_len = Self::ulong_len(ffi_queries.attrs.len())?;
         let rv = Self::call_raw(
             &admission,
             unsafe { (*self.func_list).C_GetAttributeValue },
             |function| unsafe {
-                function(
-                    h_session,
-                    h_object,
-                    ffi_queries.attrs.as_mut_ptr(),
-                    Self::ulong_len(ffi_queries.attrs.len()),
-                )
+                function(h_session, h_object, ffi_queries.attrs.as_mut_ptr(), ck_queries_len)
             },
         )?;
         let backend_rv = CkRv(rv as u64);
@@ -143,16 +134,12 @@ impl FfiBackend {
         let ffi_attrs = FfiAttrs::from_opt_slice(template)?;
         let h_session = Self::session_handle(session)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         Self::call_object_output(
             &admission,
             unsafe { (*self.func_list).C_CreateObject },
             |function, handle| unsafe {
-                function(
-                    h_session,
-                    Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
-                    handle,
-                )
+                function(h_session, Self::ffi_attr_ptr(&ffi_attrs), ck_attr_len, handle)
             },
         )
     }
@@ -168,6 +155,7 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         Self::call_object_output(
             &admission,
             unsafe { (*self.func_list).C_CopyObject },
@@ -176,7 +164,7 @@ impl FfiBackend {
                     h_session,
                     h_object,
                     Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
+                    ck_attr_len,
                     new_handle,
                 )
             },
@@ -245,16 +233,12 @@ impl FfiBackend {
         let h_session = Self::session_handle(session)?;
         let h_object = Self::object_handle(object)?;
         let _session_fence = self.session_fences.enter(&admission, session)?;
+        let ck_attr_len = Self::ffi_attr_len(&ffi_attrs)?;
         Self::call_unit(
             &admission,
             unsafe { (*self.func_list).C_SetAttributeValue },
             |function| unsafe {
-                function(
-                    h_session,
-                    h_object,
-                    Self::ffi_attr_ptr(&ffi_attrs),
-                    Self::ffi_attr_len(&ffi_attrs),
-                )
+                function(h_session, h_object, Self::ffi_attr_ptr(&ffi_attrs), ck_attr_len)
             },
         )
     }

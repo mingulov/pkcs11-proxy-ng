@@ -15,11 +15,11 @@ impl FfiBackend {
         // W1-C6-07: NULL pin/username (protected path) stays NULL at the
         // provider boundary, exactly like `ffi_login` — never an empty slice.
         let (pin_ptr, pin_len) = match pin {
-            Some(p) => (p.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let (username_ptr, username_len) = match username {
-            Some(u) => (u.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR, Self::ulong_len(u.len())),
+            Some(u) => (u.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR, Self::ulong_len(u.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let _session_fence = self.session_fences.enter(&admission, session)?;

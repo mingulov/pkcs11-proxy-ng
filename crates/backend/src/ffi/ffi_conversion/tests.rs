@@ -1554,3 +1554,365 @@ mod null_template_tests {
         assert!(empty.attrs.is_empty());
     }
 }
+
+#[cfg(test)]
+mod output_params_equal_tests {
+    //! W1-C4-04: `output_params_equal` must agree with `output_params` on
+    //! every mechanism-out arm, so `call_bytes_exact_with_mechanism_output`
+    //! can reuse the pre-call snapshot when the provider wrote nothing and
+    //! snapshot once per call instead of twice.
+    use super::mechanism_to_ffi;
+    use pkcs11_proxy_ng_types::{
+        CkAttribute, CkAttributeType, CkAttributeValue, CkMechanism, CkMechanismParams,
+        CkMechanismType, CkObjectHandle, GcmParams, PbeParams, PrfDataParam, SecretBytes,
+        Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams, Ssl3KeyMatParams,
+        Ssl3MasterKeyDeriveParams, SslRandomData, Tls12MasterKeyDeriveParams, TlsPrfParams,
+        WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
+    };
+
+    fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
+        mechanism_to_ffi(&CkMechanism { mechanism_type, params: Some(params) })
+            .expect("mechanism converts to ffi")
+    }
+
+    fn gcm_fixture() -> CkMechanismParams {
+        CkMechanismParams::Gcm(GcmParams {
+            iv: vec![0x11; 12],
+            iv_bits: 96,
+            iv_buffer_len: 12,
+            aad: b"aad-bytes".to_vec().into(),
+            tag_bits: 128,
+            iv_null: false,
+            aad_null: false,
+        })
+    }
+
+    fn all_output_fixtures() -> Vec<(CkMechanismType, CkMechanismParams, &'static str)> {
+        // Arm selection keys off the params variant, not the mechanism
+        // type (which is only narrowed); nearby consts stand in where no
+        // exact official const exists in this checkout.
+        vec![
+            (CkMechanismType::AES_GCM, gcm_fixture(), "Gcm"),
+            (
+                CkMechanismType::TLS12_MASTER_KEY_DERIVE,
+                CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
+                    random_info: SslRandomData {
+                        client_random: vec![0x01; 32],
+                        server_random: vec![0x02; 32],
+                    },
+                    version_major: 3,
+                    version_minor: 3,
+                    prf_hash_mechanism: CkMechanismType::SHA256,
+                }),
+                "Tls12MasterKeyDerive",
+            ),
+            (
+                CkMechanismType::WTLS_MASTER_KEY_DERIVE,
+                CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
+                    digest_mechanism: CkMechanismType::SHA256,
+                    random_info: WtlsRandomData {
+                        client_random: vec![0x03; 20],
+                        server_random: vec![0x04; 20],
+                    },
+                    version: 1,
+                }),
+                "WtlsMasterKeyDerive",
+            ),
+            (
+                CkMechanismType::WTLS_MASTER_KEY_DERIVE,
+                CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
+                    digest_mechanism: CkMechanismType::SHA256,
+                    mac_size_bits: 128,
+                    key_size_bits: 128,
+                    iv_size_bits: 128,
+                    sequence_number: 7,
+                    is_export: false,
+                    random_info: WtlsRandomData {
+                        client_random: vec![0x05; 20],
+                        server_random: vec![0x06; 20],
+                    },
+                    mac_secret_handle: CkObjectHandle(11),
+                    key_handle: CkObjectHandle(12),
+                    iv: vec![0x07; 16],
+                }),
+                "WtlsKeyMat",
+            ),
+            (
+                CkMechanismType::SSL3_KEY_AND_MAC_DERIVE,
+                CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+                    mac_size_bits: 128,
+                    key_size_bits: 128,
+                    iv_size_bits: 64,
+                    is_export: false,
+                    random_info: SslRandomData {
+                        client_random: vec![0x08; 32],
+                        server_random: vec![0x09; 32],
+                    },
+                    prf_hash_mechanism: CkMechanismType(0),
+                    client_mac_secret_handle: CkObjectHandle(21),
+                    server_mac_secret_handle: CkObjectHandle(22),
+                    client_key_handle: CkObjectHandle(23),
+                    server_key_handle: CkObjectHandle(24),
+                    client_iv: vec![0x0A; 8].into(),
+                    server_iv: vec![0x0B; 8].into(),
+                }),
+                "Ssl3KeyMat",
+            ),
+            (
+                CkMechanismType::TLS12_KEY_AND_MAC_DERIVE,
+                CkMechanismParams::Ssl3KeyMat(Ssl3KeyMatParams {
+                    mac_size_bits: 128,
+                    key_size_bits: 128,
+                    iv_size_bits: 64,
+                    is_export: false,
+                    random_info: SslRandomData {
+                        client_random: vec![0x0C; 32],
+                        server_random: vec![0x0D; 32],
+                    },
+                    prf_hash_mechanism: CkMechanismType::SHA256,
+                    client_mac_secret_handle: CkObjectHandle(31),
+                    server_mac_secret_handle: CkObjectHandle(32),
+                    client_key_handle: CkObjectHandle(33),
+                    server_key_handle: CkObjectHandle(34),
+                    client_iv: vec![0x0E; 8].into(),
+                    server_iv: vec![0x0F; 8].into(),
+                }),
+                "Tls12KeyMat",
+            ),
+            (
+                CkMechanismType::SP800_108_COUNTER_KDF,
+                CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+                    prf_type: CkMechanismType(0x0000_0251), // CKM_SHA256_HMAC
+                    data_params: vec![PrfDataParam { type_: 1, value: b"counter".to_vec().into() }],
+                    additional_derived_keys: vec![Sp800108DerivedKey {
+                        template: vec![CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String("kdf".to_string().into())),
+                        }],
+                        key_handle: CkObjectHandle(41),
+                    }],
+                }),
+                "Sp800108Kdf",
+            ),
+            (
+                CkMechanismType::SP800_108_FEEDBACK_KDF,
+                CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
+                    prf_type: CkMechanismType(0x0000_0251), // CKM_SHA256_HMAC
+                    data_params: vec![PrfDataParam {
+                        type_: 2,
+                        value: b"feedback".to_vec().into(),
+                    }],
+                    iv: vec![0x10; 16],
+                    additional_derived_keys: vec![Sp800108DerivedKey {
+                        template: vec![CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String("fb".to_string().into())),
+                        }],
+                        key_handle: CkObjectHandle(42),
+                    }],
+                }),
+                "Sp800108FeedbackKdf",
+            ),
+            (
+                CkMechanismType::TLS_PRF,
+                CkMechanismParams::TlsPrf(TlsPrfParams {
+                    seed: vec![0xA1, 0xA2].into(),
+                    label: vec![0xB1].into(),
+                    output_len: 48,
+                    output: Vec::new().into(),
+                }),
+                "TlsPrf",
+            ),
+            (
+                CkMechanismType::WTLS_PRF,
+                CkMechanismParams::WtlsPrf(WtlsPrfParams {
+                    digest_mechanism: CkMechanismType::SHA256,
+                    seed: vec![0xC1].into(),
+                    label: vec![0xD1].into(),
+                    output_len: 20,
+                    output: Vec::new().into(),
+                }),
+                "WtlsPrf",
+            ),
+            (
+                CkMechanismType::SSL3_MASTER_KEY_DERIVE,
+                CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
+                    random_info: SslRandomData {
+                        client_random: vec![0x11; 32],
+                        server_random: vec![0x12; 32],
+                    },
+                    version_major: 3,
+                    version_minor: 0,
+                }),
+                "Ssl3MasterKeyDerive",
+            ),
+            (
+                CkMechanismType::PBE_SHA1_DES3_EDE_CBC,
+                CkMechanismParams::Pbe(PbeParams {
+                    init_vector: vec![0x13; 8].into(),
+                    password: b"pw".to_vec().into(),
+                    salt: b"salt".to_vec().into(),
+                    iteration: 1000,
+                }),
+                "Pbe",
+            ),
+        ]
+    }
+
+    #[test]
+    fn equal_agrees_with_output_params_on_every_arm() {
+        for (mech_type, params, name) in all_output_fixtures() {
+            let ffi = convert(mech_type, params);
+            let snapshot = ffi.output_params();
+            assert!(snapshot.is_some(), "{name} fixture must produce output params");
+            assert!(
+                ffi.output_params_equal(&snapshot),
+                "{name}: equal() must agree with output_params() on unchanged backing"
+            );
+        }
+        // Parameterless mechanisms produce no output params on either side.
+        let no_param = mechanism_to_ffi(&CkMechanism {
+            mechanism_type: CkMechanismType::SHA256,
+            params: None,
+        })
+        .expect("parameterless converts");
+        assert_eq!(no_param.output_params(), None);
+        assert!(no_param.output_params_equal(&None));
+        // PBE with an empty IV reports no output on either side.
+        let pbe_null = convert(
+            CkMechanismType::PBE_SHA1_DES3_EDE_CBC,
+            CkMechanismParams::Pbe(PbeParams {
+                init_vector: Vec::new().into(),
+                password: b"pw".to_vec().into(),
+                salt: b"salt".to_vec().into(),
+                iteration: 1,
+            }),
+        );
+        assert_eq!(pbe_null.output_params(), None);
+        assert!(pbe_null.output_params_equal(&None));
+    }
+
+    #[test]
+    fn equal_rejects_cross_arm_tampered_and_none_mismatch() {
+        let fixtures = all_output_fixtures();
+        let snapshots: Vec<_> = fixtures
+            .iter()
+            .map(|(mech_type, params, _)| convert(*mech_type, params.clone()).output_params())
+            .collect();
+        for (i, (mech_type, params, name)) in fixtures.iter().enumerate() {
+            let ffi = convert(*mech_type, params.clone());
+            // Cross-arm: another arm's snapshot never matches this backing.
+            let other = &snapshots[(i + 1) % snapshots.len()];
+            assert!(
+                !ffi.output_params_equal(other),
+                "{name}: cross-arm snapshot must not compare equal"
+            );
+            // None never matches an output-producing backing.
+            assert!(!ffi.output_params_equal(&None), "{name}: None must not match");
+        }
+        // Tampered scalar: flipping one GCM scalar breaks equality.
+        let gcm = convert(CkMechanismType::AES_GCM, gcm_fixture());
+        let mut tampered = gcm.output_params().expect("gcm snapshot");
+        let CkMechanismParams::Gcm(ref mut p) = tampered else {
+            panic!("gcm snapshot shape");
+        };
+        p.tag_bits ^= 0xFF;
+        assert!(!gcm.output_params_equal(&Some(tampered)));
+        // Tampered bytes: flipping one IV byte breaks equality.
+        let mut tampered = gcm.output_params().expect("gcm snapshot");
+        let CkMechanismParams::Gcm(ref mut p) = tampered else {
+            panic!("gcm snapshot shape");
+        };
+        p.iv[0] ^= 0xFF;
+        assert!(!gcm.output_params_equal(&Some(tampered)));
+        // Tampered AAD: flipping one AAD byte breaks equality.
+        let mut tampered = gcm.output_params().expect("gcm snapshot");
+        let CkMechanismParams::Gcm(ref mut p) = tampered else {
+            panic!("gcm snapshot shape");
+        };
+        let mut aad = p.aad.expose(|b| b.to_vec());
+        aad[0] ^= 0xFF;
+        p.aad = SecretBytes::new(aad);
+        assert!(!gcm.output_params_equal(&Some(tampered)));
+        // Tampered TLS version breaks equality on the TLS arm.
+        let tls = convert(
+            CkMechanismType::TLS12_MASTER_KEY_DERIVE,
+            CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
+                random_info: SslRandomData {
+                    client_random: vec![0x01; 32],
+                    server_random: vec![0x02; 32],
+                },
+                version_major: 3,
+                version_minor: 3,
+                prf_hash_mechanism: CkMechanismType::SHA256,
+            }),
+        );
+        let mut tampered = tls.output_params().expect("tls snapshot");
+        let CkMechanismParams::Tls12MasterKeyDerive(ref mut p) = tampered else {
+            panic!("tls snapshot shape");
+        };
+        p.version_minor = 4;
+        assert!(!tls.output_params_equal(&Some(tampered)));
+    }
+
+    #[test]
+    fn equal_detects_provider_write_without_resnapshot() {
+        // HSM-generated-IV pattern: the provider mutates the IV in place;
+        // equal() must flip from true to false with no second snapshot.
+        let ffi = convert(CkMechanismType::AES_GCM, gcm_fixture());
+        let before = ffi.output_params();
+        assert!(ffi.output_params_equal(&before));
+        let gcm =
+            unsafe { &mut *(ffi.ck_mechanism().pParameter as *mut cryptoki_sys::CK_GCM_PARAMS) };
+        unsafe {
+            gcm.pIv.write(0x42);
+        }
+        assert!(
+            !ffi.output_params_equal(&before),
+            "provider IV write must break equality with the pre-call snapshot"
+        );
+        assert!(ffi.output_params_equal(&ffi.output_params()));
+    }
+
+    #[test]
+    fn output_params_has_no_double_copy() {
+        // W1-C5-B07/W1-L13-06/W1-L4-19: random-info readback must copy
+        // once (`x.to_vec()`), never twice (`x.clone().to_vec()`).
+        let src = include_str!("mechanism.rs");
+        assert!(
+            !src.contains(".clone().to_vec()"),
+            "output_params must not re-copy an already-owned clone"
+        );
+    }
+
+    // W1-L12-03: the ns/iter printout IS this measurement test's
+    // output (read with `-- --nocapture`); production code stays under
+    // the workspace print/dbg deny.
+    #[allow(clippy::print_stderr)]
+    #[test]
+    fn mechanism_clone_hotspot_measured() {
+        // W1-C5-B06/W1-L13-05/W1-L13-06: measured note for the
+        // per-Init backing clones. Prints ns/iter with `-- --nocapture`;
+        // the bound below is ~1000x headroom over the measured ~1us and
+        // exists only to catch pathological regression, not to gate flops.
+        let mechanism =
+            CkMechanism { mechanism_type: CkMechanismType::AES_GCM, params: Some(gcm_fixture()) };
+        // Warm up once so first-touch allocation is out of the window.
+        let ffi = mechanism_to_ffi(&mechanism).expect("gcm converts");
+        let snapshot = ffi.output_params();
+        assert!(ffi.output_params_equal(&snapshot));
+        const ITERS: u32 = 2000;
+        let start = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let ffi = mechanism_to_ffi(&mechanism).expect("gcm converts");
+            let snapshot = ffi.output_params();
+            assert!(ffi.output_params_equal(&snapshot));
+        }
+        let elapsed = start.elapsed();
+        let ns_per_iter = elapsed.as_nanos() / u128::from(ITERS);
+        eprintln!(
+            "task33-hotspot: mechanism_to_ffi(GCM-12B-iv)+output_params+equal = {ns_per_iter} ns/iter over {ITERS} iters"
+        );
+        assert!(ns_per_iter < 1_000_000, "hotspot blew past 1ms/iter: {ns_per_iter} ns");
+    }
+}

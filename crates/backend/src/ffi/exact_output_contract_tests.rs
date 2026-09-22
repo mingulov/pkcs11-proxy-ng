@@ -764,3 +764,97 @@ fn classic_gcm_ok_effect_unchanged_data_and_missing_length() {
         }
     }
 }
+
+#[test]
+fn mechanism_output_path_snapshots_once_when_provider_writes_nothing() {
+    // W1-C4-04: the exact-with-mechanism-output path must snapshot
+    // IV+AAD once per call, not twice (before+after), when the provider
+    // leaves the params untouched. Counted on a thread-local so
+    // parallel tests cannot perturb the delta.
+    use super::ffi_conversion::FfiMechanism;
+    let input = GcmParams {
+        iv: vec![0x11; 12],
+        iv_bits: 96,
+        iv_buffer_len: 12,
+        aad: vec![].into(),
+        tag_bits: 128,
+        iv_null: false,
+        aad_null: false,
+    };
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(input.clone())),
+    };
+    let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
+    choke_domain.open_for_tests();
+    let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
+    FfiMechanism::reset_output_params_calls_for_tests();
+    let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
+        &choke_admission,
+        Some(()),
+        &mechanism,
+        &CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
+        |(), _, _, length| {
+            if !length.is_null() {
+                unsafe { length.write(3) };
+            }
+            cryptoki_sys::CKR_OK
+        },
+    )
+    .unwrap();
+    assert_eq!(output.ck_rv, CkRv::OK);
+    assert_eq!(effects, Some(CkMechanismParams::Gcm(input)));
+    assert_eq!(
+        FfiMechanism::output_params_calls_for_tests(),
+        1,
+        "unchanged OK call must take exactly one snapshot"
+    );
+}
+
+#[test]
+fn mechanism_output_path_resnapshots_only_when_provider_writes() {
+    // W1-C4-04: when the provider DOES mutate the params, the path
+    // takes a second snapshot and returns the post-call values.
+    use super::ffi_conversion::FfiMechanism;
+    let mechanism = CkMechanism {
+        mechanism_type: CkMechanismType::AES_GCM,
+        params: Some(CkMechanismParams::Gcm(GcmParams {
+            iv: vec![0x11; 12],
+            iv_bits: 96,
+            iv_buffer_len: 12,
+            aad: vec![].into(),
+            tag_bits: 128,
+            iv_null: false,
+            aad_null: false,
+        })),
+    };
+    let choke_domain = crate::ffi::native_domain::LifecycleDomain::new();
+    choke_domain.open_for_tests();
+    let choke_admission = choke_domain.admit_ordinary().expect("test domain admits");
+    FfiMechanism::reset_output_params_calls_for_tests();
+    let (output, effects) = FfiBackend::call_bytes_exact_with_mechanism_output(
+        &choke_admission,
+        Some(()),
+        &mechanism,
+        &CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false },
+        |(), native, _, length| {
+            let gcm = unsafe { &*native.pParameter.cast::<cryptoki_sys::CK_GCM_PARAMS>() };
+            unsafe {
+                gcm.pIv.write(0x42);
+                length.write(7);
+            }
+            cryptoki_sys::CKR_FUNCTION_FAILED
+        },
+    )
+    .unwrap();
+    assert_eq!(output.ck_rv, CkRv::FUNCTION_FAILED);
+    let Some(CkMechanismParams::Gcm(gcm)) = effects else {
+        panic!("provider-written IV must surface on the error path");
+    };
+    assert_eq!(gcm.iv[0], 0x42);
+    assert_eq!(
+        FfiMechanism::output_params_calls_for_tests(),
+        2,
+        "changed error call takes before + after snapshots"
+    );
+}

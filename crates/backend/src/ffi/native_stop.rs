@@ -356,14 +356,18 @@ mod arch {
     pub(in crate::ffi) const STOP_ARM_NAME: &str = "fallback";
 }
 
-/// Test-only `cfg!` mirror of the five qualified `mod arch` stop arms
-/// above (Linux x86_64, Linux x86, macOS, Windows, Linux aarch64). The
-/// `cfg` arms are the
-/// source of truth; this mirror lets tests assert stop coverage equals
-/// load coverage (`NATIVE_FFI_QUALIFIED`) and agrees with the compiled
-/// arm on every target. Production cannot branch on it: the guard and the
-/// arms need `cfg`, not a value.
-#[cfg(test)]
+/// Single stop-qualification predicate (W1-C4-08): the five qualified
+/// `mod arch` stop arms above (Linux x86_64, Linux x86, macOS,
+/// Windows, Linux aarch64) as one `cfg!` value. This const is the
+/// source of truth for every consumer — the `Drop` guard legs in
+/// `loading.rs` branch on it at runtime instead of repeating the
+/// target `cfg`, so a leg edit cannot desync the gate. Sound on
+/// unqualified targets: the value is `const`-false there, the stop
+/// branch folds away, and the fallback arm's `unimplemented!()` stays
+/// unreachable exactly as under the old `#[cfg]` gating. Tests assert
+/// stop coverage equals load coverage (`NATIVE_FFI_QUALIFIED`) and
+/// agrees with the compiled arm on every target, plus a per-leg pin
+/// in `loading.rs`.
 pub(in crate::ffi) const NATIVE_STOP_QUALIFIED: bool = cfg!(all(
     target_os = "linux",
     any(target_env = "gnu", target_env = "musl"),

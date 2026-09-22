@@ -90,7 +90,7 @@ impl FfiBackend {
         let mut label_buf = [0u8; 32];
         pkcs11_proxy_ng_types::space_pad_into(&mut label_buf, label);
         let (pin_ptr, pin_len) = match so_pin {
-            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let h_slot = Self::slot_id(slot_id)?;
@@ -106,7 +106,7 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (pin_ptr, pin_len) = match pin {
-            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let h_session = Self::session_handle(session)?;
@@ -124,11 +124,11 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (old_ptr, old_len) = match old_pin {
-            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let (new_ptr, new_len) = match new_pin {
-            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let h_session = Self::session_handle(session)?;
@@ -276,7 +276,7 @@ impl FfiBackend {
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         let (pin_ptr, pin_len) = match pin {
-            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
+            Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())?),
             None => (std::ptr::null_mut(), 0),
         };
         let h_session = Self::session_handle(session)?;

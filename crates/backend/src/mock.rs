@@ -505,8 +505,14 @@ impl MockBackend {
     ///
     /// This enables multi-batch test scenarios (e.g. batch1=[denied], batch2=[allowed])
     /// by configuring a list larger than `max_count` and using a small `max_object_count`.
+    ///
+    /// W1-C5-03: installing a new list resets the cursor, so a mid-search
+    /// swap serves from the new list's start with defined behavior instead
+    /// of slicing at a stale offset. Lock order matches `find_objects_impl`
+    /// (override, then cursor).
     pub fn set_find_objects_result(&self, objects: Vec<CkObjectHandle>) {
         *self.find_objects_override.lock().unwrap() = Some(objects);
+        *self.find_objects_cursor.lock().unwrap() = 0;
     }
 
     /// Install a gate so `find_objects` serves the override list only when
@@ -1179,7 +1185,7 @@ impl MockBackend {
         Ok(())
     }
 
-    fn require_open_session(&self, session: CkSessionHandle) -> CkResult<()> {
+    pub(crate) fn require_open_session(&self, session: CkSessionHandle) -> CkResult<()> {
         if self.state.lock().unwrap().has_session(session) {
             Ok(())
         } else {

@@ -25,7 +25,7 @@ impl FfiBackend {
                     ffi_mech.ck_mechanism_ptr(),
                     Self::object_handle(key)?,
                     sig_ptr as *mut cryptoki_sys::CK_BYTE,
-                    Self::ulong_len_u64(sig_len)
+                    Self::ulong_len_u64(sig_len)?
                 )
             }
             None => {
@@ -60,7 +60,7 @@ impl FfiBackend {
             C_VerifySignature,
             Self::session_handle(session)?,
             data_ptr as *mut cryptoki_sys::CK_BYTE,
-            Self::ulong_len_u64(data_len)
+            Self::ulong_len_u64(data_len)?
         )
     }
 
@@ -79,7 +79,7 @@ impl FfiBackend {
             C_VerifySignatureUpdate,
             Self::session_handle(session)?,
             dp_ptr as *mut cryptoki_sys::CK_BYTE,
-            Self::ulong_len_u64(dp_len)
+            Self::ulong_len_u64(dp_len)?
         )
     }
 
