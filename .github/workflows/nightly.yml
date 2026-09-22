@@ -242,8 +242,8 @@ jobs:
 
       - name: cargo llvm-cov (workspace)
         run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info
-          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          cargo llvm-cov --locked --workspace --lcov --output-path lcov.info
+          cargo llvm-cov report --locked --summary-only | tee coverage-summary.txt
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
@@ -286,8 +286,8 @@ jobs:
       # (lib.rs cfg); the raw-pointer parse paths below are the point.
       - name: cargo miri test (width/attribute logic + shim parse paths)
         run: |
-          cargo +nightly miri test -p pkcs11-proxy-ng-types -- width attribute
-          cargo +nightly miri test -p pkcs11-proxy-ng-shim --lib -- \
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-types -- width attribute
+          cargo +nightly miri test --locked -p pkcs11-proxy-ng-shim --lib -- \
             dispatch::general::width_bridge \
             dispatch::general::helpers::nested_template_input \
             not_wild_read

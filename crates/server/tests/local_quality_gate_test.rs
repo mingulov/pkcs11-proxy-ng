@@ -338,6 +338,97 @@ fn supply_chain_pins_are_consistent() {
 }
 
 #[test]
+fn packaging_and_aux_images_are_pinned() {
+    // Deferred T22 F6: packaging + aux Dockerfiles pin bases by digest
+    // (tag kept for readability; the digest is what Docker pulls) and
+    // install a pinned Rust toolchain via the versioned, SHA-verified
+    // rustup-init bootstrap (the Dockerfile.test convention); GitLab
+    // pins its docker images the same way. `scratch` needs no digest
+    // (not a registry ref). Digests are format-checked here; values
+    // were resolved live at pin time (see the group-T22 report).
+    let root = workspace_root();
+    let toolchain_file = fs::read_to_string(root.join("rust-toolchain.toml"))
+        .expect("rust-toolchain.toml should exist");
+    let channel = toolchain_file
+        .lines()
+        .find_map(|line| line.strip_prefix("channel = \"")?.strip_suffix('"'))
+        .expect("rust-toolchain.toml should pin a channel");
+
+    for dockerfile_rel in [
+        "packaging/alpine/Dockerfile.alpine",
+        "packaging/amazon/Dockerfile.amazon",
+        "Dockerfile.be-qemu",
+        "Dockerfile.musl",
+    ] {
+        let path = root.join(dockerfile_rel);
+        let dockerfile = fs::read_to_string(&path).expect("Dockerfile should be readable");
+        assert!(
+            !dockerfile.contains("sh.rustup.rs"),
+            "{dockerfile_rel} should use the versioned rustup-init bootstrap, not sh.rustup.rs"
+        );
+        assert!(
+            !dockerfile.contains("--default-toolchain stable"),
+            "{dockerfile_rel} should pin a toolchain version, not stable"
+        );
+        assert!(
+            dockerfile.contains(&format!("ARG RUST_TOOLCHAIN={channel}")),
+            "{dockerfile_rel} toolchain should match rust-toolchain.toml ({channel})"
+        );
+        assert!(
+            dockerfile.contains("RUSTUP_VERSION=") && dockerfile.contains("sha256sum -c"),
+            "{dockerfile_rel} should verify the rustup-init download by SHA256"
+        );
+        for line in dockerfile.lines().map(str::trim) {
+            if !line.starts_with("FROM ") {
+                continue;
+            }
+            let reference = line.split_whitespace().nth(1).unwrap_or("");
+            if reference == "scratch" || reference.starts_with('$') {
+                continue;
+            }
+            assert!(
+                reference.contains("@sha256:"),
+                "{dockerfile_rel}: FROM `{reference}` should be digest-pinned"
+            );
+        }
+        for line in dockerfile.lines().map(str::trim) {
+            if line.starts_with("ARG ALPINE_BUILD_IMAGE=")
+                || line.starts_with("ARG AMAZON_BUILD_IMAGE=")
+            {
+                let digest = line.split("@sha256:").nth(1).unwrap_or("");
+                assert!(
+                    digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()),
+                    "{dockerfile_rel}: `{line}` should default to a digest-pinned image"
+                );
+            }
+        }
+    }
+
+    let gitlab =
+        fs::read_to_string(root.join(".gitlab-ci.yml")).expect(".gitlab-ci.yml should be readable");
+    for line in gitlab.lines().map(str::trim) {
+        if line.starts_with("image:") && line.contains("docker:") || line.starts_with("- docker:") {
+            assert!(line.contains("@sha256:"), ".gitlab-ci.yml: `{line}` should be digest-pinned");
+        }
+        if line.contains("ALPINE_BUILD_IMAGE:") || line.contains("AMAZON_BUILD_IMAGE:") {
+            assert!(
+                line.contains("@sha256:"),
+                ".gitlab-ci.yml: `{line}` should pass a digest-pinned image"
+            );
+        }
+    }
+    assert!(!gitlab.contains("docker:latest"), ".gitlab-ci.yml should not float on docker:latest");
+    assert!(
+        gitlab.contains("--build-arg ALPINE_BUILD_IMAGE="),
+        ".gitlab-ci.yml should pass the pinned Alpine build image"
+    );
+    assert!(
+        gitlab.contains("--build-arg AMAZON_BUILD_IMAGE="),
+        ".gitlab-ci.yml should pass the pinned Amazon build image"
+    );
+}
+
+#[test]
 fn shim_cdylib_tokio_closure_stays_minimal() {
     // W1-L6-11: confirm Task 22 (W1-L16-15) tokio scoping still covers
     // the shim cdylib — the server-only surface (signal/process, plus
@@ -428,6 +519,34 @@ fn test_matrix_fast_only_matches_ci_tier0_commands() {
             "local test matrix should run Tier 0 commands in CI order"
         );
         previous_position = position;
+    }
+}
+
+#[test]
+fn test_matrix_usage_names_fast_check_set_consistently() {
+    // Deferred T22 F5: --skip-fast skips exactly the fast set --fast-only
+    // runs, so both usage lines must name the same checks.
+    let root = workspace_root();
+    let test_matrix = fs::read_to_string(root.join("scripts/test-matrix.sh"))
+        .expect("scripts/test-matrix.sh should be readable");
+    let usage_line = |flag: &str| {
+        test_matrix
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{flag} ")))
+            .unwrap_or_else(|| panic!("test-matrix.sh usage should document {flag}"))
+            .to_string()
+    };
+    let fast_only = usage_line("--fast-only");
+    let skip_fast = usage_line("--skip-fast");
+    for check in ["fmt", "audit", "deny", "build", "test", "clippy"] {
+        assert!(
+            fast_only.contains(check),
+            "--fast-only usage should name `{check}`: `{fast_only}`"
+        );
+        assert!(
+            skip_fast.contains(check),
+            "--skip-fast usage should name `{check}`: `{skip_fast}`"
+        );
     }
 }
 
@@ -614,6 +733,39 @@ fn ci_locked_builds_match_documented_gate_set() {
         }
         if GATED_VERBS.iter().any(|verb| trimmed.contains(verb)) {
             assert!(trimmed.contains("--locked"), "CI cargo line should run --locked: `{trimmed}`");
+        }
+    }
+
+    // Deferred T22 F3: nightly's llvm-cov/miri lines run --locked too
+    // (same lockfile, no nightly conflict). `cargo llvm-cov report`
+    // accepts --locked (listed in its --help alongside the other
+    // subcommands) and `cargo miri test` supports the same flags as
+    // `cargo test`, so every cargo line here carries it.
+    const NIGHTLY_GATED_VERBS: &[&str] = &[
+        "cargo build",
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+        "cargo xwin",
+        "cargo install",
+        "cargo llvm-cov",
+        "miri test",
+    ];
+    let nightly = fs::read_to_string(root.join(".github/workflows/nightly.yml"))
+        .expect(".github/workflows/nightly.yml should be readable");
+    for line in nightly.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#')
+            || trimmed.starts_with("- name:")
+            || trimmed.starts_with("name:")
+        {
+            continue;
+        }
+        if NIGHTLY_GATED_VERBS.iter().any(|verb| trimmed.contains(verb)) {
+            assert!(
+                trimmed.contains("--locked"),
+                "nightly cargo line should run --locked: `{trimmed}`"
+            );
         }
     }
 
