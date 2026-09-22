@@ -5,6 +5,7 @@
 
 use clap::Parser;
 use pkcs11_proxy_ng_client::{Pkcs11Client, tls::ClientTlsFiles};
+use tracing_subscriber::EnvFilter;
 
 mod cli;
 mod handlers;
@@ -37,11 +38,48 @@ fn build_health_endpoint(
     Ok(builder)
 }
 
+/// Resolve the CLI log filter directive (W1-C11-21):
+/// `--quiet`/`--verbose` override `RUST_LOG`; otherwise `RUST_LOG` wins;
+/// unset falls back to `"info"` (matching the daemon default).
+fn resolve_log_directive(quiet: bool, verbose: bool, rust_log: Option<&str>) -> String {
+    if quiet {
+        "error".to_string()
+    } else if verbose {
+        "debug".to_string()
+    } else {
+        rust_log.unwrap_or("info").to_string()
+    }
+}
+
+/// Install tracing with `RUST_LOG` honored (W1-C11-21): same shape as
+/// the daemon's `init_tracing` (`EnvFilter`, `"info"` default, loud
+/// warning on a set-but-invalid `RUST_LOG`), plus `--quiet`/`--verbose`
+/// overrides. Logs go to stderr so stdout stays plumbable.
+#[allow(clippy::print_stderr)]
+fn init_logging(cli: &Cli) {
+    let rust_log_raw = std::env::var("RUST_LOG").ok();
+    let directive = resolve_log_directive(cli.quiet, cli.verbose, rust_log_raw.as_deref());
+    let filter = match EnvFilter::try_new(&directive) {
+        Ok(filter) => filter,
+        Err(_) => {
+            // Only reachable via a set-but-invalid RUST_LOG (flag
+            // directives are constants): warn loudly, fall back to info.
+            if let Some(value) = rust_log_raw.as_deref() {
+                eprintln!(
+                    "pkcs11-proxy-ng-cli: RUST_LOG={value:?} is not a valid tracing filter; \
+                     using default \"info\""
+                );
+            }
+            EnvFilter::new("info")
+        }
+    };
+    tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).init();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn core::error::Error>> {
-    tracing_subscriber::fmt::init();
-
     let cli = Cli::parse();
+    init_logging(&cli);
 
     if let Commands::Audit { cmd: AuditCmd::Verify { dir, public_key_hex } } = &cli.command {
         return handlers::audit::verify(dir, public_key_hex.as_deref());
@@ -128,9 +166,25 @@ fn exit_code_for_error(err: &(dyn core::error::Error + 'static)) -> Option<i32> 
 
 #[cfg(test)]
 mod tests {
-    use super::{build_health_endpoint, exit_code_for_error};
+    use super::{build_health_endpoint, exit_code_for_error, resolve_log_directive};
     use pkcs11_proxy_ng_client::tls::ClientTlsFiles;
     use std::path::PathBuf;
+
+    // W1-C11-21: RUST_LOG controls CLI verbosity; --quiet/--verbose
+    // override it; unset falls back to "info" (daemon-matching).
+    #[test]
+    fn log_directive_honors_rust_log_with_flag_overrides() {
+        assert_eq!(resolve_log_directive(false, false, None), "info");
+        assert_eq!(resolve_log_directive(false, false, Some("debug")), "debug");
+        assert_eq!(
+            resolve_log_directive(false, false, Some("pkcs11_proxy_ng_cli=trace")),
+            "pkcs11_proxy_ng_cli=trace"
+        );
+        assert_eq!(resolve_log_directive(true, false, Some("debug")), "error");
+        assert_eq!(resolve_log_directive(false, true, Some("warn")), "debug");
+        assert_eq!(resolve_log_directive(true, false, None), "error");
+        assert_eq!(resolve_log_directive(false, true, None), "debug");
+    }
 
     // W1-C11-12: signature-INVALID exits 2 (distinct from generic
     // failures, which exit 1 via the runtime).

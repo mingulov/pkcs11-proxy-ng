@@ -168,10 +168,7 @@ pub(crate) async fn get_attribute(
         .await
         .map_err(crate::handlers::cli_err("C_GetAttributeValue"))?;
     if get_rv.is_err() {
-        eprintln!(
-            "warning: C_GetAttributeValue returned CKR 0x{:08X} (partial results follow)",
-            get_rv.0
-        );
+        eprintln!("warning: C_GetAttributeValue returned {get_rv} (partial results follow)");
     }
 
     for attribute in &results {

@@ -34,21 +34,42 @@ pub(crate) async fn slot_info(client: &mut Pkcs11Client, slot_id: u64) -> CliRes
     Ok(())
 }
 
+/// Render the full `CkTokenInfo` struct (W1-C11-23): all 18 fields —
+/// the RW session counts, memory counters, versions and utc_time the
+/// old 9-line printer dropped.
+pub(super) fn format_token_info(slot_id: u64, info: &CkTokenInfo) -> String {
+    use std::fmt::Write as _;
+    let mut out = format!("Token in slot {slot_id}:");
+    let mut line = |label: &str, value: String| {
+        write!(out, "\n  {label:<20} {value}").expect("String write cannot fail");
+    };
+    line("Label:", info.label.clone());
+    line("Manufacturer:", info.manufacturer_id.clone());
+    line("Model:", info.model.clone());
+    line("Serial:", info.serial_number.clone());
+    line("Flags:", format!("0x{:08X}", info.flags.0));
+    line("Max sessions:", info.max_session_count.to_string());
+    line("Current sessions:", info.session_count.to_string());
+    line("Max RW sessions:", info.max_rw_session_count.to_string());
+    line("RW sessions:", info.rw_session_count.to_string());
+    line("Max PIN length:", info.max_pin_len.to_string());
+    line("Min PIN length:", info.min_pin_len.to_string());
+    line("Total public memory:", format!("{} bytes", info.total_public_memory));
+    line("Free public memory:", format!("{} bytes", info.free_public_memory));
+    line("Total private memory:", format!("{} bytes", info.total_private_memory));
+    line("Free private memory:", format!("{} bytes", info.free_private_memory));
+    line("HW version:", format!("{}.{}", info.hardware_version.0, info.hardware_version.1));
+    line("FW version:", format!("{}.{}", info.firmware_version.0, info.firmware_version.1));
+    line("UTC time:", info.utc_time.clone());
+    out
+}
+
 pub(crate) async fn token_info(client: &mut Pkcs11Client, slot_id: u64) -> CliResult {
     let info = client
         .get_token_info(CkSlotId(slot_id))
         .await
         .map_err(crate::handlers::cli_err("C_GetTokenInfo"))?;
-    println!("Token in slot {}:", slot_id);
-    println!("  Label:            {}", info.label);
-    println!("  Manufacturer:     {}", info.manufacturer_id);
-    println!("  Model:            {}", info.model);
-    println!("  Serial:           {}", info.serial_number);
-    println!("  Flags:            0x{:08X}", info.flags.0);
-    println!("  Max sessions:     {}", info.max_session_count);
-    println!("  Current sessions: {}", info.session_count);
-    println!("  Max PIN length:   {}", info.max_pin_len);
-    println!("  Min PIN length:   {}", info.min_pin_len);
+    println!("{}", format_token_info(slot_id, &info));
     Ok(())
 }
 
@@ -155,7 +176,58 @@ pub(crate) async fn random(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_random_format;
+    use super::{format_token_info, parse_random_format};
+    use pkcs11_proxy_ng_types::{CkTokenFlags, CkTokenInfo};
+
+    // W1-C11-23: token-info prints all 18 CkTokenInfo fields (1 header +
+    // 18 field lines); if the struct grows, extend the printer.
+    #[test]
+    fn token_info_format_prints_all_18_fields() {
+        let info = CkTokenInfo {
+            label: "LABEL-AAA".to_string(),
+            manufacturer_id: "MFR-BBB".to_string(),
+            model: "MODEL-CCC".to_string(),
+            serial_number: "SER-DDD".to_string(),
+            flags: CkTokenFlags(4),
+            max_session_count: 101,
+            session_count: 102,
+            max_rw_session_count: 103,
+            rw_session_count: 104,
+            max_pin_len: 105,
+            min_pin_len: 106,
+            total_public_memory: 107,
+            free_public_memory: 108,
+            total_private_memory: 109,
+            free_private_memory: 110,
+            hardware_version: (9, 8),
+            firmware_version: (7, 6),
+            utc_time: "UTC-EEE".to_string(),
+        };
+        let out = format_token_info(7, &info);
+        for needle in [
+            "LABEL-AAA",
+            "MFR-BBB",
+            "MODEL-CCC",
+            "SER-DDD",
+            "0x00000004",
+            "101",
+            "102",
+            "103",
+            "104",
+            "105",
+            "106",
+            "107",
+            "108",
+            "109",
+            "110",
+            "9.8",
+            "7.6",
+            "UTC-EEE",
+        ] {
+            assert!(out.contains(needle), "missing {needle}:\n{out}");
+        }
+        assert_eq!(out.lines().count(), 19, "header + 18 fields:\n{out}");
+    }
 
     // W1-C11-06: valid formats (case-insensitive) parse; anything else
     // errors loudly listing the valid values instead of silent-hex.

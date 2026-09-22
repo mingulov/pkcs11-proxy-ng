@@ -29,9 +29,10 @@ impl core::error::Error for VerifyInvalid {}
 
 /// Format a `CkRv` from a named PKCS#11 entry point as a CLI-facing error.
 /// Use with `.map_err(cli_err("C_FooName"))?`. Centralises the
-/// `"C_FooName failed: CKR 0x{...}"` shape that was copy-pasted at 37+ sites.
+/// `"C_FooName failed: {rv}"` shape that was copy-pasted at 37+ sites
+/// (W1-C11-16: symbolic CKR name via `CkRv` Display, hex alongside).
 pub(crate) fn cli_err(fn_name: &'static str) -> impl FnOnce(CkRv) -> Box<dyn core::error::Error> {
-    move |e| format!("{fn_name} failed: CKR 0x{:08X}", e.0).into()
+    move |e| format!("{fn_name} failed: {e}").into()
 }
 
 /// Build a (possibly parameterized) mechanism from its CLI name plus an
@@ -544,6 +545,24 @@ mod tests {
             }
         }
         assert_eq!(defs.len(), 1, "expected one cli_mechanism definition, found: {defs:?}");
+    }
+
+    // W1-C11-16: cli_err prints the symbolic CKR name via CkRv
+    // Display (hex alongside) instead of bare hex.
+    #[test]
+    fn cli_err_prints_symbolic_name_with_hex() {
+        use super::cli_err;
+        use pkcs11_proxy_ng_types::CkRv;
+        let err = cli_err("C_Login")(CkRv::PIN_INCORRECT);
+        let msg = err.to_string();
+        assert!(msg.contains("C_Login"), "must name the entry point: {msg}");
+        assert!(msg.contains("CKR_PIN_INCORRECT"), "must print symbolic name: {msg}");
+        assert!(msg.contains("0x"), "must keep hex alongside: {msg}");
+        // Unknown/vendor values still render (no panic, hex present).
+        let err = cli_err("C_Foo")(CkRv(0xDEAD_BEEF));
+        let msg = err.to_string();
+        assert!(msg.contains("C_Foo"), "must name the entry point: {msg}");
+        assert!(msg.contains("0x"), "unknown rv must keep hex: {msg}");
     }
 
     // W1-C11-09: the shared helper delegates to the params builder —
