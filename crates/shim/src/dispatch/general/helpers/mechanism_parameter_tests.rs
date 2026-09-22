@@ -17,6 +17,14 @@ fn ensure_registry() {
     crate::state::replace_mechanism_registry(registry);
 }
 
+/// Test read of a mechanism's typed params via `read_mechanism`.
+///
+/// # Safety
+///
+/// The `read_mechanism` parameter contract: `mechanism.pParameter`, when
+/// non-null with nonzero length, must designate `ulParameterLen` readable
+/// bytes containing the appropriate C struct (the `&` borrow already
+/// upholds the struct-validity half).
 unsafe fn read_ck_mechanism(mechanism: &CK_MECHANISM) -> CkMechanismParams {
     ensure_registry();
     unsafe { read_mechanism(mechanism) }.expect("read mechanism").params.expect("mechanism params")

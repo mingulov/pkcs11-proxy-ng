@@ -150,6 +150,16 @@ unsafe extern "C" fn wrap(
     unsafe { ExactOracle_ByteOutput(out, length) }
 }
 
+/// Oracle parameter writeback for message calls (test-only native provider).
+///
+/// # Safety
+///
+/// When non-null with an active parameter action, `pointer` must designate
+/// a writable message-params struct of `length` bytes matching the loaded
+/// `MECHANISM` (`CK_GCM_MESSAGE_PARAMS` / `CK_CCM_MESSAGE_PARAMS` /
+/// `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`); its embedded `pIv`/`pTag` /
+/// `pNonce`/`pMAC` pointers, when dereferenced, must be writable for their
+/// declared extents. A null `pointer` (or action 0) is a no-op.
 unsafe fn parameter(
     pointer: CK_VOID_PTR,
     length: CK_ULONG,

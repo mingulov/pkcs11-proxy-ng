@@ -118,7 +118,13 @@ pub unsafe extern "C" fn C_GetInterfaceList(
 ///   scan window) are rejected with `CKR_ARGUMENTS_BAD` (W1-C6-06).
 ///
 /// # Safety
-/// `pp_interface` must be a valid, non-null writable pointer.
+/// `pp_interface` must be non-null and writable (a null pointer returns
+/// `CKR_ARGUMENTS_BAD` without writing). A non-null `p_interface_name`
+/// must designate readable bytes up to and including the first NUL within
+/// the 256-byte scan window — overlong or unterminated input is rejected
+/// loudly, never over-read. A non-null `p_version` must be readable for
+/// one `CK_VERSION`. Null `p_interface_name`/`p_version` select the
+/// default interface / any version.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetInterface(
     p_interface_name: *mut CK_UTF8CHAR,
