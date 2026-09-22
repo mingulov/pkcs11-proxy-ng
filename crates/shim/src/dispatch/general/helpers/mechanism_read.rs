@@ -165,7 +165,12 @@ pub(crate) unsafe fn validate_mechanism(p_mechanism: *const CK_MECHANISM) -> CK_
     if has_params && (c_mech.ulParameterLen as usize) > MAX_MECHANISM_PARAM_STRUCT_LEN {
         return rv_err(CkRv::MECHANISM_PARAM_INVALID);
     }
-    match crate::state::mechanism_registry().check_operation(c_mech.mechanism.into(), has_params) {
+    let registry = match crate::state::try_mechanism_registry() {
+        Ok(registry) => registry,
+        // Pre-init (or racing C_Initialize): no registry installed yet.
+        Err(rv) => return rv_err(rv),
+    };
+    match registry.check_operation(c_mech.mechanism.into(), has_params) {
         Ok(()) => rv_ok(),
         Err(rv) => rv_err(rv),
     }
@@ -202,7 +207,7 @@ unsafe fn read_mechanism_budgeted(
     // Hold the Arc until after we have copied the shape string out — the
     // returned `&str` borrows from the Arc, so dropping it before the call
     // below would leave a dangling reference.
-    let registry = crate::state::mechanism_registry();
+    let registry = crate::state::try_mechanism_registry()?;
     let shape = registry.param_shape(c_mech.mechanism.into());
     unsafe { read_mechanism_with_shape_budgeted(&c_mech, shape, budget) }
 }
@@ -220,7 +225,7 @@ pub(crate) unsafe fn read_wrap_key_mechanism(
 ) -> CkResult<CkMechanism> {
     let c_mech = unsafe { read_param_struct(p_mechanism) }?;
     let param_len = c_mech.ulParameterLen as usize;
-    let registry = crate::state::mechanism_registry();
+    let registry = crate::state::try_mechanism_registry()?;
     let shape = match c_mech.mechanism {
         CKM_AES_GCM if param_len == std::mem::size_of::<CK_GCM_WRAP_PARAMS>() => Some("gcm_wrap"),
         CKM_AES_CCM if param_len == std::mem::size_of::<CK_CCM_WRAP_PARAMS>() => Some("ccm_wrap"),

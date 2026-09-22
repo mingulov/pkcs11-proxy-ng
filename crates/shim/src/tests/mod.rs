@@ -30,6 +30,7 @@ mod init_args;
 mod interface;
 mod null_pointers;
 mod output_semantics;
+mod poison_recovery;
 mod regression;
 mod resource_limits;
 mod retained_oracle_live;
