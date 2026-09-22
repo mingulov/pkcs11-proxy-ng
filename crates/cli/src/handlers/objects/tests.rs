@@ -13,7 +13,7 @@ use pkcs11_proxy_ng_backend::mock::MockBackend;
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
 
-use super::find_objects;
+use super::{find_objects, get_attribute};
 
 /// Spin up an in-process gRPC daemon backed by `backend`.
 ///
@@ -126,4 +126,16 @@ async fn small_listing_uses_single_find_call() {
         .await
         .expect("find-objects must succeed");
     assert_eq!(fx.backend.find_objects_call_count(), 1);
+}
+
+// W1-C11-31: an empty --attr query errors loudly (naming --attr) before
+// any session/RPC work, instead of printing nothing and exiting 0.
+#[tokio::test]
+async fn get_attribute_with_no_attrs_errors_loudly() {
+    let mut fx = fixture().await;
+    let err = get_attribute(&mut fx.client, fx.slot, None, 0, vec![], false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("--attr"), "must name the flag: {err}");
 }

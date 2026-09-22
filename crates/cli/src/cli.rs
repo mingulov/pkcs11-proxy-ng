@@ -49,6 +49,9 @@ pub(crate) struct Cli {
     pub(crate) command: Commands,
 }
 
+/// Slot selection convention (W1-C11-17): every command that operates
+/// on a slot takes `--slot-id` (no positionals), so slot-taking
+/// invocations all share one spelling.
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
     /// List available slots.
@@ -60,17 +63,20 @@ pub(crate) enum Commands {
     /// Print CK_SLOT_INFO for a slot.
     SlotInfo {
         /// Slot id (daemon-assigned virtual slot number).
+        #[arg(long)]
         slot_id: u64,
     },
     /// Print the full CK_TOKEN_INFO for the token in a slot.
     TokenInfo {
         /// Slot id (daemon-assigned virtual slot number).
+        #[arg(long)]
         slot_id: u64,
     },
     /// List the mechanisms a token supports (live daemon query for
     /// the slot; contrast list-mechanism-names, the static table).
     ListMechanisms {
         /// Slot id (daemon-assigned virtual slot number).
+        #[arg(long)]
         slot_id: u64,
     },
     /// Find objects on a slot, optionally filtered by label.
@@ -229,6 +235,11 @@ pub(crate) enum Commands {
         /// Read the hex input from stdin instead of `--input`.
         #[arg(long)]
         input_stdin: bool,
+        /// Redact the hex plaintext (prints a sized [redacted] marker
+        /// instead). Off by default: explicitly requested output prints;
+        /// pass --redact when stdout is captured, logged, or shared.
+        #[arg(long)]
+        redact: bool,
     },
     /// Destroy an object by handle (irreversible).
     DestroyObject {
@@ -249,6 +260,9 @@ pub(crate) enum Commands {
         /// Object handle (decimal, from find-objects).
         #[arg(long)]
         object_handle: u64,
+        /// Skip the interactive destruction confirmation prompt.
+        #[arg(long)]
+        force: bool,
     },
     /// Print an object's size in bytes.
     GetObjectSize {
@@ -471,9 +485,9 @@ pub(crate) enum Commands {
         ec_params: Option<String>,
     },
     /// Probe the daemon's gRPC health endpoint. Exits 0 if SERVING,
-    /// non-zero otherwise. Use as an `exec`-based k8s readiness probe
-    /// (closes FOLLOWUP-grpc-health-probe — TCP-only probes don't
-    /// honour the daemon's backend-health gating).
+    /// 1 if NOT_SERVING, 2 if the probe itself fails. Use as an
+    /// `exec`-based k8s readiness probe (TCP-only probes don't honour
+    /// the daemon's backend-health gating).
     Health {
         /// gRPC service name to check. The daemon only flips the
         /// status of its own service when the backend-health gate
@@ -499,6 +513,9 @@ pub(crate) enum Commands {
         /// Label to assign the token.
         #[arg(long)]
         label: String,
+        /// Skip the interactive erasure confirmation prompt.
+        #[arg(long)]
+        force: bool,
     },
     /// Initialize the user PIN (requires the SO PIN).
     InitPin {
@@ -666,9 +683,14 @@ pub(crate) enum Commands {
         /// Object handle (decimal, from find-objects).
         #[arg(long)]
         object_handle: u64,
-        /// Attribute to read: name (LABEL, SUBJECT, ...), 0x<hex>, or decimal id. Repeatable.
-        #[arg(long)]
+        /// Attribute to read: name (LABEL, SUBJECT, ...), 0x<hex>, or decimal id. Repeatable (at least one required).
+        #[arg(long, required = true)]
         attr: Vec<String>,
+        /// Redact key-material values ([redacted]) instead of printing
+        /// them. Off by default: explicitly requested output prints;
+        /// pass --redact when stdout is captured, logged, or shared.
+        #[arg(long)]
+        redact: bool,
     },
     /// Import an X.509 certificate object from a file.
     ImportCertificate {
@@ -1145,5 +1167,220 @@ mod tests {
             rendered.contains(env!("CARGO_PKG_VERSION")),
             "version output should include crate version: {rendered}"
         );
+    }
+
+    // W1-C11-17: slot selection is `--slot-id` on every slot command —
+    // the former slot-info/token-info/list-mechanisms positionals are gone.
+    #[test]
+    fn slot_selection_uses_long_slot_id_everywhere() {
+        with_env_vars(&[], || {
+            let cli = Cli::try_parse_from(["pkcs11-proxy-ng-cli", "slot-info", "--slot-id", "3"])
+                .unwrap();
+            assert!(matches!(cli.command, Commands::SlotInfo { slot_id: 3 }));
+            let cli = Cli::try_parse_from(["pkcs11-proxy-ng-cli", "token-info", "--slot-id", "3"])
+                .unwrap();
+            assert!(matches!(cli.command, Commands::TokenInfo { slot_id: 3 }));
+            let cli =
+                Cli::try_parse_from(["pkcs11-proxy-ng-cli", "list-mechanisms", "--slot-id", "3"])
+                    .unwrap();
+            assert!(matches!(cli.command, Commands::ListMechanisms { slot_id: 3 }));
+            for cmd in ["slot-info", "token-info", "list-mechanisms"] {
+                assert!(
+                    Cli::try_parse_from(["pkcs11-proxy-ng-cli", cmd, "3"]).is_err(),
+                    "{cmd} must not take a positional slot id"
+                );
+            }
+        });
+    }
+
+    // W1-C11-18: user-facing Health help must not leak internal tracker
+    // references.
+    #[test]
+    fn health_help_has_no_tracker_references() {
+        use clap::CommandFactory;
+        let about = Cli::command()
+            .find_subcommand("health")
+            .expect("health exists")
+            .get_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            !about.to_lowercase().contains("followup"),
+            "health help leaks tracker text: {about}"
+        );
+    }
+
+    // W1-C11-19: Health help documents the 0/1/2 exit codes.
+    #[test]
+    fn health_help_documents_exit_codes() {
+        use clap::CommandFactory;
+        let about = Cli::command()
+            .find_subcommand("health")
+            .expect("health exists")
+            .get_about()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        assert!(
+            about.contains("Exits 0 if SERVING, 1 if NOT_SERVING, 2"),
+            "health help must document 0/1/2: {about}"
+        );
+    }
+
+    // W1-C11-27: destructive commands accept --force (default pinned
+    // once the field exists).
+    #[test]
+    fn destructive_commands_accept_force_flag() {
+        with_env_vars(&[("PKCS11_PROXY_SO_PIN", "so")], || {
+            Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "destroy-object",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+                "--force",
+            ])
+            .unwrap();
+            Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "init-token",
+                "--slot-id",
+                "1",
+                "--label",
+                "t",
+                "--force",
+            ])
+            .unwrap();
+        });
+    }
+
+    // W1-C11-31: get-attribute with zero --attr is a loud usage error,
+    // never a silent-Ok empty query.
+    #[test]
+    fn get_attribute_rejects_zero_attr() {
+        with_env_vars(&[], || {
+            let err = match Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "get-attribute",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+            ]) {
+                Ok(_) => panic!("zero --attr must fail to parse"),
+                Err(err) => err,
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+            Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "get-attribute",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+                "--attr",
+                "LABEL",
+            ])
+            .unwrap();
+        });
+    }
+
+    // W1-C11-27: --force defaults off (confirmation required).
+    #[test]
+    fn force_flag_defaults_off() {
+        with_env_vars(&[("PKCS11_PROXY_SO_PIN", "so")], || {
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "destroy-object",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Commands::DestroyObject { force: false, .. }));
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "init-token",
+                "--slot-id",
+                "1",
+                "--label",
+                "t",
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Commands::InitToken { force: false, .. }));
+        });
+    }
+
+    // W1-L2-12: get-attribute and decrypt accept --redact (default pinned
+    // once the field exists).
+    #[test]
+    fn secret_printing_commands_accept_redact_flag() {
+        with_env_vars(&[], || {
+            Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "get-attribute",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+                "--attr",
+                "LABEL",
+                "--redact",
+            ])
+            .unwrap();
+            Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "decrypt",
+                "--slot-id",
+                "1",
+                "--pin",
+                "x",
+                "--key-label",
+                "k",
+                "--mechanism",
+                "AES_ECB",
+                "--input",
+                "aa",
+                "--redact",
+            ])
+            .unwrap();
+        });
+    }
+
+    // W1-L2-12: --redact defaults off: explicitly requested output prints
+    // (intended UX per W2-V6); --redact opts into redaction.
+    #[test]
+    fn redact_flag_defaults_off() {
+        with_env_vars(&[], || {
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "get-attribute",
+                "--slot-id",
+                "1",
+                "--object-handle",
+                "9",
+                "--attr",
+                "LABEL",
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Commands::GetAttribute { redact: false, .. }));
+            let cli = Cli::try_parse_from([
+                "pkcs11-proxy-ng-cli",
+                "decrypt",
+                "--slot-id",
+                "1",
+                "--pin",
+                "x",
+                "--key-label",
+                "k",
+                "--mechanism",
+                "AES_ECB",
+                "--input",
+                "aa",
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Commands::Decrypt { redact: false, .. }));
+        });
     }
 }

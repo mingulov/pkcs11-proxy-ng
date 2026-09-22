@@ -97,7 +97,8 @@ async fn main() -> Result<(), Box<dyn core::error::Error>> {
     // FOLLOWUP-grpc-health-probe: a no-side-effects health check that
     // honours the daemon's backend-health gating (the daemon registers
     // its main service and flips NOT_SERVING on N consecutive backend
-    // failures). Exits 0/1/2 so k8s exec probes can interpret.
+    // failures). Exits 0 if SERVING, 1 if NOT_SERVING, 2 if the probe
+    // itself fails, so k8s exec probes (and scripts) can interpret.
     if let Commands::Health { service } = &cli.command {
         use tonic_health::pb::HealthCheckRequest;
         use tonic_health::pb::health_check_response::ServingStatus;
@@ -109,23 +110,39 @@ async fn main() -> Result<(), Box<dyn core::error::Error>> {
             cli.tls_domain.clone(),
         )
         .map_err(|e| format!("invalid TLS flags: {e}"))?;
-        let channel = build_health_endpoint(&cli.endpoint, tls_files)
-            .map_err(|e| format!("health probe setup failed: {e}"))?
-            .connect()
-            .await?;
+        let endpoint = match build_health_endpoint(&cli.endpoint, tls_files) {
+            Ok(endpoint) => endpoint,
+            Err(e) => {
+                eprintln!("health probe setup failed: {e}");
+                std::process::exit(2);
+            }
+        };
+        let channel = match endpoint.connect().await {
+            Ok(channel) => channel,
+            Err(e) => {
+                eprintln!("health probe connection failed: {e}");
+                std::process::exit(2);
+            }
+        };
         let mut hc = HealthClient::new(channel);
-        let resp = hc.check(HealthCheckRequest { service: service.clone() }).await?.into_inner();
+        let resp = match hc.check(HealthCheckRequest { service: service.clone() }).await {
+            Ok(resp) => resp.into_inner(),
+            Err(e) => {
+                eprintln!("health probe check failed: {e}");
+                std::process::exit(2);
+            }
+        };
         let status = ServingStatus::try_from(resp.status).unwrap_or(ServingStatus::Unknown);
-        match status {
-            ServingStatus::Serving => {
-                println!("SERVING");
-                return Ok(());
-            }
-            other => {
-                eprintln!("NOT_SERVING: {other:?}");
-                std::process::exit(1);
-            }
+        if status == ServingStatus::Serving {
+            println!("SERVING");
+            return Ok(());
         }
+        if status == ServingStatus::NotServing {
+            eprintln!("NOT_SERVING");
+        } else {
+            eprintln!("health probe indeterminate: {status:?}");
+        }
+        std::process::exit(health_exit_code(status));
     }
 
     let tls_files = ClientTlsFiles::from_optional_paths(
@@ -164,9 +181,24 @@ fn exit_code_for_error(err: &(dyn core::error::Error + 'static)) -> Option<i32> 
     if err.downcast_ref::<handlers::VerifyInvalid>().is_some() { Some(2) } else { None }
 }
 
+/// Map a gRPC health status to the documented probe exit code
+/// (W1-C11-19): 0 = SERVING, 1 = the daemon answered NOT_SERVING, 2 =
+/// indeterminate (UNKNOWN/SERVICE_UNKNOWN — a probe failure, not a
+/// verdict, like a transport error).
+fn health_exit_code(status: tonic_health::pb::health_check_response::ServingStatus) -> i32 {
+    use tonic_health::pb::health_check_response::ServingStatus;
+    match status {
+        ServingStatus::Serving => 0,
+        ServingStatus::NotServing => 1,
+        ServingStatus::Unknown | ServingStatus::ServiceUnknown => 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_health_endpoint, exit_code_for_error, resolve_log_directive};
+    use super::{
+        build_health_endpoint, exit_code_for_error, health_exit_code, resolve_log_directive,
+    };
     use pkcs11_proxy_ng_client::tls::ClientTlsFiles;
     use std::path::PathBuf;
 
@@ -194,6 +226,18 @@ mod tests {
         assert_eq!(exit_code_for_error(invalid.as_ref()), Some(2));
         let generic: Box<dyn core::error::Error> = std::io::Error::other("boom").into();
         assert_eq!(exit_code_for_error(generic.as_ref()), None);
+    }
+
+    // W1-C11-19: the health probe exits 0 when SERVING, 1 when the
+    // daemon answers NOT_SERVING, and 2 when the probe itself is
+    // indeterminate (UNKNOWN/SERVICE_UNKNOWN) or fails.
+    #[test]
+    fn health_exit_code_pins_all_statuses() {
+        use tonic_health::pb::health_check_response::ServingStatus;
+        assert_eq!(health_exit_code(ServingStatus::Serving), 0);
+        assert_eq!(health_exit_code(ServingStatus::NotServing), 1);
+        assert_eq!(health_exit_code(ServingStatus::Unknown), 2);
+        assert_eq!(health_exit_code(ServingStatus::ServiceUnknown), 2);
     }
 
     #[test]

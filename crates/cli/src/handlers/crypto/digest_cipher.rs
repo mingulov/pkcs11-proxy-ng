@@ -53,6 +53,17 @@ pub(crate) async fn encrypt(
     Ok(())
 }
 
+/// Render `decrypt` output (W1-L2-12): the hex plaintext as before,
+/// or a sized `[redacted]` marker with `--redact` (the length still
+/// proves the expected output size without exposing content).
+fn format_decrypt_output(plaintext: &[u8], redact: bool) -> String {
+    if redact {
+        format!("[redacted: {} bytes of plaintext]", plaintext.len())
+    } else {
+        hex::encode(plaintext)
+    }
+}
+
 pub(crate) async fn decrypt(
     client: &mut Pkcs11Client,
     slot_id: u64,
@@ -61,6 +72,7 @@ pub(crate) async fn decrypt(
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
     input: String,
+    redact: bool,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
@@ -76,7 +88,24 @@ pub(crate) async fn decrypt(
         .decrypt(session, &ciphertext)
         .await
         .map_err(crate::handlers::cli_err("C_Decrypt"))?;
-    println!("{}", hex::encode(&plaintext));
+    println!("{}", format_decrypt_output(&plaintext, redact));
     close_session(client, session, true).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_decrypt_output;
+
+    // W1-L2-12: --redact replaces the hex plaintext with a sized marker
+    // (length still proves the expected output size); unredacted output
+    // keeps the exact hex shape.
+    #[test]
+    fn format_decrypt_output_redacts_when_asked() {
+        assert_eq!(format_decrypt_output(&[0xab, 0xcd], false), "abcd");
+        let redacted = format_decrypt_output(&[0xab, 0xcd], true);
+        assert!(redacted.contains("redacted"), "must mark redaction: {redacted}");
+        assert!(redacted.contains('2'), "must size the plaintext: {redacted}");
+        assert!(!redacted.contains("abcd"), "must not leak plaintext: {redacted}");
+    }
 }

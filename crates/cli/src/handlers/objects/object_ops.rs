@@ -16,6 +16,53 @@ fn format_ulong_attribute(attr_type: CkAttributeType, value: u64) -> String {
     }
 }
 
+/// Attribute types whose values are key material (W1-L2-12): the
+/// secret-key/private-key blobs `get-attribute --redact` replaces with
+/// `[redacted]`. Public halves (MODULUS, PUBLIC_EXPONENT, EC_POINT,
+/// ...) and metadata are never secret.
+fn is_secret_attribute(attr_type: CkAttributeType) -> bool {
+    use CkAttributeType as T;
+    matches!(
+        attr_type,
+        T::VALUE
+            | T::PRIVATE_EXPONENT
+            | T::PRIME_1
+            | T::PRIME_2
+            | T::EXPONENT_1
+            | T::EXPONENT_2
+            | T::COEFFICIENT
+    )
+}
+
+/// Render one `get-attribute` output line (W1-L2-12): with `redact`, a
+/// present secret value prints as `[redacted]`; everything else keeps
+/// its exact historical shape.
+fn format_attribute_value(name: &str, attribute: &CkAttribute, redact: bool) -> String {
+    if redact && attribute.value.is_some() && is_secret_attribute(attribute.attr_type) {
+        return format!("  {name}: [redacted]");
+    }
+    match &attribute.value {
+        Some(CkAttributeValue::Bytes(bytes)) => bytes.expose(|raw| {
+            if raw.iter().all(|byte| byte.is_ascii_graphic() || *byte == b' ') {
+                format!("  {name}: \"{}\"", String::from_utf8_lossy(raw))
+            } else {
+                format!("  {name}: 0x{}", hex::encode(raw))
+            }
+        }),
+        Some(CkAttributeValue::Ulong(value)) => {
+            format!("  {name}: {}", format_ulong_attribute(attribute.attr_type, *value))
+        }
+        Some(CkAttributeValue::Bool(value)) => format!("  {name}: {value}"),
+        Some(CkAttributeValue::String(value)) => {
+            value.expose(|raw| format!("  {name}: \"{}\"", String::from_utf8_lossy(raw)))
+        }
+        Some(CkAttributeValue::NestedTemplate(subs)) => {
+            format!("  {name}: <nested template, {} attributes>", subs.len())
+        }
+        None => format!("  {name}: <unavailable>"),
+    }
+}
+
 pub(crate) async fn find_objects(
     client: &mut Pkcs11Client,
     slot_id: u64,
@@ -151,7 +198,14 @@ pub(crate) async fn get_attribute(
     pin: Option<SecretBytes>,
     object_handle: u64,
     attr: Vec<String>,
+    redact: bool,
 ) -> CliResult {
+    // W1-C11-31: an empty query prints nothing and would exit 0 — reject
+    // it loudly before any session/RPC work (clap also requires --attr,
+    // this guards programmatic callers).
+    if attr.is_empty() {
+        return Err("get-attribute requires at least one --attr (e.g. --attr LABEL)".into());
+    }
     let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     let logged_in = pin.is_some();
     login_if_present(client, session, pin).await?;
@@ -173,26 +227,7 @@ pub(crate) async fn get_attribute(
 
     for attribute in &results {
         let name = attr_type_name(attribute.attr_type.0);
-        match &attribute.value {
-            Some(CkAttributeValue::Bytes(bytes)) => bytes.expose(|raw| {
-                if raw.iter().all(|byte| byte.is_ascii_graphic() || *byte == b' ') {
-                    println!("  {}: \"{}\"", name, String::from_utf8_lossy(raw));
-                } else {
-                    println!("  {}: 0x{}", name, hex::encode(raw));
-                }
-            }),
-            Some(CkAttributeValue::Ulong(value)) => {
-                println!("  {}: {}", name, format_ulong_attribute(attribute.attr_type, *value))
-            }
-            Some(CkAttributeValue::Bool(value)) => println!("  {}: {}", name, value),
-            Some(CkAttributeValue::String(value)) => {
-                value.expose(|raw| println!("  {}: \"{}\"", name, String::from_utf8_lossy(raw)))
-            }
-            Some(CkAttributeValue::NestedTemplate(subs)) => {
-                println!("  {}: <nested template, {} attributes>", name, subs.len());
-            }
-            None => println!("  {}: <unavailable>", name),
-        }
+        println!("{}", format_attribute_value(&name, attribute, redact));
     }
 
     close_session(client, session, logged_in).await;
@@ -201,8 +236,8 @@ pub(crate) async fn get_attribute(
 
 #[cfg(test)]
 mod tests {
-    use super::format_ulong_attribute;
-    use pkcs11_proxy_ng_types::CkAttributeType;
+    use super::{format_attribute_value, format_ulong_attribute, is_secret_attribute};
+    use pkcs11_proxy_ng_types::{CkAttribute, CkAttributeType, CkAttributeValue};
 
     // W1-C11-07: CLASS renders symbolically from the now-typed Ulong
     // value; other ulong attrs render decoded (no raw-LE-hex fallback).
@@ -214,5 +249,66 @@ mod tests {
     #[test]
     fn non_class_ulong_renders_decoded_number() {
         assert_eq!(format_ulong_attribute(CkAttributeType::VALUE_LEN, 32), "32".to_string());
+    }
+
+    // W1-L2-12: exactly the key-material attributes count as secret
+    // (public halves and metadata never redact).
+    #[test]
+    fn is_secret_attribute_pins_key_material() {
+        use CkAttributeType as T;
+        for secret in [
+            T::VALUE,
+            T::PRIVATE_EXPONENT,
+            T::PRIME_1,
+            T::PRIME_2,
+            T::EXPONENT_1,
+            T::EXPONENT_2,
+            T::COEFFICIENT,
+        ] {
+            assert!(is_secret_attribute(secret), "{secret:?} must be secret");
+        }
+        for public in [
+            T::LABEL,
+            T::CLASS,
+            T::KEY_TYPE,
+            T::MODULUS,
+            T::MODULUS_BITS,
+            T::PUBLIC_EXPONENT,
+            T::EC_PARAMS,
+            T::EC_POINT,
+            T::ID,
+            T::SUBJECT,
+            T::ISSUER,
+            T::SERIAL_NUMBER,
+            T::VALUE_LEN,
+        ] {
+            assert!(!is_secret_attribute(public), "{public:?} must not be secret");
+        }
+    }
+
+    // W1-L2-12: --redact hides secret values only; public values still
+    // print, and unredacted secrets still print (explicitly requested).
+    #[test]
+    fn format_attribute_redacts_secrets_only_when_asked() {
+        let secret = CkAttribute {
+            attr_type: CkAttributeType::VALUE,
+            value: Some(CkAttributeValue::Bytes(vec![0xab, 0xcd].into())),
+        };
+        let redacted = format_attribute_value("VALUE", &secret, true);
+        assert!(redacted.contains("[redacted]"), "must redact: {redacted}");
+        assert!(!redacted.contains("abcd"), "must not leak hex: {redacted}");
+        let shown = format_attribute_value("VALUE", &secret, false);
+        assert!(shown.contains("abcd"), "explicit request prints: {shown}");
+
+        let label = CkAttribute {
+            attr_type: CkAttributeType::LABEL,
+            value: Some(CkAttributeValue::String("my-key".to_string().into())),
+        };
+        let line = format_attribute_value("LABEL", &label, true);
+        assert!(line.contains("my-key"), "public values print under --redact: {line}");
+
+        let missing = CkAttribute { attr_type: CkAttributeType::PRIVATE_EXPONENT, value: None };
+        let line = format_attribute_value("PRIVATE_EXPONENT", &missing, true);
+        assert!(line.contains("unavailable"), "missing stays missing: {line}");
     }
 }

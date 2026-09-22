@@ -233,10 +233,31 @@ async fn decrypt_resolves_secret_key_by_label() {
         "AES_ECB".to_string(),
         None,
         DATA_HEX.to_string(),
+        false,
     )
     .await
     .expect("decrypt must resolve a SECRET_KEY object by label");
     assert_fallback_search_order(&fx.backend, CkObjectClass::PRIVATE_KEY);
+}
+
+// W1-L2-12: the redacted decrypt path runs end to end (the marker shape
+// is pinned by `format_decrypt_output`'s unit test; stdout is not
+// captured here).
+#[tokio::test]
+async fn decrypt_with_redact_succeeds() {
+    let mut fx = fixture(CkObjectClass::SECRET_KEY, SECRET_LABEL).await;
+    decrypt(
+        &mut fx.client,
+        fx.slot,
+        SecretBytes::from(PIN),
+        SECRET_LABEL.to_string(),
+        "AES_ECB".to_string(),
+        None,
+        DATA_HEX.to_string(),
+        true,
+    )
+    .await
+    .expect("redacted decrypt must succeed");
 }
 
 #[tokio::test]
@@ -305,6 +326,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
                 "AES_ECB".to_string(),
                 None,
                 DATA_HEX.to_string(),
+                false,
             )
             .await
         }

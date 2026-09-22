@@ -46,8 +46,44 @@ pub(crate) fn cli_mechanism(
     crate::mech_params::build_mechanism(name, params_file)
 }
 
+/// Require explicit confirmation for a destructive operation (W1-C11-27):
+/// `--force` skips the prompt (scripting); otherwise the operator must
+/// type `yes` (or `y`) on stdin. Anything else — including EOF, so
+/// non-TTY stdin fails closed — aborts with an error naming `--force`.
+/// The prompt goes to stderr so stdout stays plumbable.
+pub(crate) fn confirm_destructive(
+    prompt: &str,
+    force: bool,
+    reader: &mut dyn std::io::BufRead,
+) -> Result<(), Box<dyn core::error::Error>> {
+    if force {
+        return Ok(());
+    }
+    eprint!("{prompt}");
+    let mut answer = String::new();
+    reader.read_line(&mut answer).map_err(|e| format!("cannot read confirmation: {e}"))?;
+    if answer.trim().eq_ignore_ascii_case("yes") || answer.trim().eq_ignore_ascii_case("y") {
+        return Ok(());
+    }
+    Err("aborted: confirmation required (type 'yes' or rerun with --force)".into())
+}
+
+/// Commands `main` dispatches before the PKCS#11 client is initialized
+/// (W1-C11-20): they never reach `run_command`, so their arms below are
+/// all explicit `unreachable!` with a reason — never silent `Ok(())`.
+pub(crate) fn dispatched_before_client_init(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::ListMechanismNames | Commands::Health { .. } | Commands::Audit { .. }
+    )
+}
+
 pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) -> CliResult {
     use crate::secrets as s;
+    debug_assert!(
+        !dispatched_before_client_init(&command),
+        "main must dispatch this command before client init"
+    );
     // Secret resolvers need the raw argv to tell an explicit `--flag`
     // value (warned) from an env-filled one (silent).
     let argv: Vec<String> =
@@ -72,11 +108,14 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
         Commands::Random { slot_id, len, format } => {
             query::random(client, slot_id, len, format).await
         }
-        Commands::ListMechanismNames => Ok(()),
-        // Handled in main() before we initialize the PKCS#11 client.
-        Commands::Health { .. } => Ok(()),
-        // Audit subcommands are intercepted in main() before the PKCS#11 client
-        // is initialized, so this arm is never reached.
+        // All three are dispatched in main() before the PKCS#11 client
+        // is initialized, so these arms are never reached (W1-C11-20).
+        Commands::ListMechanismNames => {
+            unreachable!("list-mechanism-names is dispatched in main before client init")
+        }
+        Commands::Health { .. } => {
+            unreachable!("health is dispatched in main before client init")
+        }
         Commands::Audit { .. } => {
             unreachable!("audit subcommands are dispatched in main before client init")
         }
@@ -84,8 +123,16 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
             objects::find_objects(client, slot_id, pin, label, verbose).await
         }
-        Commands::DestroyObject { slot_id, pin, pin_stdin, object_handle } => {
+        Commands::DestroyObject { slot_id, pin, pin_stdin, object_handle, force } => {
             let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            confirm_destructive(
+                &format!(
+                    "Destroy object {object_handle} on slot {slot_id}? This cannot be undone. \
+                     Type 'yes' to confirm (or rerun with --force): "
+                ),
+                force,
+                &mut std::io::stdin().lock(),
+            )?;
             objects::destroy_object(client, slot_id, pin, object_handle).await
         }
         Commands::GetObjectSize { slot_id, pin, pin_stdin, object_handle } => {
@@ -111,9 +158,9 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             )?;
             objects::create_object(client, slot_id, pin, label, value).await
         }
-        Commands::GetAttribute { slot_id, pin, pin_stdin, object_handle, attr } => {
+        Commands::GetAttribute { slot_id, pin, pin_stdin, object_handle, attr, redact } => {
             let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
-            objects::get_attribute(client, slot_id, pin, object_handle, attr).await
+            objects::get_attribute(client, slot_id, pin, object_handle, attr, redact).await
         }
         Commands::ImportCertificate { slot_id, pin, pin_stdin, label, file } => {
             let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
@@ -291,6 +338,7 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             input,
             input_file,
             input_stdin,
+            redact,
         } => {
             let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
             let input = s::resolve_required_secret(
@@ -300,7 +348,8 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
                 stdin,
                 warn,
             )?;
-            crypto::decrypt(client, slot_id, pin, key_label, mechanism, params_file, input).await
+            crypto::decrypt(client, slot_id, pin, key_label, mechanism, params_file, input, redact)
+                .await
         }
         Commands::Verify {
             slot_id,
@@ -334,13 +383,21 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             crypto::verify(client, slot_id, pin, key_label, mechanism, params_file, data, signature)
                 .await
         }
-        Commands::InitToken { slot_id, so_pin, label } => {
+        Commands::InitToken { slot_id, so_pin, label, force } => {
             let so_pin = s::resolve_required_inline_pin(
                 Some(so_pin),
                 "so-pin",
                 "PKCS11_PROXY_SO_PIN",
                 &argv,
                 warn,
+            )?;
+            confirm_destructive(
+                &format!(
+                    "Initialize the token in slot {slot_id} with label '{label}'? This ERASES \
+                     the token contents. Type 'yes' to confirm (or rerun with --force): "
+                ),
+                force,
+                &mut std::io::stdin().lock(),
             )?;
             admin::init_token(client, slot_id, so_pin, label).await
         }
@@ -362,7 +419,8 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             admin::init_pin(client, slot_id, so_pin, new_pin).await
         }
         Commands::SeedRandom { slot_id, pin, pin_stdin, seed } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            // W1-C11-33: optional PIN like digest/session-info/verify.
+            let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
             admin::seed_random(client, slot_id, pin, seed).await
         }
         Commands::SetPin { slot_id, pin, pin_stdin, new_pin } => {
@@ -577,5 +635,49 @@ mod tests {
         assert_eq!(mech.params, None);
         let err = cli_mechanism("AES_GCM", None).unwrap_err().to_string();
         assert!(err.contains("--params-file"), "must hint: {err}");
+    }
+
+    // W1-C11-20: exactly the main-dispatched commands bypass run_command
+    // (all three arms are unreachable-with-reason, not silent-Ok).
+    #[test]
+    fn main_dispatched_commands_pin() {
+        use super::dispatched_before_client_init;
+        use crate::cli::{AuditCmd, Commands};
+        assert!(dispatched_before_client_init(&Commands::ListMechanismNames));
+        assert!(dispatched_before_client_init(&Commands::Health { service: String::new() }));
+        assert!(dispatched_before_client_init(&Commands::Audit {
+            cmd: AuditCmd::Verify { dir: std::path::PathBuf::from("d"), public_key_hex: None },
+        }));
+        assert!(!dispatched_before_client_init(&Commands::GetInfo));
+        assert!(!dispatched_before_client_init(&Commands::SlotInfo { slot_id: 1 }));
+    }
+
+    // W1-C11-27: --force skips the prompt without reading stdin.
+    #[test]
+    fn confirm_destructive_force_skips_prompt() {
+        use super::confirm_destructive;
+        let mut input = std::io::Cursor::new(b"no".as_slice());
+        confirm_destructive("prompt", true, &mut input).unwrap();
+        assert_eq!(input.position(), 0, "--force must not read stdin");
+    }
+
+    // W1-C11-27: without --force, only an explicit yes/no-yes confirms;
+    // anything else (including EOF, for non-TTY stdin) aborts fail-closed
+    // and names the --force bypass.
+    #[test]
+    fn confirm_destructive_reads_yes_no() {
+        use super::confirm_destructive;
+        for yes in ["yes", "YES", " y ", "Y\n"] {
+            let mut input = std::io::Cursor::new(yes.as_bytes());
+            confirm_destructive("prompt", false, &mut input)
+                .unwrap_or_else(|e| panic!("{yes:?} must confirm: {e}"));
+        }
+        for no in ["no", "n", "", "abort", "yes please"] {
+            let mut input = std::io::Cursor::new(no.as_bytes());
+            let err = confirm_destructive("prompt", false, &mut input).unwrap_err().to_string();
+            assert!(err.contains("--force"), "must name the bypass: {err}");
+        }
+        let mut eof = std::io::Cursor::new(b"".as_slice());
+        assert!(confirm_destructive("prompt", false, &mut eof).is_err(), "EOF must abort");
     }
 }
