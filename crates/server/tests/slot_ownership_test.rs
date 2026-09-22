@@ -868,3 +868,40 @@ async fn slot_events_translate_backend_ids_and_suppress_unknown_or_denied_slots(
         .into_inner();
     assert_eq!((denied.ck_rv, denied.slot_id), (CkRv::NO_EVENT.0, 0));
 }
+
+// T16: custom-service boundary pin — the service honors backend
+// admission for non-FFI backends exactly as for the real one: a call
+// the (mock) backend refuses answers locally with zero dispatch, so
+// the queued event survives for the next poll. Custom-backend
+// compliance is pinned here, never inferred from FfiBackend tests.
+#[tokio::test]
+async fn slot_events_refused_before_dispatch_for_custom_backend() {
+    let f = fixture().await;
+    let mut client = open(&f, false).await;
+    f.backend.enqueue_slot_event(CkSlotId(42));
+    // Blocking mode: refused by the shared width→mode boundary.
+    let refused = client
+        .rpc
+        .wait_for_slot_event(WaitForSlotEventRequest {
+            client_context_id: client.context.clone(),
+            flags: 0,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((refused.ck_rv, refused.slot_id), (CkRv::FUNCTION_NOT_SUPPORTED.0, 0));
+    // Zero dispatch on the refusal: the queued event is still there.
+    // (Checked-width refusal is pinned in 32-bit-only backend tests —
+    // every u64 fits CK_ULONG on 64-bit hosts, so no portable RPC case
+    // can exercise it here.)
+    let response = client
+        .rpc
+        .wait_for_slot_event(WaitForSlotEventRequest {
+            client_context_id: client.context,
+            flags: 1,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((response.ck_rv, response.slot_id), (CkRv::OK.0, 1));
+}

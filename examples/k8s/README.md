@@ -1,9 +1,15 @@
 # Reference k8s deployment for pkcs11-proxy-ng
 
 This directory contains the manifests the SRE/ops audit
-exercises. It is the recommended starting point for operators
-adapting pkcs11-proxy-ng to their cluster — copy these files into
-your overlay / Helm chart and tune for your environment.
+exercises. It is an isolated audit/test fixture — not a production
+template and not a recommended starting point. Its `auth = "none"`
+transport and baked-in demo PINs exist so the audit can exercise the
+proxy without credential provisioning; do not promote this fixture
+by copying it into an overlay or chart. Start production from
+`examples/configs/{prod,staging}` with mTLS enabled (see
+[mTLS setup](../../doc/release/mtls-setup.md) and the
+[operator runbook](../../doc/runbooks/operating-pkcs11-proxy-ng.md))
+and provision real PINs.
 
 ## Topology
 

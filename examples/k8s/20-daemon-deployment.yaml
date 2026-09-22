@@ -63,6 +63,9 @@ spec:
               slots.mechanisms = ALL
               library.reset_on_fork = false
               EOF
+              # Fixture-only PIN setup: baked-in demo PINs so the audit runs
+              # without credential provisioning. Production provisions
+              # real PINs out of band — never bake them into manifests.
               if ! softhsm2-util --show-slots 2>/dev/null | grep -q "Label:[[:space:]]*demo-token"; then
                   softhsm2-util --init-token --free \
                       --label demo-token --so-pin abcd --pin 1234 >/dev/null

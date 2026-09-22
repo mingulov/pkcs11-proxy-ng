@@ -69,6 +69,14 @@ pub(super) async fn wait_for_slot_event_with_grace(
     // mode boundary must live in the backend seam, not as a top-of-
     // handler flag check, so lifecycle/width failures keep precedence
     // over FUNCTION_NOT_SUPPORTED (ownership §"Slot-event scope").
+    // T16: the real backend and the trait default admit DONT_BLOCK
+    // only — a blocking wait is a local refusal that never reaches
+    // native dispatch. Blocking native dispatch below exists solely
+    // for the custom-service boundary: a custom backend that overrides
+    // `admit_slot_wait` to admit blocking waits. Single-waiter
+    // serialization likewise lives backend-side (the FFI native
+    // domain's waiter reservation refuses contention locally and never
+    // queues); the service never serializes or queues waits itself.
     if let Err(error) = backend_ref.admit_slot_wait(req.flags) {
         return Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
             ck_rv: error.0,
@@ -77,14 +85,17 @@ pub(super) async fn wait_for_slot_event_with_grace(
     }
 
     // W1-L6-10: slot waits bypass spawn_backend entirely — they hold NO
-    // breaker slot and take NO request timeout. A blocking wait
-    // legitimately outlives request_timeout (native modules block
-    // indefinitely), so routing it through the breaker burned a stuck
-    // slot per slow wait and let repeated waits trip the global
-    // breaker. Floods are bounded instead by the transport (L6-20) and
-    // per-connection admission (L7-28) layers. The dispatch operation
-    // guard still travels into the blocking task so a parked wait keeps
-    // its context unreapable, exactly as before.
+    // breaker slot and take NO request timeout. The bypass exists for
+    // the custom-service boundary: a custom backend that admits
+    // blocking waits may park them indefinitely, so routing such a
+    // wait through the breaker would burn a stuck slot per slow wait
+    // and let repeated waits trip the global breaker. (The real
+    // backend refuses blocking waits at admission, so this path only
+    // ever parks for custom backends.) Floods are bounded instead by
+    // the transport (L6-20) and per-connection admission (L7-28)
+    // layers. The dispatch operation guard still travels into the
+    // blocking task so a parked wait keeps its context unreapable,
+    // exactly as before.
     let flags = req.flags;
     let dont_block = flags & cryptoki_sys::CKF_DONT_BLOCK as u64 != 0;
     let backend = backend_ref.clone();
