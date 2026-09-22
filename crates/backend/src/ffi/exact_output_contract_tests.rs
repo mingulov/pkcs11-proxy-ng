@@ -3,7 +3,9 @@ use super::*;
 #[path = "../../../../tests/ffi_oracles/exact_outputs/src/lib.rs"]
 mod oracle;
 use oracle::*;
-static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// W1-L1-05: STATE-touching tests serialize on the oracle's shared test
+// lock (the oracle's own poison tests take the same lock in both test
+// binaries); no file-local lock domain here.
 
 fn invoke(
     spec: &CkOutputBufferSpec,
@@ -48,7 +50,7 @@ fn invoke_actions(
 
 #[test]
 fn exact_data_error_preserves_provider_length_changed_unchanged_zero_and_all_ones() {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let spec =
         CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false };
     for rv in [CkRv::DEVICE_ERROR, CkRv::ARGUMENTS_BAD, CkRv(0x8000_0017)] {
@@ -66,7 +68,7 @@ fn exact_data_error_preserves_provider_length_changed_unchanged_zero_and_all_one
 
 #[test]
 fn exact_query_error_preserves_provably_written_length_and_reports_ambiguous_zero() {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let spec =
         CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
     for length in [Some(7), Some(cryptoki_sys::CK_ULONG::MAX as u64), Some(0), None] {
@@ -83,7 +85,7 @@ fn exact_query_error_preserves_provably_written_length_and_reports_ambiguous_zer
 
 #[test]
 fn exact_over_capacity_length_preserves_rv_without_exposing_storage() {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let spec =
         CkOutputBufferSpec { buffer_present: true, buffer_len: 4, length_pointer_null: false };
     for rv in [CkRv::OK, CkRv::BUFFER_TOO_SMALL, CkRv::DEVICE_ERROR] {
@@ -131,7 +133,7 @@ fn exact_oracle_hostile_length_clobbers_cell_with_unavailable() {
     // W1-L10-18 negative control: length_action=2 models a hostile provider
     // that clobbers the length cell with CK_UNAVAILABLE_INFORMATION instead
     // of the scenario length. The old oracle honored only action==1.
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut buffer = [0xAAu8; 8];
     let (_, cell, observation) = drive_oracle_direct(&mut buffer, 2, 7, 0);
     assert_eq!(cell, cryptoki_sys::CK_UNAVAILABLE_INFORMATION, "hostile length clobber");
@@ -144,7 +146,7 @@ fn exact_oracle_zero_length_write_records_without_storing() {
     // W1-L10-18 negative control: output_action=2 models a provider
     // zero-byte write — no bytes stored, buffer provably untouched, and the
     // zero write recorded (distinguished from "no write attempted").
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut buffer = [0xBBu8; 8];
     let (_, cell, observation) = drive_oracle_direct(&mut buffer, 0, 0, 2);
     assert_eq!(cell, 8, "zero-length write leaves the capacity cell alone");
@@ -159,7 +161,7 @@ fn exact_oracle_oversized_write_attempt_is_bounded_and_recorded() {
     // attempts capacity+8 bytes. The oracle writes only within capacity
     // (an actual overrun would be UB) and records the attempt, so consumers
     // can prove the backend never exposes the excess.
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut backing = [0xCCu8; 16];
     let (_, cell, observation) = drive_oracle_direct(&mut backing[..8], 0, 0, 3);
     assert_eq!(cell, 8);
@@ -173,7 +175,7 @@ fn exact_oracle_oversized_write_attempt_is_bounded_and_recorded() {
 fn exact_oracle_hostile_fill_covers_capacity() {
     // W1-L10-18 negative control: output_action=4 models a hostile provider
     // filling the whole capacity with garbage (not the 4-byte canary).
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut buffer = [0x00u8; 8];
     let (_, cell, observation) = drive_oracle_direct(&mut buffer, 0, 0, 4);
     assert_eq!(cell, 8);
@@ -185,7 +187,7 @@ fn exact_oracle_hostile_fill_covers_capacity() {
 fn exact_oversized_hostile_bytes_forwarded_exactly() {
     // W1-L10-18 consumer: the bounded hostile bytes cross the exact-output
     // boundary byte-identically (no reconstruction, no truncation).
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let spec =
         CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false };
     let (result, observation) = invoke_actions(&spec, CkRv::OK, 1, 8, 3);
@@ -200,7 +202,7 @@ fn exact_oversized_hostile_bytes_forwarded_exactly() {
 
 #[test]
 fn exact_unrepresentable_or_over_limit_capacity_rejects_before_native_call() {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let spec = CkOutputBufferSpec {
         buffer_present: true,
         buffer_len: u64::MAX,
@@ -342,7 +344,7 @@ unsafe extern "C" fn kem_error(
 
 #[test]
 fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
     table.C_EncapsulateKey = Some(kem_error);
@@ -403,7 +405,7 @@ unsafe extern "C" fn message_error(
 #[test]
 fn exact_parameter_error_preserves_only_defined_initialized_effects() {
     use pkcs11_proxy_ng_proto::convert::message_params::{GcmMessageParams, MessageParameter};
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
     table.C_EncryptMessage = Some(message_error);
@@ -477,7 +479,7 @@ unsafe extern "C" fn begin_error(
 #[test]
 fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
     use pkcs11_proxy_ng_proto::convert::message_params::{GcmMessageParams, MessageParameter};
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = oracle::ORACLE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
     table.C_EncryptMessageBegin = Some(begin_error);

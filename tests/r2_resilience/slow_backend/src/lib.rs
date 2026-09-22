@@ -24,6 +24,9 @@
 //!                                 chaos scenario 2 to flip backend health.
 //!   SLOW_BACKEND_BREAK_RV_HEX   — CK_RV to return after the break.
 //!                                 Defaults to 0x2 (CKR_HOST_MEMORY).
+//!   SLOW_BACKEND_VERBOSE=1        — emit the per-op stderr trace (op
+//!                                 counter, BROKEN fast-path); quiet by
+//!                                 default (W1-L10-20).
 //!
 //! Everything else is a stub: minimum valid return values, no real
 //! state. Sufficient to drive the daemon's lifecycle but not to do
@@ -214,14 +217,17 @@ unsafe extern "C" fn c_open_session(
     if phsession.is_null() {
         return CKR_GENERAL_ERROR_LITERAL;
     }
-    unsafe { *phsession = 1; }
+    // W1-L10-20: unique handles (first is still 1) so concurrent
+    // consumers are distinguishable for per-session FindObjects state.
+    unsafe { *phsession = NEXT_SESSION.fetch_add(1, AtomicOrdering::Relaxed) };
     CKR_OK
 }
 
-unsafe extern "C" fn c_close_session(_h: CK_SESSION_HANDLE) -> CK_RV {
+unsafe extern "C" fn c_close_session(h: CK_SESSION_HANDLE) -> CK_RV {
     if let Some(rv) = count_op_and_maybe_break() {
         return rv;
     }
+    find_lock().remove(&h);
     CKR_OK
 }
 
@@ -321,18 +327,28 @@ static BROKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 /// `SLOW_BACKEND_BREAK_RV_HEX` (default 0x2 = CKR_HOST_MEMORY). This
 /// produces an unbroken stream of Failure events at the daemon
 /// without intervening Success calls resetting the gate counter.
+/// W1-L10-20: per-op stderr chatter is off unless explicitly enabled so
+/// scenario logs stay quiet; `SLOW_BACKEND_VERBOSE=1` restores it.
+fn verbose() -> bool {
+    std::env::var("SLOW_BACKEND_VERBOSE").is_ok_and(|v| v == "1")
+}
+
 fn count_op_and_maybe_break() -> Option<CK_RV> {
     // Already broken — every subsequent call fails fast.
     if BROKEN.load(std::sync::atomic::Ordering::Relaxed) {
         let rv = env_rv("SLOW_BACKEND_BREAK_RV_HEX").unwrap_or(0x2);
-        eprintln!("slow_backend: BROKEN, returning rv=0x{rv:x}");
+        if verbose() {
+            eprintln!("slow_backend: BROKEN, returning rv=0x{rv:x}");
+        }
         return Some(rv);
     }
     let break_after = std::env::var("SLOW_BACKEND_BREAK_AFTER_CALLS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok());
     let n = OP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    eprintln!("slow_backend: op#{n} (break_after={break_after:?})");
+    if verbose() {
+        eprintln!("slow_backend: op#{n} (break_after={break_after:?})");
+    }
     if let Some(threshold) = break_after
         && n >= threshold
     {
@@ -482,26 +498,41 @@ unsafe extern "C" fn c_get_attribute_value(
 unsupported!(c_set_attribute_value, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG);
 // Chaos scenarios need real FindObjects support so pkcs11-tool --sign
 // can resolve a key handle. We return a fixed handle (42) on first
-// invocation, then 0-results on subsequent invocations of the same
-// FindObjects sequence. Thread-unsafe; the chaos fixture is
-// single-consumer so that's fine.
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-static FIND_RETURNED: AtomicBool = AtomicBool::new(false);
+// invocation per session, then 0-results on subsequent invocations of
+// that session's FindObjects sequence.
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{LazyLock, Mutex};
+
+/// Next backend session handle (W1-L10-20).
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
+
+/// Per-session FindObjects single-shot state (W1-L10-20): whether the
+/// session's current search already returned its handle. The old global
+/// single-shot flag starved every consumer after the first; keying by
+/// session lets concurrent consumers each get handles. Entries are
+/// dropped by FindObjectsFinal and CloseSession.
+static FIND_RETURNED: LazyLock<Mutex<HashMap<CK_SESSION_HANDLE, bool>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn find_lock() -> std::sync::MutexGuard<'static, HashMap<CK_SESSION_HANDLE, bool>> {
+    FIND_RETURNED.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 unsafe extern "C" fn c_find_objects_init(
-    _h: CK_SESSION_HANDLE,
+    h: CK_SESSION_HANDLE,
     _tmpl: CK_ATTRIBUTE_PTR,
     _count: CK_ULONG,
 ) -> CK_RV {
     if let Some(rv) = count_op_and_maybe_break() {
         return rv;
     }
-    FIND_RETURNED.store(false, AtomicOrdering::SeqCst);
+    find_lock().insert(h, false);
     CKR_OK
 }
 
 unsafe extern "C" fn c_find_objects(
-    _h: CK_SESSION_HANDLE,
+    h: CK_SESSION_HANDLE,
     out: CK_OBJECT_HANDLE_PTR,
     max: CK_ULONG,
     pul_count: CK_ULONG_PTR,
@@ -512,7 +543,7 @@ unsafe extern "C" fn c_find_objects(
     if pul_count.is_null() {
         return CKR_GENERAL_ERROR_LITERAL;
     }
-    let already_returned = FIND_RETURNED.swap(true, AtomicOrdering::SeqCst);
+    let already_returned = std::mem::replace(find_lock().entry(h).or_insert(false), true);
     if already_returned || max == 0 || out.is_null() {
         unsafe { *pul_count = 0; }
         return CKR_OK;
@@ -524,10 +555,11 @@ unsafe extern "C" fn c_find_objects(
     CKR_OK
 }
 
-unsafe extern "C" fn c_find_objects_final(_h: CK_SESSION_HANDLE) -> CK_RV {
+unsafe extern "C" fn c_find_objects_final(h: CK_SESSION_HANDLE) -> CK_RV {
     if let Some(rv) = count_op_and_maybe_break() {
         return rv;
     }
+    find_lock().remove(&h);
     CKR_OK
 }
 unsupported!(c_encrypt_init, CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
@@ -712,4 +744,63 @@ static FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetFunctionList(list: *mut *mut CK_FUNCTION_LIST) -> CK_RV {
     unsafe { c_get_function_list(list) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_session() -> CK_SESSION_HANDLE {
+        let mut h: CK_SESSION_HANDLE = 0;
+        let rv = unsafe { c_open_session(0, 0, std::ptr::null_mut(), None, &mut h) };
+        assert_eq!(rv, CKR_OK, "open_session must succeed");
+        h
+    }
+
+    #[test]
+    fn open_session_returns_unique_handles() {
+        // W1-L10-20: per-consumer FindObjects needs distinguishable sessions.
+        let h1 = open_session();
+        let h2 = open_session();
+        assert_ne!(h1, h2, "concurrent consumers need distinct session handles");
+    }
+
+    #[test]
+    fn concurrent_consumers_each_get_find_handles() {
+        // W1-L10-20: interleaved find sequences on two sessions must each
+        // yield the stub handle; single-shot-per-consumer is preserved.
+        let h1 = open_session();
+        let h2 = open_session();
+        assert_eq!(unsafe { c_find_objects_init(h1, std::ptr::null_mut(), 0) }, CKR_OK);
+        assert_eq!(unsafe { c_find_objects_init(h2, std::ptr::null_mut(), 0) }, CKR_OK);
+
+        let mut o1: CK_OBJECT_HANDLE = 0;
+        let mut c1: CK_ULONG = 0;
+        let mut o2: CK_OBJECT_HANDLE = 0;
+        let mut c2: CK_ULONG = 0;
+        assert_eq!(unsafe { c_find_objects(h1, &mut o1, 1, &mut c1) }, CKR_OK);
+        assert_eq!(unsafe { c_find_objects(h2, &mut o2, 1, &mut c2) }, CKR_OK);
+        assert_eq!((c1, o1), (1, 42), "first consumer gets the handle");
+        assert_eq!((c2, o2), (1, 42), "second consumer gets its own handle");
+
+        // Second find on each session yields nothing (per-consumer single-shot).
+        assert_eq!(unsafe { c_find_objects(h1, &mut o1, 1, &mut c1) }, CKR_OK);
+        assert_eq!(unsafe { c_find_objects(h2, &mut o2, 1, &mut c2) }, CKR_OK);
+        assert_eq!(c1, 0, "first consumer single-shot exhausted");
+        assert_eq!(c2, 0, "second consumer single-shot exhausted");
+
+        assert_eq!(unsafe { c_find_objects_final(h1) }, CKR_OK);
+        assert_eq!(unsafe { c_find_objects_final(h2) }, CKR_OK);
+    }
+
+    #[test]
+    fn per_op_logging_is_quiet_unless_verbose() {
+        // W1-L10-20: default runs stay quiet; SLOW_BACKEND_VERBOSE=1
+        // restores the per-op chatter for scenario debugging.
+        assert!(!verbose(), "per-op eprintln must be off by default");
+        unsafe { std::env::set_var("SLOW_BACKEND_VERBOSE", "1") };
+        assert!(verbose(), "SLOW_BACKEND_VERBOSE=1 must enable op tracing");
+        unsafe { std::env::remove_var("SLOW_BACKEND_VERBOSE") };
+        assert!(!verbose(), "removing the flag must quiet the stub again");
+    }
 }

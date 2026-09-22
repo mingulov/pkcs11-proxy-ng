@@ -853,11 +853,13 @@ mod tests {
 
     // --- R2 coalescer tests ---
 
-    /// Enable the coalescer for all coalesce-ON tests. The OnceLock is set
-    /// once per process; since every caller here uses `true`, the first call
-    /// wins and all subsequent calls are no-ops — the flag stays `true`.
-    fn enable_coalesce() {
+    /// Enable the coalescer for all coalesce-ON tests. W1-C2-11: holds the
+    /// resilience serial guard for the whole test so a concurrent config
+    /// reset cannot flip the flag mid-test; first call wins as before.
+    async fn enable_coalesce() -> tokio::sync::MutexGuard<'static, ()> {
+        let guard = crate::server::resilience::CONFIG_TEST_GUARD.lock().await;
         crate::server::resilience::configure(None, true);
+        guard
     }
 
     /// Build a MockBackend with CKA_ID and CKA_LABEL registered for object 1,
@@ -893,7 +895,7 @@ mod tests {
 
     #[tokio::test]
     async fn coalesce_on_second_read_of_cacheable_attr_is_a_cache_hit() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = mock_with_attrs();
         let (ctx, ctx_id, session_handle) =
             setup_with_mock(mock.clone(), allow_policy(), Some(MTLS_IDENTITY.into())).await;
@@ -953,7 +955,7 @@ mod tests {
 
     #[tokio::test]
     async fn coalesce_on_mixed_template_fetches_only_uncached_attrs() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = mock_with_attrs();
         let (ctx, ctx_id, session_handle) =
             setup_with_mock(mock.clone(), allow_policy(), Some(MTLS_IDENTITY.into())).await;
@@ -1027,7 +1029,7 @@ mod tests {
 
     #[tokio::test]
     async fn coalesce_on_value_bearing_secret_never_cached() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         // Don't register CKA_VALUE — MockBackend returns no-op (Ok, value stays None)
         // for unregistered attrs; the backend IS reached each time.
@@ -1066,7 +1068,7 @@ mod tests {
 
     #[tokio::test]
     async fn coalesce_on_sensitive_result_not_cached() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = mock_with_attrs();
         let (ctx, ctx_id, session_handle) =
             setup_with_mock(mock.clone(), allow_policy(), Some(MTLS_IDENTITY.into())).await;
@@ -1105,7 +1107,7 @@ mod tests {
 
     #[tokio::test]
     async fn coalesce_on_set_invalidates_cache() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = mock_with_attrs();
         let (ctx, ctx_id, session_handle) =
             setup_with_mock(mock.clone(), allow_policy(), Some(MTLS_IDENTITY.into())).await;
@@ -1183,7 +1185,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_path_cache_served_result_is_byte_identical_to_fresh() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = mock_with_attrs();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
@@ -1261,7 +1263,7 @@ mod tests {
     /// and its returned_len must equal a fresh size query's returned_len.
     #[tokio::test]
     async fn exact_path_size_query_cache_hit_is_byte_identical_to_fresh() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = mock_with_attrs();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
@@ -1355,7 +1357,7 @@ mod tests {
     /// cache with CKR_BUFFER_TOO_SMALL (byte-identical to a fresh backend response).
     #[tokio::test]
     async fn exact_path_buffer_too_small_cache_hit_returns_buffer_too_small() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = mock_with_attrs();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
@@ -1478,7 +1480,7 @@ mod tests {
     /// backend call) and returns identical bytes.
     #[tokio::test]
     async fn single_owner_coalesced_responses_byte_identical() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = mock_with_attrs();
         let (ctx, ctx_id, session_handle) =
             setup_with_mock(mock.clone(), allow_policy(), Some(MTLS_IDENTITY.into())).await;

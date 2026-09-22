@@ -50,7 +50,14 @@ const USERNAME_CANARY: &[u8] = b"PINLEAK-USERNAME-aa55cc33dd99ee11-canary";
 
 // 16-byte prefixes — also banned, so even a partial leak (e.g. truncated
 // debug output) is caught.
-const CANARY_PREFIXES: &[&[u8]] = &[b"PINLEAK-USER-PIN", b"PINLEAK-SO-PIN", b"PINLEAK-NEW-PIN"];
+const CANARY_PREFIXES: &[&[u8]] = &[
+    b"PINLEAK-USER-PIN",
+    b"PINLEAK-SO-PIN",
+    b"PINLEAK-NEW-PIN",
+    // W1-C2-10: without the username prefix, a truncated username leak
+    // shorter than the full canary evaded the prefix scan.
+    b"PINLEAK-USERNAME",
+];
 
 // ---- shared buffer + MakeWriter -------------------------------------------
 
@@ -151,6 +158,19 @@ fn memmem(haystack: &[u8], needle: &[u8]) -> bool {
         return false;
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn truncated_username_leak_trips_prefix_scan() {
+    // W1-C2-10: a username truncated past the full canary must still trip
+    // the 16-byte PINLEAK-USERNAME prefix scan.
+    assert_eq!(b"PINLEAK-USERNAME".len(), 16);
+    assert!(USERNAME_CANARY.starts_with(b"PINLEAK-USERNAME"));
+    let truncated_leak = b"op=user_login user=PINLEAK-USERNAME-aa55 (truncated)";
+    assert!(
+        CANARY_PREFIXES.iter().any(|p| memmem(truncated_leak, p)),
+        "truncated PINLEAK-USERNAME leak must trip CANARY_PREFIXES"
+    );
 }
 
 // ---- the actual test ------------------------------------------------------

@@ -666,24 +666,63 @@ async fn concurrent_get_context_from_multiple_readers() {
 
 #[tokio::test]
 async fn evict_expired_concurrent_with_new_context_creation() {
+    use std::collections::HashSet;
+
     use pkcs11_proxy_ng_backend::MockBackend;
 
+    // W1-C2-12: the churn must assert post-churn invariants, not merely
+    // "did not hang": every created context is evicted exactly once, no
+    // phantom or duplicate evictions occur, and the final drain reaps
+    // everything (no leaked leases).
     let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> =
         Arc::new(MockBackend::default_test());
     let mgr = Arc::new(ContextManager::new(std::time::Duration::from_millis(1), 0));
     let mgr_clone = mgr.clone();
     let backend_clone = backend.clone();
     let evict_task = tokio::spawn(async move {
+        let mut evicted = Vec::new();
         for _ in 0..50 {
-            mgr_clone.evict_expired(&backend_clone).await;
+            evicted.extend(mgr_clone.evict_expired(&backend_clone).await);
             tokio::task::yield_now().await;
         }
+        evicted
     });
+    let mut created = Vec::new();
     for _ in 0..50 {
-        let _ = mgr.create_context(None).await;
+        // max_contexts == 0 is unlimited: creation is infallible here, and
+        // a silent `let _ =` would hide a shortfall in the accounting below.
+        created.push(mgr.create_context(None).await.unwrap());
         tokio::task::yield_now().await;
     }
-    evict_task.await.unwrap();
+    let mut evicted: Vec<ClientContextId> = evict_task.await.unwrap();
+
+    // No duplicate context ids at creation.
+    let created_set: HashSet<ClientContextId> = created.iter().cloned().collect();
+    assert_eq!(created_set.len(), 50, "all 50 created context ids must be unique");
+    // Every eviction names a created context, and none repeats.
+    let mut evicted_set = HashSet::new();
+    for id in &evicted {
+        assert!(created_set.contains(id), "evicted id must have been created: {id:?}");
+        assert!(evicted_set.insert(id.clone()), "context evicted twice: {id:?}");
+    }
+
+    // Final drain: past the 1ms lease, one evict round reaps stragglers;
+    // loop (bounded) so a scheduling hiccup cannot flake the test. The
+    // count/id reads below do not touch leases (unlike `get_context`).
+    for _ in 0..10 {
+        if mgr.context_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        for id in mgr.evict_expired(&backend).await {
+            assert!(created_set.contains(&id), "drained id must have been created: {id:?}");
+            assert!(evicted_set.insert(id.clone()), "context evicted twice: {id:?}");
+            evicted.push(id);
+        }
+    }
+    assert_eq!(mgr.context_count(), 0, "final drain must reap every context (no leaked leases)");
+    assert!(mgr.context_ids().is_empty(), "no context ids may survive the drain");
+    assert_eq!(evicted_set, created_set, "every created context must be evicted exactly once");
 }
 
 #[test]

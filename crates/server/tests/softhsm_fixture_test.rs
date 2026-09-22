@@ -500,14 +500,15 @@ async fn concurrent_sessions_on_different_slots() -> Result<(), String> {
     Ok(())
 }
 
-/// CloseAllSessions clears all session handles in the client context.
+/// CloseAllSessions clears only the targeted slot's session handles.
 ///
-/// Note: The current proxy implementation clears ALL session handles
-/// per-context (not just the targeted slot), because per-slot filtering
-/// of virtual handles is not yet implemented. This test verifies the
-/// current behavior: after CloseAllSessions(slot_a), sessions on
-/// slot_b must be reopened. A new session on the other slot works fine
-/// because the backend sessions for that slot are still alive.
+/// The proxy filters virtual sessions by the targeted slot (W1-C2-08:
+/// `close_all_sessions` in `session_handlers/lifecycle.rs` collects only
+/// the sessions whose slot matches the target). This test verifies that
+/// after CloseAllSessions(slot_a) the slot-A session handle is invalid
+/// while the slot-B session handle stays usable without reopening. A new
+/// session on either slot also works because the backend sessions for the
+/// untouched slot are still alive.
 #[tokio::test]
 #[ignore] // requires SoftHSM2
 async fn close_all_sessions_clears_context_handles() -> Result<(), String> {
@@ -519,7 +520,7 @@ async fn close_all_sessions_clears_context_handles() -> Result<(), String> {
     assert!(slots.len() >= 2);
 
     let session_a = open_user_session(&mut client, slots[0], "1234", true).await?;
-    let _session_b = open_user_session(&mut client, slots[1], "1234", true).await?;
+    let session_b = open_user_session(&mut client, slots[1], "1234", true).await?;
 
     // Create objects to prove sessions work.
     create_data_object(&mut client, session_a, "slot-a-obj", b"a").await?;
@@ -530,6 +531,12 @@ async fn close_all_sessions_clears_context_handles() -> Result<(), String> {
     // Session A handle should be invalid.
     let result = client.get_session_info(session_a).await;
     assert!(result.is_err(), "session on slot A should be invalid after CloseAllSessions");
+
+    // W1-C2-08: per-slot filtering leaves the other slot's session usable.
+    client
+        .get_session_info(session_b)
+        .await
+        .map_err(|rv| format!("session on slot B must survive CloseAllSessions(slot A): {rv}"))?;
 
     // Can reopen a session on slot B — the backend sessions there are fine.
     // Note: Don't use open_user_session because the user may still be logged in

@@ -373,10 +373,13 @@ mod tests {
     use crate::server::context_manager::{CachedAttr, ClientContextId, ContextManager, LoginState};
     use crate::server::handle_map::BackendHandle;
 
-    // Ensure the coalescer is on for C1 tests. The OnceLock is set once per
-    // process; the first call wins — subsequent calls are no-ops.
-    fn enable_coalesce() {
+    // Ensure the coalescer is on for C1 tests. W1-C2-11: holds the
+    // resilience serial guard for the whole test so a concurrent config
+    // reset cannot flip the flag mid-test; first call wins as before.
+    async fn enable_coalesce() -> tokio::sync::MutexGuard<'static, ()> {
+        let guard = crate::server::resilience::CONFIG_TEST_GUARD.lock().await;
         crate::server::resilience::configure(None, true);
+        guard
     }
 
     /// C1: a successful C_Logout must clear the calling context's attr_cache so
@@ -384,7 +387,7 @@ mod tests {
     /// has been logged out (post-logout transparency divergence fix).
     #[tokio::test]
     async fn logout_clears_attr_cache_on_success() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
@@ -445,7 +448,7 @@ mod tests {
     /// must also clear the calling context's attr_cache.
     #[tokio::test]
     async fn logical_logout_clears_attr_cache() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
@@ -530,7 +533,7 @@ mod tests {
     /// C1 negative: a failed logout must NOT clear the attr_cache.
     #[tokio::test]
     async fn failed_logout_does_not_clear_attr_cache() {
-        enable_coalesce();
+        let _coalesce_guard = enable_coalesce().await;
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
