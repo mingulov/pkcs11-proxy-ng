@@ -795,7 +795,18 @@ pub(crate) fn maybe_install_server_registry(
 ) {
     if !server_registry_disabled() {
         if let Some(payload) = payload {
-            let registry: MechanismRegistry = payload.into();
+            // W1-C8-10: a duplicate-ID payload is malformed; keep the
+            // previously installed registry instead of installing a
+            // last-wins corruption, and say so loudly.
+            let registry = match MechanismRegistry::try_from(payload) {
+                Ok(registry) => registry,
+                Err(duplicate) => {
+                    tracing::error!(
+                        "{duplicate}; ignoring server-published registry, keeping previous"
+                    );
+                    return;
+                }
+            };
             let new_revision = registry.revision().to_string();
             log_registry_change(&new_revision);
             state::replace_mechanism_registry(registry);

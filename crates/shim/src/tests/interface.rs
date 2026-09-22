@@ -1323,6 +1323,46 @@ fn server_registry_ignored_when_disable_env_set() {
     );
 }
 
+/// W1-C8-10: a duplicate-ID server payload is ignored (the previous
+/// registry stays) and the refusal is logged loudly, naming the
+/// offending mechanism ID — never silently last-winning.
+#[test]
+fn server_registry_with_duplicate_id_is_ignored_and_logged() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    SavedDisableRegistry::set(None);
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    let mut payload = registry_payload_with_revision("c8-10-dup-must-not-install");
+    // Repeat a real mechanism ID under a second shape entry.
+    let duplicated = payload
+        .params
+        .iter()
+        .find_map(|entry| entry.mechanisms.first().copied())
+        .expect("embedded payload has params");
+    payload.params.push(pkcs11_proxy_ng_proto::MechanismParamEntry {
+        shape: "c8-10-dup-shape".to_string(),
+        mechanisms: vec![duplicated],
+    });
+    // State assertion first, retrying past concurrent unguarded
+    // `ensure_registry()` clobbers (see install_and_read_back_revision):
+    // a broken install would surface the dup revision at least once.
+    for _ in 0..100 {
+        crate::interface_probe::maybe_install_server_registry(Some(&payload));
+        let after = crate::state::mechanism_registry().revision().to_string();
+        assert!(after != "c8-10-dup-must-not-install", "duplicate-ID payload must never install");
+    }
+    let output = capture_logs(|| {
+        crate::interface_probe::maybe_install_server_registry(Some(&payload));
+    });
+    assert!(
+        output.contains("ignoring server-published registry"),
+        "refusal must be logged: {output:?}"
+    );
+    let id = format!("{duplicated:#X}");
+    assert!(output.contains(&id), "refusal must name the duplicate ID {id}: {output:?}");
+}
+
 /// W1-C7-06: consecutive installs with different revisions emit the
 /// registry-drift WARN naming both revisions (HA-daemon drift signal).
 #[test]
