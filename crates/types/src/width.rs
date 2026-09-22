@@ -200,6 +200,14 @@ pub fn checked_narrow_to_width(wire: u64, dst_width: usize) -> Option<u64> {
     if wire > all_ones(dst_width) { None } else { Some(wire) }
 }
 
+/// Narrow one wire `u32` to a native byte (T05). The single checked
+/// `u32 -> u8` conversion: callers map [`WidthError::Overflow`] to their
+/// boundary-specific error instead of truncating with `as u8` (259 must
+/// never alias 3).
+pub fn narrow_u32_to_u8(value: u32) -> Result<u8, WidthError> {
+    u8::try_from(value).map_err(|_| WidthError::Overflow)
+}
+
 /// Translate a `CK_ULONG`-typed attribute's `ulValueLen` from the source edge's
 /// width to the destination edge's width.
 ///
@@ -386,6 +394,21 @@ mod tests {
             translate_ulong_len(CANONICAL_UNAVAILABLE, 0, 8),
             Err(WidthError::UnsupportedWidth)
         );
+    }
+
+    #[test]
+    fn narrow_u32_to_u8_byte_boundary_vectors() {
+        // T05: the one checked u32 -> u8 conversion matches the primitive
+        // exactly on every boundary; production arms must drive the
+        // helper (arm-level tests below), not re-implement it.
+        for (value, expected) in [(0, Some(0)), (255, Some(255)), (256, None), (u32::MAX, None)] {
+            assert_eq!(u8::try_from(value).ok(), expected);
+            assert_eq!(narrow_u32_to_u8(value).ok(), expected);
+            assert_eq!(
+                narrow_u32_to_u8(value).err(),
+                expected.map_or(Some(WidthError::Overflow), |_| None)
+            );
+        }
     }
 
     #[test]

@@ -1154,6 +1154,82 @@ mod lifecycle_op_state_tests {
 }
 
 #[cfg(all(test, unix))]
+mod derive_malformed_byte_tests {
+    use super::*;
+    use pkcs11_proxy_ng_types::{SslRandomData, Tls12MasterKeyDeriveParams};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static DERIVE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static DERIVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn derive_counting(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _base_key: cryptoki_sys::CK_OBJECT_HANDLE,
+        _template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _count: cryptoki_sys::CK_ULONG,
+        handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        DERIVE_CALLS.fetch_add(1, Ordering::SeqCst);
+        if !handle.is_null() {
+            unsafe { *handle = 51 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_counting_derive() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_DeriveKey = Some(derive_counting);
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
+        (backend, functions)
+    }
+
+    fn tls12_mech(major: u32, minor: u32) -> CkMechanism {
+        CkMechanism {
+            mechanism_type: CkMechanismType::TLS12_MASTER_KEY_DERIVE,
+            params: Some(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
+                random_info: SslRandomData {
+                    client_random: vec![0x11; 32],
+                    server_random: vec![0x22; 32],
+                },
+                version_major: major,
+                version_minor: minor,
+                prf_hash_mechanism: CkMechanismType::SHA256,
+            })),
+        }
+    }
+
+    #[test]
+    fn malformed_version_bytes_never_reach_provider() {
+        // T05: valid-first/invalid-second version fails conversion, so the
+        // oracle provider observes zero calls.
+        let _guard = DERIVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        DERIVE_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_counting_derive();
+        backend.lifecycle_domain.open_for_tests();
+        let err = backend
+            .ffi_derive_key(CkSessionHandle(7), &tls12_mech(3, 256), CkObjectHandle(9), None)
+            .unwrap_err();
+        assert_eq!(err, CkRv::MECHANISM_PARAM_INVALID);
+        assert_eq!(DERIVE_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn valid_version_bytes_reach_provider_once() {
+        // Control: the same path with valid bytes invokes the provider.
+        let _guard = DERIVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        DERIVE_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _functions) = backend_with_counting_derive();
+        backend.lifecycle_domain.open_for_tests();
+        let handle = backend
+            .ffi_derive_key(CkSessionHandle(7), &tls12_mech(3, 3), CkObjectHandle(9), None)
+            .unwrap();
+        assert_eq!(DERIVE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(handle, CkObjectHandle(51));
+    }
+}
+
+#[cfg(all(test, unix))]
 mod lifecycle_random_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

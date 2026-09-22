@@ -1820,8 +1820,8 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
             // pVersion = NULL for DH variants (version is 0.0 sentinel)
             let version_is_null = p.version_major == 0 && p.version_minor == 0;
             let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
-                major: p.version_major as cryptoki_sys::CK_BYTE,
-                minor: p.version_minor as cryptoki_sys::CK_BYTE,
+                major: narrow_wire_byte(p.version_major)?,
+                minor: narrow_wire_byte(p.version_minor)?,
             }));
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
@@ -1951,8 +1951,8 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
             let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
             let version_is_null = p.version_major == 0 && p.version_minor == 0;
             let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
-                major: p.version_major as cryptoki_sys::CK_BYTE,
-                minor: p.version_minor as cryptoki_sys::CK_BYTE,
+                major: narrow_wire_byte(p.version_major)?,
+                minor: narrow_wire_byte(p.version_minor)?,
             }));
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
@@ -1987,8 +1987,8 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
             let mut session_hash = Zeroizing::new(p.session_hash.clone());
             let version_is_null = p.version_major == 0 && p.version_minor == 0;
             let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
-                major: p.version_major as cryptoki_sys::CK_BYTE,
-                minor: p.version_minor as cryptoki_sys::CK_BYTE,
+                major: narrow_wire_byte(p.version_major)?,
+                minor: narrow_wire_byte(p.version_minor)?,
             }));
             let hash_ptr = if session_hash.is_empty() {
                 std::ptr::null_mut()
@@ -2346,7 +2346,7 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
             let mut x = p.x.expose(|b| Zeroizing::new(b.to_vec()));
             let x_ptr = if x.is_empty() { std::ptr::null_mut() } else { x.as_mut_ptr() };
             let kw = Box::new(cryptoki_sys::CK_KEY_WRAP_SET_OAEP_PARAMS {
-                bBC: p.bc as cryptoki_sys::CK_BYTE,
+                bBC: narrow_wire_byte(p.bc)?,
                 pX: x_ptr,
                 ulXLen: x.len() as cryptoki_sys::CK_ULONG,
             });
@@ -2424,7 +2424,7 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
                 ulCKYiLen: ckyi.len() as cryptoki_sys::CK_ULONG,
                 pCKYr: ckyr_ptr,
                 ulCKYrLen: ckyr.len() as cryptoki_sys::CK_ULONG,
-                keyNumber: p.key_number as cryptoki_sys::CK_BYTE,
+                keyNumber: narrow_wire_byte(p.key_number)?,
             });
             Ok(FfiMechanism::from_box(mech_type, ike, |b| {
                 FfiParamBacking::Ike1PrfDerive(b, ckyi, ckyr)
@@ -2476,7 +2476,7 @@ fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<Ffi
         CkMechanismParams::WtlsMasterKeyDerive(p) => {
             let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
             let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
-            let mut version_buf = Zeroizing::new(vec![p.version as u8]);
+            let mut version_buf = Zeroizing::new(vec![narrow_wire_byte(p.version)?]);
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
             } else {
