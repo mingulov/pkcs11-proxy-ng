@@ -3,7 +3,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -258,6 +258,95 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// Exactly-once stuck-call accounting (T08, R-H1).
+///
+/// A backend call counts as stuck from the timeout branch's publication
+/// until the blocking task actually finishes. The old
+/// `fetch_add`-then-`store` handshake leaked +1 whenever the FFI
+/// returned in between; the timeout and completion sides now rendezvous
+/// on one mutex over three states, so every interleaving balances:
+///
+/// * `Running → TimedOut` (timeout branch): increments the gauge.
+/// * `TimedOut → Completed` (task completion guard): decrements it.
+/// * `Running → Completed` (fast completion): no gauge movement.
+/// * `Completed → Completed` (redundant completion): no-op.
+///
+/// No backend operation runs under the lock — only the state flip and
+/// the gauge update — so this cannot wedge a call. A poisoned mutex
+/// (unreachable in practice: the critical section cannot panic)
+/// recovers via `into_inner` like the shim's lock helpers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StuckCallState {
+    Running,
+    TimedOut,
+    Completed,
+}
+
+struct StuckCallAccounting<'a> {
+    gauge: &'a AtomicUsize,
+    state: Mutex<StuckCallState>,
+}
+
+impl<'a> StuckCallAccounting<'a> {
+    fn new(gauge: &'a AtomicUsize) -> Self {
+        Self { gauge, state: Mutex::new(StuckCallState::Running) }
+    }
+
+    /// Publish the timeout. Returns the gauge value after publication
+    /// (the live stuck count for the timeout log line). If the task
+    /// already completed (`Running → Completed` won the race), the call
+    /// is already accounted and nothing is published.
+    fn timeout(&self) -> usize {
+        let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        if *state == StuckCallState::Running {
+            *state = StuckCallState::TimedOut;
+            self.gauge.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            self.gauge.load(Ordering::Relaxed)
+        }
+    }
+
+    /// Mark the backend call finished. Returns the remaining stuck count
+    /// when this call releases a published stuck slot, `None` otherwise.
+    /// Idempotent: only the `TimedOut → Completed` transition decrements,
+    /// so the gauge can neither leak +1 nor underflow.
+    fn complete(&self) -> Option<usize> {
+        let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        match *state {
+            StuckCallState::TimedOut => {
+                *state = StuckCallState::Completed;
+                Some(self.gauge.fetch_sub(1, Ordering::Relaxed) - 1)
+            }
+            StuckCallState::Running => {
+                *state = StuckCallState::Completed;
+                None
+            }
+            StuckCallState::Completed => None,
+        }
+    }
+}
+
+/// Drops when the blocking task ends — normal return, panic unwind, or
+/// post-cancellation completion — releasing exactly one stuck slot iff
+/// the timeout branch published one. Caller cancellation alone never
+/// touches the gauge: it drops the timeout future (no `timeout()` call)
+/// while the task still runs, and the later `complete()` observes
+/// `Running → Completed`.
+struct StuckCallCompletionGuard<'a> {
+    accounting: Arc<StuckCallAccounting<'a>>,
+}
+
+impl Drop for StuckCallCompletionGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(remaining) = self.accounting.complete() {
+            tracing::info!(
+                stuck_calls = remaining,
+                "a previously stuck backend call returned; slot released"
+            );
+        }
+    }
+}
+
 fn try_acquire_backend_call(
     counter: &'static AtomicUsize,
     max_calls: usize,
@@ -474,10 +563,12 @@ where
     };
     let context_operation_guard = current_context_operation_guard();
 
-    // Set when the caller's timeout fires: tells the task's completion
-    // path to decrement the stuck gauge it was counted into.
-    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let timed_out_task = std::sync::Arc::clone(&timed_out);
+    // Exactly-once stuck accounting (T08): the mutex inside serializes
+    // the timeout branch below against the task's completion guard, so a
+    // return racing the timeout can neither leak +1 nor decrement a gauge
+    // that was never incremented.
+    let accounting = Arc::new(StuckCallAccounting::new(stuck_gauge));
+    let accounting_task = Arc::clone(&accounting);
     let task = spawn_task(move || {
         // Hold the slot for the TRUE lifetime of the backend call: a
         // blocking task always runs to completion, so the guard drops
@@ -486,25 +577,19 @@ where
         let _guard = guard;
         let _peer_guard = peer_guard;
         let _context_operation_guard = context_operation_guard;
-        let result = operation();
-        if timed_out_task.load(Ordering::Acquire) {
-            let remaining = stuck_gauge.fetch_sub(1, Ordering::Relaxed) - 1;
-            tracing::info!(
-                stuck_calls = remaining,
-                "a previously stuck backend call returned; slot released"
-            );
-        }
-        result
+        // Completion ownership lives INSIDE the blocking closure: the
+        // guard drops exactly when the FFI returns — including on panic
+        // unwind and after caller cancellation — balancing any timeout
+        // publication. Breaker/peer/context guards keep their true
+        // lifetimes: caller cancellation releases none of them.
+        let _completion = StuckCallCompletionGuard { accounting: accounting_task };
+        operation()
     });
 
     let result = match tokio::time::timeout(timeout, task).await {
         Ok(result) => result,
         Err(_elapsed) => {
-            // Order matters: count the call as stuck BEFORE publishing the
-            // flag its completion path reads, so the decrement can never
-            // run against a gauge that was not yet incremented.
-            let stuck = stuck_gauge.fetch_add(1, Ordering::Relaxed) + 1;
-            timed_out.store(true, Ordering::Release);
+            let stuck = accounting.timeout();
             tracing::warn!(
                 timeout_secs = timeout.as_secs(),
                 in_flight = counter.load(Ordering::Relaxed),
@@ -1761,6 +1846,208 @@ mod tests {
             0,
             "gauge drops when the call returns"
         );
+    }
+
+    #[test]
+    fn stuck_accounting_state_level_contract() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gauge = AtomicUsize::new(0);
+        let accounting = StuckCallAccounting::new(&gauge);
+        accounting.complete();
+        accounting.timeout();
+        assert_eq!(gauge.load(Ordering::SeqCst), 0);
+
+        let gauge = AtomicUsize::new(0);
+        let accounting = StuckCallAccounting::new(&gauge);
+        accounting.timeout();
+        assert_eq!(gauge.load(Ordering::SeqCst), 1);
+        accounting.complete();
+        accounting.complete();
+        assert_eq!(gauge.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stuck_accounting_timeout_complete_collision_balances() {
+        // Forced collisions, not sleeps: both sides enter past a barrier
+        // simultaneously 500 times, so the mutex sees both orders across
+        // iterations. Every pair must net to zero — any non-atomicity in
+        // the handshake would leak +1 or underflow.
+        use std::sync::Barrier;
+        static COLLISION_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        for _ in 0..500 {
+            let accounting = StuckCallAccounting::new(&COLLISION_GAUGE);
+            let barrier = Barrier::new(2);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    barrier.wait();
+                    accounting.timeout();
+                });
+                barrier.wait();
+                accounting.complete();
+            });
+            assert_eq!(
+                COLLISION_GAUGE.load(Ordering::SeqCst),
+                0,
+                "every timeout/complete collision must balance"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stuck_accounting_completion_after_timeout_balances_gauge() {
+        // Rendezvous-forced order: the timeout observably fires first
+        // (FUNCTION_FAILED + gauge 1), then the release lets the FFI
+        // return. The late completion must free both the stuck slot and
+        // the breaker slot — no leaked +1 either side.
+        static LATE_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static LATE_TEST_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        let (unstick_tx, unstick_rx) = std::sync::mpsc::channel::<()>();
+
+        let result = spawn_backend_core(
+            &LATE_TEST_COUNTER,
+            &LATE_TEST_GAUGE,
+            Duration::from_millis(50),
+            8,
+            move || {
+                let _ = unstick_rx.recv();
+                Ok(0u8)
+            },
+        )
+        .await;
+        assert_eq!(result.expect("no transport error").unwrap_err(), CkRv::FUNCTION_FAILED);
+        assert_eq!(LATE_TEST_GAUGE.load(Ordering::Relaxed), 1);
+
+        unstick_tx.send(()).expect("receiver alive");
+        for _ in 0..400 {
+            if LATE_TEST_GAUGE.load(Ordering::Relaxed) == 0
+                && LATE_TEST_COUNTER.load(Ordering::Relaxed) == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            LATE_TEST_GAUGE.load(Ordering::Relaxed),
+            0,
+            "late completion releases the stuck slot"
+        );
+        assert_eq!(
+            LATE_TEST_COUNTER.load(Ordering::Relaxed),
+            0,
+            "late completion releases the breaker slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn stuck_accounting_task_panic_after_timeout_balances_gauge() {
+        // The completion guard drops on task unwind: a panic after the
+        // timeout published must still release the stuck slot.
+        static PANIC_LATE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static PANIC_LATE_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        let (unstick_tx, unstick_rx) = std::sync::mpsc::channel::<()>();
+
+        let result = spawn_backend_core(
+            &PANIC_LATE_COUNTER,
+            &PANIC_LATE_GAUGE,
+            Duration::from_millis(50),
+            8,
+            move || -> CkResult<u8> {
+                let _ = unstick_rx.recv();
+                panic!("T08 fixture: panic after timeout");
+            },
+        )
+        .await;
+        assert_eq!(result.expect("no transport error").unwrap_err(), CkRv::FUNCTION_FAILED);
+        assert_eq!(PANIC_LATE_GAUGE.load(Ordering::Relaxed), 1);
+
+        unstick_tx.send(()).expect("receiver alive");
+        for _ in 0..400 {
+            if PANIC_LATE_GAUGE.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            PANIC_LATE_GAUGE.load(Ordering::Relaxed),
+            0,
+            "unwind completion releases the stuck slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn stuck_accounting_task_panic_before_timeout_never_increments() {
+        // A panic before any timeout: the guard observes Running →
+        // Completed, so the gauge never moves. Deterministic — the spawn
+        // returns only after the task (and its guard) finished.
+        static PANIC_FAST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static PANIC_FAST_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        let result = spawn_backend_core(
+            &PANIC_FAST_COUNTER,
+            &PANIC_FAST_GAUGE,
+            Duration::from_secs(30),
+            8,
+            || -> CkResult<u8> {
+                panic!("T08 fixture: panic before timeout");
+            },
+        )
+        .await;
+        assert!(result.is_err(), "blocking-task panic surfaces as Status");
+        assert_eq!(PANIC_FAST_GAUGE.load(Ordering::SeqCst), 0);
+        assert_eq!(PANIC_FAST_COUNTER.load(Ordering::SeqCst), 0, "breaker slot frees on panic");
+    }
+
+    #[tokio::test]
+    async fn stuck_accounting_caller_cancellation_leaves_no_stuck_count() {
+        // Caller cancellation drops the timeout future (no timeout() call)
+        // while the task still runs: the later completion observes Running
+        // → Completed, and no guard is released early.
+        static CANCEL_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static CANCEL_TEST_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        let (unstick_tx, unstick_rx) = std::sync::mpsc::channel::<()>();
+
+        let rpc = tokio::spawn(spawn_backend_core(
+            &CANCEL_TEST_COUNTER,
+            &CANCEL_TEST_GAUGE,
+            Duration::from_secs(30),
+            8,
+            move || {
+                let _ = unstick_rx.recv();
+                Ok(0u8)
+            },
+        ));
+        for _ in 0..400 {
+            if CANCEL_TEST_COUNTER.load(Ordering::Relaxed) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            CANCEL_TEST_COUNTER.load(Ordering::Relaxed),
+            1,
+            "slot acquired before cancellation"
+        );
+
+        rpc.abort();
+        let aborted = rpc.await.expect_err("aborted join must err");
+        assert!(aborted.is_cancelled());
+        assert_eq!(
+            CANCEL_TEST_COUNTER.load(Ordering::Relaxed),
+            1,
+            "cancellation must not release the breaker slot"
+        );
+
+        unstick_tx.send(()).expect("receiver alive");
+        for _ in 0..400 {
+            if CANCEL_TEST_GAUGE.load(Ordering::Relaxed) == 0
+                && CANCEL_TEST_COUNTER.load(Ordering::Relaxed) == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(CANCEL_TEST_GAUGE.load(Ordering::Relaxed), 0);
+        assert_eq!(CANCEL_TEST_COUNTER.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
