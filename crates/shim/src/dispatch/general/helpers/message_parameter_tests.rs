@@ -1323,7 +1323,9 @@ fn write_mechanism_output_params_writes_tls12_pversion() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     assert_eq!(version.major, 3);
@@ -1363,7 +1365,9 @@ fn write_mechanism_output_params_writes_pbe_init_vector() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     // The generated IV landed in the caller's buffer; password/salt intact.
@@ -1399,7 +1403,9 @@ fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
     });
     // Must not panic / deref NULL.
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 }
 
@@ -1434,7 +1440,9 @@ fn write_mechanism_output_params_writes_tls_prf_output() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     assert_eq!(&out_buf[..32], prf_bytes.as_slice());
@@ -1474,7 +1482,9 @@ fn write_mechanism_output_params_writes_wtls_prf_output() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     assert_eq!(&out_buf[..], prf_bytes.as_slice());
@@ -1506,7 +1516,9 @@ fn write_mechanism_output_params_prf_safe_when_output_null() {
         output: vec![0x5Au8; 8].into(),
     });
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
     // Did not crash, did not write through NULL.
 }
@@ -1542,7 +1554,9 @@ fn write_mechanism_output_params_writes_ssl3_master_key_version() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     assert_eq!(version.major, 3);
@@ -1582,7 +1596,9 @@ fn write_mechanism_output_params_tls12_safe_when_pversion_null() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
     // Did not crash, did not write through NULL.
 }
@@ -1637,7 +1653,9 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
         version: 2,
     });
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     assert_eq!(version, 2);
@@ -1713,7 +1731,9 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
     });
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     // E0793: params structs are packed on Windows; assert on by-value copies.
@@ -1804,7 +1824,9 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         server_iv: vec![0xB1, 0xB2, 0xB3, 0xB4].into(),
     });
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     let (h_client_mac, h_server_mac, h_client_key, h_server_key) = (

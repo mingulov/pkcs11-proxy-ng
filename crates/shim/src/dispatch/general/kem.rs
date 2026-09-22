@@ -136,10 +136,10 @@ pub unsafe extern "C" fn c_decapsulate_key(
             template_opt,
             ciphertext,
         )) {
-            Ok(key_handle) => {
-                unsafe { write_object_handle_output(key_handle, ph_key) };
-                rv_ok()
-            }
+            Ok(key_handle) => match unsafe { write_object_handle_output(key_handle, ph_key) } {
+                Ok(()) => rv_ok(),
+                Err(e) => rv_err(e),
+            },
             Err(e) => rv_err(e),
         }
     })

@@ -2891,14 +2891,6 @@ unsafe fn sp800_108_derived_keys_invalid(
     })
 }
 
-pub(crate) fn gcm_iv_write_capacity(gcm: &CK_GCM_PARAMS) -> usize {
-    if gcm.ulIvLen > 0 {
-        gcm.ulIvLen as usize
-    } else {
-        (((gcm.ulIvBits as u64).saturating_add(7)) / 8) as usize
-    }
-}
-
 pub(crate) fn missing_embedded_pointer<T>(ptr: *const T, len: CK_ULONG) -> bool {
     ptr.is_null() && len != 0
 }

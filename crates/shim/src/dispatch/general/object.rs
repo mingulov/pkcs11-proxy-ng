@@ -209,10 +209,10 @@ pub unsafe extern "C" fn c_create_object(
         let template_opt = null_preserving_template(&template, p_template);
         match with_client!(client => client.create_object(CkSessionHandle(h_session as u64), template_opt))
         {
-            Ok(handle) => {
-                unsafe { write_object_handle_output(handle, ph_object) };
-                rv_ok()
-            }
+            Ok(handle) => match unsafe { write_object_handle_output(handle, ph_object) } {
+                Ok(()) => rv_ok(),
+                Err(e) => rv_err(e),
+            },
             Err(e) => rv_err(e),
         }
     })
@@ -239,10 +239,10 @@ pub unsafe extern "C" fn c_copy_object(
             CkObjectHandle(h_object as u64),
             template_opt,
         )) {
-            Ok(handle) => {
-                unsafe { write_object_handle_output(handle, ph_new_object) };
-                rv_ok()
-            }
+            Ok(handle) => match unsafe { write_object_handle_output(handle, ph_new_object) } {
+                Ok(()) => rv_ok(),
+                Err(e) => rv_err(e),
+            },
             Err(e) => rv_err(e),
         }
     })

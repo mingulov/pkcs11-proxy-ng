@@ -1,7 +1,8 @@
 use super::{
-    MAX_MECHANISM_PARAM_STRUCT_LEN, MAX_NESTED_MECHANISMS, NestingBudget, read_mechanism,
-    read_mechanism_with_shape, read_mechanism_with_shape_budgeted, read_raw_bytes,
-    read_wrap_key_mechanism, validate_mechanism, write_mechanism_output_params,
+    MAX_MECHANISM_PARAM_STRUCT_LEN, MAX_NESTED_MECHANISMS, NestingBudget,
+    prepare_mechanism_output_params, read_mechanism, read_mechanism_with_shape,
+    read_mechanism_with_shape_budgeted, read_raw_bytes, read_wrap_key_mechanism,
+    validate_mechanism,
 };
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::{
@@ -599,7 +600,9 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         aad: Vec::new().into(),
         tag_bits: 96,
     });
-    unsafe { write_mechanism_output_params(&mut mechanism, &output) };
+    let plan = unsafe { prepare_mechanism_output_params(&mut mechanism, &output) }
+        .expect("valid output prepares");
+    unsafe { plan.commit() };
     assert_eq!(&iv[..4], &[1, 2, 3, 4]);
     // E0793: params structs are packed on Windows; assert on by-value copies.
     let (gcm_iv_len, gcm_tag_bits) = (gcm_wrap.ulIvLen, gcm_wrap.ulTagBits);
@@ -630,7 +633,9 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         aad: Vec::new().into(),
         mac_len: 12,
     });
-    unsafe { write_mechanism_output_params(&mut mechanism, &output) };
+    let plan = unsafe { prepare_mechanism_output_params(&mut mechanism, &output) }
+        .expect("valid output prepares");
+    unsafe { plan.commit() };
     assert_eq!(&nonce[..4], &[9, 8, 7, 6]);
     let (ccm_nonce_len, ccm_mac_len) = (ccm_wrap.ulNonceLen, ccm_wrap.ulMACLen);
     assert_eq!(ccm_nonce_len, 4);
@@ -2012,8 +2017,8 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
     }
 
     let generated = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
-    unsafe {
-        write_mechanism_output_params(
+    let plan = unsafe {
+        prepare_mechanism_output_params(
             &mut mechanism,
             &CkMechanismParams::Gcm(GcmParams {
                 iv: generated.clone(),
@@ -2025,8 +2030,10 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
                 iv_null: false,
                 aad_null: false,
             }),
-        );
+        )
     }
+    .expect("valid output prepares");
+    unsafe { plan.commit() };
 
     assert_eq!(iv, generated.as_slice());
     let (gcm_iv_len, gcm_iv_bits) = (gcm.ulIvLen, gcm.ulIvBits);
@@ -2388,8 +2395,8 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
         other => panic!("unexpected SP800-108 feedback params: {other:?}"),
     }
 
-    unsafe {
-        write_mechanism_output_params(
+    let plan = unsafe {
+        prepare_mechanism_output_params(
             &mut mechanism,
             &CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
                 prf_type: CkMechanismType(CKM_SHA256_HMAC),
@@ -2400,8 +2407,10 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
                     key_handle: CkObjectHandle(0xCAFE),
                 }],
             }),
-        );
+        )
     }
+    .expect("valid output prepares");
+    unsafe { plan.commit() };
 
     assert_eq!(additional_key_handle, 0xCAFE);
 }
@@ -2730,7 +2739,8 @@ fn misaligned_copy<T: Copy>(value: T) -> (Vec<u8>, *const T) {
     let align = std::mem::align_of::<T>().max(2);
     let mut backing = vec![0u8; size + align + 1];
     let base = backing.as_ptr() as usize;
-    let offset = (1..=align).find(|o| (base + o) % align != 0).expect("misaligned offset exists");
+    let offset =
+        (1..=align).find(|o| !(base + o).is_multiple_of(align)).expect("misaligned offset exists");
     let ptr = unsafe { backing.as_mut_ptr().add(offset) as *mut T };
     unsafe { ptr.write_unaligned(value) };
     assert_ne!((ptr as usize) % align, 0, "fixture must actually be misaligned");

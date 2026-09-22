@@ -2440,7 +2440,11 @@ def parse_ck_mechanism_param_variants(path: Path) -> set[str]:
 
 def parse_writeback_variants(path: Path) -> set[str]:
     text = path.read_text(encoding="utf-8")
-    start = text.find("pub(crate) unsafe fn write_mechanism_output_params")
+    # T06: the writeback dispatch moved from the deleted void
+    # `write_mechanism_output_params` into `prepare_mechanism_output_params`
+    # (validate-before-commit); the flat per-variant match still marks
+    # every supported output shape.
+    start = text.find("pub(crate) unsafe fn prepare_mechanism_output_params")
     if start == -1:
         return set()
     end = text.find("fn gcm_iv_write_capacity", start)
