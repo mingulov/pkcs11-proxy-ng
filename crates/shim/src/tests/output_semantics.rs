@@ -62,6 +62,18 @@ impl TestDaemon {
             .get_or_init(|| Self::start_configured(MockAbi::host(), Some(foreign)))
     }
 
+    /// An owned (non-singleton) daemon with a cold server discovery
+    /// cache (T11): the fresh backend `Arc` is a cache key no prior
+    /// probe could have stored, so the first probe deterministically
+    /// reaches the backend instead of a shared-singleton cache hit.
+    /// Assumes no (backend, payload) address reuse by a later `fresh()`
+    /// within the 5 s cache TTL (a hit would surface loudly as a 15 s
+    /// rendezvous timeout). Dropping it stops its server; the caller
+    /// must restore the endpoint env + reconnect flag for later tests.
+    pub(super) fn fresh() -> Self {
+        Self::start(MockAbi::host())
+    }
+
     fn start(abi: MockAbi) -> Self {
         Self::start_configured(abi, None)
     }

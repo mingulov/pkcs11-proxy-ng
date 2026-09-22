@@ -34,6 +34,17 @@ struct TokenRendezvous {
     release: std::sync::mpsc::Receiver<()>,
 }
 
+/// One-shot rendezvous gate for slow-discovery simulation (T11): the
+/// next `get_interface_capabilities` signals on `entered`, blocks on
+/// `release`, then proceeds. Taken (not cloned) so only the first
+/// call parks — later calls run normally, which keeps multi-RPC
+/// tests deadlock-free. Slotless sibling of [`TokenRendezvous`]:
+/// discovery carries no slot identity.
+struct InterfaceCapsRendezvous {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
 /// Predicate over a `find_objects_init` template: installed with
 /// [`MockBackend::set_find_template_gate`] so `find_objects` can simulate
 /// class-sensitive search.
@@ -198,6 +209,14 @@ pub struct MockBackend {
     /// snapshot — modeling a slow provider read whose data may be stale by
     /// return time.
     token_info_gate: Mutex<Option<TokenRendezvous>>,
+    /// One-shot gate for the next `get_interface_capabilities` (T11):
+    /// signals entry, parks until release, then returns the caps —
+    /// modeling a slow discovery RPC. Set via
+    /// [`MockBackend::set_interface_caps_gate`].
+    interface_caps_gate: Mutex<Option<InterfaceCapsRendezvous>>,
+    /// Count of `get_interface_capabilities` trait calls reaching the
+    /// backend. Discovery tests use it to prove backend reach.
+    interface_caps_calls: AtomicUsize,
     /// Error that `login` specifically returns (before `login_impl`). Used to
     /// simulate PIN failures (e.g. CKR_PIN_INCORRECT) so tests can exercise
     /// the per-slot failed-login budget without a real PKCS#11 module.
@@ -406,6 +425,8 @@ impl MockBackend {
             init_token_gate: Mutex::new(None),
             init_token_error: Mutex::new(None),
             token_info_gate: Mutex::new(None),
+            interface_caps_gate: Mutex::new(None),
+            interface_caps_calls: AtomicUsize::new(0),
             injected_login_rv: Mutex::new(None),
             encrypt_init_output: Mutex::new(None),
             encrypt_operation_output: Mutex::new(None),
@@ -872,6 +893,25 @@ impl MockBackend {
         release: std::sync::mpsc::Receiver<()>,
     ) {
         *self.token_info_gate.lock().unwrap() = Some(TokenRendezvous { entered, release });
+    }
+
+    /// Install a one-shot gate for the next
+    /// `get_interface_capabilities` (T11): it signals `entered`,
+    /// blocks until `release` fires, then returns the caps. Only the
+    /// first call parks; later calls run normally.
+    pub fn set_interface_caps_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        *self.interface_caps_gate.lock().unwrap() =
+            Some(InterfaceCapsRendezvous { entered, release });
+    }
+
+    /// Number of `get_interface_capabilities` trait calls that reached
+    /// the backend.
+    pub fn interface_caps_call_count(&self) -> usize {
+        self.interface_caps_calls.load(Ordering::SeqCst)
     }
 
     /// Number of currently open backend sessions. Leak accounting for
@@ -3800,6 +3840,16 @@ impl Pkcs11Backend for MockBackend {
     }
 
     fn get_interface_capabilities(&self) -> InterfaceCapabilities {
+        self.interface_caps_calls.fetch_add(1, Ordering::SeqCst);
+        // T11 one-shot gate: signal entry, park until release, then
+        // proceed. Bound before the branch: an if-let scrutinee take
+        // would hold the guard across the park (temporary lifetime)
+        // and wedge later calls.
+        let gate = self.interface_caps_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.recv();
+        }
         if let Some(caps) = self.interface_capabilities.lock().unwrap().as_ref() {
             return caps.clone();
         }
