@@ -147,6 +147,14 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
         requirements: &["NSS softokn libsoftokn3.so and certutil"],
     },
     IgnoredTestLane {
+        file: "crates/server/tests/nss_tls_mkd_mechanism_out_test.rs",
+        reason: "NSS softokn SSL3 master-key-derive mechanism-output coverage",
+        commands: &[
+            "cargo test -p pkcs11-proxy-ng --test nss_tls_mkd_mechanism_out_test -- --ignored --test-threads=1",
+        ],
+        requirements: &["NSS softokn libsoftokn3.so and certutil"],
+    },
+    IgnoredTestLane {
         file: "crates/server/tests/provider_matrix_test.rs",
         reason: "Optional NSS and Kryoptic provider matrix smoke coverage",
         commands: &[
@@ -2469,7 +2477,9 @@ fn oasis_inventory_tracks_mechanism_parameter_shape_layers() {
     assert_eq!(wtls_prf["proto_oneof_field"], "wtls_prf_params");
     assert_eq!(wtls_prf["backend_ffi_conversion"], true);
     assert_eq!(wtls_prf["shim_read_support"], true);
-    assert_eq!(wtls_prf["shim_writeback_support"], false);
+    // W1-C5-01: the CkMechanismParams::WtlsPrf writeback arm exists
+    // (mechanism_writeback.rs), so the inventory reports support.
+    assert_eq!(wtls_prf["shim_writeback_support"], true);
     for expected_test in
         ["wtls_prf_params_round_trip", "reads_wtls_prf_and_x942_mqv_parameter_structs"]
     {

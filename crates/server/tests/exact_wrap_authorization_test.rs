@@ -576,9 +576,12 @@ async fn wrap_preparation_preserves_session_then_mechanism_then_policy_precedenc
             CkRv::ARGUMENTS_BAD.0,
             "{route:?}"
         );
+        // W1-C1-13 (permitted-before-remap): the GOST wrap type is not in
+        // the AES-KW-only grant, so the gate's MECHANISM_INVALID wins over
+        // the unknown embedded handle's OBJECT_HANDLE_INVALID.
         assert_eq!(
             invoke(&mut c, route, mechanism(u64::MAX), output_spec()).await.unwrap().rv,
-            CkRv::OBJECT_HANDLE_INVALID.0,
+            CkRv::MECHANISM_INVALID.0,
             "{route:?}"
         );
         assert_eq!(

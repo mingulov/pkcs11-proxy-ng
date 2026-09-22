@@ -3024,6 +3024,14 @@ mod tests {
 
     // --- W1-L7-28: per-connection admission under the global breaker ---
 
+    // Final-review F6: the peer admission table is process-global, so the
+    // tests that park table entries serialize on this test-only mutex;
+    // otherwise a sibling's live entry breaks the size-0 drain assertion
+    // in `per_connection_admission_rejects_over_cap`. No production
+    // change: the table behavior itself is pinned and green.
+    static PEER_ADMISSION_TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     fn test_peer(octet: u8, port: u16) -> std::net::SocketAddr {
         std::net::SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, octet)),
@@ -3069,6 +3077,7 @@ mod tests {
     /// entry is removed (bounded table).
     #[tokio::test(flavor = "multi_thread")]
     async fn per_connection_admission_rejects_over_cap() {
+        let _table_guard = PEER_ADMISSION_TEST_LOCK.lock().await;
         let peer = test_peer(51, 40051);
         let cap = per_connection_max_in_flight();
         assert!(cap >= 1, "per-connection cap must be at least 1");
@@ -3122,6 +3131,7 @@ mod tests {
     /// by another peer's exhausted budget.
     #[tokio::test(flavor = "multi_thread")]
     async fn per_connection_admission_is_per_peer() {
+        let _table_guard = PEER_ADMISSION_TEST_LOCK.lock().await;
         let busy = test_peer(52, 40052);
         let idle = test_peer(53, 40053);
         let cap = per_connection_max_in_flight();

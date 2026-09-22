@@ -51,6 +51,9 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     "crates/backend/src/ffi/constructor_child_tests.rs",
     "crates/backend/src/ffi/native_domain_tests.rs",
     "crates/backend/src/ffi/retained_owner_contract_tests.rs",
+    // Perf-measurement printout (W1-C4-04): the ns/iter report IS the
+    // measurement test's output (read with `-- --nocapture`).
+    "crates/backend/src/ffi/ffi_conversion/tests.rs",
     // Benchmark report lines.
     "crates/server/benches/proxy_latency_histogram.rs",
     "crates/server/benches/proxy_throughput.rs",
