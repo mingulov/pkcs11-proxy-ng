@@ -1498,7 +1498,7 @@ fn concurrent_ensure_probed_installs_consistent_state() {
     crate::state::mark_finalized();
     crate::interface_probe::clear_cache();
     let handles: Vec<_> =
-        (0..8).map(|_| std::thread::spawn(|| crate::interface_probe::ensure_probed())).collect();
+        (0..8).map(|_| std::thread::spawn(crate::interface_probe::ensure_probed)).collect();
     for handle in handles {
         handle.join().expect("probe thread must not panic").expect("probe must succeed");
     }
