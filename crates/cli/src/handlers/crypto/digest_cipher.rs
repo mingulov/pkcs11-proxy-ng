@@ -10,11 +10,13 @@ pub(crate) async fn digest(
     slot_id: u64,
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
-    input: String,
+    input: zeroize::Zeroizing<String>,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
-    let data = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
+    // T14: decode into a wiping owner, then lend the wiping allocation
+    // across the RPC (no plain working copy).
+    let data = crate::secrets::decode_hex_secret(&input, "Invalid hex input")?.into_zeroizing();
 
     client
         .digest_init(session, &mechanism)
@@ -34,13 +36,15 @@ pub(crate) async fn encrypt(
     key_label: String,
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
-    input: String,
+    input: zeroize::Zeroizing<String>,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     login_user(client, session, pin).await?;
     let key = find_key_by_label(client, session, &key_label, CkObjectClass::PUBLIC_KEY).await?;
-    let data = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
+    // T14: decode into a wiping owner, then lend the wiping allocation
+    // across the RPC (no plain working copy).
+    let data = crate::secrets::decode_hex_secret(&input, "Invalid hex input")?.into_zeroizing();
 
     client
         .encrypt_init(session, &mechanism, key)
@@ -71,14 +75,17 @@ pub(crate) async fn decrypt(
     key_label: String,
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
-    input: String,
+    input: zeroize::Zeroizing<String>,
     redact: bool,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     login_user(client, session, pin).await?;
     let key = find_key_by_label(client, session, &key_label, CkObjectClass::PRIVATE_KEY).await?;
-    let ciphertext = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
+    // T14: decode into a wiping owner, then lend the wiping allocation
+    // across the RPC (no plain working copy).
+    let ciphertext =
+        crate::secrets::decode_hex_secret(&input, "Invalid hex input")?.into_zeroizing();
 
     client
         .decrypt_init(session, &mechanism, key)

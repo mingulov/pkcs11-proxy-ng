@@ -30,9 +30,13 @@ const DATA_HEX: &str = "00112233445566778899aabbccddeeff";
 
 /// The mock backend's one-shot `C_Verify` only accepts the deterministic
 /// `echo("sign", data)` output (2 bytes, `MOCK_SIGN_LEN`) as the signature.
-fn mock_signature_hex() -> String {
+fn mock_signature_hex() -> zeroize::Zeroizing<String> {
     let data = hex::decode(DATA_HEX).unwrap();
-    hex::encode(pkcs11_proxy_ng_backend::mock::echo::echo_bytes("sign", &[&data], 2))
+    zeroize::Zeroizing::new(hex::encode(pkcs11_proxy_ng_backend::mock::echo::echo_bytes(
+        "sign",
+        &[&data],
+        2,
+    )))
 }
 
 /// Spin up an in-process gRPC daemon backed by `backend`.
@@ -215,7 +219,7 @@ async fn encrypt_resolves_secret_key_by_label() {
         SECRET_LABEL.to_string(),
         "AES_ECB".to_string(),
         None,
-        DATA_HEX.to_string(),
+        zeroize::Zeroizing::new(DATA_HEX.to_string()),
     )
     .await
     .expect("encrypt must resolve a SECRET_KEY object by label");
@@ -232,7 +236,7 @@ async fn decrypt_resolves_secret_key_by_label() {
         SECRET_LABEL.to_string(),
         "AES_ECB".to_string(),
         None,
-        DATA_HEX.to_string(),
+        zeroize::Zeroizing::new(DATA_HEX.to_string()),
         false,
     )
     .await
@@ -253,7 +257,7 @@ async fn decrypt_with_redact_succeeds() {
         SECRET_LABEL.to_string(),
         "AES_ECB".to_string(),
         None,
-        DATA_HEX.to_string(),
+        zeroize::Zeroizing::new(DATA_HEX.to_string()),
         true,
     )
     .await
@@ -270,7 +274,7 @@ async fn sign_resolves_secret_key_by_label() {
         SECRET_LABEL.to_string(),
         "SHA256_HMAC".to_string(),
         None,
-        DATA_HEX.to_string(),
+        zeroize::Zeroizing::new(DATA_HEX.to_string()),
     )
     .await
     .expect("sign must resolve a SECRET_KEY object by label");
@@ -287,7 +291,7 @@ async fn verify_resolves_secret_key_by_label() {
         SECRET_LABEL.to_string(),
         "SHA256_HMAC".to_string(),
         None,
-        DATA_HEX.to_string(),
+        zeroize::Zeroizing::new(DATA_HEX.to_string()),
         mock_signature_hex(),
     )
     .await
@@ -313,7 +317,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
                 label.to_string(),
                 "AES_ECB".to_string(),
                 None,
-                DATA_HEX.to_string(),
+                zeroize::Zeroizing::new(DATA_HEX.to_string()),
             )
             .await
         }
@@ -325,7 +329,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
                 label.to_string(),
                 "AES_ECB".to_string(),
                 None,
-                DATA_HEX.to_string(),
+                zeroize::Zeroizing::new(DATA_HEX.to_string()),
                 false,
             )
             .await
@@ -338,7 +342,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
                 label.to_string(),
                 "SHA256_HMAC".to_string(),
                 None,
-                DATA_HEX.to_string(),
+                zeroize::Zeroizing::new(DATA_HEX.to_string()),
             )
             .await
         }
@@ -350,7 +354,7 @@ async fn run_op(op: CryptoOp, client: &mut Pkcs11Client, slot: u64, label: &str)
                 label.to_string(),
                 "SHA256_HMAC".to_string(),
                 None,
-                DATA_HEX.to_string(),
+                zeroize::Zeroizing::new(DATA_HEX.to_string()),
                 mock_signature_hex(),
             )
             .await
@@ -370,7 +374,7 @@ async fn bare_gcm_encrypt_errors_with_cli_hint() {
         SECRET_LABEL.to_string(),
         "AES_GCM".to_string(),
         None,
-        DATA_HEX.to_string(),
+        zeroize::Zeroizing::new(DATA_HEX.to_string()),
     )
     .await
     .unwrap_err()
@@ -393,8 +397,8 @@ async fn verify_invalid_releases_session() {
         SECRET_LABEL.to_string(),
         "SHA256_HMAC".to_string(),
         None,
-        DATA_HEX.to_string(),
-        "00".to_string(),
+        zeroize::Zeroizing::new(DATA_HEX.to_string()),
+        zeroize::Zeroizing::new("00".to_string()),
     )
     .await
     .unwrap_err();
@@ -433,7 +437,7 @@ async fn encrypt_accepts_gcm_params_file() {
         SECRET_LABEL.to_string(),
         "AES_GCM".to_string(),
         Some(params_path),
-        DATA_HEX.to_string(),
+        zeroize::Zeroizing::new(DATA_HEX.to_string()),
     )
     .await
     .expect("encrypt with AES_GCM + params file must succeed");
@@ -451,7 +455,7 @@ async fn duplicate_label_errors_listing_matches() {
         SECRET_LABEL.to_string(),
         "AES_ECB".to_string(),
         None,
-        DATA_HEX.to_string(),
+        zeroize::Zeroizing::new(DATA_HEX.to_string()),
     )
     .await
     .unwrap_err()
