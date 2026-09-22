@@ -81,6 +81,10 @@ pub fn configure(find_result_warn_threshold: Option<usize>, coalesce_attributes:
 
 /// Whether the session-scoped attribute coalescer is active (R2).
 /// Returns `false` when [`configure`] has not been called (safe default: no caching).
+///
+/// T28-M4: reads take the `Mutex` (not lock-free `OnceLock` reads) so tests can
+/// reset to a known baseline under `CONFIG_TEST_GUARD` while production keeps
+/// first-wins semantics; the uncontended lock cost on the data plane is negligible.
 pub fn coalesce_enabled() -> bool {
     CONFIG.lock().unwrap_or_else(|e| e.into_inner()).map(|c| c.coalesce_attributes).unwrap_or(false)
 }
@@ -95,6 +99,8 @@ pub fn record_attr_coalesce_miss() {
     ATTR_COALESCE_MISSES.fetch_add(1, Ordering::Relaxed);
 }
 
+/// T28-M4: same `Mutex`-per-read trade-off as [`coalesce_enabled`] (test
+/// isolation via reset under `CONFIG_TEST_GUARD`; negligible uncontended cost).
 fn threshold() -> Option<usize> {
     CONFIG.lock().unwrap_or_else(|e| e.into_inner()).and_then(|c| c.find_warn_threshold)
 }

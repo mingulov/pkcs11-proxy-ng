@@ -338,6 +338,14 @@ struct AnchorFile {
 /// 3. Else start from genesis.
 fn reconstruct_chain_state(active_path: &Path, dir: &Path) -> io::Result<ChainState> {
     let (offset, anchored) = read_anchor_tail(dir);
+    // T28-M1: an offset past EOF is only reachable via out-of-band
+    // truncate/replace of the active file (in-band, offset <= len always).
+    // Clamp to the full-scan fallback instead of returning the stale
+    // anchor without scanning the real content.
+    let offset = match std::fs::metadata(active_path) {
+        Ok(meta) if offset > meta.len() => 0,
+        _ => offset,
+    };
     if let Ok(suffix) = read_active_suffix(active_path, offset) {
         let mut last_valid: Option<AuditRecord> = None;
         for line in suffix.lines() {
@@ -1497,6 +1505,55 @@ mod tests {
         let last = last_valid.expect("records must parse");
         assert_eq!(last.seq, 249);
         assert_eq!(chain.last_hash, record_hash(&last.prev_hash, &last));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// T28-M1: an anchor offset past EOF (only reachable via out-of-band
+    /// truncate/replace of the active file) must fall back to scanning the
+    /// real content, not return the stale anchor.
+    #[test]
+    fn anchor_offset_past_eof_falls_back_to_full_scan() {
+        let dir = temp_dir("stale-anchor-clamp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Establish an anchor with a large offset: 110 records force a
+        // checkpoint at 100, which persists active_bytes > 0.
+        let dropped = Arc::new(AtomicU64::new(0));
+        let mut writer =
+            WriterState::open(dir.clone(), None, 64 * 1024 * 1024, 10, dropped).unwrap();
+        for _ in 0..110 {
+            writer.write_record(make_record(EventClass::DataPlane)).unwrap();
+        }
+        drop(writer);
+
+        let anchor_data = std::fs::read(dir.join("audit.anchor.json")).unwrap();
+        let anchor_json: serde_json::Value = serde_json::from_slice(&anchor_data).unwrap();
+        let anchor_offset = anchor_json.get("active_bytes").unwrap().as_u64().unwrap();
+        assert!(anchor_offset > 0, "anchor must persist a positive tail offset");
+
+        // Out-of-band replace: swap the active file for short content whose
+        // length is below the persisted anchor offset.
+        let active_path = dir.join("audit.jsonl");
+        let mut chain = ChainState::genesis();
+        let mut text = String::new();
+        for _ in 0..3 {
+            let mut rec = make_record(EventClass::Auth);
+            chain.append(&mut rec);
+            text.push_str(&to_jsonl(&rec));
+        }
+        std::fs::write(&active_path, &text).unwrap();
+        assert!(
+            std::fs::metadata(&active_path).unwrap().len() < anchor_offset,
+            "replacement must be shorter than the stale anchor offset"
+        );
+
+        // Recovery must scan the real content (3 records, seqs 0..2) and
+        // resume at 3 — not return the stale anchor tip (last_seq 100).
+        let resumed = reconstruct_chain_state(&active_path, &dir).unwrap();
+        assert_eq!(resumed.last_seq, 3);
+        assert_eq!(resumed.last_hash, chain.last_hash);
 
         std::fs::remove_dir_all(&dir).ok();
     }

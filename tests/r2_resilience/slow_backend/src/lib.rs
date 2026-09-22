@@ -354,7 +354,10 @@ fn count_op_and_maybe_break() -> Option<CK_RV> {
     {
         BROKEN.store(true, std::sync::atomic::Ordering::Relaxed);
         let rv = env_rv("SLOW_BACKEND_BREAK_RV_HEX").unwrap_or(0x2);
-        eprintln!("slow_backend: tripped break at op#{n}, latching BROKEN");
+        // T28-M2: gate the one-shot latch line like the two per-op sites above.
+        if verbose() {
+            eprintln!("slow_backend: tripped break at op#{n}, latching BROKEN");
+        }
         return Some(rv);
     }
     None
@@ -750,6 +753,19 @@ pub unsafe extern "C" fn C_GetFunctionList(list: *mut *mut CK_FUNCTION_LIST) -> 
 mod tests {
     use super::*;
 
+    /// T28-M3: serializes every test in this module. `count_op_and_maybe_break`
+    /// reads process env (`verbose()`, break thresholds) and mutates process-global
+    /// counters, while `per_op_logging_is_quiet_unless_verbose` mutates process env,
+    /// so unserialized runs could observe a stray env value. Follows the C2-11
+    /// `CONFIG_TEST_GUARD` precedent.
+    static ENV_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Lock [`ENV_TEST_GUARD`], recovering from poisoning so one failing test
+    /// cannot cascade into its siblings (same shape as the resilience `CONFIG` locks).
+    fn lock_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn open_session() -> CK_SESSION_HANDLE {
         let mut h: CK_SESSION_HANDLE = 0;
         let rv = unsafe { c_open_session(0, 0, std::ptr::null_mut(), None, &mut h) };
@@ -759,6 +775,7 @@ mod tests {
 
     #[test]
     fn open_session_returns_unique_handles() {
+        let _guard = lock_env_guard();
         // W1-L10-20: per-consumer FindObjects needs distinguishable sessions.
         let h1 = open_session();
         let h2 = open_session();
@@ -767,6 +784,7 @@ mod tests {
 
     #[test]
     fn concurrent_consumers_each_get_find_handles() {
+        let _guard = lock_env_guard();
         // W1-L10-20: interleaved find sequences on two sessions must each
         // yield the stub handle; single-shot-per-consumer is preserved.
         let h1 = open_session();
@@ -795,12 +813,57 @@ mod tests {
 
     #[test]
     fn per_op_logging_is_quiet_unless_verbose() {
+        let _guard = lock_env_guard();
         // W1-L10-20: default runs stay quiet; SLOW_BACKEND_VERBOSE=1
         // restores the per-op chatter for scenario debugging.
+        // T28-M2: this gate also covers the one-shot "latching BROKEN" line;
+        // see broken_latch_line_is_verbose_gated for the stderr-level pin.
         assert!(!verbose(), "per-op eprintln must be off by default");
         unsafe { std::env::set_var("SLOW_BACKEND_VERBOSE", "1") };
         assert!(verbose(), "SLOW_BACKEND_VERBOSE=1 must enable op tracing");
         unsafe { std::env::remove_var("SLOW_BACKEND_VERBOSE") };
         assert!(!verbose(), "removing the flag must quiet the stub again");
+    }
+
+    /// T28-M2 probe child: trips the BROKEN latch once. Only acts when
+    /// re-executed as a subprocess by `broken_latch_line_is_verbose_gated`
+    /// (a fresh process, so the tripped latch cannot poison siblings); a
+    /// no-op in normal suite runs.
+    #[test]
+    fn latch_probe_child() {
+        if std::env::var("SLOW_BACKEND_LATCH_PROBE").is_err() {
+            return;
+        }
+        let _guard = lock_env_guard();
+        // The parent sets SLOW_BACKEND_BREAK_AFTER_CALLS=0, so the first op trips.
+        let _ = count_op_and_maybe_break();
+    }
+
+    /// T28-M2: the one-shot "latching BROKEN" line is verbose-gated like the
+    /// two per-op sites. Trips the latch in a child process (tripping it
+    /// in-process would latch the global BROKEN flag for siblings) and
+    /// inspects the child's stderr with the env unset and set.
+    #[test]
+    fn broken_latch_line_is_verbose_gated() {
+        let _guard = lock_env_guard();
+        for (verbose, expect_line) in [(false, false), (true, true)] {
+            let exe = std::env::current_exe().expect("test binary path");
+            let mut cmd = std::process::Command::new(exe);
+            cmd.args(["tests::latch_probe_child", "--exact", "--nocapture", "--test-threads=1"])
+                .env("SLOW_BACKEND_LATCH_PROBE", "1")
+                .env("SLOW_BACKEND_BREAK_AFTER_CALLS", "0")
+                .env_remove("SLOW_BACKEND_VERBOSE");
+            if verbose {
+                cmd.env("SLOW_BACKEND_VERBOSE", "1");
+            }
+            let out = cmd.output().expect("spawn probe child");
+            assert!(out.status.success(), "probe child must exit 0");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                stderr.contains("latching BROKEN"),
+                expect_line,
+                "verbose={verbose}: child stderr was {stderr:?}"
+            );
+        }
     }
 }
