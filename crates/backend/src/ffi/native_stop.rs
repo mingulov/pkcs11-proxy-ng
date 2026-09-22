@@ -339,9 +339,12 @@ mod arch {
     /// # Safety
     ///
     /// Never reached on the stop-qualified arms: the guard call site is
-    /// cfg-gated there, and the controller fires only past an armed
-    /// deadline. Elsewhere, see the controller-on-unqualified-target
-    /// behavior above: loud contained controller-thread panic.
+    /// const-runtime-gated there (via `stop_target_qualified()` →
+    /// `NATIVE_STOP_QUALIFIED`, which folds away exactly as the old
+    /// `#[cfg]` gating did), and the controller fires only past an
+    /// armed deadline. Elsewhere, see the
+    /// controller-on-unqualified-target behavior above: loud contained
+    /// controller-thread panic.
     #[inline(never)]
     pub(in crate::ffi) unsafe fn raw_exit_group_70() -> RawStopAttempt {
         unimplemented!(

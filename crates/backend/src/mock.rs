@@ -508,8 +508,9 @@ impl MockBackend {
     ///
     /// W1-C5-03: installing a new list resets the cursor, so a mid-search
     /// swap serves from the new list's start with defined behavior instead
-    /// of slicing at a stale offset. Lock order matches `find_objects_impl`
-    /// (override, then cursor).
+    /// of slicing at a stale offset. The override and cursor locks are
+    /// never held simultaneously here or in `find_objects_impl`, so there
+    /// is no lock-ordering hazard.
     pub fn set_find_objects_result(&self, objects: Vec<CkObjectHandle>) {
         *self.find_objects_override.lock().unwrap() = Some(objects);
         *self.find_objects_cursor.lock().unwrap() = 0;
