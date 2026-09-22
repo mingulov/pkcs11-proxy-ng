@@ -1447,6 +1447,7 @@ dependencies = [
 name = "pkcs11-proxy-ng-proto"
 version = "0.2.0"
 dependencies = [
+ "heck",
  "pkcs11-proxy-ng-types",
  "prost",
  "toml",

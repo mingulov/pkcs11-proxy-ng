@@ -753,10 +753,19 @@ mod tests {
 
     #[test]
     fn byte_output_exact_request_null_len_roundtrip() {
+        // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`; struct-update
+        // syntax is forbidden — all fields are spelled out.
         let req = v1_proto::ByteOutputExactRequest {
-            exact_output_effects_version: 1,
+            client_context_id: String::new(),
+            session_handle: 0,
+            function: 0,
+            output_spec: None,
+            input_data: Vec::new(),
+            mechanism: None,
+            wrapping_key_handle: 0,
+            key_handle: 0,
             input_data_null_len: Some(42),
-            ..Default::default()
+            exact_output_effects_version: 1,
         };
         let bytes = prost::Message::encode_to_vec(&req);
         let back = v1_proto::ByteOutputExactRequest::decode(&bytes[..]).unwrap();
@@ -858,10 +867,19 @@ mod tests {
     fn null_len_present_with_zero_is_distinct_from_absent() {
         // NULL pointer with claimed length 0 is a real client input class; the
         // wire must distinguish Some(0) (NULL, len 0) from None (valid pointer).
+        // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`; struct-update
+        // syntax is forbidden — all fields are spelled out.
         let req = v1_proto::ByteOutputExactRequest {
-            exact_output_effects_version: 1,
+            client_context_id: String::new(),
+            session_handle: 0,
+            function: 0,
+            output_spec: None,
+            input_data: Vec::new(),
+            mechanism: None,
+            wrapping_key_handle: 0,
+            key_handle: 0,
             input_data_null_len: Some(0),
-            ..Default::default()
+            exact_output_effects_version: 1,
         };
         let bytes = prost::Message::encode_to_vec(&req);
         let back = v1_proto::ByteOutputExactRequest::decode(&bytes[..]).unwrap();
