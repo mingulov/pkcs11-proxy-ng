@@ -7,6 +7,9 @@
 // boundary (response/request construction); the standing justification lives in
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
+use pkcs11_proxy_ng_proto::version::{
+    exact_effects_version_rejected, exact_output_effects_version_supported,
+};
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -277,8 +280,9 @@ pub(crate) async fn encapsulate_key_exact(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
-    if req.exact_output_effects_version != 1 {
-        return Err(Status::failed_precondition("exact output effects version 1 required"));
+    // W1-L5-04: compatibility-range gate, never an equality literal.
+    if !exact_output_effects_version_supported(req.exact_output_effects_version) {
+        return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
     let ctx_id = ClientContextId(req.client_context_id);
 

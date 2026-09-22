@@ -1,4 +1,7 @@
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
+use pkcs11_proxy_ng_proto::version::{
+    exact_effects_version_rejected, exact_output_effects_version_supported,
+};
 use std::time::Instant;
 
 use tonic::{Request, Response, Status};
@@ -102,15 +105,33 @@ fn exact_result_from_cache(
     }
 }
 
-/// Merge two exact-path overall `CK_RV` values using PKCS#11 priority ordering.
+/// Merge two exact-path overall `CK_RV` values in native call order (W1-L3-10).
 ///
-/// `CKR_BUFFER_TOO_SMALL` always dominates (mirrors the MockBackend's policy).
-/// Otherwise the first non-OK value is kept.
+/// A native single call ranks multi-attribute failures by a priority ladder,
+/// not by template position and not by 336-dominance: SoftHSM 2.6.1 answers
+/// SENSITIVE over INVALID over BUFFER_TOO_SMALL in BOTH template orders
+/// (full 2x2x2 mixed-error matrix; probe evidence recorded in the Task 29
+/// campaign report). Template-position first-error would diverge from
+/// observed native ([336-first, INVALID-second] is INVALID natively), so the
+/// merge implements the ladder. Call-aborting failures (device/session
+/// class — anything outside the per-attribute ladder and OK) outrank every
+/// per-attribute classification: a native call that hits one answers it,
+/// never a per-attribute outcome.
 fn merge_exact_rv(a: CkRv, b: CkRv) -> CkRv {
-    if a == CkRv::BUFFER_TOO_SMALL || b == CkRv::BUFFER_TOO_SMALL {
-        return CkRv::BUFFER_TOO_SMALL;
+    fn rank(rv: CkRv) -> u8 {
+        if rv == CkRv::OK {
+            0
+        } else if rv == CkRv::BUFFER_TOO_SMALL {
+            1
+        } else if rv == CkRv::ATTRIBUTE_TYPE_INVALID {
+            2
+        } else if rv == CkRv::ATTRIBUTE_SENSITIVE {
+            3
+        } else {
+            4
+        }
     }
-    if a != CkRv::OK { a } else { b }
+    if rank(b) > rank(a) { b } else { a }
 }
 
 // ── Per-attr RV contribution from a reconstructed exact result ────────────────
@@ -345,8 +366,9 @@ pub(super) async fn get_attribute_value_exact(
     let started = Instant::now();
     crate::server::resilience::record_get_attribute_value();
     let req = request.into_inner();
-    if req.exact_output_effects_version != 1 {
-        return Err(Status::failed_precondition("exact output effects version 1 required"));
+    // W1-L5-04: compatibility-range gate, never an equality literal.
+    if !exact_output_effects_version_supported(req.exact_output_effects_version) {
+        return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
     let ctx_id = ClientContextId(req.client_context_id);
     let object_handle = req.object_handle;
@@ -1429,7 +1451,7 @@ mod tests {
             after_warm,
             "M3(b): buffer-too-small query must be served from cache (backend must not be called)"
         );
-        // Overall RV must be BUFFER_TOO_SMALL (dominant RV for small-buffer hits).
+        // Overall RV must be BUFFER_TOO_SMALL (sole error on the native ladder).
         assert_eq!(
             cached_small.ck_rv,
             CkRv::BUFFER_TOO_SMALL.0,
@@ -1533,6 +1555,265 @@ mod tests {
         cached.value.expose(|bytes| {
             assert_eq!(bytes, b"my-label", "cached bytes must match the response");
         });
+    }
+
+    // --- W1-L3-10: native-order RV merge ---
+    //
+    // Differential contract (proxy vs observed native): SoftHSM 2.6.1
+    // answers mixed-error C_GetAttributeValue with a priority ladder —
+    // SENSITIVE > INVALID > BUFFER_TOO_SMALL — in BOTH template orders
+    // (probe evidence recorded in the Task 29 campaign report).
+    // Template-position first-error would diverge from observed native
+    // ([336-first, INVALID-second] is INVALID natively), so the merge
+    // implements the native ladder, not position order and not 336-dominance.
+
+    #[test]
+    fn merge_exact_rv_follows_native_priority_ladder() {
+        let cases = [
+            ((CkRv::OK, CkRv::OK), CkRv::OK),
+            ((CkRv::OK, CkRv::BUFFER_TOO_SMALL), CkRv::BUFFER_TOO_SMALL),
+            ((CkRv::BUFFER_TOO_SMALL, CkRv::OK), CkRv::BUFFER_TOO_SMALL),
+            ((CkRv::BUFFER_TOO_SMALL, CkRv::BUFFER_TOO_SMALL), CkRv::BUFFER_TOO_SMALL),
+            ((CkRv::BUFFER_TOO_SMALL, CkRv::ATTRIBUTE_SENSITIVE), CkRv::ATTRIBUTE_SENSITIVE),
+            ((CkRv::ATTRIBUTE_SENSITIVE, CkRv::BUFFER_TOO_SMALL), CkRv::ATTRIBUTE_SENSITIVE),
+            ((CkRv::BUFFER_TOO_SMALL, CkRv::ATTRIBUTE_TYPE_INVALID), CkRv::ATTRIBUTE_TYPE_INVALID),
+            ((CkRv::ATTRIBUTE_TYPE_INVALID, CkRv::BUFFER_TOO_SMALL), CkRv::ATTRIBUTE_TYPE_INVALID),
+            ((CkRv::ATTRIBUTE_SENSITIVE, CkRv::ATTRIBUTE_TYPE_INVALID), CkRv::ATTRIBUTE_SENSITIVE),
+            ((CkRv::ATTRIBUTE_TYPE_INVALID, CkRv::ATTRIBUTE_SENSITIVE), CkRv::ATTRIBUTE_SENSITIVE),
+            ((CkRv::OK, CkRv::ATTRIBUTE_SENSITIVE), CkRv::ATTRIBUTE_SENSITIVE),
+            ((CkRv::ATTRIBUTE_SENSITIVE, CkRv::OK), CkRv::ATTRIBUTE_SENSITIVE),
+            ((CkRv::OK, CkRv::ATTRIBUTE_TYPE_INVALID), CkRv::ATTRIBUTE_TYPE_INVALID),
+            ((CkRv::ATTRIBUTE_TYPE_INVALID, CkRv::OK), CkRv::ATTRIBUTE_TYPE_INVALID),
+            // Call-aborting class outranks per-attr classes: a native call
+            // that hits a device/session failure answers it, never a
+            // per-attribute classification.
+            ((CkRv::BUFFER_TOO_SMALL, CkRv::DEVICE_ERROR), CkRv::DEVICE_ERROR),
+            ((CkRv::DEVICE_ERROR, CkRv::BUFFER_TOO_SMALL), CkRv::DEVICE_ERROR),
+            ((CkRv::OK, CkRv::DEVICE_ERROR), CkRv::DEVICE_ERROR),
+            ((CkRv::DEVICE_ERROR, CkRv::OK), CkRv::DEVICE_ERROR),
+            ((CkRv::ATTRIBUTE_SENSITIVE, CkRv::DEVICE_ERROR), CkRv::DEVICE_ERROR),
+        ];
+        for ((a, b), expected) in cases {
+            assert_eq!(
+                super::merge_exact_rv(a, b),
+                expected,
+                "W1-L3-10: merge({a:?}, {b:?}) must follow the native ladder"
+            );
+        }
+    }
+
+    fn exact_query(
+        attr_type: CkAttributeType,
+        buffer_len: u64,
+    ) -> pkcs11_proxy_ng_proto::AttributeQuery {
+        pkcs11_proxy_ng_proto::AttributeQuery {
+            attr_type: attr_type.0,
+            buffer_present: true,
+            buffer_len,
+            nested: None,
+        }
+    }
+
+    async fn exact_mixed_setup() -> (HandlerContext, ClientContextId, u64, u64, Arc<MockBackend>) {
+        let mock = mock_with_attrs();
+        let (ctx, ctx_id, session_handle) =
+            setup_with_mock(mock.clone(), allow_policy(), Some(MTLS_IDENTITY.into())).await;
+        ctx.context_manager
+            .get_context(&ctx_id, |c| {
+                c.object_handles.insert(BackendHandle(1));
+            })
+            .await;
+        let object_handle = ctx_mgr_object_virtual(&ctx, &ctx_id).await;
+        // Warm the cache: ID ("my-id", 5 bytes) with an adequate buffer.
+        let warm = pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+            exact_output_effects_version: 1,
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            object_handle,
+            queries: vec![exact_query(CkAttributeType::ID, 64)],
+        };
+        let warmed =
+            super::get_attribute_value_exact(&ctx, Request::new(warm)).await.unwrap().into_inner();
+        assert_eq!(warmed.ck_rv, CkRv::OK.0, "cache-warming read must succeed");
+        (ctx, ctx_id, session_handle, object_handle, mock)
+    }
+
+    async fn ctx_mgr_object_virtual(ctx: &HandlerContext, ctx_id: &ClientContextId) -> u64 {
+        ctx.context_manager
+            .get_context(ctx_id, |c| c.object_handles.virtual_handles().next().unwrap().0)
+            .await
+            .unwrap()
+    }
+
+    async fn run_exact_mixed(
+        ctx: &HandlerContext,
+        ctx_id: &ClientContextId,
+        session_handle: u64,
+        object_handle: u64,
+        queries: Vec<pkcs11_proxy_ng_proto::AttributeQuery>,
+    ) -> pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+        super::get_attribute_value_exact(
+            ctx,
+            Request::new(pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+                exact_output_effects_version: 1,
+                client_context_id: ctx_id.0.clone(),
+                session_handle,
+                object_handle,
+                queries,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+    }
+
+    /// Cache-336 at position 0 + fetched SENSITIVE at position 1: native
+    /// answers SENSITIVE in both orders; dominance answers 336.
+    #[tokio::test]
+    async fn coalesced_cache_too_small_then_sensitive_matches_native() {
+        let _coalesce_guard = enable_coalesce().await;
+        let (ctx, ctx_id, session_handle, object_handle, _) = exact_mixed_setup().await;
+        let resp = run_exact_mixed(
+            &ctx,
+            &ctx_id,
+            session_handle,
+            object_handle,
+            vec![exact_query(CkAttributeType::ID, 1), exact_query(CkAttributeType::SENSITIVE, 8)],
+        )
+        .await;
+        assert_eq!(resp.results.len(), 2);
+        assert_eq!(resp.results[0].ck_rv, Some(CkRv::BUFFER_TOO_SMALL.0));
+        assert_eq!(resp.results[1].ck_rv, Some(CkRv::ATTRIBUTE_SENSITIVE.0));
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::ATTRIBUTE_SENSITIVE.0,
+            "W1-L3-10: coalesced RV must equal native (SENSITIVE), not 336-dominant"
+        );
+    }
+
+    /// Fetched SENSITIVE at position 0 + cache-336 at position 1: native
+    /// answers SENSITIVE here too (ladder is position-insensitive).
+    #[tokio::test]
+    async fn coalesced_sensitive_then_cache_too_small_matches_native() {
+        let _coalesce_guard = enable_coalesce().await;
+        let (ctx, ctx_id, session_handle, object_handle, _) = exact_mixed_setup().await;
+        let resp = run_exact_mixed(
+            &ctx,
+            &ctx_id,
+            session_handle,
+            object_handle,
+            vec![exact_query(CkAttributeType::SENSITIVE, 8), exact_query(CkAttributeType::ID, 1)],
+        )
+        .await;
+        assert_eq!(resp.results.len(), 2);
+        assert_eq!(resp.results[0].ck_rv, Some(CkRv::ATTRIBUTE_SENSITIVE.0));
+        assert_eq!(resp.results[1].ck_rv, Some(CkRv::BUFFER_TOO_SMALL.0));
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::ATTRIBUTE_SENSITIVE.0,
+            "W1-L3-10: coalesced RV must equal native (SENSITIVE) in either order"
+        );
+    }
+
+    /// Cache-336 + fetched INVALID (unregistered MODULUS): native answers
+    /// INVALID in both orders.
+    #[tokio::test]
+    async fn coalesced_cache_too_small_then_invalid_matches_native() {
+        let _coalesce_guard = enable_coalesce().await;
+        let (ctx, ctx_id, session_handle, object_handle, _) = exact_mixed_setup().await;
+        let resp = run_exact_mixed(
+            &ctx,
+            &ctx_id,
+            session_handle,
+            object_handle,
+            vec![exact_query(CkAttributeType::ID, 1), exact_query(CkAttributeType::MODULUS, 8)],
+        )
+        .await;
+        assert_eq!(resp.results.len(), 2);
+        assert_eq!(resp.results[0].ck_rv, Some(CkRv::BUFFER_TOO_SMALL.0));
+        assert_eq!(resp.results[1].ck_rv, Some(CkRv::ATTRIBUTE_TYPE_INVALID.0));
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::ATTRIBUTE_TYPE_INVALID.0,
+            "W1-L3-10: coalesced RV must equal native (INVALID), not 336-dominant"
+        );
+    }
+
+    /// Fetched INVALID + cache-336: native answers INVALID here too.
+    #[tokio::test]
+    async fn coalesced_invalid_then_cache_too_small_matches_native() {
+        let _coalesce_guard = enable_coalesce().await;
+        let (ctx, ctx_id, session_handle, object_handle, _) = exact_mixed_setup().await;
+        let resp = run_exact_mixed(
+            &ctx,
+            &ctx_id,
+            session_handle,
+            object_handle,
+            vec![exact_query(CkAttributeType::MODULUS, 8), exact_query(CkAttributeType::ID, 1)],
+        )
+        .await;
+        assert_eq!(resp.results.len(), 2);
+        assert_eq!(resp.results[0].ck_rv, Some(CkRv::ATTRIBUTE_TYPE_INVALID.0));
+        assert_eq!(resp.results[1].ck_rv, Some(CkRv::BUFFER_TOO_SMALL.0));
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::ATTRIBUTE_TYPE_INVALID.0,
+            "W1-L3-10: coalesced RV must equal native (INVALID) in either order"
+        );
+    }
+
+    // --- W1-L5-04: range-gate behavior (attributes.rs exemplar; the
+    // byte_output_exact.rs source scan pins the other five gate sites) ---
+
+    /// Out-of-range versions fail loudly: FAILED_PRECONDITION naming the
+    /// supported range (message half is RED pre-range, code half pins).
+    #[tokio::test]
+    async fn exact_gate_rejects_out_of_range_version_loudly() {
+        let (ctx, ctx_id, session_handle) = setup(allow_policy(), Some(MTLS_IDENTITY.into())).await;
+        // No object registration needed: the version gate precedes resolution.
+        let err = super::get_attribute_value_exact(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+                exact_output_effects_version: 2,
+                client_context_id: ctx_id.0.clone(),
+                session_handle,
+                object_handle: 0,
+                queries: vec![],
+            }),
+        )
+        .await
+        .expect_err("out-of-range version must be rejected");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            err.message().contains("1..=1"),
+            "rejection must name the supported range, got: {}",
+            err.message()
+        );
+    }
+
+    /// The current version passes the gate (here: onward to session
+    /// resolution, which fails for the bogus handle — proving the gate
+    /// did not trip). Characterization: green before and after.
+    #[tokio::test]
+    async fn exact_gate_accepts_current_version() {
+        let (ctx, ctx_id, _) = setup(allow_policy(), Some(MTLS_IDENTITY.into())).await;
+        let resp = super::get_attribute_value_exact(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::GetAttributeValueExactRequest {
+                exact_output_effects_version: 1,
+                client_context_id: ctx_id.0.clone(),
+                session_handle: u64::MAX,
+                object_handle: 0,
+                queries: vec![],
+            }),
+        )
+        .await
+        .expect("current version must pass the gate");
+        assert_eq!(
+            resp.into_inner().ck_rv,
+            CkRv::SESSION_HANDLE_INVALID.0,
+            "v1 request must reach session resolution"
+        );
     }
 
     #[test]

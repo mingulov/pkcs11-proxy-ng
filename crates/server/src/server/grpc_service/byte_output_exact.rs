@@ -2,6 +2,9 @@ use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::output::byte_output_function_from_i32;
+use pkcs11_proxy_ng_proto::version::{
+    exact_effects_version_rejected, exact_output_effects_version_supported,
+};
 use pkcs11_proxy_ng_types::{
     ByteOutputFunction, CkInBuf, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
     SecretBytes,
@@ -22,8 +25,9 @@ pub(super) async fn byte_output_exact(
     let started = std::time::Instant::now();
     let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
-    if req.exact_output_effects_version != 1 {
-        return Err(Status::failed_precondition("exact output effects version 1 required"));
+    // W1-L5-04: compatibility-range gate, never an equality literal.
+    if !exact_output_effects_version_supported(req.exact_output_effects_version) {
+        return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -262,6 +266,42 @@ mod sanitize_inputs_tests {
     use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
     use pkcs11_proxy_ng_types::*;
     use tonic::Request;
+
+    /// W1-L5-04: every server-side exact-effects version gate (6 sites in
+    /// 5 files) must delegate to the compatibility-range helper — no
+    /// equality literal may remain. Expected helper-name occurrences per
+    /// file: one import + one call per gate.
+    #[test]
+    fn exact_effects_gates_use_the_compatibility_range() {
+        // Concat-built so the patterns cannot match their own source text.
+        let pats = [["!= ", "1"].concat(), ["== ", "1"].concat()];
+        let helper = ["exact_output_effects_version_", "supported"].concat();
+        let files = [
+            ("byte_output_exact.rs", include_str!("byte_output_exact.rs"), 2usize),
+            ("parameter_output_exact.rs", include_str!("parameter_output_exact.rs"), 2),
+            ("object/attributes.rs", include_str!("object/attributes.rs"), 2),
+            ("key_ops/kem.rs", include_str!("key_ops/kem.rs"), 2),
+            ("message_crypto/mod.rs", include_str!("message_crypto/mod.rs"), 3),
+        ];
+        for (name, src, expected_uses) in files {
+            for (index, line) in src.lines().enumerate() {
+                if line.contains("effects_version") && !line.trim_start().starts_with("//") {
+                    for pat in &pats {
+                        assert!(
+                            !line.contains(pat),
+                            "{name} line {}: gate must use the range helper, not `{pat}`: {line}",
+                            index + 1
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                src.matches(&helper).count(),
+                expected_uses,
+                "{name}: expected one import + one range-helper call per gate"
+            );
+        }
+    }
 
     use super::super::digest_cipher::{decrypt_init, encrypt_init};
     use super::byte_output_exact;

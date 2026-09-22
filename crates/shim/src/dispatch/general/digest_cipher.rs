@@ -26,6 +26,15 @@ pub unsafe extern "C" fn c_digest_init(
             }
             return unit_result_to_rv(result);
         }
+        // W1-L3-11: native error precedence — uninitialized cryptoki first,
+        // then session resolution before mechanism validation, so a bad
+        // session + bad mechanism answers the session error like a native call.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
+        if !state::is_session_known(h_session) {
+            return rv_err(CkRv::SESSION_HANDLE_INVALID);
+        }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -123,6 +132,15 @@ pub unsafe extern "C" fn c_encrypt_init(
                 state::clear_operation_state_cache(h_session);
             }
             return unit_result_to_rv(result);
+        }
+        // W1-L3-11: native error precedence — uninitialized cryptoki first,
+        // then session resolution before mechanism validation, so a bad
+        // session + bad mechanism answers the session error like a native call.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
+        if !state::is_session_known(h_session) {
+            return rv_err(CkRv::SESSION_HANDLE_INVALID);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -225,6 +243,15 @@ pub unsafe extern "C" fn c_decrypt_init(
                 state::clear_operation_state_cache(h_session);
             }
             return unit_result_to_rv(result);
+        }
+        // W1-L3-11: native error precedence — uninitialized cryptoki first,
+        // then session resolution before mechanism validation, so a bad
+        // session + bad mechanism answers the session error like a native call.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
+        if !state::is_session_known(h_session) {
+            return rv_err(CkRv::SESSION_HANDLE_INVALID);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {

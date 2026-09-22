@@ -185,6 +185,21 @@ pub(crate) unsafe fn output_buffer_spec(
     }
 }
 
+/// Decide the host-width mapping for a 64-bit wire `ck_rv` (W1-L3-13).
+///
+/// Returns `None` when `rv` fits `host_max` (the path every real backend
+/// takes: all genuine PKCS#11 RVs are small). Returns
+/// `Some(CkRv::GENERAL_ERROR)` when the value is unrepresentable — reachable
+/// only on hosts where `CK_ULONG` is 32 bits (ILP32, Windows LLP64) meeting
+/// a peer that emits a >32-bit RV. `GENERAL_ERROR` is the documented
+/// proxy-originated fallback (no PKCS#11 RV names "unrepresentable"; cause
+/// recorded in error-reference.md); the caller logs the saturation loudly.
+/// Split out as a pure decision so the 32-bit mapping is pinnable on 64-bit
+/// CI by simulating `host_max = u32::MAX`.
+pub(crate) fn ck_rv_width_fallback(rv: u64, host_max: u64) -> Option<CkRv> {
+    (rv > host_max).then_some(CkRv::GENERAL_ERROR)
+}
+
 /// Write an exact `CkOutputBufferResult` back to the C caller.
 ///
 /// Handles all three PKCS#11 outcomes:
@@ -215,7 +230,20 @@ pub(crate) unsafe fn write_exact_output(
     }
     // The validated request snapshot is the capacity authority. In particular,
     // a NULL-output query may have an uninitialized incoming length cell.
-    let rv = CK_RV::try_from(result.ck_rv.0).unwrap_or(CKR_GENERAL_ERROR);
+    // W1-L3-13: loud, documented narrowing — a 64-bit wire ck_rv the host
+    // CK_RV cannot represent (32-bit CK_ULONG hosts only) saturates to
+    // GENERAL_ERROR with a warn, never silently.
+    let rv = match ck_rv_width_fallback(result.ck_rv.0, CK_ULONG::MAX as u64) {
+        Some(fallback) => {
+            tracing::warn!(
+                wire_ck_rv = result.ck_rv.0,
+                "ck_rv unrepresentable in host CK_RV; saturating to CKR_GENERAL_ERROR"
+            );
+            rv_err(fallback)
+        }
+        // `result.ck_rv.0 <= CK_ULONG::MAX`, so the narrowing cast is exact.
+        None => result.ck_rv.0 as CK_RV,
+    };
     let length = result.returned_len.map(|n| CK_ULONG::try_from(n).expect("validated width"));
     if let Some(value) = &result.value
         && !value.is_empty()
@@ -319,6 +347,44 @@ unsafe fn byte_output_exact_with_input(
 #[cfg(test)]
 mod exact_scalar_tests {
     use super::*;
+
+    /// W1-L3-13: the 32-bit saturation mapping, pinned via a simulated host
+    /// width (real 32-bit-CK_ULONG hosts — ILP32, Windows LLP64 — cannot run
+    /// in 64-bit CI, so the pure decision is tested with `host_max = u32::MAX`).
+    #[test]
+    fn ck_rv_width_fallback_pins_32bit_saturation_mapping() {
+        let max32 = u32::MAX as u64;
+        assert_eq!(super::ck_rv_width_fallback(0, max32), None);
+        assert_eq!(super::ck_rv_width_fallback(CKR_GENERAL_ERROR as u64, max32), None);
+        assert_eq!(super::ck_rv_width_fallback(max32, max32), None);
+        assert_eq!(
+            super::ck_rv_width_fallback(max32 + 1, max32),
+            Some(CkRv::GENERAL_ERROR),
+            "first unrepresentable value must saturate loudly to GENERAL_ERROR"
+        );
+        assert_eq!(super::ck_rv_width_fallback(u64::MAX, max32), Some(CkRv::GENERAL_ERROR));
+        // 64-bit host: everything fits, never saturates.
+        assert_eq!(super::ck_rv_width_fallback(u64::MAX, u64::MAX), None);
+        assert_eq!(super::ck_rv_width_fallback(0x150, u64::MAX), None);
+    }
+
+    /// W1-L3-13: no silent narrowing fallback to CKR_GENERAL_ERROR may
+    /// remain — the 32-bit path must saturate through the loud helper.
+    #[test]
+    fn ck_rv_narrowing_has_no_silent_general_error_fallback() {
+        let src = include_str!("mod.rs");
+        // Built via concat so the assertions do not match their own source text.
+        let silent = ["unwrap_or", "(CKR_GENERAL_ERROR)"].concat();
+        assert!(
+            !src.contains(&silent),
+            "silent ck_rv narrowing must be replaced by the loud W1-L3-13 helper"
+        );
+        let loud = ["unrepresentable in host ", "CK_RV"].concat();
+        assert!(
+            src.contains(&loud),
+            "the 32-bit saturation must log loudly (W1-L3-13 warn marker)"
+        );
+    }
 
     #[test]
     fn write_exact_output_size_query_never_reads_incoming_length() {

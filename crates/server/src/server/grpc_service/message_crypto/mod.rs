@@ -26,6 +26,9 @@ use pkcs11_proxy_ng_proto::convert::message_params::{
 // boundary (response/request construction); the standing justification lives in
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
+use pkcs11_proxy_ng_proto::version::{
+    exact_effects_version_rejected, exact_output_effects_version_supported,
+};
 use pkcs11_proxy_ng_types::*;
 
 use super::super::context_manager::{
@@ -1613,8 +1616,11 @@ pub(crate) async fn encrypt_message_begin(
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageBeginResponse>, Status> {
     let req = request.into_inner();
-    if req.parameter_out_spec.is_some() && req.exact_output_effects_version != 1 {
-        return Err(Status::failed_precondition("exact output effects version 1 is required"));
+    // W1-L5-04: compatibility-range gate, never an equality literal.
+    if req.parameter_out_spec.is_some()
+        && !exact_output_effects_version_supported(req.exact_output_effects_version)
+    {
+        return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
     let ctx_id = ClientContextId(req.client_context_id);
     let result = execute_message_begin(
@@ -1865,8 +1871,11 @@ pub(crate) async fn decrypt_message_begin(
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageBeginResponse>, Status> {
     let req = request.into_inner();
-    if req.parameter_out_spec.is_some() && req.exact_output_effects_version != 1 {
-        return Err(Status::failed_precondition("exact output effects version 1 is required"));
+    // W1-L5-04: compatibility-range gate, never an equality literal.
+    if req.parameter_out_spec.is_some()
+        && !exact_output_effects_version_supported(req.exact_output_effects_version)
+    {
+        return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
     let ctx_id = ClientContextId(req.client_context_id);
     let result = execute_message_begin(

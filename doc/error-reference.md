@@ -70,6 +70,11 @@ Also originated by the proxy for:
   daemon returned a byte count differing from the requested length.
   A protocol violation, failed closed before any caller memory is
   written.
+- 64-bit daemon `ck_rv` unrepresentable in the host `CK_RV` (W1-L3-13):
+  on hosts where `CK_ULONG` is 32 bits (ILP32, Windows LLP64) a peer
+  RV above `u32::MAX` saturates here with a shim-side warn. No
+  genuine backend emits such values; saturation indicates a
+  hostile or buggy peer.
 
 **Operator action.** Verify the daemon is reachable at the URL
 configured by `PKCS11_PROXY_ENDPOINT` and that mTLS files (if any)
@@ -257,10 +262,16 @@ arrives with its `info` payload absent (W1-L3-06; formerly
 `CKR_DEVICE_ERROR`): a malformed or older daemon spoke a contract
 the client cannot interpret. A backend-RETURNED `CKR_DEVICE_ERROR`
 still passes through as `CKR_DEVICE_ERROR`.
+Also returned at `C_Initialize` when the shim's and daemon's
+exact-output effects version ranges are disjoint (W1-L5-05): the
+peers cannot agree on an effects encoding, so init fails fast
+instead of corrupting per-RPC effects later.
 
 **Operator action.** Confirm the backend version supports the
 function; some HSMs ship truncated function lists for older
-PKCS#11 versions.
+PKCS#11 versions. For `C_Initialize` failures, compare the shim and
+daemon builds: disjoint exact-output effects ranges fail fast here
+(W1-L5-05) — upgrade the older peer.
 
 **Application action.** Use an alternative function or fall back
 to a different mechanism.

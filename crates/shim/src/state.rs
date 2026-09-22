@@ -262,6 +262,21 @@ pub(crate) fn remember_session_slot(h_session: CK_SESSION_HANDLE, slot_id: CK_SL
     }
 }
 
+/// Whether `h_session` was opened through this shim and not since closed
+/// (W1-L3-11: native error precedence needs session resolution before
+/// mechanism validation). Every live session in this process passed through
+/// `c_open_session` (which remembers it) and every close/evict path forgets
+/// it, so "unknown" means the server would answer `SESSION_HANDLE_INVALID`
+/// (or the handle never existed). Fail-open on a poisoned map: proceeding
+/// preserves correctness (the server still resolves the session), degrading
+/// only the precedence nicety.
+pub(crate) fn is_session_known(h_session: CK_SESSION_HANDLE) -> bool {
+    match SESSION_SLOTS.lock() {
+        Ok(map) => map.contains_key(&h_session),
+        Err(_) => true,
+    }
+}
+
 fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
     if let Ok(mut map) = SESSION_SLOTS.lock() {
         map.remove(&h_session);

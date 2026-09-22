@@ -55,6 +55,20 @@ fn pointer_safe_message_parameters_from_wire(advertised: Option<bool>) -> bool {
     advertised.unwrap_or(false)
 }
 
+/// Validate the daemon's init version range (W1-L5-05): overlap negotiates
+/// (returns the agreed version), disjoint ranges fail loudly with
+/// FUNCTION_NOT_SUPPORTED before any context is stored. `None` bounds mean
+/// a legacy daemon, treated as v1-only.
+fn negotiate_init_version(daemon_min: Option<u32>, daemon_max: Option<u32>) -> CkResult<u32> {
+    pkcs11_proxy_ng_proto::version::negotiate_effects_version(
+        pkcs11_proxy_ng_proto::version::EXACT_OUTPUT_EFFECTS_VERSION_MIN,
+        pkcs11_proxy_ng_proto::version::EXACT_OUTPUT_EFFECTS_VERSION_MAX,
+        daemon_min,
+        daemon_max,
+    )
+    .ok_or(CkRv::FUNCTION_NOT_SUPPORTED)
+}
+
 /// Typed `connect` / `get_backend_interfaces` failure (W1-C10-07):
 /// callers can distinguish retryable transport failures from
 /// configuration/permanent ones instead of parsing a `String`.
@@ -284,7 +298,17 @@ impl Pkcs11Client {
     /// is NOT in that set, so a daemon-unreachable failure surfaces as
     /// `CKR_GENERAL_ERROR` instead.
     pub async fn initialize(&mut self) -> CkResult<()> {
-        let req = pkcs11_proxy_ng_proto::InitializeRequest { client_context_id: String::new() };
+        // W1-L5-05: advertise our effects range; the daemon negotiates the
+        // highest mutual version and rejects disjoint ranges loudly.
+        let req = pkcs11_proxy_ng_proto::InitializeRequest {
+            client_context_id: String::new(),
+            client_effects_version_min: Some(
+                pkcs11_proxy_ng_proto::version::EXACT_OUTPUT_EFFECTS_VERSION_MIN,
+            ),
+            client_effects_version_max: Some(
+                pkcs11_proxy_ng_proto::version::EXACT_OUTPUT_EFFECTS_VERSION_MAX,
+            ),
+        };
         let response = self
             .grpc
             .initialize(req)
@@ -295,6 +319,12 @@ impl Pkcs11Client {
         if rv.is_err() {
             return Err(rv);
         }
+        // W1-L5-05: validate the daemon's range before storing the context —
+        // a disjoint range fails loudly here, never per-RPC later.
+        negotiate_init_version(
+            response.daemon_effects_version_min,
+            response.daemon_effects_version_max,
+        )?;
         self.context_id = Some(response.client_context_id);
         Ok(())
     }
@@ -560,5 +590,29 @@ mod tests {
     #[test]
     fn pointer_safe_message_advertised_capability_is_safe() {
         assert!(pointer_safe_message_parameters_from_wire(Some(true)));
+    }
+
+    /// W1-L5-05: the client validates the daemon's init version range —
+    /// overlap negotiates, disjoint fails loudly without storing a context.
+    /// `None` bounds = legacy daemon = v1-only.
+    #[test]
+    fn negotiate_init_version_overlaps_or_rejects() {
+        use pkcs11_proxy_ng_types::CkRv;
+        assert_eq!(super::negotiate_init_version(None, None), Ok(1));
+        assert_eq!(super::negotiate_init_version(Some(1), Some(1)), Ok(1));
+        assert_eq!(
+            super::negotiate_init_version(Some(1), Some(2)),
+            Ok(1),
+            "future daemon overlapping our range degrades to our max"
+        );
+        assert_eq!(
+            super::negotiate_init_version(Some(99), Some(99)),
+            Err(CkRv::FUNCTION_NOT_SUPPORTED),
+            "disjoint daemon range must fail loudly at init"
+        );
+        assert_eq!(
+            super::negotiate_init_version(Some(2), Some(3)),
+            Err(CkRv::FUNCTION_NOT_SUPPORTED)
+        );
     }
 }
