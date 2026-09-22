@@ -292,6 +292,35 @@ impl FfiBackend {
         )
     }
 
+    /// Lifecycle head of the slot-wait boundary, shared by service
+    /// admission (`ffi_admit_slot_wait`) and dispatch below so both refuse
+    /// sealed/uncertain states identically, before width/mode.
+    fn wait_lifecycle_admission(&self) -> CkResult<super::native_domain::OrdinaryGuard<'_>> {
+        match self.lifecycle_domain.admit_ordinary() {
+            Ok(guard) => Ok(guard),
+            Err(error) => {
+                // Wait-table row: an Uncertain domain refuses DEVICE_ERROR.
+                // Admission itself reports GENERAL_ERROR for every ordinary
+                // path, so the wait boundary maps it here; the peek races
+                // benignly (both outcomes are local zero-native refusals).
+                if self.lifecycle_domain.is_uncertain() {
+                    return Err(CkRv::DEVICE_ERROR);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// T10a service seam: lifecycle, then the shared width→mode checks.
+    /// No waiter reservation here — contention serializes only under a
+    /// held reservation inside the wait itself, and a reserve-drop-reserve
+    /// pair would admit a lost race. Mode-before-contention holds because
+    /// a refusal here precedes any dispatch.
+    pub(super) fn ffi_admit_slot_wait(&self, flags: u64) -> CkResult<()> {
+        let _admission = self.wait_lifecycle_admission()?;
+        crate::traits::admit_slot_wait_width_mode(flags)
+    }
+
     pub(super) fn ffi_wait_for_slot_event(&self, flags: u64) -> CkResult<CkSlotId> {
         // Ownership ordered boundary: lifecycle first, then checked width,
         // then mode, then waiter contention ("lifecycle precedes width,
@@ -302,20 +331,11 @@ impl FfiBackend {
         // no native wait can block the daemon worker. Every refusal is
         // local with zero native attempts; the sole supported DONT_BLOCK
         // reservation preserves every original bit, including
-        // representable unknown ones.
-        let admission = match self.lifecycle_domain.admit_ordinary() {
-            Ok(guard) => guard,
-            Err(error) => {
-                // Wait-table row: an Uncertain domain refuses DEVICE_ERROR.
-                // Admission itself reports GENERAL_ERROR for every ordinary
-                // path, so the wait boundary maps it here; the peek races
-                // benignly (both outcomes are local zero-native refusals).
-                if self.lifecycle_domain.is_uncertain() {
-                    return Err(CkRv::DEVICE_ERROR);
-                }
-                return Err(error);
-            }
-        };
+        // representable unknown ones. The service admits through
+        // `ffi_admit_slot_wait` first; this re-check is idempotent and
+        // covers direct callers plus races with a seal landing between
+        // admission and dispatch.
+        let admission = self.wait_lifecycle_admission()?;
         let native_flags = narrow_wire_ulong(flags)?;
         if native_flags & cryptoki_sys::CKF_DONT_BLOCK == 0 {
             return Err(CkRv::FUNCTION_NOT_SUPPORTED);
@@ -1468,6 +1488,85 @@ mod slot_wait_tests {
                 "sealed {state:?} must make zero native attempts"
             );
         }
+    }
+
+    /// T10a: service admission mirrors the dispatch boundary's
+    /// lifecycle→width→mode head for every sealed state and flag shape,
+    /// with zero native attempts and no waiter reservation consumed (a
+    /// later DONT_BLOCK dispatch still reserves cleanly).
+    #[test]
+    fn slot_wait_admit_mirrors_sealed_dispatch_head() {
+        use crate::ffi::native_domain::ModuleState::*;
+        use crate::traits::Pkcs11Backend;
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait();
+        let dont_block = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        let flag_shapes =
+            [0, dont_block, dont_block | 0x8000_0000, 1u64 << 32, 1u64 << 32 | dont_block];
+        for state in [LoadedUninitialized, Initializing, Draining, Finalizing, Finalized] {
+            backend.lifecycle_domain.set_state_for_tests(state, 3);
+            for flags in flag_shapes {
+                assert_eq!(
+                    backend.admit_slot_wait(flags).unwrap_err(),
+                    CkRv::CRYPTOKI_NOT_INITIALIZED,
+                    "sealed {state:?} admission must refuse flags {flags:#x} first"
+                );
+            }
+            assert_eq!(
+                SLOT_WAIT_CALLS.load(Ordering::SeqCst),
+                0,
+                "sealed {state:?} admission must make zero native attempts"
+            );
+        }
+    }
+
+    /// T10a: admission on an Open domain refuses blocking mode and admits
+    /// DONT_BLOCK, without consuming the sole waiter reservation.
+    #[test]
+    fn slot_wait_admit_open_mode_boundary_consumes_no_reservation() {
+        use crate::traits::Pkcs11Backend;
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait();
+        backend.lifecycle_domain.open_for_tests();
+        let dont_block = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        assert_eq!(
+            backend.admit_slot_wait(0).unwrap_err(),
+            CkRv::FUNCTION_NOT_SUPPORTED,
+            "Open blocking admission must refuse mode"
+        );
+        assert_eq!(backend.admit_slot_wait(dont_block), Ok(()));
+        assert_eq!(
+            SLOT_WAIT_CALLS.load(Ordering::SeqCst),
+            0,
+            "admission must make zero native attempts"
+        );
+        // The reservation is still free: dispatch reserves cleanly.
+        backend.ffi_wait_for_slot_event(dont_block).unwrap();
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    /// T10a: Uncertain admission refuses DEVICE_ERROR like dispatch,
+    /// for every flag shape, with zero native attempts.
+    #[test]
+    fn slot_wait_admit_uncertain_refuses_device_error() {
+        use crate::ffi::native_domain::ModuleState;
+        use crate::traits::Pkcs11Backend;
+        let _guard = SLOT_WAIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_wait_fixture();
+        let (backend, _functions) = backend_with_wait();
+        backend.lifecycle_domain.set_state_for_tests(ModuleState::Uncertain, 3);
+        let dont_block = cryptoki_sys::CKF_DONT_BLOCK as u64;
+        for flags in [0, dont_block, dont_block | 0x8000_0000, 1u64 << 32, 1u64 << 32 | dont_block]
+        {
+            assert_eq!(
+                backend.admit_slot_wait(flags).unwrap_err(),
+                CkRv::DEVICE_ERROR,
+                "Uncertain admission must refuse flags {flags:#x} with DEVICE_ERROR"
+            );
+        }
+        assert_eq!(SLOT_WAIT_CALLS.load(Ordering::SeqCst), 0);
     }
 
     /// TO26b group 2: an Uncertain domain refuses DEVICE_ERROR (wait-table

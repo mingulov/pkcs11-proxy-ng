@@ -1043,6 +1043,10 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_wait_for_slot_event(flags)
     }
 
+    fn admit_slot_wait(&self, flags: u64) -> CkResult<()> {
+        self.ffi_admit_slot_wait(flags)
+    }
+
     fn get_operation_state(&self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         self.ffi_get_operation_state(session)
     }

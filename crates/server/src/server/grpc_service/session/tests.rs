@@ -1582,12 +1582,16 @@ async fn slot_wait_server_abort_retains_ordinary_owner() {
     // stuck must not strand or corrupt anything. The blocking worker
     // keeps its captured backend/context ownership through native
     // settlement; the aborted call delivers no response; the backend
-    // stays usable afterwards.
+    // stays usable afterwards. T10a: the parked call is a faulty
+    // DONT_BLOCK wait (hang-injected), not a supported blocking wait —
+    // blocking mode never dispatches past admission.
     use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
 
     let mock = std::sync::Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
-    // Empty queue + blocking flags: the native call parks on the condvar.
+    // Backstop: release the parked waiter on every exit (including test
+    // failure) so no blocking-pool thread strands runtime shutdown.
+    let _hang_guard = SlotEventHangGuard::inject(&mock);
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
     let mock_ref = mock.clone();
 
@@ -1613,32 +1617,61 @@ async fn slot_wait_server_abort_retains_ordinary_owner() {
                 &policy,
                 Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
                     client_context_id: ctx,
-                    flags: 0, // blocking: parks until an event arrives
+                    flags: 1, // DONT_BLOCK, parked by the injected hang
                 }),
             )
             .await
         }
     });
-    // Let the native call enter (order-independent: an early event would
-    // just queue, a late abort still precedes settlement either way).
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Rendezvous: the native call entered (hang plus empty queue prove it
+    // is parked, not answered) before the abort lands.
+    let start = std::time::Instant::now();
+    while mock_ref.wait_call_count() != 1 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "parked native call must enter promptly"
+        );
+        tokio::task::yield_now().await;
+    }
     waiter.abort();
     let aborted = waiter.await.unwrap_err();
     assert!(aborted.is_cancelled(), "the aborted waiter delivers no response");
 
     // Settle the native call after the abort: the retained worker must
-    // complete crash-free with its captured ownership intact.
+    // complete crash-free with its captured ownership intact. The drained
+    // queue proves the detached worker consumed the settlement event.
     mock_ref.enqueue_slot_event(CkSlotId(0));
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    mock_ref.inject_slot_event_hang(false);
+    let start = std::time::Instant::now();
+    while mock_ref.slot_event_queue_len() != 0 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "released waiter must settle promptly"
+        );
+        tokio::task::yield_now().await;
+    }
 
-    // The backend serves a fresh waiter afterwards: no leak, no poison.
-    // (The aborted worker consumed the settlement event while completing,
-    // so a new event proves liveness rather than a stale queue entry.)
-    mock_ref.enqueue_slot_event(CkSlotId(0));
+    // The backend serves fresh waiters afterwards: no leak, no poison.
+    // First poll finds the queue the aborted worker drained (NO_EVENT,
+    // not a stale entry); a new event then proves full liveness.
     let policy = crate::server::auth::policy::TokenPolicy::from_config(
         &crate::config::AuthConfig::default(),
     )
     .unwrap();
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1, // DONT_BLOCK: queue drained by the aborted worker
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::NO_EVENT.0, "aborted worker consumed the settlement event");
+    mock_ref.enqueue_slot_event(CkSlotId(0));
     let resp = wait_for_slot_event_with_policy(
         &ctx_mgr,
         &backend,
@@ -1711,11 +1744,14 @@ async fn slot_event_hang_guard_releases_parked_waiter_on_drop() {
 }
 
 #[tokio::test]
-async fn slot_wait_nonblocking_hang_abnormal_stop() {
-    // C3M.6 row 14: a faulty provider that hangs even a DONT_BLOCK
-    // waiter must hit the daemon timeout (independent stop) with no
-    // cleanup/unload of the library. The stuck call settles exactly
-    // once released, and the backend stays initialized and usable.
+async fn spawn_backend_timeout_counts_hung_call_stuck_until_settlement() {
+    // T10a re-scope (was `slot_wait_nonblocking_hang_abnormal_stop`):
+    // this exercises the generic `spawn_backend_with_counters` helper,
+    // not handler dispatch or process stopping. A hung closure hits the
+    // helper timeout promptly (FUNCTION_FAILED) with the still-parked
+    // call counted as stuck; the helper performs no cleanup/unload of
+    // the parked closure, which settles exactly once released. Real
+    // process-stop qualification belongs to T10.
     use crate::server::grpc_service::service_utils::spawn_backend_with_counters;
     use std::sync::atomic::{AtomicUsize, Ordering};
     // Dedicated breaker/stuck counters: the global IN_FLIGHT/STUCK_CALLS
@@ -1750,19 +1786,20 @@ async fn slot_wait_nonblocking_hang_abnormal_stop() {
     });
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
         .await
-        .expect("hung waiter must hit the daemon timeout, not the test timeout")
+        .expect("hung waiter must hit the helper timeout, not the test timeout")
         .expect("waiter task must not panic");
     assert_eq!(
         outcome.expect("no transport error").unwrap_err(),
         CkRv::FUNCTION_FAILED,
-        "a hung waiter surfaces the timeout promptly (W1-L3-01)"
+        "a hung call surfaces the helper timeout promptly (W1-L3-01)"
     );
     assert_eq!(HANG_GAUGE.load(Ordering::Relaxed), 1, "the still-parked call counts as stuck");
 
-    // Independent stop performed no cleanup/unload: release the native
-    // call and it settles; the library answers afterwards. Enqueue
-    // before clearing (see SlotEventHangGuard::drop) so the waiter
-    // deterministically consumes the wakeup event.
+    // The helper performed no cleanup/unload of the parked closure:
+    // release the native call and it settles; the library answers
+    // afterwards. Enqueue before clearing (see
+    // SlotEventHangGuard::drop) so the waiter deterministically consumes
+    // the wakeup event.
     mock.enqueue_slot_event(CkSlotId(0));
     mock.inject_slot_event_hang(false);
     for _ in 0..200 {
@@ -4598,16 +4635,25 @@ async fn close_all_sessions_multi_session_success_unchanged() {
     assert_eq!(stale_login_state, None);
 }
 
-/// W1-L6-10: a DONT_BLOCK wait must never block — even a faulty provider
-/// that parks nonblocking waiters gets a bounded grace, then NO_EVENT
-/// (no breaker slot burned, nothing stuck). Pre-fix the wait rode
-/// spawn_backend to the 30s request timeout and answered DEVICE_ERROR.
+/// T10a: an expired provider grace is a transport deadline, not a
+/// provider NO_EVENT. A gated faulty provider (hang-injected mock) parks
+/// the DONT_BLOCK call; past the injected short grace the handler answers
+/// `DeadlineExceeded` — which the client maps to FUNCTION_FAILED per
+/// ADR-0003 — with no response and no slot output. Waiter/context
+/// ownership is retained: releasing the native call with an event settles
+/// it exactly once, and a subsequent actual empty poll returns the
+/// provider's own NO_EVENT. (W1-L6-10 still holds: no breaker slot is
+/// burned and nothing counts as stuck on this path.)
 #[tokio::test]
-async fn wait_for_slot_event_dont_block_never_blocks_on_hung_backend() {
-    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+async fn wait_for_slot_event_grace_expiry_is_transport_deadline() {
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy_and_grace;
 
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
+    // Backstop: clearing the injected hang on drop (including test
+    // failure) so a parked backend thread can never strand the tokio
+    // runtime shutdown and wedge the whole suite binary.
+    let _hang_guard = SlotEventHangGuard::inject(&mock);
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
@@ -4618,16 +4664,10 @@ async fn wait_for_slot_event_dont_block_never_blocks_on_hung_backend() {
     )
     .unwrap();
 
-    mock.inject_slot_event_hang(true);
-    let start = std::time::Instant::now();
-    // Test-side bound far under the 30s request timeout: pre-fix this
-    // parks until the backend timeout (then DEVICE_ERROR).
-    // The hang flag is cleared on EVERY path below (before any assert can
-    // panic): a test panic that left the parked blocking thread stranded
-    // hangs process teardown, masking the real failure.
-    let timed = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        wait_for_slot_event_with_policy(
+    let waits_before = mock.wait_call_count();
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        wait_for_slot_event_with_policy_and_grace(
             &ctx_mgr,
             &backend,
             &policy,
@@ -4635,37 +4675,91 @@ async fn wait_for_slot_event_dont_block_never_blocks_on_hung_backend() {
                 client_context_id: ctx_id.0.clone(),
                 flags: 1, // CKF_DONT_BLOCK
             }),
+            std::time::Duration::from_millis(100),
         ),
     )
-    .await;
-    // Release the abandoned parked call (clearing wakes waiters to re-check).
-    mock.inject_slot_event_hang(false);
-    let resp = timed
-        .expect("DONT_BLOCK wait must answer promptly even on a hung backend")
-        .unwrap()
-        .into_inner();
+    .await
+    .expect("short grace must bound the parked call")
+    .expect_err("a call parked past the grace must be a transport deadline, not a response");
+    assert_eq!(err.code(), tonic::Code::DeadlineExceeded);
     assert_eq!(
-        resp.ck_rv,
-        CkRv::NO_EVENT.0,
-        "an unanswerable nonblocking poll reports no-event, never blocks"
+        pkcs11_proxy_ng_client::grpc_status_to_ck_rv(err.code(), false),
+        CkRv::FUNCTION_FAILED,
+        "ADR-0003 maps the deadline to FUNCTION_FAILED, never synthetic NO_EVENT"
     );
+    // The parked native call entered exactly once — no replay, requeue,
+    // or extra provider poll from the timeout branch. (Entry follows the
+    // detached worker's scheduling, so await the count; the hang plus the
+    // empty queue prove it is parked, not answered.)
+    let start = std::time::Instant::now();
+    while mock.wait_call_count() != waits_before + 1 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "parked native call must enter promptly"
+        );
+        tokio::task::yield_now().await;
+    }
+    // Ownership retained across the deadline: the context survives and
+    // stays usable for the follow-up poll below.
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(15),
-        "took {:?}, must be bounded",
-        start.elapsed()
+        ctx_mgr.get_context(&ctx_id, |_| ()).await.is_some(),
+        "the deadline must not reap the waiting context"
+    );
+
+    // Release the native call with an event; it settles exactly once.
+    // Enqueue-then-clear wakes the waiter onto a non-empty queue, so it
+    // deterministically consumes the wakeup event (see
+    // SlotEventHangGuard::drop); the drained queue proves consumption.
+    mock.enqueue_slot_event(CkSlotId(0));
+    mock.inject_slot_event_hang(false);
+    let start = std::time::Instant::now();
+    while mock.slot_event_queue_len() != 0 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "released waiter must settle promptly"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    // A subsequent actual empty poll returns the provider's own NO_EVENT
+    // — and the wait count proves the released call settled exactly once
+    // with no extra provider poll from either branch.
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1, // CKF_DONT_BLOCK
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::NO_EVENT.0);
+    assert_eq!(resp.slot_id, 0, "no slot output on no-event");
+    assert_eq!(
+        mock.wait_call_count(),
+        waits_before + 2,
+        "parked call plus one true poll; nothing replayed"
     );
 }
 
-/// W1-L6-10 characterization: a blocking wait still delivers a queued
-/// event (bypassing the breaker changes accounting, not outcomes).
+/// T10a custom-backend admission: a blocking wait with valid context,
+/// Open lifecycle and representable width refuses
+/// FUNCTION_NOT_SUPPORTED with zero provider attempts and no slot output
+/// (ADR-0010 slot-event amendment). The queued event stays queued: a
+/// follow-up DONT_BLOCK poll still delivers it, proving the refusal
+/// consumed nothing.
 #[tokio::test]
-async fn wait_for_slot_event_blocking_delivers_queued_event() {
+async fn wait_for_slot_event_blocking_refused_without_provider_attempt() {
     use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
 
-    let mock = MockBackend::default_test();
+    let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     mock.enqueue_slot_event(CkSlotId(0));
-    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
 
     let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
     ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
@@ -4688,8 +4782,140 @@ async fn wait_for_slot_event_blocking_delivers_queued_event() {
     .await
     .unwrap()
     .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::FUNCTION_NOT_SUPPORTED.0);
+    assert_eq!(resp.slot_id, 0, "no slot output on refusal");
+    assert_eq!(mock.wait_call_count(), 0, "zero provider attempts on mode refusal");
+
+    // The refusal consumed nothing: the queued event is still there.
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1, // CKF_DONT_BLOCK
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
     assert_eq!(resp.ck_rv, CkRv::OK.0);
     assert_eq!(resp.slot_id, virtual_slot.0);
+    assert_eq!(mock.wait_call_count(), 1, "only the follow-up poll entered the backend");
+}
+
+/// T10a precedence: a missing context refuses NOT_INITIALIZED even for
+/// blocking flags, before admission and with zero provider attempts.
+#[tokio::test]
+async fn wait_for_slot_event_blocking_absent_context_refuses_first() {
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .unwrap();
+
+    for flags in [0, 1] {
+        let resp = wait_for_slot_event_with_policy(
+            &ctx_mgr,
+            &backend,
+            &policy,
+            Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+                client_context_id: "no-such-context".to_string(),
+                flags,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+            "absent context must refuse flags {flags:#x} before admission"
+        );
+        assert_eq!(resp.slot_id, 0, "no slot output on refusal");
+    }
+    assert_eq!(mock.wait_call_count(), 0, "zero backend wait attempts");
+}
+
+/// T10a precedence: backend lifecycle precedes mode — a blocking wait
+/// against an uninitialized backend answers the lifecycle error, not
+/// FUNCTION_NOT_SUPPORTED, with zero provider attempts.
+#[tokio::test]
+async fn wait_for_slot_event_blocking_uninitialized_backend_refuses_lifecycle_first() {
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = Arc::new(MockBackend::default_test());
+    // Deliberately uninitialized: lifecycle must refuse before mode.
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .unwrap();
+
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 0, // blocking
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::CRYPTOKI_NOT_INITIALIZED.0, "lifecycle must precede mode");
+    assert_eq!(resp.slot_id, 0, "no slot output on refusal");
+    assert_eq!(mock.wait_call_count(), 0, "zero provider attempts on lifecycle refusal");
+}
+
+/// T10a precedence (narrow hosts only): native width precedes mode — a
+/// blocking wait whose flags the native CK_FLAGS cannot represent fails
+/// checked narrowing (FUNCTION_FAILED), not the mode refusal. On wide
+/// hosts narrowing is infallible, so this shape is covered by the native
+/// `slot_wait_checked_width_and_precedence` matrix instead.
+#[tokio::test]
+#[cfg(target_pointer_width = "32")]
+async fn wait_for_slot_event_blocking_unrepresentable_width_fails_first() {
+    use crate::server::grpc_service::state_ops::wait_for_slot_event_with_policy;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(
+        &crate::config::AuthConfig::default(),
+    )
+    .unwrap();
+
+    let resp = wait_for_slot_event_with_policy(
+        &ctx_mgr,
+        &backend,
+        &policy,
+        Request::new(pkcs11_proxy_ng_proto::WaitForSlotEventRequest {
+            client_context_id: ctx_id.0.clone(),
+            flags: 1u64 << 32, // blocking + unrepresentable on narrow CK_FLAGS
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(resp.ck_rv, CkRv::FUNCTION_FAILED.0, "width must precede mode");
+    assert_eq!(resp.slot_id, 0, "no slot output on refusal");
+    assert_eq!(mock.wait_call_count(), 0, "zero provider attempts on width refusal");
 }
 
 /// W1-L6-10 characterization: a DONT_BLOCK wait on an empty queue

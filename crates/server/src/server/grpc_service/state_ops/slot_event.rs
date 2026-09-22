@@ -13,8 +13,10 @@ use super::super::service_utils::{current_context_operation_guard, spawn_task};
 
 /// Bound for a `CKF_DONT_BLOCK` backend wait (W1-L6-10). A correct provider
 /// answers a nonblocking poll in microseconds; only a faulty one parks it.
-/// Past this grace the daemon reports `CKR_NO_EVENT` and abandons the
-/// parked call instead of blocking a poll that must never block.
+/// Past this grace the daemon answers transport deadline (client-mapped to
+/// `CKR_FUNCTION_FAILED` per ADR-0003) and abandons the parked call instead
+/// of blocking a poll that must never block. The detached worker keeps its
+/// ownership through settlement, but a late event may be lost.
 const NONBLOCKING_WAIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn no_event() -> Response<pkcs11_proxy_ng_proto::WaitForSlotEventResponse> {
@@ -30,6 +32,26 @@ pub(super) async fn wait_for_slot_event(
     token_policy: &TokenPolicy,
     request: Request<pkcs11_proxy_ng_proto::WaitForSlotEventRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WaitForSlotEventResponse>, Status> {
+    wait_for_slot_event_with_grace(
+        ctx_mgr,
+        backend_ref,
+        token_policy,
+        request,
+        NONBLOCKING_WAIT_GRACE,
+    )
+    .await
+}
+
+/// Test seam: the production path always uses [`NONBLOCKING_WAIT_GRACE`];
+/// tests inject a short grace so the parked-call deadline stays fast and
+/// deterministic.
+pub(super) async fn wait_for_slot_event_with_grace(
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    token_policy: &TokenPolicy,
+    request: Request<pkcs11_proxy_ng_proto::WaitForSlotEventRequest>,
+    nonblocking_grace: std::time::Duration,
+) -> Result<Response<pkcs11_proxy_ng_proto::WaitForSlotEventResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -37,6 +59,19 @@ pub(super) async fn wait_for_slot_event(
     if context.is_none() {
         return Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
             ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+            slot_id: 0,
+        }));
+    }
+
+    // T10a service admission: context (above) → backend lifecycle →
+    // native width → mode. A backend-local refusal answers here with
+    // zero provider attempts; only admitted waits dispatch below. The
+    // mode boundary must live in the backend seam, not as a top-of-
+    // handler flag check, so lifecycle/width failures keep precedence
+    // over FUNCTION_NOT_SUPPORTED (ownership §"Slot-event scope").
+    if let Err(error) = backend_ref.admit_slot_wait(req.flags) {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
+            ck_rv: error.0,
             slot_id: 0,
         }));
     }
@@ -57,21 +92,32 @@ pub(super) async fn wait_for_slot_event(
     let result = if dont_block {
         // Respect DONT_BLOCK: a nonblocking poll must never block. A
         // correct provider answers at once; if a faulty one still
-        // hasn't answered within the grace, report NO_EVENT and abandon
-        // the parked call — any real event surfaces on the next poll.
+        // hasn't answered within the grace, answer transport deadline
+        // (the client maps it to FUNCTION_FAILED per ADR-0003) and
+        // abandon the parked call. Timeout response and actual
+        // completion stay distinct: the detached worker keeps its
+        // operation guard through native settlement, but a late event
+        // may be lost — it is never replayed, requeued, or promised
+        // on the next poll (ownership §"Slot-event scope").
         let task = spawn_task(move || {
             let _operation_guard = operation_guard;
             backend.wait_for_slot_event(flags)
         });
-        match tokio::time::timeout(NONBLOCKING_WAIT_GRACE, task).await {
+        match tokio::time::timeout(nonblocking_grace, task).await {
             Ok(result) => result?,
             Err(_elapsed) => {
                 tracing::warn!(
-                    grace_secs = NONBLOCKING_WAIT_GRACE.as_secs(),
+                    grace_ms = nonblocking_grace.as_millis(),
                     "DONT_BLOCK slot wait still parked past the grace; \
-                     reporting NO_EVENT (faulty provider)"
+                     reporting deadline (faulty provider)"
                 );
-                Err(CkRv::NO_EVENT)
+                // The expired `timeout` dropped the `spawn_task` future,
+                // which detaches the blocking worker (a dropped JoinHandle
+                // never aborts): the native call keeps its captured
+                // backend/context ownership through settlement.
+                return Err(Status::deadline_exceeded(
+                    "nonblocking slot wait exceeded the provider grace",
+                ));
             }
         }
     } else {

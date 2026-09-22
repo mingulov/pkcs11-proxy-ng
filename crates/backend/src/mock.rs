@@ -598,6 +598,12 @@ impl MockBackend {
         self.wait_calls.load(Ordering::SeqCst)
     }
 
+    /// Number of slot events currently queued (test rendezvous: lets a
+    /// test await a parked waiter's consumption without sleeps).
+    pub fn slot_event_queue_len(&self) -> usize {
+        self.slot_event_queue.lock().unwrap().len()
+    }
+
     /// Configure whether a token is present in a known slot.
     ///
     /// This lets tests model insertion/removal without changing the default
@@ -2192,6 +2198,17 @@ impl Pkcs11Backend for MockBackend {
     }
     fn wait_for_slot_event(&self, flags: u64) -> CkResult<CkSlotId> {
         self.wait_for_slot_event_impl(flags)
+    }
+
+    fn admit_slot_wait(&self, flags: u64) -> CkResult<()> {
+        // Mock lifecycle first (mirrors the check inside
+        // `wait_for_slot_event_impl`), then the shared width→mode
+        // boundary — the custom-backend responsibility pattern: lifecycle
+        // precedes width precedes mode, zero provider attempts.
+        if !self.state.lock().unwrap().initialized {
+            return Err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
+        crate::traits::admit_slot_wait_width_mode(flags)
     }
 
     fn get_operation_state(&self, s: CkSessionHandle) -> CkResult<SecretBytes> {

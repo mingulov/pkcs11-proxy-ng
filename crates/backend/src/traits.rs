@@ -19,6 +19,23 @@ impl CkDeriveKeyOutputResult {
     }
 }
 
+/// Shared slot-wait width→mode admission (T10a).
+///
+/// Checked native-width narrowing first (`CKR_FUNCTION_FAILED` on overflow —
+/// a native module could not have been handed that value either), then
+/// `DONT_BLOCK`-only mode (`CKR_FUNCTION_NOT_SUPPORTED` when the bit is
+/// clear). Pure and provider-free. Backends with module-lifecycle state call
+/// this AFTER their own lifecycle refusal; see
+/// [`Pkcs11Backend::admit_slot_wait`].
+pub fn admit_slot_wait_width_mode(flags: u64) -> CkResult<()> {
+    let native_flags =
+        cryptoki_sys::CK_ULONG::try_from(flags).map_err(|_| CkRv::FUNCTION_FAILED)?;
+    if native_flags & cryptoki_sys::CKF_DONT_BLOCK == 0 {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    Ok(())
+}
+
 /// A PKCS#11 backend that the daemon can dispatch operations to (ADR-0004 §1).
 /// Each method corresponds to a supported PKCS#11 function.
 /// All methods are synchronous — the daemon bridges to async at the gRPC layer
@@ -367,16 +384,36 @@ pub trait Pkcs11Backend: Send + Sync {
     /// Wait for a slot event. `flags == CkFlags::DONT_BLOCK` means non-blocking.
     /// Returns the slot ID where the event occurred.
     ///
-    /// Native backends enforce the ownership wait boundary
-    /// (`doc/release/native-mechanism-ownership.md` §"Slot-event scope"):
-    /// checked widths, `DONT_BLOCK`-only mode, and the sole waiter
-    /// reservation, in that order after lifecycle admission. The service
-    /// performs no early mode/width refusal of its own, so the backend's
-    /// ordering is the system's ordering. [`MockBackend`](crate::mock::MockBackend)
-    /// deliberately models faulty/legacy providers instead (blocking
-    /// calls park; hangs are injectable) for abort/timeout coverage — it
-    /// is test-only and never the deployed backend.
+    /// The service admits every wait through [`Pkcs11Backend::admit_slot_wait`]
+    /// before dispatching here, so a refused wait never reaches this method
+    /// from the service path. Direct callers (tests, embedded users) must
+    /// admit first themselves to preserve the ownership ordering.
+    /// [`MockBackend`](crate::mock::MockBackend) deliberately models
+    /// faulty/legacy providers underneath admission (blocking calls park
+    /// once admitted; hangs are injectable) for abort/timeout coverage —
+    /// it is test-only and never the deployed backend.
     fn wait_for_slot_event(&self, flags: u64) -> CkResult<CkSlotId>;
+    /// Admit a slot wait without a provider attempt (T10a service seam).
+    ///
+    /// Ownership order (`doc/release/native-mechanism-ownership.md`
+    /// §"Slot-event scope"): lifecycle → native width → mode →
+    /// contention. The service calls this after its own context check and
+    /// before dispatching [`Pkcs11Backend::wait_for_slot_event`]; an `Err`
+    /// return value is answered to the caller with zero provider attempts
+    /// and no slot output. Contention stays with the wait itself (only a
+    /// held reservation can serialize waiters); this seam covers
+    /// lifecycle/width/mode, and mode-before-contention holds because a
+    /// mode refusal here precedes any dispatch.
+    ///
+    /// Custom-backend responsibilities: the default implementation performs
+    /// the shared width→mode checks ([`admit_slot_wait_width_mode`]) for
+    /// backends without module-lifecycle state. A backend WITH lifecycle
+    /// state must override this method, refuse its non-admissible states
+    /// first, and then delegate to [`admit_slot_wait_width_mode`] — never
+    /// refuse mode before lifecycle/width, and never touch the provider.
+    fn admit_slot_wait(&self, flags: u64) -> CkResult<()> {
+        admit_slot_wait_width_mode(flags)
+    }
     fn get_operation_state(&self, session: CkSessionHandle) -> CkResult<SecretBytes>;
     fn set_operation_state(
         &self,
@@ -1280,5 +1317,30 @@ pub trait Pkcs11Backend: Send + Sync {
         _session: CkSessionHandle,
     ) -> Option<CkMechanismParams> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T10a: the shared width→mode helper admits DONT_BLOCK, refuses
+    /// blocking mode, and fails unrepresentable widths before mode (on
+    /// narrow hosts; wide hosts narrow infallibly).
+    #[test]
+    fn admit_width_mode_boundary() {
+        assert_eq!(admit_slot_wait_width_mode(CkFlags::DONT_BLOCK.0), Ok(()));
+        assert_eq!(
+            admit_slot_wait_width_mode(CkFlags::DONT_BLOCK.0 | 0x8000_0000),
+            Ok(()),
+            "representable unknown bits ride along with DONT_BLOCK"
+        );
+        assert_eq!(admit_slot_wait_width_mode(0).unwrap_err(), CkRv::FUNCTION_NOT_SUPPORTED);
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(
+            admit_slot_wait_width_mode(1u64 << 32).unwrap_err(),
+            CkRv::FUNCTION_FAILED,
+            "width precedes mode"
+        );
     }
 }
