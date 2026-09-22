@@ -744,16 +744,39 @@ fn fixup_catalog(st: &mut InterfaceState) {
     debug_assert_eq!(idx as CK_ULONG, st.count, "catalog entries must match count");
 }
 
+/// Whether the server-published registry is disabled via
+/// `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` (W1-L8-19).
+///
+/// Unset keeps the default (install the server payload). An explicit falsy
+/// value (`0`, `false`, `no`, `off`, case-insensitive) re-enables the
+/// install so operators can flip the flag off without unsetting it. Any
+/// other set value — including `1`, `true`, the empty string, and
+/// unrecognized text — keeps the legacy presence-means-disabled behavior.
+pub(crate) fn server_registry_disabled() -> bool {
+    match std::env::var_os("PKCS11_PROXY_DISABLE_SERVER_REGISTRY") {
+        None => false,
+        Some(value) => match value.to_str() {
+            Some(text) => {
+                !matches!(text.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+            }
+            // Non-UTF8 value: keep the legacy presence-means-disabled
+            // behavior rather than silently re-enabling.
+            None => true,
+        },
+    }
+}
+
 /// Install the server-published registry whenever the daemon includes
 /// one. Older daemons predate the field — in that case we keep whatever
 /// the shim's embedded-default fallback already installed (see
 /// init_general.rs). `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` (test/debug
 /// use, see AGENTS.md) forces the fallback path even when the daemon
-/// publishes a registry.
+/// publishes a registry; see [`server_registry_disabled`] for the
+/// value parsing (explicit `0`/`false` re-enables).
 pub(crate) fn maybe_install_server_registry(
     payload: Option<&pkcs11_proxy_ng_proto::MechanismRegistryPayload>,
 ) {
-    if std::env::var_os("PKCS11_PROXY_DISABLE_SERVER_REGISTRY").is_none() {
+    if !server_registry_disabled() {
         if let Some(payload) = payload {
             let registry: MechanismRegistry = payload.into();
             let new_revision = registry.revision().to_string();

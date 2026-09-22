@@ -2169,3 +2169,94 @@ tokens = ["label:Prod"]
     let cfg: DaemonConfig = toml::from_str(toml).unwrap();
     cfg.validate().expect("taught SPKI policy identity must validate");
 }
+
+// ---------------------------------------------------------------------------
+// W1-L8-18: 'host:badport' must fail at validate with a friendly,
+// value-naming error (confirms the W1-C3-13 SocketAddr-grade check holds).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn host_colon_badport_bind_rejected_with_friendly_error() {
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.remote]
+bind = "host:badport"
+auth = "none"
+allow_insecure_tcp = true
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err();
+    assert!(err.contains("host:badport"), "error must name the offending value, got: {err}");
+    assert!(
+        err.contains("IP:port") || err.contains("SocketAddr"),
+        "error must steer toward IP:port, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-20: the k8s ConfigMap's mechanism stub must teach merge semantics
+// (an override merged over the shipped embedded default), not claim to BE
+// the embedded default.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn k8s_configmap_teaches_registry_merge_not_replace() {
+    let yaml = submodule_file("examples/k8s/10-configmap.yaml");
+    assert!(
+        !yaml.contains("Shipped embedded default"),
+        "stub must not claim to be the embedded default:\n{yaml}"
+    );
+    assert!(
+        yaml.to_ascii_lowercase().contains("merge"),
+        "stub comment must teach merge semantics:\n{yaml}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-21: the apply_env_overrides doc list, env_var_help(), and the
+// override body must agree on the full env-var set (all 8 incl.
+// ALLOW_INSECURE) — an omission in any surface is a doc/behavior lie, and
+// in test ALL_VARS it is an env-bleed risk.
+// ---------------------------------------------------------------------------
+
+/// Every `PKCS11_PROXY_*` var token on `///` doc lines between markers.
+fn doc_listed_env_vars(source: &str, start: &str, end: &str) -> Vec<String> {
+    let doc = section_between(source, start, end);
+    let mut vars = Vec::new();
+    for line in doc.lines() {
+        let mut rest = line;
+        while let Some(i) = rest.find("PKCS11_PROXY_") {
+            let token: String = rest[i..]
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            if token.len() > "PKCS11_PROXY_".len() && !vars.contains(&token) {
+                vars.push(token);
+            }
+            rest = &rest[i + "PKCS11_PROXY_".len()..];
+        }
+    }
+    vars
+}
+
+#[test]
+fn env_var_surfaces_agree_on_all_vars() {
+    let source = own_config_source();
+    let doc_vars =
+        doc_listed_env_vars(&source, "/// Documented env vars:", "pub fn apply_env_overrides");
+    assert_eq!(doc_vars.len(), 8, "doc list must name all 8 daemon env vars: {doc_vars:?}");
+    let help = env_var_help();
+    for var in &doc_vars {
+        assert!(help.contains(var), "env_var_help() must list {var}:\n{help}");
+        assert!(source.contains(&format!("get(\"{var}\")")), "override body must read {var}");
+    }
+    // And help must not advertise vars the body ignores.
+    for (var, _field) in documented_env_vars() {
+        assert!(
+            source.contains(&format!("get(\"{var}\")")),
+            "help-advertised {var} must be read by the override body"
+        );
+    }
+}

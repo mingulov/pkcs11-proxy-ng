@@ -6,10 +6,14 @@
 //!   - env set: env wins (conflicting TOML value is overridden)
 //!
 //! Env vars covered:
-//!   - PKCS11_PROXY_BIND              → listener.remote.bind
-//!   - PKCS11_PROXY_BACKEND_MODULE    → backend.module
-//!   - PKCS11_PROXY_BACKEND_ARGS      → backend.initialize_args
-//!   - PKCS11_PROXY_MECHANISMS_CONFIG → mechanisms.config_path
+//!   - PKCS11_PROXY_BIND                        → listener.remote.bind
+//!   - PKCS11_PROXY_BACKEND_MODULE              → backend.module
+//!   - PKCS11_PROXY_BACKEND_ARGS                → backend.initialize_args
+//!   - PKCS11_PROXY_MECHANISMS_CONFIG           → mechanisms.config_path
+//!   - PKCS11_PROXY_ALLOW_INSECURE              → listener.remote.allow_insecure_tcp
+//!   - PKCS11_PROXY_RESILIENCE_METRICS_SOCKET   → resilience.metrics_socket
+//!   - PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD   → resilience.find_result_warn_threshold
+//!   - PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET   → test_hooks.control_socket
 //!
 //! Note: the Rust test harness runs these `#[test]` fns as THREADS in a
 //! single process, so `std::env` is shared global state. Each case takes a
@@ -35,6 +39,11 @@ const ALL_VARS: &[&str] = &[
     "PKCS11_PROXY_BACKEND_ARGS",
     "PKCS11_PROXY_MECHANISMS_CONFIG",
     "PKCS11_PROXY_ALLOW_INSECURE",
+    // W1-L8-21: these three were missing, so a leaked value (e.g. from CI
+    // env) bled into hermetic precedence cases instead of being cleared.
+    "PKCS11_PROXY_RESILIENCE_METRICS_SOCKET",
+    "PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD",
+    "PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET",
 ];
 
 fn clear_all_env() {
@@ -187,6 +196,30 @@ module = "{}"
     assert_eq!(tcp.bind, "0.0.0.0:8888");
     assert!(tcp.allow_insecure_tcp);
     clear_all_env();
+}
+
+#[test]
+fn all_vars_covers_every_documented_env_var() {
+    // W1-L8-21: clear_all_env() must unset every var the override body can
+    // read, or a leaked value bleeds into hermetic precedence cases. The
+    // expected set is derived from env_var_help() so a new var fails here
+    // until ALL_VARS covers it.
+    let help = pkcs11_proxy_ng::config::env_var_help();
+    let mut documented = Vec::new();
+    for line in help.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("PKCS11_PROXY_") {
+            let var = format!("PKCS11_PROXY_{}", rest.split_whitespace().next().unwrap_or(""));
+            documented.push(var);
+        }
+    }
+    assert!(!documented.is_empty(), "help output must document env vars:\n{help}");
+    for var in &documented {
+        assert!(
+            ALL_VARS.contains(&var.as_str()),
+            "ALL_VARS must cover documented {var} (env bleed risk)"
+        );
+    }
 }
 
 #[test]

@@ -1350,3 +1350,62 @@ fn absent_registry_payload_keeps_current_registry() {
         );
     }
 }
+
+/// W1-L8-19: explicit falsy values re-enable the server registry —
+/// `=0`/`=false`/`=no`/`=off` must behave like unset, not like `=1`.
+#[test]
+fn server_registry_installs_when_disable_env_is_falsy() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    for value in ["0", "false", "FALSE", "no", "off"] {
+        SavedDisableRegistry::set(Some(value));
+        let rev = format!("l8-19-falsy-{value}");
+        let payload = registry_payload_with_revision(&rev);
+        let output = capture_logs(|| {
+            crate::interface_probe::maybe_install_server_registry(Some(&payload));
+        });
+        // The install logs either the install INFO (first revision) or the
+        // drift WARN (later revisions) — both name the payload revision.
+        assert!(
+            output.contains(&rev) && !output.contains("ignoring server-published registry"),
+            "disable env ={value} must re-enable install, got: {output:?}"
+        );
+        assert_eq!(install_and_read_back_revision(&payload), rev);
+    }
+}
+
+/// W1-L8-19: truthy or unrecognized values keep the legacy disable
+/// (presence semantics) — only explicit falsy values re-enable, and only
+/// unset keeps the pure default.
+#[test]
+fn server_registry_ignored_for_truthy_disable_values() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    for (i, value) in ["1", "true", "TRUE", "yes", ""].into_iter().enumerate() {
+        SavedDisableRegistry::set(Some(value));
+        let rev = format!("l8-19-truthy-{i}");
+        let ignored = registry_payload_with_revision(&rev);
+        // State assertion first, retrying past concurrent unguarded
+        // `ensure_registry()` clobbers (see install_and_read_back_revision).
+        for _ in 0..100 {
+            let before = crate::state::mechanism_registry().revision().to_string();
+            crate::interface_probe::maybe_install_server_registry(Some(&ignored));
+            let after = crate::state::mechanism_registry().revision().to_string();
+            assert!(after != rev, "disable env ={value:?} must never install the server payload");
+            if after == before {
+                break;
+            }
+        }
+        let output = capture_logs(|| {
+            crate::interface_probe::maybe_install_server_registry(Some(&ignored));
+        });
+        assert!(
+            output.contains("ignoring server-published registry"),
+            "disable env ={value:?} must log the fallback: {output:?}"
+        );
+    }
+}

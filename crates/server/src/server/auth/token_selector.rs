@@ -5,12 +5,23 @@ pub enum TokenSelector {
 }
 
 /// Strip PKCS#11 field padding (trailing spaces and NULs) for
-/// comparison and parsing (W1-C3-37).
+/// comparison and parsing (W1-C3-37, wording W1-L7-22).
 ///
 /// Token labels and serials live in blank-padded fixed-width backend
 /// fields, so trailing spaces/NULs are padding and insignificant —
 /// but leading characters are significant. Only the trailing end is
-/// ever normalized.
+/// ever normalized. This mirrors the backend decoder
+/// (`backend::ffi::ffi_conversion::utf8_trim`), which lossy-UTF8-decodes
+/// the raw field bytes and then trims exactly `[' ', '\0']` from the
+/// trailing end — so both sides of a match already share the same
+/// trailing-trimmed basis, and this re-trim only absorbs padding an
+/// operator typed into the selector value itself.
+///
+/// Lossy-UTF8 handling: token labels/serials reach matching as the
+/// backend's lossy-decoded strings, so non-UTF8 field bytes compare as
+/// U+FFFD replacement characters on both sides. To select such a token,
+/// write the replacement character literally in the selector value
+/// (e.g. `label:Tok�en`); there is no byte-level matching escape.
 fn trim_field_padding(s: &str) -> &str {
     s.trim_end_matches([' ', '\0'])
 }
@@ -63,7 +74,10 @@ impl TokenSelector {
     ///
     /// Comparison normalizes PKCS#11 field padding (trailing spaces/NULs
     /// on either side are insignificant); leading characters are
-    /// significant (W1-C3-37).
+    /// significant (W1-C3-37, wording W1-L7-22). Both inputs are the
+    /// backend's lossy-decoded, trailing-trimmed strings (see
+    /// `trim_field_padding`), so non-UTF8 bytes compare as U+FFFD on
+    /// both sides.
     pub fn matches(&self, token_label: &str, token_serial: &str) -> bool {
         // W1-C3-17: the unconstructible Uri variant (whose arm hardcoded
         // false) is deleted; pkcs11: URIs are rejected in parse().
@@ -147,5 +161,51 @@ mod tests {
         assert!(TokenSelector::parse("label:").is_err());
         assert!(TokenSelector::parse("label:   ").is_err());
         assert!(TokenSelector::parse("serial:").is_err());
+    }
+
+    // W1-L7-22: matching agrees with the backend's lossy-trim decode
+    // (`backend::ffi::ffi_conversion::utf8_trim`): raw field bytes are
+    // lossy-UTF8-decoded, then only trailing spaces/NULs are padding.
+    // Leading-space labels stay expressible and match per backend rules.
+    #[test]
+    fn matches_agrees_with_backend_lossy_trim_semantics() {
+        fn backend_decode(field: &[u8]) -> String {
+            String::from_utf8_lossy(field).trim_end_matches([' ', '\0']).to_string()
+        }
+        // 32-byte blank-padded label field with a significant leading space.
+        let mut raw = [b' '; 32];
+        raw[1..6].copy_from_slice(b"Audit");
+        let label = backend_decode(&raw);
+        assert_eq!(label, " Audit");
+        let selector = TokenSelector::parse("label: Audit").unwrap();
+        assert!(selector.matches(&label, "x"));
+        assert!(!TokenSelector::parse("label:Audit").unwrap().matches(&label, "x"));
+        // Non-UTF8 bytes stay lossy on both sides: the backend decodes to
+        // U+FFFD, and the selector compares that same lossy form.
+        let mut raw_bad = [b' '; 32];
+        raw_bad[0..3].copy_from_slice(b"Tok");
+        raw_bad[3] = 0xff;
+        raw_bad[4..6].copy_from_slice(b"en");
+        let lossy = backend_decode(&raw_bad);
+        assert_eq!(lossy, "Tok�en");
+        assert!(TokenSelector::parse("label:Tok�en").unwrap().matches(&lossy, "x"));
+        assert!(!TokenSelector::parse("label:Token").unwrap().matches(&lossy, "x"));
+    }
+
+    // W1-L7-22 doc pin (R2: Task 31 owns the final wording): the module
+    // docs must describe trailing-only trimming AND the lossy-UTF8
+    // comparison basis shared with the backend decoder.
+    #[test]
+    fn selector_docs_describe_trailing_only_trim_and_lossy_utf8() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/server/auth/token_selector.rs");
+        let text = std::fs::read_to_string(&path).expect("read own token_selector.rs");
+        // Only the production section counts — this test's own comments
+        // below also name these terms.
+        let end = text.find("#[cfg(test)]").expect("test module present");
+        let prod = &text[..end];
+        for needle in ["trailing", "lossy", "U+FFFD", "utf8_trim"] {
+            assert!(prod.contains(needle), "selector docs must mention {needle:?}");
+        }
     }
 }

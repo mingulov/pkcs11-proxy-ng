@@ -544,4 +544,18 @@ mod tests {
         let err = super::server_tls_config(&tcp).unwrap_err();
         assert!(err.contains("too-permissive"), "error should flag mode: {err}");
     }
+
+    // W1-L7-07: the UDS listener socket is created mode-0600 (owner-only).
+    // Task 3 (C3-11) deleted the stale peer_cred helpers whose docs floated
+    // 0660/0666 deployment modes; this pins the surviving contract.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_unix_listener_creates_mode_0600_socket() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("t31-0600.sock");
+        let _listener = super::bind_unix_listener(&sock).expect("bind");
+        let mode = std::fs::symlink_metadata(&sock).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "unix socket must be created 0600, got {mode:o}");
+    }
 }
