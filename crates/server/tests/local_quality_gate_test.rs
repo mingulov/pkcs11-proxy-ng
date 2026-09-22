@@ -330,6 +330,66 @@ fn supply_chain_pins_are_consistent() {
 }
 
 #[test]
+fn shim_cdylib_tokio_closure_stays_minimal() {
+    // W1-L6-11: confirm Task 22 (W1-L16-15) tokio scoping still covers
+    // the shim cdylib — the server-only surface (signal/process, plus
+    // full/rt-multi-thread/fs per the Task 22 cargo-tree check) must
+    // not creep into the first-party manifests whose feature union
+    // forms the cdylib build. Only `[dependencies]` is scanned:
+    // dev/build deps (shim test harness, proto codegen) never link
+    // into the shipped cdylib. Third-party unions (tonic/hyper) are
+    // verified out-of-band via
+    // `cargo tree -p pkcs11-proxy-ng-shim -e normal` (no
+    // signal/process/full — recheck when adding client-side deps).
+    const BANNED: &[&str] = &["full", "signal", "process", "rt-multi-thread", "fs"];
+    let root = workspace_root();
+
+    // Workspace base must stay featureless.
+    let workspace = fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml readable");
+    let base = workspace
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("tokio = "))
+        .expect("workspace must declare shared tokio");
+    assert!(
+        base.contains("default-features = false"),
+        "workspace tokio must keep default-features = false: {base}"
+    );
+
+    // First-party crates feeding the cdylib (shim + its path deps).
+    for member in [
+        "crates/shim/Cargo.toml",
+        "crates/client/Cargo.toml",
+        "crates/proto/Cargo.toml",
+        "crates/types/Cargo.toml",
+    ] {
+        let manifest = fs::read_to_string(root.join(member)).expect("member manifest readable");
+        let mut in_deps = false;
+        for line in manifest.lines().map(str::trim) {
+            if line.starts_with('[') {
+                in_deps = line == "[dependencies]";
+                continue;
+            }
+            if !in_deps || !line.starts_with("tokio = ") {
+                continue;
+            }
+            assert!(
+                line.contains("workspace = true") || line.contains("default-features = false"),
+                "{member}: tokio must inherit the featureless workspace base: {line}"
+            );
+            if let Some(features) = line.split_once("features") {
+                for banned in BANNED {
+                    assert!(
+                        !features.1.contains(&format!("\"{banned}\"")),
+                        "{member}: banned tokio feature \"{banned}\" in the cdylib closure: {line}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn test_matrix_fast_only_matches_ci_tier0_commands() {
     let root = workspace_root();
     let test_matrix = fs::read_to_string(root.join("scripts/test-matrix.sh"))

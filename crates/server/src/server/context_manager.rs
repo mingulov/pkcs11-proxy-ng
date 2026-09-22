@@ -254,6 +254,13 @@ pub struct LogicalClientInstance {
     /// via `note_login_acquired` / `note_login_released` (W1-L13-17).
     pub login_state: HashMap<BackendSlotId, LoginState>,
     pub authenticated_identity: Option<String>, // bound at creation (ADR-0005 §4)
+    /// Last TCP peer IP seen opening a session on this context (W1-L7-02).
+    /// Recorded only for unauthenticated contexts while the session quota
+    /// is active, so [`ContextManager::session_count_for_principal`] can
+    /// attribute live sessions to a peer-IP quota key. Last-wins; a
+    /// context used from several IPs counts under each attributable key
+    /// (conservative — see the counter).
+    pub last_peer_ip: Option<std::net::IpAddr>,
     /// Virtual object handles minted by this context (via generate/wrap/create,
     /// NOT via find). Used by `gate_object_handle` to allow a principal to use
     /// keys it generated, even when its `objects` grant does not list the new
@@ -324,6 +331,7 @@ impl LogicalClientInstance {
             attr_cache: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
+            last_peer_ip: None,
             in_flight: Arc::new(AtomicI64::new(0)),
             message_operations: HashMap::new(),
         }
@@ -1270,11 +1278,15 @@ impl ContextManager {
         })
     }
 
-    /// Sum of open sessions across ALL contexts whose principal key equals
-    /// `principal_key`. A context's principal key is its `authenticated_identity`
-    /// when set; otherwise the context-id string itself (mirrors the derivation
-    /// used at the dispatch seam so authenticated principals aggregate across
-    /// their contexts and unauthenticated contexts are counted individually).
+    /// Sum of open sessions across ALL contexts attributable to
+    /// `principal_key`. A context matches when ANY of its keys equals the
+    /// requested one: its `authenticated_identity` when set, its recorded
+    /// peer IP ([`LogicalClientInstance::last_peer_ip`], W1-L7-02), or its
+    /// context-id string. Match-any (rather than a single derived key)
+    /// keeps peer-keyed quotas whole: live sessions always count under
+    /// the peer key even for mixed-transport contexts, and counting a
+    /// session under several keys is conservative (fail-closed for
+    /// quotas). Peerless/identity-bound counting is unchanged.
     ///
     /// Counts LIVE sessions only; in-flight opens hold
     /// [`SessionQuotaReservation`]s which count toward the same cap (W1-L6-04).
@@ -1288,9 +1300,10 @@ impl ContextManager {
             .iter()
             .map(|entry| {
                 let ctx = entry.value();
-                let key =
-                    ctx.authenticated_identity.as_deref().unwrap_or_else(|| entry.key().0.as_str());
-                if key == principal_key { ctx.session_slots.len() } else { 0 }
+                let identity_match = ctx.authenticated_identity.as_deref() == Some(principal_key);
+                let peer_match = ctx.last_peer_ip.is_some_and(|ip| ip.to_string() == principal_key);
+                let id_match = entry.key().0.as_str() == principal_key;
+                if identity_match || peer_match || id_match { ctx.session_slots.len() } else { 0 }
             })
             .sum()
     }

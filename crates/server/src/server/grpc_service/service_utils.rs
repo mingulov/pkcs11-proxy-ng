@@ -77,6 +77,23 @@ where
 pub(super) fn current_peer() -> Option<SocketAddr> {
     CURRENT_PEER.try_with(|peer| *peer).ok().flatten()
 }
+
+/// Derive the per-principal quota key (W1-L7-02), shared by the
+/// in-flight guard and the session quota so both caps key identically:
+/// the bound transport identity when one is recorded; otherwise the
+/// TCP peer IP from [`current_peer`] (published by
+/// `run_context_scoped` for every RPC) so N contexts from one peer
+/// cannot multiply the opt-in caps; otherwise (UDS / unpublished
+/// transport — no IP exists) the context id, as before.
+pub(super) fn principal_quota_key(ctx_mgr: &ContextManager, ctx_id: &ClientContextId) -> String {
+    if let Some(identity) = ctx_mgr.context_identity(ctx_id) {
+        return identity;
+    }
+    if let Some(peer) = current_peer() {
+        return peer.ip().to_string();
+    }
+    ctx_id.0.clone()
+}
 /// Tracks whether the LAST sent health event was `Success`. Initialized
 /// to `true` because the health-gate task assumes the daemon starts in
 /// `SERVING`. Used by [`report_backend_outcome`] to suppress
@@ -3134,5 +3151,64 @@ mod tests {
     async fn per_connection_admission_skipped_without_peer() {
         let result = spawn_backend(|| Ok::<u8, CkRv>(5)).await;
         assert_eq!(result.expect("no transport error"), Ok(5u8));
+    }
+
+    /// W1-L7-02: a context with a bound transport identity keeps that
+    /// identity as its quota key even when a peer is published —
+    /// authenticated quotas are unchanged.
+    #[tokio::test]
+    async fn principal_quota_key_prefers_bound_identity_over_peer() {
+        let ctx_mgr = ContextManager::new(Duration::from_secs(300), 0);
+        let ctx_id = ctx_mgr.create_context(Some("alice".to_string())).await.unwrap();
+        let peer = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 7)),
+            4321,
+        );
+        let key =
+            scope_peer_admission(Some(peer), async { principal_quota_key(&ctx_mgr, &ctx_id) })
+                .await;
+        assert_eq!(key, "alice", "bound identity must win over the peer key");
+    }
+
+    /// W1-L7-02: unauthenticated contexts (no bound identity) share one
+    /// quota key per peer IP, so N contexts cannot multiply the caps.
+    /// The key is IP-only: ports never split a peer's quota.
+    #[tokio::test]
+    async fn principal_quota_key_uses_peer_ip_for_unauthenticated() {
+        let ctx_mgr = ContextManager::new(Duration::from_secs(300), 0);
+        let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+        let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 7));
+        let key_a = scope_peer_admission(Some(std::net::SocketAddr::new(ip, 1111)), async {
+            principal_quota_key(&ctx_mgr, &ctx_a)
+        })
+        .await;
+        let key_b = scope_peer_admission(Some(std::net::SocketAddr::new(ip, 2222)), async {
+            principal_quota_key(&ctx_mgr, &ctx_b)
+        })
+        .await;
+        assert_eq!(key_a, "192.0.2.7", "unauthenticated key must be the peer IP");
+        assert_eq!(key_b, key_a, "same-IP contexts must share one quota key");
+        let other_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 8));
+        let key_c = scope_peer_admission(Some(std::net::SocketAddr::new(other_ip, 1111)), async {
+            principal_quota_key(&ctx_mgr, &ctx_b)
+        })
+        .await;
+        assert_ne!(key_c, key_a, "different peer IPs must not share a quota key");
+    }
+
+    /// W1-L7-02 characterization: without a published peer (UDS /
+    /// unknown transport) the unauthenticated key stays the context id,
+    /// as before — there is no IP to key on.
+    #[tokio::test]
+    async fn principal_quota_key_falls_back_to_ctx_id_without_peer() {
+        let ctx_mgr = ContextManager::new(Duration::from_secs(300), 0);
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        assert!(current_peer().is_none(), "setup: no peer must be published");
+        assert_eq!(
+            principal_quota_key(&ctx_mgr, &ctx_id),
+            ctx_id.0,
+            "peerless contexts keep the context-id key"
+        );
     }
 }

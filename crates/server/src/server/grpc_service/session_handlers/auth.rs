@@ -63,7 +63,9 @@ pub(super) async fn login(
     // insert. Otherwise two clients racing the first login on the shared token
     // both see "no other login" and both take the real-login path, and the
     // second is answered USER_ALREADY_LOGGED_IN instead of the logical OK.
-    let _login_lock = match acquire_slot_login_lock(ctx_mgr, slot).await {
+    // W1-L6-08: `mut` so F-01 reconcile below can release this guard
+    // across the logout and re-acquire it for the retry + mint.
+    let mut _login_lock = match acquire_slot_login_lock(ctx_mgr, slot).await {
         Ok(guard) => guard,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse { ck_rv: rv.0 }));
@@ -167,6 +169,12 @@ pub(super) async fn login(
     // gets ALREADY with no state minted, and no path ever logs out. Reconcile
     // with one backend logout through this session, then retry the login
     // exactly once so the PIN verifies against a logged-out token.
+    // W1-L6-08: the slot lock is released across the logout and
+    // re-acquired for the retry (per-attempt acquisition with a
+    // generation check) so a slow HSM does not pin other tenants'
+    // slot logins for up to 3x request_timeout. The re-acquired guard
+    // is stored back into `_login_lock` so the mint path below still
+    // runs under the lock (M5 serialization preserved).
     let result = match result {
         Err(rv)
             if (rv == CkRv::USER_ALREADY_LOGGED_IN
@@ -178,6 +186,7 @@ pub(super) async fn login(
                 user_type = user_type_raw,
                 "Login reconciling holderless-but-logged-in backend"
             );
+            drop(_login_lock);
             let backend = backend_ref.clone();
             if let Err(rv) = spawn_backend(move || backend.logout(session)).await? {
                 warn!(
@@ -185,6 +194,31 @@ pub(super) async fn login(
                     rv = rv.0,
                     "Login reconcile logout failed; retrying login once anyway"
                 );
+            }
+            // Re-acquire for the retry attempt: another tenant may hold
+            // the slot now — refuse rather than queue unboundedly (same
+            // GENERAL_ERROR bound as the initial acquisition). Lock
+            // order unchanged: slot lock outer, transient
+            // contexts-DashMap guards only.
+            _login_lock = match acquire_slot_login_lock(ctx_mgr, slot).await {
+                Ok(guard) => guard,
+                Err(rv) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse { ck_rv: rv.0 }));
+                }
+            };
+            // Generation check: lock-free mapping removers (close-all,
+            // eviction) may have dropped or recycled this session while
+            // the lock was released. Fail closed — mint nothing for an
+            // untracked or rebound handle (same rule as the W1-L6-25
+            // post-call verify below).
+            match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
+                Ok((fresh_session, fresh_slot, _))
+                    if fresh_session == session && fresh_slot == slot => {}
+                _ => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+                        ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
+                    }));
+                }
             }
             let backend = backend_ref.clone();
             spawn_backend(move || {
@@ -826,5 +860,75 @@ mod tests {
             before + 1,
             "context-specific login must still reach the backend"
         );
+    }
+
+    /// W1-L6-08: F-01 reconcile must release the per-slot login lock
+    /// across the logout+retry so a slow HSM does not pin other tenants'
+    /// slot logins (pre-fix the lock was held across initial login +
+    /// logout + retry, up to 3x request_timeout). The lock must become
+    /// acquirable while the delayed reconcile logout is in flight, and
+    /// the reconcile must still succeed and mint the logical login.
+    #[tokio::test]
+    async fn l6_08_reconcile_releases_slot_lock_across_slow_logout() {
+        let slot = CkSlotId(44);
+        let backend_slot = crate::server::slot_map::BackendSlotId(slot);
+        let mock = Arc::new(MockBackend::new(vec![slot], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let backend_session = mock.open_session(slot, CkSessionFlags::default()).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(backend_slot).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(BackendHandle(backend_session.0), backend_slot)
+            })
+            .await
+            .unwrap();
+
+        // Holderless-but-logged-in backend: the token is logged in behind
+        // the proxy's back, so the login below enters F-01 reconcile.
+        mock.login(backend_session, CkUserType::User, None).unwrap();
+        assert!(
+            !ctx_mgr.any_login_state_for_slot(backend_slot),
+            "setup: no logical holder may exist"
+        );
+        // Slow-HSM logout: the reconcile logout sleeps this long on the
+        // blocking pool, opening the window the lock must be released for.
+        mock.set_logout_delay(Duration::from_millis(750));
+
+        let login_fut = super::login(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::LoginRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh.0,
+                user_type: CkUserType::User as u64,
+                pin: None,
+            }),
+        );
+        tokio::pin!(login_fut);
+        let slot_lock = ctx_mgr.slot_login_lock(backend_slot);
+        let mut released = false;
+        let result = loop {
+            tokio::select! {
+                biased;
+                r = &mut login_fut => break r,
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {
+                    if slot_lock.try_lock().is_ok() {
+                        released = true;
+                    }
+                }
+            }
+        };
+        mock.clear_logout_delay();
+        assert!(released, "slot login lock must be released while reconcile logout is in flight");
+        let resp = result.unwrap().into_inner();
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "reconcile must still succeed");
+        let state = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.login_state.get(&backend_slot).copied())
+            .await
+            .unwrap();
+        assert_eq!(state, Some(LoginState::User), "reconciled login must mint logical state");
     }
 }

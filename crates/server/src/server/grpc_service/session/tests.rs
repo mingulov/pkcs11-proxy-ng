@@ -4225,6 +4225,85 @@ async fn open_session_quota_enforced_end_to_end() {
     assert_eq!(ro3.ck_rv, CkRv::SESSION_COUNT.0, "other context hits own quota independently");
 }
 
+/// W1-L7-02 end-to-end: unauthenticated contexts from one TCP peer IP
+/// share a single session quota — N contexts cannot multiply the cap.
+/// Same `configure` values as `open_session_quota_enforced_end_to_end`
+/// (identical cfg, same `quota_mutex`) so the two tests agree
+/// whichever wins the OnceLock race.
+#[tokio::test]
+async fn open_session_quota_shared_per_peer_ip_for_unauthenticated() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let _guard = quota_mutex().lock().await;
+
+    let cfg = crate::config::RateLimitConfig {
+        per_principal_max_in_flight: None,
+        per_principal_max_sessions: Some(2),
+        per_slot_failed_login_budget: None,
+        per_slot_failed_login_cooldown_secs: None,
+    };
+    crate::server::rate_quota::configure(&cfg);
+    if crate::server::rate_quota::per_principal_max_sessions() != Some(2) {
+        // OnceLock already set otherwise by another caller — skip gracefully.
+        return;
+    }
+
+    let mock = MockBackend::default_test();
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+
+    let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend.clone());
+    let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+    let open_as = |cid: String, peer: SocketAddr| {
+        let svc = svc.clone();
+        let slot = virtual_slot.0;
+        async move {
+            let mut req = Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
+                client_context_id: cid,
+                slot_id: slot,
+                flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            });
+            req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
+                local_addr: None,
+                remote_addr: Some(peer),
+            });
+            svc.open_session(req).await.unwrap().into_inner()
+        }
+    };
+
+    // Two contexts from the SAME peer IP (different ports — the key is
+    // IP-only) share one quota of 2.
+    let peer_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 1111);
+    let peer_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 2222);
+    let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+    let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+
+    let r1 = open_as(ctx_a.0.clone(), peer_a).await;
+    assert_eq!(r1.ck_rv, CkRv::OK.0, "peer 1st open must succeed");
+    let r2 = open_as(ctx_a.0.clone(), peer_b).await;
+    assert_eq!(r2.ck_rv, CkRv::OK.0, "peer 2nd open must succeed");
+    let r3 = open_as(ctx_b.0.clone(), peer_a).await;
+    assert_eq!(
+        r3.ck_rv,
+        CkRv::SESSION_COUNT.0,
+        "second context from the same peer IP must share the quota (3rd open rejected)"
+    );
+    assert_eq!(r3.session_handle, 0, "rejected open must return handle 0");
+
+    // A different peer IP gets its own independent quota of 2.
+    let peer_c = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20)), 3333);
+    let ctx_c = ctx_mgr.create_context(None).await.unwrap();
+    let c1 = open_as(ctx_c.0.clone(), peer_c).await;
+    assert_eq!(c1.ck_rv, CkRv::OK.0, "other peer 1st open must succeed");
+    let c2 = open_as(ctx_c.0.clone(), peer_c).await;
+    assert_eq!(c2.ck_rv, CkRv::OK.0, "other peer 2nd open must succeed");
+    let c3 = open_as(ctx_c.0.clone(), peer_c).await;
+    assert_eq!(c3.ck_rv, CkRv::SESSION_COUNT.0, "other peer hits own quota independently");
+}
+
 // ---------------------------------------------------------------------------
 // G2-PR3: per-slot aggregate failed-login budget
 // ---------------------------------------------------------------------------

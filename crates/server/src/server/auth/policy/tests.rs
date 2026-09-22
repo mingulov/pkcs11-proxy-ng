@@ -1969,6 +1969,25 @@ fn sustained_unique_spki_peers_keep_logged_set_bounded() {
     );
 }
 
+/// W1-L7-06 (residual pin on the W1-C3-10 eviction): eviction must log
+/// at debug and never warn-spam. Pinned by source scan rather than a
+/// tracing capture: callsite-interest caching is process-global, so a
+/// capture races sibling tests emitting from the same callsite
+/// unscoped in full parallel runs (observed flake), while the scan is
+/// deterministic.
+#[test]
+fn l7_06_log_dedup_eviction_logs_at_debug_never_warn() {
+    let src = include_str!("../policy.rs");
+    let insert = src
+        .split("fn insert(&mut self, key: String) -> bool")
+        .nth(1)
+        .expect("LogDedupSet::insert must exist");
+    let body = insert.split("\n    }\n").next().unwrap_or(insert);
+    assert!(body.contains("tracing::debug!"), "eviction must log at debug");
+    assert!(!body.contains("tracing::warn!"), "eviction must never warn-spam");
+    assert!(!body.contains("tracing::error!"), "eviction must never error-spam");
+}
+
 #[test]
 fn sustained_unique_legacy_peers_keep_warned_set_bounded() {
     use std::collections::HashMap;
