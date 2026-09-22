@@ -3,7 +3,7 @@ use pkcs11_proxy_ng_types::*;
 
 use crate::state;
 
-use super::helpers::{catch_panics, rv_err, rv_ok};
+use super::helpers::{catch_panics, read_param_struct, rv_err, rv_ok};
 
 use std::path::PathBuf;
 
@@ -34,7 +34,13 @@ unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
     if p_init_args.is_null() {
         return None; // Null is always acceptable.
     }
-    let args = unsafe { &*(p_init_args as *const CK_C_INITIALIZE_ARGS) };
+    // Whole-copy without assuming alignment (T03); the struct is
+    // repr(packed) on Windows LLP64, where even forming this reference
+    // was UB. Arithmetic-invalid extents fail closed as ARGUMENTS_BAD.
+    let args = match unsafe { read_param_struct(p_init_args as *const CK_C_INITIALIZE_ARGS) } {
+        Ok(args) => args,
+        Err(_) => return Some(rv_err(CkRv::ARGUMENTS_BAD)),
+    };
 
     // pReserved must be null (PKCS#11 §5.4).
     if !args.pReserved.is_null() {

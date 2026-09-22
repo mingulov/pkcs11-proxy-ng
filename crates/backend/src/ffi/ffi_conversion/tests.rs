@@ -12,9 +12,9 @@ mod mechanism_to_ffi_tests {
         AesCmacKeyDerivationParams, AesCtrParams, CkMechanism, CkMechanismParams, CkMechanismType,
         CkMgf, CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv,
         DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams, IvParams,
-        KeyDerivationStringData, KmacParams, KyberParams, MuGenParams, ObjectHandleParam,
-        PbeParams, Pkcs5Pbkd2Params, RawMechanismParams, RsaAesKeyWrapParams, RsaPkcsOaepParams,
-        RsaPkcsPssParams, SecretBytes, SignAdditionalContext, Ssl3KeyMatParams,
+        KeyDerivationStringData, KipParams, KmacParams, KyberParams, MuGenParams,
+        ObjectHandleParam, PbeParams, Pkcs5Pbkd2Params, RawMechanismParams, RsaAesKeyWrapParams,
+        RsaPkcsOaepParams, RsaPkcsPssParams, SecretBytes, SignAdditionalContext, Ssl3KeyMatParams,
         Ssl3MasterKeyDeriveParams, SslRandomData, TlsPrfParams, VendorObjectExtractParams,
         VendorObjectInsertParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams,
         WtlsRandomData,
@@ -23,6 +23,37 @@ mod mechanism_to_ffi_tests {
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
         mechanism_to_ffi(&CkMechanism { mechanism_type, params: Some(params) })
             .expect("mechanism converts to ffi")
+    }
+
+    #[test]
+    fn kip_nesting_depth_limit_is_enforced() {
+        // T03/RV-N2 backend half: mirror of the shim reader bound (16
+        // nested nodes allowed, 17th rejected). The typed tree is owned
+        // (acyclic), so a depth counter suffices; no cycle check needed.
+        fn nest(inner: CkMechanism) -> CkMechanism {
+            CkMechanism {
+                mechanism_type: CkMechanismType::RSA_PKCS,
+                params: Some(CkMechanismParams::Kip(KipParams {
+                    mechanism: Box::new(inner),
+                    key_handle: CkObjectHandle(0),
+                    seed: SecretBytes::copy_from_slice(&[]),
+                })),
+            }
+        }
+        fn leaf() -> CkMechanism {
+            CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None }
+        }
+        let mut mech = leaf();
+        for _ in 0..16 {
+            mech = nest(mech);
+        }
+        assert!(mechanism_to_ffi(&mech).is_ok(), "16 nested nodes must convert");
+        let deep = nest(mech);
+        assert_eq!(
+            mechanism_to_ffi(&deep).err(),
+            Some(CkRv::MECHANISM_PARAM_INVALID),
+            "17th nested node must be rejected before recursion"
+        );
     }
 
     #[test]

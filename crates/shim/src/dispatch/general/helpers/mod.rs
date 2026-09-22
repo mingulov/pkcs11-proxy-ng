@@ -179,6 +179,34 @@ pub(crate) unsafe fn try_read_optional_bytes<'a>(
     }
 }
 
+/// Validate caller-memory extent arithmetic before constructing any slice or
+/// performing any multi-byte unaligned copy (T03).
+///
+/// Checks, in order: `count` fits `usize` (32-bit `CK_ULONG` hosts),
+/// `count * stride` does not overflow, the byte extent is within `cap` and
+/// `isize::MAX` (the slice limit), and `address + extent` does not wrap the
+/// address space. Returns the byte extent only — it does NOT certify that the
+/// range is mapped or allocated; callers still rely on the FFI contract for
+/// readability and must never treat a passing extent as proof of validity.
+///
+/// The rejection is `ARGUMENTS_BAD` (arithmetic-invalid input). Mechanism
+/// readers map it to `MECHANISM_PARAM_INVALID` at their wrappers to match
+/// the entry-gate convention.
+pub(crate) fn checked_extent(
+    address: usize,
+    count: u64,
+    stride: usize,
+    cap: usize,
+) -> CkResult<usize> {
+    let count = usize::try_from(count).map_err(|_| CkRv::ARGUMENTS_BAD)?;
+    let extent = count.checked_mul(stride).ok_or(CkRv::ARGUMENTS_BAD)?;
+    if extent > cap || extent > isize::MAX as usize {
+        return Err(CkRv::ARGUMENTS_BAD);
+    }
+    address.checked_add(extent).ok_or(CkRv::ARGUMENTS_BAD)?;
+    Ok(extent)
+}
+
 /// Build a `CkOutputBufferSpec` from the C caller's pointer pair.
 ///
 /// This captures exactly what the PKCS#11 caller passed:
@@ -846,6 +874,15 @@ mod tests {
         let buf = [0u8; 1];
         let result = unsafe { super::try_read_optional_bytes(buf.as_ptr(), 0) }.unwrap();
         assert_eq!(result, Some([].as_slice()));
+    }
+
+    #[test]
+    fn checked_extent_pins_arithmetic_rejection_without_dereference() {
+        // Pure arithmetic: sentinel addresses are never dereferenced.
+        assert_eq!(super::checked_extent(8, 2, 4, 64), Ok(8));
+        assert!(super::checked_extent(usize::MAX - 3, 2, 4, 64).is_err());
+        assert!(super::checked_extent(8, u64::MAX, 8, 64).is_err());
+        assert!(super::checked_extent(8, 65_537, 1, 65_536).is_err());
     }
 }
 
