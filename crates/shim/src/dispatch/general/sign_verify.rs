@@ -1,8 +1,6 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
-use crate::state;
-
 use super::helpers::{
     catch_panics, classify_input, dispatch_byte_output_exact, dispatch_byte_output_exact_no_input,
     input_buf_to_ck_in_buf, read_mechanism, rv_err, rv_ok, unit_result_to_rv, validate_mechanism,
@@ -18,10 +16,6 @@ pub unsafe extern "C" fn c_sign_init(
         if p_mechanism.is_null() {
             let result =
                 with_client!(client => client.sign_init_cancel(CkSessionHandle(h_session as u64)));
-            if result.is_ok() {
-                state::clear_sign_output_caches(h_session);
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
@@ -37,10 +31,6 @@ pub unsafe extern "C" fn c_sign_init(
             &mech,
             CkObjectHandle(h_key as u64),
         ));
-        if result.is_ok() {
-            state::clear_sign_output_caches(h_session);
-            state::clear_operation_state_cache(h_session);
-        }
         unit_result_to_rv(result)
     })
 }
@@ -107,9 +97,6 @@ pub unsafe extern "C" fn c_verify_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result = with_client!(client => client.verify_init_cancel(CkSessionHandle(h_session as u64)));
-            if result.is_ok() {
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
@@ -202,10 +189,6 @@ pub unsafe extern "C" fn c_sign_recover_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result = with_client!(client => client.sign_recover_init_cancel(CkSessionHandle(h_session as u64)));
-            if result.is_ok() {
-                state::clear_sign_recover_output_cache(h_session);
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
@@ -221,10 +204,6 @@ pub unsafe extern "C" fn c_sign_recover_init(
             &mech,
             CkObjectHandle(h_key as u64),
         ));
-        if result.is_ok() {
-            state::clear_sign_recover_output_cache(h_session);
-            state::clear_operation_state_cache(h_session);
-        }
         unit_result_to_rv(result)
     })
 }
@@ -258,10 +237,6 @@ pub unsafe extern "C" fn c_verify_recover_init(
             let result = with_client!(client => client.verify_recover_init_cancel(
                 CkSessionHandle(h_session as u64)
             ));
-            if result.is_ok() {
-                state::clear_verify_recover_output_cache(h_session);
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
@@ -277,10 +252,6 @@ pub unsafe extern "C" fn c_verify_recover_init(
             &mech,
             CkObjectHandle(h_key as u64),
         ));
-        if result.is_ok() {
-            state::clear_verify_recover_output_cache(h_session);
-            state::clear_operation_state_cache(h_session);
-        }
         unit_result_to_rv(result)
     })
 }

@@ -20,10 +20,6 @@ pub unsafe extern "C" fn c_digest_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result = with_client!(client => client.digest_init_cancel(CkSessionHandle(h_session as u64)));
-            if result.is_ok() {
-                state::clear_digest_output_caches(h_session);
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
         }
         // W1-L3-11: native error precedence — uninitialized cryptoki first,
@@ -45,10 +41,6 @@ pub unsafe extern "C" fn c_digest_init(
         };
         let result =
             with_client!(client => client.digest_init(CkSessionHandle(h_session as u64), &mech));
-        if result.is_ok() {
-            state::clear_digest_output_caches(h_session);
-            state::clear_operation_state_cache(h_session);
-        }
         unit_result_to_rv(result)
     })
 }
@@ -127,10 +119,6 @@ pub unsafe extern "C" fn c_encrypt_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result = with_client!(client => client.encrypt_init_cancel(CkSessionHandle(h_session as u64)));
-            if result.is_ok() {
-                state::clear_encrypt_output_caches(h_session);
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
         }
         // W1-L3-11: native error precedence — uninitialized cryptoki first,
@@ -164,8 +152,6 @@ pub unsafe extern "C" fn c_encrypt_init(
                 if let Some(params) = output_params {
                     unsafe { write_mechanism_output_params(p_mechanism, &params) };
                 }
-                state::clear_encrypt_output_caches(h_session);
-                state::clear_operation_state_cache(h_session);
                 rv_ok()
             }
             Err(e) => rv_err(e),
@@ -238,10 +224,6 @@ pub unsafe extern "C" fn c_decrypt_init(
     catch_panics(|| {
         if p_mechanism.is_null() {
             let result = with_client!(client => client.decrypt_init_cancel(CkSessionHandle(h_session as u64)));
-            if result.is_ok() {
-                state::clear_decrypt_output_caches(h_session);
-                state::clear_operation_state_cache(h_session);
-            }
             return unit_result_to_rv(result);
         }
         // W1-L3-11: native error precedence — uninitialized cryptoki first,
@@ -266,10 +248,6 @@ pub unsafe extern "C" fn c_decrypt_init(
             &mech,
             CkObjectHandle(h_key as u64),
         ));
-        if result.is_ok() {
-            state::clear_decrypt_output_caches(h_session);
-            state::clear_operation_state_cache(h_session);
-        }
         unit_result_to_rv(result)
     })
 }

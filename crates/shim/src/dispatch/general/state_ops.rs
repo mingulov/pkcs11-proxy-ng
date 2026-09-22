@@ -110,9 +110,7 @@ pub unsafe extern "C" fn c_set_operation_state(
             CkObjectHandle(h_encryption_key as u64),
             CkObjectHandle(h_authentication_key as u64),
         ));
-        if result.is_ok() {
-            state::evict_session_output_caches(h_session);
-        } else if let Err(error) = &result
+        if let Err(error) = &result
             && error.origin == MessageCallErrorOrigin::Backend
             && error.ck_rv != CkRv::DEVICE_ERROR
         {

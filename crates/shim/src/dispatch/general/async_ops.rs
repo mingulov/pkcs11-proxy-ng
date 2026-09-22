@@ -23,9 +23,14 @@ pub unsafe extern "C" fn c_async_complete(
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
 
-        // Read the null-terminated function name string
+        // Read the null-terminated function name string with a bounded
+        // scan (W1-C6-06): no NUL within 256 content bytes is a loud
+        // ARGUMENTS_BAD, never an unbounded `CStr::from_ptr` read.
         let function_name =
-            unsafe { std::ffi::CStr::from_ptr(p_function_name as *const std::os::raw::c_char) };
+            match unsafe { read_bounded_cstr(p_function_name as *const std::os::raw::c_char) } {
+                Ok(name) => name,
+                Err(e) => return rv_err(e),
+            };
         let function_name = match function_name.to_str() {
             Ok(s) => s,
             Err(_) => return rv_err(CkRv::ARGUMENTS_BAD),

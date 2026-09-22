@@ -2,6 +2,8 @@
 // for cross-platform PKCS#11 portability.
 #![allow(clippy::unnecessary_cast)]
 
+use std::ffi::CStr;
+
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
@@ -183,6 +185,46 @@ pub(crate) unsafe fn output_buffer_spec(
         },
         length_pointer_null,
     }
+}
+
+/// Maximum caller C-string length (content bytes, excluding the NUL) the
+/// shim will scan (W1-C6-06). Interface and async function names are short
+/// literals (`"PKCS 11"`, `"C_Sign"`); anything without a NUL inside this
+/// bound is a buggy caller, answered loudly instead of scanned unboundedly.
+/// Mirrors the backend's `MAX_INTERFACE_NAME_LEN` (W1-C4-06).
+pub(crate) const MAX_C_STRING_LEN: usize = 256;
+
+/// Read a NUL-terminated caller string with a bounded scan (W1-C6-06).
+///
+/// Returns `Err(CkRv::ARGUMENTS_BAD)` when no NUL appears within
+/// [`MAX_C_STRING_LEN`] content bytes — the loud error for an unterminated
+/// or overlong caller string. Never `CStr::from_ptr`: it would scan
+/// unboundedly into caller memory.
+///
+/// # Safety
+///
+/// `ptr` must be non-null, and the bytes from `ptr` up to and including
+/// the first NUL (or [`MAX_C_STRING_LEN`] bytes when no NUL appears
+/// sooner) must be readable for the returned borrow's lifetime.
+pub(crate) unsafe fn read_bounded_cstr<'a>(
+    ptr: *const std::os::raw::c_char,
+) -> Result<&'a CStr, CkRv> {
+    let mut len = 0usize;
+    while len < MAX_C_STRING_LEN {
+        // SAFETY: non-null per the contract; the scan stays within the
+        // readable prefix it guarantees.
+        if unsafe { *ptr.add(len) } == 0 {
+            break;
+        }
+        len += 1;
+    }
+    if len == MAX_C_STRING_LEN {
+        return Err(CkRv::ARGUMENTS_BAD);
+    }
+    // SAFETY: the `len` bytes before the NUL were just scanned readable
+    // one by one; `from_bytes_with_nul` re-validates the terminator.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len + 1) };
+    std::ffi::CStr::from_bytes_with_nul(bytes).map_err(|_| CkRv::ARGUMENTS_BAD)
 }
 
 /// Decide the host-width mapping for a 64-bit wire `ck_rv` (W1-L3-13).
@@ -568,6 +610,33 @@ mod tests {
     fn catch_panics_passes_through_non_panicking_rv() {
         let rv = super::catch_panics(|| pkcs11_proxy_ng_types::CkRv::OK.0 as _);
         assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::OK.0 as CK_RV);
+    }
+
+    #[test]
+    fn bounded_cstr_accepts_short_and_boundary_names() {
+        // W1-C6-06: NUL-terminated names within the 256-content-byte bound
+        // read back verbatim, including the empty string and the exact
+        // 255-content-byte boundary.
+        for content in [b"".as_slice(), b"PKCS 11".as_slice(), [b'A'; 255].as_slice()] {
+            let mut owned = content.to_vec();
+            owned.push(0);
+            let read =
+                unsafe { super::read_bounded_cstr(owned.as_ptr() as *const std::os::raw::c_char) };
+            assert_eq!(read.expect("in-bound name must parse").to_bytes(), content);
+        }
+    }
+
+    #[test]
+    fn bounded_cstr_rejects_names_without_nul_in_bound() {
+        // W1-C6-06: no NUL within 256 content bytes is a loud
+        // ARGUMENTS_BAD. The trailing NUL at byte 300 keeps the buffer
+        // itself well-formed; only the bound refuses it.
+        let mut owned = vec![b'A'; 300];
+        owned.push(0);
+        let err =
+            unsafe { super::read_bounded_cstr(owned.as_ptr() as *const std::os::raw::c_char) }
+                .expect_err("overlong name must be refused");
+        assert_eq!(err, pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD);
     }
 
     #[test]

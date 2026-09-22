@@ -193,6 +193,36 @@ fn get_interface_unknown_name_returns_null_ok() {
 }
 
 #[test]
+fn get_interface_overlong_name_returns_arguments_bad() {
+    // W1-C6-06: the caller name scan is bounded (256 bytes); a name with no
+    // NUL inside the bound is a loud ARGUMENTS_BAD, never an unbounded read.
+    let _guard = shim_state_test_guard();
+    let mut name = vec![b'A'; 300];
+    name.push(0);
+    let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
+    let rv = unsafe {
+        C_GetInterface(name.as_ptr() as *mut CK_UTF8CHAR, std::ptr::null_mut(), &mut pp, 0)
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert!(pp.is_null());
+}
+
+#[test]
+fn get_interface_boundary_length_name_still_resolves() {
+    // W1-C6-06: 255 content bytes + NUL fits the 256 bound, so lookup
+    // proceeds (unknown name → OK + NULL per the no-match contract).
+    let _guard = shim_state_test_guard();
+    let mut name = vec![b'B'; 255];
+    name.push(0);
+    let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
+    let rv = unsafe {
+        C_GetInterface(name.as_ptr() as *mut CK_UTF8CHAR, std::ptr::null_mut(), &mut pp, 0)
+    };
+    assert_eq!(rv, CKR_OK as CK_RV);
+    assert!(pp.is_null());
+}
+
+#[test]
 fn get_interface_unknown_version_returns_null_ok() {
     let _guard = shim_state_test_guard();
     let name = b"PKCS 11\0";
