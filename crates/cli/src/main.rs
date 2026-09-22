@@ -103,13 +103,20 @@ async fn main() -> Result<(), Box<dyn core::error::Error>> {
         use tonic_health::pb::HealthCheckRequest;
         use tonic_health::pb::health_check_response::ServingStatus;
         use tonic_health::pb::health_client::HealthClient;
-        let tls_files = ClientTlsFiles::from_optional_paths(
+        let tls_files = match ClientTlsFiles::from_optional_paths(
             cli.tls_ca_cert.clone(),
             cli.tls_client_cert.clone(),
             cli.tls_client_key.clone(),
             cli.tls_domain.clone(),
         )
-        .map_err(|e| format!("invalid TLS flags: {e}"))?;
+        .map_err(|e| format!("invalid TLS flags: {e}"))
+        {
+            Ok(tls_files) => tls_files,
+            Err(e) => {
+                eprintln!("health probe setup failed: {e}");
+                std::process::exit(2);
+            }
+        };
         let endpoint = match build_health_endpoint(&cli.endpoint, tls_files) {
             Ok(endpoint) => endpoint,
             Err(e) => {

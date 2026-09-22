@@ -124,7 +124,9 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             objects::find_objects(client, slot_id, pin, label, verbose).await
         }
         Commands::DestroyObject { slot_id, pin, pin_stdin, object_handle, force } => {
-            let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            // Confirm BEFORE resolving the PIN (review M1): --pin-stdin
+            // drains stdin, which would leave the prompt at EOF and make
+            // confirmation impossible without --force.
             confirm_destructive(
                 &format!(
                     "Destroy object {object_handle} on slot {slot_id}? This cannot be undone. \
@@ -133,6 +135,7 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
                 force,
                 &mut std::io::stdin().lock(),
             )?;
+            let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
             objects::destroy_object(client, slot_id, pin, object_handle).await
         }
         Commands::GetObjectSize { slot_id, pin, pin_stdin, object_handle } => {
@@ -679,5 +682,27 @@ mod tests {
         }
         let mut eof = std::io::Cursor::new(b"".as_slice());
         assert!(confirm_destructive("prompt", false, &mut eof).is_err(), "EOF must abort");
+    }
+
+    // Task-40 fix round 1 (review M1): destroy-object must confirm
+    // BEFORE resolving the PIN — `--pin-stdin` drains stdin via
+    // read_to_string, which would leave the interactive prompt at EOF
+    // (unconfirmable without --force). Confirm-first keeps piped-PIN-only
+    // failing closed (the PIN line is not "yes") while letting an
+    // explicit "yes" plus --force/scripted input through.
+    #[test]
+    fn destroy_object_confirms_before_pin_resolution() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let src = std::fs::read_to_string(manifest.join("src/handlers/mod.rs")).unwrap();
+        let arm_start = src.find("Commands::DestroyObject").expect("DestroyObject arm must exist");
+        let arm_end =
+            src[arm_start..].find("objects::destroy_object").expect("arm must call destroy_object");
+        let arm = &src[arm_start..arm_start + arm_end];
+        let confirm = arm.find("confirm_destructive").expect("arm must confirm");
+        let pin = arm.find("resolve_optional_pin").expect("arm must resolve PIN");
+        assert!(
+            confirm < pin,
+            "confirm must precede PIN resolution so --pin-stdin stays confirmable"
+        );
     }
 }

@@ -20,18 +20,11 @@ fn format_ulong_attribute(attr_type: CkAttributeType, value: u64) -> String {
 /// secret-key/private-key blobs `get-attribute --redact` replaces with
 /// `[redacted]`. Public halves (MODULUS, PUBLIC_EXPONENT, EC_POINT,
 /// ...) and metadata are never secret.
+///
+/// Delegates to the canonical types-crate classifier (review M2) so the
+/// redaction list cannot drift from the extract gate's.
 fn is_secret_attribute(attr_type: CkAttributeType) -> bool {
-    use CkAttributeType as T;
-    matches!(
-        attr_type,
-        T::VALUE
-            | T::PRIVATE_EXPONENT
-            | T::PRIME_1
-            | T::PRIME_2
-            | T::EXPONENT_1
-            | T::EXPONENT_2
-            | T::COEFFICIENT
-    )
+    is_value_bearing_secret(attr_type)
 }
 
 /// Render one `get-attribute` output line (W1-L2-12): with `redact`, a
@@ -310,5 +303,39 @@ mod tests {
         let missing = CkAttribute { attr_type: CkAttributeType::PRIVATE_EXPONENT, value: None };
         let line = format_attribute_value("PRIVATE_EXPONENT", &missing, true);
         assert!(line.contains("unavailable"), "missing stays missing: {line}");
+    }
+
+    // Task-40 fix round 1 (review M2): the CLI redaction classifier must
+    // reuse the canonical types-crate list, not carry a duplicate
+    // 7-member list that can drift from the extract gate's.
+    #[test]
+    fn secret_classifier_reuses_types_crate() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let src =
+            std::fs::read_to_string(manifest.join("src/handlers/objects/object_ops.rs")).unwrap();
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        let mut uses = 0;
+        for line in code.lines() {
+            let line_code = line.split("//").next().unwrap_or("");
+            if line_code.contains("is_value_bearing_secret") {
+                uses += 1;
+            }
+        }
+        assert!(uses >= 1, "is_secret_attribute must delegate to the types-crate classifier");
+    }
+
+    // Task-40 fix round 1 (review M2): the redaction classifier agrees
+    // with the canonical list on every attribute type in range, so a
+    // future local list cannot silently drift.
+    #[test]
+    fn secret_classifier_agrees_with_types_crate() {
+        use pkcs11_proxy_ng_types::{CkAttributeType, is_value_bearing_secret};
+        for raw in 0..0x400u64 {
+            assert_eq!(
+                super::is_secret_attribute(CkAttributeType(raw)),
+                is_value_bearing_secret(CkAttributeType(raw)),
+                "classifier must agree with canonical list at 0x{raw:X}"
+            );
+        }
     }
 }

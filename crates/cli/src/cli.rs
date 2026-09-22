@@ -254,7 +254,8 @@ pub(crate) enum Commands {
             value_parser = parse_wiping_pin
         )]
         pin: Option<SecretBytes>,
-        /// Read the user PIN from stdin instead of `--pin`.
+        /// Read the user PIN from stdin instead of `--pin` (the
+        /// destruction confirmation is prompted first).
         #[arg(long)]
         pin_stdin: bool,
         /// Object handle (decimal, from find-objects).
