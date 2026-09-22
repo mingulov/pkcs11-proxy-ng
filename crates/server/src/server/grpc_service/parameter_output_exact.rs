@@ -89,12 +89,14 @@ pub(super) async fn parameter_output_exact(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
+    // T12: `ParameterOutputExactRequest` is `ZeroizeOnDrop`; take owned
+    // fields out with `mem::take` instead of moving them.
     let mut req = request.into_inner();
     // W1-L5-04: compatibility-range gate, never an equality literal.
     if !exact_output_effects_version_supported(req.exact_output_effects_version) {
         return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
-    let ctx_id = ClientContextId(req.client_context_id);
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     // Parse the function discriminator
     let function = match parameter_output_function_from_i32(req.function) {
@@ -134,21 +136,23 @@ pub(super) async fn parameter_output_exact(
         });
 
     // Build the parameter roundtrip spec
+    // T12: `ParameterRoundtripSpec` is `ZeroizeOnDrop`; take the owned field
+    // out with `mem::take` instead of moving it.
     let param_out_spec = req
         .parameter_out_spec
         .take()
-        .map(|s| CkParameterRoundtripSpec {
+        .map(|mut s| CkParameterRoundtripSpec {
             buffer_present: s.buffer_present,
             buffer_len: s.buffer_len,
-            value: s.value.map(SecretBytes::new),
+            value: std::mem::take(&mut s.value).map(SecretBytes::new),
         })
         .unwrap_or(CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None });
 
-    let input_data = SecretBytes::new(req.input_data);
+    let input_data = SecretBytes::new(std::mem::take(&mut req.input_data));
     let input_data_null_len = req.input_data_null_len;
-    let associated_data = SecretBytes::new(req.associated_data);
+    let associated_data = SecretBytes::new(std::mem::take(&mut req.associated_data));
     let associated_data_null_len = req.associated_data_null_len;
-    let parameter = SecretBytes::new(req.parameter);
+    let parameter = SecretBytes::new(std::mem::take(&mut req.parameter));
     let flags = CkFlags(req.flags as u64);
 
     match function {
@@ -160,7 +164,7 @@ pub(super) async fn parameter_output_exact(
                     req.session_handle,
                     req.wrapping_key_handle,
                     req.key_handle,
-                    req.mechanism,
+                    std::mem::take(&mut req.mechanism),
                 )
                 .await?
                 {
@@ -1007,7 +1011,15 @@ mod ambiguity_tests {
                 }),
                 wrapping_key_handle: virtual_wrapping_key,
                 key_handle: virtual_key,
-                ..Default::default()
+                // T12: `ParameterOutputExactRequest` is `ZeroizeOnDrop`;
+                // struct-update syntax is forbidden — all fields spelled out.
+                input_data: Vec::new(),
+                associated_data: Vec::new(),
+                parameter: Vec::new(),
+                flags: 0,
+                message_parameter: None,
+                input_data_null_len: None,
+                associated_data_null_len: None,
             }),
         )
         .await
@@ -1126,10 +1138,26 @@ mod ambiguity_tests {
 
         let resp = parameter_output_exact(
             &HandlerContext::for_test(&ctx_mgr, &backend),
+            // T12: `ParameterOutputExactRequest` is `ZeroizeOnDrop`;
+            // struct-update syntax is forbidden — all fields spelled out.
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
                 exact_output_effects_version: 1,
                 function: 9999,
-                ..Default::default()
+                authenticated_parameters: None,
+                client_context_id: String::new(),
+                session_handle: 0,
+                output_spec: None,
+                input_data: Vec::new(),
+                associated_data: Vec::new(),
+                parameter: Vec::new(),
+                parameter_out_spec: None,
+                flags: 0,
+                mechanism: None,
+                wrapping_key_handle: 0,
+                key_handle: 0,
+                message_parameter: None,
+                input_data_null_len: None,
+                associated_data_null_len: None,
             }),
         )
         .await

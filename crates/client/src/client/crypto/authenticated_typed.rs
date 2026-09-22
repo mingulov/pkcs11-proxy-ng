@@ -79,26 +79,32 @@ impl Pkcs11Client {
     ) -> CkResult<(Vec<u8>, AuthenticatedOutput)> {
         validate_input(mechanism, parameter)?;
         self.require_typed_authenticated_parameters().await?;
+        // T12: `WrapKeyAuthenticatedRequest` is `ZeroizeOnDrop`, so
+        // struct-update syntax is forbidden — all fields are spelled out
+        // (the input buffer is filled by `fill_input` below).
         let mut request = wire::WrapKeyAuthenticatedRequest {
             client_context_id: self.context_id()?,
             session_handle: session.0,
             mechanism: Some(mechanism.try_into()?),
             wrapping_key_handle: wrapping_key.0,
             key_handle: key.0,
+            associated_data: Vec::new(),
+            associated_data_null_len: None,
             authenticated_parameters: Some(wire::AuthenticatedParameters {
                 message_parameter: parameter.map(Into::into),
             }),
-            ..Default::default()
         };
         Self::fill_input(aad, &mut request.associated_data, &mut request.associated_data_null_len);
-        let response = pkcs11_unary_call!(self.grpc.wrap_key_authenticated(request), true);
+        // T12: `WrapKeyAuthenticatedResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it.
+        let mut response = pkcs11_unary_call!(self.grpc.wrap_key_authenticated(request), true);
         let output = decode_output(
             mechanism,
             parameter,
             response.authenticated_output.as_ref(),
             &response.mechanism_parameter_out,
         )?;
-        Ok((response.wrapped_key, output))
+        Ok((std::mem::take(&mut response.wrapped_key), output))
     }
 
     pub async fn wrap_key_authenticated_exact_typed(
@@ -114,6 +120,9 @@ impl Pkcs11Client {
         validate_input(mechanism, parameter)?;
         self.require_typed_authenticated_parameters().await?;
         self.require_exact_output_effects().await?;
+        // T12: `ParameterOutputExactRequest` is `ZeroizeOnDrop`, so
+        // struct-update syntax is forbidden — all fields are spelled out
+        // (the input buffer is filled by `fill_input` below).
         let mut request = wire::ParameterOutputExactRequest {
             exact_output_effects_version: 1,
             client_context_id: self.context_id()?,
@@ -123,10 +132,17 @@ impl Pkcs11Client {
             wrapping_key_handle: wrapping_key.0,
             key_handle: key.0,
             output_spec: Some(spec.into()),
+            input_data: Vec::new(),
+            associated_data: Vec::new(),
+            parameter: Vec::new(),
+            parameter_out_spec: None,
+            flags: 0,
+            message_parameter: None,
+            input_data_null_len: None,
+            associated_data_null_len: None,
             authenticated_parameters: Some(wire::AuthenticatedParameters {
                 message_parameter: parameter.map(Into::into),
             }),
-            ..Default::default()
         };
         Self::fill_input(aad, &mut request.associated_data, &mut request.associated_data_null_len);
         let response = self
@@ -182,17 +198,23 @@ impl Pkcs11Client {
     ) -> CkResult<(CkObjectHandle, AuthenticatedOutput)> {
         validate_input(mechanism, parameter)?;
         self.require_typed_authenticated_parameters().await?;
+        // T12: `UnwrapKeyAuthenticatedRequest` is `ZeroizeOnDrop`, so
+        // struct-update syntax is forbidden — all fields are spelled out
+        // (the input buffers are filled by `fill_input` below).
         let mut request = wire::UnwrapKeyAuthenticatedRequest {
             client_context_id: self.context_id()?,
             session_handle: session.0,
             mechanism: Some(mechanism.try_into()?),
             unwrapping_key_handle: unwrapping_key.0,
+            wrapped_key: Vec::new(),
             template: Self::proto_template(template.unwrap_or(&[])),
-            template_null: template.is_none(),
+            associated_data: Vec::new(),
+            wrapped_key_null_len: None,
+            associated_data_null_len: None,
             authenticated_parameters: Some(wire::AuthenticatedParameters {
                 message_parameter: parameter.map(Into::into),
             }),
-            ..Default::default()
+            template_null: template.is_none(),
         };
         Self::fill_input(wrapped, &mut request.wrapped_key, &mut request.wrapped_key_null_len);
         Self::fill_input(aad, &mut request.associated_data, &mut request.associated_data_null_len);

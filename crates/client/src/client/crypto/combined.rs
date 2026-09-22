@@ -32,7 +32,7 @@ impl Pkcs11Client {
             encrypted_part: encrypted_part.to_vec(),
             encrypted_part_null_len: None,
         };
-        pkcs11_unary_map!(self.grpc.decrypt_digest_update(req), true, resp => resp.part)
+        pkcs11_unary_map!(self.grpc.decrypt_digest_update(req), true, mut resp => std::mem::take(&mut resp.part))
     }
 
     // NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
@@ -64,6 +64,6 @@ impl Pkcs11Client {
             encrypted_part: encrypted_part.to_vec(),
             encrypted_part_null_len: None,
         };
-        pkcs11_unary_map!(self.grpc.decrypt_verify_update(req), true, resp => resp.part)
+        pkcs11_unary_map!(self.grpc.decrypt_verify_update(req), true, mut resp => std::mem::take(&mut resp.part))
     }
 }

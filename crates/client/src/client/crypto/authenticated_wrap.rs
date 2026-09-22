@@ -30,8 +30,12 @@ impl Pkcs11Client {
             associated_data_null_len: None,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.wrap_key_authenticated(req), true);
-        Ok((resp.wrapped_key, resp.mechanism_parameter_out))
+        // T12: `WrapKeyAuthenticatedResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.wrap_key_authenticated(req), true);
+        let wrapped_key = std::mem::take(&mut resp.wrapped_key);
+        let parameter_out = std::mem::take(&mut resp.mechanism_parameter_out);
+        Ok((wrapped_key, parameter_out))
     }
 
     // --- C_UnwrapKeyAuthenticated — returns (key_handle, mechanism_parameter_out) ---
@@ -65,7 +69,9 @@ impl Pkcs11Client {
         };
         Self::fill_input(wrapped_key, &mut req.wrapped_key, &mut req.wrapped_key_null_len);
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.unwrap_key_authenticated(req), true);
-        Ok((CkObjectHandle(resp.key_handle), resp.mechanism_parameter_out))
+        // T12: `UnwrapKeyAuthenticatedResponse` is `ZeroizeOnDrop`; take
+        // the owned field out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.unwrap_key_authenticated(req), true);
+        Ok((CkObjectHandle(resp.key_handle), std::mem::take(&mut resp.mechanism_parameter_out)))
     }
 }

@@ -147,7 +147,7 @@ impl Pkcs11Client {
             signature: signature.to_vec(),
             signature_null_len: None,
         };
-        pkcs11_unary_map!(self.grpc.verify_recover(req), true, resp => resp.data)
+        pkcs11_unary_map!(self.grpc.verify_recover(req), true, mut resp => std::mem::take(&mut resp.data))
     }
 
     pub async fn verify_init(

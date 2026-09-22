@@ -523,8 +523,11 @@ impl Pkcs11Client {
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         Self::fill_input(plaintext, &mut req.plaintext, &mut req.plaintext_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.encrypt_message(req), true);
-        Ok((resp.parameter_out, resp.ciphertext))
+        // T12: `EncryptMessageResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.encrypt_message(req), true);
+        let parameter_out = std::mem::take(&mut resp.parameter_out);
+        Ok((parameter_out, std::mem::take(&mut resp.ciphertext)))
     }
 
     // --- C_EncryptMessageBegin — returns parameter_out ---
@@ -547,8 +550,10 @@ impl Pkcs11Client {
             message_parameter: None,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.encrypt_message_begin(req), true);
-        Ok(resp.parameter_out)
+        // T12: `EncryptMessageBeginResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.encrypt_message_begin(req), true);
+        Ok(std::mem::take(&mut resp.parameter_out))
     }
 
     /// Capability-gated Begin contract used by the C shim. The raw legacy
@@ -613,8 +618,11 @@ impl Pkcs11Client {
             plaintext_part_null_len: None,
         };
         Self::fill_input(plaintext_part, &mut req.plaintext_part, &mut req.plaintext_part_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.encrypt_message_next(req), true);
-        Ok((resp.parameter_out, resp.ciphertext_part))
+        // T12: `EncryptMessageNextResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.encrypt_message_next(req), true);
+        let parameter_out = std::mem::take(&mut resp.parameter_out);
+        Ok((parameter_out, std::mem::take(&mut resp.ciphertext_part)))
     }
 
     // --- C_DecryptMessage — returns (parameter_out, plaintext) ---
@@ -638,8 +646,11 @@ impl Pkcs11Client {
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         Self::fill_input(ciphertext, &mut req.ciphertext, &mut req.ciphertext_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.decrypt_message(req), true);
-        Ok((resp.parameter_out, resp.plaintext))
+        // T12: `DecryptMessageResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.decrypt_message(req), true);
+        let parameter_out = std::mem::take(&mut resp.parameter_out);
+        Ok((parameter_out, std::mem::take(&mut resp.plaintext)))
     }
 
     // --- C_DecryptMessageBegin — returns parameter_out ---
@@ -662,8 +673,10 @@ impl Pkcs11Client {
             message_parameter: None,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.decrypt_message_begin(req), true);
-        Ok(resp.parameter_out)
+        // T12: `DecryptMessageBeginResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.decrypt_message_begin(req), true);
+        Ok(std::mem::take(&mut resp.parameter_out))
     }
 
     pub async fn decrypt_message_begin_contract(
@@ -729,8 +742,11 @@ impl Pkcs11Client {
             &mut req.ciphertext_part,
             &mut req.ciphertext_part_null_len,
         );
-        let resp = pkcs11_unary_call!(self.grpc.decrypt_message_next(req), true);
-        Ok((resp.parameter_out, resp.plaintext_part))
+        // T12: `DecryptMessageNextResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.decrypt_message_next(req), true);
+        let parameter_out = std::mem::take(&mut resp.parameter_out);
+        Ok((parameter_out, std::mem::take(&mut resp.plaintext_part)))
     }
 
     // --- C_SignMessage — returns (parameter_out, signature) ---
@@ -750,8 +766,11 @@ impl Pkcs11Client {
             data_null_len: None,
         };
         Self::fill_input(data, &mut req.data, &mut req.data_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.sign_message(req), true);
-        Ok((resp.parameter_out, resp.signature))
+        // T12: `SignMessageResponse` is `ZeroizeOnDrop`; take owned fields
+        // out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.sign_message(req), true);
+        let parameter_out = std::mem::take(&mut resp.parameter_out);
+        Ok((parameter_out, std::mem::take(&mut resp.signature)))
     }
 
     // --- C_SignMessageBegin — returns parameter_out ---
@@ -768,8 +787,10 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             parameter_out_spec: None,
         };
-        let resp = pkcs11_unary_call!(self.grpc.sign_message_begin(req), true);
-        Ok(resp.parameter_out)
+        // T12: `SignMessageBeginResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.sign_message_begin(req), true);
+        Ok(std::mem::take(&mut resp.parameter_out))
     }
 
     pub async fn sign_message_begin_contract(
@@ -821,8 +842,11 @@ impl Pkcs11Client {
             parameter_out_spec: None,
         };
         Self::fill_input(data_part, &mut req.data_part, &mut req.data_part_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.sign_message_next(req), true);
-        Ok((resp.parameter_out, resp.signature))
+        // T12: `SignMessageNextResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.sign_message_next(req), true);
+        let parameter_out = std::mem::take(&mut resp.parameter_out);
+        Ok((parameter_out, std::mem::take(&mut resp.signature)))
     }
 
     pub async fn sign_message_next_feed_contract(

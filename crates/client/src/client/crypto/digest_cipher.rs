@@ -256,8 +256,11 @@ impl Pkcs11Client {
             encrypted_data: encrypted_data.to_vec(),
             encrypted_data_null_len: None,
         };
-        pkcs11_unary_map!(self.grpc.decrypt(req), true, resp => {
-            (resp.data, Self::parse_mech_out(resp.mechanism_out)?)
+        pkcs11_unary_map!(self.grpc.decrypt(req), true, mut resp => {
+            (
+                std::mem::take(&mut resp.data),
+                Self::parse_mech_out(std::mem::take(&mut resp.mechanism_out))?,
+            )
         })
     }
 
@@ -286,8 +289,11 @@ impl Pkcs11Client {
             encrypted_part: encrypted_part.to_vec(),
             encrypted_part_null_len: None,
         };
-        pkcs11_unary_map!(self.grpc.decrypt_update(req), true, resp => {
-            (resp.part, Self::parse_mech_out(resp.mechanism_out)?)
+        pkcs11_unary_map!(self.grpc.decrypt_update(req), true, mut resp => {
+            (
+                std::mem::take(&mut resp.part),
+                Self::parse_mech_out(std::mem::take(&mut resp.mechanism_out))?,
+            )
         })
     }
 
@@ -308,8 +314,11 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
         };
-        pkcs11_unary_map!(self.grpc.decrypt_final(req), true, resp => {
-            (resp.last_part, Self::parse_mech_out(resp.mechanism_out)?)
+        pkcs11_unary_map!(self.grpc.decrypt_final(req), true, mut resp => {
+            (
+                std::mem::take(&mut resp.last_part),
+                Self::parse_mech_out(std::mem::take(&mut resp.mechanism_out))?,
+            )
         })
     }
 

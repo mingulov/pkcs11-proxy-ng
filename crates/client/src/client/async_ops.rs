@@ -35,10 +35,12 @@ impl Pkcs11Client {
             return Err(rv);
         }
 
-        let data = response.async_data.unwrap_or_default();
+        // T12: `AsyncData` is `ZeroizeOnDrop`; take the owned field out
+        // with `mem::take` instead of moving it.
+        let mut data = response.async_data.unwrap_or_default();
         Ok((
             data.version,
-            data.value,
+            std::mem::take(&mut data.value),
             data.value_len,
             CkObjectHandle(data.object_handle),
             CkObjectHandle(data.additional_object_handle),
@@ -79,7 +81,9 @@ impl Pkcs11Client {
             operation_id,
             buffer_size,
         };
-        let resp = pkcs11_unary_call!(self.grpc.async_join(req), true);
-        Ok(resp.data)
+        // T12: `AsyncJoinResponse` is `ZeroizeOnDrop`; take the owned
+        // field out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.async_join(req), true);
+        Ok(std::mem::take(&mut resp.data))
     }
 }

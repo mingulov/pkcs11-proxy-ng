@@ -27,8 +27,10 @@ impl Pkcs11Client {
             wrapping_key_handle: wrapping_key.0,
             key_handle: key.0,
         };
-        let resp = pkcs11_unary_call!(self.grpc.wrap_key(req), true);
-        Ok(resp.wrapped_key)
+        // T12: `WrapKeyResponse` is `ZeroizeOnDrop`; take the owned field
+        // out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.wrap_key(req), true);
+        Ok(std::mem::take(&mut resp.wrapped_key))
     }
 
     pub async fn unwrap_key(
@@ -200,8 +202,10 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
         };
-        let resp = pkcs11_unary_call!(self.grpc.get_operation_state(req), true);
-        Ok(resp.operation_state)
+        // T12: `GetOperationStateResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.get_operation_state(req), true);
+        Ok(std::mem::take(&mut resp.operation_state))
     }
 
     pub async fn set_operation_state(
@@ -272,8 +276,10 @@ impl Pkcs11Client {
             session_handle: session.0,
             length: len,
         };
-        let resp = pkcs11_unary_call!(self.grpc.generate_random(req), true);
-        Ok(resp.random_data)
+        // T12: `GenerateRandomResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.generate_random(req), true);
+        Ok(std::mem::take(&mut resp.random_data))
     }
 }
 
