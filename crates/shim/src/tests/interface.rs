@@ -1439,3 +1439,101 @@ fn server_registry_ignored_for_truthy_disable_values() {
         );
     }
 }
+
+/// W1-C7-11: `clear_cache` (the C_Finalize path) resets the registry
+/// revision tracker, so a re-Initialize against a different daemon logs
+/// a fresh install INFO — not a spurious drift WARN.
+#[test]
+fn clear_cache_resets_revision_tracker_no_spurious_drift_warn() {
+    let _guard = shim_state_test_guard();
+    let _saved = SavedDisableRegistry::capture();
+    SavedDisableRegistry::set(None);
+    ensure_registry_installed();
+    crate::interface_probe::reset_registry_revision_for_test();
+    let first = registry_payload_with_revision("c7-11-first-daemon");
+    let second = registry_payload_with_revision("c7-11-second-daemon");
+    let output = capture_logs(|| {
+        crate::interface_probe::maybe_install_server_registry(Some(&first));
+        crate::interface_probe::clear_cache();
+        crate::interface_probe::maybe_install_server_registry(Some(&second));
+    });
+    assert!(
+        output.contains("mechanism registry installed from server")
+            && output.contains("c7-11-second-daemon"),
+        "re-install after clear_cache must log a fresh install INFO: {output:?}"
+    );
+    assert!(
+        !output.contains("changed between probes"),
+        "clear_cache must reset the revision tracker — no spurious drift WARN: {output:?}"
+    );
+}
+
+/// W1-C7-12: direct `copy_catalog` misuse with a null buffer fails safe
+/// (0, nothing written) instead of faulting. Complements W1-L1-02 (the
+/// `unsafe` marker + short-buffer fail-safe): null is now an in-callee
+/// refusal, not a caller-upheld precondition.
+#[test]
+fn copy_catalog_null_buf_fails_safe() {
+    let _guard = shim_state_test_guard();
+    crate::interface_probe::clear_cache();
+    // buf_len above the catalog count so only the null check can save us.
+    let n = unsafe { crate::interface_probe::copy_catalog(std::ptr::null_mut(), 4) };
+    assert_eq!(n, 0, "null buffer must fail safe with 0");
+}
+
+/// W1-C7-10: concurrent `ensure_probed` calls cannot mix registry/ABI
+/// across winners — every caller either fails or observes the single
+/// installed state, and the installed catalog is self-consistent
+/// (count matches the copied entries, no null function lists).
+#[test]
+fn concurrent_ensure_probed_installs_consistent_state() {
+    use super::output_semantics::TestDaemon;
+    let _guard = shim_state_test_guard();
+    let _saved = SavedConnectEnv::capture();
+    let daemon = TestDaemon::shared();
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon.endpoint);
+        std::env::remove_var("PKCS11_PROXY_SOCKET");
+    }
+    crate::state::mark_finalized();
+    crate::interface_probe::clear_cache();
+    let handles: Vec<_> =
+        (0..8).map(|_| std::thread::spawn(|| crate::interface_probe::ensure_probed())).collect();
+    for handle in handles {
+        handle.join().expect("probe thread must not panic").expect("probe must succeed");
+    }
+    let n = crate::interface_probe::interface_count();
+    assert!((1..=4).contains(&n), "installed count must be sane: {n}");
+    let mut buf = [super::empty_interface(); 4];
+    let written = unsafe { crate::interface_probe::copy_catalog(buf.as_mut_ptr(), 4) };
+    assert_eq!(written, n, "copied entries must match the installed count");
+    for entry in &buf[..n as usize] {
+        assert!(
+            !entry.pFunctionList.is_null(),
+            "installed catalog entries must have function lists"
+        );
+    }
+}
+
+/// W1-L5-03: the pre-probe fallback catalog is an intentional optimistic
+/// transient — count 3 with entries [2.40, 3.0, 3.2] — used until the
+/// first successful probe installs the backend's actual shape, which may
+/// legitimately differ (fewer entries, or a 3.1 entry with no 3.0 alias).
+#[test]
+fn pre_probe_fallback_catalog_shape_is_pinned_transient() {
+    let _guard = shim_state_test_guard();
+    crate::interface_probe::clear_cache();
+    assert_eq!(crate::interface_probe::interface_count(), 3, "pre-probe fallback count");
+    let mut buf = [super::empty_interface(); 4];
+    let n = unsafe { crate::interface_probe::copy_catalog(buf.as_mut_ptr(), 4) };
+    assert_eq!(n, 3, "pre-probe fallback catalog entries");
+    let versions: Vec<(u8, u8)> = buf[..3]
+        .iter()
+        .map(|entry| {
+            assert!(!entry.pFunctionList.is_null(), "fallback entries must have function lists");
+            let ver = unsafe { *(entry.pFunctionList as *const CK_VERSION) };
+            (ver.major, ver.minor)
+        })
+        .collect();
+    assert_eq!(versions, [(2, 40), (3, 0), (3, 2)], "fallback shape is the optimistic transient");
+}

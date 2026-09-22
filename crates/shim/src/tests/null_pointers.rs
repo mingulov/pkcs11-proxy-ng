@@ -693,93 +693,24 @@ fn init_known_session_with_bad_mechanism_still_validates_mechanism() {
 // ADR-0010 Scope 2: NULL-pointer faithfulness end-to-end (c_decrypt exemplar)
 //
 // These tests require a full shim → client → gRPC → server → MockBackend
-// stack and so need a running daemon. They use their own minimal fixture
-// rather than the one in output_semantics.rs (which is private).
+// stack and so need a running daemon. They reuse the shared TestDaemon
+// fixture from output_semantics.rs (W1-C7-14) rather than a private
+// duplicate.
 // ---------------------------------------------------------------------------
 
 mod decrypt_null_e2e {
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use pkcs11_proxy_ng::server::context_manager::ContextManager;
-    use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
-    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
-    use pkcs11_proxy_ng_proto::Pkcs11ProxyServer;
-    use pkcs11_proxy_ng_types::{CkMechanismType, CkSlotId, InterfaceCapabilities, InterfaceInfo};
-    use tokio::net::TcpListener;
-    use tokio::runtime::Runtime;
-    use tokio::sync::watch;
-    use tokio_stream::wrappers::TcpListenerStream;
-    use tonic::transport::Server;
-
+    use super::super::output_semantics::TestDaemon;
     use super::super::*;
 
-    /// A minimal in-process daemon for c_decrypt e2e tests.
-    struct DecryptDaemon {
-        // Kept to ensure the tokio runtime outlives the daemon.
-        _runtime: Runtime,
-        endpoint: String,
-        _shutdown: watch::Sender<bool>,
-    }
+    /// Finalizes the shim when the test ends — including on assertion
+    /// unwind — mirroring the shared-daemon [`super::super::output_semantics::ShimSession`]
+    /// teardown (the fixture daemon itself is a process-lifetime singleton
+    /// and needs no per-test shutdown).
+    struct FinalizeOnDrop;
 
-    impl DecryptDaemon {
-        fn start() -> Self {
-            let runtime = Runtime::new().expect("test runtime");
-            let (endpoint, shutdown_tx) = runtime.block_on(async {
-                let backend = Arc::new(MockBackend::new(
-                    vec![CkSlotId(0)],
-                    vec![CkMechanismType::AES_ECB, CkMechanismType::AES_GCM],
-                ));
-                backend.set_interface_capabilities(InterfaceCapabilities {
-                    interfaces: vec![
-                        InterfaceInfo {
-                            version_major: 2,
-                            version_minor: 40,
-                            null_functions: vec![],
-                        },
-                        InterfaceInfo {
-                            version_major: 3,
-                            version_minor: 0,
-                            null_functions: vec![],
-                        },
-                        InterfaceInfo {
-                            version_major: 3,
-                            version_minor: 2,
-                            null_functions: vec![],
-                        },
-                    ],
-                });
-                let backend_trait: Arc<dyn Pkcs11Backend> = backend.clone();
-                let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-                context_manager.populate_slots(&backend_trait).await.expect("populate_slots");
-
-                let service =
-                    Pkcs11ProxyService::insecure_for_tests(context_manager.clone(), backend_trait);
-                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-                let addr = listener.local_addr().expect("local addr");
-                let endpoint = format!("http://127.0.0.1:{}", addr.port());
-                let incoming = TcpListenerStream::new(listener);
-                let (shutdown_tx, shutdown_rx) = watch::channel(false);
-                tokio::spawn(async move {
-                    let _ = Server::builder()
-                        .add_service(Pkcs11ProxyServer::new(service))
-                        .serve_with_incoming_shutdown(incoming, async move {
-                            let mut shutdown_rx = shutdown_rx;
-                            let _ = shutdown_rx.changed().await;
-                        })
-                        .await;
-                });
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                (endpoint, shutdown_tx)
-            });
-            Self { _runtime: runtime, endpoint, _shutdown: shutdown_tx }
-        }
-    }
-
-    impl Drop for DecryptDaemon {
+    impl Drop for FinalizeOnDrop {
         fn drop(&mut self) {
             let _ = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
-            unsafe { std::env::remove_var("PKCS11_PROXY_ENDPOINT") };
         }
     }
 
@@ -843,7 +774,8 @@ mod decrypt_null_e2e {
     #[test]
     fn c_decrypt_null_input_with_len_reaches_backend_as_null() {
         let _guard = shim_state_test_guard();
-        let daemon = DecryptDaemon::start();
+        let daemon = TestDaemon::shared();
+        let _finalize = FinalizeOnDrop;
         let (session, _key) = init_decrypt_session(&daemon.endpoint);
 
         let mut out_len: CK_ULONG = 64;
@@ -869,7 +801,8 @@ mod decrypt_null_e2e {
     #[test]
     fn c_decrypt_too_large_input_shim_rejects_with_arguments_bad() {
         let _guard = shim_state_test_guard();
-        let daemon = DecryptDaemon::start();
+        let daemon = TestDaemon::shared();
+        let _finalize = FinalizeOnDrop;
         let (session, _key) = init_decrypt_session(&daemon.endpoint);
 
         let mut out_len: CK_ULONG = 64;
@@ -896,7 +829,8 @@ mod decrypt_null_e2e {
     #[test]
     fn c_decrypt_null_input_zero_len_is_not_arguments_bad_from_null_handling() {
         let _guard = shim_state_test_guard();
-        let daemon = DecryptDaemon::start();
+        let daemon = TestDaemon::shared();
+        let _finalize = FinalizeOnDrop;
         let (session, _key) = init_decrypt_session(&daemon.endpoint);
 
         let mut out_len: CK_ULONG = 64;

@@ -57,6 +57,17 @@ unsafe impl Sync for InterfaceState {}
 
 static INTERFACE_STATE: RwLock<Option<&'static InterfaceState>> = RwLock::new(None);
 
+/// Serializes probe-and-install sequences (W1-C7-10).
+///
+/// A probe has global side effects — backend-ABI recording and registry
+/// install happen inside `probe_backend`, before the function lists are
+/// installed. Two concurrent probes could otherwise cross-pair: the
+/// loser's ABI/registry with the winner's function lists. `ensure_probed`
+/// and `reprobe` hold this across probe + install, and `clear_cache`
+/// holds it across the clear, so install/clear never interleave. Always
+/// the outermost lock (taken before `INTERFACE_STATE`).
+static PROBE_INSTALL_LOCK: Mutex<()> = Mutex::new(());
+
 /// Backend `sizeof(CK_ULONG)` advertised by the daemon at probe (ADR-0011 D2).
 /// `0` = not yet probed, or a daemon predating the advertisement; readers fall
 /// back to 8 bytes (D9).
@@ -580,8 +591,6 @@ fn build_patched_function_list_3_2(null_names: &[String]) -> CK_FUNCTION_LIST_3_
 // Backend probe
 // ---------------------------------------------------------------------------
 
-/// Contact the backend and build an `InterfaceState` with patched function
-/// lists reflecting the backend's capabilities. Also pulls the server's
 /// Why a probe failed — the two classes propagate differently.
 ///
 /// A transient failure (transport, daemon restart) keeps the previous
@@ -602,9 +611,16 @@ impl std::fmt::Display for ProbeFailure {
     }
 }
 
+/// Contact the backend and build an `InterfaceState` with patched function
+/// lists reflecting the backend's capabilities. Also pulls the server's
 /// mechanism registry payload (when provided) and atomically swaps the
 /// shim's in-memory registry to match.
-fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
+///
+/// The caller must hold [`PROBE_INSTALL_LOCK`]: the probe has global
+/// side effects (backend-ABI recording, registry install) that must not
+/// interleave with another probe's install (W1-C7-10). The guard
+/// parameter enforces that at compile time.
+fn probe_backend(_install: &std::sync::MutexGuard<'_, ()>) -> Result<InterfaceState, ProbeFailure> {
     // W1-C7-01: pre-init probes share one failed dial outcome. A failed dial
     // series (~21 s at default attempts/backoff) is cached in state; later
     // pre-init probes to the same endpoint fail fast instead of re-dialing.
@@ -792,8 +808,7 @@ pub(crate) fn maybe_install_server_registry(
 }
 
 /// Reset the revision tracker so drift tests start from a known state.
-/// Test-only; production resets (e.g. on cache clear) are Task 36's
-/// W1-C7-11, which subsumes this hook's purpose for real flows.
+/// Test-only; production resets happen in `clear_cache` (W1-C7-11).
 #[cfg(test)]
 pub(crate) fn reset_registry_revision_for_test() {
     *LAST_REGISTRY_REVISION.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -846,6 +861,9 @@ fn leak_fixed_state(st: InterfaceState) -> &'static InterfaceState {
 ///
 /// This is a no-op if the cache already has data.
 pub fn ensure_probed() -> Result<(), String> {
+    // W1-C7-10: serialize probe + install so two concurrent callers cannot
+    // cross-pair one probe's ABI/registry with another's function lists.
+    let install = PROBE_INSTALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Fast path: already cached.
     {
         let guard = INTERFACE_STATE.read().unwrap_or_else(|e| e.into_inner());
@@ -854,7 +872,7 @@ pub fn ensure_probed() -> Result<(), String> {
         }
     }
     // Slow path: probe and store.
-    let st = probe_backend().map_err(|e| e.to_string())?;
+    let st = probe_backend(&install).map_err(|e| e.to_string())?;
     let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(leak_fixed_state(st));
@@ -872,12 +890,15 @@ pub fn ensure_probed() -> Result<(), String> {
 /// Called from `C_Initialize` after a successful server init so that the
 /// function lists reflect the current backend.
 pub fn reprobe() -> Result<(), String> {
+    // W1-C7-10: same install lock as ensure_probed — a reprobe racing an
+    // initial probe must not interleave side effects with the install.
+    let install = PROBE_INSTALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // A reprobe can be talking to a restarted or downgraded daemon. Do not let
     // a transient failure retain permission for stateful message operations.
     clear_pointer_safe_message_parameters();
     // A re-probe always dials fresh: drop any cached pre-init failure (W1-C7-01).
     state::clear_pre_init_connect_failure();
-    match probe_backend() {
+    match probe_backend(&install) {
         Ok(st) => {
             let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
             *guard = Some(leak_fixed_state(st));
@@ -903,6 +924,9 @@ pub fn reprobe() -> Result<(), String> {
 ///
 /// After this, `ensure_probed()` will re-probe on the next call.
 pub fn clear_cache() {
+    // W1-C7-10: hold the install lock so a clear cannot interleave with a
+    // concurrent probe's side effects or install.
+    let _install = PROBE_INSTALL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     clear_pointer_safe_message_parameters();
     // Cache-clear (e.g. C_Finalize) also drops the dial-failure cache (W1-C7-01).
     state::clear_pre_init_connect_failure();
@@ -911,6 +935,10 @@ pub fn clear_cache() {
     // Drop the advertised backend ABI so a fresh probe re-reads it (D2).
     BACKEND_ULONG_SIZE.store(0, Ordering::Relaxed);
     BACKEND_ATTRIBUTE_STRIDE.store(0, Ordering::Relaxed);
+    // W1-C7-11: reset the revision tracker — the next Initialize may talk
+    // to a different daemon, and that must log a fresh install INFO, not
+    // a spurious drift WARN against the previous lifetime's revision.
+    *LAST_REGISTRY_REVISION.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Return a pointer to the v2.40 function list.
@@ -930,6 +958,13 @@ pub fn get_function_list() -> *mut CK_FUNCTION_LIST {
 ///
 /// After a successful probe, reflects the backend's actual interface set.
 /// Before probing, returns 3 (optimistic fallback).
+///
+/// W1-L5-03: the pre-probe answer is an intentional transient — the
+/// optimistic [2.40, 3.0, 3.2] shape — because the backend's real set is
+/// unknowable before first contact. The first successful probe replaces
+/// it with the backend's actual shape, which may legitimately differ
+/// (fewer entries, or a 3.1 entry with no 3.0 alias). Pinned by
+/// `pre_probe_fallback_catalog_shape_is_pinned_transient`.
 pub fn interface_count() -> CK_ULONG {
     let guard = INTERFACE_STATE.read().unwrap_or_else(|e| e.into_inner());
     match guard.as_ref() {
@@ -941,20 +976,23 @@ pub fn interface_count() -> CK_ULONG {
 /// Copy the interface catalog into a caller-provided buffer.
 ///
 /// If the probe cache is populated, uses the patched catalog.
-/// Otherwise falls back to the static (all-non-null) catalog.
+/// Otherwise falls back to the static (all-non-null) catalog — the
+/// W1-L5-03 optimistic transient; see [`interface_count`].
 ///
 /// Returns the number of entries written.
 ///
 /// # Safety
 ///
-/// `buf` must be non-null and valid for writes of `buf_len`
-/// `CK_INTERFACE` entries. A short buffer (`buf_len` below the catalog
-/// count) fails safe — nothing is written and 0 is returned — but a null
-/// `buf`, or a buffer smaller than the claimed `buf_len`, is immediate
-/// undefined behavior. The sole caller `C_GetInterfaceList` excludes null
-/// via its count-only path before calling. (In-callee null hardening is
-/// Task 36's W1-C7-12; until then the caller must uphold non-null.)
+/// `buf` must be valid for writes of `buf_len` `CK_INTERFACE` entries.
+/// A short buffer (`buf_len` below the catalog count) fails safe —
+/// nothing is written and 0 is returned — as does a null `buf`
+/// (W1-C7-12 in-callee hardening: direct misuse fails safe instead of
+/// faulting). A non-null buffer smaller than the claimed `buf_len` is
+/// still immediate undefined behavior; the caller must uphold it.
 pub unsafe fn copy_catalog(buf: *mut CK_INTERFACE, buf_len: CK_ULONG) -> CK_ULONG {
+    if buf.is_null() {
+        return 0; // W1-C7-12: direct misuse fails safe, no caller guard needed
+    }
     let n = interface_count();
     if buf_len < n {
         return 0; // caller should have checked
@@ -1400,6 +1438,23 @@ mod backend_abi_tests {
             assert!(result.is_err(), "order {order} is out of contract and must be refused");
             let err = result.unwrap_err();
             assert!(err.contains("byte order"), "refusal must name the field: {err}");
+        }
+    }
+
+    /// W1-L5-08: unknown byte orders are refused at every size arm — the
+    /// order check precedes the width check, so even an absent or
+    /// invalid size cannot smuggle an out-of-contract order through.
+    /// Confirms the W1-C7-08 (Task 12) shape; the refusal names the
+    /// byte-order field on every arm.
+    #[test]
+    fn out_of_contract_byte_orders_refused_at_every_size_arm() {
+        for order in [0, 3, 99, u32::MAX] {
+            for size in [None, Some(4), Some(8), Some(0), Some(16)] {
+                let result = resolve_backend_ulong_size(size, Some(order));
+                assert!(result.is_err(), "order {order} with size {size:?} must be refused");
+                let err = result.unwrap_err();
+                assert!(err.contains("byte order"), "refusal must name the field: {err}");
+            }
         }
     }
 
