@@ -126,7 +126,6 @@ fn decode_parameter_output_exact_contract_response(
     Ok(decoded)
 }
 
-// Task 2 stops at shared scaffolding; Task 3 wires these helpers into concrete RPCs.
 impl Pkcs11Client {
     pub(crate) async fn require_exact_output_effects(&mut self) -> Result<(), CkRv> {
         // W1-L5-04: compatibility-range gates, never equality literals. An
@@ -146,14 +145,12 @@ impl Pkcs11Client {
         }
         Ok(())
     }
-    #[allow(dead_code)]
     pub(crate) fn proto_output_buffer_spec(
         spec: &CkOutputBufferSpec,
     ) -> v1_proto::OutputBufferSpec {
         spec.into()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn proto_parameter_roundtrip_spec(
         spec: &CkParameterRoundtripSpec,
     ) -> v1_proto::ParameterRoundtripSpec {
@@ -166,21 +163,12 @@ impl Pkcs11Client {
         queries.iter().map(v1_proto::AttributeQuery::from).collect()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn output_buffer_result_from_proto(
         result: &v1_proto::OutputBufferResult,
     ) -> Result<CkOutputBufferResult, CkRv> {
         result.try_into()
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn parameter_roundtrip_result_from_proto(
-        result: &v1_proto::ParameterRoundtripResult,
-    ) -> CkParameterRoundtripResult {
-        result.into()
-    }
-
-    #[allow(dead_code)]
     pub(crate) fn output_and_handle_result_from_proto(
         result: &v1_proto::OutputAndHandleResult,
     ) -> Result<CkOutputAndHandleResult, CkRv> {
@@ -523,6 +511,50 @@ mod message_contract_tests {
             4,
             "one import + three gate calls (cached, probe, response) must name the range helper"
         );
+    }
+
+    /// W1-C10-09: no dead from-proto helper, no stale dead-code allows,
+    /// and no stale Task scaffolding comment may remain in this module —
+    /// every remaining helper is wired into an RPC.
+    #[test]
+    fn t32_no_dead_helpers_or_stale_allows_or_task_comment() {
+        let src = include_str!("raw_output.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        // Concat-built so the patterns cannot match their own source text.
+        let dead_fn = ["parameter_roundtrip_result", "_from_proto"].concat();
+        assert!(!src.contains(&dead_fn), "dead helper `{dead_fn}` must be deleted, not kept");
+        let allow = ["allow(dead", "_code)"].concat();
+        assert!(!prod.contains(&allow), "stale allows must go — the helpers are all live");
+        assert!(
+            !prod.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("// Task ") || trimmed.starts_with("//Task ")
+            }),
+            "stale scaffolding comment must go — the wiring it promises long landed"
+        );
+    }
+
+    /// W1-C10-11 (const half, landed by Task 6 W1-C9-09): the message
+    /// auth-stage bit test must use the named constant — never a magic bit.
+    #[test]
+    fn t32_end_of_message_bit_uses_named_const() {
+        fn has_magic_bit(line: &str) -> bool {
+            line.contains("flags & 1")
+        }
+        // The detector itself, pinned both ways (negative control).
+        assert!(has_magic_bit(") || flags & 1 != 0,"));
+        assert!(!has_magic_bit(") || flags & CkFlags::END_OF_MESSAGE != 0,"));
+        let src = include_str!("raw_output.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        for (index, line) in prod.lines().enumerate() {
+            assert!(
+                !has_magic_bit(line),
+                "line {}: magic bit — use the named const: {line}",
+                index + 1
+            );
+        }
+        let named = ["CkFlags::END", "_OF_MESSAGE"].concat();
+        assert!(prod.contains(&named), "the flags-bit test must name the const");
     }
 
     fn gcm_parameter() -> MessageParameter {

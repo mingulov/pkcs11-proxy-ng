@@ -7,7 +7,7 @@ pub use deadline::DEFAULT_RPC_TIMEOUT;
 use deadline::RpcDeadline;
 // W1-C10-06: downstream crates name these from the crate root.
 pub use key_ops::DeriveKeyMechanismOutResult;
-pub use lifecycle::{BackendProbe, ConnectError};
+pub use lifecycle::{BackendInterface, BackendProbe, ConnectError, ConnectTimeouts};
 
 macro_rules! pkcs11_template {
     ($template:expr) => {{ $template.iter().map(pkcs11_proxy_ng_proto::Attribute::from).collect::<Vec<_>>() }};
@@ -129,6 +129,7 @@ pub struct Pkcs11Client {
     context_id: Option<String>,
     source: ConnectionSource,
     rpc_timeout: std::time::Duration,
+    connect_timeouts: lifecycle::ConnectTimeouts,
 }
 
 impl Pkcs11Client {

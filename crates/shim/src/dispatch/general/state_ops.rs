@@ -24,7 +24,7 @@ pub unsafe extern "C" fn c_wait_for_slot_event(
         // FUNCTION_FAILED with pSlot untouched; a nonzero wide error is
         // never truncated into CKR_OK, and a wide slot never into a wrong
         // slot. Error paths never touch the output-only caller buffer.
-        match with_client!(client => client.wait_for_slot_event(flags.into())) {
+        match with_client!(client => client.wait_for_slot_event(CkFlags(flags as u64))) {
             Ok(slot) => {
                 let Some(narrow) = pkcs11_proxy_ng_types::width::checked_narrow_to_width(
                     slot.0,

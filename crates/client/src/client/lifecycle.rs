@@ -28,13 +28,65 @@ fn new_grpc_client(
         .max_encoding_message_size(MAX_MESSAGE_BYTES)
 }
 
+/// Dial-time transport timeouts (W1-C10-12 operator knobs): the dial
+/// timeout, the HTTP/2 keepalive pair, and the mTLS handshake timeout.
+/// Applied by one shared helper, so the TCP and Unix-socket constructors
+/// cannot desync. Defaults preserve the previously hardcoded values
+/// (dial 5 s, keepalive 10 s / 5 s, handshake 10 s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectTimeouts {
+    /// Dial timeout for establishing the transport connection.
+    pub connect: std::time::Duration,
+    /// HTTP/2 keepalive ping interval on idle connections.
+    pub http2_keep_alive_interval: std::time::Duration,
+    /// HTTP/2 keepalive ping acknowledgement timeout.
+    pub keep_alive_timeout: std::time::Duration,
+    /// mTLS handshake timeout (TCP+TLS endpoints only).
+    pub tls_handshake: std::time::Duration,
+}
+
+impl Default for ConnectTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: std::time::Duration::from_secs(5),
+            http2_keep_alive_interval: std::time::Duration::from_secs(10),
+            keep_alive_timeout: std::time::Duration::from_secs(5),
+            tls_handshake: crate::tls::DEFAULT_TLS_HANDSHAKE_TIMEOUT,
+        }
+    }
+}
+
+/// Apply dial-time timeouts to a tonic endpoint (W1-C10-12): the single
+/// definition shared by the TCP and Unix-socket constructors.
+fn apply_connect_timeouts(
+    builder: tonic::transport::Endpoint,
+    timeouts: &ConnectTimeouts,
+) -> tonic::transport::Endpoint {
+    builder
+        .connect_timeout(timeouts.connect)
+        .keep_alive_while_idle(true)
+        .http2_keep_alive_interval(timeouts.http2_keep_alive_interval)
+        .keep_alive_timeout(timeouts.keep_alive_timeout)
+}
+
+/// One backend interface version from a `get_backend_interfaces` probe:
+/// the PKCS#11 version plus the function names that are NULL in the
+/// backend's function list for that version. Field names mirror the
+/// backend-side `InterfaceInfo` sibling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendInterface {
+    pub version_major: u8,
+    pub version_minor: u8,
+    pub null_functions: Vec<String>,
+}
+
 /// Result of a `get_backend_interfaces` probe — the backend's interface
 /// capabilities plus the server's mechanism registry payload (absent on
 /// older daemons predating the field).
 #[derive(Debug, Clone)]
 pub struct BackendProbe {
     pub exact_output_effects_version: Option<u32>,
-    pub interfaces: Vec<(u8, u8, Vec<String>)>,
+    pub interfaces: Vec<BackendInterface>,
     pub mechanism_registry: Option<MechanismRegistryPayload>,
     /// Backend `sizeof(CK_ULONG)` in bytes (4 or 8), advertised for the width
     /// bridge (ADR-0011 D2). `None` against an older daemon that predates the
@@ -144,6 +196,7 @@ impl From<ConnectError> for String {
 async fn connect_channel(
     endpoint: &str,
     tls_files: Option<crate::tls::ClientTlsFiles>,
+    timeouts: &ConnectTimeouts,
 ) -> Result<Channel, ConnectError> {
     // Unix-domain-socket endpoint (`unix:/abs/path` or `unix:///abs/path`):
     // dial the local socket. No TLS — a Unix socket carries no network to
@@ -158,7 +211,7 @@ async fn connect_channel(
                     "TLS configuration ignored for unix-socket endpoint (peer-cred auth)"
                 );
             }
-            return connect_unix_channel(path).await;
+            return connect_unix_channel(path, timeouts).await;
         }
         #[cfg(not(unix))]
         {
@@ -173,17 +226,15 @@ async fn connect_channel(
     let mut builder = tonic::transport::Endpoint::from_shared(endpoint.to_owned())
         .map_err(|e| ConnectError::permanent(format!("invalid endpoint: {e}")))?;
     if let Some(tls_files) = tls_files {
-        let tls_config = tls_files.into_tonic_config().map_err(ConnectError::permanent)?;
+        let tls_config = tls_files
+            .into_tonic_config_with_handshake_timeout(timeouts.tls_handshake)
+            .map_err(ConnectError::permanent)?;
         builder = builder
             .tls_config(tls_config)
             .map_err(|e| ConnectError::permanent(format!("invalid TLS config: {e}")))?;
     }
 
-    builder
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .keep_alive_while_idle(true)
-        .http2_keep_alive_interval(std::time::Duration::from_secs(10))
-        .keep_alive_timeout(std::time::Duration::from_secs(5))
+    apply_connect_timeouts(builder, timeouts)
         .connect()
         .await
         .map_err(|e| ConnectError::transient(format!("gRPC connect failed: {e}")))
@@ -191,7 +242,10 @@ async fn connect_channel(
 
 /// Connect a gRPC channel over a Unix-domain socket at `raw_path`.
 #[cfg(unix)]
-async fn connect_unix_channel(raw_path: &str) -> Result<Channel, ConnectError> {
+async fn connect_unix_channel(
+    raw_path: &str,
+    timeouts: &ConnectTimeouts,
+) -> Result<Channel, ConnectError> {
     // Tolerate the authority form `unix://<path>` by dropping a leading "//".
     let path = raw_path.strip_prefix("//").unwrap_or(raw_path).to_owned();
     if path.is_empty() {
@@ -200,12 +254,9 @@ async fn connect_unix_channel(raw_path: &str) -> Result<Channel, ConnectError> {
 
     // The HTTP/2 `:authority` is unused for a UDS connector, but tonic still
     // needs a syntactically valid Endpoint to carry the connection settings.
-    tonic::transport::Endpoint::try_from("http://pkcs11-proxy-ng.local")
-        .map_err(|e| ConnectError::permanent(format!("invalid unix endpoint base: {e}")))?
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .keep_alive_while_idle(true)
-        .http2_keep_alive_interval(std::time::Duration::from_secs(10))
-        .keep_alive_timeout(std::time::Duration::from_secs(5))
+    let endpoint = tonic::transport::Endpoint::try_from("http://pkcs11-proxy-ng.local")
+        .map_err(|e| ConnectError::permanent(format!("invalid unix endpoint base: {e}")))?;
+    apply_connect_timeouts(endpoint, timeouts)
         .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
             let path = path.clone();
             async move {
@@ -220,7 +271,8 @@ async fn connect_unix_channel(raw_path: &str) -> Result<Channel, ConnectError> {
 impl Pkcs11Client {
     /// Connect to the proxy daemon at `endpoint` (e.g. `"http://127.0.0.1:50051"`).
     pub async fn connect(endpoint: &str) -> Result<Self, ConnectError> {
-        let channel = connect_channel(endpoint, None).await?;
+        let timeouts = ConnectTimeouts::default();
+        let channel = connect_channel(endpoint, None, &timeouts).await?;
         let grpc = new_grpc_client(channel.clone(), DEFAULT_RPC_TIMEOUT);
         Ok(Self {
             exact_effects_version: Default::default(),
@@ -230,6 +282,7 @@ impl Pkcs11Client {
             context_id: None,
             source: ConnectionSource::Endpoint { endpoint: endpoint.to_owned(), tls_files: None },
             rpc_timeout: DEFAULT_RPC_TIMEOUT,
+            connect_timeouts: timeouts,
         })
     }
 
@@ -238,7 +291,8 @@ impl Pkcs11Client {
         endpoint: &str,
         tls_files: crate::tls::ClientTlsFiles,
     ) -> Result<Self, ConnectError> {
-        let channel = connect_channel(endpoint, Some(tls_files.clone())).await?;
+        let timeouts = ConnectTimeouts::default();
+        let channel = connect_channel(endpoint, Some(tls_files.clone()), &timeouts).await?;
         let grpc = new_grpc_client(channel.clone(), DEFAULT_RPC_TIMEOUT);
         Ok(Self {
             exact_effects_version: Default::default(),
@@ -251,6 +305,7 @@ impl Pkcs11Client {
                 tls_files: Some(tls_files),
             },
             rpc_timeout: DEFAULT_RPC_TIMEOUT,
+            connect_timeouts: timeouts,
         })
     }
 
@@ -265,6 +320,7 @@ impl Pkcs11Client {
             context_id: None,
             source: ConnectionSource::SharedChannel,
             rpc_timeout: DEFAULT_RPC_TIMEOUT,
+            connect_timeouts: ConnectTimeouts::default(),
         }
     }
 
@@ -286,6 +342,27 @@ impl Pkcs11Client {
     /// Builder form of [`set_rpc_timeout`][Self::set_rpc_timeout].
     pub fn with_rpc_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.set_rpc_timeout(timeout);
+        self
+    }
+
+    /// The dial-time transport timeouts ([`ConnectTimeouts::default`]
+    /// unless changed).
+    pub fn connect_timeouts(&self) -> ConnectTimeouts {
+        self.connect_timeouts
+    }
+
+    /// Replace the dial-time transport timeouts, effective on the next
+    /// dial — i.e. the next [`reconnect`][Self::reconnect], since the live
+    /// channel's endpoint settings were fixed when it was established.
+    /// Unlike [`set_rpc_timeout`][Self::set_rpc_timeout] this never touches
+    /// the live connection (re-dialing would drop in-flight calls).
+    pub fn set_connect_timeouts(&mut self, timeouts: ConnectTimeouts) {
+        self.connect_timeouts = timeouts;
+    }
+
+    /// Builder form of [`set_connect_timeouts`][Self::set_connect_timeouts].
+    pub fn with_connect_timeouts(mut self, timeouts: ConnectTimeouts) -> Self {
+        self.set_connect_timeouts(timeouts);
         self
     }
 
@@ -382,8 +459,10 @@ impl Pkcs11Client {
             interfaces: resp
                 .interfaces
                 .into_iter()
-                .map(|info| {
-                    (info.version_major as u8, info.version_minor as u8, info.null_functions)
+                .map(|info| BackendInterface {
+                    version_major: info.version_major as u8,
+                    version_minor: info.version_minor as u8,
+                    null_functions: info.null_functions,
                 })
                 .collect(),
             mechanism_registry: resp.mechanism_registry,
@@ -416,7 +495,7 @@ impl Pkcs11Client {
     pub async fn reconnect(&mut self) -> CkResult<()> {
         match &self.source {
             ConnectionSource::Endpoint { endpoint, tls_files } => {
-                let channel = connect_channel(endpoint, tls_files.clone())
+                let channel = connect_channel(endpoint, tls_files.clone(), &self.connect_timeouts)
                     .await
                     .map_err(|_| CkRv::DEVICE_ERROR)?;
                 self.grpc = new_grpc_client(channel.clone(), self.rpc_timeout);
@@ -590,6 +669,101 @@ mod tests {
     #[test]
     fn pointer_safe_message_advertised_capability_is_safe() {
         assert!(pointer_safe_message_parameters_from_wire(Some(true)));
+    }
+
+    /// W1-C10-10: `BackendProbe.interfaces` must use the named struct —
+    /// no positional version/null-list tuple may remain at any use site.
+    #[test]
+    fn t32_interfaces_use_named_backend_interface() {
+        let src = include_str!("lifecycle.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        // Concat-built so the pattern cannot match its own source text.
+        let tuple = ["(u8, u8, Vec<", "String>)"].concat();
+        assert!(!prod.contains(&tuple), "positional tuple must become the named struct");
+        assert!(
+            prod.contains("pub struct BackendInterface"),
+            "BackendProbe.interfaces must be Vec<BackendInterface>"
+        );
+    }
+
+    /// W1-C10-12: the TCP and UDS constructors must share one timeout
+    /// definition — a single helper, called by both, with no duplicated
+    /// literal blocks.
+    #[test]
+    fn t32_tcp_and_uds_share_one_timeout_definition() {
+        let src = include_str!("lifecycle.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert_eq!(
+            prod.matches("apply_connect_timeouts").count(),
+            3,
+            "one definition + two call sites (TCP + UDS)"
+        );
+        assert_eq!(
+            prod.matches("connect_timeout(").count(),
+            1,
+            "connect_timeout applied once, inside the shared helper"
+        );
+        assert_eq!(
+            prod.matches("http2_keep_alive_interval(").count(),
+            1,
+            "keepalive interval applied once, inside the shared helper"
+        );
+        assert_eq!(
+            prod.matches("keep_alive_timeout(").count(),
+            1,
+            "keepalive timeout applied once, inside the shared helper"
+        );
+    }
+
+    /// W1-C10-10: the interface triple carries named fields — no
+    /// positional misread possible at any use site.
+    #[test]
+    fn t32_backend_interface_fields_are_named() {
+        use super::BackendInterface;
+        let iface = BackendInterface {
+            version_major: 3,
+            version_minor: 0,
+            null_functions: vec!["C_SeedRandom".to_string()],
+        };
+        assert_eq!(iface.version_major, 3);
+        assert_eq!(iface.version_minor, 0);
+        assert_eq!(iface.null_functions, ["C_SeedRandom".to_string()]);
+    }
+
+    /// W1-C10-12: the connect-timeout knobs default to today's hardcoded
+    /// values (connect 5 s, keepalive 10 s / 5 s, TLS handshake 10 s) —
+    /// configurability must not silently change defaults.
+    #[test]
+    fn t32_connect_timeouts_have_documented_defaults() {
+        use super::ConnectTimeouts;
+        use std::time::Duration;
+        let defaults = ConnectTimeouts::default();
+        assert_eq!(defaults.connect, Duration::from_secs(5));
+        assert_eq!(defaults.http2_keep_alive_interval, Duration::from_secs(10));
+        assert_eq!(defaults.keep_alive_timeout, Duration::from_secs(5));
+        assert_eq!(defaults.tls_handshake, Duration::from_secs(10));
+    }
+
+    /// W1-C10-12: the knobs round-trip through the getter/setter/builder
+    /// (the `rpc_timeout` pattern from W1-C10-01).
+    #[tokio::test]
+    async fn t32_connect_timeouts_round_trip() {
+        use super::ConnectTimeouts;
+        use std::time::Duration;
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let mut client = Pkcs11Client::from_channel(channel);
+        assert_eq!(client.connect_timeouts(), ConnectTimeouts::default());
+        let custom = ConnectTimeouts {
+            connect: Duration::from_secs(2),
+            http2_keep_alive_interval: Duration::from_secs(20),
+            keep_alive_timeout: Duration::from_secs(3),
+            tls_handshake: Duration::from_secs(7),
+        };
+        client.set_connect_timeouts(custom);
+        assert_eq!(client.connect_timeouts(), custom);
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let client = Pkcs11Client::from_channel(channel).with_connect_timeouts(custom);
+        assert_eq!(client.connect_timeouts(), custom);
     }
 
     /// W1-L5-05: the client validates the daemon's init version range —

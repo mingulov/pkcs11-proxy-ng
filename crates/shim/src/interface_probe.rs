@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use cryptoki_sys::*;
+use pkcs11_proxy_ng_client::BackendInterface;
 use pkcs11_proxy_ng_types::MechanismRegistry;
 
 use crate::function_registry::{build_function_list, build_function_list_3_x};
@@ -643,20 +644,20 @@ fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
 }
 
 /// Build the cached interface state from one probe response. Pure over the
-/// reported `(major, minor, null_functions)` triples so the version mapping
-/// is unit tested without a daemon.
+/// reported [`BackendInterface`] entries so the version mapping is unit
+/// tested without a daemon.
 ///
 /// Catalog order is ascending by version; entries exist only for versions
 /// the backend actually reported — a 3.1 report yields a {3,1} entry and no
 /// {3,0} alias (W1-L5-01).
 fn build_interface_state(
-    interfaces: &[(u8, u8, Vec<String>)],
+    interfaces: &[BackendInterface],
     pointer_safe_message_parameters: bool,
 ) -> InterfaceState {
     // Index null-function lists by (major, minor).
     let mut null_map = std::collections::HashMap::<(u8, u8), Vec<String>>::new();
-    for (major, minor, nulls) in interfaces {
-        null_map.insert((*major, *minor), nulls.clone());
+    for iface in interfaces {
+        null_map.insert((iface.version_major, iface.version_minor), iface.null_functions.clone());
     }
 
     let empty = Vec::new();
@@ -1102,10 +1103,14 @@ mod backend_abi_tests {
     use cryptoki_sys::{CK_INTERFACE, CK_VERSION};
 
     use super::{
-        clear_pointer_safe_message_parameters, find_interface_in_catalog,
+        BackendInterface, clear_pointer_safe_message_parameters, find_interface_in_catalog,
         pointer_safe_message_parameters, record_pointer_safe_message_parameters,
         resolve_backend_attribute_stride, resolve_backend_ulong_size,
     };
+
+    fn iface(major: u8, minor: u8, nulls: Vec<String>) -> BackendInterface {
+        BackendInterface { version_major: major, version_minor: minor, null_functions: nulls }
+    }
 
     fn synthetic_catalog() -> [CK_INTERFACE; 2] {
         static NAME: &[u8] = b"PKCS 11\0";
@@ -1149,7 +1154,8 @@ mod backend_abi_tests {
     /// with NULL, exactly like the native module. No invented {3,0} alias.
     #[test]
     fn bouncyhsm_probe_answers_3_1_and_not_3_0() {
-        let probe = vec![(2u8, 40u8, Vec::new()), (3, 1, Vec::new()), (3, 2, Vec::new())];
+        let probe =
+            vec![iface(2, 40, Vec::new()), iface(3, 1, Vec::new()), iface(3, 2, Vec::new())];
         let mut st = super::build_interface_state(&probe, false);
         super::fixup_catalog(&mut st);
         assert_eq!(st.count, 3);
@@ -1183,7 +1189,8 @@ mod backend_abi_tests {
     /// answering {3,0} and must not gain a phantom {3,1}.
     #[test]
     fn literal_3_0_probe_answers_3_0_and_not_3_1() {
-        let probe = vec![(2u8, 40u8, Vec::new()), (3, 0, Vec::new()), (3, 2, Vec::new())];
+        let probe =
+            vec![iface(2, 40, Vec::new()), iface(3, 0, Vec::new()), iface(3, 2, Vec::new())];
         let mut st = super::build_interface_state(&probe, false);
         super::fixup_catalog(&mut st);
         assert_eq!(st.count, 3);
@@ -1209,9 +1216,9 @@ mod backend_abi_tests {
     #[test]
     fn patched_function_list_nulls_reported_slots_only() {
         let probe = vec![
-            (2u8, 40u8, vec!["C_Encrypt".to_string(), "C_Decrypt".to_string()]),
-            (3, 0, vec!["C_LoginUser".to_string()]),
-            (3, 2, Vec::new()),
+            iface(2, 40, vec!["C_Encrypt".to_string(), "C_Decrypt".to_string()]),
+            iface(3, 0, vec!["C_LoginUser".to_string()]),
+            iface(3, 2, Vec::new()),
         ];
         let st = super::build_interface_state(&probe, false);
         // E0793: CK lists are packed on Windows; `is_some()`/`is_none()`
@@ -1265,7 +1272,7 @@ mod backend_abi_tests {
     /// or NULL unrelated slots.
     #[test]
     fn patched_function_list_ignores_unknown_names() {
-        let probe = vec![(2u8, 40u8, vec!["C_NoSuchFunction".to_string(), String::new()])];
+        let probe = vec![iface(2, 40, vec!["C_NoSuchFunction".to_string(), String::new()])];
         let st = super::build_interface_state(&probe, false);
         assert!(
             {
@@ -1295,7 +1302,8 @@ mod backend_abi_tests {
     /// invented {3,0} entry, and {3,0} lookups honestly miss.
     #[test]
     fn patched_3_2_without_3_0_catalogs_exactly_two_entries() {
-        let probe = vec![(2u8, 40u8, Vec::new()), (3, 2, vec!["C_EncapsulateKey".to_string()])];
+        let probe =
+            vec![iface(2, 40, Vec::new()), iface(3, 2, vec!["C_EncapsulateKey".to_string()])];
         let mut st = super::build_interface_state(&probe, false);
         super::fixup_catalog(&mut st);
         assert_eq!(st.count, 2);
