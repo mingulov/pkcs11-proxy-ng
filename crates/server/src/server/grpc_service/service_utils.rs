@@ -883,13 +883,18 @@ pub(super) async fn resolve_object_authz_context(
     let (label, serial) = match ctx.context_manager.cached_token_info(backend_slot) {
         Some(cached) => cached,
         None => {
+            // Generation-guarded publication (T09): a fetch started before
+            // a reinit must not reinsert stale label/serial after its
+            // invalidation.
+            let generation = ctx.context_manager.authz_generation();
             let backend_ref = ctx.backend.clone();
             match spawn_backend(move || backend_ref.get_token_info(backend_slot.0)).await {
                 Ok(Ok(info)) => {
-                    ctx.context_manager.cache_token_info(
+                    ctx.context_manager.cache_token_info_if_generation(
                         backend_slot,
                         info.label.clone(),
                         info.serial_number.clone(),
+                        generation,
                     );
                     (info.label, info.serial_number)
                 }
