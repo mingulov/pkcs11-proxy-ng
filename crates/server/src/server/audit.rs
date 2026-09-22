@@ -401,19 +401,27 @@ fn create_audit_dir(dir: &Path) -> io::Result<()> {
 // Signing key loader
 // ---------------------------------------------------------------------------
 
+/// Read the audit signing seed into a bounded wiping owner (T15).
+/// The read is capped at 33 bytes (one past valid) so a huge key file
+/// can never balloon the daemon; anything but exactly 32 bytes is a
+/// loud error that names no path or length. Every exit drops the
+/// `Zeroizing` owner (mid-read I/O errors wipe the partial seed).
+fn read_signer_seed(reader: impl std::io::Read) -> std::io::Result<zeroize::Zeroizing<Vec<u8>>> {
+    use std::io::Read;
+    let mut seed = zeroize::Zeroizing::new(Vec::with_capacity(33));
+    reader.take(33).read_to_end(&mut seed)?;
+    if seed.len() != 32 {
+        return Err(std::io::Error::other("audit signing seed must contain exactly 32 bytes"));
+    }
+    Ok(seed)
+}
+
 fn load_signer(cfg: &AuditConfig) -> io::Result<Option<Signer>> {
     let Some(ref key_path) = cfg.signing_key else {
         return Ok(None);
     };
     check_private_file_perms(key_path, "audit.signing_key").map_err(io::Error::other)?;
-    let seed = std::fs::read(key_path)?;
-    if seed.len() != 32 {
-        return Err(io::Error::other(format!(
-            "audit signing key '{}' must be 32 bytes, got {}",
-            key_path.display(),
-            seed.len()
-        )));
-    }
+    let seed = read_signer_seed(std::fs::File::open(key_path)?)?;
     Signer::from_seed_bytes(&seed).map(Some).map_err(|e| io::Error::other(e.to_string()))
 }
 
@@ -968,6 +976,94 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("audit-sink-{}-{}", std::process::id(), tag))
+    }
+
+    // T15: the seed reader accepts exactly 32 bytes into a wiping owner.
+    // The owner type is pinned at compile time (no freed-memory reads);
+    // the signer borrow carries the same bytes as a direct load.
+    #[test]
+    fn signer_seed_accepts_exactly_32_bytes_in_wiping_owner() {
+        fn assert_wiping(_: &zeroize::Zeroizing<Vec<u8>>) {}
+        let seed = read_signer_seed(std::io::Cursor::new([0x5Au8; 32])).unwrap();
+        assert_wiping(&seed);
+        assert_eq!(seed.len(), 32);
+        assert_eq!(seed.as_slice(), &[0x5Au8; 32]);
+        let via_reader = Signer::from_seed_bytes(&seed).unwrap().public_hex();
+        let direct = Signer::from_seed_bytes(&[0x5Au8; 32]).unwrap().public_hex();
+        assert_eq!(via_reader, direct, "same seed must yield the same signer key");
+    }
+
+    // T15: 0/31/33/large inputs are a loud fixed error (no path, no
+    // length, no bytes); the 33-byte cap keeps huge files cheap.
+    #[test]
+    fn signer_seed_rejects_short_long_and_large_inputs() {
+        for len in [0usize, 31, 33, 4096] {
+            let input = vec![0xA5u8; len];
+            let err = read_signer_seed(std::io::Cursor::new(input)).unwrap_err().to_string();
+            assert_eq!(err, "audit signing seed must contain exactly 32 bytes", "len {len}");
+        }
+    }
+
+    // T15: a reader yielding a secret prefix then failing propagates the
+    // I/O error (not the length error); the partial seed stays inside
+    // the dropped wiping owner by construction.
+    #[test]
+    fn signer_seed_propagates_mid_read_io_error() {
+        struct FailAfterPrefix {
+            prefix: &'static [u8],
+            failed: bool,
+        }
+
+        impl std::io::Read for FailAfterPrefix {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.failed {
+                    return Err(std::io::Error::other("boom"));
+                }
+                self.failed = true;
+                let len = self.prefix.len().min(buf.len());
+                buf[..len].copy_from_slice(&self.prefix[..len]);
+                Ok(len)
+            }
+        }
+
+        let reader = FailAfterPrefix { prefix: &[0x5A; 16], failed: false };
+        let err = read_signer_seed(reader).unwrap_err().to_string();
+        assert_eq!(err, "boom");
+    }
+
+    // T15: an absent key keeps prior behavior (unsigned sink, no
+    // filesystem touch); a wrong-length key file fails with the fixed
+    // seed error after the permission check passes.
+    #[tokio::test]
+    async fn load_signer_keeps_absent_key_and_rejects_bad_length() {
+        let cfg = AuditConfig { dir: None, signing_key: None, ..Default::default() };
+        assert!(load_signer(&cfg).unwrap().is_none());
+
+        let dir = temp_dir("seedlen");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Both sides of the 32-byte boundary, end to end through
+        // `load_signer` (perm check → open → fixed seed error).
+        for (tag, len) in [("short", 31usize), ("long", 33usize)] {
+            let key_path = dir.join(format!("signing-{tag}.key"));
+            std::fs::write(&key_path, vec![0x11u8; len]).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+            }
+            let cfg = AuditConfig {
+                dir: Some(dir.clone()),
+                signing_key: Some(key_path),
+                ..Default::default()
+            };
+            // (`unwrap_err` needs `Signer: Debug`; `.err()` does not.)
+            let err = load_signer(&cfg).err().expect("bad length must fail").to_string();
+            assert_eq!(err, "audit signing seed must contain exactly 32 bytes", "len {len}");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Test 1: rotation + PRUNING + pruning-aware chain verification.
