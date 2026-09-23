@@ -252,6 +252,56 @@ pub(crate) unsafe fn read_mechanism_with_shape(
     unsafe { read_mechanism_with_shape_budgeted(c_mech, shape, &mut NestingBudget::new()) }
 }
 
+/// Parse a struct-sized GCM parameter buffer (`CK_GCM_PARAMS`), copying the
+/// pointed-to IV/AAD bytes into owned storage so no client pointer ever
+/// crosses to the backend.
+///
+/// Shared by the `"gcm"` arm and the `"gcm_compat"` arm (GMAC dual
+/// encoding); the arms differ only in how they treat buffers too short to
+/// be the struct. Degenerate structs (NULL pointer with nonzero length,
+/// unmaterializable payload lengths) fall back to Raw, exactly as the
+/// `"gcm"` arm always did.
+///
+/// # Safety
+///
+/// `param_ptr` must designate `param_len` readable bytes with
+/// `param_len >= size_of::<CK_GCM_PARAMS>()`.
+unsafe fn read_gcm_struct_params(
+    param_ptr: *mut std::ffi::c_void,
+    param_len: usize,
+) -> CkResult<CkMechanismParams> {
+    // Safety: caller guarantees a struct-sized readable buffer.
+    let gcm = unsafe { read_param_struct(param_ptr as *const CK_GCM_PARAMS)? };
+    if missing_embedded_pointer(gcm.pIv, gcm.ulIvLen)
+        || missing_embedded_pointer(gcm.pAAD, gcm.ulAADLen)
+        || !embedded_payload_len_ok(gcm.ulIvLen)
+        || !embedded_payload_len_ok(gcm.ulAADLen)
+    {
+        return raw_mechanism_params(param_ptr, param_len);
+    }
+    let iv = if gcm.pIv.is_null() || gcm.ulIvLen == 0 {
+        Vec::new()
+    } else {
+        unsafe { payload_bytes(gcm.pIv as *const u8, gcm.ulIvLen)? }
+    };
+    let aad = if gcm.pAAD.is_null() || gcm.ulAADLen == 0 {
+        Vec::new()
+    } else {
+        unsafe { payload_bytes(gcm.pAAD as *const u8, gcm.ulAADLen)? }
+    };
+    Ok(CkMechanismParams::Gcm(GcmParams {
+        iv,
+        iv_bits: gcm.ulIvBits as u64,
+        iv_buffer_len: gcm_iv_buffer_len(&gcm),
+        aad: aad.into(),
+        tag_bits: gcm.ulTagBits as u64,
+        // F3/D2: (NULL, 0) vs (ptr, 0) must survive the
+        // crossing; (NULL, len > 0) took the Raw path above.
+        iv_null: gcm.pIv.is_null(),
+        aad_null: gcm.pAAD.is_null(),
+    }))
+}
+
 /// Budget-carrying mechanism-shape reader for nested (KIP) recursion.
 /// Production entries always route through here so the nesting budget is
 /// enforced; the unbudgeted wrapper is a test-only seam.
@@ -342,37 +392,23 @@ pub(crate) unsafe fn read_mechanism_with_shape_budgeted(
                     data: unsafe { read_raw_bytes(param_ptr, param_len)? }.into(),
                 }))
             } else {
-                // Safety: pParameter points to a valid CK_GCM_PARAMS.
-                let gcm = unsafe { read_param_struct(param_ptr as *const CK_GCM_PARAMS)? };
-                if missing_embedded_pointer(gcm.pIv, gcm.ulIvLen)
-                    || missing_embedded_pointer(gcm.pAAD, gcm.ulAADLen)
-                    || !embedded_payload_len_ok(gcm.ulIvLen)
-                    || !embedded_payload_len_ok(gcm.ulAADLen)
-                {
-                    Some(raw_mechanism_params(param_ptr, param_len)?)
-                } else {
-                    let iv = if gcm.pIv.is_null() || gcm.ulIvLen == 0 {
-                        Vec::new()
-                    } else {
-                        unsafe { payload_bytes(gcm.pIv as *const u8, gcm.ulIvLen)? }
-                    };
-                    let aad = if gcm.pAAD.is_null() || gcm.ulAADLen == 0 {
-                        Vec::new()
-                    } else {
-                        unsafe { payload_bytes(gcm.pAAD as *const u8, gcm.ulAADLen)? }
-                    };
-                    Some(CkMechanismParams::Gcm(GcmParams {
-                        iv,
-                        iv_bits: gcm.ulIvBits as u64,
-                        iv_buffer_len: gcm_iv_buffer_len(&gcm),
-                        aad: aad.into(),
-                        tag_bits: gcm.ulTagBits as u64,
-                        // F3/D2: (NULL, 0) vs (ptr, 0) must survive the
-                        // crossing; (NULL, len > 0) took the Raw path above.
-                        iv_null: gcm.pIv.is_null(),
-                        aad_null: gcm.pAAD.is_null(),
-                    }))
-                }
+                Some(unsafe { read_gcm_struct_params(param_ptr, param_len)? })
+            }
+        }
+
+        Some("gcm_compat") => {
+            // GMAC dual encoding (T20): 2.40-style callers pass bare IV
+            // bytes, 3.x-style callers pass a CK_GCM_PARAMS struct. Length
+            // tells them apart — anything shorter than the struct cannot
+            // be the struct, and is flat pointer-free bytes. Forwarding a
+            // struct-sized buffer verbatim would hand the backend stale
+            // client pointers (daemon SIGSEGV on freehsm-c), so struct
+            // halves are always parsed, never forwarded.
+            if param_len < std::mem::size_of::<CK_GCM_PARAMS>() {
+                let iv = unsafe { read_raw_bytes(param_ptr, param_len)? };
+                Some(CkMechanismParams::Iv(IvParams { iv }))
+            } else {
+                Some(unsafe { read_gcm_struct_params(param_ptr, param_len)? })
             }
         }
 

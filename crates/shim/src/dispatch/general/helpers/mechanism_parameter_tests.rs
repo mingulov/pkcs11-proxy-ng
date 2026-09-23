@@ -12,7 +12,7 @@ use pkcs11_proxy_ng_types::{
     CcmParams, CcmWrapParams, ChaCha20Params, CkAttributeType, CkAttributeValue,
     CkGeneratorFunction, CkKdf, CkMechanism, CkMechanismParams, CkMechanismType, CkMgf,
     CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv, ExtractParams, GcmParams,
-    GcmWrapParams, KeyWrapSetOaepParams, KipParams, KmacParams, MacGeneralParams,
+    GcmWrapParams, IvParams, KeyWrapSetOaepParams, KipParams, KmacParams, MacGeneralParams,
     MechanismRegistry, MuGenParams, RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams,
     Salsa20ChaCha20Poly1305Params, SecretBytes, SignAdditionalContext, Sp800108DerivedKey,
     Sp800108FeedbackKdfParams, Sp800108KdfParams, TlsPrfParams,
@@ -186,6 +186,61 @@ fn reads_common_mechanism_parameter_structs() {
             assert_eq!(params.cb, [0x33; 16]);
         }
         other => panic!("unexpected CTR params: {other:?}"),
+    }
+}
+
+#[test]
+fn gmac_bare_iv_forwards_verbatim_as_iv() {
+    // T20: 2.40-style callers (BouncyHSM) pass bare IV bytes for GMAC —
+    // shorter than CK_GCM_PARAMS, flat and pointer-free, forwarded
+    // verbatim exactly as the old "iv" mapping did. Registry-driven so
+    // the TOML mapping itself is pinned.
+    let mut iv = [0x11u8; 12];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GMAC.0 as CK_MECHANISM_TYPE,
+        pParameter: iv.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    match unsafe { read_ck_mechanism(&mechanism) } {
+        CkMechanismParams::Iv(IvParams { iv }) => assert_eq!(iv, [0x11; 12]),
+        other => panic!("unexpected GMAC bare-IV params: {other:?}"),
+    }
+}
+
+#[test]
+fn gmac_struct_params_parse_as_gcm_without_forwarding_pointers() {
+    // T20: 3.x-style callers (freehsm-c) pass a CK_GCM_PARAMS struct for
+    // GMAC. The struct half must be parsed — IV/AAD bytes copied
+    // client-side — and never forwarded verbatim: the embedded pIv/pAAD
+    // are client-process pointers that segfaulted the daemon (freehsm-c
+    // AES-GMAC SIGSEGV). Uses the freehsm shape: NULL AAD with zero
+    // length alongside a real IV.
+    let mut iv = [0x11u8; 12];
+    let mut gcm = CK_GCM_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvBits: 96,
+        pAAD: std::ptr::null_mut(),
+        ulAADLen: 0,
+        ulTagBits: 128,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GMAC.0 as CK_MECHANISM_TYPE,
+        pParameter: &mut gcm as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_ck_mechanism(&mechanism) } {
+        CkMechanismParams::Gcm(GcmParams {
+            iv, iv_bits, aad, tag_bits, iv_null, aad_null, ..
+        }) => {
+            assert_eq!(iv, [0x11; 12]);
+            assert_eq!(iv_bits, 96);
+            assert_eq!(aad, SecretBytes::copy_from_slice(&[]));
+            assert_eq!(tag_bits, 128);
+            assert!(!iv_null);
+            assert!(aad_null);
+        }
+        other => panic!("unexpected GMAC struct params: {other:?}"),
     }
 }
 
