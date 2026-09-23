@@ -44,7 +44,7 @@ pub const EMBEDDED_DEFAULT_REVISION: &str = "embedded-default";
 /// operator-excluded mechanisms, and discovery mode. Built from an embedded
 /// TOML default plus an optional operator override, or reconstructed from a
 /// server-published payload.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MechanismRegistry {
     param_shapes: HashMap<u64, String>,
     parameterless: HashSet<u64>,

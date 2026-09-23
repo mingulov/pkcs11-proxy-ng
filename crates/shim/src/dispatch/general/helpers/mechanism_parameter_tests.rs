@@ -19,7 +19,14 @@ use pkcs11_proxy_ng_types::{
 };
 
 fn ensure_registry() {
-    let registry = MechanismRegistry::load(None).expect("default mechanism registry");
+    // Load-once: the embedded default never changes within a test binary,
+    // so parsing TOML on every call only burns time (minutes per call
+    // under Miri across ~50 read_ck_mechanism tests). Each caller still
+    // gets a fresh clone installed globally, exactly as before.
+    static DEFAULT: std::sync::OnceLock<MechanismRegistry> = std::sync::OnceLock::new();
+    let registry = DEFAULT
+        .get_or_init(|| MechanismRegistry::load(None).expect("default mechanism registry"))
+        .clone();
     crate::state::replace_mechanism_registry(registry);
 }
 
