@@ -1,3 +1,6 @@
+// `as CK_ULONG` casts below are identity on 64-bit targets but load-bearing
+// on 32-bit targets (CK_ULONG=u32); the allow keeps them portable.
+#![allow(clippy::unnecessary_cast)]
 use super::{
     MessageCallMemory, MessageParameterCall, MessageParameterDirection, MessageParameterStage,
     empty_message_parameter_roundtrip_spec, message_parameter_roundtrip_spec,
@@ -1307,10 +1310,10 @@ fn write_mechanism_output_params_writes_tls12_pversion() {
             ulServerRandomLen: 0,
         },
         pVersion: &mut version,
-        prfHashMechanism: CkMechanismType::SHA256.0,
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0,
+        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_TLS12_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
     };
@@ -1351,7 +1354,7 @@ fn write_mechanism_output_params_writes_pbe_init_vector() {
         ulIteration: 1000,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::PBE_SHA1_DES3_EDE_CBC.0,
+        mechanism: CkMechanismType::PBE_SHA1_DES3_EDE_CBC.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
     };
@@ -1391,7 +1394,7 @@ fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
         ulIteration: 1,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::PBA_SHA1_WITH_SHA1_HMAC.0,
+        mechanism: CkMechanismType::PBA_SHA1_WITH_SHA1_HMAC.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
     };
@@ -1426,7 +1429,7 @@ fn write_mechanism_output_params_writes_tls_prf_output() {
         pulOutputLen: &mut out_len,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::TLS_PRF.0,
+        mechanism: CkMechanismType::TLS_PRF.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
     };
@@ -1467,7 +1470,7 @@ fn write_mechanism_output_params_writes_wtls_prf_output() {
         pulOutputLen: &mut out_len,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::WTLS_PRF.0,
+        mechanism: CkMechanismType::WTLS_PRF.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_WTLS_PRF_PARAMS>() as CK_ULONG,
     };
@@ -1505,7 +1508,7 @@ fn write_mechanism_output_params_prf_safe_when_output_null() {
         pulOutputLen: std::ptr::null_mut(),
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::TLS_PRF.0,
+        mechanism: CkMechanismType::TLS_PRF.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
     };
@@ -1542,7 +1545,7 @@ fn write_mechanism_output_params_writes_ssl3_master_key_version() {
         pVersion: &mut version,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::SSL3_MASTER_KEY_DERIVE.0,
+        mechanism: CkMechanismType::SSL3_MASTER_KEY_DERIVE.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_SSL3_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
     };
@@ -1580,10 +1583,10 @@ fn write_mechanism_output_params_tls12_safe_when_pversion_null() {
             ulServerRandomLen: 0,
         },
         pVersion: std::ptr::null_mut(),
-        prfHashMechanism: CkMechanismType::SHA256.0,
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0,
+        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_TLS12_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
     };
@@ -1615,7 +1618,7 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
     let mut server_random = [0xB1u8, 0xB2];
     let mut version = 1u8;
     let mut params = CK_WTLS_MASTER_KEY_DERIVE_PARAMS {
-        DigestMechanism: CkMechanismType::SHA256.0,
+        DigestMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
         RandomInfo: CK_WTLS_RANDOM_DATA {
             pClientRandom: client_random.as_mut_ptr(),
             ulClientRandomLen: client_random.len() as CK_ULONG,
@@ -1674,7 +1677,7 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
     let mut iv = [0u8; 4];
     let mut key_mat_out = CK_WTLS_KEY_MAT_OUT { hMacSecret: 0, hKey: 0, pIV: iv.as_mut_ptr() };
     let mut params = CK_WTLS_KEY_MAT_PARAMS {
-        DigestMechanism: CkMechanismType::SHA256.0,
+        DigestMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
         ulMacSizeInBits: 160,
         ulKeySizeInBits: 128,
         ulIVSizeInBits: 32,
@@ -1775,7 +1778,7 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             ulServerRandomLen: server_random.len() as CK_ULONG,
         },
         pReturnedKeyMaterial: &mut key_mat_out,
-        prfHashMechanism: CkMechanismType::SHA256.0,
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
     };
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_TLS12_KEY_AND_MAC_DERIVE,

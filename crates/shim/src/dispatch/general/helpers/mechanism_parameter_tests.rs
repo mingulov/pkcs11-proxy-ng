@@ -1,3 +1,6 @@
+// `as CK_ULONG` / `as u64` casts below are identity on 64-bit targets but
+// load-bearing on 32-bit targets (CK_ULONG=u32); the allow keeps them portable.
+#![allow(clippy::unnecessary_cast)]
 use super::{
     MAX_MECHANISM_PARAM_STRUCT_LEN, MAX_NESTED_MECHANISMS, NestingBudget,
     prepare_mechanism_output_params, read_mechanism, read_mechanism_with_shape,
@@ -275,7 +278,7 @@ fn reads_signature_parameter_structs() {
         other => panic!("unexpected EdDSA params: {other:?}"),
     }
 
-    let mut xeddsa = CK_XEDDSA_PARAMS { hash: CkMechanismType::SHA256.0 };
+    let mut xeddsa = CK_XEDDSA_PARAMS { hash: CkMechanismType::SHA256.0 as CK_ULONG };
     let mechanism = CK_MECHANISM {
         mechanism: CKM_TEST_XEDDSA,
         pParameter: &mut xeddsa as *mut _ as CK_VOID_PTR,
@@ -2399,7 +2402,7 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
         prepare_mechanism_output_params(
             &mut mechanism,
             &CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                prf_type: CkMechanismType(CKM_SHA256_HMAC as u64),
                 data_params: Vec::new(),
                 iv: vec![0xA5; 16],
                 additional_derived_keys: vec![Sp800108DerivedKey {
