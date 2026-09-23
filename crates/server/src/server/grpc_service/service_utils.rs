@@ -1370,68 +1370,131 @@ async fn backend_object_is_private(
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> bool {
-    probe_backend_object_private(ctx, backend_session, backend_object).await == Some(true)
+    matches!(
+        probe_bool_attr(ctx, backend_session, backend_object, CkAttributeType::PRIVATE).await,
+        BoolAttrProbe::Present(true)
+    )
 }
 
 /// F-04: known-public probe for find-enumeration filtering. Returns `true`
-/// only when the probe positively reports public; unknown privacy hides the
-/// object (fail-closed — unlike USE there is no backend verdict to fall back
-/// to, and a logged-out context must not observe private objects).
+/// when the probe positively reports public, or when the attribute is absent
+/// on a spec "other"-class object (see [`is_other_object_class`]); unknown
+/// privacy otherwise hides the object (fail-closed — unlike USE there is no
+/// backend verdict to fall back to, and a logged-out context must not
+/// observe private objects).
 pub(super) async fn backend_object_known_public(
     ctx: &HandlerContext,
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> bool {
-    probe_backend_object_private(ctx, backend_session, backend_object).await == Some(false)
-}
-
-/// Three-state `CKA_TOKEN` probe for one backend object: `Some(true)` is a
-/// token object, `Some(false)` is session-scoped, `None` is probe failure.
-/// Read-only; mirrors [`probe_backend_object_private`].
-async fn probe_backend_object_token(
-    ctx: &HandlerContext,
-    backend_session: CkSessionHandle,
-    backend_object: CkObjectHandle,
-) -> Option<bool> {
-    let backend = ctx.backend.clone();
-    let fetched = spawn_backend(move || {
-        let mut template = [CkAttribute {
-            attr_type: CkAttributeType::TOKEN,
-            value: Some(CkAttributeValue::Bool(false)),
-        }];
-        let token =
-            match backend.get_attribute_value(backend_session, backend_object, &mut template) {
-                Ok(()) => template.first().and_then(|attr| attr.value.as_ref()).and_then(|value| {
-                    match value {
-                        CkAttributeValue::Bool(b) => Some(*b),
-                        CkAttributeValue::Bytes(bytes) => {
-                            Some(bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0)))
-                        }
-                        CkAttributeValue::Ulong(u) => Some(*u != 0),
-                        _ => None,
-                    }
-                }),
-                Err(_) => None,
-            };
-        Ok(token)
-    })
-    .await;
-    match fetched {
-        Ok(Ok(token)) => token,
-        _ => None,
+    match probe_bool_attr(ctx, backend_session, backend_object, CkAttributeType::PRIVATE).await {
+        BoolAttrProbe::Present(public) => !public,
+        // Absent PRIVATE on an "other"-class object is spec-compliant (no
+        // storage attributes); such objects are token-global metadata —
+        // fail open. Anything else stays fail-closed.
+        BoolAttrProbe::AttrAbsent => {
+            backend_object_has_other_class(ctx, backend_session, backend_object).await
+        }
+        BoolAttrProbe::Failed => false,
     }
 }
 
 /// CROSS-PROC-001: known-token probe for find-enumeration filtering.
-/// Returns `true` only when the probe positively reports a token object;
-/// session-scoped or probe failure returns `false` (fail-closed — an
-/// unknown session object belongs to another context and must hide).
+/// Returns `true` when the probe positively reports a token object, or when
+/// the attribute is absent on a spec "other"-class object (see
+/// [`is_other_object_class`]); session-scoped or otherwise-unknown objects
+/// return `false` (fail-closed — an unknown session object belongs to
+/// another context and must hide).
 pub(super) async fn backend_object_known_token(
     ctx: &HandlerContext,
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> bool {
-    probe_backend_object_token(ctx, backend_session, backend_object).await == Some(true)
+    match probe_bool_attr(ctx, backend_session, backend_object, CkAttributeType::TOKEN).await {
+        BoolAttrProbe::Present(token) => token,
+        // Absent TOKEN on an "other"-class object is spec-compliant (no
+        // storage attributes); such objects are token-global metadata —
+        // fail open. Anything else stays fail-closed.
+        BoolAttrProbe::AttrAbsent => {
+            backend_object_has_other_class(ctx, backend_session, backend_object).await
+        }
+        BoolAttrProbe::Failed => false,
+    }
+}
+
+/// T20 visibility: PKCS#11 "other" object classes (OASIS
+/// `object_classification`: HW_FEATURE, MECHANISM, PROFILE, VALIDATION)
+/// possess no storage attributes, so spec-compliant backends answer
+/// `CKA_TOKEN` / `CKA_PRIVATE` with `ATTRIBUTE_TYPE_INVALID` (observed
+/// natively on kryoptic mechanism objects). They are token-global
+/// metadata by design — never secrets — so attribute-absence fails open
+/// for them, matching direct (where no proxy filter hides them).
+/// Storage classes and unknown/vendor classes stay fail-closed.
+fn is_other_object_class(class: CkObjectClass) -> bool {
+    matches!(
+        class,
+        CkObjectClass::HW_FEATURE
+            | CkObjectClass::MECHANISM
+            | CkObjectClass::PROFILE
+            | CkObjectClass::VALIDATION
+    )
+}
+
+/// `CKA_CLASS` probe for one backend object: the class value, or `None` on
+/// any failure or undecodable value (fail-closed — callers treat unknown
+/// class as storage).
+async fn probe_object_class(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> Option<CkObjectClass> {
+    let backend = ctx.backend.clone();
+    let fetched = spawn_backend(move || {
+        let mut template = [CkAttribute {
+            attr_type: CkAttributeType::CLASS,
+            value: Some(CkAttributeValue::Ulong(0)),
+        }];
+        let class =
+            match backend.get_attribute_value(backend_session, backend_object, &mut template) {
+                Ok(()) => match template.first().and_then(|attr| attr.value.as_ref()) {
+                    Some(CkAttributeValue::Ulong(u)) => Some(CkObjectClass(*u)),
+                    Some(CkAttributeValue::Bytes(bytes)) => bytes.expose(|raw| {
+                        if raw.len() == size_of::<u64>() {
+                            let mut buf = [0u8; 8];
+                            buf.copy_from_slice(raw);
+                            Some(CkObjectClass(u64::from_ne_bytes(buf)))
+                        } else if raw.len() == size_of::<u32>() {
+                            let mut buf = [0u8; 4];
+                            buf.copy_from_slice(raw);
+                            Some(CkObjectClass(u64::from(u32::from_ne_bytes(buf))))
+                        } else {
+                            None
+                        }
+                    }),
+                    _ => None,
+                },
+                Err(_) => None,
+            };
+        Ok(class)
+    })
+    .await;
+    match fetched {
+        Ok(Ok(class)) => class,
+        _ => None,
+    }
+}
+
+/// True when the object's probed class is a spec "other" class (see
+/// [`is_other_object_class`]); any probe failure reads as storage
+/// (fail-closed).
+async fn backend_object_has_other_class(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> bool {
+    probe_object_class(ctx, backend_session, backend_object)
+        .await
+        .is_some_and(is_other_object_class)
 }
 
 /// CROSS-PROC-001: true when `backend_object` already maps in the calling
