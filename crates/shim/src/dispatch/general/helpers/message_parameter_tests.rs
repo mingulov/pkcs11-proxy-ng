@@ -1290,6 +1290,37 @@ fn salsa_reader_treats_nonce_length_as_bits() {
 }
 
 #[test]
+fn salsa_reader_accepts_nonce_length_in_bytes_verbatim() {
+    // T20: ulNonceLen arrives in bytes from shipping backends (kryoptic,
+    // NSS accept 12) and the field name says Len, not Bits — accept the
+    // bytes form and round-trip the original value verbatim so each
+    // backend sees what its callers send.
+    let mut nonce = [0x33u8; 12];
+    let mut tag = [0x44u8; 16];
+    let params = CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS {
+        pNonce: nonce.as_mut_ptr(),
+        ulNonceLen: 12,
+        pTag: tag.as_mut_ptr(),
+    };
+
+    let parameter = unsafe {
+        read_message_parameter_for_shape(
+            (&params as *const CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS).cast(),
+            std::mem::size_of_val(&params) as CK_ULONG,
+            MessageParameterShape::SalsaChacha,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    }
+    .unwrap()
+    .unwrap();
+
+    let MessageParameter::SalaChacha(parameter) = parameter else { panic!("expected Salsa") };
+    assert_eq!(parameter.nonce_bits, 12, "original value must round-trip verbatim");
+    assert_eq!(parameter.nonce, nonce);
+}
+
+#[test]
 fn write_mechanism_output_params_writes_tls12_pversion() {
     // Verify that the shim's writeback function fills in the
     // CK_VERSION buffer pointed at by
