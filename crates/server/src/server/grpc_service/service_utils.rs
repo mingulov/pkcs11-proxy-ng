@@ -1283,63 +1283,80 @@ pub(super) async fn session_slot_login_state(
 }
 
 /// D6(1) enforcement for object-MINTING operations (create/copy/generate/
-/// derive/unwrap): when the calling context is logically logged out on the
-/// session's slot and `template` declares the new object private, refuse with
-/// `CKR_USER_NOT_LOGGED_IN` without reaching the backend — regardless of the
-/// backend's own login state (which other live tenants may hold). Pure
-/// logical-layer check; never disturbs other tenants' backend state.
+/// derive/unwrap), as refined in T20: when the calling context is logically
+/// logged out on the session's slot and `template` declares the new object
+/// private, refuse with `CKR_USER_NOT_LOGGED_IN` — but ONLY while another
+/// live tenant holds the slot login (forwarding would ride their backend
+/// login). With no other holder the backend is truly logged out, so its
+/// verdict is unpolluted and authoritative: forward and return whatever it
+/// says (lenient backends such as NSS allow logged-out private session
+/// mints; strict backends refuse — both match direct exactly). The old
+/// unconditional refusal diverged from every lenient backend (21 lanes).
+/// Unknown sessions fail closed (refuse), preserving error precedence for
+/// the downstream handle resolve.
 pub(super) async fn ensure_private_mint_allowed(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
     virtual_session: u64,
     template: &[CkAttribute],
 ) -> Result<(), CkRv> {
-    if template_declares_private_object(template)
-        && session_slot_login_state(ctx_mgr, ctx_id, virtual_session).await.is_none()
-    {
+    if !template_declares_private_object(template) {
+        return Ok(());
+    }
+    let (_, slot, login_state) =
+        match resolve_session_slot_login(ctx_mgr, ctx_id, virtual_session).await {
+            Ok(triple) => triple,
+            Err(_) => return Err(CkRv::USER_NOT_LOGGED_IN),
+        };
+    if login_state.is_none() && ctx_mgr.other_login_state_for_slot(slot, ctx_id) {
         return Err(CkRv::USER_NOT_LOGGED_IN);
     }
     Ok(())
 }
 
-/// Three-state `CKA_PRIVATE` probe for one backend object: `Some(true)` is
-/// known private, `Some(false)` is known public, `None` is probe failure
-/// (backend error, transport failure, absent/unparseable value). A read-only
-/// probe that never disturbs other tenants. Callers choose the failure
-/// polarity: USE fails open to the backend's own faithful verdict
-/// ([`backend_object_is_private`]); find-enumeration fails closed
-/// ([`backend_object_known_public`]).
-async fn probe_backend_object_private(
+/// Outcome of a single boolean-attribute probe (T20 visibility refinement).
+/// `Present(b)` is a decoded value; `AttrAbsent` is attribute-absence — the
+/// call failed with `ATTRIBUTE_TYPE_INVALID`, or succeeded with a
+/// per-attribute `CK_UNAVAILABLE_INFORMATION` marker (value `None`);
+/// `Failed` is any other backend/transport error or an undecodable value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoolAttrProbe {
+    Present(bool),
+    AttrAbsent,
+    Failed,
+}
+
+/// Shared single-attribute boolean probe behind the read-only find filters
+/// (`CKA_PRIVATE` / `CKA_TOKEN`). Read-only; never disturbs other tenants.
+async fn probe_bool_attr(
     ctx: &HandlerContext,
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
-) -> Option<bool> {
+    attr_type: CkAttributeType,
+) -> BoolAttrProbe {
     let backend = ctx.backend.clone();
     let fetched = spawn_backend(move || {
-        let mut template = [CkAttribute {
-            attr_type: CkAttributeType::PRIVATE,
-            value: Some(CkAttributeValue::Bool(false)),
-        }];
-        let privacy =
+        let mut template = [CkAttribute { attr_type, value: Some(CkAttributeValue::Bool(false)) }];
+        let outcome =
             match backend.get_attribute_value(backend_session, backend_object, &mut template) {
-                Ok(()) => template.first().and_then(|attr| attr.value.as_ref()).and_then(|value| {
-                    match value {
-                        CkAttributeValue::Bool(b) => Some(*b),
-                        CkAttributeValue::Bytes(bytes) => {
-                            Some(bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0)))
-                        }
-                        CkAttributeValue::Ulong(u) => Some(*u != 0),
-                        _ => None,
-                    }
-                }),
-                Err(_) => None,
+                Ok(()) => match template.first().and_then(|attr| attr.value.as_ref()) {
+                    None => BoolAttrProbe::AttrAbsent,
+                    Some(CkAttributeValue::Bool(b)) => BoolAttrProbe::Present(*b),
+                    Some(CkAttributeValue::Bytes(bytes)) => BoolAttrProbe::Present(
+                        bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0)),
+                    ),
+                    Some(CkAttributeValue::Ulong(u)) => BoolAttrProbe::Present(*u != 0),
+                    Some(_) => BoolAttrProbe::Failed,
+                },
+                Err(e) if e == CkRv::ATTRIBUTE_TYPE_INVALID => BoolAttrProbe::AttrAbsent,
+                Err(_) => BoolAttrProbe::Failed,
             };
-        Ok(privacy)
+        Ok(outcome)
     })
     .await;
     match fetched {
-        Ok(Ok(privacy)) => privacy,
-        _ => None,
+        Ok(Ok(outcome)) => outcome,
+        _ => BoolAttrProbe::Failed,
     }
 }
 
@@ -1458,10 +1475,16 @@ pub(super) async fn find_result_visible_to_context(
 }
 
 /// D6(1) enforcement for object/key USE (sign/verify/encrypt/decrypt/digest
-/// init, get/set attributes, wrap/unwrap/derive keys, ...): when the calling
-/// context is logically logged out on the session's slot and the object is
-/// private, refuse with `CKR_USER_NOT_LOGGED_IN` without performing the
-/// operation.
+/// init, get/set attributes, wrap/unwrap/derive keys, ...), as refined in
+/// T20: when the calling context is logically logged out on the session's
+/// slot and the object is private, refuse with `CKR_USER_NOT_LOGGED_IN` —
+/// but ONLY while another live tenant holds the slot login (forwarding
+/// would ride their backend login). With no other holder the backend is
+/// truly logged out, so its verdict is unpolluted and authoritative:
+/// forward and return whatever it says (lenient backends such as NSS
+/// allow logged-out use of own private session objects; strict backends
+/// refuse — both match direct exactly). The old unconditional refusal
+/// diverged from every lenient backend (21 lanes).
 ///
 /// Cost: the logged-in path costs one in-memory map read. The logged-out path
 /// decides from the mint-recorded privacy bit when known (still no backend
@@ -1498,10 +1521,27 @@ pub(super) async fn ensure_private_use_allowed(
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> Result<(), CkRv> {
-    if session_slot_login_state(&ctx.context_manager, ctx_id, virtual_session).await.is_some() {
+    let (_, slot, login_state) =
+        match resolve_session_slot_login(&ctx.context_manager, ctx_id, virtual_session).await {
+            Ok(triple) => triple,
+            Err(_) => {
+                // Unknown session: fail closed exactly like the old gate
+                // (refuse when private), preserving error precedence for
+                // the downstream handle resolve.
+                if object_is_private(ctx, ctx_id, virtual_object, backend_session, backend_object)
+                    .await
+                {
+                    return Err(CkRv::USER_NOT_LOGGED_IN);
+                }
+                return Ok(());
+            }
+        };
+    if login_state.is_some() {
         return Ok(());
     }
-    if object_is_private(ctx, ctx_id, virtual_object, backend_session, backend_object).await {
+    if object_is_private(ctx, ctx_id, virtual_object, backend_session, backend_object).await
+        && ctx.context_manager.other_login_state_for_slot(slot, ctx_id)
+    {
         return Err(CkRv::USER_NOT_LOGGED_IN);
     }
     Ok(())
