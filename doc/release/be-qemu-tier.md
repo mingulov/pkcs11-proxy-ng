@@ -8,7 +8,7 @@ native FFI on a BE host stays excluded (see below). Re-run any time with
 `cross-platform.yml`, which is a provider-parity gate and BE has no
 provider-parity claim; this script stays the proof vehicle).
 
-## Proven (2026-09-18)
+## Proven (2026-09-23)
 
 Toolchain: `Dockerfile.be-qemu` (Debian 13.6) with rustc 1.98.1,
 `s390x-linux-gnu-gcc` 14.2.0, `qemu-s390x-static` 10.0.13, `protoc`
@@ -19,25 +19,34 @@ hardware was involved.
   (only pre-existing `dead_code` warnings where the x86-only stop
   machinery cfgs out), plus the `pkcs11-proxy-ng-shim` cdylib and the
   s390x `CK_GCM_MESSAGE_PARAMS` 48-byte layout assertion.
-- **Unit suites:** types 124, proto 211, client 31, audit 20, cli 8 —
-  all green, including the native byte-order pins.
-- **Backend lib:** 409 green (57 `native_stop*`/`native_domain*`
-  skipped — unqualified-target exclusions, see below).
-- **Shim lib:** 349 green — in-process mock daemons over gRPC,
+- **Unit suites:** types 159, proto 253, client 77, audit 57, cli 108
+  (+1 `health_tls_exit_code`) — all green, including the native
+  byte-order pins.
+- **Backend lib:** 602 green (91 `native_stop*`/`native_domain*`/
+  `constructor_child*` skipped — unqualified-target exclusions, see
+  below; the TO26a constructor battery joined the exclusion in T20).
+- **Shim lib:** 490 green — in-process mock daemons over gRPC,
   cross-width bridge both directions against emulated narrow ABIs,
   D6 refusal of the foreign order end to end.
-- **Shim integration:** `stress_registry` and (ignored-by-default)
-  `fork_after_init` green.
-- **Server package:** lib 650 + bin 8 + every runnable mock-based
-  integration target green (`local_quality_gate` 61,
-  `exact_wrap_authorization` 23, `wave6_3x` 23, `mechanism_authorization`
-  18, `fault_injection` 16, `wave1_session_3x` 10, `slot_ownership` 10,
-  `mechanism_out_derive_mock` 9, `stress` 9, `wave2_kem` 8,
-  `example_configs_parse` 8, `env_var_precedence` 7, `mtls_authorization`
-  3, `uds_transport`/`daemon_cli_ux`/`protected_decode_live` 2 each,
-  `exact_output_error`/`pin_leak`/`rate_quota_login` 1 each).
-- **C ABI:** 7 of 8 `shim_c_abi_mechanism_out` tests green against the
-  cross-built s390x cdylib via `dlopen` (the 8th is skipped — a
+- **Shim integration:** (ignored-by-default) `fork_after_init` 3
+  green; `stress_registry` 0-run (ignored by default).
+- **Server package:** lib 877 + bin 18 + every runnable mock-based
+  integration target green (`local_quality_gate` 94,
+  `exact_wrap_authorization`/`wave6_3x` 23 each,
+  `mechanism_authorization` 18, `fault_injection`/`slot_ownership` 16
+  each, `parameterized_mechanism` 12, `wave1_session_3x` 11,
+  `mechanism_out_derive_mock`/`stress`/`unique_id_authorization`/
+  `example_configs_parse` 9 each, `wave2_kem`/`print_sink_gate`/
+  `env_var_precedence` 8 each, `shutdown_lifetime` 6,
+  `auth_combo_harness`/`exact_output_error` 5 each,
+  `noncontract_begin_health` 4, `mtls_authorization` 3,
+  `uds_transport`/`daemon_cli_ux`/`protected_decode_live`/`pin_leak` 2
+  each, `rate_quota_login`/`provider_matrix`/`mechanism_info_mock`/
+  `kryoptic_mechanism`/`consumer_pkcs11_tool`/
+  `concurrency_and_recovery` 1 each; provider-gated targets report
+  ignored only).
+- **C ABI:** 8 of 9 `shim_c_abi_mechanism_out` tests green against the
+  cross-built s390x cdylib via `dlopen` (the 9th is skipped — a
   pre-existing dev failure, byte-identical on the LE baseline; see the
   script header).
 
