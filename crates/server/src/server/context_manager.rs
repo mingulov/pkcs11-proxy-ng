@@ -290,6 +290,18 @@ pub struct LogicalClientInstance {
     /// `C_DestroyObject`, plus full teardown) so a recycled virtual handle
     /// cannot inherit a stale privacy bit.
     pub object_private: HashMap<VirtualHandle, bool>,
+    /// Virtual object handles removed by an explicit `C_DestroyObject`
+    /// (T20 tombstones). A later use of a tombstoned handle answers the
+    /// handle-invalid family locally instead of forwarding 0, whose
+    /// backend verdict is backend-specific (bouncyhsm answers
+    /// `DEVICE_ERROR` on copy-of-0 but `OBJECT_HANDLE_INVALID` on
+    /// copy-of-destroyed). Session-close evictions (B2) intentionally do
+    /// NOT tombstone (pinned forward-0 semantic). The virtual allocator
+    /// is monotonic (no reuse), so entries never collide with future
+    /// handles; the set dies with the context on teardown. Bounded by
+    /// explicit destroys per context (live mappings stay bounded by live
+    /// objects as before).
+    pub destroyed_objects: HashSet<VirtualHandle>,
     /// Session-scoped attribute result cache (R2 coalescer).
     ///
     /// Keys are `(virtual object handle, attribute type)`. Entries are evicted
@@ -328,6 +340,7 @@ impl LogicalClientInstance {
             session_objects: HashMap::new(),
             created_objects: HashSet::new(),
             object_private: HashMap::new(),
+            destroyed_objects: HashSet::new(),
             attr_cache: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
@@ -1427,6 +1440,24 @@ impl ContextManager {
     /// True when any live context holds logical login for `slot`.
     pub fn any_login_state_for_slot(&self, slot: BackendSlotId) -> bool {
         self.contexts.iter().any(|entry| entry.value().login_state.contains_key(&slot))
+    }
+
+    /// T20 (D6(1) refinement): true when any live context OTHER than
+    /// `exclude` holds a logical login on `slot`. Authoritative scan for
+    /// the private gates: a logged-out context may forward private ops
+    /// only when no other tenant holds the slot login (the backend is
+    /// then truly logged out, so its verdict is unpolluted); while
+    /// another tenant holds it, forwarding would ride their backend
+    /// login, so the gates refuse. Deliberately NOT the lossy holder
+    /// index — a missed holder here would forward onto a held login.
+    pub fn other_login_state_for_slot(
+        &self,
+        slot: BackendSlotId,
+        exclude: &ClientContextId,
+    ) -> bool {
+        self.contexts
+            .iter()
+            .any(|entry| entry.key() != exclude && entry.value().login_state.contains_key(&slot))
     }
 
     /// True when any live context's session map still references `handle`

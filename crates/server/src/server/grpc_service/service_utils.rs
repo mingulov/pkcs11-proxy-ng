@@ -1057,12 +1057,24 @@ pub(super) async fn resolve_session_and_key(
     session_handle: u64,
     key_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
-    let Some((session, key)) = ctx
+    resolve_session_and_handle(ctx, ctx_id, session_handle, key_handle, CkRv::KEY_HANDLE_INVALID)
+        .await
+}
+
+async fn resolve_session_and_handle(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    session_handle: u64,
+    object_handle: u64,
+    stale_rv: CkRv,
+) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
+    let Some((session, key, destroyed)) = ctx
         .context_manager
         .get_context(ctx_id, |c| {
             (
                 c.session_handles.resolve(VirtualHandle(session_handle)),
-                c.object_handles.resolve(VirtualHandle(key_handle)),
+                c.object_handles.resolve(VirtualHandle(object_handle)),
+                c.destroyed_objects.contains(&VirtualHandle(object_handle)),
             )
         })
         .await
@@ -1071,6 +1083,15 @@ pub(super) async fn resolve_session_and_key(
     };
 
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
+    // T20 tombstone: a virtual handle removed by an explicit C_DestroyObject
+    // names a definitively-gone object — answer the handle-invalid family
+    // locally instead of forwarding 0 (whose backend verdict is
+    // backend-specific: bouncyhsm answers DEVICE_ERROR on copy-of-0 but
+    // OBJECT_HANDLE_INVALID on copy-of-destroyed). Never-existed handles
+    // still forward 0 so the backend decides error priority.
+    if key.is_none() && destroyed {
+        return Err(stale_rv);
+    }
     // When the key handle is unknown to the proxy (not in the mapping),
     // forward CK_INVALID_HANDLE (0) to the backend rather than returning
     // CKR_KEY_HANDLE_INVALID locally.  This preserves transparency: the
@@ -1086,7 +1107,7 @@ pub(super) async fn resolve_session_and_key(
             ctx,
             ctx_id,
             session_handle,
-            key_handle,
+            object_handle,
             CkSessionHandle(backend_session.0),
             backend_key,
         )
@@ -1099,7 +1120,7 @@ pub(super) async fn resolve_session_and_key(
         || ctx.token_policy.per_class_active())
         && backend_key.0 != 0
     {
-        gate_object_handle(ctx, ctx_id, session_handle, key_handle, backend_session, backend_key)
+        gate_object_handle(ctx, ctx_id, session_handle, object_handle, backend_session, backend_key)
             .await
     } else {
         backend_key
@@ -1113,11 +1134,18 @@ pub(super) async fn resolve_session_and_object(
     session_handle: u64,
     object_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
-    // W1-L11-05: the key and object resolvers were line-identical modulo
-    // parameter names (same forward-0, D6(1) authn, and per-object/class
-    // gate); the object entry point delegates to the key implementation so
-    // there is exactly one. Both names are kept for call-site clarity.
-    resolve_session_and_key(ctx, ctx_id, session_handle, object_handle).await
+    // W1-L11-05: one shared implementation behind both names (same
+    // forward-0, tombstone, D6(1) authn, and per-object/class gate); the
+    // names differ only in the tombstone RV flavor (key vs object) for
+    // call-site clarity.
+    resolve_session_and_handle(
+        ctx,
+        ctx_id,
+        session_handle,
+        object_handle,
+        CkRv::OBJECT_HANDLE_INVALID,
+    )
+    .await
 }
 
 pub(super) async fn resolve_session_and_two_objects(
@@ -1127,13 +1155,15 @@ pub(super) async fn resolve_session_and_two_objects(
     first_object_handle: u64,
     second_object_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle, CkObjectHandle), CkRv> {
-    let Some((session, first_object, second_object)) = ctx
+    let Some((session, first_object, second_object, first_destroyed, second_destroyed)) = ctx
         .context_manager
         .get_context(ctx_id, |c| {
             (
                 c.session_handles.resolve(VirtualHandle(session_handle)),
                 c.object_handles.resolve(VirtualHandle(first_object_handle)),
                 c.object_handles.resolve(VirtualHandle(second_object_handle)),
+                c.destroyed_objects.contains(&VirtualHandle(first_object_handle)),
+                c.destroyed_objects.contains(&VirtualHandle(second_object_handle)),
             )
         })
         .await
@@ -1142,6 +1172,15 @@ pub(super) async fn resolve_session_and_two_objects(
     };
 
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
+    // T20 tombstones (both handles are keys on the wrap/unwrap path): a
+    // destroyed handle answers KEY_HANDLE_INVALID locally instead of
+    // forwarding 0; never-existed handles still forward 0.
+    if first_object.is_none() && first_destroyed {
+        return Err(CkRv::KEY_HANDLE_INVALID);
+    }
+    if second_object.is_none() && second_destroyed {
+        return Err(CkRv::KEY_HANDLE_INVALID);
+    }
     // Forward CK_INVALID_HANDLE to backend when either object is unknown; see
     // resolve_session_and_key for rationale. Local context/session validation
     // remains explicit; backend-visible object handle priority stays backend-owned.
