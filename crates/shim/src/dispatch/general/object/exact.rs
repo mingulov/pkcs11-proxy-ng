@@ -99,6 +99,18 @@ pub(super) unsafe fn capture(
             pkcs11_proxy_ng_types::WidthError::LengthOverflow => CkRv::HOST_MEMORY,
             _ => CkRv::GENERAL_ERROR,
         })?;
+        // A present caller buffer must never request zero backend bytes: a
+        // sub-element ulong length rescales to 0 (likewise a genuinely
+        // empty buffer), and the backend edge maps empty buffers to NULL
+        // (T4-FIX) — reframing the too-small data query as a size query,
+        // which wrongly answers OK. One byte preserves the too-small
+        // shape so the backend reports BUFFER_TOO_SMALL exactly like a
+        // direct undersized call (live cross-width proof; SoftHSM2
+        // answers BTS + CK_UNAVAILABLE_INFORMATION for it at both
+        // widths). True NULL size queries (buffer absent) still send 0.
+        if !value.is_null() && query.buffer_len == 0 {
+            query.buffer_len = 1;
+        }
     }
     Ok(AttributeCall {
         query,
@@ -549,5 +561,53 @@ mod tests {
         let label_len = attrs[1].ulValueLen;
         assert_eq!(label_len, 4);
         assert_eq!(label_buf, *b"test", "valid attribute must still be returned");
+    }
+
+    #[test]
+    fn exact_present_buffer_never_requests_zero_backend_bytes() {
+        // Live-leg regression (32c/64b sub-element request): a present
+        // caller buffer that rescales to zero backend bytes (a 2-byte
+        // buffer for a ulong attribute, or a genuinely empty buffer)
+        // must still request one byte. A 0-byte request reaches the
+        // backend edge as NULL (T4-FIX), reframing the too-small data
+        // query as a size query and wrongly answering OK; one byte
+        // preserves the too-small shape so the backend reports
+        // BUFFER_TOO_SMALL like a direct undersized call. True NULL
+        // size queries still request 0, and whole-element rescales are
+        // unchanged.
+        let stride = std::mem::size_of::<CK_ATTRIBUTE>();
+        let class = CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE;
+        let array = CkAttributeType::ALLOWED_MECHANISMS.0 as CK_ATTRIBUTE_TYPE;
+        let mut tiny = [0xa5u8; 2];
+        // (present, capacity, attr_type, client_width, backend_width, want_len)
+        let cases: [(bool, u64, CK_ATTRIBUTE_TYPE, usize, usize, u64); 9] = [
+            // Sub-element ulong requests both directions: clamped to 1.
+            (true, 2, class, 4, 8, 1),
+            (true, 2, class, 8, 4, 1),
+            (true, 2, array, 4, 8, 1),
+            // Genuinely empty present buffers: clamped to 1 (ulong + opaque).
+            (true, 0, class, 4, 8, 1),
+            (true, 0, CKA_LABEL, 8, 8, 1),
+            // True size query: still 0.
+            (false, 0, class, 4, 8, 0),
+            // Whole-element rescales: unchanged.
+            (true, 4, class, 4, 8, 8),
+            (true, 8, class, 8, 4, 4),
+            (true, 7, CKA_LABEL, 4, 8, 7),
+        ];
+        for (present, capacity, attr_type, client_width, backend_width, want) in cases {
+            let mut attr = CK_ATTRIBUTE {
+                type_: attr_type,
+                pValue: if present { tiny.as_mut_ptr().cast() } else { std::ptr::null_mut() },
+                ulValueLen: CK_ULONG::try_from(capacity).unwrap(),
+            };
+            let call =
+                unsafe { capture(&mut attr, false, client_width, backend_width, stride) }.unwrap();
+            assert_eq!(call.query.buffer_present, present);
+            assert_eq!(
+                call.query.buffer_len, want,
+                "present={present} capacity={capacity} {client_width}->{backend_width}"
+            );
+        }
     }
 }
