@@ -520,7 +520,7 @@ cat "$WORKDIR/cli-slots.txt"
 SLOT_ID="$(awk '/^Slot [0-9]+$/ { print $2; exit }' "$WORKDIR/cli-slots.txt")"
 test -n "$SLOT_ID"
 echo "    using slot $SLOT_ID for token-info:"
-/artifacts/pkcs11-proxy-ng-cli token-info "$SLOT_ID" >"$WORKDIR/cli-token.txt"
+/artifacts/pkcs11-proxy-ng-cli token-info --slot-id "$SLOT_ID" >"$WORKDIR/cli-token.txt"
 cat "$WORKDIR/cli-token.txt"
 grep -q "$TOKEN_LABEL" "$WORKDIR/cli-token.txt"
 
