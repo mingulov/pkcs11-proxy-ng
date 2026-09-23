@@ -493,11 +493,13 @@ fn c_find_objects_null_outputs_returns_bad_args() {
 }
 
 #[test]
-fn c_find_objects_rejects_max_count_above_wire_width_before_client_use() {
-    // W1-L3-07: ulMaxObjectCount wider than the u32 wire field must be
-    // rejected with CKR_DATA_LEN_RANGE (the c_generate_random convention),
-    // never truncated via `as u32`. Recorded pre-fix state: the count was
-    // truncated and the call proceeded to the client (NOT_INITIALIZED here).
+fn c_find_objects_clamps_max_count_above_wire_width() {
+    // T20: ulMaxObjectCount is a CAP — backends accept absurd values
+    // (SoftHSM answers OK to 0x100000008), so the shim saturates to the
+    // u32 wire field instead of rejecting (the old W1-L3-07 DATA_LEN_RANGE
+    // reject diverged from every backend that accepts the call). Caps
+    // clamp; exact lengths (c_generate_random) keep the narrowing reject.
+    // The saturated call proceeds to the client (NOT_INITIALIZED here).
     if CK_ULONG::BITS <= u32::BITS {
         return;
     }
@@ -510,9 +512,9 @@ fn c_find_objects_rejects_max_count_above_wire_width_before_client_use() {
 
     let rv = unsafe { dispatch::general::c_find_objects(0, &mut object, too_large, &mut count) };
 
-    assert_eq!(rv, CKR_DATA_LEN_RANGE as CK_RV);
-    assert_eq!(count, 0, "rejected call must not write the count");
-    assert_eq!(object, CK_INVALID_HANDLE, "rejected call must not write handles");
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+    assert_eq!(count, 0, "uninitialized call must not write the count");
+    assert_eq!(object, CK_INVALID_HANDLE, "uninitialized call must not write handles");
 }
 
 #[test]
