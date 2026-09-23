@@ -19,14 +19,6 @@ pub(crate) fn login_state_for_user_type(user_type: CkUserType) -> Option<LoginSt
     }
 }
 
-pub(crate) fn already_logged_in_rv(current: LoginState, requested: LoginState) -> CkRv {
-    if current == requested {
-        CkRv::USER_ALREADY_LOGGED_IN
-    } else {
-        CkRv::USER_ANOTHER_ALREADY_LOGGED_IN
-    }
-}
-
 pub(super) async fn login(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
@@ -81,7 +73,7 @@ pub(super) async fn login(
     // close): per-slot login tokio Mutex OUTER; while holding it, take only
     // TRANSIENT contexts-DashMap guards. Never acquire the slot lock while
     // holding a contexts guard.
-    let (session, current_login_state) =
+    let (session, _current_login_state) =
         match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
             Ok((session, resolved_slot, login_state)) if resolved_slot == slot => {
                 (session, login_state)
@@ -117,37 +109,21 @@ pub(super) async fn login(
     // when dropped, and Debug redacts the secret (audit/log safety net).
     let pin = std::mem::take(&mut req.pin).map(SecretBytes::new);
 
-    // W1-L13-11 + W1-L7-15 (one edit): same-context re-login
-    // short-circuit. This context already holds a logical login on the
-    // slot, so the shared backend token is logged in and a physical
-    // C_Login could only answer ALREADY (without even checking the PIN)
-    // — answer locally with no backend call. Context-specific logins
-    // (requested `None`) never mint token state and always fall through
-    // to the backend, as before.
-    if let Some(current) = current_login_state
-        && let Some(requested) = requested_login_state
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-            ck_rv: already_logged_in_rv(current, requested).0,
-        }));
-    }
-
-    // D6(3) reconciliation (Wave 3.5 tenancy ruling; supersedes ADR-0008): when
-    // another live context already holds a login on this slot, the shared
-    // backend token is logged in and would answer a second backend C_Login
-    // with USER_ALREADY_LOGGED_IN *without* checking the PIN. The daemon
-    // therefore cannot PIN-verify this login against the token, so it returns
-    // the backend's answer faithfully and mints NO logical login — never a
-    // login on an unverified PIN. The caller retries after the holder releases
-    // the slot (last-context-out backend logout, D6(2), bounds the window).
-    if current_login_state.is_none()
-        && let Some(requested) = requested_login_state
-        && let Some(other_login_state) = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id)
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-            ck_rv: already_logged_in_rv(other_login_state, requested).0,
-        }));
-    }
+    // T20: NO short-circuit past this point — every login attempt, including
+    // same-context re-logins and logins while another context holds the
+    // slot, is forwarded to the backend and the backend's verdict is
+    // returned verbatim. The removed W1-L13-11/W1-L7-15 same-context and
+    // D6(3) cross-context short-circuits asserted a physical C_Login
+    // "could only answer ALREADY (without even checking the PIN)" — but
+    // re-validating backends (BouncyHSM, opencryptoki) answer a wrong PIN
+    // with PIN_INCORRECT even while logged in, and check error precedence
+    // natively (e.g. SO-on-readonly-session). Asserting ALREADY locally
+    // diverged from all of them (15 lanes). Forwarding preserves every
+    // rule the short-circuits protected: ALREADY still mints nothing
+    // (D6(3) "never a login on an unverified PIN" — the backend, not an
+    // assertion, is the verifier now), re-mint on OK is idempotent (set +
+    // map insert), and PIN-retry burn matches direct exactly (the call the
+    // short-circuit skipped is the call direct always makes).
 
     let user_type_raw = req.user_type;
     // A second wiping copy for a possible F-01 reconcile retry below; both
@@ -710,13 +686,13 @@ mod tests {
         assert_eq!(logout_rv, CkRv::GENERAL_ERROR.0, "logout must refuse with GENERAL_ERROR");
     }
 
-    /// W1-L13-11 + W1-L7-15 (one edit): a same-context re-login must
-    /// short-circuit locally with ALREADY and issue NO backend C_Login.
-    /// The backend is reset to logged-out between the calls, so only the
-    /// short-circuit can answer ALREADY — a backend round-trip would
-    /// succeed with OK instead.
+    /// T20 (replaces W1-L13-11/W1-L7-15 short-circuit): a same-context
+    /// re-login is forwarded and the backend's verdict returned verbatim.
+    /// The mock is non-revalidating, so it answers ALREADY while logged
+    /// in; re-validating backends (BouncyHSM, opencryptoki) answer a wrong
+    /// PIN with PIN_INCORRECT on this same path (15 lanes).
     #[tokio::test]
-    async fn l13_11_same_context_relogin_short_circuits_without_backend_call() {
+    async fn t20_same_context_relogin_forwards_backend_verdict() {
         let slot = CkSlotId(41);
         let mock = Arc::new(MockBackend::new(vec![slot], vec![CkMechanismType::RSA_PKCS]));
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -746,27 +722,31 @@ mod tests {
         assert_eq!(first.ck_rv, CkRv::OK.0, "first login must succeed");
         assert_eq!(mock.login_call_count(), 1);
 
-        // Reset the BACKEND to logged-out; the logical login stays held.
-        mock.logout(backend_session).unwrap();
-
         let second =
             super::login(&ctx_mgr, &backend, Request::new(login_req())).await.unwrap().into_inner();
         assert_eq!(
             second.ck_rv,
             CkRv::USER_ALREADY_LOGGED_IN.0,
-            "same-context re-login must answer ALREADY locally"
+            "re-login must return the backend's ALREADY verbatim"
         );
-        assert_eq!(mock.login_call_count(), 1, "re-login must not issue a backend C_Login");
-        // The backend is still logged out — no call reached it.
-        assert_eq!(mock.logout(backend_session).unwrap_err(), CkRv::USER_NOT_LOGGED_IN);
+        assert_eq!(mock.login_call_count(), 2, "re-login must reach the backend");
+        // The logical login stays held exactly once (re-mint idempotent).
+        let held = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.login_state.get(&crate::server::slot_map::BackendSlotId(slot)).copied()
+            })
+            .await
+            .flatten();
+        assert_eq!(held, Some(LoginState::User));
     }
 
-    /// W1-L7-15: same-context re-login for the OTHER user type answers
-    /// USER_ANOTHER_ALREADY_LOGGED_IN locally (the backend would only
-    /// ever answer the same-type ALREADY here).
+    /// T20: split-brain heal — backend logged out underneath a live holder.
+    /// The forwarded re-login re-verifies the PIN (OK here) and the holder
+    /// survives; a wrong PIN would surface PIN_INCORRECT instead of the
+    /// old asserted ALREADY.
     #[tokio::test]
-    async fn l7_15_same_context_other_user_type_answers_another_already() {
-        let slot = CkSlotId(42);
+    async fn t20_relogin_heals_holder_without_backend_login() {
+        let slot = CkSlotId(44);
         let mock = Arc::new(MockBackend::new(vec![slot], vec![CkMechanismType::RSA_PKCS]));
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let backend_session = mock.open_session(slot, CkSessionFlags::default()).unwrap();
@@ -774,42 +754,91 @@ mod tests {
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(slot)).await;
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let backend_slot = crate::server::slot_map::BackendSlotId(slot);
         let session_vh = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                ctx.register_session(
-                    BackendHandle(backend_session.0),
-                    crate::server::slot_map::BackendSlotId(slot),
-                )
+                ctx.register_session(BackendHandle(backend_session.0), backend_slot)
             })
             .await
             .unwrap();
 
-        let login_as = |user_type: CkUserType| pkcs11_proxy_ng_proto::LoginRequest {
+        let login_req = || pkcs11_proxy_ng_proto::LoginRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session_vh.0,
-            user_type: user_type as u64,
+            user_type: CkUserType::User as u64,
             pin: None,
         };
-        let first = super::login(&ctx_mgr, &backend, Request::new(login_as(CkUserType::User)))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(first.ck_rv, CkRv::OK.0, "first login must succeed");
+        let first =
+            super::login(&ctx_mgr, &backend, Request::new(login_req())).await.unwrap().into_inner();
+        assert_eq!(first.ck_rv, CkRv::OK.0);
 
-        let second = super::login(&ctx_mgr, &backend, Request::new(login_as(CkUserType::So)))
+        // Reset the BACKEND to logged-out; the logical login stays held.
+        mock.logout(backend_session).unwrap();
+
+        let second =
+            super::login(&ctx_mgr, &backend, Request::new(login_req())).await.unwrap().into_inner();
+        assert_eq!(second.ck_rv, CkRv::OK.0, "re-login must re-verify against the backend");
+        assert_eq!(mock.login_call_count(), 2);
+        let held = ctx_mgr
+            .get_context(&ctx_id, |ctx| ctx.login_state.get(&backend_slot).copied())
+            .await
+            .flatten();
+        assert_eq!(held, Some(LoginState::User), "holder must survive the heal");
+    }
+
+    /// T20 (replaces the D6(3) cross-context short-circuit): a second
+    /// context's login while another holds the slot is forwarded; the
+    /// mock answers ALREADY, which mints nothing (never a login on an
+    /// unverified PIN) and is returned verbatim.
+    #[tokio::test]
+    async fn t20_other_context_login_forwards_without_mint_on_already() {
+        let slot = CkSlotId(45);
+        let mock = Arc::new(MockBackend::new(vec![slot], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let backend_slot = crate::server::slot_map::BackendSlotId(slot);
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(backend_slot).await;
+        let register_session = |ctx_mgr: Arc<ContextManager>,
+                                mock: Arc<MockBackend>,
+                                ctx_id: ClientContextId| async move {
+            let backend_session = mock.open_session(slot, CkSessionFlags::default()).unwrap();
+            ctx_mgr
+                .get_context(&ctx_id, |ctx| {
+                    ctx.register_session(BackendHandle(backend_session.0), backend_slot)
+                })
+                .await
+                .unwrap()
+        };
+        let ctx_a = ctx_mgr.create_context(None).await.unwrap();
+        let session_a = register_session(ctx_mgr.clone(), mock.clone(), ctx_a.clone()).await;
+        let ctx_b = ctx_mgr.create_context(None).await.unwrap();
+        let session_b = register_session(ctx_mgr.clone(), mock.clone(), ctx_b.clone()).await;
+
+        let login_req =
+            |ctx_id: &ClientContextId, session_vh: u64| pkcs11_proxy_ng_proto::LoginRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh,
+                user_type: CkUserType::User as u64,
+                pin: None,
+            };
+        let first = super::login(&ctx_mgr, &backend, Request::new(login_req(&ctx_a, session_a.0)))
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(
-            second.ck_rv,
-            CkRv::USER_ANOTHER_ALREADY_LOGGED_IN.0,
-            "other-type re-login must answer ANOTHER locally"
-        );
-        assert_eq!(
-            mock.login_call_count(),
-            1,
-            "other-type re-login must not issue a backend C_Login"
-        );
+        assert_eq!(first.ck_rv, CkRv::OK.0);
+
+        let second = super::login(&ctx_mgr, &backend, Request::new(login_req(&ctx_b, session_b.0)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(second.ck_rv, CkRv::USER_ALREADY_LOGGED_IN.0);
+        assert_eq!(mock.login_call_count(), 2, "second context must reach the backend");
+        let held_b = ctx_mgr
+            .get_context(&ctx_b, |ctx| ctx.login_state.get(&backend_slot).copied())
+            .await
+            .flatten();
+        assert_eq!(held_b, None, "ALREADY must mint no logical login");
     }
 
     /// Pin: context-specific logins never mint token state, so they must

@@ -3021,7 +3021,7 @@ impl Pkcs11Backend for MockBackend {
     fn login_user(
         &self,
         session: CkSessionHandle,
-        _user_type: CkUserType,
+        user_type: CkUserType,
         username: Option<&[u8]>,
         pin: Option<&[u8]>,
     ) -> CkResult<()> {
@@ -3047,9 +3047,25 @@ impl Pkcs11Backend for MockBackend {
         if !self.state.lock().unwrap().has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
+        // T20: share the token login state with `login_impl` — the mock
+        // token holds one login per slot and answers a second login with
+        // ALREADY without evaluating the PIN (non-revalidating backend).
         // A NULL (protected-path) PIN carries no verifiable bytes, so the
         // mock cannot accept it; only the exact test PIN succeeds.
-        if pin.is_some_and(|p| p == b"1234") { Ok(()) } else { Err(CkRv::PIN_INCORRECT) }
+        let mut state = self.state.lock().unwrap();
+        let slot_id = match state.session_record(session) {
+            Some((slot_id, _)) => slot_id,
+            None => return Err(CkRv::SESSION_HANDLE_INVALID),
+        };
+        if state.login_state.contains_key(&slot_id) {
+            return Err(CkRv::USER_ALREADY_LOGGED_IN);
+        }
+        if pin.is_some_and(|p| p == b"1234") {
+            state.login_state.insert(slot_id, user_type);
+            Ok(())
+        } else {
+            Err(CkRv::PIN_INCORRECT)
+        }
     }
 
     fn session_cancel(&self, session: CkSessionHandle, _flags: CkFlags) -> CkResult<()> {

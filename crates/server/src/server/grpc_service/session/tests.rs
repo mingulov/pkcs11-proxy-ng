@@ -180,12 +180,12 @@ async fn logout_response(
 
 #[tokio::test]
 async fn second_context_login_returns_backend_already_faithfully_without_minting_login() {
-    // D6(3): while one live context holds the slot login, the shared backend
-    // token is logged in and would answer a second backend C_Login with
-    // USER_ALREADY_LOGGED_IN without checking the PIN. The daemon cannot
-    // PIN-verify such a login, so it returns ALREADY faithfully and mints NO
-    // logical login for the second context — never a login on an unverified
-    // PIN (Wave 3.5 tenancy ruling; supersedes the ADR-0008 verifier).
+    // D6(3) as literally ruled (T20 forward): while one live context holds
+    // the slot login, a second login is forwarded and the backend's answer
+    // returned faithfully — the mock answers ALREADY without checking the
+    // PIN, and NO logical login is minted for the second context (never a
+    // login on an unverified PIN). Re-validating backends answer a wrong
+    // PIN with PIN_INCORRECT on this same path.
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -206,8 +206,8 @@ async fn second_context_login_returns_backend_already_faithfully_without_minting
     );
     assert_eq!(
         mock.login_call_count(),
-        1,
-        "the refused second login must not reach the backend at all"
+        2,
+        "the refused second login must reach the backend (T20 forward); the mock's ALREADY mints nothing"
     );
 
     // No logical login may be minted for ctx_b.
@@ -247,13 +247,12 @@ async fn second_context_login_returns_backend_already_faithfully_without_minting
     );
 }
 
-/// W1-L13-11 + W1-L7-15: a same-client re-login short-circuits locally —
-/// ALREADY with no redundant backend C_Login. (The old
-/// backend-authoritative expectation — every re-login reaches the
-/// provider — was challenged and rejected in adjudication; the re-login
-/// RV itself is unchanged.)
+/// T20 (replaces the W1-L13-11 short-circuit): a same-client re-login is
+/// forwarded and the backend's verdict returned verbatim — the mock
+/// answers ALREADY while logged in. Re-validating backends answer a
+/// wrong PIN with PIN_INCORRECT on this same path.
 #[tokio::test]
-async fn repeated_login_in_same_logical_client_short_circuits_locally() {
+async fn repeated_login_in_same_logical_client_forwards_backend_verdict() {
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -270,8 +269,8 @@ async fn repeated_login_in_same_logical_client_short_circuits_locally() {
     );
     assert_eq!(
         mock.login_call_count(),
-        1,
-        "same-client re-login must short-circuit locally without a backend call (W1-L13-11)"
+        2,
+        "same-client re-login must reach the backend (T20 forward)"
     );
 }
 
@@ -2276,12 +2275,12 @@ async fn close_session_drops_mapping_for_every_terminal_already_gone_result() {
 
 #[tokio::test]
 async fn cross_client_login_while_slot_held_is_already_regardless_of_pin() {
-    // D6(3): when a slot is held logged-in by another live context, the daemon
-    // cannot PIN-verify a new login (the token would just answer ALREADY), so
-    // the PIN is never evaluated: wrong and correct PINs alike get the
-    // faithful USER_ALREADY_LOGGED_IN, and no logical login is minted either
-    // way. (Supersedes the ADR-0008 verifier contract, which answered
-    // PIN_INCORRECT/OK from a cached hash.)
+    // D6(3) with T20 forward: while a slot is held logged-in by another live
+    // context, each login is forwarded and the backend's answer returned
+    // faithfully. The mock is non-revalidating, so wrong and correct PINs
+    // alike get USER_ALREADY_LOGGED_IN and no logical login is minted either
+    // way (never a login on an unverified PIN). Re-validating backends
+    // answer a wrong PIN with PIN_INCORRECT on this same path.
     let mock = MockBackend::default_test();
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = Arc::new(mock);
@@ -3048,18 +3047,18 @@ async fn teardown_of_one_tenant_does_not_disturb_other_tenant() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn concurrent_first_login_serializes_to_one_backend_login() {
+async fn concurrent_first_login_serializes_to_one_mint() {
     // M5: two clients racing the FIRST login on the same shared token must not
-    // both take the real-login path. Per-slot login serialization makes the
-    // first do the real C_Login and the second — after blocking on the lock and
-    // seeing A's state — take the faithful-ALREADY path (D6(3)): exactly one
-    // backend C_Login.
+    // both mint a login. Per-slot login serialization makes the first do the
+    // real C_Login and mint; the second — after blocking on the lock — forwards
+    // and gets the backend's faithful ALREADY (T20 forward, D6(3)), minting
+    // nothing: exactly one OK, two backend calls.
     //
     // Deterministic harness: a login gate holds client A inside the backend
     // C_Login (still holding the per-slot lock) while client B starts, so B is
-    // guaranteed to race. Without the lock, B would scan "no other login" before
-    // A inserts its state and issue a SECOND backend login (count == 2); with it,
-    // B blocks on the lock, then sees A's state and answers ALREADY faithfully.
+    // guaranteed to race. Without the lock, B would issue its backend login
+    // before A mints and also succeed (two OKs, double mint); with it, B blocks
+    // on the lock, then forwards after A's mint and answers ALREADY faithfully.
     let mock = Arc::new(MockBackend::default_test());
     mock.initialize().unwrap();
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
@@ -3113,7 +3112,7 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
     };
 
     // Release A; it finishes the real login, records its login state, and drops
-    // the lock; B then sees A's login state and answers ALREADY faithfully.
+    // the lock; B then forwards and answers the backend's ALREADY faithfully.
     {
         let (lock, cv) = &*proceed;
         *lock.lock().unwrap() = true;
@@ -3131,8 +3130,8 @@ async fn concurrent_first_login_serializes_to_one_backend_login() {
     );
     assert_eq!(
         mock.login_call_count(),
-        1,
-        "per-slot serialization must yield exactly one real backend C_Login"
+        2,
+        "both raced logins reach the backend (T20 forward); serialization yields exactly one OK"
     );
 }
 
