@@ -19,11 +19,15 @@
 #   6. The ignored C-ABI suite against the cross-built shim cdylib.
 #
 # Exclusion list (documented, stable):
-#   * backend `native_stop*` / `native_domain*` — s390x is not a qualified
-#     native-FFI target (NATIVE_FFI_QUALIFIED=false; stop arms are x86/x86_64
-#     asm only) and the code correctly refuses it there. Qualifying s390x
-#     for real-module FFI needs new stop arms + hardware validation and is
-#     explicitly out of scope (T6a BLOCKED-scope concern).
+#   * backend `native_stop*` / `native_domain*` / `constructor_child*` —
+#     s390x is not a qualified native-FFI target
+#     (NATIVE_FFI_QUALIFIED=false; stop arms are x86/x86_64 asm only) and
+#     the code correctly refuses it there (`FfiBackend::load`
+#     platform-refuses before any reservation, so the TO26a constructor
+#     battery's poison-denial expectations cannot hold — same fail-closed
+#     refusal, earlier). Qualifying s390x for real-module FFI needs new
+#     stop arms + hardware validation and is explicitly out of scope
+#     (T6a BLOCKED-scope concern).
 #   * server `loaded_shim_writes_mechanism_out_to_caller_stack_after_...` —
 #     pre-existing failure on dev, byte-identical on the LE baseline
 #     (SP800-108 virtualization area, not byte-order related).
@@ -189,7 +193,7 @@ be_cargo test --target "$TARGET" -p pkcs11-proxy-ng-cli
 
 echo "[be-qemu] (3/6) backend lib (native-FFI qualification tests excluded) ..."
 be_cargo test --target "$TARGET" -p pkcs11-proxy-ng-backend --lib -- \
-    --skip native_stop --skip native_domain
+    --skip native_stop --skip native_domain --skip constructor_child
 
 echo "[be-qemu] (4/6) shim lib + integration ..."
 be_cargo test --target "$TARGET" -p pkcs11-proxy-ng-shim --lib
