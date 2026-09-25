@@ -17,12 +17,19 @@ use std::path::PathBuf;
 ///   the combination used by GnuTLS/p11-kit)
 /// - `CKF_OS_LOCKING_OK` set, no custom callbacks → accepted
 /// - `CKF_LIBRARY_CANT_CREATE_OS_THREADS` → rejected with
-///   `CKR_NEED_TO_CREATE_THREADS` (the shim's tokio runtime spawns OS worker
-///   threads on first use, so a caller forbidding library threads cannot be
-///   honored)
+///   `CKR_NEED_TO_CREATE_THREADS` (the shim drives a current-thread tokio
+///   runtime via `block_on` on the calling thread and spawns no OS worker
+///   threads, but the no-library-threads combination is refused
+///   conservatively rather than promised — see `state::runtime`)
 /// - null pInitArgs → accepted (spec allows, treated as OS-locking default)
 ///
 /// Returns `None` on success, `Some(rv)` on error.
+///
+/// # Safety
+///
+/// A null `p_init_args` is always accepted; otherwise it must point to
+/// a valid, readable `CK_C_INITIALIZE_ARGS` (fields are copied by value,
+/// never referenced in place, for packed-layout soundness).
 unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
     if p_init_args.is_null() {
         return None; // Null is always acceptable.
@@ -57,8 +64,9 @@ unsafe fn parse_init_args(p_init_args: CK_VOID_PTR) -> Option<CK_RV> {
     }
     // If all_mutex && CKF_OS_LOCKING_OK: accept, we'll use OS locking (tokio).
 
-    // The shim's tokio runtime spawns OS worker threads (lazily, on first use),
-    // so a caller that forbids library threads cannot be honored.
+    // The shim drives a current-thread tokio runtime via `block_on` on the
+    // calling thread (see `state::runtime`); the no-library-threads
+    // combination is refused conservatively rather than promised.
     if (args.flags & CKF_LIBRARY_CANT_CREATE_OS_THREADS) != 0 {
         return Some(CKR_NEED_TO_CREATE_THREADS as CK_RV);
     }
@@ -246,7 +254,7 @@ pub unsafe extern "C" fn c_get_info(p_info: CK_INFO_PTR) -> CK_RV {
                             minor: info.cryptoki_version.1,
                         };
                         space_pad_into(&mut out.manufacturerID, &info.manufacturer_id);
-                        out.flags = info.flags as CK_FLAGS;
+                        out.flags = info.flags.0 as CK_FLAGS;
                         space_pad_into(&mut out.libraryDescription, &info.library_description);
                         out.libraryVersion = CK_VERSION {
                             major: info.library_version.0,

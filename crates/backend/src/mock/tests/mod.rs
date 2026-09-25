@@ -4,6 +4,7 @@
 
 mod derive;
 mod exact_outputs;
+mod find_swap;
 mod profiles;
 mod rest;
 mod session_state;

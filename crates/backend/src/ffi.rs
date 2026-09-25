@@ -93,15 +93,13 @@ macro_rules! session_bytes_input {
     ($session:expr, $input:expr, $function:ident, $output:ident, $output_len:ident) => {{
         let _ck_session = crate::ffi::narrow_session_handle!($session);
         let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
-        unsafe {
-            $function(
-                _ck_session,
-                _ck_in_ptr as *mut _,
-                Self::ulong_len_u64(_ck_in_len),
-                $output,
-                $output_len,
-            )
-        }
+        // W1-C4-05: checked length narrowing, same tail-of-closure
+        // loud-failure shape as `narrow_session_handle!` above.
+        let _ck_in_len = match Self::ulong_len_u64(_ck_in_len) {
+            Ok(len) => len,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
+        unsafe { $function(_ck_session, _ck_in_ptr as *mut _, _ck_in_len, $output, $output_len) }
     }};
 }
 pub(crate) use session_bytes_input;
@@ -110,7 +108,13 @@ macro_rules! session_unit_input {
     ($session:expr, $input:expr, $function:ident) => {{
         let _ck_session = crate::ffi::narrow_session_handle!($session);
         let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
-        unsafe { $function(_ck_session, _ck_in_ptr as *mut _, Self::ulong_len_u64(_ck_in_len)) }
+        // W1-C4-05: checked length narrowing, same tail-of-closure
+        // loud-failure shape as `narrow_session_handle!` above.
+        let _ck_in_len = match Self::ulong_len_u64(_ck_in_len) {
+            Ok(len) => len,
+            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
+        };
+        unsafe { $function(_ck_session, _ck_in_ptr as *mut _, _ck_in_len) }
     }};
 }
 pub(crate) use session_unit_input;
@@ -147,10 +151,17 @@ macro_rules! session_object_unit {
 }
 pub(crate) use session_object_unit;
 
-/// Dispatch a call through a 3.x function list pointer.
+/// Dispatch a call through a 3.x function list pointer (W1-L11-02).
 ///
-/// Returns `Err(CkRv::FUNCTION_NOT_SUPPORTED)` if the function list is `None`
-/// (module only supports 2.40) or if the specific function slot is `None`.
+/// Looks like a plain call, but the expansion carries two hidden early
+/// returns: `return Err(CkRv::FUNCTION_NOT_SUPPORTED)` when the function
+/// list is `None` (module only supports 2.40), and the same return when
+/// the specific function slot is `None`. The enclosing function must
+/// therefore return [`CkResult`] — using this macro in a non-`CkResult`
+/// caller fails to compile (the `return Err(..)` arms do not coerce).
+///
+/// On success the expansion evaluates to `FfiBackend::ck_result(rv)` for
+/// the native return value.
 ///
 /// # Safety
 /// The caller must ensure arguments satisfy the PKCS#11 C ABI contract for the
@@ -332,7 +343,7 @@ impl FfiBackend {
         }
     }
 
-    fn ffi_attr_len(ffi_attrs: &FfiAttrs) -> cryptoki_sys::CK_ULONG {
+    fn ffi_attr_len(ffi_attrs: &FfiAttrs) -> CkResult<cryptoki_sys::CK_ULONG> {
         Self::ulong_len(ffi_attrs.attrs.len())
     }
 }

@@ -24,12 +24,11 @@ pub unsafe extern "C" fn c_wait_for_slot_event(
         // FUNCTION_FAILED with pSlot untouched; a nonzero wide error is
         // never truncated into CKR_OK, and a wide slot never into a wrong
         // slot. Error paths never touch the output-only caller buffer.
-        match with_client!(client => client.wait_for_slot_event(flags.into())) {
+        match with_client!(client => client.wait_for_slot_event(CkFlags(flags as u64))) {
             Ok(slot) => {
-                let Some(narrow) = pkcs11_proxy_ng_types::width::checked_narrow_to_width(
-                    slot.0,
-                    std::mem::size_of::<CK_SLOT_ID>(),
-                ) else {
+                let Some(narrow) =
+                    checked_narrow_to_width(slot.0, std::mem::size_of::<CK_SLOT_ID>())
+                else {
                     return rv_err(CkRv::FUNCTION_FAILED);
                 };
                 unsafe {
@@ -38,12 +37,7 @@ pub unsafe extern "C" fn c_wait_for_slot_event(
                 rv_ok()
             }
             Err(e) => {
-                if pkcs11_proxy_ng_types::width::checked_narrow_to_width(
-                    e.0,
-                    std::mem::size_of::<CK_RV>(),
-                )
-                .is_none()
-                {
+                if checked_narrow_to_width(e.0, std::mem::size_of::<CK_RV>()).is_none() {
                     return rv_err(CkRv::FUNCTION_FAILED);
                 }
                 rv_err(e)
@@ -110,9 +104,7 @@ pub unsafe extern "C" fn c_set_operation_state(
             CkObjectHandle(h_encryption_key as u64),
             CkObjectHandle(h_authentication_key as u64),
         ));
-        if result.is_ok() {
-            state::evict_session_output_caches(h_session);
-        } else if let Err(error) = &result
+        if let Err(error) = &result
             && error.origin == MessageCallErrorOrigin::Backend
             && error.ck_rv != CkRv::DEVICE_ERROR
         {

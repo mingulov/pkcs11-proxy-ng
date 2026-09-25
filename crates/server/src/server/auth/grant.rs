@@ -70,7 +70,8 @@ impl TokenGrant {
 /// Parse an object-class string into a `CkObjectClass`.
 ///
 /// Accepted forms:
-/// - Short names: `"data"`, `"certificate"`, `"public_key"`, `"private_key"`, `"secret_key"`
+/// - Short names: `"data"`, `"certificate"`, `"public_key"`, `"private_key"`,
+///   `"secret_key"`, `"vendor_defined"`
 /// - CKO_* prefix: `"CKO_DATA"`, `"CKO_CERTIFICATE"`, `"CKO_PUBLIC_KEY"`,
 ///   `"CKO_PRIVATE_KEY"`, `"CKO_SECRET_KEY"`, `"CKO_VENDOR_DEFINED"`
 /// - Hex integer: `"0x00000003"` or decimal: `"3"`
@@ -93,9 +94,11 @@ pub fn parse_class(s: &str) -> Result<CkObjectClass, String> {
     if let Ok(n) = t.parse::<u64>() {
         return Ok(CkObjectClass(n));
     }
+    // W1-C3-20: the accepted-names list must include vendor_defined
+    // (both the short name and the CKO_* form parse successfully above).
     Err(format!(
         "unknown object class '{t}'; expected one of: data, certificate, public_key, \
-         private_key, secret_key (or CKO_* prefix, or a hex/decimal integer)"
+         private_key, secret_key, vendor_defined (or CKO_* prefix, or a hex/decimal integer)"
     ))
 }
 

@@ -1,10 +1,3 @@
-// CK_ULONG-derived C types are u32 on narrow-CK_ULONG targets (i686, armv7,
-// Windows x64). Crate-wide allow so the shim (incl. its test modules, which
-// build C structs from canonical u64 constants and so cast the other way) and
-// the dispatch layer compile on every target with explicit `as`/`.into()`
-// width conversions (ADR-0011).
-#![allow(clippy::unnecessary_cast, clippy::useless_conversion)]
-
 mod dispatch;
 mod function_list;
 mod function_list_3_0;
@@ -121,9 +114,17 @@ pub unsafe extern "C" fn C_GetInterfaceList(
 /// - If no match is found, sets `*pp_interface = NULL` and returns `CKR_OK`
 ///   (per PKCS#11 3.0 §5.4).
 /// - Requested flags must be a subset of the returned interface's advertised flags.
+/// - Names with more than 255 content bytes (no NUL within the 256-byte
+///   scan window) are rejected with `CKR_ARGUMENTS_BAD` (W1-C6-06).
 ///
 /// # Safety
-/// `pp_interface` must be a valid, non-null writable pointer.
+/// `pp_interface` must be non-null and writable (a null pointer returns
+/// `CKR_ARGUMENTS_BAD` without writing). A non-null `p_interface_name`
+/// must designate readable bytes up to and including the first NUL within
+/// the 256-byte scan window — overlong or unterminated input is rejected
+/// loudly, never over-read. A non-null `p_version` must be readable for
+/// one `CK_VERSION`. Null `p_interface_name`/`p_version` select the
+/// default interface / any version.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetInterface(
     p_interface_name: *mut CK_UTF8CHAR,
@@ -142,9 +143,18 @@ pub unsafe extern "C" fn C_GetInterface(
         let name = if p_interface_name.is_null() {
             None
         } else {
-            Some(unsafe {
-                std::ffi::CStr::from_ptr(p_interface_name as *const std::os::raw::c_char)
-            })
+            // W1-C6-06: bounded scan (255 content bytes max + NUL within
+            // the 256-byte window) — an unterminated or overlong caller
+            // name is a loud ARGUMENTS_BAD, never an unbounded
+            // `CStr::from_ptr` read.
+            match unsafe {
+                crate::dispatch::general::helpers::read_bounded_cstr(
+                    p_interface_name as *const std::ffi::c_char,
+                )
+            } {
+                Ok(name) => Some(name),
+                Err(_) => return CKR_ARGUMENTS_BAD as CK_RV,
+            }
         };
 
         let version = if p_version.is_null() { None } else { Some(unsafe { &*p_version }) };

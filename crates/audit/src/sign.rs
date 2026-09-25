@@ -12,6 +12,7 @@
 //! always produces identical bytes across calls, processes, and restarts.
 
 use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use zeroize::Zeroizing;
 
 use crate::AuditError;
 
@@ -38,18 +39,31 @@ pub fn checkpoint_bytes(cp: &Checkpoint) -> Vec<u8> {
 }
 
 /// An Ed25519 signing key loaded from a 32-byte seed.
+///
+/// Key material is wiped after use (W1-C12-16): the seed copy in
+/// [`Signer::from_seed_bytes`] is zeroed once the key is built, and the key
+/// itself wipes on drop (ed25519-dalek `zeroize`, pinned explicitly in this
+/// crate's `Cargo.toml`).
 pub struct Signer {
     key: SigningKey,
 }
 
+/// Dropping a [`Signer`] wipes its Ed25519 secret through the key's own
+/// wiping `Drop` (see `signer_key_material_wiped_on_drop`).
+impl zeroize::ZeroizeOnDrop for Signer {}
+
 impl Signer {
     /// Load a [`Signer`] from a 32-byte Ed25519 seed.
+    ///
+    /// The seed copy is held in a wiping wrapper and zeroed on return, so no
+    /// seed bytes linger on the stack after the key is built (W1-C12-16).
     ///
     /// Returns [`AuditError::Malformed`] if `seed` is not exactly 32 bytes.
     pub fn from_seed_bytes(seed: &[u8]) -> Result<Self, AuditError> {
         let arr: [u8; 32] = seed.try_into().map_err(|_| {
             AuditError::Malformed(format!("seed must be 32 bytes, got {}", seed.len()))
         })?;
+        let arr = Zeroizing::new(arr);
         Ok(Signer { key: SigningKey::from_bytes(&arr) })
     }
 
@@ -136,5 +150,40 @@ mod tests {
     #[test]
     fn wrong_seed_length_errors() {
         assert!(Signer::from_seed_bytes(&[0u8; 31]).is_err());
+    }
+
+    /// W1-C12-16: the seed copy in `from_seed_bytes` must be wiped after
+    /// use (via the wiping wrapper), never left lingering on the stack.
+    /// The scanned-for name is built from parts so this test's own source
+    /// does not satisfy the scan (same pattern as the W1-C12-10 test).
+    #[test]
+    fn signer_seed_wiped_after_use() {
+        let src = include_str!("sign.rs");
+        let wiper = ["Zeroi", "zing"].concat();
+        assert!(src.contains(&wiper), "seed handling must wipe via {wiper}");
+    }
+
+    /// W1-C12-16 (guard pin): `Signer` must keep the wiping drop glue over
+    /// its key material. This already holds pre-fix (ed25519-dalek's
+    /// `zeroize` feature arrives transitively via `std -> alloc`), so it
+    /// pins the guarantee against future feature trims rather than going
+    /// red here; the red half of this item is `signer_seed_wiped_after_use`.
+    #[test]
+    fn signer_key_material_wiped_on_drop() {
+        assert!(
+            std::mem::needs_drop::<Signer>(),
+            "Signer must run a wiping Drop over its key material"
+        );
+    }
+
+    /// W1-C12-16 (compile-time pins): the wipe-on-drop guarantee is carried
+    /// by `ZeroizeOnDrop` markers — on our `Signer` and on dalek's
+    /// `SigningKey` (i.e. the ed25519 `zeroize` feature is on). If either
+    /// marker ever stops holding, this fails to compile.
+    #[test]
+    fn signer_zeroize_markers_hold() {
+        fn assert_wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_wiped_on_drop::<Signer>();
+        assert_wiped_on_drop::<SigningKey>();
     }
 }

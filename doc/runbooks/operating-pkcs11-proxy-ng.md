@@ -56,7 +56,7 @@ not capabilities supplied by this documentation change.
 #    Likewise tests/r2_resilience/Dockerfile.daemon builds a test-only
 #    fixture (weak PINs, auth="none"): use it as the pattern for your
 #    runtime Dockerfile, not as a release image.
-docker build --build-arg ALPINE_VER=3.23 \
+docker build --build-arg ALPINE_BUILD_IMAGE=alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 \
   -f packaging/alpine/Dockerfile.alpine \
   -t pkcs11-proxy-ng:test-alpine3.23 .
 docker build -f <your-runtime-Dockerfile> \
@@ -304,6 +304,13 @@ volumes:
 #     subPath: proxy.toml
 ```
 
+### Authorization policy edits require a restart
+
+Unlike the mechanism registry above, the `[auth.policy]` token policy is
+loaded once at startup and is NOT reloaded on SIGHUP. Editing the policy
+therefore requires a daemon restart (`kubectl rollout restart`), and
+contexts already open keep the grants captured at their `C_Initialize`.
+
 ## 6. Troubleshooting common CK_RV codes
 
 ### CKR_DEVICE_ERROR (0x30)
@@ -543,7 +550,7 @@ hostname does not match the certificate.
 | Variable | Purpose |
 | --- | --- |
 | `PKCS11_PROXY_MECHANISMS` | Path to a TOML override file the shim layers on top of its embedded default registry at `C_Initialize`. Used only until the server-published registry arrives via `GetBackendInterfaces`. |
-| `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` | If set to any value, the shim ignores the server-published registry and uses only the embedded default + `PKCS11_PROXY_MECHANISMS` override. Test/debug use only — production should leave this unset so vendor mechanisms picked up by the daemon's `[mechanisms].config_path` are honoured. |
+| `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` | If set (except an explicit falsy `0`/`false`/`no`/`off`, which re-enables), the shim ignores the server-published registry and uses only the embedded default + `PKCS11_PROXY_MECHANISMS` override. Test/debug use only — production should leave this unset so vendor mechanisms picked up by the daemon's `[mechanisms].config_path` are honoured. Value parsing is defined by `server_registry_disabled` in `crates/shim/src/interface_probe.rs`: empty, unrecognized, and non-UTF8 values keep the legacy disable (deliberate fail-legacy). |
 
 ## 8c. Private diagnostic bundles
 

@@ -30,7 +30,7 @@ fn reinitialize_produces_fresh_handle_space() {
 fn close_all_sessions_clears_login_state_for_slot() {
     let backend = MockBackend::new(vec![CkSlotId(0), CkSlotId(1)], vec![CkMechanismType::RSA_PKCS]);
     backend.initialize().unwrap();
-    let rw = CkSessionFlags(CkSessionFlags::RW_SESSION);
+    let rw = CkSessionFlags::RW_SESSION;
     let s0a = backend.open_session(CkSlotId(0), rw).unwrap();
     let s0b = backend.open_session(CkSlotId(0), rw).unwrap();
     let s1 = backend.open_session(CkSlotId(1), rw).unwrap();
@@ -210,7 +210,7 @@ fn object_handles_are_unique_and_non_overlapping() {
 fn rw_session_flag_reflected_in_session_info() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let rw_flags = CkSessionFlags(CkSessionFlags::RW_SESSION);
+    let rw_flags = CkSessionFlags::RW_SESSION;
     let session = backend.open_session(CkSlotId(0), rw_flags).unwrap();
     let info = backend.get_session_info(session).unwrap();
     assert!(info.flags.is_rw());
@@ -221,7 +221,7 @@ fn rw_session_flag_reflected_in_session_info() {
 fn ro_session_flag_reflected_in_session_info() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let ro_flags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+    let ro_flags = CkSessionFlags::SERIAL_SESSION;
     let session = backend.open_session(CkSlotId(0), ro_flags).unwrap();
     let info = backend.get_session_info(session).unwrap();
     assert!(!info.flags.is_rw());
@@ -232,7 +232,7 @@ fn ro_session_flag_reflected_in_session_info() {
 fn user_login_transitions_rw_session_to_rw_user() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let rw_flags = CkSessionFlags(CkSessionFlags::RW_SESSION);
+    let rw_flags = CkSessionFlags::RW_SESSION;
     let session = backend.open_session(CkSlotId(0), rw_flags).unwrap();
     backend.login(session, CkUserType::User, Some(b"1234".as_ref())).unwrap();
     let info = backend.get_session_info(session).unwrap();
@@ -243,7 +243,7 @@ fn user_login_transitions_rw_session_to_rw_user() {
 fn user_login_transitions_ro_session_to_ro_user() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let ro_flags = CkSessionFlags(CkSessionFlags::SERIAL_SESSION);
+    let ro_flags = CkSessionFlags::SERIAL_SESSION;
     let session = backend.open_session(CkSlotId(0), ro_flags).unwrap();
     backend.login(session, CkUserType::User, Some(b"1234".as_ref())).unwrap();
     let info = backend.get_session_info(session).unwrap();
@@ -254,7 +254,7 @@ fn user_login_transitions_ro_session_to_ro_user() {
 fn so_login_transitions_rw_session_to_rw_so() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let rw_flags = CkSessionFlags(CkSessionFlags::RW_SESSION);
+    let rw_flags = CkSessionFlags::RW_SESSION;
     let session = backend.open_session(CkSlotId(0), rw_flags).unwrap();
     backend.login(session, CkUserType::So, Some(b"so-pin".as_ref())).unwrap();
     let info = backend.get_session_info(session).unwrap();
@@ -265,8 +265,7 @@ fn so_login_transitions_rw_session_to_rw_so() {
 fn login_returns_user_already_logged_in_on_double_login() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let session =
-        backend.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::RW_SESSION)).unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::RW_SESSION).unwrap();
     backend.login(session, CkUserType::User, Some(b"1234".as_ref())).unwrap();
     let err = backend.login(session, CkUserType::User, Some(b"1234".as_ref())).unwrap_err();
     assert_eq!(err, CkRv::USER_ALREADY_LOGGED_IN);
@@ -276,7 +275,7 @@ fn login_returns_user_already_logged_in_on_double_login() {
 fn logout_after_login_transitions_back_to_public() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let rw_flags = CkSessionFlags(CkSessionFlags::RW_SESSION);
+    let rw_flags = CkSessionFlags::RW_SESSION;
     let session = backend.open_session(CkSlotId(0), rw_flags).unwrap();
     backend.login(session, CkUserType::User, Some(b"1234".as_ref())).unwrap();
     backend.logout(session).unwrap();
@@ -288,7 +287,7 @@ fn logout_after_login_transitions_back_to_public() {
 fn close_last_session_clears_login_state_for_slot() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let rw_flags = CkSessionFlags(CkSessionFlags::RW_SESSION);
+    let rw_flags = CkSessionFlags::RW_SESSION;
     let session = backend.open_session(CkSlotId(0), rw_flags).unwrap();
     backend.login(session, CkUserType::User, Some(b"1234".as_ref())).unwrap();
     backend.close_session(session).unwrap();
@@ -311,7 +310,7 @@ fn logout_when_not_logged_in_returns_user_not_logged_in() {
 fn login_state_is_token_wide_all_sessions_on_slot_see_login() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let rw_flags = CkSessionFlags(CkSessionFlags::RW_SESSION);
+    let rw_flags = CkSessionFlags::RW_SESSION;
     let s1 = backend.open_session(CkSlotId(0), rw_flags).unwrap();
     let s2 = backend.open_session(CkSlotId(0), rw_flags).unwrap();
     backend.login(s1, CkUserType::User, Some(b"1234".as_ref())).unwrap();
@@ -323,7 +322,7 @@ fn login_state_is_token_wide_all_sessions_on_slot_see_login() {
 fn login_state_is_per_slot_independent() {
     let backend = MockBackend::new(vec![CkSlotId(0), CkSlotId(1)], vec![CkMechanismType::RSA_PKCS]);
     backend.initialize().unwrap();
-    let rw = CkSessionFlags(CkSessionFlags::RW_SESSION);
+    let rw = CkSessionFlags::RW_SESSION;
     let s0 = backend.open_session(CkSlotId(0), rw).unwrap();
     let s1 = backend.open_session(CkSlotId(1), rw).unwrap();
     backend.login(s0, CkUserType::User, Some(b"1234".as_ref())).unwrap();
@@ -352,7 +351,7 @@ fn logout_with_invalid_session_returns_session_handle_invalid() {
 fn so_login_can_be_followed_by_user_login_on_different_slot() {
     let backend = MockBackend::new(vec![CkSlotId(0), CkSlotId(1)], vec![CkMechanismType::RSA_PKCS]);
     backend.initialize().unwrap();
-    let rw = CkSessionFlags(CkSessionFlags::RW_SESSION);
+    let rw = CkSessionFlags::RW_SESSION;
     let s0 = backend.open_session(CkSlotId(0), rw).unwrap();
     let s1 = backend.open_session(CkSlotId(1), rw).unwrap();
     backend.login(s0, CkUserType::So, Some(b"so-pin".as_ref())).unwrap();
@@ -365,13 +364,11 @@ fn so_login_can_be_followed_by_user_login_on_different_slot() {
 fn finalize_clears_login_state() {
     let backend = MockBackend::default_test();
     backend.initialize().unwrap();
-    let session =
-        backend.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::RW_SESSION)).unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::RW_SESSION).unwrap();
     backend.login(session, CkUserType::User, Some(b"1234".as_ref())).unwrap();
     backend.finalize().unwrap();
     backend.initialize().unwrap();
-    let session2 =
-        backend.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::RW_SESSION)).unwrap();
+    let session2 = backend.open_session(CkSlotId(0), CkSessionFlags::RW_SESSION).unwrap();
     let err = backend.logout(session2).unwrap_err();
     assert_eq!(err, CkRv::USER_NOT_LOGGED_IN);
 }

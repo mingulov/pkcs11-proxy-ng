@@ -105,7 +105,7 @@ run_pkcs11test_suite() {
         echo "[pkcs11test/$tag] passed (log: $log)"
         return 0
     else
-        # $? here is pkcs11test's status (an if without else returns 0).
+        # In the else branch, $? is the if-condition's exit status (pkcs11test's).
         local rc=$?
         echo "[pkcs11test/$tag] FAILED (exit $rc); output follows:" >&2
         cat "$log" >&2

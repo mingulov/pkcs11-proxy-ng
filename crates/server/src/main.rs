@@ -262,7 +262,12 @@ async fn build_service(
     let registry_source = MechanismRegistrySource::load(config.mechanisms.config_path.as_deref())
         .map_err(|e| format!("Mechanism registry load failed: {e}"))?;
     {
-        let payload = registry_source.current();
+        // W1-C3-26: fail closed with a startup error, never a panic
+        // (the lock is freshly constructed here, so poison is
+        // unreachable — but the accessor is fallible by contract).
+        let payload = registry_source
+            .current()
+            .map_err(|e| format!("Mechanism registry unavailable at startup: {e}"))?;
         tracing::info!(
             revision = %payload.revision,
             discovery_mode = %payload.discovery_mode,
@@ -467,6 +472,22 @@ fn validate_runtime_listener_support(config: &config::DaemonConfig) -> Result<()
 /// NOTE: only the mechanism registry is reloaded. The `[auth.policy]`
 /// authorization policy is load-once (see `token_policy` in `main`); changing
 /// it requires a daemon restart.
+///
+/// W1-L6-12: [`MechanismRegistrySource::reload`] does sync file read +
+/// TOML parse, so the SIGHUP path runs it on the blocking pool via
+/// this helper — never on an async executor worker. Failures (read,
+/// parse, or a panicking pool task) surface as `Err` and retain the
+/// previously served payload.
+#[cfg(unix)]
+async fn reload_registry_on_blocking_pool(
+    source: &MechanismRegistrySource,
+) -> Result<std::sync::Arc<pkcs11_proxy_ng_proto::MechanismRegistryPayload>, String> {
+    let source = source.clone();
+    tokio::task::spawn_blocking(move || source.reload())
+        .await
+        .map_err(|e| format!("mechanism registry reload task failed: {e}"))?
+}
+
 #[cfg(unix)]
 fn spawn_sighup_handler(registry_source: MechanismRegistrySource) {
     tokio::spawn(async move {
@@ -479,7 +500,7 @@ fn spawn_sighup_handler(registry_source: MechanismRegistrySource) {
             }
         };
         while sighup.recv().await.is_some() {
-            match registry_source.reload() {
+            match reload_registry_on_blocking_pool(&registry_source).await {
                 Ok(payload) => tracing::info!(
                     revision = %payload.revision,
                     discovery_mode = %payload.discovery_mode,
@@ -1241,5 +1262,79 @@ auth = "peer_cred"
         );
         #[cfg(not(unix))]
         assert_eq!(outcome, MemoryLockOutcome::Unsupported);
+    }
+
+    /// W1-L6-12: the SIGHUP reload path must run the sync file read +
+    /// TOML parse on the blocking pool, never the async worker. Pinned
+    /// structurally: the reload helper routes through
+    /// `tokio::task::spawn_blocking`, and the SIGHUP handler calls the
+    /// helper instead of sync `reload()` directly.
+    #[cfg(unix)]
+    #[test]
+    fn sighup_reload_runs_off_the_async_worker() {
+        // Deferred T30 M2: intentionally refactor-brittle/fail-closed — update this pin if the pinned structure moves deliberately.
+        let src = include_str!("main.rs");
+        let helper = src
+            .split("fn reload_registry_on_blocking_pool")
+            .nth(1)
+            .expect("blocking-pool reload helper must exist");
+        let helper_body = helper.split("\n}\n").next().unwrap_or(helper);
+        assert!(
+            helper_body.contains("spawn_blocking"),
+            "reload helper must run on the blocking pool via spawn_blocking"
+        );
+        let handler =
+            src.split("fn spawn_sighup_handler").nth(1).expect("SIGHUP handler must exist");
+        let handler_body = handler.split("\n}\n").next().unwrap_or(handler);
+        assert!(
+            handler_body.contains("reload_registry_on_blocking_pool"),
+            "SIGHUP handler must route through the blocking-pool helper"
+        );
+        assert!(
+            !handler_body.contains(".reload()"),
+            "SIGHUP handler must not call sync reload() on the async worker"
+        );
+    }
+
+    /// W1-L6-12: the blocking-pool reload helper must pick up new file
+    /// content (new revision + new shape) like a direct reload.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sighup_reload_helper_picks_up_new_content() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, "[[params]]\nshape = \"gcm\"\nmechanisms = [0x80000001]\n").unwrap();
+        let src = MechanismRegistrySource::load(Some(f.path())).unwrap();
+        let first_rev = src.current().unwrap().revision.clone();
+
+        std::fs::write(f.path(), "[[params]]\nshape = \"iv\"\nmechanisms = [0x80000002]\n")
+            .unwrap();
+        let reloaded = super::reload_registry_on_blocking_pool(&src).await.unwrap();
+        assert_ne!(reloaded.revision, first_rev, "helper must pick up new content");
+        assert!(
+            reloaded.params.iter().any(|e| e.shape == "iv" && e.mechanisms.contains(&0x80000002)),
+            "helper must serve the re-parsed payload"
+        );
+    }
+
+    /// W1-L6-12: a malformed registry must fail the helper loudly while
+    /// the served payload is retained (never swapped to a half-read).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sighup_reload_helper_retains_on_malformed() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, "[[params]]\nshape = \"gcm\"\nmechanisms = [0x80000001]\n").unwrap();
+        let src = MechanismRegistrySource::load(Some(f.path())).unwrap();
+        let before = src.current().unwrap().revision.clone();
+
+        std::fs::write(f.path(), "[[[not-valid-toml").unwrap();
+        let err = super::reload_registry_on_blocking_pool(&src).await.unwrap_err();
+        assert!(!err.is_empty(), "malformed registry must fail loudly");
+        assert_eq!(
+            src.current().unwrap().revision,
+            before,
+            "served payload must be retained on reload failure"
+        );
     }
 }

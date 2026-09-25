@@ -17,14 +17,14 @@ pub mod sign;
 pub mod verify;
 
 pub use chain::{ChainState, GENESIS_HASH};
-pub use record::{AUDIT_SCHEMA_VERSION, AuditRecord, EventClass};
+pub use record::{AUDIT_SCHEMA_VERSION, AuditRecord, EventClass, GAP_SENTINEL_METHOD};
 
+// Chain breaks surface via `verify::VerifyReport` flags, not an error
+// variant (W1-C12-14): one way, no dead variants.
 #[derive(Debug, thiserror::Error)]
 pub enum AuditError {
     #[error("malformed audit record: {0}")]
     Malformed(String),
-    #[error("chain broken at seq {seq}: expected prev {expected}, found {found}")]
-    ChainBroken { seq: u64, expected: String, found: String },
     #[error("signature verification failed: {0}")]
     BadSignature(String),
     #[error("io: {0}")]
@@ -52,5 +52,15 @@ mod tests {
             !src.contains(&unconditional),
             "crate docs must not claim unconditional tamper-evidence"
         );
+    }
+
+    /// W1-C12-14: chain breaks surface via `VerifyReport` flags (one way);
+    /// the never-constructed variant must stay deleted. Built from parts so
+    /// this test's own source does not contain the scanned-for name.
+    #[test]
+    fn no_dead_chain_broken_variant() {
+        let src = include_str!("lib.rs");
+        let dead = ["Chain", "Broken"].concat();
+        assert!(!src.contains(&dead), "dead AuditError::{dead} variant must not exist");
     }
 }

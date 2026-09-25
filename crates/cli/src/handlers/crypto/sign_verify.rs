@@ -16,8 +16,7 @@ pub(crate) async fn sign(
     input: String,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     login_user(client, session, pin).await?;
     let key = find_key_by_label(client, session, &key_label, CkObjectClass::PRIVATE_KEY).await?;
     let data = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
@@ -46,8 +45,7 @@ pub(crate) async fn verify(
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let data = hex::decode(&data).map_err(|e| format!("Invalid hex data: {e}"))?;
     let signature = hex::decode(&signature).map_err(|e| format!("Invalid hex signature: {e}"))?;
-    let session =
-        open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
+    let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     // By-value PIN (W1-L2-11): consume it into login, keep only the
     // logged-in flag for session teardown.
     let logged_in = pin.is_some();

@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_proto::version::{
+    EXACT_OUTPUT_EFFECTS_VERSION_MAX, EXACT_OUTPUT_EFFECTS_VERSION_MIN, negotiate_effects_version,
+};
 use pkcs11_proxy_ng_types::*;
 
 use super::super::super::auth::identity::AuthenticatedIdentity;
@@ -28,12 +31,43 @@ pub(super) async fn initialize(
     // max_contexts cap. Uses the dedicated always-on initialize budget
     // (decoupled from the opt-in discovery limiter).
     check_init_throttle(&identity, request.remote_addr().map(|addr| addr.ip()))?;
+    // W1-L5-05: negotiate the effects range BEFORE minting. Disjoint ranges
+    // fail fast here — loud FUNCTION_NOT_SUPPORTED with the daemon range
+    // echoed for diagnosis — never per-RPC later. Absent bounds mean a
+    // legacy v1 client. The throttle stays first so version-garbage floods
+    // cannot bypass flood protection.
+    let body = request.get_ref();
+    // T29 M2: the agreed version is deliberately discarded (overlap check
+    // only) — correct while v1 is the only version; the bump procedure in
+    // `pkcs11_proxy_ng_proto::version` names this site for plumbing on the
+    // first real bump.
+    let _negotiated = negotiate_effects_version(
+        EXACT_OUTPUT_EFFECTS_VERSION_MIN,
+        EXACT_OUTPUT_EFFECTS_VERSION_MAX,
+        body.client_effects_version_min,
+        body.client_effects_version_max,
+    );
+    if _negotiated.is_none() {
+        warn!(
+            client_min = ?body.client_effects_version_min,
+            client_max = ?body.client_effects_version_max,
+            "Initialize rejected: disjoint exact-output effects version range"
+        );
+        return Ok(Response::new(pkcs11_proxy_ng_proto::InitializeResponse {
+            ck_rv: CkRv::FUNCTION_NOT_SUPPORTED.0,
+            client_context_id: String::new(),
+            daemon_effects_version_min: Some(EXACT_OUTPUT_EFFECTS_VERSION_MIN),
+            daemon_effects_version_max: Some(EXACT_OUTPUT_EFFECTS_VERSION_MAX),
+        }));
+    }
     let ctx_id = match ctx_mgr.create_context(Some(identity.to_string())).await {
         Ok(id) => id,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::InitializeResponse {
                 ck_rv: rv.0,
                 client_context_id: String::new(),
+                daemon_effects_version_min: Some(EXACT_OUTPUT_EFFECTS_VERSION_MIN),
+                daemon_effects_version_max: Some(EXACT_OUTPUT_EFFECTS_VERSION_MAX),
             }));
         }
     };
@@ -41,6 +75,8 @@ pub(super) async fn initialize(
     Ok(Response::new(pkcs11_proxy_ng_proto::InitializeResponse {
         ck_rv: CkRv::OK.0,
         client_context_id: ctx_id.0,
+        daemon_effects_version_min: Some(EXACT_OUTPUT_EFFECTS_VERSION_MIN),
+        daemon_effects_version_max: Some(EXACT_OUTPUT_EFFECTS_VERSION_MAX),
     }))
 }
 
@@ -259,8 +295,12 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 46));
         let peer = SocketAddr::new(ip, 1234);
         let request = || {
+            // Legacy-shaped request (no version fields): exercises the
+            // unversioned-client path through the throttle checks.
             let mut req = Request::new(pkcs11_proxy_ng_proto::InitializeRequest {
                 client_context_id: String::new(),
+                client_effects_version_min: None,
+                client_effects_version_max: None,
             });
             req.extensions_mut().insert(tonic::transport::server::TcpConnectInfo {
                 local_addr: None,
@@ -324,6 +364,8 @@ mod tests {
                 &backend,
                 Request::new(pkcs11_proxy_ng_proto::InitializeRequest {
                     client_context_id: String::new(),
+                    client_effects_version_min: None,
+                    client_effects_version_max: None,
                 }),
                 crate::config::TcpAuthMode::None,
                 crate::config::UnixAuthMode::None,
@@ -359,6 +401,90 @@ mod tests {
         }
         // …as does an unauthenticated caller with no peer address.
         assert!(super::check_init_throttle(&AuthenticatedIdentity::Unauthenticated, None).is_ok());
+    }
+
+    // --- W1-L5-05: init-time version negotiation ---
+
+    fn versioned_init_request(
+        min: Option<u32>,
+        max: Option<u32>,
+    ) -> Request<pkcs11_proxy_ng_proto::InitializeRequest> {
+        Request::new(pkcs11_proxy_ng_proto::InitializeRequest {
+            client_context_id: String::new(),
+            client_effects_version_min: min,
+            client_effects_version_max: max,
+        })
+    }
+
+    /// A client whose range is disjoint from the daemon's must fail fast at
+    /// init: loud FUNCTION_NOT_SUPPORTED, no context minted, and the daemon
+    /// range echoed for diagnosis.
+    #[tokio::test]
+    async fn initialize_rejects_disjoint_version_range_without_minting() {
+        let ctx_mgr = test_ctx_mgr();
+        let backend = test_backend();
+        let resp = super::initialize(
+            &ctx_mgr,
+            &backend,
+            versioned_init_request(Some(99), Some(99)),
+            crate::config::TcpAuthMode::None,
+            crate::config::UnixAuthMode::None,
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::FUNCTION_NOT_SUPPORTED.0,
+            "W1-L5-05: mixed versions must fail fast at init"
+        );
+        assert!(resp.client_context_id.is_empty(), "rejected init must mint no context id");
+        assert_eq!(ctx_mgr.context_count(), 0, "rejected init must mint no context");
+        assert_eq!(resp.daemon_effects_version_min, Some(1));
+        assert_eq!(resp.daemon_effects_version_max, Some(1));
+    }
+
+    /// Legacy clients (no version fields) are v1: accepted, with the daemon
+    /// range advertised in the response.
+    #[tokio::test]
+    async fn initialize_accepts_legacy_unversioned_client() {
+        let ctx_mgr = test_ctx_mgr();
+        let backend = test_backend();
+        let resp = super::initialize(
+            &ctx_mgr,
+            &backend,
+            versioned_init_request(None, None),
+            crate::config::TcpAuthMode::None,
+            crate::config::UnixAuthMode::None,
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "legacy unversioned client must be accepted as v1");
+        assert!(!resp.client_context_id.is_empty());
+        assert_eq!(ctx_mgr.context_count(), 1);
+        assert_eq!(resp.daemon_effects_version_min, Some(1));
+        assert_eq!(resp.daemon_effects_version_max, Some(1));
+    }
+
+    /// A matching [1,1] client negotiates v1 (characterization of the
+    /// overlap path; structurally red until the fields exist).
+    #[tokio::test]
+    async fn initialize_accepts_matching_version_range() {
+        let ctx_mgr = test_ctx_mgr();
+        let backend = test_backend();
+        let resp = super::initialize(
+            &ctx_mgr,
+            &backend,
+            versioned_init_request(Some(1), Some(1)),
+            crate::config::TcpAuthMode::None,
+            crate::config::UnixAuthMode::None,
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(ctx_mgr.context_count(), 1);
     }
 
     /// Idle finalize is unchanged (characterization).

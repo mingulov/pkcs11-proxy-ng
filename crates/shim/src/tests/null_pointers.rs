@@ -198,7 +198,7 @@ fn c_init_token_valid_label_reaches_client_state() {
     // W1-L11-10 pin: the fixed-32 label read is unaffected by the
     // fallible-reader migration — parsing passes through.
     let _guard = shim_state_test_guard();
-    let mut label = [b' '; 32];
+    let mut label = [b' '; pkcs11_proxy_ng_types::PKCS11_TOKEN_LABEL_LEN];
     label[..8].copy_from_slice(b"test tok");
     let rv = unsafe {
         dispatch::general::c_init_token(0, std::ptr::null_mut(), 0, label.as_ptr() as *mut _)
@@ -606,96 +606,220 @@ fn c_get_operation_state_null_pul_len_reaches_client_state() {
 }
 
 // ---------------------------------------------------------------------------
+// W1-L3-11: session resolution before mechanism validation (native precedence)
+// ---------------------------------------------------------------------------
+
+/// A session handle no backend can ever mint (MockBackend/SoftHSM allocate
+/// small handles), so it is guaranteed unknown to the shim's session map.
+const UNKNOWN_SESSION: CK_SESSION_HANDLE = CK_SESSION_HANDLE::MAX;
+/// A second never-minted handle, registered as known for the control test.
+const KNOWN_SESSION: CK_SESSION_HANDLE = CK_SESSION_HANDLE::MAX - 1;
+
+/// Build a mechanism `validate_mechanism` must reject deterministically:
+/// an overlong parameter length trips the entry gate before any memory is
+/// touched, so the dangling pointer is never dereferenced (W1-L12-06
+/// convention) and no registry state is needed.
+fn overlong_mechanism() -> CK_MECHANISM {
+    CK_MECHANISM {
+        mechanism: CKM_AES_ECB,
+        pParameter: std::ptr::dangling_mut::<u8>().cast(),
+        ulParameterLen: (dispatch::general::helpers::MAX_MECHANISM_PARAM_STRUCT_LEN + 1)
+            as CK_ULONG,
+    }
+}
+
+/// Dual-defect input (bad session + bad mechanism) must yield the native
+/// session error on every digest/cipher init, not the mechanism error.
+#[test]
+fn init_bad_session_and_bad_mechanism_yields_session_error() {
+    let _guard = shim_state_test_guard();
+    let _ = state::mark_initialized();
+    let mut mech = overlong_mechanism();
+    let rv = unsafe { dispatch::general::c_digest_init(UNKNOWN_SESSION, &mut mech) };
+    assert_eq!(
+        rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "W1-L3-11: C_DigestInit with bad session + bad mechanism must return the session error"
+    );
+    let rv = unsafe { dispatch::general::c_encrypt_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(
+        rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "W1-L3-11: C_EncryptInit with bad session + bad mechanism must return the session error"
+    );
+    let rv = unsafe { dispatch::general::c_decrypt_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(
+        rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "W1-L3-11: C_DecryptInit with bad session + bad mechanism must return the session error"
+    );
+    // Leave-no-trace: later tests (e.g. ShimSession fixtures) require the
+    // cryptoki flag unset at entry.
+    state::mark_finalized();
+}
+
+/// Uninitialized cryptoki outranks both: dual-defect input before
+/// C_Initialize must answer NOT_INITIALIZED, never MECHANISM_*.
+#[test]
+fn init_dual_defect_before_initialize_returns_not_initialized() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let mut mech = overlong_mechanism();
+    let rv = unsafe { dispatch::general::c_digest_init(UNKNOWN_SESSION, &mut mech) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+    let rv = unsafe { dispatch::general::c_encrypt_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+    let rv = unsafe { dispatch::general::c_decrypt_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+/// Control: a KNOWN session with a bad mechanism still reaches mechanism
+/// validation (no RPC is sent; characterization, green before and after).
+#[test]
+fn init_known_session_with_bad_mechanism_still_validates_mechanism() {
+    let _guard = shim_state_test_guard();
+    let _ = state::mark_initialized();
+    state::remember_session_slot(KNOWN_SESSION, 0);
+    let mut mech = overlong_mechanism();
+    let rv = unsafe { dispatch::general::c_digest_init(KNOWN_SESSION, &mut mech) };
+    assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID as CK_RV);
+    let rv = unsafe { dispatch::general::c_encrypt_init(KNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID as CK_RV);
+    let rv = unsafe { dispatch::general::c_decrypt_init(KNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID as CK_RV);
+    // Leave-no-trace: unset the cryptoki flag and forget the sentinel.
+    state::evict_session_authoritative_state(KNOWN_SESSION);
+    state::mark_finalized();
+}
+
+// ---------------------------------------------------------------------------
+// Deferred T29 M3: the same session-before-mechanism precedence on the
+// session-init siblings outside digest_cipher.rs (sign/verify +
+// sign/verify-recover + VerifySignature inits).
+// ---------------------------------------------------------------------------
+
+/// Dual-defect input (bad session + bad mechanism) must yield the native
+/// session error on every sibling init, not the mechanism error.
+#[test]
+fn sibling_init_bad_session_and_bad_mechanism_yields_session_error() {
+    let _guard = shim_state_test_guard();
+    let _ = state::mark_initialized();
+    let mut mech = overlong_mechanism();
+    let rv = unsafe { dispatch::general::c_sign_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(
+        rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "T29 M3: C_SignInit with bad session + bad mechanism must return the session error"
+    );
+    let rv = unsafe { dispatch::general::c_verify_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(
+        rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "T29 M3: C_VerifyInit with bad session + bad mechanism must return the session error"
+    );
+    let rv = unsafe { dispatch::general::c_sign_recover_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(
+        rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "T29 M3: C_SignRecoverInit with bad session + bad mechanism must return the session error"
+    );
+    let rv = unsafe { dispatch::general::c_verify_recover_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(
+        rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "T29 M3: C_VerifyRecoverInit with bad session + bad mechanism must return the session error"
+    );
+    let rv = unsafe {
+        dispatch::general::c_verify_signature_init(
+            UNKNOWN_SESSION,
+            &mut mech,
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_eq!(
+        rv, CKR_SESSION_HANDLE_INVALID as CK_RV,
+        "T29 M3: C_VerifySignatureInit with bad session + bad mechanism must return the session error"
+    );
+    // Leave-no-trace: later tests require the cryptoki flag unset at entry.
+    state::mark_finalized();
+}
+
+/// Uninitialized cryptoki outranks both on the siblings too: dual-defect
+/// input before C_Initialize must answer NOT_INITIALIZED, never MECHANISM_*.
+#[test]
+fn sibling_init_dual_defect_before_initialize_returns_not_initialized() {
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let mut mech = overlong_mechanism();
+    let rv = unsafe { dispatch::general::c_sign_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+    let rv = unsafe { dispatch::general::c_verify_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+    let rv = unsafe { dispatch::general::c_sign_recover_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+    let rv = unsafe { dispatch::general::c_verify_recover_init(UNKNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+    let rv = unsafe {
+        dispatch::general::c_verify_signature_init(
+            UNKNOWN_SESSION,
+            &mut mech,
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+/// Control: a KNOWN session with a bad mechanism still reaches mechanism
+/// validation on every sibling (no RPC is sent; characterization, green
+/// before and after).
+#[test]
+fn sibling_init_known_session_with_bad_mechanism_still_validates_mechanism() {
+    let _guard = shim_state_test_guard();
+    let _ = state::mark_initialized();
+    state::remember_session_slot(KNOWN_SESSION, 0);
+    let mut mech = overlong_mechanism();
+    let rv = unsafe { dispatch::general::c_sign_init(KNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID as CK_RV);
+    let rv = unsafe { dispatch::general::c_verify_init(KNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID as CK_RV);
+    let rv = unsafe { dispatch::general::c_sign_recover_init(KNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID as CK_RV);
+    let rv = unsafe { dispatch::general::c_verify_recover_init(KNOWN_SESSION, &mut mech, 0) };
+    assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID as CK_RV);
+    let rv = unsafe {
+        dispatch::general::c_verify_signature_init(
+            KNOWN_SESSION,
+            &mut mech,
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_eq!(rv, CKR_MECHANISM_PARAM_INVALID as CK_RV);
+    // Leave-no-trace: unset the cryptoki flag and forget the sentinel.
+    state::evict_session_authoritative_state(KNOWN_SESSION);
+    state::mark_finalized();
+}
+
+// ---------------------------------------------------------------------------
 // ADR-0010 Scope 2: NULL-pointer faithfulness end-to-end (c_decrypt exemplar)
 //
 // These tests require a full shim → client → gRPC → server → MockBackend
-// stack and so need a running daemon. They use their own minimal fixture
-// rather than the one in output_semantics.rs (which is private).
+// stack and so need a running daemon. They reuse the shared TestDaemon
+// fixture from output_semantics.rs (W1-C7-14) rather than a private
+// duplicate.
 // ---------------------------------------------------------------------------
 
 mod decrypt_null_e2e {
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use pkcs11_proxy_ng::server::context_manager::ContextManager;
-    use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
-    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
-    use pkcs11_proxy_ng_proto::Pkcs11ProxyServer;
-    use pkcs11_proxy_ng_types::{CkMechanismType, CkSlotId, InterfaceCapabilities, InterfaceInfo};
-    use tokio::net::TcpListener;
-    use tokio::runtime::Runtime;
-    use tokio::sync::watch;
-    use tokio_stream::wrappers::TcpListenerStream;
-    use tonic::transport::Server;
-
+    use super::super::output_semantics::TestDaemon;
     use super::super::*;
 
-    /// A minimal in-process daemon for c_decrypt e2e tests.
-    struct DecryptDaemon {
-        // Kept to ensure the tokio runtime outlives the daemon.
-        _runtime: Runtime,
-        endpoint: String,
-        _shutdown: watch::Sender<bool>,
-    }
+    /// Finalizes the shim when the test ends — including on assertion
+    /// unwind — mirroring the shared-daemon [`super::super::output_semantics::ShimSession`]
+    /// teardown (the fixture daemon itself is a process-lifetime singleton
+    /// and needs no per-test shutdown).
+    struct FinalizeOnDrop;
 
-    impl DecryptDaemon {
-        fn start() -> Self {
-            let runtime = Runtime::new().expect("test runtime");
-            let (endpoint, shutdown_tx) = runtime.block_on(async {
-                let backend = Arc::new(MockBackend::new(
-                    vec![CkSlotId(0)],
-                    vec![CkMechanismType::AES_ECB, CkMechanismType::AES_GCM],
-                ));
-                backend.set_interface_capabilities(InterfaceCapabilities {
-                    interfaces: vec![
-                        InterfaceInfo {
-                            version_major: 2,
-                            version_minor: 40,
-                            null_functions: vec![],
-                        },
-                        InterfaceInfo {
-                            version_major: 3,
-                            version_minor: 0,
-                            null_functions: vec![],
-                        },
-                        InterfaceInfo {
-                            version_major: 3,
-                            version_minor: 2,
-                            null_functions: vec![],
-                        },
-                    ],
-                });
-                let backend_trait: Arc<dyn Pkcs11Backend> = backend.clone();
-                let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-                context_manager.populate_slots(&backend_trait).await.expect("populate_slots");
-
-                let service =
-                    Pkcs11ProxyService::insecure_for_tests(context_manager.clone(), backend_trait);
-                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-                let addr = listener.local_addr().expect("local addr");
-                let endpoint = format!("http://127.0.0.1:{}", addr.port());
-                let incoming = TcpListenerStream::new(listener);
-                let (shutdown_tx, shutdown_rx) = watch::channel(false);
-                tokio::spawn(async move {
-                    let _ = Server::builder()
-                        .add_service(Pkcs11ProxyServer::new(service))
-                        .serve_with_incoming_shutdown(incoming, async move {
-                            let mut shutdown_rx = shutdown_rx;
-                            let _ = shutdown_rx.changed().await;
-                        })
-                        .await;
-                });
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                (endpoint, shutdown_tx)
-            });
-            Self { _runtime: runtime, endpoint, _shutdown: shutdown_tx }
-        }
-    }
-
-    impl Drop for DecryptDaemon {
+    impl Drop for FinalizeOnDrop {
         fn drop(&mut self) {
             let _ = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
-            unsafe { std::env::remove_var("PKCS11_PROXY_ENDPOINT") };
         }
     }
 
@@ -759,7 +883,8 @@ mod decrypt_null_e2e {
     #[test]
     fn c_decrypt_null_input_with_len_reaches_backend_as_null() {
         let _guard = shim_state_test_guard();
-        let daemon = DecryptDaemon::start();
+        let daemon = TestDaemon::shared();
+        let _finalize = FinalizeOnDrop;
         let (session, _key) = init_decrypt_session(&daemon.endpoint);
 
         let mut out_len: CK_ULONG = 64;
@@ -785,7 +910,8 @@ mod decrypt_null_e2e {
     #[test]
     fn c_decrypt_too_large_input_shim_rejects_with_arguments_bad() {
         let _guard = shim_state_test_guard();
-        let daemon = DecryptDaemon::start();
+        let daemon = TestDaemon::shared();
+        let _finalize = FinalizeOnDrop;
         let (session, _key) = init_decrypt_session(&daemon.endpoint);
 
         let mut out_len: CK_ULONG = 64;
@@ -812,7 +938,8 @@ mod decrypt_null_e2e {
     #[test]
     fn c_decrypt_null_input_zero_len_is_not_arguments_bad_from_null_handling() {
         let _guard = shim_state_test_guard();
-        let daemon = DecryptDaemon::start();
+        let daemon = TestDaemon::shared();
+        let _finalize = FinalizeOnDrop;
         let (session, _key) = init_decrypt_session(&daemon.endpoint);
 
         let mut out_len: CK_ULONG = 64;

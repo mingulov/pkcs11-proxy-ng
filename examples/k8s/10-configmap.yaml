@@ -24,11 +24,13 @@ data:
     [mechanisms]
     config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"
 
-  # Shipped embedded default — replace with your own mechanism
-  # registry to enable vendor extensions (CloudHSM, etc.). The
-  # daemon recomputes the revision hash on every reload, so a
-  # `kubectl rollout restart` after editing this file is the
-  # canonical operator workflow.
+  # Mechanism registry OVERRIDE — merged over the shipped embedded
+  # default (~50 shapes), not a replacement for it. List only your
+  # additions/changes here (e.g. vendor extensions for CloudHSM,
+  # etc.); everything else keeps the embedded entries. The daemon
+  # merges this file over the default and recomputes the revision
+  # hash on every reload, so a `kubectl rollout restart` after
+  # editing this file is the canonical operator workflow.
   mechanism_params.toml: |
     discovery_mode = "transparent"
 

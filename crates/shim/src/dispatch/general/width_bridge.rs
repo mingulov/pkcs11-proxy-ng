@@ -12,8 +12,9 @@
 //! native byte order (asserted compatible with this client at probe —
 //! ADR-0011 D6), so both edges encode/decode in the shared native order.
 
-use pkcs11_proxy_ng_types::CkAttributeType;
-use pkcs11_proxy_ng_types::width::{self, ByteOrder, WidthError};
+use pkcs11_proxy_ng_types::{
+    ByteOrder, CkAttributeType, WidthError, reencode_ulong, translate_ulong_len,
+};
 
 /// True when this attribute's value is one or more `CK_ULONG`s and therefore
 /// must be re-encoded between differing edge widths.
@@ -36,7 +37,7 @@ pub fn bridge_request_buffer_len(
     if client_width == backend_width || !is_ulong_typed(attr_type) {
         return client_len;
     }
-    width::translate_ulong_len(client_len, client_width, backend_width)
+    translate_ulong_len(client_len, client_width, backend_width)
 }
 
 /// Outer `CKA_*_TEMPLATE` buffer length, client layout -> backend layout.
@@ -89,11 +90,11 @@ pub fn bridge_output_value(
     if backend_width == client_width || !is_ulong_typed(attr_type) {
         return Ok((value.map(<[u8]>::to_vec), returned_len));
     }
-    let client_len = width::translate_ulong_len(returned_len, backend_width, client_width);
+    let client_len = translate_ulong_len(returned_len, backend_width, client_width);
     let client_value = match value {
         Some(bytes) => {
             // D6 guarantees both edges share this client's native order.
-            Some(width::reencode_ulong(bytes, backend_width, client_width, ByteOrder::native())?)
+            Some(reencode_ulong(bytes, backend_width, client_width, ByteOrder::native())?)
         }
         None => None,
     };
@@ -103,7 +104,7 @@ pub fn bridge_output_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE;
+    use pkcs11_proxy_ng_types::{CANONICAL_UNAVAILABLE, encode_native_ulong};
 
     const SCALAR: CkAttributeType = CkAttributeType::CLASS;
     const ARRAY: CkAttributeType = CkAttributeType::ALLOWED_MECHANISMS;
@@ -186,7 +187,7 @@ mod tests {
 
     /// Backend-native ulong bytes for `v` at `width` on this host.
     fn native_bytes(v: u64, width: usize) -> Vec<u8> {
-        width::encode_native_ulong(v, width)
+        encode_native_ulong(v, width)
     }
 
     #[test]
@@ -243,7 +244,7 @@ mod law_tests {
     //! bridge's pure length/value functions across every width and stride
     //! pairing — complements the pinned example matrix in `tests`.
 
-    use pkcs11_proxy_ng_types::CkAttributeType;
+    use pkcs11_proxy_ng_types::{CkAttributeType, encode_native_ulong};
 
     use super::*;
 
@@ -289,7 +290,7 @@ mod law_tests {
             let values: Vec<u64> = (0..n).map(|_| rng.next() & 0xFFFF_FFFF).collect();
             // Backend width 4 -> client width 8 (the widening direction).
             let backend_bytes: Vec<u8> =
-                values.iter().flat_map(|v| width::encode_native_ulong(*v, 4)).collect();
+                values.iter().flat_map(|v| encode_native_ulong(*v, 4)).collect();
             let (out, len) = bridge_output_value(
                 CkAttributeType::ALLOWED_MECHANISMS,
                 Some(&backend_bytes),

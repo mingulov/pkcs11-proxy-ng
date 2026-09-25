@@ -12,14 +12,18 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_backend::mock::MockBackend;
 use pkcs11_proxy_ng_client::Pkcs11Client;
 // W1-C10-06: downstream crates name these types from the crate root.
-use pkcs11_proxy_ng_client::{BackendProbe, DeriveKeyMechanismOutResult};
+use pkcs11_proxy_ng_client::{BackendInterface, BackendProbe, DeriveKeyMechanismOutResult};
 use pkcs11_proxy_ng_types::*;
 
 #[test]
 fn root_reexports_name_downstream_types() {
     let probe = BackendProbe {
         exact_output_effects_version: Some(1),
-        interfaces: vec![(3, 0, vec![])],
+        interfaces: vec![BackendInterface {
+            version_major: 3,
+            version_minor: 0,
+            null_functions: vec![],
+        }],
         mechanism_registry: None,
         backend_ulong_size: Some(8),
         backend_byte_order: Some(1),
@@ -28,6 +32,10 @@ fn root_reexports_name_downstream_types() {
         pointer_safe_authenticated_parameters: false,
     };
     assert_eq!(probe.exact_output_effects_version, Some(1));
+    // W1-C10-10: downstream names the interface fields (no positional tuple).
+    assert_eq!(probe.interfaces[0].version_major, 3);
+    assert_eq!(probe.interfaces[0].version_minor, 0);
+    assert!(probe.interfaces[0].null_functions.is_empty());
     let out = DeriveKeyMechanismOutResult { rv: CkRv::OK, key_handle: None, mechanism_out: None };
     assert_eq!(out.rv, CkRv::OK);
 }
@@ -268,10 +276,7 @@ async fn get_attribute_value_preserves_scalar_types() {
     let mut client = Pkcs11Client::connect(&daemon.endpoint).await.unwrap();
     client.initialize().await.unwrap();
     let slots = client.get_slot_list(false).await.unwrap();
-    let session = client
-        .open_session(slots[0], CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
-        .await
-        .unwrap();
+    let session = client.open_session(slots[0], CkSessionFlags::SERIAL_SESSION).await.unwrap();
     let object = client
         .create_object(
             session,

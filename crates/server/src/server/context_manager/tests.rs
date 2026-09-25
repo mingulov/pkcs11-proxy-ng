@@ -416,8 +416,7 @@ async fn evict_expired_bounded_under_wedged_backend() {
     let id = mgr.create_context(None).await.unwrap();
     // Give the context a backend session and a login so teardown has both
     // a session to close and a last-holder logout to attempt.
-    let session =
-        mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+    let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
     mock.login(session, CkUserType::User, Some(b"1234")).unwrap();
     mgr.get_context(&id, |ctx| {
         ctx.register_session(
@@ -459,8 +458,7 @@ async fn evict_expired_closes_backend_sessions() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(0), 0);
     mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
     let id = mgr.create_context(None).await.unwrap();
-    let session =
-        mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
+    let session = mock.open_session(CkSlotId(0), CkSessionFlags::SERIAL_SESSION).unwrap();
     mgr.get_context(&id, |ctx| {
         ctx.register_session(
             BackendHandle(session.0),
@@ -666,24 +664,63 @@ async fn concurrent_get_context_from_multiple_readers() {
 
 #[tokio::test]
 async fn evict_expired_concurrent_with_new_context_creation() {
+    use std::collections::HashSet;
+
     use pkcs11_proxy_ng_backend::MockBackend;
 
+    // W1-C2-12: the churn must assert post-churn invariants, not merely
+    // "did not hang": every created context is evicted exactly once, no
+    // phantom or duplicate evictions occur, and the final drain reaps
+    // everything (no leaked leases).
     let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> =
         Arc::new(MockBackend::default_test());
     let mgr = Arc::new(ContextManager::new(std::time::Duration::from_millis(1), 0));
     let mgr_clone = mgr.clone();
     let backend_clone = backend.clone();
     let evict_task = tokio::spawn(async move {
+        let mut evicted = Vec::new();
         for _ in 0..50 {
-            mgr_clone.evict_expired(&backend_clone).await;
+            evicted.extend(mgr_clone.evict_expired(&backend_clone).await);
             tokio::task::yield_now().await;
         }
+        evicted
     });
+    let mut created = Vec::new();
     for _ in 0..50 {
-        let _ = mgr.create_context(None).await;
+        // max_contexts == 0 is unlimited: creation is infallible here, and
+        // a silent `let _ =` would hide a shortfall in the accounting below.
+        created.push(mgr.create_context(None).await.unwrap());
         tokio::task::yield_now().await;
     }
-    evict_task.await.unwrap();
+    let mut evicted: Vec<ClientContextId> = evict_task.await.unwrap();
+
+    // No duplicate context ids at creation.
+    let created_set: HashSet<ClientContextId> = created.iter().cloned().collect();
+    assert_eq!(created_set.len(), 50, "all 50 created context ids must be unique");
+    // Every eviction names a created context, and none repeats.
+    let mut evicted_set = HashSet::new();
+    for id in &evicted {
+        assert!(created_set.contains(id), "evicted id must have been created: {id:?}");
+        assert!(evicted_set.insert(id.clone()), "context evicted twice: {id:?}");
+    }
+
+    // Final drain: past the 1ms lease, one evict round reaps stragglers;
+    // loop (bounded) so a scheduling hiccup cannot flake the test. The
+    // count/id reads below do not touch leases (unlike `get_context`).
+    for _ in 0..10 {
+        if mgr.context_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        for id in mgr.evict_expired(&backend).await {
+            assert!(created_set.contains(&id), "drained id must have been created: {id:?}");
+            assert!(evicted_set.insert(id.clone()), "context evicted twice: {id:?}");
+            evicted.push(id);
+        }
+    }
+    assert_eq!(mgr.context_count(), 0, "final drain must reap every context (no leaked leases)");
+    assert!(mgr.context_ids().is_empty(), "no context ids may survive the drain");
+    assert_eq!(evicted_set, created_set, "every created context must be evicted exactly once");
 }
 
 #[test]
@@ -1302,4 +1339,81 @@ async fn session_quota_reservations_are_per_principal() {
         "bob must be unaffected by alice's exhausted quota"
     );
     drop(held);
+}
+
+/// W1-L13-17: the per-slot holder index tracks acquire/release, and the
+/// indexed scan live-verifies candidates (index-only entries miss and
+/// are pruned — the index is a hint, never authoritative).
+#[tokio::test]
+async fn l13_17_holder_index_tracks_acquire_and_release() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let slot = BackendSlotId(CkSlotId(51));
+    let a = mgr.create_context(None).await.unwrap();
+    let b = mgr.create_context(None).await.unwrap();
+
+    assert_eq!(mgr.first_login_state_for_slot_excluding(slot, &a), None);
+
+    // Index entries WITHOUT live state verify as misses ...
+    mgr.note_login_acquired(&a, slot);
+    mgr.note_login_acquired(&b, slot);
+    assert_eq!(mgr.first_login_state_for_slot_excluding(slot, &a), None);
+    // ... and the failed verification prunes the stale ids.
+    assert!(
+        mgr.slot_login_holders.get(&slot).map(|h| h.is_empty()).unwrap_or(true),
+        "stale index entries must be pruned on verified miss"
+    );
+
+    // Live state → hit for others, miss for the excluded holder.
+    mgr.get_context(&a, |ctx| {
+        ctx.login_state.insert(slot, LoginState::User);
+    })
+    .await;
+    mgr.note_login_acquired(&a, slot);
+    assert_eq!(mgr.first_login_state_for_slot_excluding(slot, &b), Some(LoginState::User));
+    assert_eq!(mgr.first_login_state_for_slot_excluding(slot, &a), None);
+
+    mgr.note_login_released(&a, slot);
+    assert_eq!(mgr.first_login_state_for_slot_excluding(slot, &b), None);
+}
+
+/// W1-L13-17: the index holds exactly the holders (not all contexts),
+/// and the indexed scan agrees with the authoritative full scan for
+/// every exclusion.
+#[tokio::test]
+async fn l13_17_indexed_scan_matches_authoritative_scan() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let slot = BackendSlotId(CkSlotId(52));
+    let other_slot = BackendSlotId(CkSlotId(53));
+    let mut idle = Vec::new();
+    for _ in 0..200 {
+        idle.push(mgr.create_context(None).await.unwrap());
+    }
+    let h1 = mgr.create_context(None).await.unwrap();
+    let h2 = mgr.create_context(None).await.unwrap();
+    for (id, slot, state) in [(&h1, slot, LoginState::User), (&h2, other_slot, LoginState::So)] {
+        mgr.get_context(id, |ctx| {
+            ctx.login_state.insert(slot, state);
+        })
+        .await;
+        mgr.note_login_acquired(id, slot);
+    }
+
+    // Two slots indexed despite 202 live contexts — the scan input is
+    // O(holders), not O(contexts).
+    assert_eq!(mgr.slot_login_holders.len(), 2);
+    assert_eq!(mgr.slot_login_holders.get(&slot).map(|h| h.len()), Some(1));
+
+    for excluded in idle.iter().chain([&h1, &h2]) {
+        assert_eq!(
+            mgr.first_login_state_for_slot_excluding(slot, excluded),
+            mgr.first_login_state_for_slot_excluding_authoritative(slot, excluded),
+            "indexed scan must match the authoritative full scan"
+        );
+    }
+    assert_eq!(mgr.first_login_state_for_slot_excluding(slot, &h1), None);
+    assert_eq!(mgr.first_login_state_for_slot_excluding(slot, &idle[0]), Some(LoginState::User));
+    assert_eq!(
+        mgr.first_login_state_for_slot_excluding(other_slot, &idle[0]),
+        Some(LoginState::So)
+    );
 }
