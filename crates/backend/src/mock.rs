@@ -122,6 +122,14 @@ pub struct MockBackend {
     /// the normal `enqueue_slot_event` wakeup (or by clearing the flag,
     /// which also wakes parked waiters to re-check).
     hang_slot_event: Mutex<bool>,
+    /// One-shot `wait_for_slot_event` outcome override for ownership-matrix
+    /// tests (TO26b group 2). The next wait consumes it, letting tests
+    /// script backend errors (contention, sentinel RVs) the queue cannot
+    /// express. Set via `set_next_wait_outcome()`.
+    next_wait_outcome: Mutex<Option<CkResult<CkSlotId>>>,
+    /// Count of `wait_for_slot_event` trait calls reaching the backend.
+    /// Wait-matrix tests use it to prove zero-backend-entry refusals.
+    wait_calls: AtomicUsize,
     /// Per-slot token presence override. Slots not present in this map default
     /// to token-present to preserve the historical mock behavior.
     token_presence: Mutex<HashMap<CkSlotId, bool>>,
@@ -302,6 +310,8 @@ impl MockBackend {
             }),
             slot_event_queue: Mutex::new(std::collections::VecDeque::new()),
             hang_slot_event: Mutex::new(false),
+            next_wait_outcome: Mutex::new(None),
+            wait_calls: AtomicUsize::new(0),
             mechanism_entries: Mutex::new(mechanism_entry::MechanismEntries::default()),
             wrap_entries: Mutex::new(Vec::new()),
             wrap_action: Mutex::new(None),
@@ -458,6 +468,18 @@ impl MockBackend {
     pub fn inject_slot_event_hang(&self, hang: bool) {
         *self.hang_slot_event.lock().unwrap() = hang;
         self.slot_event_condvar.notify_all();
+    }
+
+    /// Script the next `wait_for_slot_event` outcome (consumed one-shot).
+    /// Lets ownership-matrix tests drive backend errors — contention
+    /// refusals, sentinel RVs — the event queue cannot express.
+    pub fn set_next_wait_outcome(&self, outcome: CkResult<CkSlotId>) {
+        *self.next_wait_outcome.lock().unwrap() = Some(outcome);
+    }
+
+    /// Number of `wait_for_slot_event` trait calls that reached the backend.
+    pub fn wait_call_count(&self) -> usize {
+        self.wait_calls.load(Ordering::SeqCst)
     }
 
     /// Configure whether a token is present in a known slot.

@@ -258,6 +258,12 @@ impl MockBackend {
     }
 
     pub(super) fn wait_for_slot_event_impl(&self, flags: u64) -> CkResult<CkSlotId> {
+        self.wait_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Scripted one-shot outcome first (TO26b group 2): the queue and
+        // hang injector cannot express backend contention/sentinel errors.
+        if let Some(outcome) = self.next_wait_outcome.lock().unwrap().take() {
+            return outcome;
+        }
         let dont_block = flags & 0x1 != 0;
         let mut queue = self.slot_event_queue.lock().unwrap();
 

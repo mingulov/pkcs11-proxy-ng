@@ -124,6 +124,8 @@ settlement; session calls also hold their generation-qualified session guard.
 Finalize seals admission, drains ordinary workers, then uses exclusive native
 access. Its own native call runs in a tracked worker.
 
+Status: IMPLEMENTED (TF01b; enforcement-complete 52f9796, 2026-09-19).
+
 Retain all project-owned native graphs, actual nested/attribute buffers,
 input/output cells, library and control contexts through their termination
 receipts. A pointer may not be retained to a local stack cell. Park complete
@@ -428,10 +430,35 @@ remains; the residual unqualified set is precisely the complement of
 
 ## Required acceptance evidence
 
-All cases below remain required future tests, not receipts from this amendment.
-Use synthetic canaries, deterministic gates, actual production owner seams and
-immutable same-source binaries, hashes, ELF widths, commands/test counts,
-toolchains, libc/kernel/environment records and child wait/marker results.
+All cases below are RECEIPTED (TO26a groups 1+4+5+6,
+`cd0b6e7f4cbafd38536d00407a195b85c2b392ae..d57d2cdfda608406c7619acf475d7bc178034ff4`;
+TO26b groups 2+3+7 plus carry items and the trailing paragraph,
+`0ae0effd78e9d4ff7ab9e0da2700e2267c3ec6a7..1519ed3e5beb14dfabd6f0b054b97d5961861675`;
+flipped 2026-09-19 — GAP-1 closed). The evidence rules that produced
+them still bind every future re-run: use synthetic canaries,
+deterministic gates, actual production owner seams and immutable
+same-source binaries, hashes, ELF widths, commands/test counts,
+toolchains, libc/kernel/environment records and child wait/marker
+results. Per-group evidence map:
+
+- Group 1 (constructor battery): TO26a report + `native_domain_tests`,
+  `constructor_child_tests`.
+- Group 2 (wait matrices): `WaiterDomain` + `slot_wait_tests`
+  (direct-backend), `session/tests.rs` wait cases (gRPC),
+  `shim/tests/wait_matrix.rs` (loaded shim), `types::width` helper
+  matrix; live legs in the group-3 runners.
+- Group 3 (width pairs): `run-retained-oracle-live-test.sh` (12 legs:
+  retention ×8 + control-loop ×4, hook daemons, maps/width/instance
+  receipts, production-build negative) and
+  `run-cross-width-live-test.sh` + `run-cross-width-nss32-live-test.sh`
+  (SoftHSM all four pairs + NSS32, bridging + live-wait receipts).
+- Groups 4–6 (stop/markers/signals): TO26a report (S1–S16, M1–M11,
+  N1); the group-4 gated-waiter case is S17 (TO26b I1), which
+  supersedes S11's parked-thread analog as waiter coverage.
+- Group 7 (codegen + native exec + classification):
+  `doc/release/native-stop-codegen-review.md` (8 codegen/final-link
+  variants, 4 native execution variants) and the wait-scope table in
+  `doc/release/native-ownership-inventory.md`.
 
 - Constructor races/second loads: identical, relative, symlink, hardlink and
   genuinely different paths; Reserved/Active/Retiring contention; no second
@@ -476,8 +503,13 @@ toolchains, libc/kernel/environment records and child wait/marker results.
   blocking Wait as excluded scope and separately qualify nonblocking events;
   crypto-only success or a provider's own unsupported Wait proves no event path.
 
-The full per-variant/consumer ownership inventory, associated exact-output
-effects, created-object cleanup, cancellation/retirement tests and independent
-review remain required alongside P0. This document does not accept the common
+The full per-variant/consumer ownership inventory
+(`doc/release/native-ownership-inventory.md`), associated exact-output
+effects (`exact_output_contract_tests`, `retained_owner_contract_tests`,
+loaded `exact_output_error_test` 15/15), created-object cleanup
+(`object_cleanup`, retained-owner contracts) and cancellation/retirement
+tests (cancel/fence retirement suites, server close taxonomy) are
+RECEIPTED alongside P0 (same SHAs/date as above). Independent review
+remains required alongside P0. This document does not accept the common
 owner repair, async completion, later lifecycle/privacy/budget integration,
 Windows native loading or a release.
