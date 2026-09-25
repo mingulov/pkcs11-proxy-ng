@@ -44,7 +44,7 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     },
     IgnoredTestLane {
         file: "crates/server/tests/cli_hardening_test.rs",
-        reason: "SoftHSM2-backed CLI subprocess coverage",
+        reason: "CLI subprocess tests using SoftHSM2",
         commands: &[
             "cargo test -p pkcs11-proxy-ng --test cli_hardening_test -- --ignored --test-threads=1",
         ],
@@ -52,7 +52,7 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     },
     IgnoredTestLane {
         file: "crates/server/tests/concurrency_and_recovery_test.rs",
-        reason: "SoftHSM2-backed multi-client and recovery coverage",
+        reason: "Multi-client and recovery tests using SoftHSM2",
         commands: &[
             "cargo test -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored --test-threads=1",
         ],
@@ -60,7 +60,7 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     },
     IgnoredTestLane {
         file: "crates/server/tests/consumer_p11tool_test.rs",
-        reason: "SoftHSM2-backed GnuTLS p11tool consumer coverage",
+        reason: "GnuTLS p11tool tests using SoftHSM2",
         commands: &[
             "cargo test -p pkcs11-proxy-ng --test consumer_p11tool_test -- --ignored --test-threads=1",
         ],
@@ -72,7 +72,7 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     },
     IgnoredTestLane {
         file: "crates/server/tests/consumer_pkcs11_tool_test.rs",
-        reason: "SoftHSM2-backed OpenSC pkcs11-tool consumer coverage",
+        reason: "OpenSC pkcs11-tool tests using SoftHSM2",
         commands: &[
             "cargo test -p pkcs11-proxy-ng --test consumer_pkcs11_tool_test -- --ignored --test-threads=1",
         ],
@@ -84,7 +84,7 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     },
     IgnoredTestLane {
         file: "crates/server/tests/consumer_python_test.rs",
-        reason: "SoftHSM2-backed Python PyKCS11 consumer coverage",
+        reason: "Python PyKCS11 tests using SoftHSM2",
         commands: &[
             "cargo test -p pkcs11-proxy-ng --test consumer_python_test -- --ignored --test-threads=1",
         ],
@@ -96,7 +96,7 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     },
     IgnoredTestLane {
         file: "crates/server/tests/integration_test.rs",
-        reason: "Split SoftHSM2 and NSS real-backend smoke coverage",
+        reason: "Smoke tests using SoftHSM2 and NSS softokn",
         commands: &[
             "cargo test -p pkcs11-proxy-ng --test integration_test softhsm_smoke_workflow -- --ignored --test-threads=1",
             "cargo test -p pkcs11-proxy-ng --test integration_test nss_sign_recover_and_verify_recover -- --ignored --test-threads=1",
@@ -116,14 +116,13 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     },
     IgnoredTestLane {
         file: "crates/server/tests/mechanism_out_gcm_iv_test.rs",
-        reason: "Patched-SoftHSM2-backed AES-GCM init-time generated-IV coverage \
-                 for the Wave 1 + Wave 2 mechanism_out work",
+        reason: "AES-GCM generated-IV output using patched SoftHSM2",
         commands: &["SOFTHSM2_GCM_IV_SIM_LIB=/path/to/patched/libsofthsm2.so \
              cargo test -p pkcs11-proxy-ng --test mechanism_out_gcm_iv_test \
              -- --ignored --test-threads=1"],
         requirements: &[
-            "Patched libsofthsm2.so built from pkcs11-check/docker/softhsm2/patches/ \
-             with SOFTHSM2_GCM_IV_SIM_LIB pointing at it",
+            "Patched libsofthsm2.so built from [pkcs11-check](https://github.com/mingulov/pkcs11-check) \
+             `docker/softhsm2/patches/`; set SOFTHSM2_GCM_IV_SIM_LIB to its path",
             "softhsm2-util",
         ],
     },
@@ -187,7 +186,7 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
     },
     IgnoredTestLane {
         file: "crates/server/tests/template_compat_test.rs",
-        reason: "SoftHSM2-backed template compatibility coverage",
+        reason: "Template compatibility tests using SoftHSM2",
         commands: &[
             "cargo test -p pkcs11-proxy-ng --test template_compat_test -- --ignored --test-threads=1",
         ],

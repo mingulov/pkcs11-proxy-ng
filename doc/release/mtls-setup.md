@@ -1,17 +1,15 @@
 # mTLS Setup
 
-The baseline supported public transport is TCP with mutual TLS. This guide
-generates a CA, a server certificate, and one client certificate, then wires
-them into the daemon config and the client.
+For TCP connections, configure mutual TLS on the daemon and shim. This guide
+creates a CA, a server certificate, and one client certificate.
 
-> For same-host deployments you can skip certificates entirely and use a
-> Unix-domain socket with peer-credential auth instead — see
+> For same-host deployments, use a Unix socket with peer-credential auth; see
 > [Unix-domain socket](#unix-domain-socket-alternative).
 
 ## 1. Generate certificates
 
-Any standard CA tooling works; here is a minimal `openssl` flow. Use a real CA
-and proper key management for anything beyond evaluation.
+This `openssl` example is for evaluation. Use your organization's CA and key
+management for a real deployment.
 
 ```bash
 # Certificate authority
@@ -54,14 +52,15 @@ server_cert = "/etc/pkcs11-proxy-ng/tls/server.crt"
 server_key  = "/etc/pkcs11-proxy-ng/tls/server.key"
 
 [auth]
-# Either accept any client with a CA-signed cert:
+# Evaluation only: accept any client with a CA-signed cert.
 allow_all_authenticated = true
-# …or restrict per client identity (issuer/subject from the client cert) to
-# specific tokens. See the operator runbook for policy syntax.
+# For production, remove this setting and restrict each certificate identity
+# to specific tokens; see the operator runbook for policy syntax.
 ```
 
-Start from [`examples/configs/staging/proxy.toml`](../../examples/configs/staging/proxy.toml)
-or `prod/proxy.toml` rather than hand-rolling.
+See the [staging](../../examples/configs/staging/proxy.toml) and
+[production](../../examples/configs/prod/proxy.toml) examples for complete
+configurations.
 
 ## 4. Client configuration
 
@@ -85,11 +84,12 @@ For same-host deployments, run the daemon on a Unix socket with
 peer-credential authentication (no certificates), and point the client at it:
 
 ```bash
-export PKCS11_PROXY_SOCKET=/run/pkcs11-proxy-ng/proxy.sock
+export PKCS11_PROXY_ENDPOINT=unix:/run/pkcs11-proxy-ng/proxy.sock
 ```
 
 The daemon authenticates the connecting process by its OS credentials
-(`SO_PEERCRED`). See the
+(`SO_PEERCRED`). Use `PKCS11_PROXY_ENDPOINT` for Unix sockets;
+`PKCS11_PROXY_SOCKET` accepts only legacy `tcp://` addresses. See the
 [operator runbook](../runbooks/operating-pkcs11-proxy-ng.md) for the local
 listener configuration.
 
