@@ -77,6 +77,9 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: 1.98.1
+          # Match rust-toolchain.toml before restoring build artifacts so
+          # the first cargo command does not modify the toolchain.
+          components: rustfmt,clippy
 
       - name: Install protoc (all OSes)
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
@@ -249,6 +252,7 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: 1.98.1
+          components: rustfmt,clippy
           targets: i686-pc-windows-msvc
 
       - name: Install protoc
