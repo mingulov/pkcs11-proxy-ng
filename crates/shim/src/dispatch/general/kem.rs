@@ -22,12 +22,15 @@ pub unsafe extern "C" fn c_encapsulate_key(
         if p_mechanism.is_null() || pul_ciphertext_len.is_null() || ph_key.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
         let spec = unsafe { output_buffer_spec(p_ciphertext, pul_ciphertext_len) };
 
         let result = with_client!(client => client.encapsulate_key_exact(
@@ -77,13 +80,16 @@ pub unsafe extern "C" fn c_decapsulate_key(
         if p_ciphertext.is_null() && ul_ciphertext_len != 0 {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         let ciphertext = unsafe { read_input_slice(p_ciphertext, ul_ciphertext_len) };
-        let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
         match with_client!(client => client.decapsulate_key(
             CkSessionHandle(h_session),
             &mech,

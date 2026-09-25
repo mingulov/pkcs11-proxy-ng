@@ -1,0 +1,174 @@
+# Provider Quirk Registry
+#
+# Machine-readable registry of known provider-specific behaviors, limitations,
+# and template requirements.  Used by test infrastructure to make skip/xfail
+# decisions, and as a human reference for compatibility work.
+#
+# Structure:
+#   [providers.<id>]                     — provider metadata
+#   [providers.<id>.login]               — login/session semantics
+#   [providers.<id>.mechanisms]           — mechanism support notes
+#   [providers.<id>.templates]           — template attribute requirements
+#   [providers.<id>.quirks]              — known behavioral quirks
+#   [providers.<id>.skip]                — explicit test skip reasons
+
+# ─── SoftHSM2 ─────────────────────────────────────────────────────────
+
+[providers.softhsm2]
+display_name = "SoftHSM2"
+module_paths = [
+    "/usr/lib/softhsm/libsofthsm2.so",
+    "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so",
+    "/usr/lib64/softhsm/libsofthsm2.so",
+]
+init_tool = "softhsm2-util"
+status = "primary"  # primary | optional | experimental
+
+[providers.softhsm2.login]
+so_pin_required_for_init = true
+user_pin_set_via_so_session = true
+shared_login_across_sessions = true
+notes = "Token must be initialized with softhsm2-util --init-token before use."
+
+[providers.softhsm2.mechanisms]
+supported = [
+    "CKM_RSA_PKCS_KEY_PAIR_GEN",
+    "CKM_RSA_PKCS",
+    "CKM_RSA_PKCS_PSS",
+    "CKM_RSA_PKCS_OAEP",
+    "CKM_SHA256",
+    "CKM_SHA384",
+    "CKM_SHA512",
+    "CKM_AES_KEY_GEN",
+    "CKM_AES_CBC",
+    "CKM_AES_GCM",
+    "CKM_EC_KEY_PAIR_GEN",
+    "CKM_ECDSA",
+    "CKM_ECDH1_DERIVE",
+]
+unsupported = [
+    "CKM_RSA_X_509",  # raw RSA not available
+]
+no_sign_recover = true  # CKF_SIGN_RECOVER not reported for any mechanism
+no_verify_recover = true
+
+[providers.softhsm2.templates]
+rsa_minimal_pub = ["CKA_MODULUS_BITS", "CKA_PUBLIC_EXPONENT"]
+rsa_minimal_priv = []  # empty template accepted
+aes_required = ["CKA_CLASS", "CKA_KEY_TYPE", "CKA_VALUE_LEN"]
+ec_required_pub = ["CKA_KEY_TYPE", "CKA_EC_PARAMS"]
+data_object_minimal = ["CKA_CLASS", "CKA_VALUE"]
+cka_token_default = "session"  # omitting CKA_TOKEN defaults to session object
+cka_extractable = "accepted"
+cka_wrap_unwrap = "accepted"
+cka_id = "accepted"
+
+[providers.softhsm2.quirks]
+fork_unsafe = true  # tokio runtime does not survive fork()
+fork_note = "fork() + async runtime: child inherits dead runtime, C_Initialize fails"
+multi_slot = true  # supports multiple slots via softhsm2-util
+operation_state_support = "limited"  # C_GetOperationState may return CKR_STATE_UNSAVEABLE
+
+[providers.softhsm2.skip]
+sign_recover = "CKF_SIGN_RECOVER not reported for any mechanism"
+verify_recover = "CKF_VERIFY_RECOVER not reported for any mechanism"
+hotplug = "no hotplug events in software token"
+
+# ─── NSS softokn ──────────────────────────────────────────────────────
+
+[providers.nss_softokn]
+display_name = "NSS softokn"
+module_paths = [
+    "/usr/lib/x86_64-linux-gnu/nss/libsoftokn3.so",
+    "/usr/lib64/nss/libsoftokn3.so",
+    "/usr/lib/nss/libsoftokn3.so",
+]
+init_tool = "certutil"
+status = "optional"
+
+[providers.nss_softokn.login]
+so_pin_required_for_init = false
+user_pin_set_via_so_session = false
+shared_login_across_sessions = true
+notes = """
+NSS uses certutil -N -d for database initialization rather than \
+C_InitToken.  The SO PIN concept does not directly map.  Token \
+initialization via C_InitToken + C_InitPIN may behave differently \
+than the certutil path."""
+
+[providers.nss_softokn.mechanisms]
+supported = [
+    "CKM_RSA_PKCS_KEY_PAIR_GEN",
+    "CKM_RSA_PKCS",
+    "CKM_SHA256",
+    "CKM_EC_KEY_PAIR_GEN",
+    "CKM_ECDSA",
+]
+sign_recover_available = true  # CKF_SIGN_RECOVER reported for RSA_PKCS
+verify_recover_available = true
+
+[providers.nss_softokn.templates]
+notes = "NSS has stricter template validation than SoftHSM2 in some cases."
+
+[providers.nss_softokn.quirks]
+config_dir_required = true
+config_dir_note = "Requires configDir= in CK_C_INITIALIZE_ARGS or NSS_INIT_* env"
+db_format = "sql"  # cert9.db / key4.db (sql: prefix)
+fork_unsafe = true
+
+[providers.nss_softokn.skip]
+aes_keygen = "CKM_AES_KEY_GEN may not be available in all NSS builds"
+oaep = "CKM_RSA_PKCS_OAEP behavior varies by NSS version"
+
+# ─── Kryoptic ─────────────────────────────────────────────────────────
+
+[providers.kryoptic]
+display_name = "Kryoptic"
+module_paths = []  # must be specified via PKCS11_PROXY_KRYOPTIC_MODULE env
+init_tool = ""  # no external init tool; uses internal provisioning
+status = "experimental"
+
+[providers.kryoptic.login]
+so_pin_required_for_init = true
+user_pin_set_via_so_session = true
+shared_login_across_sessions = true
+notes = "Kryoptic is a Rust PKCS#11 token. Configuration and provisioning varies by version."
+
+[providers.kryoptic.mechanisms]
+supported = [
+    "CKM_RSA_PKCS_KEY_PAIR_GEN",
+    "CKM_RSA_PKCS",
+    "CKM_SHA256",
+    "CKM_AES_KEY_GEN",
+    "CKM_EC_KEY_PAIR_GEN",
+]
+notes = "Mechanism list varies by Kryoptic version and build features."
+
+[providers.kryoptic.quirks]
+fork_unsafe = true
+container_build_required = true
+container_note = "Must be built from source with pinned revision for reproducibility"
+
+[providers.kryoptic.skip]
+env_required = "PKCS11_PROXY_KRYOPTIC_MODULE must point to the .so"
+
+# ─── Proxy shim (meta-provider for shim-level quirks) ─────────────────
+
+[providers.proxy_shim]
+display_name = "pkcs11-proxy-ng shim"
+module_paths = []
+status = "primary"
+
+[providers.proxy_shim.quirks]
+fork_unsafe = true
+fork_note = "Tokio runtime does not survive fork(); child process gets dead runtime"
+digest_two_call_cache = true
+digest_note = """
+The shim's two_call_cached_bytes pattern executes the server-side \
+operation during the size-query (NULL buffer) call, consuming the \
+backend operation state.  A subsequent data-retrieval call finds no \
+active operation and returns CKR_OPERATION_NOT_INITIALIZED.  This \
+affects consumers like pkcs11-tool that use the two-call pattern for \
+C_Digest."""
+os_locking_ok = true
+os_locking_note = "CKF_OS_LOCKING_OK accepted per ADR decision"

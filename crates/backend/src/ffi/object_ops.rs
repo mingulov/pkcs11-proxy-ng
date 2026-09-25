@@ -1,5 +1,19 @@
 use super::*;
 
+/// Upper bound on the number of object handles a single `C_FindObjects` call
+/// may allocate, mirroring the array cap in `call_helpers` (512 MiB worth of
+/// `CK_OBJECT_HANDLE`). PKCS#11 permits returning fewer than `ulMaxObjectCount`
+/// per call, so a caller wanting more simply calls `C_FindObjects` again.
+pub(super) const MAX_FIND_OBJECTS_PER_CALL: usize = super::call_helpers::MAX_OUTPUT_BUFFER_BYTES
+    as usize
+    / std::mem::size_of::<cryptoki_sys::CK_OBJECT_HANDLE>();
+
+/// Clamp a client-supplied `ulMaxObjectCount` to a bounded allocation size so
+/// one request cannot drive a multi-GB allocation in the shared daemon.
+pub(super) fn cap_find_objects_count(max_count: u32) -> usize {
+    (max_count as usize).min(MAX_FIND_OBJECTS_PER_CALL)
+}
+
 impl FfiBackend {
     pub(super) fn ffi_find_objects_init(
         &self,
@@ -22,17 +36,21 @@ impl FfiBackend {
         session: CkSessionHandle,
         max_count: u32,
     ) -> CkResult<Vec<CkObjectHandle>> {
-        let mut handles = vec![0 as cryptoki_sys::CK_OBJECT_HANDLE; max_count as usize];
+        let cap = cap_find_objects_count(max_count);
+        let mut handles = vec![0 as cryptoki_sys::CK_OBJECT_HANDLE; cap];
         let mut found: cryptoki_sys::CK_ULONG = 0;
         Self::call_unit(unsafe { (*self.func_list).C_FindObjects }, |function| unsafe {
             function(
                 Self::session_handle(session),
                 handles.as_mut_ptr(),
-                max_count as cryptoki_sys::CK_ULONG,
+                cap as cryptoki_sys::CK_ULONG,
                 &mut found,
             )
         })?;
-        Ok(handles[..found as usize].iter().map(|&h| CkObjectHandle(h)).collect())
+        // A conformant backend writes at most `cap` handles; clamp `found`
+        // defensively so a buggy backend cannot drive an out-of-bounds slice.
+        let n = (found as usize).min(cap);
+        Ok(handles[..n].iter().map(|&h| CkObjectHandle(h)).collect())
     }
 
     pub(super) fn ffi_find_objects_final(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -159,5 +177,28 @@ impl FfiBackend {
                 Self::ffi_attr_len(&ffi_attrs),
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod find_objects_cap_tests {
+    use super::{MAX_FIND_OBJECTS_PER_CALL, cap_find_objects_count};
+
+    #[test]
+    fn caps_absurd_count_to_bound() {
+        // A malicious uint32 (~4.29 billion handles ≈ 34 GB) must be clamped.
+        assert_eq!(cap_find_objects_count(u32::MAX), MAX_FIND_OBJECTS_PER_CALL);
+    }
+
+    #[test]
+    fn passes_through_reasonable_count() {
+        assert_eq!(cap_find_objects_count(10), 10);
+        assert_eq!(cap_find_objects_count(0), 0);
+    }
+
+    #[test]
+    fn bound_is_a_tiny_fraction_of_u32_max() {
+        assert!(MAX_FIND_OBJECTS_PER_CALL < u32::MAX as usize);
+        assert_eq!(MAX_FIND_OBJECTS_PER_CALL, 512 * 1024 * 1024 / 8);
     }
 }

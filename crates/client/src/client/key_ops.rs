@@ -124,6 +124,19 @@ impl Pkcs11Client {
         mechanism: &CkMechanism,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
+        self.generate_key_with_mechanism_out(session, mechanism, template).await.map(|(h, _)| h)
+    }
+
+    /// `C_GenerateKey` returning the key handle plus any HSM-written mechanism
+    /// param mutation (e.g. the generated `CK_PBE_PARAMS.pInitVector`). The
+    /// mutation is `None` for the common mechanisms without output params.
+    /// Mirrors `derive_key_with_mechanism_out_result`.
+    pub async fn generate_key_with_mechanism_out(
+        &mut self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        template: &[CkAttribute],
+    ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         let ctx = self.context_id()?;
         let proto_mech = Self::proto_mechanism(mechanism);
         let proto_template = Self::proto_template(template);
@@ -134,7 +147,11 @@ impl Pkcs11Client {
             template: proto_template,
         };
         let resp = pkcs11_unary_call!(self.grpc.generate_key(req), true);
-        Ok(CkObjectHandle(resp.key_handle))
+        let mechanism_out = match resp.mechanism_out {
+            Some(proto_mech) => CkMechanism::try_from(&proto_mech)?.params,
+            None => None,
+        };
+        Ok((CkObjectHandle(resp.key_handle), mechanism_out))
     }
 
     pub async fn generate_key_pair(

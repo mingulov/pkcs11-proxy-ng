@@ -8,6 +8,13 @@ use pkcs11_proxy_ng_types::*;
 /// when a client sends an absurd `pulOutputLen` (e.g. `isize::MAX + 1`).
 pub(super) const MAX_OUTPUT_BUFFER_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Cap a client-claimed exact-output buffer length to `MAX_OUTPUT_BUFFER_BYTES`
+/// before allocating, so a single request cannot drive a multi-GB allocation in
+/// the shared daemon. The backend writes at most this many bytes.
+pub(super) fn capped_output_len(buffer_len: u64) -> usize {
+    buffer_len.min(MAX_OUTPUT_BUFFER_BYTES) as usize
+}
+
 impl FfiBackend {
     #[inline]
     pub(super) const fn slot_id(slot_id: CkSlotId) -> cryptoki_sys::CK_SLOT_ID {
@@ -735,5 +742,22 @@ impl FfiBackend {
         Self::object_pair_output(|first, second| {
             call(function, &mut ffi_mech.ck_mechanism, first, second)
         })
+    }
+}
+
+#[cfg(test)]
+mod output_cap_tests {
+    use super::{MAX_OUTPUT_BUFFER_BYTES, capped_output_len};
+
+    #[test]
+    fn caps_absurd_buffer_len() {
+        assert_eq!(capped_output_len(u64::MAX), MAX_OUTPUT_BUFFER_BYTES as usize);
+        assert_eq!(capped_output_len(4 * 1024 * 1024 * 1024), MAX_OUTPUT_BUFFER_BYTES as usize);
+    }
+
+    #[test]
+    fn passes_through_reasonable_buffer_len() {
+        assert_eq!(capped_output_len(1024), 1024);
+        assert_eq!(capped_output_len(0), 0);
     }
 }

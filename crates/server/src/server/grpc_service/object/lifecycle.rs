@@ -6,6 +6,7 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::CkRv;
 
 use super::super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::super::handle_map::VirtualHandle;
 use super::super::convert_template;
 use super::super::service_utils::{
     ck_rv_only, register_object_handle, resolve_session, resolve_session_and_object, spawn_backend,
@@ -122,6 +123,13 @@ pub(super) async fn destroy_object(
 
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.destroy_object(session, object)).await?;
+
+    // On successful destroy, evict the virtual->backend mapping so a recycled
+    // backend object number can never alias this now-stale handle (B2).
+    if result.is_ok() {
+        let virtual_object = VirtualHandle(req.object_handle);
+        let _ = ctx_mgr.get_context(&ctx_id, |ctx| ctx.object_handles.remove(virtual_object)).await;
+    }
 
     Ok(Response::new(pkcs11_proxy_ng_proto::DestroyObjectResponse { ck_rv: ck_rv_only(result) }))
 }

@@ -17,8 +17,9 @@ pub(super) async fn initialize(
     backend_ref: &Arc<dyn Pkcs11Backend>,
     request: Request<pkcs11_proxy_ng_proto::InitializeRequest>,
     tcp_auth_mode: crate::config::TcpAuthMode,
+    unix_auth_mode: crate::config::UnixAuthMode,
 ) -> Result<Response<pkcs11_proxy_ng_proto::InitializeResponse>, Status> {
-    lifecycle::initialize(ctx_mgr, backend_ref, request, tcp_auth_mode).await
+    lifecycle::initialize(ctx_mgr, backend_ref, request, tcp_auth_mode, unix_auth_mode).await
 }
 
 pub(super) async fn finalize(

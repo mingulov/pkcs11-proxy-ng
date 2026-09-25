@@ -119,6 +119,7 @@ pub(crate) async fn generate_key(
             return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
                 ck_rv: rv.0,
                 key_handle: 0,
+                mechanism_out: None,
             }));
         }
     };
@@ -129,6 +130,7 @@ pub(crate) async fn generate_key(
             return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
                 ck_rv: rv.0,
                 key_handle: 0,
+                mechanism_out: None,
             }));
         }
     };
@@ -139,26 +141,37 @@ pub(crate) async fn generate_key(
             return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
                 ck_rv: rv,
                 key_handle: 0,
+                mechanism_out: None,
             }));
         }
     };
 
+    let mechanism_type = mechanism.mechanism_type;
     let backend = Arc::clone(backend_ref);
     let result =
-        spawn_backend(move || backend.generate_key(session, &mechanism, &template)).await?;
+        spawn_backend(move || backend.generate_key_with_output(session, &mechanism, &template))
+            .await?;
 
     match result {
-        Ok(object) => {
+        Ok((object, mechanism_out_params)) => {
             let key_handle =
                 register_object_handle(ctx_mgr, &ctx_id, CkObjectHandle(object.0)).await;
+            let mechanism_out = mechanism_out_params.map(|params| {
+                pkcs11_proxy_ng_proto::Mechanism::from(&pkcs11_proxy_ng_types::CkMechanism {
+                    mechanism_type,
+                    params: Some(params),
+                })
+            });
             Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
                 ck_rv: CkRv::OK.0,
                 key_handle,
+                mechanism_out,
             }))
         }
         Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
             ck_rv: error.0,
             key_handle: 0,
+            mechanism_out: None,
         })),
     }
 }

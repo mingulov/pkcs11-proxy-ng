@@ -1121,7 +1121,7 @@ fn mock_backend_supports_provider_gap_3x_workflows() {
         backend.decapsulate_key(session, &mechanism, key, &[], &capsule).unwrap();
     assert_ne!(decapsulated_key, CkObjectHandle(0));
 
-    backend.message_encrypt_init(session, Some(&mechanism), key).unwrap();
+    backend.message_encrypt_init(session, Some(&mechanism), None, key).unwrap();
     let mut parameter = vec![0x11, 0x22, 0x33, 0x44];
     let (parameter_out, ciphertext) =
         backend.encrypt_message(session, &mut parameter, b"aad", b"plaintext").unwrap();
@@ -1129,7 +1129,7 @@ fn mock_backend_supports_provider_gap_3x_workflows() {
     assert_ne!(ciphertext, b"plaintext");
     backend.message_encrypt_final(session).unwrap();
 
-    backend.message_decrypt_init(session, Some(&mechanism), key).unwrap();
+    backend.message_decrypt_init(session, Some(&mechanism), None, key).unwrap();
     let mut decrypt_parameter = parameter.clone();
     let (_parameter_out, recovered) =
         backend.decrypt_message(session, &mut decrypt_parameter, b"aad", &ciphertext).unwrap();
@@ -1200,7 +1200,7 @@ fn official_source_grounded_mock_enforces_mechanism_workflow_flags() {
         backend.unwrap_key(session, &aes_gcm, key, &wrapped, &[]).unwrap(),
         CkObjectHandle(0)
     );
-    backend.message_encrypt_init(session, Some(&aes_gcm), key).unwrap();
+    backend.message_encrypt_init(session, Some(&aes_gcm), None, key).unwrap();
     assert_eq!(backend.sign_init(session, &aes_gcm, key).unwrap_err(), CkRv::MECHANISM_INVALID);
     assert_eq!(backend.generate_key(session, &aes_gcm, &[]).unwrap_err(), CkRv::MECHANISM_INVALID);
 
@@ -1370,12 +1370,12 @@ fn official_source_grounded_mock_rejects_all_no_source_workflow_mechanisms() {
         assert_mechanism_invalid(
             "message_encrypt_init",
             mechanism_type,
-            backend.message_encrypt_init(session, Some(&mechanism), key),
+            backend.message_encrypt_init(session, Some(&mechanism), None, key),
         );
         assert_mechanism_invalid(
             "message_decrypt_init",
             mechanism_type,
-            backend.message_decrypt_init(session, Some(&mechanism), key),
+            backend.message_decrypt_init(session, Some(&mechanism), None, key),
         );
         assert_mechanism_invalid(
             "message_sign_init",
@@ -1693,14 +1693,14 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_core_workflow
         );
 
         let mut message_parameter = vec![0x11, 0x22, 0x33, 0x44];
-        backend.message_encrypt_init(session, Some(&mechanism), key).unwrap();
+        backend.message_encrypt_init(session, Some(&mechanism), None, key).unwrap();
         let (message_encrypt_parameter, message_ciphertext) =
             backend.encrypt_message(session, &mut message_parameter, b"aad", b"message").unwrap();
         assert_eq!(message_encrypt_parameter, message_parameter);
         assert_ne!(message_ciphertext, b"message");
         backend.message_encrypt_final(session).unwrap();
 
-        backend.message_decrypt_init(session, Some(&mechanism), key).unwrap();
+        backend.message_decrypt_init(session, Some(&mechanism), None, key).unwrap();
         let (message_decrypt_parameter, message_plaintext) = backend
             .decrypt_message(session, &mut message_parameter, b"aad", &message_ciphertext)
             .unwrap();
@@ -2009,13 +2009,13 @@ fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.message_encrypt_init(session, Some(&mechanism), key).unwrap_err(),
+        backend.message_encrypt_init(session, Some(&mechanism), None, key).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
     assert_eq!(
-        backend.message_decrypt_init(session, Some(&mechanism), key).unwrap_err(),
+        backend.message_decrypt_init(session, Some(&mechanism), None, key).unwrap_err(),
         CkRv::MECHANISM_INVALID
     );
 
@@ -2952,11 +2952,11 @@ fn key_bearing_workflows_reject_invalid_object_handles() {
         CkRv::OBJECT_HANDLE_INVALID
     );
     assert_eq!(
-        backend.message_encrypt_init(session, Some(&mechanism), invalid_key).unwrap_err(),
+        backend.message_encrypt_init(session, Some(&mechanism), None, invalid_key).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
     assert_eq!(
-        backend.message_decrypt_init(session, Some(&mechanism), invalid_key).unwrap_err(),
+        backend.message_decrypt_init(session, Some(&mechanism), None, invalid_key).unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID
     );
     assert_eq!(

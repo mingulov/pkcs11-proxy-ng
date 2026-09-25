@@ -420,6 +420,8 @@ mod tests {
             0x002C, // CKM_HASH_ML_DSA_SHAKE256
             0x0037, // CKM_HASH_SLH_DSA_SHA256
             0x003F, // CKM_HASH_SLH_DSA_SHAKE256
+            0x001F, // CKM_HASH_ML_DSA  (generic — CK_HASH_SIGN_ADDITIONAL_CONTEXT)
+            0x0034, // CKM_HASH_SLH_DSA (generic — CK_HASH_SIGN_ADDITIONAL_CONTEXT)
         ] {
             assert_eq!(
                 reg.param_shape(mech),

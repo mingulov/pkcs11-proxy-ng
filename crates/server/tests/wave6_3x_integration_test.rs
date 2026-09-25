@@ -145,7 +145,7 @@ async fn message_encrypt_decrypt_round_trip() {
     let parameter = b"nonce123";
 
     // Init encrypt
-    client.message_encrypt_init(session, Some(&test_mechanism()), key).await.unwrap();
+    client.message_encrypt_init(session, Some(&test_mechanism()), None, key).await.unwrap();
 
     // Encrypt one message
     let (param_out, ciphertext) =
@@ -156,7 +156,7 @@ async fn message_encrypt_decrypt_round_trip() {
     client.message_encrypt_final(session).await.unwrap();
 
     // Init decrypt
-    client.message_decrypt_init(session, Some(&test_mechanism()), key).await.unwrap();
+    client.message_decrypt_init(session, Some(&test_mechanism()), None, key).await.unwrap();
 
     // Decrypt
     let (_param_out2, recovered) =
@@ -180,7 +180,7 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
     let part1 = b"hello ";
     let part2 = b"message begin-next";
 
-    client.message_encrypt_init(session, Some(&mechanism), key).await.unwrap();
+    client.message_encrypt_init(session, Some(&mechanism), None, key).await.unwrap();
     let encrypt_parameter = client.encrypt_message_begin(session, parameter, aad).await.unwrap();
     assert_eq!(encrypt_parameter, parameter);
 
@@ -193,7 +193,7 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
     assert_ne!(ciphertext2, part2);
     client.message_encrypt_final(session).await.unwrap();
 
-    client.message_decrypt_init(session, Some(&mechanism), key).await.unwrap();
+    client.message_decrypt_init(session, Some(&mechanism), None, key).await.unwrap();
     let decrypt_parameter =
         client.decrypt_message_begin(session, &encrypt_parameter, aad).await.unwrap();
     assert_eq!(decrypt_parameter, parameter);

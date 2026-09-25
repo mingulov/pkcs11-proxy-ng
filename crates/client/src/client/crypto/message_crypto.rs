@@ -1,3 +1,4 @@
+use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
 use crate::client::Pkcs11Client;
@@ -9,6 +10,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
+        init_param: Option<&MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
@@ -17,6 +19,7 @@ impl Pkcs11Client {
             session_handle: session.0,
             mechanism: mechanism.map(Self::proto_mechanism),
             key_handle: key.0,
+            init_message_parameter: init_param.map(Into::into),
         };
         pkcs11_unary_ok!(self.grpc.message_encrypt_init(req), true)
     }
@@ -38,6 +41,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
+        init_param: Option<&MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
@@ -46,6 +50,7 @@ impl Pkcs11Client {
             session_handle: session.0,
             mechanism: mechanism.map(Self::proto_mechanism),
             key_handle: key.0,
+            init_message_parameter: init_param.map(Into::into),
         };
         pkcs11_unary_ok!(self.grpc.message_decrypt_init(req), true)
     }

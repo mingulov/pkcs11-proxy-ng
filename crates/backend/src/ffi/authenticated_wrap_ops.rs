@@ -180,8 +180,9 @@ impl FfiBackend {
             }
         } else {
             // Data query: allocate caller-specified buffer.
-            out_len = output_spec.buffer_len as cryptoki_sys::CK_ULONG;
-            let mut buf = vec![0u8; output_spec.buffer_len as usize];
+            let capped = super::call_helpers::capped_output_len(output_spec.buffer_len as u64);
+            out_len = capped as cryptoki_sys::CK_ULONG;
+            let mut buf = vec![0u8; capped];
             let rv = unsafe {
                 f(
                     Self::session_handle(session),

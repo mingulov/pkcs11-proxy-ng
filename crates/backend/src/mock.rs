@@ -3,6 +3,7 @@ use crate::traits::{CkDeriveKeyOutputResult, Pkcs11Backend};
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
 mod crypto_ops;
@@ -140,6 +141,7 @@ pub struct MockBackend {
     /// Interface capabilities to report. If `None`, uses the MockBackend
     /// default 2.40/3.0/3.2 catalog with no NULL functions.
     interface_capabilities: Mutex<Option<InterfaceCapabilities>>,
+    login_calls: AtomicUsize,
 }
 
 impl MockBackend {
@@ -179,6 +181,7 @@ impl MockBackend {
             verify_signature_state: Mutex::new(HashMap::new()),
             verify_signature_accumulator: Mutex::new(HashMap::new()),
             interface_capabilities: Mutex::new(None),
+            login_calls: AtomicUsize::new(0),
         }
     }
 
@@ -255,6 +258,10 @@ impl MockBackend {
     /// mock behavior where all configured slots have a token present.
     pub fn set_token_present(&self, slot_id: CkSlotId, present: bool) {
         self.token_presence.lock().unwrap().insert(slot_id, present);
+    }
+
+    pub fn login_call_count(&self) -> usize {
+        self.login_calls.load(Ordering::SeqCst)
     }
 
     /// Configure a slot-specific mechanism list.
@@ -944,6 +951,7 @@ impl Pkcs11Backend for MockBackend {
         user_type: CkUserType,
         _pin: Option<&[u8]>,
     ) -> CkResult<()> {
+        self.login_calls.fetch_add(1, Ordering::SeqCst);
         self.login_impl(session, user_type)
     }
 
@@ -1775,6 +1783,7 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
+        _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let state = self.state.lock().unwrap();
@@ -1838,6 +1847,7 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
+        _init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
         let state = self.state.lock().unwrap();

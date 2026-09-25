@@ -25,9 +25,12 @@ for the codes themselves; this reference is about the proxy's
 **Cause.** Used by the proxy as the canonical "the call could not
 reach the backend, or the backend reported a hard failure" code.
 Specifically:
-- gRPC transport failure (daemon unreachable, TLS handshake fail,
-  request timeout).
-- Daemon's `spawn_backend` timeout (`proxy.request_timeout_secs`).
+- gRPC transport failure (daemon unreachable, TLS handshake fail) on a
+  **session-scoped** call. For lifecycle calls the same transport failure maps
+  to `CKR_GENERAL_ERROR`, and for slot/token calls to `CKR_TOKEN_NOT_PRESENT`.
+- Daemon's `spawn_backend` timeout (`proxy.request_timeout_secs`). Note the
+  **client-side** gRPC request timeout (`DeadlineExceeded`) instead maps to
+  `CKR_FUNCTION_FAILED` ("the operation may not have executed").
 - `classify_backend_outcome` widens this to fold `HOST_MEMORY`,
   `DEVICE_REMOVED`, `TOKEN_NOT_PRESENT` into the health-gate's
   unhealthy set, but the **return value to the caller is still the

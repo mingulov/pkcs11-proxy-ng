@@ -141,7 +141,9 @@ parameterless = [
     0x1083,  # CKM_AES_MAC
     0x108A,  # CKM_AES_CMAC
     0x108C,  # CKM_AES_XCBC_MAC
-    0x108E,  # CKM_AES_GMAC
+    # CKM_AES_GMAC (0x108E) is NOT parameterless — it takes an IV/nonce
+    # parameter (see the "iv" shape). It was previously mis-listed here, which
+    # made the shim locally reject the IV with CKR_MECHANISM_PARAM_INVALID.
 
     # SEED
     0x0650,  # CKM_SEED_KEY_GEN
@@ -323,6 +325,13 @@ shape = "iv"
 mechanisms = [
     0x1082,  # CKM_AES_CBC
     0x1085,  # CKM_AES_CBC_PAD
+    # CKM_AES_GMAC: sign/verify MAC over AAD. Spec models the param as
+    # CK_GCM_PARAMS, but real modules (e.g. BouncyHSM) take the bare IV/nonce
+    # bytes here, and the shim forwards the caller's parameter buffer verbatim
+    # (length-preserving) so it reaches the backend byte-identically to a direct
+    # call — the proxy must not impose a struct the native module does not want.
+    0x108E,  # CKM_AES_GMAC
+
     0x0122,  # CKM_DES_CBC
     0x0125,  # CKM_DES_CBC_PAD
     0x0133,  # CKM_DES3_CBC
@@ -594,6 +603,11 @@ mechanisms = [
     0x003D,  # CKM_HASH_SLH_DSA_SHA3_512
     0x003E,  # CKM_HASH_SLH_DSA_SHAKE128
     0x003F,  # CKM_HASH_SLH_DSA_SHAKE256
+    # Generic hash-DSA: the parameter is CK_HASH_SIGN_ADDITIONAL_CONTEXT (the
+    # plain struct PLUS an explicit `hash` mechanism). The shim/FFI select the
+    # larger struct by the non-zero hash; one shape entry, size-aware handling.
+    0x001F,  # CKM_HASH_ML_DSA  (generic — hash carried in the param)
+    0x0034,  # CKM_HASH_SLH_DSA (generic — hash carried in the param)
 ]
 
 # PKCS#5 PBKD2: CK_PKCS5_PBKD2_PARAMS2 (salt, iterations, PRF, password)
@@ -667,6 +681,7 @@ mechanisms = [
     0x03A9,  # CKM_PBE_SHA1_DES2_EDE_CBC
     0x03AA,  # CKM_PBE_SHA1_RC2_128_CBC
     0x03AB,  # CKM_PBE_SHA1_RC2_40_CBC
+    0x03C0,  # CKM_PBA_SHA1_WITH_SHA1_HMAC (HMAC-key gen; CK_PBE_PARAMS, pInitVector unused)
 ]
 
 # ECDH-AES Key Wrap: CK_ECDH_AES_KEY_WRAP_PARAMS

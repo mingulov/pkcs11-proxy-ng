@@ -71,6 +71,14 @@ fn new_leaf(
 fn write_file(dir: &TempDir, name: &str, contents: &str) -> PathBuf {
     let path = dir.path().join(name);
     std::fs::write(&path, contents).unwrap();
+    // The daemon rejects mTLS private keys with group/other access (mode must
+    // be 0600 or stricter). The test host's umask can leave freshly written
+    // files at 0664, so tighten every credential file we emit to owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     path
 }
 
@@ -115,6 +123,7 @@ async fn start_mtls_daemon() -> MtlsFixture {
         context_manager,
         backend,
         TcpAuthMode::Mtls,
+        pkcs11_proxy_ng::config::UnixAuthMode::None,
         Arc::new(token_policy),
         pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource::load(None).unwrap(),
     );

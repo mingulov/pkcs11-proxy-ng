@@ -37,6 +37,17 @@ async fn connect_channel(
     endpoint: &str,
     tls_files: Option<crate::tls::ClientTlsFiles>,
 ) -> Result<Channel, String> {
+    // Unix-domain-socket endpoint (`unix:/abs/path` or `unix:///abs/path`):
+    // dial the local socket. No TLS — a Unix socket carries no network to
+    // secure; the daemon authenticates the peer via SO_PEERCRED. Intended for
+    // local-user / ssh-forwarded use.
+    if let Some(path) = endpoint.strip_prefix("unix:") {
+        if tls_files.is_some() {
+            tracing::debug!("TLS configuration ignored for unix-socket endpoint (peer-cred auth)");
+        }
+        return connect_unix_channel(path).await;
+    }
+
     let mut builder = tonic::transport::Endpoint::from_shared(endpoint.to_owned())
         .map_err(|e| format!("invalid endpoint: {e}"))?;
     if let Some(tls_files) = tls_files {
@@ -53,6 +64,33 @@ async fn connect_channel(
         .connect()
         .await
         .map_err(|e| format!("gRPC connect failed: {e}"))
+}
+
+/// Connect a gRPC channel over a Unix-domain socket at `raw_path`.
+async fn connect_unix_channel(raw_path: &str) -> Result<Channel, String> {
+    // Tolerate the authority form `unix://<path>` by dropping a leading "//".
+    let path = raw_path.strip_prefix("//").unwrap_or(raw_path).to_owned();
+    if path.is_empty() {
+        return Err("unix endpoint has an empty socket path".to_string());
+    }
+
+    // The HTTP/2 `:authority` is unused for a UDS connector, but tonic still
+    // needs a syntactically valid Endpoint to carry the connection settings.
+    tonic::transport::Endpoint::try_from("http://pkcs11-proxy-ng.local")
+        .map_err(|e| format!("invalid unix endpoint base: {e}"))?
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .keep_alive_while_idle(true)
+        .http2_keep_alive_interval(std::time::Duration::from_secs(10))
+        .keep_alive_timeout(std::time::Duration::from_secs(5))
+        .connect_with_connector(tower::service_fn(move |_: tonic::transport::Uri| {
+            let path = path.clone();
+            async move {
+                let stream = tokio::net::UnixStream::connect(&path).await?;
+                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+            }
+        }))
+        .await
+        .map_err(|e| format!("unix gRPC connect failed: {e}"))
 }
 
 impl Pkcs11Client {

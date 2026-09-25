@@ -96,13 +96,16 @@ pub unsafe extern "C" fn c_unwrap_key_authenticated(
         if p_mechanism.is_null() || ph_key.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        let template = match unsafe { ck_attrs_to_rust_checked(p_template, ul_count) } {
+            Ok(template) => template,
+            Err(e) => return rv_err(e),
+        };
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         let wrapped_key = unsafe { read_input_slice(p_wrapped_key, ul_wrapped_key_len) };
-        let template = unsafe { ck_attrs_to_rust(p_template, ul_count) };
         let aad = unsafe { read_input_slice(p_aad, ul_aad_len) };
 
         match with_client!(client => client.unwrap_key_authenticated(

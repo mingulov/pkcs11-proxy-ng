@@ -13,7 +13,7 @@
 //!     C_Logout, C_InitPIN, C_SetPIN, C_LoginUser. These are the
 //!     PIN-bearing PKCS#11 calls.
 //!
-//! Out of scope (documented in the umbrella project's compliance docs):
+//! Out of scope here (covered by code review / `cargo clippy`, not this test):
 //!   - Direct `println!`/`eprintln!`/`dbg!` writes — not captured by
 //!     tracing-subscriber. Code review and `cargo clippy` must catch
 //!     those.

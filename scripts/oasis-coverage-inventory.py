@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a source-grounded PKCS#11 coverage inventory.
 
-The vendored OASIS Markdown and published headers under the umbrella workspace
+The OASIS Markdown and published headers (supplied via PKCS11_PROXY_NG_OASIS_ROOT)
 are the primary source of truth. Local Rust tables are implementation evidence,
 not a replacement for the spec. This script intentionally reports spec-only
 functions and working-spec mechanism names instead of silently dropping them

@@ -13,9 +13,13 @@ pub(super) async fn initialize(
     _backend_ref: &Arc<dyn Pkcs11Backend>,
     request: Request<pkcs11_proxy_ng_proto::InitializeRequest>,
     tcp_auth_mode: crate::config::TcpAuthMode,
+    unix_auth_mode: crate::config::UnixAuthMode,
 ) -> Result<Response<pkcs11_proxy_ng_proto::InitializeResponse>, Status> {
-    let identity =
-        crate::server::auth::request_identity::identity_from_request(&request, tcp_auth_mode)?;
+    let identity = crate::server::auth::request_identity::identity_from_request(
+        &request,
+        tcp_auth_mode,
+        unix_auth_mode,
+    )?;
     let ctx_id = match ctx_mgr.create_context(Some(identity.to_string())).await {
         Ok(id) => id,
         Err(rv) => {

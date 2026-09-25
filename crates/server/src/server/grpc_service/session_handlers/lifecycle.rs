@@ -113,8 +113,7 @@ pub(super) async fn close_session(
     let resolved = ctx_mgr
         .get_context(&ctx_id, |ctx| {
             let vh = VirtualHandle(req.session_handle);
-            ctx.session_slots.remove(&vh);
-            ctx.session_handles.remove(vh)
+            ctx.remove_session(vh)
         })
         .await;
 
