@@ -86,32 +86,40 @@ isolation is better handled operationally — multiple daemon instances + sticky
   direct exactly (25/9/8); pure ML-DSA unchanged (263/72/80). Round-trip + FFI
   unit tests added.
 
-- **B2. Message-based API INIT param** — ✅ **FIXED (2026-05-30)**. PKCS#11 v3.0
-  passes the AEAD params (`CK_GCM_MESSAGE_PARAMS`) to `C_MessageEncryptInit`, but
-  the shim read the mechanism with the CLASSIC `gcm` shape (`CK_GCM_PARAMS`) — the
-  same `CKM_AES_GCM` type is shared with single-shot encryption, so the param
-  shape can't be inferred from the type — and shipped the wrong struct → backend
-  `CKR_MECHANISM_PARAM_INVALID`.
-  **Fix (option B — DRY, reuses the message machinery; no new mechanism shape):**
+- **B2. Message-based API parameter contract** — ✅ **FIXED (2026-08-06;
+  supersedes the 2026-05-30 size-inferred path)**. PKCS#11 v3.0 passes
+  `CK_*_MESSAGE_PARAMS` to MessageEncrypt/MessageDecrypt Init and later calls.
+  These layouts share mechanism types with classic operations, so the active
+  message operation is now bound to the registry-selected message shape and
+  direction instead of guessing a struct from its byte size.
+  **Fix (reuses the message machinery; no second parameter hierarchy):**
   1. proto: `optional MessageParameter init_message_parameter` on
-     `Message{Encrypt,Decrypt}InitRequest`.
-  2. shim `read_message_init_mechanism`: on a recognised `CK_*_MESSAGE_PARAMS`
-     (via `try_read_message_parameter`), send the mechanism TYPE only + the
-     structured param; parameterless/Raw falls back to the classic `read_mechanism`.
-  3. client/server thread the field (server converts proto→`MessageParameter`).
+     `Message{Encrypt,Decrypt}InitRequest`, plus the shared shape and outer
+     pointer-class envelope/acknowledgements on the safe paths.
+  2. shim `read_message_init_mechanism` derives GCM, CCM, or Salsa/ChaCha from
+     the mechanism registry. `read_message_parameter_call_for_shape_with_memory`
+     then enforces the exact client-native outer layout, pointer class,
+     direction/stage semantics, bounded embedded extents, and non-aliasing.
+     There is no Raw or classic-parameter fallback for a materialized message
+     parameter; materialized non-NULL/nonzero unmodelled parameters fail closed.
+  3. client/server validate and echo the independently derived shape, caller
+     envelope, and structured variant before state or caller memory is updated.
   4. `Pkcs11Backend::message_{encrypt,decrypt}_init` gain
      `init_param: Option<&MessageParameter>` (FfiBackend + MockBackend + test
      backends). `build_message_init_mechanism` reconstructs `CK_GCM/CCM/SALSA_…_
-     MESSAGE_PARAMS` (boxed for a stable address; IV/tag/nonce/MAC buffers kept
-     alive in the holder across the FFI call — same lifetime discipline as
-     `FfiMechanism`).
-  Verified: 3 FFI reconstruction unit tests + wave6 integration; **real kryoptic
-  backend** — the 2 regressions (`test_message_encrypt_decrypt_aes_gcm`,
+     MESSAGE_PARAMS` in the provider's native ABI (boxed for a stable address;
+     IV/tag/nonce/MAC buffers kept alive across the FFI call). Encrypt supports
+     validated writeback, Decrypt is input-only, and Sign/Verify is empty-only.
+  **Historical pre-supersession evidence (2026-05-30):** 3 FFI reconstruction
+  unit tests + wave6 integration; **real kryoptic backend** — the 2 regressions
+  (`test_message_encrypt_decrypt_aes_gcm`,
   `…rejects_decrypt_only_key`) now PASS == direct; `test_mech_message.py` 4/4 and
   `test_message_crypto.py` 11/11 outcomes match direct (0 regressions). The
   generated-IV-writeback test now fails IDENTICALLY to direct (a kryoptic
   limitation, previously masked by the param-invalid skip). Related: D2 (GMAC
-  multipart) shares this surface.
+  multipart) shares this surface. Those runs predate the 2026-08-06 pointer-safe
+  contract and are not provider evidence for it; a fresh provider matrix is the
+  next external gate.
 
 ## Tier C — minor / optional
 

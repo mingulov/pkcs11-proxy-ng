@@ -5,6 +5,7 @@ use crate::{CkAttributeType, CkObjectHandle, CkRv};
 pub struct CkOutputBufferSpec {
     pub buffer_present: bool,
     pub buffer_len: u64,
+    pub length_pointer_null: bool,
 }
 
 /// Exact result for a simple output byte buffer.
@@ -23,7 +24,9 @@ impl CkOutputBufferResult {
     /// - If the caller's buffer is large enough, returns the data.
     /// - Otherwise, returns `CKR_BUFFER_TOO_SMALL` with the required length.
     pub fn from_convenience_bytes(bytes: &[u8], spec: &CkOutputBufferSpec) -> Self {
-        if !spec.buffer_present {
+        if spec.length_pointer_null {
+            Self { ck_rv: CkRv::ARGUMENTS_BAD, returned_len: 0, value: None }
+        } else if !spec.buffer_present {
             Self { ck_rv: CkRv::OK, returned_len: bytes.len() as u64, value: None }
         } else if spec.buffer_len >= bytes.len() as u64 {
             Self { ck_rv: CkRv::OK, returned_len: bytes.len() as u64, value: Some(bytes.to_vec()) }

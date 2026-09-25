@@ -1,23 +1,52 @@
 use cryptoki_sys::*;
-use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
+use pkcs11_proxy_ng_client::MessageCallErrorOrigin;
+use pkcs11_proxy_ng_proto::convert::message_params::{MessageParameter, MessageParameterShape};
 use pkcs11_proxy_ng_types::*;
 
 use crate::state;
 
 use super::helpers::*;
 
+type MessageInitRead = (
+    Option<CkMechanism>,
+    Option<MessageParameter>,
+    Option<CkParameterRoundtripSpec>,
+    Option<MessageParameterShape>,
+);
+
+#[inline]
+fn pointer_safe_message_capability_error() -> Option<CK_RV> {
+    if !state::is_initialized() {
+        Some(rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED))
+    } else if !crate::interface_probe::pointer_safe_message_parameters() {
+        Some(rv_err(CkRv::FUNCTION_NOT_SUPPORTED))
+    } else {
+        None
+    }
+}
+
+fn settle_message_init_error(
+    operation: &mut state::MessageOperationState,
+    saved_shape: Option<MessageParameterShape>,
+    error: &pkcs11_proxy_ng_client::MessageCallError,
+) -> CkRv {
+    if error.origin == MessageCallErrorOrigin::Backend && error.ck_rv != CkRv::DEVICE_ERROR {
+        operation.shape = saved_shape;
+    }
+    error.ck_rv
+}
+
 /// Read a message-based encrypt/decrypt init mechanism.
 ///
-/// PKCS#11 v3.0 passes the AEAD parameters (`CK_GCM_MESSAGE_PARAMS`,
-/// `CK_CCM_MESSAGE_PARAMS`, …) to `C_Message{Encrypt,Decrypt}Init` — but the
-/// same mechanism type (`CKM_AES_GCM`, …) is also used by classic single-shot
-/// encryption with a *different* parameter struct, so the param shape cannot be
-/// inferred from the mechanism type via the registry. In the message-init path
-/// we therefore interpret the params as the message variant: when a recognised
-/// `CK_*_MESSAGE_PARAMS` struct is present we send the mechanism TYPE only plus
-/// the structured `MessageParameter`, which the backend reconstructs into the
-/// correct C struct. A NULL mechanism is the cancel path; a parameterless or
-/// unrecognised param falls back to the classic `read_mechanism` behaviour.
+/// PKCS#11 v3.0 passes AEAD parameters (`CK_GCM_MESSAGE_PARAMS`,
+/// `CK_CCM_MESSAGE_PARAMS`, …) to `C_Message{Encrypt,Decrypt}Init`. The active
+/// mechanism registry selects the message shape for this operation and
+/// `read_message_parameter_call_for_shape_with_memory` enforces that exact
+/// client-native layout, direction, and memory contract. The wire mechanism is
+/// type-only; the backend reconstructs the structured parameter in its native
+/// ABI. A NULL mechanism is the cancel path. Empty unmodelled parameters remain
+/// valid, while materialized unmodelled parameters fail closed rather than
+/// falling back to raw or classic mechanism bytes.
 ///
 /// Returns the mechanism (None = cancel) and the optional structured init param,
 /// or a `CK_RV` to return directly.
@@ -26,31 +55,40 @@ use super::helpers::*;
 /// `p_mechanism` is either NULL or a valid `CK_MECHANISM`.
 unsafe fn read_message_init_mechanism(
     p_mechanism: CK_MECHANISM_PTR,
-) -> Result<(Option<CkMechanism>, Option<MessageParameter>), CK_RV> {
+    direction: MessageParameterDirection,
+) -> Result<MessageInitRead, CK_RV> {
     if p_mechanism.is_null() {
-        return Ok((None, None)); // cancel path
+        return Ok((None, None, None, None)); // cancel path
     }
-    let rv = unsafe { validate_mechanism(p_mechanism) };
-    if rv != rv_ok() {
-        return Err(rv);
-    }
-    let c_mech = unsafe { &*p_mechanism };
-    let msg_param =
-        unsafe { try_read_message_parameter(c_mech.pParameter as *const _, c_mech.ulParameterLen) }
+    validate_message_mechanism_outer(p_mechanism).map_err(rv_err)?;
+    let c_mech = unsafe { std::ptr::read_unaligned(p_mechanism) };
+    let registry = state::mechanism_registry();
+    let shape =
+        MessageParameterShape::from_registry_name(registry.param_shape(c_mech.mechanism as u64));
+    let envelope =
+        unsafe { message_parameter_roundtrip_spec(c_mech.pParameter, c_mech.ulParameterLen) }
             .map_err(rv_err)?;
-    match msg_param {
-        // Recognised AEAD message params: ship the mechanism type only and let
-        // the backend rebuild the CK_*_MESSAGE_PARAMS struct from this.
-        Some(mp) if !matches!(mp, MessageParameter::Raw(_)) => Ok((
-            Some(CkMechanism {
-                mechanism_type: CkMechanismType(c_mech.mechanism as u64),
-                params: None,
-            }),
-            Some(mp),
-        )),
-        // Parameterless / unrecognised: preserve the classic shim behaviour.
-        _ => Ok((Some(unsafe { read_mechanism(p_mechanism) }), None)),
+    let msg_param = unsafe {
+        read_message_parameter_call_for_shape_with_memory(
+            c_mech.pParameter.cast_const(),
+            c_mech.ulParameterLen,
+            shape,
+            direction,
+            MessageParameterStage::Init,
+            MessageCallMemory::init(p_mechanism),
+        )
     }
+    .map_err(rv_err)?
+    .into_parameter();
+    Ok((
+        Some(CkMechanism {
+            mechanism_type: CkMechanismType(c_mech.mechanism as u64),
+            params: None,
+        }),
+        msg_param,
+        Some(envelope),
+        Some(shape),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -63,16 +101,47 @@ pub unsafe extern "C" fn c_message_encrypt_init(
     h_key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     catch_panics(|| {
-        let (mech, init_param) = match unsafe { read_message_init_mechanism(p_mechanism) } {
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
+        let mut operation = operation.lock().expect("message encrypt state poisoned");
+        let (mech, init_param, envelope, shape) = match unsafe {
+            read_message_init_mechanism(p_mechanism, MessageParameterDirection::Encrypt)
+        } {
             Ok(parts) => parts,
             Err(rv) => return rv,
         };
-        let result = with_client!(client => client.message_encrypt_init(
-            CkSessionHandle(h_session as u64),
-            mech.as_ref(),
-            init_param.as_ref(),
-            CkObjectHandle(h_key as u64),
-        ));
+        let saved_shape = operation.shape.take();
+        let result = if let (Some(mech), Some(envelope), Some(shape)) =
+            (mech.as_ref(), envelope.as_ref(), shape)
+        {
+            match with_client!(client => client.message_encrypt_init_contract(
+                CkSessionHandle(h_session as u64),
+                mech,
+                init_param.as_ref(),
+                CkObjectHandle(h_key as u64),
+                envelope,
+                shape,
+            )) {
+                Ok(()) => {
+                    operation.shape = Some(shape);
+                    Ok(())
+                }
+                Err(error) => Err(settle_message_init_error(&mut operation, saved_shape, &error)),
+            }
+        } else {
+            let result = with_client!(client => client.message_encrypt_init_stateful(
+                CkSessionHandle(h_session as u64),
+                None,
+                None,
+                CkObjectHandle(h_key as u64),
+            ));
+            match result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(settle_message_init_error(&mut operation, saved_shape, &error)),
+            }
+        };
         if result.is_ok() {
             state::clear_message_encrypt_output_cache(h_session);
             state::clear_operation_state_cache(h_session);
@@ -87,9 +156,31 @@ pub unsafe extern "C" fn c_message_encrypt_init(
 
 pub unsafe extern "C" fn c_message_encrypt_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
-        unit_result_to_rv(
-            with_client!(client => client.message_encrypt_final(CkSessionHandle(h_session as u64))),
-        )
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
+        let mut operation = operation.lock().expect("message encrypt state poisoned");
+        if operation.shape.is_none() {
+            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        let saved_shape = operation.shape.take();
+        match with_client!(client => client.message_encrypt_final_stateful(CkSessionHandle(h_session as u64)))
+        {
+            Ok(()) => {
+                state::clear_message_encrypt_output_cache(h_session);
+                state::clear_operation_state_cache(h_session);
+                rv_ok()
+            }
+            Err(error) => {
+                if error.origin == MessageCallErrorOrigin::Backend
+                    && error.ck_rv != CkRv::DEVICE_ERROR
+                {
+                    operation.shape = saved_shape;
+                }
+                rv_err(error.ck_rv)
+            }
+        }
     })
 }
 
@@ -103,16 +194,47 @@ pub unsafe extern "C" fn c_message_decrypt_init(
     h_key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     catch_panics(|| {
-        let (mech, init_param) = match unsafe { read_message_init_mechanism(p_mechanism) } {
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
+        let mut operation = operation.lock().expect("message decrypt state poisoned");
+        let (mech, init_param, envelope, shape) = match unsafe {
+            read_message_init_mechanism(p_mechanism, MessageParameterDirection::Decrypt)
+        } {
             Ok(parts) => parts,
             Err(rv) => return rv,
         };
-        let result = with_client!(client => client.message_decrypt_init(
-            CkSessionHandle(h_session as u64),
-            mech.as_ref(),
-            init_param.as_ref(),
-            CkObjectHandle(h_key as u64),
-        ));
+        let saved_shape = operation.shape.take();
+        let result = if let (Some(mech), Some(envelope), Some(shape)) =
+            (mech.as_ref(), envelope.as_ref(), shape)
+        {
+            match with_client!(client => client.message_decrypt_init_contract(
+                CkSessionHandle(h_session as u64),
+                mech,
+                init_param.as_ref(),
+                CkObjectHandle(h_key as u64),
+                envelope,
+                shape,
+            )) {
+                Ok(()) => {
+                    operation.shape = Some(shape);
+                    Ok(())
+                }
+                Err(error) => Err(settle_message_init_error(&mut operation, saved_shape, &error)),
+            }
+        } else {
+            let result = with_client!(client => client.message_decrypt_init_stateful(
+                CkSessionHandle(h_session as u64),
+                None,
+                None,
+                CkObjectHandle(h_key as u64),
+            ));
+            match result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(settle_message_init_error(&mut operation, saved_shape, &error)),
+            }
+        };
         if result.is_ok() {
             state::clear_message_decrypt_output_cache(h_session);
             state::clear_operation_state_cache(h_session);
@@ -127,9 +249,24 @@ pub unsafe extern "C" fn c_message_decrypt_init(
 
 pub unsafe extern "C" fn c_message_decrypt_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
-        unit_result_to_rv(
-            with_client!(client => client.message_decrypt_final(CkSessionHandle(h_session as u64))),
-        )
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
+        let mut operation = operation.lock().expect("message decrypt state poisoned");
+        if operation.shape.is_none() {
+            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        let saved_shape = operation.shape.take();
+        match with_client!(client => client.message_decrypt_final_stateful(CkSessionHandle(h_session as u64)))
+        {
+            Ok(()) => {
+                state::clear_message_decrypt_output_cache(h_session);
+                state::clear_operation_state_cache(h_session);
+                rv_ok()
+            }
+            Err(error) => rv_err(settle_message_init_error(&mut operation, saved_shape, &error)),
+        }
     })
 }
 
@@ -143,6 +280,11 @@ pub unsafe extern "C" fn c_message_sign_init(
     h_key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     catch_panics(|| {
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
+        let mut operation = operation.lock().expect("message sign state poisoned");
         let mech = if p_mechanism.is_null() {
             None // cancel path
         } else {
@@ -152,16 +294,22 @@ pub unsafe extern "C" fn c_message_sign_init(
             }
             Some(unsafe { read_mechanism(p_mechanism) })
         };
-        let result = with_client!(client => client.message_sign_init(
+        let successful_shape = mech.as_ref().map(|_| MessageParameterShape::Unmodeled);
+        let saved_shape = operation.shape.take();
+        let result = with_client!(client => client.message_sign_init_stateful(
             CkSessionHandle(h_session as u64),
             mech.as_ref(),
             CkObjectHandle(h_key as u64),
         ));
-        if result.is_ok() {
-            state::clear_message_sign_output_cache(h_session);
-            state::clear_operation_state_cache(h_session);
+        match result {
+            Ok(()) => {
+                operation.shape = successful_shape;
+                state::clear_message_sign_output_cache(h_session);
+                state::clear_operation_state_cache(h_session);
+                rv_ok()
+            }
+            Err(error) => rv_err(settle_message_init_error(&mut operation, saved_shape, &error)),
         }
-        unit_result_to_rv(result)
     })
 }
 
@@ -171,9 +319,27 @@ pub unsafe extern "C" fn c_message_sign_init(
 
 pub unsafe extern "C" fn c_message_sign_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
-        unit_result_to_rv(
-            with_client!(client => client.message_sign_final(CkSessionHandle(h_session as u64))),
-        )
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
+        let mut operation = operation.lock().expect("message sign state poisoned");
+        if operation.shape.is_none() {
+            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        let saved_shape = operation.shape.take();
+        match with_client!(client => client.message_sign_final_stateful(CkSessionHandle(h_session as u64)))
+        {
+            Ok(()) => rv_ok(),
+            Err(error) => {
+                if error.origin == MessageCallErrorOrigin::Backend
+                    && error.ck_rv != CkRv::DEVICE_ERROR
+                {
+                    operation.shape = saved_shape;
+                }
+                rv_err(error.ck_rv)
+            }
+        }
     })
 }
 
@@ -187,6 +353,11 @@ pub unsafe extern "C" fn c_message_verify_init(
     h_key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     catch_panics(|| {
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
+        let mut operation = operation.lock().expect("message verify state poisoned");
         let mech = if p_mechanism.is_null() {
             None // cancel path
         } else {
@@ -196,11 +367,27 @@ pub unsafe extern "C" fn c_message_verify_init(
             }
             Some(unsafe { read_mechanism(p_mechanism) })
         };
-        unit_result_to_rv(with_client!(client => client.message_verify_init(
+        let successful_shape = mech.as_ref().map(|_| MessageParameterShape::Unmodeled);
+        let saved_shape = operation.shape.take();
+        match with_client!(client => client.message_verify_init_stateful(
             CkSessionHandle(h_session as u64),
             mech.as_ref(),
             CkObjectHandle(h_key as u64),
-        )))
+        )) {
+            Ok(()) => {
+                operation.shape = successful_shape;
+                state::clear_operation_state_cache(h_session);
+                rv_ok()
+            }
+            Err(error) => {
+                if error.origin == MessageCallErrorOrigin::Backend
+                    && error.ck_rv != CkRv::DEVICE_ERROR
+                {
+                    operation.shape = saved_shape;
+                }
+                rv_err(error.ck_rv)
+            }
+        }
     })
 }
 
@@ -210,9 +397,27 @@ pub unsafe extern "C" fn c_message_verify_init(
 
 pub unsafe extern "C" fn c_message_verify_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
-        unit_result_to_rv(
-            with_client!(client => client.message_verify_final(CkSessionHandle(h_session as u64))),
-        )
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
+        let mut operation = operation.lock().expect("message verify state poisoned");
+        if operation.shape.is_none() {
+            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        let saved_shape = operation.shape.take();
+        match with_client!(client => client.message_verify_final_stateful(CkSessionHandle(h_session as u64)))
+        {
+            Ok(()) => rv_ok(),
+            Err(error) => {
+                if error.origin == MessageCallErrorOrigin::Backend
+                    && error.ck_rv != CkRv::DEVICE_ERROR
+                {
+                    operation.shape = saved_shape;
+                }
+                rv_err(error.ck_rv)
+            }
+        }
     })
 }
 
@@ -236,9 +441,15 @@ pub unsafe extern "C" fn c_encrypt_message(
     pul_ciphertext_len: *mut CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        if pul_ciphertext_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
         }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
+        let mut operation = operation.lock().expect("message encrypt state poisoned");
+        let shape = match operation.shape {
+            Some(shape) => shape,
+            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
+        };
         let aad = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_associated_data, ul_associated_data_len)
         }) {
@@ -257,14 +468,28 @@ pub unsafe extern "C" fn c_encrypt_message(
                 Ok(spec) => spec,
                 Err(error) => return rv_err(error),
             };
-        let msg_param = match unsafe {
-            try_read_message_parameter(p_parameter as *const _, ul_parameter_len)
+        let parameter_call = match unsafe {
+            read_message_parameter_call_for_shape_with_memory(
+                p_parameter.cast_const(),
+                ul_parameter_len,
+                shape,
+                MessageParameterDirection::Encrypt,
+                MessageParameterStage::OneShot,
+                MessageCallMemory::output(
+                    p_associated_data,
+                    ul_associated_data_len,
+                    p_plaintext,
+                    ul_plaintext_len,
+                    p_ciphertext,
+                    output_spec.buffer_len,
+                    pul_ciphertext_len,
+                ),
+            )
         } {
-            Ok(param) => param,
+            Ok(call) => call,
             Err(error) => return rv_err(error),
         };
-
-        let result = with_client!(client => client.parameter_output_exact(
+        let result = with_client!(client => client.parameter_output_exact_contract(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::EncryptMessage,
             &output_spec,
@@ -276,19 +501,36 @@ pub unsafe extern "C" fn c_encrypt_message(
             None,
             0,
             0,
-            msg_param.as_ref(),
+            parameter_call.parameter(),
         ));
 
         match result {
-            Ok((output_result, _param_result, msg_param_out)) => {
-                if let Some(ref mp) = msg_param_out {
-                    unsafe {
-                        write_message_parameter_back(mp, p_parameter, ul_parameter_len);
-                    }
+            Ok((output_result, param_result, msg_param_out)) => {
+                let rv = unsafe {
+                    write_exact_message_output(
+                        &output_spec,
+                        &param_out_spec,
+                        &parameter_call,
+                        &output_result,
+                        &param_result,
+                        msg_param_out.as_ref(),
+                        p_ciphertext,
+                        pul_ciphertext_len,
+                    )
+                };
+                if output_result.ck_rv == CkRv::DEVICE_ERROR || rv != rv_err(output_result.ck_rv) {
+                    operation.shape = None;
                 }
-                unsafe { write_exact_output(&output_result, p_ciphertext, pul_ciphertext_len) }
+                rv
             }
-            Err(e) => rv_err(e),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
         }
     })
 }
@@ -305,26 +547,70 @@ pub unsafe extern "C" fn c_encrypt_message_begin(
     ul_associated_data_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
+        let mut operation = operation.lock().expect("message encrypt state poisoned");
+        let shape = match operation.shape {
+            Some(shape) => shape,
+            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
+        };
         let aad = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_associated_data, ul_associated_data_len)
         }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
         };
+        let envelope =
+            match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
+                Ok(spec) => spec,
+                Err(error) => return rv_err(error),
+            };
+        let parameter_call = match unsafe {
+            read_message_parameter_call_for_shape_with_memory(
+                p_parameter.cast_const(),
+                ul_parameter_len,
+                shape,
+                MessageParameterDirection::Encrypt,
+                MessageParameterStage::Begin,
+                MessageCallMemory::begin(p_associated_data, ul_associated_data_len),
+            )
+        } {
+            Ok(call) => call,
+            Err(error) => return rv_err(error),
+        };
 
-        let result = with_client!(client => client.encrypt_message_begin(
+        let result = with_client!(client => client.encrypt_message_begin_contract(
             CkSessionHandle(h_session as u64),
-            parameter,
+            &envelope,
+            parameter_call.parameter(),
             aad,
         ));
 
         match result {
-            Ok(parameter_out) => {
-                unsafe { write_parameter_out(&parameter_out, p_parameter, ul_parameter_len) };
-                rv_ok()
+            Ok((parameter_result, response_parameter)) => {
+                let rv = unsafe {
+                    write_message_begin_output(
+                        &envelope,
+                        &parameter_call,
+                        &parameter_result,
+                        response_parameter.as_ref(),
+                    )
+                };
+                if rv != rv_ok() {
+                    operation.shape = None;
+                }
+                rv
             }
-            Err(e) => rv_err(e),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
         }
     })
 }
@@ -344,9 +630,15 @@ pub unsafe extern "C" fn c_encrypt_message_next(
     flags: CK_FLAGS,
 ) -> CK_RV {
     catch_panics(|| {
-        if pul_ciphertext_part_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
         }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
+        let mut operation = operation.lock().expect("message encrypt state poisoned");
+        let shape = match operation.shape {
+            Some(shape) => shape,
+            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
+        };
         let plaintext_part = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_plaintext_part, ul_plaintext_part_len)
         }) {
@@ -359,14 +651,28 @@ pub unsafe extern "C" fn c_encrypt_message_next(
                 Ok(spec) => spec,
                 Err(error) => return rv_err(error),
             };
-        let msg_param = match unsafe {
-            try_read_message_parameter(p_parameter as *const _, ul_parameter_len)
+        let parameter_call = match unsafe {
+            read_message_parameter_call_for_shape_with_memory(
+                p_parameter.cast_const(),
+                ul_parameter_len,
+                shape,
+                MessageParameterDirection::Encrypt,
+                MessageParameterStage::Next { final_part: flags & CKF_END_OF_MESSAGE != 0 },
+                MessageCallMemory::output(
+                    std::ptr::null(),
+                    0,
+                    p_plaintext_part,
+                    ul_plaintext_part_len,
+                    p_ciphertext_part,
+                    output_spec.buffer_len,
+                    pul_ciphertext_part_len,
+                ),
+            )
         } {
-            Ok(param) => param,
+            Ok(call) => call,
             Err(error) => return rv_err(error),
         };
-
-        let result = with_client!(client => client.parameter_output_exact(
+        let result = with_client!(client => client.parameter_output_exact_contract(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::EncryptMessageNext,
             &output_spec,
@@ -378,21 +684,36 @@ pub unsafe extern "C" fn c_encrypt_message_next(
             None,
             0,
             0,
-            msg_param.as_ref(),
+            parameter_call.parameter(),
         ));
 
         match result {
-            Ok((output_result, _param_result, msg_param_out)) => {
-                if let Some(ref mp) = msg_param_out {
-                    unsafe {
-                        write_message_parameter_back(mp, p_parameter, ul_parameter_len);
-                    }
+            Ok((output_result, param_result, msg_param_out)) => {
+                let rv = unsafe {
+                    write_exact_message_output(
+                        &output_spec,
+                        &param_out_spec,
+                        &parameter_call,
+                        &output_result,
+                        &param_result,
+                        msg_param_out.as_ref(),
+                        p_ciphertext_part,
+                        pul_ciphertext_part_len,
+                    )
+                };
+                if output_result.ck_rv == CkRv::DEVICE_ERROR || rv != rv_err(output_result.ck_rv) {
+                    operation.shape = None;
                 }
-                unsafe {
-                    write_exact_output(&output_result, p_ciphertext_part, pul_ciphertext_part_len)
-                }
+                rv
             }
-            Err(e) => rv_err(e),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
         }
     })
 }
@@ -413,9 +734,15 @@ pub unsafe extern "C" fn c_decrypt_message(
     pul_plaintext_len: *mut CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        if pul_plaintext_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
         }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
+        let mut operation = operation.lock().expect("message decrypt state poisoned");
+        let shape = match operation.shape {
+            Some(shape) => shape,
+            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
+        };
         let aad = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_associated_data, ul_associated_data_len)
         }) {
@@ -434,14 +761,28 @@ pub unsafe extern "C" fn c_decrypt_message(
                 Ok(spec) => spec,
                 Err(error) => return rv_err(error),
             };
-        let msg_param = match unsafe {
-            try_read_message_parameter(p_parameter as *const _, ul_parameter_len)
+        let parameter_call = match unsafe {
+            read_message_parameter_call_for_shape_with_memory(
+                p_parameter.cast_const(),
+                ul_parameter_len,
+                shape,
+                MessageParameterDirection::Decrypt,
+                MessageParameterStage::OneShot,
+                MessageCallMemory::output(
+                    p_associated_data,
+                    ul_associated_data_len,
+                    p_ciphertext,
+                    ul_ciphertext_len,
+                    p_plaintext,
+                    output_spec.buffer_len,
+                    pul_plaintext_len,
+                ),
+            )
         } {
-            Ok(param) => param,
+            Ok(call) => call,
             Err(error) => return rv_err(error),
         };
-
-        let result = with_client!(client => client.parameter_output_exact(
+        let result = with_client!(client => client.parameter_output_exact_contract(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::DecryptMessage,
             &output_spec,
@@ -453,19 +794,36 @@ pub unsafe extern "C" fn c_decrypt_message(
             None,
             0,
             0,
-            msg_param.as_ref(),
+            parameter_call.parameter(),
         ));
 
         match result {
-            Ok((output_result, _param_result, msg_param_out)) => {
-                if let Some(ref mp) = msg_param_out {
-                    unsafe {
-                        write_message_parameter_back(mp, p_parameter, ul_parameter_len);
-                    }
+            Ok((output_result, param_result, msg_param_out)) => {
+                let rv = unsafe {
+                    write_exact_message_output(
+                        &output_spec,
+                        &param_out_spec,
+                        &parameter_call,
+                        &output_result,
+                        &param_result,
+                        msg_param_out.as_ref(),
+                        p_plaintext,
+                        pul_plaintext_len,
+                    )
+                };
+                if output_result.ck_rv == CkRv::DEVICE_ERROR || rv != rv_err(output_result.ck_rv) {
+                    operation.shape = None;
                 }
-                unsafe { write_exact_output(&output_result, p_plaintext, pul_plaintext_len) }
+                rv
             }
-            Err(e) => rv_err(e),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
         }
     })
 }
@@ -482,26 +840,70 @@ pub unsafe extern "C" fn c_decrypt_message_begin(
     ul_associated_data_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
+        let mut operation = operation.lock().expect("message decrypt state poisoned");
+        let shape = match operation.shape {
+            Some(shape) => shape,
+            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
+        };
         let aad = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_associated_data, ul_associated_data_len)
         }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
         };
+        let envelope =
+            match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
+                Ok(spec) => spec,
+                Err(error) => return rv_err(error),
+            };
+        let parameter_call = match unsafe {
+            read_message_parameter_call_for_shape_with_memory(
+                p_parameter.cast_const(),
+                ul_parameter_len,
+                shape,
+                MessageParameterDirection::Decrypt,
+                MessageParameterStage::Begin,
+                MessageCallMemory::begin(p_associated_data, ul_associated_data_len),
+            )
+        } {
+            Ok(call) => call,
+            Err(error) => return rv_err(error),
+        };
 
-        let result = with_client!(client => client.decrypt_message_begin(
+        let result = with_client!(client => client.decrypt_message_begin_contract(
             CkSessionHandle(h_session as u64),
-            parameter,
+            &envelope,
+            parameter_call.parameter(),
             aad,
         ));
 
         match result {
-            Ok(parameter_out) => {
-                unsafe { write_parameter_out(&parameter_out, p_parameter, ul_parameter_len) };
-                rv_ok()
+            Ok((parameter_result, response_parameter)) => {
+                let rv = unsafe {
+                    write_message_begin_output(
+                        &envelope,
+                        &parameter_call,
+                        &parameter_result,
+                        response_parameter.as_ref(),
+                    )
+                };
+                if rv != rv_ok() {
+                    operation.shape = None;
+                }
+                rv
             }
-            Err(e) => rv_err(e),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
         }
     })
 }
@@ -521,9 +923,15 @@ pub unsafe extern "C" fn c_decrypt_message_next(
     flags: CK_FLAGS,
 ) -> CK_RV {
     catch_panics(|| {
-        if pul_plaintext_part_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
         }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
+        let mut operation = operation.lock().expect("message decrypt state poisoned");
+        let shape = match operation.shape {
+            Some(shape) => shape,
+            None => return rv_err(CkRv::OPERATION_NOT_INITIALIZED),
+        };
         let ciphertext_part = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_ciphertext_part, ul_ciphertext_part_len)
         }) {
@@ -536,14 +944,28 @@ pub unsafe extern "C" fn c_decrypt_message_next(
                 Ok(spec) => spec,
                 Err(error) => return rv_err(error),
             };
-        let msg_param = match unsafe {
-            try_read_message_parameter(p_parameter as *const _, ul_parameter_len)
+        let parameter_call = match unsafe {
+            read_message_parameter_call_for_shape_with_memory(
+                p_parameter.cast_const(),
+                ul_parameter_len,
+                shape,
+                MessageParameterDirection::Decrypt,
+                MessageParameterStage::Next { final_part: flags & CKF_END_OF_MESSAGE != 0 },
+                MessageCallMemory::output(
+                    std::ptr::null(),
+                    0,
+                    p_ciphertext_part,
+                    ul_ciphertext_part_len,
+                    p_plaintext_part,
+                    output_spec.buffer_len,
+                    pul_plaintext_part_len,
+                ),
+            )
         } {
-            Ok(param) => param,
+            Ok(call) => call,
             Err(error) => return rv_err(error),
         };
-
-        let result = with_client!(client => client.parameter_output_exact(
+        let result = with_client!(client => client.parameter_output_exact_contract(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::DecryptMessageNext,
             &output_spec,
@@ -555,21 +977,36 @@ pub unsafe extern "C" fn c_decrypt_message_next(
             None,
             0,
             0,
-            msg_param.as_ref(),
+            parameter_call.parameter(),
         ));
 
         match result {
-            Ok((output_result, _param_result, msg_param_out)) => {
-                if let Some(ref mp) = msg_param_out {
-                    unsafe {
-                        write_message_parameter_back(mp, p_parameter, ul_parameter_len);
-                    }
+            Ok((output_result, param_result, msg_param_out)) => {
+                let rv = unsafe {
+                    write_exact_message_output(
+                        &output_spec,
+                        &param_out_spec,
+                        &parameter_call,
+                        &output_result,
+                        &param_result,
+                        msg_param_out.as_ref(),
+                        p_plaintext_part,
+                        pul_plaintext_part_len,
+                    )
+                };
+                if output_result.ck_rv == CkRv::DEVICE_ERROR || rv != rv_err(output_result.ck_rv) {
+                    operation.shape = None;
                 }
-                unsafe {
-                    write_exact_output(&output_result, p_plaintext_part, pul_plaintext_part_len)
-                }
+                rv
             }
-            Err(e) => rv_err(e),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
         }
     })
 }
@@ -588,27 +1025,31 @@ pub unsafe extern "C" fn c_sign_message(
     pul_signature_len: *mut CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        if pul_signature_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
         }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
+        let mut operation = operation.lock().expect("message sign state poisoned");
+        if operation.shape.is_none() {
+            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        let param_out_spec = match unsafe {
+            empty_message_parameter_roundtrip_spec(p_parameter, ul_parameter_len)
+        } {
+            Ok(spec) => spec,
+            Err(error) => return rv_err(error),
+        };
         let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
         };
         let output_spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
-        let param_out_spec =
-            match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
-                Ok(spec) => spec,
-                Err(error) => return rv_err(error),
-            };
-        let msg_param = match unsafe {
-            try_read_message_parameter(p_parameter as *const _, ul_parameter_len)
-        } {
-            Ok(param) => param,
-            Err(error) => return rv_err(error),
-        };
+        let parameter_call = empty_message_parameter_call(
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        );
 
-        let result = with_client!(client => client.parameter_output_exact(
+        let result = with_client!(client => client.parameter_output_exact_contract(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::SignMessage,
             &output_spec,
@@ -620,19 +1061,36 @@ pub unsafe extern "C" fn c_sign_message(
             None,
             0,
             0,
-            msg_param.as_ref(),
+            None,
         ));
 
         match result {
-            Ok((output_result, _param_result, msg_param_out)) => {
-                if let Some(ref mp) = msg_param_out {
-                    unsafe {
-                        write_message_parameter_back(mp, p_parameter, ul_parameter_len);
-                    }
+            Ok((output_result, param_result, msg_param_out)) => {
+                let rv = unsafe {
+                    write_exact_message_output(
+                        &output_spec,
+                        &param_out_spec,
+                        &parameter_call,
+                        &output_result,
+                        &param_result,
+                        msg_param_out.as_ref(),
+                        p_signature,
+                        pul_signature_len,
+                    )
+                };
+                if output_result.ck_rv == CkRv::DEVICE_ERROR || rv != rv_err(output_result.ck_rv) {
+                    operation.shape = None;
                 }
-                unsafe { write_exact_output(&output_result, p_signature, pul_signature_len) }
+                rv
             }
-            Err(e) => rv_err(e),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
         }
     })
 }
@@ -647,19 +1105,48 @@ pub unsafe extern "C" fn c_sign_message_begin(
     ul_parameter_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
+        let mut operation = operation.lock().expect("message sign state poisoned");
+        if operation.shape.is_none() {
+            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        let envelope = match unsafe {
+            empty_message_parameter_roundtrip_spec(p_parameter, ul_parameter_len)
+        } {
+            Ok(spec) => spec,
+            Err(error) => return rv_err(error),
+        };
+        let parameter_call = empty_message_parameter_call(
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::Begin,
+        );
 
-        let result = with_client!(client => client.sign_message_begin(
+        let result = with_client!(client => client.sign_message_begin_contract(
             CkSessionHandle(h_session as u64),
-            parameter,
+            &envelope,
         ));
 
         match result {
-            Ok(parameter_out) => {
-                unsafe { write_parameter_out(&parameter_out, p_parameter, ul_parameter_len) };
-                rv_ok()
+            Ok(parameter_result) => {
+                let rv = unsafe {
+                    write_message_begin_output(&envelope, &parameter_call, &parameter_result, None)
+                };
+                if rv != rv_ok() {
+                    operation.shape = None;
+                }
+                rv
             }
-            Err(e) => rv_err(e),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
         }
     })
 }
@@ -678,7 +1165,20 @@ pub unsafe extern "C" fn c_sign_message_next(
     pul_signature_len: *mut CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Sign);
+        let mut operation = operation.lock().expect("message sign state poisoned");
+        if operation.shape.is_none() {
+            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        let envelope = match unsafe {
+            empty_message_parameter_roundtrip_spec(p_parameter, ul_parameter_len)
+        } {
+            Ok(spec) => spec,
+            Err(error) => return rv_err(error),
+        };
         let data_part = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_data_part, ul_data_part_len)
         }) {
@@ -690,64 +1190,91 @@ pub unsafe extern "C" fn c_sign_message_next(
         let request_signature = !pul_signature_len.is_null();
 
         if !request_signature {
-            // Feed more data — no output. Use existing convenience path.
-            let result = with_client!(client => client.sign_message_next(
+            let result = with_client!(client => client.sign_message_next_feed_contract(
                 CkSessionHandle(h_session as u64),
-                parameter,
+                &envelope,
                 data_part,
-                false,
             ));
 
             return match result {
-                Ok((param_out, _)) => {
-                    unsafe {
-                        write_parameter_out(&param_out, p_parameter, ul_parameter_len);
+                Ok(parameter_result) => {
+                    let parameter_call = empty_message_parameter_call(
+                        MessageParameterDirection::Encrypt,
+                        MessageParameterStage::Next { final_part: false },
+                    );
+                    let rv = unsafe {
+                        write_message_begin_output(
+                            &envelope,
+                            &parameter_call,
+                            &parameter_result,
+                            None,
+                        )
+                    };
+                    if rv != rv_ok() {
+                        operation.shape = None;
                     }
-                    rv_ok()
+                    rv
                 }
-                Err(e) => rv_err(e),
+                Err(error) => {
+                    if error.origin != MessageCallErrorOrigin::Backend
+                        || error.ck_rv == CkRv::DEVICE_ERROR
+                    {
+                        operation.shape = None;
+                    }
+                    rv_err(error.ck_rv)
+                }
             };
         }
 
         // Final call: request_signature = true, use exact output path
         let output_spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
-        let param_out_spec =
-            match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
-                Ok(spec) => spec,
-                Err(error) => return rv_err(error),
-            };
-        let msg_param = match unsafe {
-            try_read_message_parameter(p_parameter as *const _, ul_parameter_len)
-        } {
-            Ok(param) => param,
-            Err(error) => return rv_err(error),
-        };
+        let parameter_call = empty_message_parameter_call(
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::Next { final_part: true },
+        );
 
-        let result = with_client!(client => client.parameter_output_exact(
+        let result = with_client!(client => client.parameter_output_exact_contract(
             CkSessionHandle(h_session as u64),
             ParameterOutputFunction::SignMessageNext,
             &output_spec,
             data_part,
             CkInBuf::Bytes(&[]),
             &[],
-            &param_out_spec,
+            &envelope,
             0,
             None,
             0,
             0,
-            msg_param.as_ref(),
+            None,
         ));
 
         match result {
-            Ok((output_result, _param_result, msg_param_out)) => {
-                if let Some(ref mp) = msg_param_out {
-                    unsafe {
-                        write_message_parameter_back(mp, p_parameter, ul_parameter_len);
-                    }
+            Ok((output_result, parameter_result, msg_param_out)) => {
+                let rv = unsafe {
+                    write_exact_message_output(
+                        &output_spec,
+                        &envelope,
+                        &parameter_call,
+                        &output_result,
+                        &parameter_result,
+                        msg_param_out.as_ref(),
+                        p_signature,
+                        pul_signature_len,
+                    )
+                };
+                if output_result.ck_rv == CkRv::DEVICE_ERROR || rv != rv_err(output_result.ck_rv) {
+                    operation.shape = None;
                 }
-                unsafe { write_exact_output(&output_result, p_signature, pul_signature_len) }
+                rv
             }
-            Err(e) => rv_err(e),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
         }
     })
 }
@@ -766,7 +1293,20 @@ pub unsafe extern "C" fn c_verify_message(
     ul_signature_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
+        let mut operation = operation.lock().expect("message verify state poisoned");
+        if operation.shape.is_none() {
+            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        let envelope = match unsafe {
+            empty_message_parameter_roundtrip_spec(p_parameter, ul_parameter_len)
+        } {
+            Ok(spec) => spec,
+            Err(error) => return rv_err(error),
+        };
         let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
@@ -778,12 +1318,22 @@ pub unsafe extern "C" fn c_verify_message(
             Err(e) => return rv_err(e),
         };
 
-        unit_result_to_rv(with_client!(client => client.verify_message(
+        match with_client!(client => client.verify_message_contract(
             CkSessionHandle(h_session as u64),
-            parameter,
+            &envelope,
             data,
             signature,
-        )))
+        )) {
+            Ok(_) => rv_ok(),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
+        }
     })
 }
 
@@ -797,12 +1347,35 @@ pub unsafe extern "C" fn c_verify_message_begin(
     ul_parameter_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
+        let mut operation = operation.lock().expect("message verify state poisoned");
+        if operation.shape.is_none() {
+            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        let envelope = match unsafe {
+            empty_message_parameter_roundtrip_spec(p_parameter, ul_parameter_len)
+        } {
+            Ok(spec) => spec,
+            Err(error) => return rv_err(error),
+        };
 
-        unit_result_to_rv(with_client!(client => client.verify_message_begin(
+        match with_client!(client => client.verify_message_begin_contract(
             CkSessionHandle(h_session as u64),
-            parameter,
-        )))
+            &envelope,
+        )) {
+            Ok(_) => rv_ok(),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
+        }
     })
 }
 
@@ -820,7 +1393,20 @@ pub unsafe extern "C" fn c_verify_message_next(
     ul_signature_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
+        if let Some(rv) = pointer_safe_message_capability_error() {
+            return rv;
+        }
+        let operation = state::message_operation_state(h_session, state::MessageOperation::Verify);
+        let mut operation = operation.lock().expect("message verify state poisoned");
+        if operation.shape.is_none() {
+            return rv_err(CkRv::OPERATION_NOT_INITIALIZED);
+        }
+        let envelope = match unsafe {
+            empty_message_parameter_roundtrip_spec(p_parameter, ul_parameter_len)
+        } {
+            Ok(spec) => spec,
+            Err(error) => return rv_err(error),
+        };
         let data_part = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_data_part, ul_data_part_len)
         }) {
@@ -839,12 +1425,84 @@ pub unsafe extern "C" fn c_verify_message_next(
             CkInBuf::Bytes(&[])
         };
 
-        unit_result_to_rv(with_client!(client => client.verify_message_next(
+        match with_client!(client => client.verify_message_next_contract(
             CkSessionHandle(h_session as u64),
-            parameter,
+            &envelope,
             data_part,
             is_final,
             signature,
-        )))
+        )) {
+            Ok(_) => rv_ok(),
+            Err(error) => {
+                if error.origin != MessageCallErrorOrigin::Backend
+                    || error.ck_rv == CkRv::DEVICE_ERROR
+                {
+                    operation.shape = None;
+                }
+                rv_err(error.ck_rv)
+            }
+        }
     })
+}
+
+#[cfg(test)]
+mod init_ack_state_tests {
+    use super::*;
+    use pkcs11_proxy_ng_client::MessageCallError;
+
+    #[test]
+    fn byte_mutated_init_ack_protocol_error_clears_shape_without_caller_writes() {
+        let mut operation = state::MessageOperationState::default();
+        let saved_shape = Some(MessageParameterShape::Gcm);
+        let iv = [0x11_u8; 12];
+        let tag = [0xA5_u8; 16];
+        let error = MessageCallError {
+            ck_rv: CkRv::FUNCTION_NOT_SUPPORTED,
+            origin: MessageCallErrorOrigin::Protocol,
+        };
+
+        let rv = settle_message_init_error(&mut operation, saved_shape, &error);
+
+        assert_eq!(rv, CkRv::FUNCTION_NOT_SUPPORTED);
+        assert_eq!(operation.shape, None, "protocol ambiguity must not restore the old shape");
+        assert_eq!(iv, [0x11; 12], "Init acknowledgement failure must not write the caller IV");
+        assert_eq!(tag, [0xA5; 16], "Init acknowledgement failure must not write the caller tag");
+    }
+
+    #[test]
+    fn stale_registry_rejection_restores_the_shim_shape() {
+        let mut operation = state::MessageOperationState::default();
+        let saved_shape = Some(MessageParameterShape::Ccm);
+        let error = MessageCallError {
+            ck_rv: CkRv::MECHANISM_PARAM_INVALID,
+            origin: MessageCallErrorOrigin::Backend,
+        };
+
+        let rv = settle_message_init_error(&mut operation, saved_shape, &error);
+
+        assert_eq!(rv, CkRv::MECHANISM_PARAM_INVALID);
+        assert_eq!(
+            operation.shape, saved_shape,
+            "a pre-provider daemon rejection must preserve the shim's prior operation state",
+        );
+    }
+
+    #[test]
+    fn device_error_or_transport_failure_clears_the_shim_shape() {
+        for error in [
+            MessageCallError { ck_rv: CkRv::DEVICE_ERROR, origin: MessageCallErrorOrigin::Backend },
+            MessageCallError {
+                ck_rv: CkRv::FUNCTION_FAILED,
+                origin: MessageCallErrorOrigin::Transport,
+            },
+        ] {
+            let mut operation = state::MessageOperationState::default();
+            let saved_shape = Some(MessageParameterShape::Gcm);
+
+            let rv = settle_message_init_error(&mut operation, saved_shape, &error);
+
+            assert_eq!(rv, error.ck_rv);
+            assert_eq!(operation.shape, None, "{:?} must clear stale state", error.origin);
+        }
+    }
 }

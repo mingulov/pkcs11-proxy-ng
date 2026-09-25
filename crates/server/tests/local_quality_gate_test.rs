@@ -1441,10 +1441,6 @@ fn oasis_inventory_cites_loaded_shim_message_begin_next_function_tests() {
         "C_EncryptMessageNext",
         "C_DecryptMessageBegin",
         "C_DecryptMessageNext",
-        "C_SignMessageBegin",
-        "C_SignMessageNext",
-        "C_VerifyMessageBegin",
-        "C_VerifyMessageNext",
     ] {
         let entry = function_matrix_entry(&inventory, function);
         assert!(
@@ -1453,7 +1449,22 @@ fn oasis_inventory_cites_loaded_shim_message_begin_next_function_tests() {
                 .expect("local_tests should be an array")
                 .iter()
                 .any(|test| test == "loaded_shim_message_begin_next_round_trips_c_stack_params"),
-            "{function} should cite loaded-shim C ABI Begin/Next coverage"
+            "{function} should cite modelled Encrypt/Decrypt loaded-shim coverage"
+        );
+    }
+
+    for function in
+        ["C_SignMessageBegin", "C_SignMessageNext", "C_VerifyMessageBegin", "C_VerifyMessageNext"]
+    {
+        let entry = function_matrix_entry(&inventory, function);
+        assert!(
+            entry["local_tests"]
+                .as_array()
+                .expect("local_tests should be an array")
+                .iter()
+                .any(|test| test
+                    == "loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_per_call"),
+            "{function} should cite empty-only Sign/Verify loaded-shim coverage"
         );
     }
 }
@@ -3309,7 +3320,7 @@ fn oasis_inventory_tracks_digest_xof_as_explicit_abi_decision() {
                 .as_array()
                 .expect("XOF ABI decision evidence should be an array")
                 .iter()
-                .any(|source| source == "crates/backend/src/ffi/function_field_tables.rs"),
+                .any(|source| source == "crates/module/src/tables.rs"),
             "{function} should cite the local function-list field table checked for ABI exposure"
         );
         assert!(

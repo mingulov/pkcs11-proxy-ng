@@ -1,4 +1,5 @@
 use cryptoki_sys::*;
+use pkcs11_proxy_ng_client::MessageCallErrorOrigin;
 use pkcs11_proxy_ng_types::*;
 
 #[allow(unused_imports)]
@@ -30,12 +31,26 @@ pub unsafe extern "C" fn c_open_session(
 
 pub unsafe extern "C" fn c_close_session(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
-        let result = with_client!(client => client.close_session(
+        let result = with_client!(client => client.close_session_stateful(
             CkSessionHandle(h_session as u64)
         ));
-        // Evicted on the attempt, regardless of CK_RV (see evict_session_caches).
-        crate::state::evict_session_caches(h_session);
-        unit_result_to_rv(result)
+        // Disposable two-call output is attempt-scoped.  Authoritative
+        // session/message state survives only a decoded transient provider
+        // failure, so a still-valid handle can safely retry or continue.
+        crate::state::evict_session_output_caches(h_session);
+        let evict_authoritative = match &result {
+            Ok(()) => true,
+            Err(error) if error.origin != MessageCallErrorOrigin::Backend => true,
+            Err(error) => {
+                error.ck_rv == CkRv::DEVICE_ERROR
+                    || error.ck_rv == CkRv::SESSION_CLOSED
+                    || error.ck_rv == CkRv::SESSION_HANDLE_INVALID
+            }
+        };
+        if evict_authoritative {
+            crate::state::evict_session_authoritative_state(h_session);
+        }
+        unit_result_to_rv(result.map_err(|error| error.ck_rv))
     })
 }
 

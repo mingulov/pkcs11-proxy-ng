@@ -13,12 +13,15 @@
 ARG AMAZON_VER=2023
 ARG AMAZON_BUILD_IMAGE=amazonlinux:${AMAZON_VER}
 ARG READY_IMAGE=scratch
+ARG APP_VERSION=0.2.0
 ARG BUILD_DATE=unknown
 ARG GIT_COMMIT=unknown
 
-# ─── Stage 1: build RPMs using stock AL2023 toolchain ──────────────────────
+# ─── Stage 1: build RPMs using rustup-managed Rust toolchain ──────────────────
 
 FROM ${AMAZON_BUILD_IMAGE} AS buildrpm
+
+ARG APP_VERSION
 
 WORKDIR /root
 
@@ -47,11 +50,13 @@ RUN <<EOF
   # Stage a source tarball that the .spec file consumes. The tarball
   # includes the target/release artifacts so the .spec's %install
   # phase can pick them up without rebuilding.
-  mkdir -p ~/rpmbuild/SOURCES/pkcs11-proxy-ng-0.2.0
-  cp -a target ~/rpmbuild/SOURCES/pkcs11-proxy-ng-0.2.0/target
-  cp -a packaging crates ~/rpmbuild/SOURCES/pkcs11-proxy-ng-0.2.0/
+  source_name="pkcs11-proxy-ng-${APP_VERSION}"
+  source_dir="$HOME/rpmbuild/SOURCES/$source_name"
+  mkdir -p "$source_dir"
+  cp -a target "$source_dir/target"
+  cp -a packaging crates "$source_dir/"
   cd ~/rpmbuild/SOURCES
-  tar -czf pkcs11-proxy-ng-0.2.0.tar.gz pkcs11-proxy-ng-0.2.0
+  tar -czf "$source_name.tar.gz" "$source_name"
 
   cp /root/packaging/amazon/pkcs11-proxy-ng.spec ~/rpmbuild/SPECS/
   # The .spec %build re-runs `cargo build` from inside rpmbuild; pass

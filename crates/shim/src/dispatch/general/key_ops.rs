@@ -13,7 +13,7 @@ pub unsafe extern "C" fn c_wrap_key(
     pul_wrapped_key_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if p_mechanism.is_null() || pul_wrapped_key_len.is_null() {
+        if p_mechanism.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
@@ -34,12 +34,14 @@ pub unsafe extern "C" fn c_wrap_key(
         ));
         match result {
             Ok((r, mechanism_out)) => {
-                let rv = unsafe { write_exact_output(&r, p_wrapped_key, pul_wrapped_key_len) };
-                // Only write back on a successful, buffer-present call.
-                // Size-query (NULL output) doesn't trigger HSM-side IV
-                // generation on most providers, so there's nothing to copy.
+                let rv =
+                    unsafe { write_exact_output(&spec, &r, p_wrapped_key, pul_wrapped_key_len) };
+                // A missing length pointer remains a genuine provider call, so
+                // preserve any successful mechanism writeback independently of
+                // the main output pointer. Ordinary size queries keep the
+                // historical no-writeback behavior.
                 if rv == rv_ok()
-                    && spec.buffer_present
+                    && (spec.buffer_present || spec.length_pointer_null)
                     && let Some(params) = mechanism_out
                 {
                     unsafe { write_mechanism_output_params(p_mechanism, &params) };
@@ -278,10 +280,14 @@ pub unsafe extern "C" fn c_generate_random(
         if p_random_data.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), ul_random_len as u32))
+        let random_len = match u32::try_from(ul_random_len) {
+            Ok(len) => len,
+            Err(_) => return rv_err(CkRv::DATA_LEN_RANGE),
+        };
+        match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), random_len))
         {
             Ok(data) => {
-                if data.len() != ul_random_len as usize {
+                if data.len() != random_len as usize {
                     return rv_err(CkRv::DEVICE_ERROR);
                 }
                 unsafe {

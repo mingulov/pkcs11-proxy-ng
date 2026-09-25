@@ -7,7 +7,7 @@
 //! get the static (all-non-null) function lists; post-`C_Initialize`
 //! callers get the patched versions.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use cryptoki_sys::*;
@@ -39,6 +39,9 @@ struct InterfaceState {
     has_3_0: bool,
     /// Whether the backend reported a 3.2-compatible interface.
     has_3_2: bool,
+    /// Advertised separately from function-list availability because every
+    /// message call must fail closed against an older daemon.
+    pointer_safe_message_parameters: bool,
 }
 
 // CK_INTERFACE contains raw pointers that are always to `'static` memory
@@ -53,6 +56,25 @@ static INTERFACE_STATE: RwLock<Option<&'static InterfaceState>> = RwLock::new(No
 /// back to 8 bytes (D9).
 static BACKEND_ULONG_SIZE: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_ATTRIBUTE_STRIDE: AtomicUsize = AtomicUsize::new(0);
+static POINTER_SAFE_MESSAGE_PARAMETERS: AtomicBool = AtomicBool::new(false);
+
+/// Whether the daemon acknowledged the shape-bound message-parameter contract.
+/// Absence and an in-progress/failed reprobe are both fail-closed.
+pub fn pointer_safe_message_parameters() -> bool {
+    POINTER_SAFE_MESSAGE_PARAMETERS.load(Ordering::Acquire)
+}
+
+fn record_pointer_safe_message_parameters(advertised: bool) {
+    POINTER_SAFE_MESSAGE_PARAMETERS.store(advertised, Ordering::Release);
+}
+
+fn clear_pointer_safe_message_parameters() {
+    record_pointer_safe_message_parameters(false);
+}
+
+pub(crate) fn invalidate_pointer_safe_message_parameters() {
+    clear_pointer_safe_message_parameters();
+}
 
 /// The backend's `CK_ULONG` width in bytes for the value bridge (ADR-0011).
 ///
@@ -636,7 +658,16 @@ fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
         },
     ];
 
-    Ok(InterfaceState { fl_2_40, fl_3_0, fl_3_2, catalog, count, has_3_0, has_3_2 })
+    Ok(InterfaceState {
+        fl_2_40,
+        fl_3_0,
+        fl_3_2,
+        catalog,
+        count,
+        has_3_0,
+        has_3_2,
+        pointer_safe_message_parameters: probe.pointer_safe_message_parameters,
+    })
 }
 
 /// Fix up the catalog's `pFunctionList` pointers to point into a leaked
@@ -718,6 +749,11 @@ pub fn ensure_probed() -> Result<(), String> {
     if guard.is_none() {
         *guard = Some(leak_fixed_state(st));
     }
+    // A losing concurrent probe publishes the capability of the state that
+    // actually won installation, never its own stale response.
+    record_pointer_safe_message_parameters(
+        guard.as_ref().is_some_and(|state| state.pointer_safe_message_parameters),
+    );
     Ok(())
 }
 
@@ -726,10 +762,16 @@ pub fn ensure_probed() -> Result<(), String> {
 /// Called from `C_Initialize` after a successful server init so that the
 /// function lists reflect the current backend.
 pub fn reprobe() -> Result<(), String> {
+    // A reprobe can be talking to a restarted or downgraded daemon. Do not let
+    // a transient failure retain permission for stateful message operations.
+    clear_pointer_safe_message_parameters();
     match probe_backend() {
         Ok(st) => {
             let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
             *guard = Some(leak_fixed_state(st));
+            record_pointer_safe_message_parameters(
+                guard.as_ref().is_some_and(|state| state.pointer_safe_message_parameters),
+            );
             Ok(())
         }
         Err(ProbeFailure::Transient(e)) => {
@@ -749,6 +791,7 @@ pub fn reprobe() -> Result<(), String> {
 ///
 /// After this, `ensure_probed()` will re-probe on the next call.
 pub fn clear_cache() {
+    clear_pointer_safe_message_parameters();
     let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
     *guard = None;
     // Drop the advertised backend ABI so a fresh probe re-reads it (D2).
@@ -941,7 +984,18 @@ unsafe impl Sync for FallbackCatalog {}
 
 #[cfg(test)]
 mod backend_abi_tests {
-    use super::{resolve_backend_attribute_stride, resolve_backend_ulong_size};
+    use super::{
+        clear_pointer_safe_message_parameters, pointer_safe_message_parameters,
+        record_pointer_safe_message_parameters, resolve_backend_attribute_stride,
+        resolve_backend_ulong_size,
+    };
+
+    #[test]
+    fn message_parameter_capability_is_cleared_before_reprobe() {
+        record_pointer_safe_message_parameters(true);
+        clear_pointer_safe_message_parameters();
+        assert!(!pointer_safe_message_parameters());
+    }
 
     #[test]
     fn stride_absent_falls_back_to_three_ulongs() {

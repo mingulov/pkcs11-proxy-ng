@@ -87,6 +87,7 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
         // CKR_GENERAL_ERROR (internal catch-all), which arrive as ordinary
         // results — never triggers a spurious reconnect.
         pkcs11_proxy_ng_client::set_transport_failure_hook(|| {
+            crate::interface_probe::invalidate_pointer_safe_message_parameters();
             state::mark_client_reconnect_required()
         });
 

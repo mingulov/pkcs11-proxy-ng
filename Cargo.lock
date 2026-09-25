@@ -84,9 +84,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "asn1-rs"
@@ -1319,8 +1319,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
+name = "pkcs11-module"
+version = "0.2.0"
+dependencies = [
+ "cryptoki-sys",
+ "libloading",
+]
+
+[[package]]
 name = "pkcs11-proxy-ng"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "criterion",
@@ -1362,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-audit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -1374,11 +1382,12 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-backend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cryptoki-sys",
  "dashmap",
  "libloading",
+ "pkcs11-module",
  "pkcs11-proxy-ng-proto",
  "pkcs11-proxy-ng-types",
  "tracing",
@@ -1387,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1405,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hyper-util",
  "pkcs11-proxy-ng-proto",
@@ -1419,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pkcs11-proxy-ng-types",
  "prost",
@@ -1430,7 +1439,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-shim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cryptoki-sys",
  "libc",
@@ -1448,7 +1457,7 @@ dependencies = [
 
 [[package]]
 name = "pkcs11-proxy-ng-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "tempfile",

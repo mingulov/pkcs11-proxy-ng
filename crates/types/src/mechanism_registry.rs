@@ -327,6 +327,9 @@ mod tests {
     const CKM_IKE_PRF_DERIVE: u64 = 0x402F;
     const CKM_IKE1_PRF_DERIVE: u64 = 0x4030;
     const CKM_IKE1_EXTENDED_DERIVE: u64 = 0x4031;
+    const CKM_RC2_ECB: u64 = 0x0101;
+    const CKM_RC2_MAC: u64 = 0x0103;
+    const CKM_RC2_MAC_GENERAL: u64 = 0x0104;
 
     #[test]
     fn load_embedded_default() {
@@ -382,6 +385,23 @@ mod tests {
 
         // Default discovery mode is transparent.
         assert_eq!(reg.discovery_mode(), DiscoveryMode::Transparent);
+    }
+
+    #[test]
+    fn embedded_default_uses_the_rc2_parameter_shapes() {
+        let reg = MechanismRegistry::load_with_override_str(None).unwrap();
+
+        assert_eq!(
+            [
+                reg.param_shape(CKM_RC2_ECB),
+                reg.param_shape(CKM_RC2_MAC),
+                reg.param_shape(CKM_RC2_MAC_GENERAL),
+            ],
+            [Some("mac_general"), Some("mac_general"), Some("rc2_mac_general")]
+        );
+        for mechanism in [CKM_RC2_ECB, CKM_RC2_MAC, CKM_RC2_MAC_GENERAL] {
+            assert!(!reg.is_parameterless(mechanism));
+        }
     }
 
     #[test]
@@ -683,7 +703,7 @@ mod tests {
 
     #[test]
     fn all_standard_parameterless_mechanisms_present_in_default_config() {
-        // Verify that the embedded default TOML contains all 135 standard
+        // Verify that the embedded default TOML contains all 133 standard
         // parameterless mechanisms. This list is exhaustive against the
         // mechanism_params_default.toml file to catch accidental deletions.
         let reg = MechanismRegistry::load_with_override_str(None).unwrap();
@@ -754,7 +774,6 @@ mod tests {
             0x0350, // CKM_GENERIC_SECRET_KEY_GEN
             // RC2
             0x0100, // CKM_RC2_KEY_GEN
-            0x0101, // CKM_RC2_ECB
             // RC4
             0x0110, // CKM_RC4_KEY_GEN
             0x0111, // CKM_RC4
@@ -854,12 +873,12 @@ mod tests {
             0x001D, // CKM_ML_DSA
         ];
 
-        // Verify count matches the TOML (134 parameterless mechanisms).
-        // CKM_RC2_MAC (0x0103) was moved to mac_general shape.
+        // Verify count matches the TOML (133 parameterless mechanisms).
+        // Parameterized RC2 ECB/MAC mechanisms use registry shapes.
         assert_eq!(
             expected_parameterless.len(),
-            134,
-            "expected list should contain exactly 134 entries"
+            133,
+            "expected list should contain exactly 133 entries"
         );
 
         for &mech in expected_parameterless {

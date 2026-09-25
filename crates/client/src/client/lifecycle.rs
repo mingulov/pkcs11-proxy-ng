@@ -40,6 +40,13 @@ pub struct BackendProbe {
     pub backend_byte_order: Option<u32>,
     /// The backend's native sizeof(CK_ATTRIBUTE) (D2 extension), if advertised.
     pub backend_attribute_stride: Option<u32>,
+    /// True only when the daemon supports shape-bound message parameters.
+    /// Older daemons omit the field and are therefore unsafe.
+    pub pointer_safe_message_parameters: bool,
+}
+
+fn pointer_safe_message_parameters_from_wire(advertised: Option<bool>) -> bool {
+    advertised.unwrap_or(false)
 }
 
 async fn connect_channel(
@@ -228,6 +235,9 @@ impl Pkcs11Client {
             backend_ulong_size: resp.backend_ulong_size,
             backend_byte_order: resp.backend_byte_order,
             backend_attribute_stride: resp.backend_attribute_stride,
+            pointer_safe_message_parameters: pointer_safe_message_parameters_from_wire(
+                resp.pointer_safe_message_parameters,
+            ),
         })
     }
 
@@ -251,5 +261,25 @@ impl Pkcs11Client {
             }
             ConnectionSource::SharedChannel => Err(CkRv::GENERAL_ERROR),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pointer_safe_message_parameters_from_wire;
+
+    #[test]
+    fn pointer_safe_message_absent_capability_is_unsafe() {
+        assert!(!pointer_safe_message_parameters_from_wire(None));
+    }
+
+    #[test]
+    fn pointer_safe_message_explicitly_false_capability_is_unsafe() {
+        assert!(!pointer_safe_message_parameters_from_wire(Some(false)));
+    }
+
+    #[test]
+    fn pointer_safe_message_advertised_capability_is_safe() {
+        assert!(pointer_safe_message_parameters_from_wire(Some(true)));
     }
 }

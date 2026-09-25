@@ -47,9 +47,6 @@ pub unsafe extern "C" fn c_sign(
     pul_signature_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if pul_signature_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
-        }
         let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
@@ -65,7 +62,7 @@ pub unsafe extern "C" fn c_sign(
             0,
         ));
         match result {
-            Ok(r) => unsafe { write_exact_output(&r, p_signature, pul_signature_len) },
+            Ok(r) => unsafe { write_exact_output(&spec, &r, p_signature, pul_signature_len) },
             Err(e) => rv_err(e),
         }
     })
@@ -93,9 +90,6 @@ pub unsafe extern "C" fn c_sign_final(
     pul_signature_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if pul_signature_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
-        }
         let spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session as u64),
@@ -107,7 +101,7 @@ pub unsafe extern "C" fn c_sign_final(
             0,
         ));
         match result {
-            Ok(r) => unsafe { write_exact_output(&r, p_signature, pul_signature_len) },
+            Ok(r) => unsafe { write_exact_output(&spec, &r, p_signature, pul_signature_len) },
             Err(e) => rv_err(e),
         }
     })
@@ -249,9 +243,6 @@ pub unsafe extern "C" fn c_sign_recover(
     pul_signature_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if pul_signature_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
-        }
         let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
             Ok(buf) => buf,
             Err(e) => return rv_err(e),
@@ -267,7 +258,7 @@ pub unsafe extern "C" fn c_sign_recover(
             0,
         ));
         match result {
-            Ok(r) => unsafe { write_exact_output(&r, p_signature, pul_signature_len) },
+            Ok(r) => unsafe { write_exact_output(&spec, &r, p_signature, pul_signature_len) },
             Err(e) => rv_err(e),
         }
     })
@@ -315,9 +306,6 @@ pub unsafe extern "C" fn c_verify_recover(
     pul_data_len: CK_ULONG_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        if pul_data_len.is_null() {
-            return rv_err(CkRv::ARGUMENTS_BAD);
-        }
         let signature = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_signature, ul_signature_len)
         }) {
@@ -335,7 +323,7 @@ pub unsafe extern "C" fn c_verify_recover(
             0,
         ));
         match result {
-            Ok(r) => unsafe { write_exact_output(&r, p_data, pul_data_len) },
+            Ok(r) => unsafe { write_exact_output(&spec, &r, p_data, pul_data_len) },
             Err(e) => rv_err(e),
         }
     })

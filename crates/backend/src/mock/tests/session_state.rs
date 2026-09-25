@@ -105,7 +105,7 @@ fn object_and_key_creation_workflows_reject_invalid_session_without_allocating()
             mechanism,
             CkObjectHandle(1),
             &[label_attr("encapsulated-exact")],
-            &CkOutputBufferSpec { buffer_present: true, buffer_len: 8 },
+            &CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false },
         )
     });
     assert_invalid_session_does_not_allocate_object(|backend, session, mechanism| {
@@ -212,7 +212,8 @@ fn stateless_session_workflows_reject_invalid_session() {
     backend.initialize().unwrap();
     let invalid_session = CkSessionHandle(999);
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
-    let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 64 };
+    let output_spec =
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 64, length_pointer_null: false };
     let param_spec = CkParameterRoundtripSpec {
         buffer_present: true,
         buffer_len: 16,

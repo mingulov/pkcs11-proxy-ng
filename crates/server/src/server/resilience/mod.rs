@@ -5,8 +5,15 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+#[cfg(unix)]
 mod metrics_endpoint;
+#[cfg(unix)]
 pub use metrics_endpoint::spawn_metrics_endpoint;
+
+#[cfg(not(unix))]
+pub async fn spawn_metrics_endpoint(_path: std::path::PathBuf) -> Result<(), String> {
+    Err("resilience.metrics_socket requires Unix-domain socket support".to_string())
+}
 
 #[cfg(test)]
 mod tests;

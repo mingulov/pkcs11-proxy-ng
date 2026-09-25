@@ -141,9 +141,12 @@ For 3.0/3.2 provider-gap APIs, the function matrix also cites behavioral gRPC
 tests for async completion/status, KEM encapsulate/decapsulate, authenticated
 wrap/unwrap, and message init/one-shot/begin/next/final flows instead of
 relying only on function-list or handler-presence checks. The message
-Begin/Next rows additionally cite an ignored loaded-shim C ABI test that calls
-the 3.2 function list with caller-owned raw buffers and `CK_GCM_MESSAGE_PARAMS`
-stack structs.
+Begin/Next rows additionally cite ignored loaded-shim C ABI tests:
+`loaded_shim_message_begin_next_round_trips_c_stack_params` covers modelled
+Encrypt/Decrypt GCM parameters and all outer pointer classes through the 3.2
+function list, while
+`loaded_shim_sign_verify_message_preserves_empty_parameter_classes_once_per_call`
+covers the distinct empty-only Sign/Verify contract.
 
 The mechanism parameter-shape matrix compares every `CkMechanismParams` enum
 variant against the Rust parameter struct, OASIS `CK_*PARAMS` source evidence,
@@ -210,10 +213,13 @@ Message-operation parameter structs are tracked in a separate message-parameter
 matrix because they are not `CK_MECHANISM` parameters. That matrix currently
 covers `CK_GCM_MESSAGE_PARAMS`, `CK_CCM_MESSAGE_PARAMS`, and
 `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`, including proto fields, backend FFI
-message conversion, shim read support, shim writeback support, and mutable
-output buffers. It also cites MockBackend typed exact-path tests that return
-synthetic ciphertext/signature bytes plus structured parameter writeback for
-GCM, CCM, and Salsa/ChaCha message params.
+message conversion, shape-bound shim reads, and the bounded Encrypt writeback
+path. These three shapes are modelled only for Encrypt/Decrypt: Encrypt is
+output-capable, Decrypt is input-only, and Sign/Verify parameters are
+empty-only. A materialized non-NULL/nonzero unmodelled parameter fails closed.
+The cited MockBackend exact-path tests cover synthetic cipher output and
+structured GCM, CCM, and Salsa/ChaCha Encrypt writeback without implying
+structured Sign/Verify or Decrypt writeback.
 
 The working Markdown also names six mechanism tokens that do not have numeric
 `CKM_*` values in the vendored OASIS published v2.40, v3.0, v3.1, or v3.2

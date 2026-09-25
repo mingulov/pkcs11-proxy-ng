@@ -27,6 +27,20 @@ async fn begin_operation_capped_enforces_the_per_context_limit() {
     );
 }
 
+#[tokio::test]
+async fn operation_guard_identity_includes_its_manager() {
+    let owner = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let other = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let context_id = owner.create_context(None).await.unwrap();
+    let guard = owner.begin_operation(&context_id).expect("context exists");
+
+    assert!(guard.belongs_to(&owner, &context_id));
+    assert!(
+        !guard.belongs_to(&other, &context_id),
+        "the same context-id text in another manager must not reuse this guard",
+    );
+}
+
 #[test]
 fn token_info_cache_serves_within_ttl_and_expires_after() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
@@ -158,6 +172,38 @@ fn teardown_clears_login_state() {
 }
 
 #[test]
+fn teardown_clears_message_operation_shapes() {
+    let mut ctx = LogicalClientInstance::new(None);
+    let session = ctx.session_handles.insert(BackendHandle(50));
+    ctx.message_operations.insert(
+        (session, MessageOperation::Encrypt),
+        Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) })),
+    );
+
+    let _ = ctx.teardown();
+
+    assert!(ctx.message_operations.is_empty());
+}
+
+#[test]
+fn remove_session_evicts_only_its_message_operation_shapes() {
+    let mut ctx = LogicalClientInstance::new(None);
+    let session_a = ctx.session_handles.insert(BackendHandle(10));
+    let session_b = ctx.session_handles.insert(BackendHandle(20));
+    for session in [session_a, session_b] {
+        ctx.message_operations.insert(
+            (session, MessageOperation::Encrypt),
+            Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) })),
+        );
+    }
+
+    ctx.remove_session(session_a);
+
+    assert!(!ctx.message_operations.contains_key(&(session_a, MessageOperation::Encrypt)));
+    assert!(ctx.message_operations.contains_key(&(session_b, MessageOperation::Encrypt)));
+}
+
+#[test]
 fn remove_session_evicts_only_its_recorded_session_objects() {
     // B2: closing a session evicts the session objects recorded under it, but
     // leaves other sessions' objects (and unrecorded token objects) intact.
@@ -197,6 +243,26 @@ fn remove_sessions_for_slot_evicts_their_session_objects() {
     ctx.remove_sessions_for_slot(CkSlotId(7));
 
     assert_eq!(ctx.object_handles.resolve(obj), None, "slot-close evicts session objects");
+}
+
+#[test]
+fn remove_sessions_for_slot_evicts_only_target_message_operation_shapes() {
+    let mut ctx = LogicalClientInstance::new(None);
+    let target = ctx.session_handles.insert(BackendHandle(11));
+    let other = ctx.session_handles.insert(BackendHandle(12));
+    ctx.session_slots.insert(target, CkSlotId(7));
+    ctx.session_slots.insert(other, CkSlotId(8));
+    for session in [target, other] {
+        ctx.message_operations.insert(
+            (session, MessageOperation::Encrypt),
+            Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) })),
+        );
+    }
+
+    ctx.remove_sessions_for_slot(CkSlotId(7));
+
+    assert!(!ctx.message_operations.contains_key(&(target, MessageOperation::Encrypt)));
+    assert!(ctx.message_operations.contains_key(&(other, MessageOperation::Encrypt)));
 }
 
 #[test]
@@ -748,4 +814,204 @@ async fn attr_cache_clear_noop_for_missing_context() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let gone = ClientContextId("nonexistent".into());
     mgr.attr_cache_clear(&gone).await; // must not panic
+}
+
+#[tokio::test]
+async fn message_transition_restores_shape_when_dropped_before_provider_invocation() {
+    let state =
+        Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) }));
+
+    let guard = Arc::clone(&state).lock_owned().await;
+    drop(MessageOperationTransition::begin(guard));
+
+    assert_eq!(state.lock().await.shape, Some(MessageParameterShape::Gcm));
+}
+
+#[tokio::test]
+async fn message_transition_commits_success_and_restores_explicit_failure() {
+    let state =
+        Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) }));
+
+    {
+        let guard = Arc::clone(&state).lock_owned().await;
+        let mut transition = MessageOperationTransition::begin(guard);
+        transition.mark_started();
+        transition.settle(&Ok(()), Some(MessageParameterShape::Ccm));
+    }
+    assert_eq!(state.lock().await.shape, Some(MessageParameterShape::Ccm));
+
+    {
+        let guard = Arc::clone(&state).lock_owned().await;
+        let mut transition = MessageOperationTransition::begin(guard);
+        transition.mark_started();
+        transition.settle::<()>(&Err(CkRv::FUNCTION_FAILED), None);
+    }
+    assert_eq!(state.lock().await.shape, Some(MessageParameterShape::Ccm));
+}
+
+#[tokio::test]
+async fn message_transition_clears_shape_when_provider_panics_after_invocation() {
+    let state =
+        Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) }));
+
+    let guard = Arc::clone(&state).lock_owned().await;
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut transition = MessageOperationTransition::begin(guard);
+        transition.mark_started();
+        panic!("simulated provider panic");
+    }));
+
+    assert!(unwind.is_err());
+    assert_eq!(state.lock().await.shape, None);
+}
+
+#[tokio::test]
+async fn message_transition_clears_shape_for_ambiguous_provider_result() {
+    let state =
+        Arc::new(Mutex::new(MessageOperationState { shape: Some(MessageParameterShape::Gcm) }));
+
+    {
+        let guard = Arc::clone(&state).lock_owned().await;
+        let mut transition = MessageOperationTransition::begin(guard);
+        transition.mark_started();
+        transition.settle_ambiguous();
+    }
+
+    assert_eq!(state.lock().await.shape, None);
+}
+
+#[tokio::test]
+async fn close_transition_drop_before_invocation_reactivates_session() {
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let backend = BackendHandle(77);
+    let session =
+        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+
+    let transition = mgr.begin_close_session(&ctx_id, session).unwrap();
+    assert_eq!(transition.backend_handle(), backend);
+    assert_eq!(
+        mgr.get_context(&ctx_id, |ctx| ctx.session_handles.resolve(session)).await,
+        Some(None)
+    );
+    drop(transition);
+
+    assert_eq!(
+        mgr.get_context(&ctx_id, |ctx| ctx.session_handles.resolve(session)).await,
+        Some(Some(backend))
+    );
+}
+
+#[tokio::test]
+async fn close_transition_terminal_result_removes_session_and_shapes() {
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let backend = BackendHandle(77);
+    let session =
+        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let operation =
+        mgr.message_operation_lock(&ctx_id, session, MessageOperation::Encrypt).await.unwrap();
+    operation.lock().await.shape = Some(MessageParameterShape::Gcm);
+
+    let mut transition = mgr.begin_close_session(&ctx_id, session).unwrap();
+    transition.mark_started();
+    transition.settle(&Ok(()));
+
+    let state = mgr
+        .get_context(&ctx_id, |ctx| {
+            (
+                ctx.session_handles.resolve(session),
+                ctx.session_handles.suspended_backend(session),
+                ctx.message_operations.keys().any(|(owned_session, _)| *owned_session == session),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, (None, None, false));
+}
+
+#[tokio::test]
+async fn close_transition_panic_after_invocation_quarantines_session_and_clears_shapes() {
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let backend = BackendHandle(77);
+    let session =
+        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let operation =
+        mgr.message_operation_lock(&ctx_id, session, MessageOperation::Encrypt).await.unwrap();
+    operation.lock().await.shape = Some(MessageParameterShape::Gcm);
+
+    let mut transition = mgr.begin_close_session(&ctx_id, session).unwrap();
+    transition.mark_started();
+    drop(transition);
+
+    let state = mgr
+        .get_context(&ctx_id, |ctx| {
+            (
+                ctx.session_handles.resolve(session),
+                ctx.session_handles.suspended_backend(session),
+                ctx.message_operations.keys().any(|(owned_session, _)| *owned_session == session),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, (None, Some(backend), false));
+}
+
+#[tokio::test]
+async fn transient_old_close_completion_cannot_steal_recycled_session_binding() {
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let backend = BackendHandle(77);
+    let old =
+        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let mut transition = mgr.begin_close_session(&ctx_id, old).unwrap();
+    transition.mark_started();
+
+    let new =
+        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    assert_ne!(new, old);
+    transition.settle(&Err(CkRv::FUNCTION_FAILED));
+
+    let state = mgr
+        .get_context(&ctx_id, |ctx| {
+            (
+                ctx.session_handles.resolve(old),
+                ctx.session_handles.suspended_backend(old),
+                ctx.session_handles.resolve(new),
+                ctx.session_handles.resolve_backend(backend),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, (None, Some(backend), Some(backend), Some(new)));
+}
+
+#[tokio::test]
+async fn terminal_old_close_completion_cannot_remove_recycled_session_binding() {
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let ctx_id = mgr.create_context(None).await.unwrap();
+    let backend = BackendHandle(77);
+    let old =
+        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    let mut transition = mgr.begin_close_session(&ctx_id, old).unwrap();
+    transition.mark_started();
+
+    let new =
+        mgr.get_context(&ctx_id, |ctx| ctx.register_session(backend, CkSlotId(1))).await.unwrap();
+    assert_ne!(new, old);
+    transition.settle(&Ok(()));
+
+    let state = mgr
+        .get_context(&ctx_id, |ctx| {
+            (
+                ctx.session_handles.resolve(old),
+                ctx.session_handles.suspended_backend(old),
+                ctx.session_handles.resolve(new),
+                ctx.session_handles.resolve_backend(backend),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(state, (None, None, Some(backend), Some(new)));
 }

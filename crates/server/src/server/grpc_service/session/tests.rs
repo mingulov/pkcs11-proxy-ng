@@ -1,11 +1,14 @@
 use super::{
     close_all_sessions, close_session, init_pin, init_token, login, logout, open_session, set_pin,
 };
-use crate::server::context_manager::{ClientContextId, ContextManager, LoginState};
+use crate::server::context_manager::{
+    ClientContextId, ContextManager, LoginState, MessageOperation,
+};
 use crate::server::grpc_service::{HandlerContext, Pkcs11ProxyService};
 use crate::server::handle_map::VirtualHandle;
-use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend, mock::MockMessageLifecycleAction};
 use pkcs11_proxy_ng_proto::Pkcs11Proxy;
+use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::*;
 use std::io;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -971,6 +974,32 @@ async fn close_session_keeps_mapping_on_transient_backend_failure() {
     // retry (the old code removed it before the backend close).
     let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    mock.inject_close_error(CkRv::FUNCTION_FAILED);
+
+    let rv = close_session(
+        &HandlerContext::for_test(&ctx_mgr, &backend),
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(rv, CkRv::FUNCTION_FAILED.0);
+
+    let still = ctx_mgr
+        .get_context(&ctx_id, |c| c.session_handles.resolve(VirtualHandle(session)))
+        .await
+        .flatten();
+    assert!(still.is_some(), "a transient close failure must keep the session mapping for retry");
+}
+
+#[tokio::test]
+async fn close_session_quarantines_mapping_on_device_error() {
+    let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
     mock.inject_close_error(CkRv::DEVICE_ERROR);
 
     let rv = close_session(
@@ -986,39 +1015,338 @@ async fn close_session_keeps_mapping_on_transient_backend_failure() {
     .ck_rv;
     assert_eq!(rv, CkRv::DEVICE_ERROR.0);
 
-    let still = ctx_mgr
-        .get_context(&ctx_id, |c| c.session_handles.resolve(VirtualHandle(session)))
+    let state = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            (
+                ctx.session_handles.resolve(VirtualHandle(session)),
+                ctx.session_handles.suspended_backend(VirtualHandle(session)),
+            )
+        })
         .await
-        .flatten();
-    assert!(still.is_some(), "a transient close failure must keep the session mapping for retry");
+        .unwrap();
+    assert_eq!(state.0, None, "an ambiguous close must make the session unresolvable");
+    assert!(state.1.is_some(), "teardown must retain the quarantined backend handle");
 }
 
 #[tokio::test]
-async fn close_session_drops_mapping_when_backend_reports_already_gone() {
-    // M3: a terminal result (backend says the session is already invalid) must
-    // drop the stale mapping rather than leaving it to linger.
+async fn timed_out_close_settles_terminal_completion_after_handler_returns() {
     let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
     let backend: Arc<dyn Pkcs11Backend> = mock.clone();
-    mock.inject_close_error(CkRv::SESSION_HANDLE_INVALID);
+    let operation = ctx_mgr
+        .message_operation_lock(&ctx_id, VirtualHandle(session), MessageOperation::Encrypt)
+        .await
+        .unwrap();
+    operation.lock().await.shape = Some(MessageParameterShape::Gcm);
+    mock.set_close_session_delay(std::time::Duration::from_millis(80));
+    let calls_before = mock.close_session_call_count();
 
-    let rv = close_session(
+    let rv = super::lifecycle::close_session_with_timeout(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+        Some(std::time::Duration::from_millis(10)),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(rv, CkRv::DEVICE_ERROR.0, "handler timeout is outcome-ambiguous");
+    assert_eq!(mock.close_session_call_count(), calls_before + 1);
+
+    let in_flight = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            (
+                ctx.session_handles.resolve(VirtualHandle(session)),
+                ctx.session_handles.suspended_backend(VirtualHandle(session)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(in_flight.0, None, "timed-out close must remain unresolvable");
+    assert!(in_flight.1.is_some(), "completion token retains the quarantined handle");
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let settled = ctx_mgr
+                .get_context(&ctx_id, |ctx| {
+                    ctx.session_handles.suspended_backend(VirtualHandle(session)).is_none()
+                        && !ctx
+                            .message_operations
+                            .keys()
+                            .any(|(owned_session, _)| *owned_session == VirtualHandle(session))
+                })
+                .await
+                .unwrap_or(true);
+            if settled {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("delayed provider close must settle after the handler timeout");
+    mock.clear_close_session_delay();
+
+    assert_eq!(mock.close_session_call_count(), calls_before + 1, "provider called exactly once");
+    let terminal = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            (
+                ctx.session_handles.resolve(VirtualHandle(session)),
+                ctx.session_handles.suspended_backend(VirtualHandle(session)),
+                ctx.message_operations
+                    .keys()
+                    .any(|(owned_session, _)| *owned_session == VirtualHandle(session)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(terminal, (None, None, false));
+}
+
+#[tokio::test]
+async fn timed_out_close_settles_transient_completion_after_handler_returns() {
+    let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let operation = ctx_mgr
+        .message_operation_lock(&ctx_id, VirtualHandle(session), MessageOperation::Encrypt)
+        .await
+        .unwrap();
+    operation.lock().await.shape = Some(MessageParameterShape::Gcm);
+    mock.set_close_session_delay(std::time::Duration::from_millis(80));
+    mock.inject_close_error(CkRv::FUNCTION_FAILED);
+    let calls_before = mock.close_session_call_count();
+
+    let rv = super::lifecycle::close_session_with_timeout(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+        Some(std::time::Duration::from_millis(10)),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(rv, CkRv::DEVICE_ERROR.0, "handler timeout is outcome-ambiguous");
+
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let state = ctx_mgr
+                .get_context(&ctx_id, |ctx| {
+                    (
+                        ctx.session_handles.resolve(VirtualHandle(session)),
+                        ctx.session_handles.suspended_backend(VirtualHandle(session)),
+                    )
+                })
+                .await
+                .unwrap();
+            if state.0.is_some() && state.1.is_none() {
+                break state;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("delayed transient close must reactivate the mapping");
+    assert!(settled.0.is_some());
+    assert_eq!(settled.1, None);
+    assert_eq!(operation.lock().await.shape, Some(MessageParameterShape::Gcm));
+    assert_eq!(mock.close_session_call_count(), calls_before + 1);
+    mock.clear_close_session_delay();
+    mock.clear_close_error();
+}
+
+#[tokio::test]
+async fn panicked_close_quarantines_mapping_and_clears_shapes() {
+    let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let operation = ctx_mgr
+        .message_operation_lock(&ctx_id, VirtualHandle(session), MessageOperation::Encrypt)
+        .await
+        .unwrap();
+    operation.lock().await.shape = Some(MessageParameterShape::Gcm);
+    let calls_before = mock.close_session_call_count();
+    mock.set_next_message_lifecycle_action(MockMessageLifecycleAction::Panic);
+
+    let response = close_session(
         &HandlerContext::for_test(&ctx_mgr, &backend),
         Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx_id.0.clone(),
             session_handle: session,
         }),
     )
+    .await;
+    assert!(response.is_err(), "provider panic must be a transport error");
+    assert_eq!(mock.close_session_call_count(), calls_before + 1);
+    let state = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            (
+                ctx.session_handles.resolve(VirtualHandle(session)),
+                ctx.session_handles.suspended_backend(VirtualHandle(session)),
+                ctx.message_operations
+                    .keys()
+                    .any(|(owned_session, _)| *owned_session == VirtualHandle(session)),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.0, None, "panicked close must remain unresolvable");
+    assert!(state.1.is_some(), "teardown must retain the quarantined backend handle");
+    assert!(!state.2, "panicked close must clear message shapes");
+}
+
+#[tokio::test]
+async fn timed_out_close_holds_context_in_flight_and_reaper_cannot_close_twice() {
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::ZERO, 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    mock.set_close_session_delay(std::time::Duration::from_millis(80));
+    let calls_before = mock.close_session_call_count();
+
+    let rv = super::lifecycle::close_session_with_timeout(
+        &ctx_mgr,
+        &backend,
+        Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle: session,
+        }),
+        Some(std::time::Duration::from_millis(5)),
+    )
     .await
     .unwrap()
     .into_inner()
     .ck_rv;
-    assert_eq!(rv, CkRv::SESSION_HANDLE_INVALID.0);
+    assert_eq!(rv, CkRv::DEVICE_ERROR.0);
 
-    let gone = ctx_mgr
-        .get_context(&ctx_id, |c| c.session_handles.resolve(VirtualHandle(session)))
+    let expired = ctx_mgr.evict_expired(&backend).await;
+    assert!(
+        expired.is_empty(),
+        "the provider close closure must keep its context in flight after handler timeout",
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if mock.close_session_call_count() == calls_before + 1
+                && ctx_mgr
+                    .get_context(&ctx_id, |ctx| {
+                        ctx.session_handles.suspended_backend(VirtualHandle(session)).is_none()
+                    })
+                    .await
+                    .unwrap_or(true)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the original close must settle");
+    mock.clear_close_session_delay();
+    assert_eq!(
+        mock.close_session_call_count(),
+        calls_before + 1,
+        "provider C_CloseSession must be invoked exactly once",
+    );
+}
+
+#[tokio::test]
+async fn production_scoped_close_reuses_one_capped_context_guard() {
+    use crate::server::grpc_service::service_utils::scope_context_operation;
+
+    let mock = Arc::new(MockBackend::default_test());
+    mock.initialize().unwrap();
+    let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+    let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::ZERO, 0));
+    ctx_mgr.register_slot(CkSlotId(0)).await;
+    let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+    let session = open_test_session(&ctx_mgr, &backend, &ctx_id).await;
+    mock.set_close_session_delay(std::time::Duration::from_millis(80));
+    let guard =
+        ctx_mgr.begin_operation_capped(&ctx_id, 1).expect("under cap").expect("context exists");
+
+    let rv = scope_context_operation(
+        Some(guard),
+        super::lifecycle::close_session_with_timeout(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+            }),
+            Some(std::time::Duration::from_millis(5)),
+        ),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ck_rv;
+    assert_eq!(rv, CkRv::DEVICE_ERROR.0);
+    assert_eq!(
+        ctx_mgr
+            .get_context(&ctx_id, |context| {
+                context.in_flight.load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .await,
+        Some(1),
+        "CloseSession must share the one admitted guard instead of consuming a second slot",
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if ctx_mgr
+                .get_context(&ctx_id, |context| {
+                    context.in_flight.load(std::sync::atomic::Ordering::Relaxed)
+                })
+                .await
+                == Some(0)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("provider completion must release the shared close guard");
+    mock.clear_close_session_delay();
+}
+
+#[tokio::test]
+async fn close_session_drops_mapping_for_every_terminal_already_gone_result() {
+    // M3: a terminal result (backend says the session is already invalid) must
+    // drop the stale mapping rather than leaving it to linger.
+    for terminal_rv in [CkRv::SESSION_CLOSED, CkRv::SESSION_HANDLE_INVALID] {
+        let (ctx_mgr, mock, ctx_id, session) = setup_session_with_mock().await;
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        mock.inject_close_error(terminal_rv);
+
+        let rv = close_session(
+            &HandlerContext::for_test(&ctx_mgr, &backend),
+            Request::new(pkcs11_proxy_ng_proto::CloseSessionRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+            }),
+        )
         .await
-        .flatten();
-    assert!(gone.is_none(), "a terminal 'already gone' close must drop the stale mapping");
+        .unwrap()
+        .into_inner()
+        .ck_rv;
+        assert_eq!(rv, terminal_rv.0);
+
+        let gone = ctx_mgr
+            .get_context(&ctx_id, |c| c.session_handles.resolve(VirtualHandle(session)))
+            .await
+            .flatten();
+        assert!(gone.is_none(), "{terminal_rv:?} must drop the stale mapping");
+    }
 }
 
 #[tokio::test]

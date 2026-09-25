@@ -1750,7 +1750,8 @@ fn key_bearing_workflows_reject_invalid_object_handles() {
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
     let invalid_key = CkObjectHandle(999);
     let live_key = live_key(&backend, session);
-    let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 64 };
+    let output_spec =
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 64, length_pointer_null: false };
     let param_spec = CkParameterRoundtripSpec {
         buffer_present: true,
         buffer_len: 16,

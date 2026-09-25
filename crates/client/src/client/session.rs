@@ -14,6 +14,7 @@
 use pkcs11_proxy_ng_types::*;
 
 use super::Pkcs11Client;
+use crate::error::{MessageCallError, grpc_status_to_ck_rv};
 
 impl Pkcs11Client {
     pub async fn open_session(
@@ -32,12 +33,28 @@ impl Pkcs11Client {
     }
 
     pub async fn close_session(&mut self, session: CkSessionHandle) -> CkResult<()> {
-        let ctx = self.context_id()?;
+        self.close_session_stateful(session).await.map_err(|error| error.ck_rv)
+    }
+
+    pub async fn close_session_stateful(
+        &mut self,
+        session: CkSessionHandle,
+    ) -> Result<(), MessageCallError> {
+        let ctx = self.context_id().map_err(MessageCallError::backend)?;
         let req = pkcs11_proxy_ng_proto::CloseSessionRequest {
             client_context_id: ctx,
             session_handle: session.0,
         };
-        pkcs11_unary_ok!(self.grpc.close_session(req), true)
+        let response = self
+            .grpc
+            .close_session(req)
+            .await
+            .map_err(|status| {
+                MessageCallError::transport(grpc_status_to_ck_rv(status.code(), true))
+            })?
+            .into_inner();
+        let rv = CkRv(response.ck_rv);
+        if rv.is_ok() { Ok(()) } else { Err(MessageCallError::backend(rv)) }
     }
 
     pub async fn close_all_sessions(&mut self, slot_id: CkSlotId) -> CkResult<()> {

@@ -107,7 +107,11 @@ pub(crate) unsafe fn classify_input<'a>(ptr: *const u8, len: CK_ULONG) -> InputB
     }
     let count = len as usize;
     match count.checked_mul(std::mem::size_of::<u8>()) {
-        Some(n) if n <= MAX_SERIALIZABLE_BYTES => {
+        Some(n)
+            if n <= MAX_SERIALIZABLE_BYTES
+                && n <= isize::MAX as usize
+                && (ptr as usize).checked_add(n).is_some() =>
+        {
             InputBuf::Bytes(unsafe { std::slice::from_raw_parts(ptr, count) })
         }
         _ => InputBuf::TooLarge { len: len as u64 },
@@ -145,19 +149,21 @@ pub(crate) unsafe fn write_output_slice<'a, T>(ptr: *mut T, len: usize) -> &'a m
 ///
 /// # Safety
 ///
-/// `pul_output_len` must be non-null and point to a valid `CK_ULONG`.
-/// The caller must have already validated `pul_output_len` before calling this.
+/// A non-null `pul_output_len` must point to a valid `CK_ULONG`.
 pub(crate) unsafe fn output_buffer_spec(
     p_output: CK_BYTE_PTR,
     pul_output_len: CK_ULONG_PTR,
 ) -> pkcs11_proxy_ng_types::CkOutputBufferSpec {
-    if p_output.is_null() {
-        pkcs11_proxy_ng_types::CkOutputBufferSpec { buffer_present: false, buffer_len: 0 }
-    } else {
-        pkcs11_proxy_ng_types::CkOutputBufferSpec {
-            buffer_present: true,
-            buffer_len: unsafe { *pul_output_len } as u64,
-        }
+    let length_pointer_null = pul_output_len.is_null();
+    let buffer_present = !p_output.is_null();
+    pkcs11_proxy_ng_types::CkOutputBufferSpec {
+        buffer_present,
+        buffer_len: if length_pointer_null || !buffer_present {
+            0
+        } else {
+            (unsafe { *pul_output_len }) as u64
+        },
+        length_pointer_null,
     }
 }
 
@@ -171,13 +177,26 @@ pub(crate) unsafe fn output_buffer_spec(
 ///
 /// # Safety
 ///
-/// `pul_output_len` must be non-null. If the result contains data and `p_output` is non-null,
-/// `p_output` must point to a writable buffer of at least `returned_len` bytes.
+/// When the captured spec says the length pointer was present, `pul_output_len` must still be
+/// non-null. If the result contains data and `p_output` is non-null, `p_output` must point to a
+/// writable buffer of at least `returned_len` bytes. A captured missing-length call never
+/// dereferences or writes either output pointer.
 pub(crate) unsafe fn write_exact_output(
+    spec: &pkcs11_proxy_ng_types::CkOutputBufferSpec,
     result: &pkcs11_proxy_ng_types::CkOutputBufferResult,
     p_output: CK_BYTE_PTR,
     pul_output_len: CK_ULONG_PTR,
 ) -> CK_RV {
+    if spec.length_pointer_null {
+        if !pul_output_len.is_null()
+            || p_output.is_null() == spec.buffer_present
+            || result.returned_len != 0
+            || result.value.is_some()
+        {
+            return rv_err(CkRv::GENERAL_ERROR);
+        }
+        return rv_err(result.ck_rv);
+    }
     if pul_output_len.is_null() {
         return rv_err(CkRv::ARGUMENTS_BAD);
     }
@@ -302,31 +321,24 @@ pub(crate) unsafe fn message_parameter_roundtrip_spec(
     p_parameter: *mut ::std::os::raw::c_void,
     ul_parameter_len: CK_ULONG,
 ) -> pkcs11_proxy_ng_types::CkResult<pkcs11_proxy_ng_types::CkParameterRoundtripSpec> {
-    if p_parameter.is_null() {
-        return if ul_parameter_len == 0 {
-            Ok(pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
-                buffer_present: false,
-                buffer_len: 0,
-                value: None,
-            })
-        } else {
-            Err(pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD)
-        };
-    }
+    Ok(pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
+        buffer_present: !p_parameter.is_null(),
+        buffer_len: ul_parameter_len as u64,
+        value: None,
+    })
+}
 
-    if ul_parameter_len == 0 {
-        return Ok(pkcs11_proxy_ng_types::CkParameterRoundtripSpec {
-            buffer_present: false,
-            buffer_len: 0,
-            value: None,
-        });
+/// Sign/Verify message parameters are empty-only. Reject a positive length
+/// before touching the caller address, then preserve the two legal zero-length
+/// pointer classes in the shared roundtrip envelope.
+pub(crate) unsafe fn empty_message_parameter_roundtrip_spec(
+    p_parameter: *mut ::std::os::raw::c_void,
+    ul_parameter_len: CK_ULONG,
+) -> pkcs11_proxy_ng_types::CkResult<pkcs11_proxy_ng_types::CkParameterRoundtripSpec> {
+    if ul_parameter_len > 0 {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
     }
-
-    if (ul_parameter_len as usize) > MAX_MECHANISM_PARAM_STRUCT_LEN {
-        return Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID);
-    }
-
-    Ok(unsafe { parameter_roundtrip_spec(p_parameter, ul_parameter_len) })
+    unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) }
 }
 
 /// Write both an exact `CkOutputBufferResult` and a `CkParameterRoundtripResult`
@@ -341,6 +353,7 @@ pub(crate) unsafe fn message_parameter_roundtrip_spec(
 /// Same safety requirements as `write_exact_output` plus `p_parameter` must be
 /// writable for `ul_parameter_len` bytes if non-null.
 pub(crate) unsafe fn write_exact_parameter_output(
+    output_spec: &pkcs11_proxy_ng_types::CkOutputBufferSpec,
     output_result: &pkcs11_proxy_ng_types::CkOutputBufferResult,
     param_result: &pkcs11_proxy_ng_types::CkParameterRoundtripResult,
     p_output: CK_BYTE_PTR,
@@ -349,7 +362,7 @@ pub(crate) unsafe fn write_exact_parameter_output(
     ul_parameter_len: CK_ULONG,
 ) -> CK_RV {
     // Write the main output first
-    let rv = unsafe { write_exact_output(output_result, p_output, pul_output_len) };
+    let rv = unsafe { write_exact_output(output_spec, output_result, p_output, pul_output_len) };
 
     // Write back the parameter if present and the main result was OK or
     // BUFFER_TOO_SMALL (parameter write-back happens regardless for size queries)
@@ -400,7 +413,7 @@ pub(crate) use template_input::*;
 #[cfg(test)]
 mod tests {
     use super::pad_string;
-    use cryptoki_sys::CK_ULONG;
+    use cryptoki_sys::{CK_RV, CK_ULONG};
 
     #[test]
     fn short_src_pads_remainder_with_spaces() {
@@ -423,13 +436,13 @@ mod tests {
         // boundary. Source-substring audits pass even if catch_panics were
         // gutted to `f()`; this runtime check would not.
         let rv = super::catch_panics(|| panic!("boom across the FFI boundary"));
-        assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::GENERAL_ERROR.0 as u64);
+        assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::GENERAL_ERROR.0 as CK_RV);
     }
 
     #[test]
     fn catch_panics_passes_through_non_panicking_rv() {
         let rv = super::catch_panics(|| pkcs11_proxy_ng_types::CkRv::OK.0 as _);
-        assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::OK.0 as u64);
+        assert_eq!(rv, pkcs11_proxy_ng_types::CkRv::OK.0 as CK_RV);
     }
 
     #[test]
@@ -513,6 +526,15 @@ mod tests {
             super::InputBuf::TooLarge { len } => assert_eq!(len, CK_ULONG::MAX as u64),
             other => panic!("expected TooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn classify_input_rejects_address_range_end_overflow_before_reading() {
+        let pointer = (usize::MAX - 1) as *const u8;
+        assert!(matches!(
+            unsafe { super::classify_input(pointer, 4) },
+            super::InputBuf::TooLarge { len: 4 }
+        ));
     }
 
     #[test]

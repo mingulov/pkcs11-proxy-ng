@@ -1,4 +1,4 @@
-use super::{FfiBackend, call_3x_fn};
+use super::{FfiBackend, call_3x_fn, ffi_conversion::narrow_wire_ulong};
 use pkcs11_proxy_ng_types::*;
 
 impl FfiBackend {
@@ -29,13 +29,8 @@ impl FfiBackend {
         session: CkSessionHandle,
         flags: CkFlags,
     ) -> CkResult<()> {
-        call_3x_fn!(
-            self,
-            func_list_3_0,
-            C_SessionCancel,
-            Self::session_handle(session),
-            flags.0 as cryptoki_sys::CK_FLAGS
-        )
+        let flags = narrow_wire_ulong(flags.0)?;
+        call_3x_fn!(self, func_list_3_0, C_SessionCancel, Self::session_handle(session), flags)
     }
 
     pub(super) fn ffi_get_session_validation_flags(
@@ -53,5 +48,57 @@ impl FfiBackend {
             &mut flags
         )?;
         Ok(flags as u64)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SESSION_CANCEL_PROVIDER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn counted_session_cancel(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _flags: cryptoki_sys::CK_FLAGS,
+    ) -> cryptoki_sys::CK_RV {
+        SESSION_CANCEL_PROVIDER_CALLS.fetch_add(1, Ordering::SeqCst);
+        cryptoki_sys::CKR_OK
+    }
+
+    fn backend_with_session_cancel()
+    -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>)
+    {
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+        functions.C_SessionCancel = Some(counted_session_cancel);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: base.as_mut(),
+            func_list_3_0: Some(functions.as_ref()),
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+        };
+        (backend, base, functions)
+    }
+
+    #[test]
+    fn session_cancel_flags_wider_than_native_are_rejected_before_provider_call() {
+        SESSION_CANCEL_PROVIDER_CALLS.store(0, Ordering::SeqCst);
+        let (backend, _base, _functions) = backend_with_session_cancel();
+        let over_u32 = u32::MAX as u64 + 1;
+
+        let result = backend.ffi_session_cancel(CkSessionHandle(7), CkFlags(over_u32));
+
+        if std::mem::size_of::<cryptoki_sys::CK_ULONG>() == 4 {
+            assert_eq!(result, Err(CkRv::FUNCTION_FAILED));
+            assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(result, Ok(()));
+            assert_eq!(SESSION_CANCEL_PROVIDER_CALLS.load(Ordering::SeqCst), 1);
+        }
     }
 }

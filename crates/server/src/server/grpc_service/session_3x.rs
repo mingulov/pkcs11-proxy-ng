@@ -5,16 +5,37 @@
 //! - `C_SessionCancel`
 //! - `C_GetSessionValidationFlags`
 
+use std::time::Duration;
+
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_types::*;
 
-use super::super::context_manager::ClientContextId;
-use super::service_utils::{resolve_session, spawn_backend};
+use super::super::context_manager::{ClientContextId, MessageOperation};
+use super::super::handle_map::VirtualHandle;
+use super::service_utils::{resolve_session, spawn_backend, spawn_backend_with_optional_timeout};
 
 use crate::server::grpc_service::HandlerContext;
+
+const CKF_MESSAGE_ENCRYPT: u64 = 0x0000_0002;
+const CKF_MESSAGE_DECRYPT: u64 = 0x0000_0004;
+const CKF_MESSAGE_SIGN: u64 = 0x0000_0008;
+const CKF_MESSAGE_VERIFY: u64 = 0x0000_0010;
+
+fn cancelled_message_operations(flags: u64) -> Vec<MessageOperation> {
+    [
+        (CKF_MESSAGE_ENCRYPT, MessageOperation::Encrypt),
+        (CKF_MESSAGE_DECRYPT, MessageOperation::Decrypt),
+        (CKF_MESSAGE_SIGN, MessageOperation::Sign),
+        (CKF_MESSAGE_VERIFY, MessageOperation::Verify),
+    ]
+    .into_iter()
+    .filter_map(|(flag, operation)| (flags & flag != 0).then_some(operation))
+    .collect()
+}
+
 pub(super) async fn login_user(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::LoginUserRequest>,
@@ -69,6 +90,14 @@ pub(super) async fn session_cancel(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SessionCancelRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SessionCancelResponse>, Status> {
+    session_cancel_with_timeout(ctx, request, None).await
+}
+
+async fn session_cancel_with_timeout(
+    ctx: &HandlerContext,
+    request: Request<pkcs11_proxy_ng_proto::SessionCancelRequest>,
+    timeout_override: Option<Duration>,
+) -> Result<Response<pkcs11_proxy_ng_proto::SessionCancelResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let req = request.into_inner();
@@ -84,8 +113,34 @@ pub(super) async fn session_cancel(
     };
 
     let flags = CkFlags(req.flags as u64);
+    let operations = cancelled_message_operations(flags.0);
+    let mut transitions = match ctx_mgr
+        .begin_message_operation_transitions(
+            &ctx_id,
+            VirtualHandle(req.session_handle),
+            &operations,
+        )
+        .await
+    {
+        Ok(transitions) => transitions,
+        Err(error) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::SessionCancelResponse {
+                ck_rv: error.0,
+            }));
+        }
+    };
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.session_cancel(session, flags)).await?;
+    let result = spawn_backend_with_optional_timeout(timeout_override, move || {
+        for transition in &mut transitions {
+            transition.mark_started();
+        }
+        let result = backend.session_cancel(session, flags);
+        for transition in &mut transitions {
+            transition.settle(&result, None);
+        }
+        result
+    })
+    .await?;
 
     let ck_rv = match &result {
         Ok(()) => {
@@ -131,4 +186,217 @@ pub(super) async fn get_session_validation_flags(
     };
 
     Ok(Response::new(pkcs11_proxy_ng_proto::GetSessionValidationFlagsResponse { ck_rv, flags }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend, mock::MockMessageLifecycleAction};
+    use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
+
+    use crate::server::context_manager::ContextManager;
+    use crate::server::handle_map::BackendHandle;
+
+    async fn setup_message_shapes() -> (
+        Arc<ContextManager>,
+        Arc<MockBackend>,
+        Arc<dyn Pkcs11Backend>,
+        ClientContextId,
+        VirtualHandle,
+    ) {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(1)], vec![]));
+        mock.initialize().unwrap();
+        let backend_session = mock.open_session(CkSlotId(1), CkSessionFlags::default()).unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(BackendHandle(backend_session.0), CkSlotId(1))
+            })
+            .await
+            .unwrap();
+        for operation in [
+            MessageOperation::Encrypt,
+            MessageOperation::Decrypt,
+            MessageOperation::Sign,
+            MessageOperation::Verify,
+        ] {
+            ctx_mgr
+                .message_operation_lock(&ctx_id, virtual_session, operation)
+                .await
+                .unwrap()
+                .lock()
+                .await
+                .shape = Some(MessageParameterShape::Unmodeled);
+        }
+        (ctx_mgr, mock, backend, ctx_id, virtual_session)
+    }
+
+    async fn message_shapes(
+        ctx_mgr: &ContextManager,
+        ctx_id: &ClientContextId,
+        session: VirtualHandle,
+    ) -> Vec<Option<MessageParameterShape>> {
+        let mut shapes = Vec::new();
+        for operation in [
+            MessageOperation::Encrypt,
+            MessageOperation::Decrypt,
+            MessageOperation::Sign,
+            MessageOperation::Verify,
+        ] {
+            shapes.push(
+                ctx_mgr
+                    .message_operation_lock(ctx_id, session, operation)
+                    .await
+                    .unwrap()
+                    .lock()
+                    .await
+                    .shape,
+            );
+        }
+        shapes
+    }
+
+    #[test]
+    fn cancel_operation_selection_is_fixed_order_and_bit_selective() {
+        assert!(cancelled_message_operations(0).is_empty());
+        assert_eq!(
+            cancelled_message_operations(CKF_MESSAGE_VERIFY | CKF_MESSAGE_ENCRYPT),
+            vec![MessageOperation::Encrypt, MessageOperation::Verify],
+        );
+        assert_eq!(
+            cancelled_message_operations(
+                CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_DECRYPT | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY,
+            ),
+            vec![
+                MessageOperation::Encrypt,
+                MessageOperation::Decrypt,
+                MessageOperation::Sign,
+                MessageOperation::Verify,
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_cancel_clears_only_selected_server_shapes() {
+        let (ctx_mgr, mock, backend, ctx_id, virtual_session) = setup_message_shapes().await;
+        let handler = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let calls_before = mock.message_lifecycle_call_count();
+        let zero = session_cancel(
+            &handler,
+            Request::new(pkcs11_proxy_ng_proto::SessionCancelRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session.0,
+                flags: 0,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(zero.ck_rv, CkRv::OK.0);
+        assert_eq!(mock.message_lifecycle_call_count(), calls_before + 1);
+        assert_eq!(
+            message_shapes(&ctx_mgr, &ctx_id, virtual_session).await,
+            vec![Some(MessageParameterShape::Unmodeled); 4],
+        );
+
+        let selected = session_cancel(
+            &handler,
+            Request::new(pkcs11_proxy_ng_proto::SessionCancelRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session.0,
+                flags: CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_SIGN,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(selected.ck_rv, CkRv::OK.0);
+        assert_eq!(mock.message_lifecycle_call_count(), calls_before + 2);
+        assert_eq!(
+            message_shapes(&ctx_mgr, &ctx_id, virtual_session).await,
+            vec![
+                None,
+                Some(MessageParameterShape::Unmodeled),
+                None,
+                Some(MessageParameterShape::Unmodeled),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_outcomes_settle_only_selected_server_shapes() {
+        for (action, timeout, expected_rv, selected_shape) in [
+            (
+                MockMessageLifecycleAction::Return(CkRv::FUNCTION_FAILED),
+                None,
+                Some(CkRv::FUNCTION_FAILED),
+                Some(MessageParameterShape::Unmodeled),
+            ),
+            (
+                MockMessageLifecycleAction::Return(CkRv::DEVICE_ERROR),
+                None,
+                Some(CkRv::DEVICE_ERROR),
+                None,
+            ),
+            (
+                MockMessageLifecycleAction::Delay(std::time::Duration::from_millis(60), CkRv::OK),
+                Some(std::time::Duration::from_millis(5)),
+                Some(CkRv::DEVICE_ERROR),
+                None,
+            ),
+            (
+                MockMessageLifecycleAction::Delay(
+                    std::time::Duration::from_millis(60),
+                    CkRv::FUNCTION_FAILED,
+                ),
+                Some(std::time::Duration::from_millis(5)),
+                Some(CkRv::DEVICE_ERROR),
+                Some(MessageParameterShape::Unmodeled),
+            ),
+            (MockMessageLifecycleAction::Panic, None, None, None),
+        ] {
+            let (ctx_mgr, mock, backend, ctx_id, virtual_session) = setup_message_shapes().await;
+            let handler = HandlerContext::for_test(&ctx_mgr, &backend);
+            let calls_before = mock.message_lifecycle_call_count();
+            mock.set_next_message_lifecycle_action(action);
+            let response = session_cancel_with_timeout(
+                &handler,
+                Request::new(pkcs11_proxy_ng_proto::SessionCancelRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: virtual_session.0,
+                    flags: CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_SIGN,
+                }),
+                timeout,
+            )
+            .await;
+            match expected_rv {
+                Some(expected) => {
+                    assert_eq!(response.unwrap().into_inner().ck_rv, expected.0, "{action:?}",)
+                }
+                None => assert!(response.is_err(), "panic must be a transport error"),
+            }
+            let shapes = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                message_shapes(&ctx_mgr, &ctx_id, virtual_session),
+            )
+            .await
+            .expect("provider transition must settle");
+            assert_eq!(
+                shapes,
+                vec![
+                    selected_shape,
+                    Some(MessageParameterShape::Unmodeled),
+                    selected_shape,
+                    Some(MessageParameterShape::Unmodeled),
+                ],
+                "{action:?}",
+            );
+            assert_eq!(mock.message_lifecycle_call_count(), calls_before + 1);
+        }
+    }
 }

@@ -44,13 +44,21 @@ fn attribute_query_results_from_proto(
 
 impl From<&CkOutputBufferSpec> for v1_proto::OutputBufferSpec {
     fn from(spec: &CkOutputBufferSpec) -> Self {
-        Self { buffer_present: spec.buffer_present, buffer_len: spec.buffer_len }
+        Self {
+            buffer_present: spec.buffer_present,
+            buffer_len: spec.buffer_len,
+            length_pointer_null: spec.length_pointer_null,
+        }
     }
 }
 
 impl From<&v1_proto::OutputBufferSpec> for CkOutputBufferSpec {
     fn from(spec: &v1_proto::OutputBufferSpec) -> Self {
-        Self { buffer_present: spec.buffer_present, buffer_len: spec.buffer_len }
+        Self {
+            buffer_present: spec.buffer_present,
+            buffer_len: spec.buffer_len,
+            length_pointer_null: spec.length_pointer_null,
+        }
     }
 }
 
@@ -330,10 +338,25 @@ mod tests {
 
     #[test]
     fn output_buffer_spec_round_trip() {
-        let original = CkOutputBufferSpec { buffer_present: true, buffer_len: 4096 };
+        let original = CkOutputBufferSpec {
+            buffer_present: true,
+            buffer_len: 4096,
+            length_pointer_null: true,
+        };
         let proto = v1_proto::OutputBufferSpec::from(&original);
         let back = CkOutputBufferSpec::from(&proto);
         assert_eq!(back, original);
+    }
+
+    #[test]
+    fn output_buffer_spec_absent_length_pointer_field_decodes_false() {
+        // Legacy wire bytes: field 1 = true, field 2 = 4096, no field 3.
+        let decoded =
+            v1_proto::OutputBufferSpec::decode(&[0x08, 0x01, 0x10, 0x80, 0x20][..]).unwrap();
+        assert!(decoded.buffer_present);
+        assert_eq!(decoded.buffer_len, 4096);
+        assert!(!decoded.length_pointer_null);
+        assert!(!CkOutputBufferSpec::from(&decoded).length_pointer_null);
     }
 
     #[test]
@@ -389,7 +412,11 @@ mod tests {
             client_context_id: "ctx".to_string(),
             session_handle: 11,
             function: byte_output_function_to_i32(ByteOutputFunction::Sign),
-            output_spec: Some(v1_proto::OutputBufferSpec { buffer_present: true, buffer_len: 64 }),
+            output_spec: Some(v1_proto::OutputBufferSpec {
+                buffer_present: true,
+                buffer_len: 64,
+                length_pointer_null: false,
+            }),
             input_data: b"payload".to_vec(),
             mechanism: None,
             wrapping_key_handle: 0,

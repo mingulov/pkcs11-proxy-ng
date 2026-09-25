@@ -1,12 +1,13 @@
 use super::handle_map::{BackendHandle, HandleMap, VirtualHandle};
 use super::slot_map::SlotMap;
 use dashmap::DashMap;
+use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use uuid::Uuid;
 
 /// Opaque context identifier (ADR-0002 §3).
@@ -25,6 +26,143 @@ pub enum LoginState {
     Public,
     User,
     So,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MessageOperation {
+    Encrypt,
+    Decrypt,
+    Sign,
+    Verify,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MessageOperationState {
+    pub(crate) shape: Option<MessageParameterShape>,
+}
+
+/// Owns one message-operation state transition across the actual blocking
+/// provider call.  The state is hidden while the transition is in flight.
+/// Dropping before invocation restores it; dropping after invocation without
+/// an explicit outcome (for example, provider panic) clears it fail-closed.
+pub(crate) struct MessageOperationTransition {
+    state: OwnedMutexGuard<MessageOperationState>,
+    saved_shape: Option<MessageParameterShape>,
+    started: bool,
+    settled: bool,
+}
+
+impl MessageOperationTransition {
+    pub(crate) fn begin(mut state: OwnedMutexGuard<MessageOperationState>) -> Self {
+        let saved_shape = state.shape.take();
+        Self { state, saved_shape, started: false, settled: false }
+    }
+
+    pub(crate) fn mark_started(&mut self) {
+        self.started = true;
+    }
+
+    pub(crate) fn settle<T>(
+        &mut self,
+        result: &CkResult<T>,
+        successful_shape: Option<MessageParameterShape>,
+    ) {
+        self.state.shape = match result {
+            Ok(_) => successful_shape,
+            Err(error) if *error == CkRv::DEVICE_ERROR => None,
+            Err(_) => self.saved_shape,
+        };
+        self.settled = true;
+    }
+
+    pub(crate) fn settle_ambiguous(&mut self) {
+        self.state.shape = None;
+        self.settled = true;
+    }
+}
+
+impl Drop for MessageOperationTransition {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        self.state.shape = if self.started { None } else { self.saved_shape };
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseSessionBeginError {
+    ContextMissing,
+    SessionMissing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseSessionCompletion {
+    Terminal,
+    Transient,
+    Ambiguous,
+}
+
+/// Completion token for a suspended session close.  It is moved into the
+/// blocking provider closure so timeout/cancellation of the async handler
+/// cannot strand or prematurely reactivate the virtual handle.
+pub(crate) struct CloseSessionTransition {
+    manager: Arc<ContextManager>,
+    context_id: ClientContextId,
+    virtual_session: VirtualHandle,
+    backend_handle: BackendHandle,
+    _operation_guard: OperationGuard,
+    started: bool,
+    settled: bool,
+}
+
+impl CloseSessionTransition {
+    pub(crate) fn backend_handle(&self) -> BackendHandle {
+        self.backend_handle
+    }
+
+    pub(crate) fn mark_started(&mut self) {
+        self.started = true;
+    }
+
+    pub(crate) fn settle(&mut self, result: &CkResult<()>) {
+        let completion = match result {
+            Ok(()) => CloseSessionCompletion::Terminal,
+            Err(error)
+                if *error == CkRv::SESSION_CLOSED || *error == CkRv::SESSION_HANDLE_INVALID =>
+            {
+                CloseSessionCompletion::Terminal
+            }
+            Err(error) if *error == CkRv::DEVICE_ERROR => CloseSessionCompletion::Ambiguous,
+            Err(_) => CloseSessionCompletion::Transient,
+        };
+        self.manager.complete_close_session(
+            &self.context_id,
+            self.virtual_session,
+            self.backend_handle,
+            completion,
+        );
+        self.settled = true;
+    }
+}
+
+impl Drop for CloseSessionTransition {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let completion = if self.started {
+            CloseSessionCompletion::Ambiguous
+        } else {
+            CloseSessionCompletion::Transient
+        };
+        self.manager.complete_close_session(
+            &self.context_id,
+            self.virtual_session,
+            self.backend_handle,
+            completion,
+        );
+    }
 }
 
 /// Cached object metadata for the per-object / per-class authorization gate (G3).
@@ -113,6 +251,11 @@ pub struct LogicalClientInstance {
     /// even when it outlasts the lease. `Arc` so an `OperationGuard` can hold
     /// and decrement it after the DashMap shard lock is released.
     pub in_flight: Arc<AtomicI64>,
+    /// Per-virtual-session message-operation serialization/state. The owned
+    /// Tokio guard can travel into a blocking backend closure, so timeout of
+    /// the gRPC future cannot release this state while the provider still runs.
+    pub(crate) message_operations:
+        HashMap<(VirtualHandle, MessageOperation), Arc<Mutex<MessageOperationState>>>,
 }
 
 impl LogicalClientInstance {
@@ -132,6 +275,7 @@ impl LogicalClientInstance {
             login_state: HashMap::new(),
             authenticated_identity: identity,
             in_flight: Arc::new(AtomicI64::new(0)),
+            message_operations: HashMap::new(),
         }
     }
 
@@ -154,6 +298,7 @@ impl LogicalClientInstance {
         let mut backend_handles = Vec::with_capacity(to_remove.len());
         for vh in to_remove {
             self.session_slots.remove(&vh);
+            self.message_operations.retain(|(session, _), _| *session != vh);
             // Evict each closed session's session objects (B2) together with
             // their cached unique IDs so recycled virtual handles cannot return
             // stale ids. Also evict the created-set entries so a recycled
@@ -188,6 +333,7 @@ impl LogicalClientInstance {
     pub fn remove_session(&mut self, session: VirtualHandle) -> Option<BackendHandle> {
         let slot = self.session_slots.remove(&session);
         let backend_handle = self.session_handles.remove(session);
+        self.message_operations.retain(|(owned_session, _), _| *owned_session != session);
         // Evict the session's session objects: the backend destroys them on
         // close, so the virtual handles must not linger and alias a recycled
         // backend object number (B2).  Cached unique IDs and created-set
@@ -218,11 +364,8 @@ impl LogicalClientInstance {
     /// backend trait. The CALLER is responsible for calling
     /// backend.close_session() for each.
     pub fn teardown(&mut self) -> Vec<u64> {
-        let backend_sessions: Vec<u64> = self
-            .session_handles
-            .virtual_handles()
-            .filter_map(|vh| self.session_handles.resolve(vh).map(|bh| bh.0))
-            .collect();
+        let backend_sessions: Vec<u64> =
+            self.session_handles.backend_handles().map(|backend| backend.0).collect();
         self.session_handles.clear();
         self.session_slots.clear();
         self.object_handles.clear();
@@ -231,6 +374,7 @@ impl LogicalClientInstance {
         self.created_objects.clear();
         self.attr_cache.clear();
         self.login_state.clear();
+        self.message_operations.clear();
         backend_sessions
     }
 }
@@ -280,19 +424,37 @@ const TOKEN_INFO_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs
 
 /// RAII guard marking a backend operation in flight for one context. While it
 /// lives, eviction skips that context (see `ContextManager::begin_operation`).
+#[derive(Clone)]
 pub struct OperationGuard {
+    inner: Arc<OperationGuardInner>,
+}
+
+struct OperationGuardInner {
     manager: Arc<ContextManager>,
     id: ClientContextId,
     counter: Arc<AtomicI64>,
 }
 
-impl Drop for OperationGuard {
+impl OperationGuard {
+    fn new(manager: Arc<ContextManager>, id: ClientContextId, counter: Arc<AtomicI64>) -> Self {
+        Self { inner: Arc::new(OperationGuardInner { manager, id, counter }) }
+    }
+
+    pub(crate) fn belongs_to(&self, manager: &Arc<ContextManager>, id: &ClientContextId) -> bool {
+        Arc::ptr_eq(&self.inner.manager, manager) && self.inner.id == *id
+    }
+}
+
+impl Drop for OperationGuardInner {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::Relaxed);
-        // Refresh last_active (sync DashMap access) so a long op that just
-        // finished isn't evicted before the client's next call.
+        // Refresh last_active before publishing in_flight=0 and hold the DashMap
+        // shard lock through the decrement.  Otherwise the reaper can remove the
+        // context in the decrement-to-touch window after a long backend call.
         if let Some(mut ctx) = self.manager.contexts.get_mut(&self.id) {
             ctx.touch();
+            self.counter.fetch_sub(1, Ordering::Relaxed);
+        } else {
+            self.counter.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }
@@ -318,6 +480,123 @@ impl ContextManager {
     /// path. The lock is keyed by slot, so different slots are unaffected.
     pub fn slot_login_lock(&self, slot: CkSlotId) -> Arc<Mutex<()>> {
         self.login_locks.entry(slot).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+    }
+
+    pub(crate) async fn message_operation_lock(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_session: VirtualHandle,
+        operation: MessageOperation,
+    ) -> CkResult<Arc<Mutex<MessageOperationState>>> {
+        match self
+            .get_context(ctx_id, |ctx| {
+                if ctx.session_handles.resolve(virtual_session).is_none() {
+                    return Err(CkRv::SESSION_HANDLE_INVALID);
+                }
+                Ok(ctx
+                    .message_operations
+                    .entry((virtual_session, operation))
+                    .or_insert_with(|| Arc::new(Mutex::new(MessageOperationState::default())))
+                    .clone())
+            })
+            .await
+        {
+            Some(result) => result,
+            None => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
+        }
+    }
+
+    /// Begin several message-operation transitions in caller-supplied fixed
+    /// order.  The returned guards can move into the blocking provider closure
+    /// so timeout/cancellation of the async handler cannot release them early.
+    pub(crate) async fn begin_message_operation_transitions(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_session: VirtualHandle,
+        operations: &[MessageOperation],
+    ) -> CkResult<Vec<MessageOperationTransition>> {
+        let mut transitions = Vec::with_capacity(operations.len());
+        for operation in operations {
+            let state = self.message_operation_lock(ctx_id, virtual_session, *operation).await?;
+            transitions.push(MessageOperationTransition::begin(state.lock_owned().await));
+        }
+        Ok(transitions)
+    }
+
+    /// Atomically suspend an active virtual session and return a completion
+    /// token.  Suspended handles cannot be resolved by later RPCs.
+    #[cfg(test)]
+    pub(crate) fn begin_close_session(
+        self: &Arc<Self>,
+        ctx_id: &ClientContextId,
+        virtual_session: VirtualHandle,
+    ) -> Result<CloseSessionTransition, CloseSessionBeginError> {
+        self.begin_close_session_with_guard(ctx_id, virtual_session, None)
+    }
+
+    pub(crate) fn begin_close_session_with_guard(
+        self: &Arc<Self>,
+        ctx_id: &ClientContextId,
+        virtual_session: VirtualHandle,
+        inherited_guard: Option<OperationGuard>,
+    ) -> Result<CloseSessionTransition, CloseSessionBeginError> {
+        let operation_guard = match inherited_guard {
+            Some(guard) if guard.belongs_to(self, ctx_id) => guard,
+            _ => self.begin_operation(ctx_id).ok_or(CloseSessionBeginError::ContextMissing)?,
+        };
+        let backend_handle = {
+            let mut context =
+                self.contexts.get_mut(ctx_id).ok_or(CloseSessionBeginError::ContextMissing)?;
+            context
+                .session_handles
+                .suspend(virtual_session)
+                .ok_or(CloseSessionBeginError::SessionMissing)?
+        };
+        Ok(CloseSessionTransition {
+            manager: Arc::clone(self),
+            context_id: ctx_id.clone(),
+            virtual_session,
+            backend_handle,
+            _operation_guard: operation_guard,
+            started: false,
+            settled: false,
+        })
+    }
+
+    /// Synchronous completion path used from a blocking provider thread.
+    /// Mutate only the expected suspended tuple; stale completions are no-ops.
+    fn complete_close_session(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_session: VirtualHandle,
+        expected_backend: BackendHandle,
+        completion: CloseSessionCompletion,
+    ) {
+        let Some(mut context) = self.contexts.get_mut(ctx_id) else {
+            return;
+        };
+        if context.session_handles.suspended_backend(virtual_session) != Some(expected_backend) {
+            return;
+        }
+
+        match completion {
+            CloseSessionCompletion::Terminal => {
+                context.remove_session(virtual_session);
+            }
+            CloseSessionCompletion::Transient => {
+                if !context.session_handles.reactivate_suspended(virtual_session, expected_backend)
+                {
+                    // The raw handle has been rebound to a newer virtual id.
+                    // Keep the old mapping quarantined and discard stale shape.
+                    context
+                        .message_operations
+                        .retain(|(session, _), _| *session != virtual_session);
+                }
+            }
+            CloseSessionCompletion::Ambiguous => {
+                context.message_operations.retain(|(session, _), _| *session != virtual_session);
+            }
+        }
     }
 
     /// Cached `(label, serial)` for `backend_slot` if it was read within
@@ -592,7 +871,7 @@ impl ContextManager {
                 .iter()
                 .filter(|entry| {
                     self.is_reapable(entry.value(), now)
-                        && entry.value().session_handles.virtual_handles().next().is_none()
+                        && entry.value().session_handles.backend_handles().next().is_none()
                 })
                 .map(|entry| entry.key().clone())
                 .collect();
@@ -702,7 +981,7 @@ impl ContextManager {
             }
             entry.in_flight.clone()
         };
-        Ok(Some(OperationGuard { manager: Arc::clone(self), id: id.clone(), counter }))
+        Ok(Some(OperationGuard::new(Arc::clone(self), id.clone(), counter)))
     }
 
     pub fn begin_operation(self: &Arc<Self>, id: &ClientContextId) -> Option<OperationGuard> {
@@ -716,7 +995,7 @@ impl ContextManager {
             entry.in_flight.fetch_add(1, Ordering::Relaxed);
             entry.in_flight.clone()
         };
-        Some(OperationGuard { manager: Arc::clone(self), id: id.clone(), counter })
+        Some(OperationGuard::new(Arc::clone(self), id.clone(), counter))
     }
 
     // Not `async`: a DashMap read needs no `.await` (L5).

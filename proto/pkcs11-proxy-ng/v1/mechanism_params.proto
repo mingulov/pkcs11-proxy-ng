@@ -55,6 +55,8 @@ message GcmMessageParams {
   uint64 iv_generator = 3;
   bytes tag = 4;
   uint64 tag_bits = 5;
+  optional uint64 iv_null_len = 6;
+  optional uint64 tag_null_len = 7;
 }
 
 // CK_CCM_MESSAGE_PARAMS — per-message CCM parameters for message-based APIs.
@@ -65,12 +67,17 @@ message CcmMessageParams {
   uint64 nonce_generator = 4;
   bytes mac = 5;
   uint64 mac_len = 6;
+  optional uint64 nonce_null_len = 7;
+  optional uint64 mac_null_len = 8;
 }
 
 // CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS
 message Salsa20ChaCha20Poly1305MessageParams {
   bytes nonce = 1;
   bytes tag = 2;
+  uint64 nonce_bits = 3;
+  optional uint64 nonce_null_len = 4;
+  optional uint64 tag_null_len = 5;
 }
 
 // ---------------------------------------------------------------------------

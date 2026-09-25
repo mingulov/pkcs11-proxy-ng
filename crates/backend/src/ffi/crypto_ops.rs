@@ -481,11 +481,12 @@ impl FfiBackend {
                 session_bytes_input!(session, data, function, output, output_len)
             },
         )?;
-        let mechanism_out = if spec.buffer_present && result.ck_rv == CkRv::OK {
-            self.cached_mechanism_output_params(session)
-        } else {
-            None
-        };
+        let mechanism_out =
+            if (spec.buffer_present || spec.length_pointer_null) && result.ck_rv == CkRv::OK {
+                self.cached_mechanism_output_params(session)
+            } else {
+                None
+            };
         Ok((result, mechanism_out))
     }
 
@@ -560,5 +561,79 @@ impl FfiBackend {
                 session_bytes_final!(session, function, output, output_len)
             },
         )
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    unsafe extern "C" fn encrypt_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _data: cryptoki_sys::CK_BYTE_PTR,
+        _data_len: cryptoki_sys::CK_ULONG,
+        _output: cryptoki_sys::CK_BYTE_PTR,
+        output_len: cryptoki_sys::CK_ULONG_PTR,
+    ) -> cryptoki_sys::CK_RV {
+        if !output_len.is_null() {
+            unsafe { *output_len = 4 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
+    #[test]
+    fn encrypt_missing_length_surfaces_cached_mechanism_output_but_size_query_does_not() {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_Encrypt = Some(encrypt_ok);
+        let backend = FfiBackend {
+            _lib: libloading::os::unix::Library::this().into(),
+            func_list: functions.as_mut(),
+            func_list_3_0: None,
+            func_list_3_2: None,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+        };
+        let session = CkSessionHandle(7);
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType::AES_GCM,
+            params: Some(CkMechanismParams::Gcm(GcmParams {
+                iv: vec![0xA5; 12],
+                iv_bits: 96,
+                iv_buffer_len: 12,
+                aad: Vec::new(),
+                tag_bits: 128,
+            })),
+        };
+        backend
+            .mech_cache
+            .insert(session.0, super::super::ffi_conversion::mechanism_to_ffi(&mechanism).unwrap());
+
+        let (_, missing_output) = backend
+            .ffi_encrypt_exact_with_output(
+                session,
+                CkInBuf::Bytes(b"data"),
+                &CkOutputBufferSpec {
+                    buffer_present: false,
+                    buffer_len: 0,
+                    length_pointer_null: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(missing_output, mechanism.params);
+
+        let (_, size_output) = backend
+            .ffi_encrypt_exact_with_output(
+                session,
+                CkInBuf::Bytes(b"data"),
+                &CkOutputBufferSpec {
+                    buffer_present: false,
+                    buffer_len: 0,
+                    length_pointer_null: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(size_output, None);
     }
 }
