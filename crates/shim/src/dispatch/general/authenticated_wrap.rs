@@ -358,7 +358,9 @@ mod tests {
         assert!(parameter.pWrapOID == oid.as_mut_ptr(), "caller OID pointer must be preserved");
         assert!(parameter.pUKM == ukm.as_mut_ptr(), "caller UKM pointer must be preserved");
         assert!(mechanism.pParameter == pointer, "caller outer pointer must be preserved");
-        assert_eq!(parameter.hKey, 17);
+        // E0793: params structs are packed on Windows; assert on a by-value copy.
+        let h_key = parameter.hKey;
+        assert_eq!(h_key, 17);
         assert_eq!(length, 8);
         // Keep the mechanism mutable: the real C API accepts CK_MECHANISM_PTR.
         let _ = &mut mechanism;

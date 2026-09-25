@@ -18,13 +18,18 @@ use std::fmt;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering::SeqCst;
 
-/// Build-time native-FFI qualifier for v0.2: Linux GNU/musl, x86_64 with
-/// 64-bit pointers or x86 with 32-bit pointers. x32, other
-/// architectures/environments and non-Linux native loading are excluded.
-pub(in crate::ffi) const NATIVE_FFI_QUALIFIED: bool = cfg!(target_os = "linux")
+/// Build-time native-FFI qualifier for v0.2: Linux GNU/musl on x86_64 with
+/// 64-bit pointers or x86 with 32-bit pointers, or Windows MSVC on x86_64
+/// with 64-bit pointers. x32, other architectures/environments and other
+/// operating systems are excluded.
+pub(in crate::ffi) const NATIVE_FFI_QUALIFIED: bool = (cfg!(target_os = "linux")
     && cfg!(any(target_env = "gnu", target_env = "musl"))
     && ((cfg!(target_arch = "x86_64") && cfg!(target_pointer_width = "64"))
-        || (cfg!(target_arch = "x86") && cfg!(target_pointer_width = "32")));
+        || (cfg!(target_arch = "x86") && cfg!(target_pointer_width = "32"))))
+    || (cfg!(target_os = "windows")
+        && cfg!(target_env = "msvc")
+        && cfg!(target_arch = "x86_64")
+        && cfg!(target_pointer_width = "64"));
 
 /// Local constructor-domain failure. These are never fabricated provider
 /// `CK_RV` values; [`super::FfiBackend::load`] surfaces them as `Err(String)`.
@@ -50,7 +55,8 @@ impl fmt::Display for DomainError {
             DomainError::UnsupportedPlatform { detail } => write!(
                 f,
                 "native FFI unavailable on this platform ({detail}); v0.2 requires \
-                 Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit); refusing to load provider"
+                 Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit), or \
+                 Windows MSVC x86_64 (64-bit); refusing to load provider"
             ),
             DomainError::AlreadyReserved { epoch } => write!(
                 f,
@@ -75,27 +81,15 @@ impl fmt::Display for DomainError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegistryState {
-    Vacant {
-        next_epoch: u64,
-    },
-    Reserved {
-        epoch: u64,
-        next_epoch: u64,
-    },
-    Active {
-        epoch: u64,
-        next_epoch: u64,
-    },
-    // Entered by the Finalize-drain flow landing with the lifecycle slice;
-    // matched (never constructed) by release paths already.
-    #[allow(dead_code)]
-    Retiring {
-        epoch: u64,
-        next_epoch: u64,
-    },
-    Poisoned {
-        epoch: u64,
-    },
+    Vacant { next_epoch: u64 },
+    Reserved { epoch: u64, next_epoch: u64 },
+    Active { epoch: u64, next_epoch: u64 },
+    // Entered by the backend `Drop` body on the Release path (C3M step
+    // 7): the slot stays occupied throughout dependent retirement and
+    // library close, and only the last-field [`RetirementSentinel`]
+    // publishes the next `Vacant` once every field has dropped.
+    Retiring { epoch: u64, next_epoch: u64 },
+    Poisoned { epoch: u64 },
 }
 
 impl RegistryState {
@@ -137,7 +131,7 @@ impl DomainRegistry {
                 }
                 self.state =
                     RegistryState::Reserved { epoch: next_epoch, next_epoch: next_epoch + 1 };
-                Ok(ConstructionPermit { epoch: next_epoch })
+                Ok(ConstructionPermit { epoch: next_epoch, managed: true })
             }
             RegistryState::Reserved { epoch, .. }
             | RegistryState::Active { epoch, .. }
@@ -174,6 +168,20 @@ impl DomainRegistry {
                 self.state = RegistryState::Poisoned { epoch };
             }
             _ => {}
+        }
+    }
+
+    /// Enter `Retiring` for the exact epoch after a normal-unload
+    /// decision (C3M step 7). Returns `true` only when this call published
+    /// `Retiring`; anything but the live `Active` epoch is stale and
+    /// changes nothing.
+    pub(in crate::ffi) fn begin_retirement(&mut self, epoch: u64) -> bool {
+        match self.state {
+            RegistryState::Active { epoch: live, next_epoch } if live == epoch => {
+                self.state = RegistryState::Retiring { epoch, next_epoch };
+                true
+            }
+            _ => false,
         }
     }
 
@@ -221,7 +229,9 @@ pub(in crate::ffi) fn check_native_platform() -> Result<(), DomainError> {
     if NATIVE_FFI_QUALIFIED {
         return Ok(());
     }
-    let detail = if !cfg!(target_os = "linux") {
+    let detail = if cfg!(target_os = "windows") {
+        "non-MSVC/non-x86_64 Windows target"
+    } else if !cfg!(target_os = "linux") {
         "non-Linux target_os"
     } else if !cfg!(any(target_env = "gnu", target_env = "musl")) {
         "non-GNU/musl target_env"
@@ -245,6 +255,14 @@ pub(in crate::ffi) fn reserve_for_construction() -> Result<ConstructionPermit, D
 /// unmanaged sentinel, which never matches a live registry epoch).
 pub(in crate::ffi) struct ConstructionPermit {
     pub(in crate::ffi) epoch: u64,
+    /// True when the permit came from the process registry (`reserve`);
+    /// false only for the `cfg(test)` unmanaged sentinel. Structural flag —
+    /// no lock, no registry read — so the final-owner guard can scope itself
+    /// to managed permits on the lock-free stop path.
+    //
+    // The guard (cfg-gated to the qualified Linux and Windows arms) is
+    // the only non-test reader.
+    managed: bool,
 }
 
 impl ConstructionPermit {
@@ -269,13 +287,33 @@ impl ConstructionPermit {
         let _ = with_registry(|registry| registry.poison(self.epoch));
     }
 
+    /// Enter `Retiring` for the exact epoch after a normal-unload
+    /// decision (C3M step 7): the slot remains occupied throughout
+    /// dependent retirement and library close. Returns `true` only when
+    /// this call published `Retiring`. Stale permits change nothing.
+    /// Called by the backend `Drop` body; the [`RetirementSentinel`]
+    /// publishes the next `Vacant` once every field has dropped.
+    pub(in crate::ffi) fn begin_retirement(&self) -> bool {
+        with_registry(|registry| registry.begin_retirement(self.epoch)).unwrap_or(false)
+    }
+
     /// Retire an exact-epoch `Active`/`Retiring` reservation after normal
     /// unload so the slot is reusable. Returns `true` only when this call
     /// published the next `Vacant`. Stale releases, late workers and old
-    /// destructors can never free another epoch's slot. Used by backend
-    /// `Drop` and by tests probing stale handles.
+    /// destructors can never free another epoch's slot. Used by the
+    /// [`RetirementSentinel`] and by tests probing stale handles.
     pub(in crate::ffi) fn release_if_owner(epoch: u64) -> bool {
         with_registry(|registry| registry.release_if_owner(epoch)).unwrap_or(false)
+    }
+
+    /// Whether this permit holds a process-registry slot. Plain-bool read:
+    /// lock-free, so the final-owner guard may call it on the stop path.
+    /// False only for the `cfg(test)` unmanaged sentinel.
+    //
+    // The guard (cfg-gated to the qualified Linux and Windows arms) is
+    // the only non-test caller.
+    pub(in crate::ffi) fn holds_registry_slot(&self) -> bool {
+        self.managed
     }
 
     /// Test-only permit that matches no live registry epoch: in-crate test
@@ -286,7 +324,42 @@ impl ConstructionPermit {
         // `u64::MAX` is never issued (`Vacant { u64::MAX }` rejects with
         // `EpochExhausted`), so this sentinel matches no live epoch and every
         // registry transition ignores it.
+        Self { epoch: u64::MAX, managed: false }
+    }
+}
+
+/// Last-field retirement sentinel (C3M step 7): publishes the next `Vacant`
+/// for the exact epoch once every other backend field — dependent graphs,
+/// the `Library` (`dlclose`), the permit and the lifecycle — has dropped.
+///
+/// Must stay the LAST field of [`super::FfiBackend`]: field drops run in
+/// declaration order, so this `Drop` runs after all of them, while the
+/// backend `Drop` body (which runs before every field drop) publishes only
+/// `Retiring` on the Release path. Stale epochs and poisoned slots are
+/// untouched, so the Poison path and unmanaged test backends drop through
+/// here with no effect.
+pub(in crate::ffi) struct RetirementSentinel {
+    epoch: u64,
+}
+
+impl RetirementSentinel {
+    /// Sentinel retiring the same epoch the permit owns. Borrow the permit
+    /// before moving it into the backend literal.
+    pub(in crate::ffi) fn for_permit(permit: &ConstructionPermit) -> Self {
+        Self { epoch: permit.epoch }
+    }
+
+    /// Test-only sentinel matching no live registry epoch, pairing with
+    /// [`ConstructionPermit::unmanaged_test_only`].
+    #[cfg(test)]
+    pub(in crate::ffi) fn unmanaged_test_only() -> Self {
         Self { epoch: u64::MAX }
+    }
+}
+
+impl Drop for RetirementSentinel {
+    fn drop(&mut self) {
+        ConstructionPermit::release_if_owner(self.epoch);
     }
 }
 
@@ -299,6 +372,12 @@ impl ConstructionPermit {
 /// recycling it. Lock-free atomics; no mutex joins the native call path.
 #[derive(Debug, Default)]
 pub(in crate::ffi) struct LifecycleTracker {
+    /// A `C_Initialize` attempt reached native entry (set BEFORE the call,
+    /// fail-closed). Once native code may have run, only a later successful
+    /// `C_Finalize` re-earns release; a failed attempt without success
+    /// poisons instead of recycling (C3M steps 4-5). Monotonic: never
+    /// cleared, so failed/unknown initialization retains ownership.
+    init_attempted: std::sync::atomic::AtomicBool,
     initialized: std::sync::atomic::AtomicBool,
     finalized_ok: std::sync::atomic::AtomicBool,
     open_sessions: std::sync::atomic::AtomicUsize,
@@ -308,24 +387,65 @@ pub(in crate::ffi) struct LifecycleTracker {
     /// them and stale work cannot publish into a reinitialized domain.
     generation: std::sync::atomic::AtomicU64,
     /// A `C_Finalize` failed since the current incarnation opened. The old
-    /// incarnation is then uncertain (not cleanly closed): a later
-    /// successful `C_Initialize` starts a new cycle rather than re-affirming
-    /// the stale one. Used only for the new-cycle predicate, never to
-    /// soften the retirement decision.
+    /// incarnation is then uncertain (not cleanly closed): re-initialization
+    /// is refused until a later successful `C_Finalize` (F-08). Used only to
+    /// refuse new cycles, never to soften the retirement decision; cleared
+    /// only by [`LifecycleTracker::note_finalized`].
     finalize_failed: std::sync::atomic::AtomicBool,
 }
 
 /// Retirement outcome for backend `Drop`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::ffi) enum RetirementDecision {
-    /// Proven quiescent (never initialized, or finalized with no open
-    /// sessions): the exact epoch may publish the next `Vacant`.
+    /// Proven quiescent (no Initialize attempt and never initialized,
+    /// or finalized with no open sessions): the exact epoch may publish
+    /// the next `Vacant` after completed normal unload.
     Release,
     /// Anything else: retain ownership and poison the slot until restart.
     Poison,
 }
 
+/// Why a (re-)initialization was refused without opening a cycle (F-08).
+///
+/// Denial idiom follows [`DomainError`]: explicit refusal variants, never a
+/// wrapped or reused identity. The dispatch boundary
+/// (`super::FfiBackend::initialize`) maps these to caller-visible `CK_RV`s;
+/// this module fabricates no provider return values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::ffi) enum LifecycleRefusal {
+    /// A `C_Finalize` failed since the current incarnation opened, so the
+    /// provider state is unknown: the old incarnation may still be live, and
+    /// only a later successful `C_Finalize` can satisfy a new cycle.
+    FailedFinalizeUnresolved,
+    /// No fresh lifecycle generation remains: the counter stands at
+    /// `u64::MAX`, so the cycle is rejected rather than wrapping back to the
+    /// pre-initial identity. Precedent: [`DomainError::EpochExhausted`].
+    GenerationExhausted,
+}
+
 impl LifecycleTracker {
+    /// Record a `C_Initialize` attempt BEFORE native entry. Callers must
+    /// set this before invoking the provider so a failed attempt (native
+    /// code ran, error RV) poisons instead of recycling the reservation.
+    pub(in crate::ffi) fn note_init_attempted(&self) {
+        self.init_attempted.store(true, SeqCst);
+    }
+
+    /// Pre-native gate for (re-)initialization: refuse cycles the contract
+    /// forbids BEFORE any provider contact, with zero lifecycle side effects
+    /// — not even the init-attempt marker — so a refused cycle keeps the
+    /// retained-session evidence intact (F-08).
+    pub(in crate::ffi) fn check_reinitialize(&self) -> Result<(), LifecycleRefusal> {
+        if self.finalize_failed.load(SeqCst) {
+            return Err(LifecycleRefusal::FailedFinalizeUnresolved);
+        }
+        let new_cycle = !self.initialized.load(SeqCst) || self.finalized_ok.load(SeqCst);
+        if new_cycle && self.generation.load(SeqCst) == u64::MAX {
+            return Err(LifecycleRefusal::GenerationExhausted);
+        }
+        Ok(())
+    }
+
     /// Record a successful native `C_Initialize`. A new initialization cycle
     /// always clears a previously observed finalization.
     ///
@@ -334,23 +454,48 @@ impl LifecycleTracker {
     /// already-open incarnation keeps its generation, bindings and count,
     /// while a cycle after `C_Finalize` starts clean so a reused numeric
     /// handle cannot alias the dead incarnation's owners.
-    pub(in crate::ffi) fn note_initialized(&self) {
-        let new_cycle = !self.initialized.load(SeqCst)
-            || self.finalized_ok.load(SeqCst)
-            || self.finalize_failed.load(SeqCst);
-        self.initialized.store(true, SeqCst);
-        self.finalized_ok.store(false, SeqCst);
-        self.finalize_failed.store(false, SeqCst);
+    ///
+    /// Fails closed (F-08): a set `finalize_failed` flag refuses the cycle
+    /// instead of opening a new one, and the generation bump is checked — at
+    /// `u64::MAX` there is no next identity, so the cycle is refused WITHOUT
+    /// consuming the finalized evidence, purging bindings or resetting the
+    /// count. The flag itself is never cleared here — only
+    /// [`LifecycleTracker::note_finalized`] clears it — so a Finalize that
+    /// fails concurrently with this call still denies every later cycle.
+    pub(in crate::ffi) fn note_initialized(&self) -> Result<(), LifecycleRefusal> {
+        if self.finalize_failed.load(SeqCst) {
+            return Err(LifecycleRefusal::FailedFinalizeUnresolved);
+        }
+        let new_cycle = !self.initialized.load(SeqCst) || self.finalized_ok.load(SeqCst);
         if new_cycle {
-            self.generation.fetch_add(1, SeqCst);
+            // Checked claim: `fetch_update` keeps the bump atomic under
+            // concurrent initializers, and `checked_add` refuses at
+            // `u64::MAX` rather than wrapping to the pre-initial identity.
+            if self
+                .generation
+                .fetch_update(SeqCst, SeqCst, |generation| generation.checked_add(1))
+                .is_err()
+            {
+                return Err(LifecycleRefusal::GenerationExhausted);
+            }
+            self.initialized.store(true, SeqCst);
+            self.finalized_ok.store(false, SeqCst);
             self.open_sessions.store(0, SeqCst);
         }
+        Ok(())
     }
 
     /// Current initialization-cycle generation. Session identities created
     /// under an older generation are stale after re-initialization.
     pub(in crate::ffi) fn current_generation(&self) -> u64 {
         self.generation.load(SeqCst)
+    }
+
+    /// Seed the lifecycle generation for boundary tests. Production cycles
+    /// advance only through [`LifecycleTracker::note_initialized`].
+    #[cfg(test)]
+    pub(in crate::ffi) fn set_generation_for_tests(&self, generation: u64) {
+        self.generation.store(generation, SeqCst);
     }
 
     /// Test-only read of the provider-confirmed open-session count.
@@ -369,10 +514,10 @@ impl LifecycleTracker {
     }
 
     /// Record a failed native `C_Finalize`. The incarnation is uncertain —
-    /// not cleanly closed — so a later successful `C_Initialize` opens a new
-    /// cycle instead of re-affirming the stale one. Session bindings and the
-    /// open count are deliberately retained here (the failure proves
-    /// nothing about provider state); they reset when the new cycle starts.
+    /// not cleanly closed — so re-initialization is refused until a later
+    /// successful `C_Finalize` (F-08). Session bindings and the open count
+    /// are deliberately retained here (the failure proves nothing about
+    /// provider state); they reset only when a legitimate new cycle starts.
     pub(in crate::ffi) fn note_finalize_failed(&self) {
         self.finalize_failed.store(true, SeqCst);
     }
@@ -394,10 +539,36 @@ impl LifecycleTracker {
     }
 
     /// Decide backend `Drop`: release only when quiescent with no open
-    /// sessions; poison on every uncertain state.
+    /// sessions; poison on every uncertain state. A recorded Initialize
+    /// attempt without a later successful Finalize is uncertain (native
+    /// code may have run), even when initialization never succeeded.
     pub(in crate::ffi) fn retirement_decision(&self) -> RetirementDecision {
         use RetirementDecision::{Poison, Release};
-        let quiescent = !self.initialized.load(SeqCst) || self.finalized_ok.load(SeqCst);
+        let never_exposed = !self.init_attempted.load(SeqCst) && !self.initialized.load(SeqCst);
+        let quiescent = never_exposed || self.finalized_ok.load(SeqCst);
         if quiescent && self.open_sessions.load(SeqCst) == 0 { Release } else { Poison }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn t3_qualified_host_platform_check_is_ok() {
+        // This test runs on a qualified native-FFI host (Linux GNU/musl
+        // x86_64/x86); the const itself is covered by
+        // `native_domain_current_host_reports_qualified_or_refuses`.
+        assert!(check_native_platform().is_ok());
+    }
+
+    #[test]
+    fn t3_unsupported_platform_display_names_qualified_hosts() {
+        let msg = DomainError::UnsupportedPlatform { detail: "test-detail" }.to_string();
+        assert!(msg.contains("Linux GNU/musl"), "Display must name Linux hosts, got: {msg}");
+        assert!(
+            msg.contains("Windows MSVC x86_64"),
+            "Display must name Windows MSVC x86_64 hosts, got: {msg}"
+        );
     }
 }

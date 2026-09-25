@@ -1483,7 +1483,15 @@ def pkcs11_abi_package(root: Path) -> tuple[Path, str, str]:
 
 
 def function_field_tables(root: Path) -> Path:
-    return root / "crates/module/src/tables.rs"
+    manifest, _, _ = pkcs11_abi_package(root)
+    return manifest.parent / "src/layout.rs"
+
+
+def function_field_table_evidence() -> str:
+    # Stable citation for the upstream field catalog. The rev-pinned
+    # dependency source and rev are recorded separately in the inventory
+    # `source` section.
+    return "pkcs11-abi:crates/abi/src/layout.rs"
 
 
 def service_proto(root: Path) -> Path:

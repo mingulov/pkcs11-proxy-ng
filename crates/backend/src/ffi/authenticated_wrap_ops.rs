@@ -1121,7 +1121,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
         functions.C_WrapKeyAuthenticated = Some(missing_length_wrap);
         let backend = FfiBackend {
-            _lib: libloading::os::unix::Library::this().into(),
+            _lib: crate::ffi::loading::test_library_handle(),
             func_list: base.as_mut(),
             func_list_3_0: None,
             func_list_3_2: Some(functions.as_ref()),
@@ -1135,6 +1135,8 @@ mod tests {
             // consuming it; never backs production dispatch (C3M.4).
             construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
             lifecycle: Default::default(),
+            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
+            ),
         };
         (backend, base, functions)
     }

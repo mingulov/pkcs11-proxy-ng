@@ -14,6 +14,69 @@ pub(super) fn cap_find_objects_count(max_count: u32) -> usize {
     (max_count as usize).min(MAX_FIND_OBJECTS_PER_CALL)
 }
 
+/// Promote a lenient backend's overall `OK` to `BUFFER_TOO_SMALL` when any
+/// top-level exact result already carries the too-small marker.
+///
+/// A NULL `pValue` with length 0 is the PKCS#11 size-query shape, so strict
+/// backends answer `OK` + required length for 0-length exact buffers (the
+/// T4-FIX NULL-for-empty encoding); without promotion the "client buffer was
+/// too small" fact — already recovered per-result by the readback — would be
+/// lost from the overall rv. No second backend call: NULL+0 already returns
+/// the required length.
+///
+/// Equivalence (`mapping.rs::exact_attribute_results_from_ffi`, mapping.rs:111-166):
+/// when the backend rv is `OK`, `ck_rv == Some(BUFFER_TOO_SMALL)` iff
+/// `too_small` for every top-level result. Trace: `too_small` is
+/// `buffer_present && returned_len > buffer_len` (:129); the
+/// single-query-unavailable arm (:130-139) needs the overall rv to match one
+/// of `ATTRIBUTE_SENSITIVE | ATTRIBUTE_TYPE_INVALID | BUFFER_TOO_SMALL`
+/// (:131-134), so with overall `OK` it falls to `_ => None` (:135) and
+/// cannot fire; `unavailable` alone then yields `None` (:143-144), and the
+/// only remaining producer of `Some(BUFFER_TOO_SMALL)` is the `too_small`
+/// branch (:145-146). Hence the marker is exactly "exact query whose
+/// returned length exceeds its buffer" — promotion restates observed lengths,
+/// it invents nothing.
+///
+/// Scope: top-level results only. A nested-sub `BUFFER_TOO_SMALL` without a
+/// top-level marker keeps pre-existing semantics (out of scope). All other
+/// backend rvs pass through unchanged, so strict backends are byte-identical.
+///
+/// Callers that observe a promotion (`OK` → `BUFFER_TOO_SMALL`) must also run
+/// [`canonicalize_promoted_lengths`] so the response is wire-identical to a
+/// native 336 (sentinel lengths, not leaked required lengths).
+pub(super) fn promote_overall_rv(backend_rv: CkRv, results: &[CkAttributeQueryResult]) -> CkRv {
+    if backend_rv == CkRv::OK && results.iter().any(|r| r.ck_rv == Some(CkRv::BUFFER_TOO_SMALL)) {
+        CkRv::BUFFER_TOO_SMALL
+    } else {
+        backend_rv
+    }
+}
+
+/// Canonicalize the lengths of promoted too-small results to the all-ones
+/// sentinel. Companion to [`promote_overall_rv`]: call only when promotion
+/// fired (backend `OK` promoted to `BUFFER_TOO_SMALL`).
+///
+/// A strict backend's native 336 carries `CK_UNAVAILABLE_INFORMATION` — not a
+/// length — for the too-small attributes, and the client width-bridge renders
+/// the canonical sentinel at client width (shim `exact.rs::checked_length`).
+/// The lenient `OK` + required length the backend actually returned must not
+/// leak through alongside the promoted 336: the client would observe a bogus
+/// short `ulValueLen` with a too-small rv, a shape no backend produces. Only
+/// marked top-level results are rewritten; fitting results keep their real
+/// lengths (native multi-attribute 336 shape).
+///
+/// Safe: every marked result has `value == None`. Under backend `OK` all
+/// markers come from the `too_small` branch, i.e. `returned_len` exceeds the
+/// owned buffer, so `owned_attribute_bytes` (attrs.rs:365-375, `.get(..len)`)
+/// already returned `None` — there is no value-length invariant to repair.
+fn canonicalize_promoted_lengths(results: &mut [CkAttributeQueryResult]) {
+    for result in results.iter_mut() {
+        if result.ck_rv == Some(CkRv::BUFFER_TOO_SMALL) {
+            result.returned_len = pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE;
+        }
+    }
+}
+
 impl FfiBackend {
     pub(super) fn ffi_find_objects_init(
         &self,
@@ -95,8 +158,13 @@ impl FfiBackend {
                     Self::ulong_len(ffi_queries.attrs.len()),
                 )
             })?;
-        let rv = CkRv(rv as u64);
-        Ok((rv, ffi_queries.readback(queries, rv)))
+        let backend_rv = CkRv(rv as u64);
+        let mut results = ffi_queries.readback(queries, backend_rv);
+        let overall_rv = promote_overall_rv(backend_rv, &results);
+        if backend_rv == CkRv::OK && overall_rv == CkRv::BUFFER_TOO_SMALL {
+            canonicalize_promoted_lengths(&mut results);
+        }
+        Ok((overall_rv, results))
     }
 
     pub(super) fn ffi_create_object(
@@ -213,5 +281,108 @@ mod find_objects_cap_tests {
             MAX_FIND_OBJECTS_PER_CALL,
             512 * 1024 * 1024 / std::mem::size_of::<cryptoki_sys::CK_OBJECT_HANDLE>()
         );
+    }
+}
+
+#[cfg(test)]
+mod promote_overall_rv_tests {
+    use super::promote_overall_rv;
+    use pkcs11_proxy_ng_types::{CkAttributeQueryResult, CkAttributeType, CkRv};
+
+    fn result_with(ck_rv: Option<CkRv>) -> CkAttributeQueryResult {
+        CkAttributeQueryResult {
+            attr_type: CkAttributeType::CLASS,
+            returned_len: 8,
+            apply_returned_len: true,
+            apply_type: false,
+            value: None,
+            ck_rv,
+            nested: None,
+        }
+    }
+
+    #[test]
+    fn ok_with_too_small_marker_promotes_to_buffer_too_small() {
+        let results = vec![result_with(Some(CkRv::BUFFER_TOO_SMALL))];
+        assert_eq!(promote_overall_rv(CkRv::OK, &results), CkRv::BUFFER_TOO_SMALL);
+    }
+
+    #[test]
+    fn ok_with_all_fit_stays_ok() {
+        let results = vec![result_with(None), result_with(None)];
+        assert_eq!(promote_overall_rv(CkRv::OK, &results), CkRv::OK);
+    }
+
+    #[test]
+    fn ok_with_size_query_results_stays_ok() {
+        // Size queries never set the marker (`too_small` needs
+        // `buffer_present`), so a lenient OK+len size answer is untouched.
+        let results = vec![CkAttributeQueryResult {
+            attr_type: CkAttributeType::CLASS,
+            returned_len: 8,
+            apply_returned_len: true,
+            apply_type: false,
+            value: None,
+            ck_rv: None,
+            nested: None,
+        }];
+        assert_eq!(promote_overall_rv(CkRv::OK, &results), CkRv::OK);
+    }
+
+    #[test]
+    fn strict_buffer_too_small_passes_through() {
+        let results = vec![result_with(Some(CkRv::BUFFER_TOO_SMALL))];
+        assert_eq!(promote_overall_rv(CkRv::BUFFER_TOO_SMALL, &results), CkRv::BUFFER_TOO_SMALL);
+    }
+
+    #[test]
+    fn device_error_passes_through() {
+        let results = vec![result_with(Some(CkRv::BUFFER_TOO_SMALL))];
+        assert_eq!(promote_overall_rv(CkRv::DEVICE_ERROR, &results), CkRv::DEVICE_ERROR);
+    }
+
+    #[test]
+    fn nested_only_marker_does_not_promote() {
+        // Top-level results only: a nested-sub 336 without a top-level
+        // marker keeps pre-existing semantics (out of scope).
+        let mut top = result_with(None);
+        top.nested = Some(vec![result_with(Some(CkRv::BUFFER_TOO_SMALL))]);
+        assert_eq!(promote_overall_rv(CkRv::OK, &[top]), CkRv::OK);
+    }
+}
+
+#[cfg(test)]
+mod canonicalize_promoted_lengths_tests {
+    use super::canonicalize_promoted_lengths;
+    use pkcs11_proxy_ng_types::{CkAttributeQueryResult, CkAttributeType, CkRv};
+
+    fn result_with(ck_rv: Option<CkRv>, returned_len: u64) -> CkAttributeQueryResult {
+        CkAttributeQueryResult {
+            attr_type: CkAttributeType::CLASS,
+            returned_len,
+            apply_returned_len: true,
+            apply_type: false,
+            value: None,
+            ck_rv,
+            nested: None,
+        }
+    }
+
+    #[test]
+    fn marked_results_get_sentinel_unmarked_keep_length() {
+        let mut results = vec![result_with(Some(CkRv::BUFFER_TOO_SMALL), 8), result_with(None, 4)];
+        canonicalize_promoted_lengths(&mut results);
+        assert_eq!(results[0].returned_len, pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE);
+        assert_eq!(results[1].returned_len, 4);
+        // Markers themselves are untouched.
+        assert_eq!(results[0].ck_rv, Some(CkRv::BUFFER_TOO_SMALL));
+        assert_eq!(results[1].ck_rv, None);
+    }
+
+    #[test]
+    fn no_markers_leaves_results_untouched() {
+        let mut results = vec![result_with(None, 8)];
+        canonicalize_promoted_lengths(&mut results);
+        assert_eq!(results[0].returned_len, 8);
     }
 }

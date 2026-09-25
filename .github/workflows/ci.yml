@@ -219,6 +219,11 @@ jobs:
   # Windows-only ABI gaps (packed-field E0793, Unix-only deps). The daemon is
   # mTLS-TCP-only on Windows: the UDS/peer-cred transport is compiled out and
   # config validation rejects [listener.local] there.
+  # --all-targets coverage (T1): compiles libs, bins, tests, examples, and
+  # benches so packed-field E0793 fallout and fork-gated helpers stay green.
+  # i686 executes natively via multilib (Tier 0e): no binfmt/QEMU anywhere.
+  # 32-bit-musl is intentionally absent: the musl claim is x86_64 Alpine
+  # packaging only.
   windows-client-llp64:
     name: Windows client shim (LLP64, cargo-xwin)
     runs-on: ubuntu-24.04
@@ -241,7 +246,7 @@ jobs:
 
       - name: cargo xwin build (client shim + daemon, Windows x64)
         run: |
-          cargo xwin build --target x86_64-pc-windows-msvc \
+          cargo xwin build --target x86_64-pc-windows-msvc --all-targets \
             -p pkcs11-proxy-ng-shim \
             -p pkcs11-proxy-ng-client \
             -p pkcs11-proxy-ng-backend \

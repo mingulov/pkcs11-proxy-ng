@@ -450,27 +450,6 @@ fn shim_get_attribute_value_null_zero_reaches_empty_query_backend() {
 }
 
 #[test]
-fn shim_get_attribute_value_null_zero_reaches_empty_query_backend() {
-    let _guard = shim_state_test_guard();
-    let daemon = TestDaemon::shared();
-    let shim = ShimSession::new();
-    let object = create_object(shim.session);
-    daemon.backend.set_attribute(
-        backend_object_handle(daemon, object),
-        CkAttributeType::LABEL,
-        MockAttributeSlot::Value(CkAttributeValue::String("key".into())),
-    );
-    let calls_before = daemon.backend.attr_get_exact_call_count();
-
-    let rv = unsafe {
-        dispatch::general::c_get_attribute_value(shim.session, object, std::ptr::null_mut(), 0)
-    };
-
-    assert_eq!(rv, CKR_OK as CK_RV);
-    assert_eq!(daemon.backend.attr_get_exact_call_count(), calls_before + 1);
-}
-
-#[test]
 fn shim_get_attribute_value_exact_fit_copies_bytes() {
     let _guard = shim_state_test_guard();
     let daemon = TestDaemon::shared();

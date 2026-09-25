@@ -4,7 +4,8 @@
 # Tiers (module/naming convention — no cargo features):
 #   unit         pure logic: every workspace package's non-live tests
 #                (types, proto, backend + server libs, client, cli, audit,
-#                pkcs11-module, shim dispatch units)
+#                shim dispatch units; pkcs11-module now lives upstream in
+#                pkcs11-components and is covered by that repo's own CI)
 #   integration  in-process TestDaemon suites (shim tests::), incl. the
 #                cross-ABI topology suite (tests::cross_abi)
 #   regression   named defect pins: tests::regression plus the canonical
@@ -31,7 +32,6 @@ run_unit() {
     cargo test -p pkcs11-proxy-ng-client
     cargo test -p pkcs11-proxy-ng-cli
     cargo test -p pkcs11-proxy-ng-audit
-    cargo test -p pkcs11-module
     cargo test -p pkcs11-proxy-ng-shim --lib dispatch::
 }
 
@@ -54,6 +54,7 @@ run_live() {
     scripts/test-daemon-startup-logging.sh
     scripts/test-live-harness-locators.sh
     scripts/run-cross-width-live-test.sh
+    scripts/run-cross-width-nss32-live-test.sh
     scripts/run-llp64-wine-smoke.sh
     scripts/run-windows-daemon-wine-smoke.sh
 }

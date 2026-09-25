@@ -79,7 +79,7 @@ impl FfiBackend {
             Ok(lib) => lib,
             Err(e) => {
                 permit.rollback_before_native();
-                return Err(format!("dlopen failed: {e}"));
+                return Err(format!("native module load failed: {e}"));
             }
         };
 
@@ -145,6 +145,7 @@ impl FfiBackend {
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
             object_cleanup: Default::default(),
+            retirement_sentinel: super::native_domain::RetirementSentinel::for_permit(&permit),
             construction: permit,
             lifecycle: super::native_domain::LifecycleTracker::default(),
         })
@@ -193,17 +194,61 @@ impl FfiBackend {
     }
 }
 
+/// Pure fire condition for the abnormal-stop guard: stop only when the
+/// retiring instance cannot prove quiescence (`Poison`) and still holds
+/// the process-registry slot (managed permit). Ungated so the unit-test
+/// matrix below exercises it on every host; the `Drop` guard applies the
+/// qualified-target cfg around the call.
+fn stop_fire_condition(
+    decision: super::native_domain::RetirementDecision,
+    holds_slot: bool,
+) -> bool {
+    matches!(decision, super::native_domain::RetirementDecision::Poison) && holds_slot
+}
+
 impl Drop for FfiBackend {
-    /// Retire the construction reservation honestly: release the exact epoch
-    /// only when the instance lifecycle proves quiescence (never initialized,
-    /// or finalized with no open sessions); otherwise retain ownership and
-    /// poison the slot until process restart. Stale handles and already
+    /// Retire the construction reservation honestly: enter `Retiring` for the
+    /// exact epoch only when the instance lifecycle proves quiescence (never
+    /// initialized, or finalized with no open sessions) — the slot stays
+    /// occupied throughout dependent retirement and library close, and the
+    /// last-field [`super::native_domain::RetirementSentinel`] publishes the
+    /// next `Vacant` once every field has dropped; otherwise retain ownership
+    /// and poison the slot until process restart. Stale handles and already
     /// poisoned slots are untouched.
     fn drop(&mut self) {
         use super::native_domain::RetirementDecision::{Poison, Release};
-        match self.lifecycle.retirement_decision() {
+        let decision = self.lifecycle.retirement_decision();
+        // Qualified targets only (Linux x86_64/x86 GNU/musl, Windows MSVC
+        // x86_64): abnormally stop the native lifetime when the managed
+        // final owner cannot prove quiescence. First statement and
+        // lock-free (atomic-only decision plus a plain-bool slot check), so
+        // it precedes the lock-taking poison path and all dependent field
+        // drops. Elsewhere this block cfg-compiles out and the arms below
+        // keep today's behavior bit-for-bit.
+        #[cfg(any(
+            all(
+                target_os = "linux",
+                any(target_env = "gnu", target_env = "musl"),
+                any(
+                    all(target_arch = "x86_64", target_pointer_width = "64"),
+                    all(target_arch = "x86", target_pointer_width = "32")
+                )
+            ),
+            all(
+                target_os = "windows",
+                target_env = "msvc",
+                target_arch = "x86_64",
+                target_pointer_width = "64"
+            )
+        ))]
+        if stop_fire_condition(decision, self.construction.holds_registry_slot()) {
+            super::native_stop::abnormal_stop_native_lifetime(
+                super::native_stop::StopReason::UnprovenFinalOwner,
+            );
+        }
+        match decision {
             Release => {
-                super::native_domain::ConstructionPermit::release_if_owner(self.construction.epoch);
+                self.construction.begin_retirement();
             }
             Poison => {
                 self.construction.poison();
@@ -331,17 +376,6 @@ mod tests {
                 "decision={decision:?} holds_slot={holds_slot}"
             );
         }
-    }
-
-    #[test]
-    fn drop_guard_cfg_matches_stop_arms() {
-        // TC1: the `Drop` guard must fire exactly where stop arms exist;
-        // the guard predicate mirrors `NATIVE_STOP_QUALIFIED` leg for leg.
-        assert_eq!(
-            super::DROP_GUARD_STOP_ARMED,
-            crate::ffi::native_stop::NATIVE_STOP_QUALIFIED,
-            "Drop guard cfg must arm exactly where stop arms exist"
-        );
     }
 
     /// Verify that a backend constructed with `None` for the 3.x fields

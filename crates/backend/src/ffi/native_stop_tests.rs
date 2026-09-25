@@ -115,8 +115,7 @@ fn native_stop_child_entry() {
 /// failed, 15 no-new-privs failed, 16 seccomp failed, 17 thread spawn failed,
 /// 18 handoff failed, 19 sync timeout, 20 stop did not fire, 21 unexpected
 /// worker completion, 22 mech failed, 23 controller did not fire, 24
-/// initialize unexpectedly succeeded, 25 finalize unexpectedly succeeded,
-/// 99 fell through the denied stop).
+/// initialize unexpectedly succeeded, 99 fell through the denied stop).
 fn run_stop_child(scenario: &str) -> ! {
     match scenario {
         "s1-main" => run_s1_main(),
@@ -132,15 +131,9 @@ fn run_stop_child(scenario: &str) -> ! {
         "s10-unsettled" => run_s10_unsettled(),
         "s11-gated" => run_s11_gated(),
         "s12-failed-init" => run_s12_failed_init(),
-        "s13-stuck-call" => run_s13_stuck_call(),
-        "s14-proof-invalidated" => run_s14_proof_invalidated(),
-        "s15-failed-finalize" => run_s15_failed_finalize(),
-        "s16-handler-installed" => run_s16_handler_installed(),
-        "s17-genuine-waiter" => run_s17_genuine_waiter(),
         "c1-never-init" => run_c1_never_init(),
         "c2-unmanaged" => run_c2_unmanaged(),
         "n1-seccomp" => run_n1_seccomp(),
-        "n1-worker" => run_n1_worker(),
         _ => std::process::exit(11),
     }
 }
@@ -198,8 +191,6 @@ fn child_backend_managed(
         retirement_sentinel: super::native_domain::RetirementSentinel::for_permit(&permit),
         construction: permit,
         lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
     }
 }
 
@@ -565,66 +556,6 @@ fn run_s11_gated() -> ! {
     std::process::exit(20);
 }
 
-/// Set by the S17 gated wait stub on native entry: the waiter holds a
-/// genuine reservation plus ordinary admission inside C when the drop
-/// fires (TO26b I1 — S11's parked thread holds neither).
-static S17_ENTERED: AtomicBool = AtomicBool::new(false);
-
-/// Never-returning wait stub for S17: signals native entry, then parks
-/// forever holding the waiter's reservation and ordinary guard. Touches
-/// only a process-static flag — no backend state after entry.
-unsafe extern "C" fn child_wait_gated(
-    _flags: cryptoki_sys::CK_FLAGS,
-    _slot: *mut cryptoki_sys::CK_SLOT_ID,
-    _reserved: *mut std::ffi::c_void,
-) -> cryptoki_sys::CK_RV {
-    S17_ENTERED.store(true, Ordering::SeqCst);
-    loop {
-        std::thread::park();
-    }
-}
-
-/// S17 child: a GENUINE gated DONT_BLOCK waiter (real reservation, real
-/// admission, parked inside native C) outstanding when the sole owner
-/// drops — the group stops at 70. Main becomes the waiter; an
-/// independent controller thread drops the sole `Box` owner once native
-/// entry is proven. The waiter performs no backend access after parking
-/// and main's drop stop-fires lock-free at its first statement
-/// (initialized-never-finalized ⇒ Poison), so no access can recur before
-/// `exit_group` ends every thread — the documented direct-embedder shape
-/// (whole-process stop with borrowed-reference workers).
-fn run_s17_genuine_waiter() -> ! {
-    let backend =
-        Box::new(child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok)));
-    unsafe { (*backend.func_list).C_WaitForSlotEvent = Some(child_wait_gated) };
-    let leaked: &'static FfiBackend = Box::leak(backend);
-    if leaked.initialize().is_err() {
-        std::process::exit(14);
-    }
-    {
-        let spawned = std::thread::Builder::new().name("stop-controller".to_owned()).spawn(|| {
-            wait_flag_5s(&S17_ENTERED);
-            let _ = writeln!(std::io::stdout(), "READY s17-genuine-waiter");
-            let _ = std::io::stdout().flush();
-            let owned = unsafe { Box::from_raw(leaked as *const FfiBackend as *mut FfiBackend) };
-            drop(owned);
-            // Unreachable: the drop stops the group at 70.
-            std::process::exit(20);
-        });
-        if spawned.is_err() {
-            std::process::exit(17);
-        }
-    }
-    let barrier = Arc::new(Barrier::new(3));
-    for index in 0..2 {
-        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
-    }
-    barrier.wait();
-    // Main becomes the genuine waiter. Never returns: the gate never opens.
-    let _ = leaked.ffi_wait_for_slot_event(cryptoki_sys::CKF_DONT_BLOCK as u64);
-    std::process::exit(21);
-}
-
 /// S12 child: failed Initialize (native entered, error RV) on a managed
 /// backend, then drop. C3M steps 4-5: the attempt poisons, so the
 /// final-owner guard stops the group at 70 instead of recycling.
@@ -639,177 +570,6 @@ fn run_s12_failed_init() -> ! {
     }
     barrier.wait();
     let _ = writeln!(std::io::stdout(), "READY s12-failed-init");
-    let _ = std::io::stdout().flush();
-    drop(backend);
-    std::process::exit(20);
-}
-
-/// Set by the S13 stuck slot-list stub on native entry (worker is inside C
-/// holding ordinary admission when main starts Finalize).
-static S13_ENTERED: AtomicBool = AtomicBool::new(false);
-
-/// Never-returning ordinary stub for S13: signals entry, then parks
-/// forever holding the worker's ordinary guard (no locks held).
-unsafe extern "C" fn child_slot_list_stuck(
-    _token_present: cryptoki_sys::CK_BBOOL,
-    _slots: *mut cryptoki_sys::CK_SLOT_ID,
-    _count: *mut cryptoki_sys::CK_ULONG,
-) -> cryptoki_sys::CK_RV {
-    S13_ENTERED.store(true, Ordering::SeqCst);
-    loop {
-        std::thread::park();
-    }
-}
-
-/// S13 child: a stuck ordinary native call cannot block the independent
-/// stop. The worker parks inside C holding its guard; main Finalizes with
-/// the 200 ms grace (parent env) and the sealer suicides at the deadline
-/// past the stuck call. A 5 s watchdog exits 23 if nothing fires.
-fn run_s13_stuck_call() -> ! {
-    let backend =
-        Arc::new(child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok)));
-    unsafe { (*backend.func_list).C_GetSlotList = Some(child_slot_list_stuck) };
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    {
-        let spawned = std::thread::Builder::new().name("stop-watchdog".to_owned()).spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            std::process::exit(23);
-        });
-        if spawned.is_err() {
-            std::process::exit(17);
-        }
-    }
-    let barrier = Arc::new(Barrier::new(4));
-    {
-        let owned = backend.clone();
-        let gate = barrier.clone();
-        let spawned =
-            std::thread::Builder::new().name("stop-stuck-call".to_owned()).spawn(move || {
-                gate.wait();
-                let _ = owned.ffi_get_slot_list(false);
-                // The stuck call must never return.
-                std::process::exit(21);
-            });
-        if spawned.is_err() {
-            std::process::exit(17);
-        }
-    }
-    for index in 0..2 {
-        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
-    }
-    barrier.wait();
-    wait_flag_5s(&S13_ENTERED);
-    let _ = writeln!(std::io::stdout(), "READY s13-stuck-call");
-    let _ = std::io::stdout().flush();
-    // The seal cannot drain the stuck reader: the 200 ms deadline stops
-    // the group at 70. Any return means nothing fired.
-    let _ = backend.finalize();
-    std::process::exit(23);
-}
-
-/// Counts S14 Initialize entries: the first succeeds, every later one
-/// fails natively (the failed re-Initialize after a clean Finalize).
-static S14_INIT_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Succeed-once Initialize stub for S14 (proof invalidation).
-unsafe extern "C" fn child_initialize_once_then_fails(
-    _: *mut std::ffi::c_void,
-) -> cryptoki_sys::CK_RV {
-    if S14_INIT_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
-        cryptoki_sys::CKR_OK
-    } else {
-        cryptoki_sys::CKR_GENERAL_ERROR
-    }
-}
-
-/// S14 child: init→finalize→failed re-init invalidates the destruction
-/// proof — the drop stops the group at 70 instead of recycling the
-/// reservation (TO26a proof-invalidation fix at stop level).
-fn run_s14_proof_invalidated() -> ! {
-    let backend =
-        child_backend_managed(Some(child_initialize_once_then_fails), Some(child_finalize_ok));
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    if backend.finalize().is_err() {
-        std::process::exit(32);
-    }
-    if backend.initialize().is_ok() {
-        std::process::exit(24);
-    }
-    let barrier = Arc::new(Barrier::new(4));
-    for index in 0..3 {
-        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
-    }
-    barrier.wait();
-    let _ = writeln!(std::io::stdout(), "READY s14-proof-invalidated");
-    let _ = std::io::stdout().flush();
-    drop(backend);
-    std::process::exit(20);
-}
-
-/// Counts S15 Finalize entries: exactly one native entry, error RV.
-static S15_FINALIZE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Failing Finalize stub for S15: native entered, error RV.
-unsafe extern "C" fn child_finalize_fails(_: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
-    S15_FINALIZE_CALLS.fetch_add(1, Ordering::SeqCst);
-    cryptoki_sys::CKR_GENERAL_ERROR
-}
-
-/// S15 child: a native Finalize error (not a simulated marker) leaves the
-/// incarnation uncertain with retained bindings, so the drop stops the
-/// group at 70 instead of recycling.
-fn run_s15_failed_finalize() -> ! {
-    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_fails));
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    if backend.finalize().is_ok() {
-        std::process::exit(25);
-    }
-    // TO26b Fidelity-M2: the failed Finalize entered native exactly
-    // once — the uncertainty is observed, not simulated.
-    if S15_FINALIZE_CALLS.load(Ordering::SeqCst) != 1 {
-        std::process::exit(26);
-    }
-    let barrier = Arc::new(Barrier::new(4));
-    for index in 0..3 {
-        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
-    }
-    barrier.wait();
-    let _ = writeln!(std::io::stdout(), "READY s15-failed-finalize");
-    let _ = std::io::stdout().flush();
-    drop(backend);
-    std::process::exit(20);
-}
-
-/// S16 child: a returning SIGABRT handler is installed, proven functional
-/// (raise → fires → returns), and still installed when the dirty-owner
-/// drop stops the group at 70 — the handler neither diverts nor blocks
-/// the stop. Reuses the M6 handler decls (separate process, no state
-/// shared with the M6 control child).
-fn run_s16_handler_installed() -> ! {
-    let _ = unsafe { signal(M6_SIGABRT, Some(m6_sigabrt_handler)) };
-    if unsafe { raise(M6_SIGABRT) } != 0 {
-        std::process::exit(33);
-    }
-    if !M6_FIRED.load(Ordering::Relaxed) {
-        std::process::exit(34);
-    }
-    M6_FIRED.store(false, Ordering::Relaxed);
-    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    let barrier = Arc::new(Barrier::new(4));
-    for index in 0..3 {
-        spawn_parked_worker(format!("stop-park-{index}"), barrier.clone());
-    }
-    barrier.wait();
-    let _ = writeln!(std::io::stdout(), "READY s16-handler-installed");
     let _ = std::io::stdout().flush();
     drop(backend);
     std::process::exit(20);
@@ -837,8 +597,6 @@ fn child_backend_unmanaged(
         object_cleanup: Default::default(),
         construction: super::native_domain::ConstructionPermit::unmanaged_test_only(),
         lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
         retirement_sentinel: super::native_domain::RetirementSentinel::unmanaged_test_only(),
     }
 }
@@ -967,51 +725,6 @@ fn run_n1_seccomp() -> ! {
     std::process::exit(16);
 }
 
-/// N1-worker child: the denied stop must spin (never fall through) from a
-/// nonleader worker too — seccomp filters are per-thread, so the
-/// worker-thread denial is its own case. Mirrors S2's handoff shape.
-#[cfg(target_os = "linux")]
-fn run_n1_worker() -> ! {
-    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    install_exit_group_errno_deny();
-    let (tx, rx) = std::sync::mpsc::channel::<FfiBackend>();
-    let main_parked = Arc::new(AtomicBool::new(false));
-    {
-        let flag = main_parked.clone();
-        let spawned =
-            std::thread::Builder::new().name("stop-worker-0".to_owned()).spawn(move || {
-                let owner = match rx.recv() {
-                    Ok(owner) => owner,
-                    Err(_) => std::process::exit(18),
-                };
-                wait_flag_5s(&flag);
-                let _ = writeln!(std::io::stdout(), "READY n1-worker");
-                let _ = std::io::stdout().flush();
-                drop(owner);
-                // Fallthrough: the denied stop returned (or Release) — parent kills.
-                std::process::exit(99);
-            });
-        if spawned.is_err() {
-            std::process::exit(17);
-        }
-    }
-    if tx.send(backend).is_err() {
-        std::process::exit(18);
-    }
-    main_parked.store(true, Ordering::SeqCst);
-    loop {
-        std::thread::park();
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_n1_worker() -> ! {
-    std::process::exit(16);
-}
-
 /// S1: main-thread stop with parked workers (minimal dirty).
 #[test]
 fn native_stop_s1_main_thread_stop() {
@@ -1120,56 +833,6 @@ fn native_stop_s12_failed_initialize_stop() {
     assert_stop_status(&output, "s12-failed-init");
 }
 
-/// S13: a stuck ordinary native call cannot block the independent stop —
-/// the Finalize sealer suicides at the 200 ms grace past the stuck call.
-#[test]
-fn native_stop_s13_stuck_ordinary_call_deadline_stop() {
-    let (child, _permit) = spawn_stop_child_with_env(
-        "s13-stuck-call",
-        &[("PKCS11_PROXY_NATIVE_STOP_GRACE_MS", "200")],
-    );
-    let output = child.wait_with_output().expect("reap stop child");
-    assert_stop_status(&output, "s13-stuck-call");
-}
-
-/// S14: init→finalize→failed re-init invalidates the proof — the drop
-/// stops instead of recycling (stop-level proof of the TO26a fix).
-#[test]
-fn native_stop_s14_proof_invalidation_stop() {
-    let (child, _permit) = spawn_stop_child("s14-proof-invalidated");
-    let output = child.wait_with_output().expect("reap stop child");
-    assert_stop_status(&output, "s14-proof-invalidated");
-}
-
-/// S15: a native Finalize error (not simulated) leaves uncertainty — the
-/// drop stops instead of recycling.
-#[test]
-fn native_stop_s15_failed_finalize_stop() {
-    let (child, _permit) = spawn_stop_child("s15-failed-finalize");
-    let output = child.wait_with_output().expect("reap stop child");
-    assert_stop_status(&output, "s15-failed-finalize");
-}
-
-/// S16: an installed, proven-functional returning SIGABRT handler neither
-/// diverts nor blocks the stop — the group still exits 70.
-#[test]
-fn native_stop_s16_sigabrt_handler_installed_stop() {
-    let (child, _permit) = spawn_stop_child("s16-handler-installed");
-    let output = child.wait_with_output().expect("reap stop child");
-    assert_stop_status(&output, "s16-handler-installed");
-}
-
-/// S17 (TO26b I1): a GENUINE gated DONT_BLOCK waiter — real reservation,
-/// real admission, parked inside native C (proven by native entry before
-/// READY) — outstanding when the sole owner drops: the group exits 70.
-/// This replaces S11's parked-thread analog as waiter coverage.
-#[test]
-fn native_stop_s17_genuine_waiter_stop() {
-    let (child, _permit) = spawn_stop_child("s17-genuine-waiter");
-    let output = child.wait_with_output().expect("reap stop child");
-    assert_stop_status(&output, "s17-genuine-waiter");
-}
-
 /// C1: never-initialized control (normal Drop, child exit 0, no stop).
 #[test]
 fn native_stop_c1_never_initialized_normal_drop() {
@@ -1186,12 +849,14 @@ fn native_stop_c2_poisoned_unmanaged_normal_drop() {
     assert_control_status(&output, "c2-unmanaged");
 }
 
-/// Assert a seccomp-denied child spins (never falls through): the parent
-/// observes 5 s of aliveness, then SIGKILLs (external-parent termination)
-/// and reaps. Shared by the main-thread and worker-thread denials.
+/// N1: seccomp errno-denial on `exit_group` — child must NOT fall through.
+/// Unsupported-environment: with `exit_group` denied (`BPF_DENY`), the stop
+/// retry loop spins forever (never 70, never fallthrough exit 99); the parent
+/// observes 5 s of aliveness, then SIGKILLs and reaps. Linux-only (seccomp).
 #[cfg(target_os = "linux")]
-fn assert_denied_child_spins(scenario: &str) {
-    let (mut child, _permit) = spawn_stop_child(scenario);
+#[test]
+fn native_stop_n1_seccomp_errno_denial_unsupported_environment() {
+    let (mut child, _permit) = spawn_stop_child("n1-seccomp");
     // 5 s budget: the denied child must stay alive (spinning, not exiting).
     let start = std::time::Instant::now();
     let budget = std::time::Duration::from_secs(5);
@@ -1204,43 +869,23 @@ fn assert_denied_child_spins(scenario: &str) {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Some(status) => {
-                panic!("{scenario}: child must NOT exit (fell through?), got {status:?}");
+                panic!("n1-seccomp: child must NOT exit (fell through?), got {status:?}");
             }
         }
     }
     match child.try_wait().expect("confirm child alive") {
         None => {}
         Some(status) => {
-            panic!("{scenario}: child exited during kill window, got {status:?}");
+            panic!("n1-seccomp: child exited during kill window, got {status:?}");
         }
     }
     child.kill().expect("SIGKILL denied child");
     let output = child.wait_with_output().expect("reap denied child");
     // 9 is SIGKILL: killed, never exited 70/0/99 (no fallthrough).
-    assert_eq!(output.status.signal(), Some(9), "{scenario}: SIGKILL, got {:?}", output.status);
-    assert_eq!(output.status.code(), None, "{scenario}: no exit code when killed");
+    assert_eq!(output.status.signal(), Some(9), "n1-seccomp: SIGKILL, got {:?}", output.status);
+    assert_eq!(output.status.code(), None, "n1-seccomp: no exit code when killed");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("READY"), "{scenario}: READY missing, stdout={stdout:?}");
-}
-
-/// N1: seccomp errno-denial on `exit_group` — child must NOT fall through.
-/// Unsupported-environment: with `exit_group` denied (`BPF_DENY`), the stop
-/// retry loop spins forever (never 70, never fallthrough exit 99); the parent
-/// observes 5 s of aliveness, then SIGKILLs and reaps. Linux-only (seccomp).
-#[cfg(target_os = "linux")]
-#[test]
-fn native_stop_n1_seccomp_errno_denial_unsupported_environment() {
-    assert_denied_child_spins("n1-seccomp");
-}
-
-/// N1-worker: the same errno-denial from a nonleader worker — seccomp
-/// filters are per-thread, so the worker-thread denial spins too (never
-/// falls through to Drop), needing the same external-parent termination.
-/// Linux-only (seccomp).
-#[cfg(target_os = "linux")]
-#[test]
-fn native_stop_n1_worker_seccomp_errno_denial_unsupported_environment() {
-    assert_denied_child_spins("n1-worker");
+    assert!(stdout.contains("READY"), "n1-seccomp: READY missing, stdout={stdout:?}");
 }
 
 // STOP-C2 marker tests + positive controls (file-based).
@@ -1318,11 +963,7 @@ fn native_stop_marker_child_entry() {
     run_marker_child(&scenario);
 }
 
-/// Marker child dispatch (never returns). Marker-child setup codes: 30
-/// outcome dir missing/unusable, 31 atexit/on-exit registration refused,
-/// 32 control finalize failed, 33 raise failed, 34 SIGABRT handler did
-/// not fire, 35 unexpected provider-callback enrollment or session setup
-/// failure (11/12/13/14/20 reused from STOP-C1).
+/// Marker child dispatch (never returns).
 fn run_marker_child(scenario: &str) -> ! {
     match scenario {
         "m1-drop-stop" => run_m1_drop_stop(),
@@ -1336,18 +977,6 @@ fn run_marker_child(scenario: &str) -> ! {
         "m5-finalize-stop" => run_m5_finalize_stop(),
         "m5-finalize-control" => run_m5_finalize_control(),
         "m6-sigabrt-control" => run_m6_sigabrt_control(),
-        "m7-poisoned-domain-stop" => run_m7_poisoned_domain_stop(),
-        "m7-poisoned-domain-control" => run_m7_poisoned_domain_control(),
-        "m8-tls-stop" => run_m8_tls_stop(),
-        "m8-tls-control" => run_m8_tls_control(),
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        "m9-onexit-stop" => run_m9_onexit_stop(),
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        "m9-onexit-control" => run_m9_onexit_control(),
-        "m10-callback-stop" => run_m10_callback_stop(),
-        "m10-callback-control" => run_m10_callback_control(),
-        "m11-domain-stop" => run_m11_domain_stop(),
-        "m11-domain-control" => run_m11_domain_control(),
         _ => std::process::exit(11),
     }
 }
@@ -1854,497 +1483,6 @@ fn native_stop_m6_sigabrt_handler_control_present() {
         &dir.join("sigabrt_handler.marker"),
         b"sigabrt-handler-returned",
         "m6-sigabrt-control",
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// M7 stop child: C3M-clean (initialized then finalized) backend whose
-/// lifecycle DOMAIN is poisoned. The C3M retirement predicate says
-/// Release, so only the TF01b Drop quiescence probe can stop the group:
-/// the child must exit 70. Reaching past the drop means no stop fired —
-/// fail loudly with exit 20 (never silently green).
-fn run_m7_poisoned_domain_stop() -> ! {
-    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    if backend.finalize().is_err() {
-        std::process::exit(32);
-    }
-    std::thread::scope(|scope| {
-        let poisoned = scope.spawn(|| {
-            backend
-                .lifecycle_domain
-                .hold_write_across_for_tests(|| panic!("intentional M7 domain poison"));
-        });
-        if poisoned.join().is_ok() {
-            std::process::exit(24);
-        }
-    });
-    let _ = writeln!(std::io::stdout(), "READY m7-poisoned-domain-stop");
-    let _ = std::io::stdout().flush();
-    drop(backend);
-    std::process::exit(20);
-}
-
-/// M7 control child: the same C3M-clean backend with a quiet domain — a
-/// normal Release drop and exit 0.
-fn run_m7_poisoned_domain_control() -> ! {
-    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    if backend.finalize().is_err() {
-        std::process::exit(32);
-    }
-    let _ = writeln!(std::io::stdout(), "READY m7-poisoned-domain-control");
-    let _ = std::io::stdout().flush();
-    drop(backend);
-    std::process::exit(0);
-}
-
-/// M7: dropping a backend whose lifecycle domain is poisoned stops the
-/// group at 70 even though the C3M predicate says Release.
-#[test]
-fn native_stop_m7_poisoned_domain_drop_stops() {
-    let dir = fresh_outcome_dir("m7-stop");
-    let (child, _permit) = spawn_marker_child("m7-poisoned-domain-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
-    assert_stop_status(&output, "m7-poisoned-domain-stop");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// M7 positive control: the same C3M-clean backend with a quiet domain
-/// drops normally (exit 0, no stop).
-#[test]
-fn native_stop_m7_poisoned_domain_drop_control_clean() {
-    let dir = fresh_outcome_dir("m7-control");
-    let (child, _permit) = spawn_marker_child("m7-poisoned-domain-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
-    assert_control_status(&output, "m7-poisoned-domain-control");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Expected bytes of the M8 TLS-Drop marker.
-const M8_BYTES: &[u8] = b"tls-drop-fired";
-
-/// M8 TLS sentinel: its `Drop` would write the marker. Lives in
-/// thread-local storage; the stop must preempt it with the thread.
-struct M8TlsGuard {
-    path: std::path::PathBuf,
-}
-
-impl Drop for M8TlsGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::write(&self.path, M8_BYTES);
-    }
-}
-
-std::thread_local! {
-    static M8_TLS: std::cell::RefCell<Option<M8TlsGuard>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// M8 stop child: TLS sentinel armed on the main thread across a
-/// dirty-owner drop (the stop). Thread-local destructors never run.
-fn run_m8_tls_stop() -> ! {
-    let dir = child_outcome_dir();
-    M8_TLS.with(|cell| {
-        *cell.borrow_mut() = Some(M8TlsGuard { path: dir.join("tls_drop.marker") });
-    });
-    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    let _ = writeln!(std::io::stdout(), "READY m8-tls-stop");
-    let _ = std::io::stdout().flush();
-    drop(backend);
-    // No stop fired: disarm without running the sentinel, then fail loudly.
-    M8_TLS.with(|cell| std::mem::forget(cell.take()));
-    std::process::exit(20);
-}
-
-/// M8 control child: a worker thread arms its own TLS sentinel and
-/// returns — thread exit runs the destructor — proving the marker works;
-/// the main backend drops normally (never initialized) and exits 0.
-fn run_m8_tls_control() -> ! {
-    let dir = child_outcome_dir();
-    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
-    std::thread::scope(|scope| {
-        let path = dir.join("tls_drop.marker");
-        let joined = scope
-            .spawn(move || {
-                M8_TLS.with(|cell| *cell.borrow_mut() = Some(M8TlsGuard { path }));
-            })
-            .join();
-        if joined.is_err() {
-            std::process::exit(17);
-        }
-    });
-    let _ = writeln!(std::io::stdout(), "READY m8-tls-control");
-    let _ = std::io::stdout().flush();
-    drop(backend);
-    std::process::exit(0);
-}
-
-/// M8: thread-local destructors must NOT run when the stop fires.
-#[test]
-fn native_stop_m8_tls_drop_absent_on_stop() {
-    let dir = fresh_outcome_dir("m8-stop");
-    let (child, _permit) = spawn_marker_child("m8-tls-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
-    assert_stop_status(&output, "m8-tls-stop");
-    assert_marker_absent(&dir.join("tls_drop.marker"), "m8-tls-stop");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// M8 positive control: worker-thread exit runs the TLS sentinel.
-#[test]
-fn native_stop_m8_tls_drop_control_present() {
-    let dir = fresh_outcome_dir("m8-control");
-    let (child, _permit) = spawn_marker_child("m8-tls-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
-    assert_control_status(&output, "m8-tls-control");
-    assert_marker_bytes(&dir.join("tls_drop.marker"), b"tls-drop-fired", "m8-tls-control");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Expected bytes of the M9 `on_exit` marker.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-const M9_BYTES: &[u8] = b"c-onexit-fired";
-
-// Manual `on_exit(3)` declaration (glibc-only, hence the whole M9 family
-// is `cfg(all(linux, gnu))` — "where available" per the battery): no
-// `libc` dev-dep needed, same as the M3 `atexit` decl.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-unsafe extern "C" {
-    fn on_exit(
-        callback: Option<unsafe extern "C" fn(std::ffi::c_int, *mut std::ffi::c_void)>,
-        arg: *mut std::ffi::c_void,
-    ) -> std::ffi::c_int;
-}
-
-/// Outcome dir for the M9 `on_exit` callback (C callbacks capture nothing).
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-static M9_OUTCOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-
-/// M9 `on_exit` callback: writes the marker. Never panics.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-unsafe extern "C" fn m9_onexit_callback(_status: std::ffi::c_int, _arg: *mut std::ffi::c_void) {
-    if let Some(dir) = M9_OUTCOME.get() {
-        let _ = std::fs::write(dir.join("c_onexit.marker"), M9_BYTES);
-    }
-}
-
-/// Register the M9 `on_exit` callback (exits 31 when libc refuses).
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn install_m9_onexit(dir: &std::path::Path) {
-    let _ = M9_OUTCOME.set(dir.to_path_buf());
-    let registered = unsafe { on_exit(Some(m9_onexit_callback), std::ptr::null_mut()) };
-    if registered != 0 {
-        std::process::exit(31);
-    }
-}
-
-/// M9 stop child: `on_exit` registered, then a dirty-owner drop (the
-/// stop). `exit_group` preempts the exit-handler chain.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn run_m9_onexit_stop() -> ! {
-    let dir = child_outcome_dir();
-    install_m9_onexit(&dir);
-    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    let _ = writeln!(std::io::stdout(), "READY m9-onexit-stop");
-    let _ = std::io::stdout().flush();
-    drop(backend);
-    std::process::exit(20);
-}
-
-/// M9 control child: `on_exit` registered, then `process::exit(0)` —
-/// which runs the exit chain — so the marker is present.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn run_m9_onexit_control() -> ! {
-    let dir = child_outcome_dir();
-    install_m9_onexit(&dir);
-    let _ = writeln!(std::io::stdout(), "READY m9-onexit-control");
-    let _ = std::io::stdout().flush();
-    std::process::exit(0);
-}
-
-/// M9: the C `on_exit` handler must NOT run when the stop fires.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-#[test]
-fn native_stop_m9_c_onexit_absent_on_stop() {
-    let dir = fresh_outcome_dir("m9-stop");
-    let (child, _permit) = spawn_marker_child("m9-onexit-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
-    assert_stop_status(&output, "m9-onexit-stop");
-    assert_marker_absent(&dir.join("c_onexit.marker"), "m9-onexit-stop");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// M9 positive control: `process::exit(0)` runs `on_exit`, so the marker
-/// is present.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-#[test]
-fn native_stop_m9_c_onexit_control_present() {
-    let dir = fresh_outcome_dir("m9-control");
-    let (child, _permit) = spawn_marker_child("m9-onexit-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
-    assert_control_status(&output, "m9-onexit-control");
-    assert_marker_bytes(&dir.join("c_onexit.marker"), b"c-onexit-fired", "m9-onexit-control");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Expected bytes of the M10 provider-entry marker.
-const M10_BYTES: &[u8] = b"provider-entry-ran";
-
-/// Outcome dir for the M10 stubs (C stubs capture nothing).
-static M10_OUTCOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-
-/// M10 Initialize stub: records the received callback enrollment — the
-/// backend must pass no mutex callbacks (exit 35 if one is ever
-/// enrolled) — and succeeds.
-unsafe extern "C" fn m10_initialize_stub(args: *mut std::ffi::c_void) -> cryptoki_sys::CK_RV {
-    if !args.is_null() {
-        let init = unsafe { &*(args as *const cryptoki_sys::CK_C_INITIALIZE_ARGS) };
-        if init.CreateMutex.is_some()
-            || init.DestroyMutex.is_some()
-            || init.LockMutex.is_some()
-            || init.UnlockMutex.is_some()
-        {
-            std::process::exit(35);
-        }
-    }
-    cryptoki_sys::CKR_OK
-}
-
-/// M10 OpenSession stub: the backend must pass no Notify callback (exit
-/// 35 if one is ever enrolled); opens session 41.
-unsafe extern "C" fn m10_open_session_stub(
-    _slot: cryptoki_sys::CK_SLOT_ID,
-    _flags: cryptoki_sys::CK_FLAGS,
-    _application: cryptoki_sys::CK_VOID_PTR,
-    notify: cryptoki_sys::CK_NOTIFY,
-    session: *mut cryptoki_sys::CK_SESSION_HANDLE,
-) -> cryptoki_sys::CK_RV {
-    if notify.is_some() {
-        std::process::exit(35);
-    }
-    if !session.is_null() {
-        unsafe { *session = 41 };
-    }
-    cryptoki_sys::CKR_OK
-}
-
-/// M10 CloseSession stub: writes the marker and sets the counter to 1.
-/// Must never run on the stop path (no provider entry may run there).
-unsafe extern "C" fn m10_close_session_stub(
-    _session: cryptoki_sys::CK_SESSION_HANDLE,
-) -> cryptoki_sys::CK_RV {
-    if let Some(dir) = M10_OUTCOME.get() {
-        let _ = std::fs::write(dir.join("provider_entry.marker"), M10_BYTES);
-        let _ = std::fs::write(dir.join("close_session.count"), b"1");
-    }
-    cryptoki_sys::CKR_OK
-}
-
-/// Build a managed backend with the M10 callback-recording stubs.
-fn child_backend_m10() -> FfiBackend {
-    let backend = child_backend_managed(Some(m10_initialize_stub), Some(child_finalize_ok));
-    unsafe { (*backend.func_list).C_OpenSession = Some(m10_open_session_stub) };
-    unsafe { (*backend.func_list).C_CloseSession = Some(m10_close_session_stub) };
-    backend
-}
-
-/// M10 stop child: init (no mutex callbacks enrolled) + open session (no
-/// Notify enrolled, open count held high) across a dirty-owner drop (the
-/// stop). No host callback exists to fire, and no provider entry
-/// (CloseSession) may run on the stop path either.
-fn run_m10_callback_stop() -> ! {
-    let dir = child_outcome_dir();
-    let _ = M10_OUTCOME.set(dir);
-    let backend = child_backend_m10();
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    let opened = backend.ffi_open_session(
-        pkcs11_proxy_ng_types::CkSlotId(11),
-        pkcs11_proxy_ng_types::CkSessionFlags(
-            pkcs11_proxy_ng_types::CkSessionFlags::SERIAL_SESSION,
-        ),
-    );
-    if opened.is_err() {
-        std::process::exit(35);
-    }
-    let _ = writeln!(std::io::stdout(), "READY m10-callback-stop");
-    let _ = std::io::stdout().flush();
-    drop(backend);
-    std::process::exit(20);
-}
-
-/// M10 control child: the same stubs, but the session is closed
-/// explicitly (entry runs: marker + counter) before Finalize and the
-/// normal backend drop — proving the marker mechanism works.
-fn run_m10_callback_control() -> ! {
-    let dir = child_outcome_dir();
-    let _ = M10_OUTCOME.set(dir);
-    let backend = child_backend_m10();
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    let session = match backend.ffi_open_session(
-        pkcs11_proxy_ng_types::CkSlotId(11),
-        pkcs11_proxy_ng_types::CkSessionFlags(
-            pkcs11_proxy_ng_types::CkSessionFlags::SERIAL_SESSION,
-        ),
-    ) {
-        Ok(session) => session,
-        Err(_) => std::process::exit(35),
-    };
-    if backend.ffi_close_session(session).is_err() {
-        std::process::exit(35);
-    }
-    if backend.finalize().is_err() {
-        std::process::exit(32);
-    }
-    let _ = writeln!(std::io::stdout(), "READY m10-callback-control");
-    let _ = std::io::stdout().flush();
-    drop(backend);
-    std::process::exit(0);
-}
-
-/// Seed the M10 fresh value: close-session counter `0`.
-fn seed_m10_fresh(dir: &std::path::Path) {
-    std::fs::write(dir.join("close_session.count"), b"0").expect("seed count");
-}
-
-/// M10: no host callback is ever enrolled (the stubs exit 35 if one is),
-/// and no provider entry (CloseSession) runs on the stop path (marker
-/// absent, counter stays 0).
-#[test]
-fn native_stop_m10_callback_absent_on_stop() {
-    let dir = fresh_outcome_dir("m10-stop");
-    seed_m10_fresh(&dir);
-    let (child, _permit) = spawn_marker_child("m10-callback-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
-    assert_stop_status(&output, "m10-callback-stop");
-    assert_marker_absent(&dir.join("provider_entry.marker"), "m10-callback-stop");
-    assert_marker_bytes(&dir.join("close_session.count"), b"0", "m10-callback-stop");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// M10 positive control: the explicit close runs the provider entry
-/// (marker present, counter exactly 1), then Finalize + normal drop.
-#[test]
-fn native_stop_m10_callback_control_present() {
-    let dir = fresh_outcome_dir("m10-control");
-    seed_m10_fresh(&dir);
-    let (child, _permit) = spawn_marker_child("m10-callback-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
-    assert_control_status(&output, "m10-callback-control");
-    assert_marker_bytes(
-        &dir.join("provider_entry.marker"),
-        b"provider-entry-ran",
-        "m10-callback-control",
-    );
-    assert_marker_bytes(&dir.join("close_session.count"), b"1", "m10-callback-control");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Expected bytes of the M11 domain-holder marker.
-const M11_BYTES: &[u8] = b"domain-drop-fired";
-
-/// M11 guard: its `Drop` would write the marker. Held in the same
-/// enclosing scope as the backend — domain-owned storage drops only on
-/// the normal path; the stop preempts it with everything else.
-struct M11Guard {
-    path: std::path::PathBuf,
-}
-
-impl Drop for M11Guard {
-    fn drop(&mut self) {
-        let _ = std::fs::write(&self.path, M11_BYTES);
-    }
-}
-
-/// Enclosing domain holder: field order drops the backend first (the
-/// stop fires there) and the domain guard second (preempted on stop,
-/// runs on the normal path).
-struct M11DomainHolder {
-    backend: FfiBackend,
-    guard: M11Guard,
-}
-
-/// M11 stop child: the holder owns an initialized backend; dropping the
-/// holder stops at the backend before the domain guard can drop.
-fn run_m11_domain_stop() -> ! {
-    let dir = child_outcome_dir();
-    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
-    if backend.initialize().is_err() {
-        std::process::exit(14);
-    }
-    let holder =
-        M11DomainHolder { backend, guard: M11Guard { path: dir.join("domain_drop.marker") } };
-    assert!(
-        matches!(
-            holder.backend.lifecycle.retirement_decision(),
-            super::native_domain::RetirementDecision::Poison
-        ),
-        "M11 stop child must drop for the Poison reason"
-    );
-    assert!(!holder.guard.path.exists(), "M11 marker starts absent");
-    let _ = writeln!(std::io::stdout(), "READY m11-domain-stop");
-    let _ = std::io::stdout().flush();
-    drop(holder);
-    std::process::exit(20);
-}
-
-/// M11 control child: the holder owns a never-initialized backend, so
-/// both drops run normally and the marker is present.
-fn run_m11_domain_control() -> ! {
-    let dir = child_outcome_dir();
-    let backend = child_backend_managed(Some(child_initialize_ok), Some(child_finalize_ok));
-    let holder =
-        M11DomainHolder { backend, guard: M11Guard { path: dir.join("domain_drop.marker") } };
-    assert!(
-        matches!(
-            holder.backend.lifecycle.retirement_decision(),
-            super::native_domain::RetirementDecision::Release
-        ),
-        "M11 control child must drop for the Release reason"
-    );
-    assert!(!holder.guard.path.exists(), "M11 marker starts absent");
-    let _ = writeln!(std::io::stdout(), "READY m11-domain-control");
-    let _ = std::io::stdout().flush();
-    drop(holder);
-    std::process::exit(0);
-}
-
-/// M11: domain-enclosing drops must NOT run when the stop fires.
-#[test]
-fn native_stop_m11_domain_drop_absent_on_stop() {
-    let dir = fresh_outcome_dir("m11-stop");
-    let (child, _permit) = spawn_marker_child("m11-domain-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
-    assert_stop_status(&output, "m11-domain-stop");
-    assert_marker_absent(&dir.join("domain_drop.marker"), "m11-domain-stop");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// M11 positive control: the normal path drops the domain guard.
-#[test]
-fn native_stop_m11_domain_drop_control_present() {
-    let dir = fresh_outcome_dir("m11-control");
-    let (child, _permit) = spawn_marker_child("m11-domain-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
-    assert_control_status(&output, "m11-domain-control");
-    assert_marker_bytes(
-        &dir.join("domain_drop.marker"),
-        b"domain-drop-fired",
-        "m11-domain-control",
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -535,8 +535,10 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
     });
     unsafe { write_mechanism_output_params(&mut mechanism, &output) };
     assert_eq!(&iv[..4], &[1, 2, 3, 4]);
-    assert_eq!(gcm_wrap.ulIvLen, 4);
-    assert_eq!(gcm_wrap.ulTagBits, 96);
+    // E0793: params structs are packed on Windows; assert on by-value copies.
+    let (gcm_iv_len, gcm_tag_bits) = (gcm_wrap.ulIvLen, gcm_wrap.ulTagBits);
+    assert_eq!(gcm_iv_len, 4);
+    assert_eq!(gcm_tag_bits, 96);
 
     let mut nonce = [0u8; 12];
     let mut ccm_wrap = CK_CCM_WRAP_PARAMS {
@@ -564,8 +566,9 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
     });
     unsafe { write_mechanism_output_params(&mut mechanism, &output) };
     assert_eq!(&nonce[..4], &[9, 8, 7, 6]);
-    assert_eq!(ccm_wrap.ulNonceLen, 4);
-    assert_eq!(ccm_wrap.ulMACLen, 12);
+    let (ccm_nonce_len, ccm_mac_len) = (ccm_wrap.ulNonceLen, ccm_wrap.ulMACLen);
+    assert_eq!(ccm_nonce_len, 4);
+    assert_eq!(ccm_mac_len, 12);
 }
 
 #[test]
@@ -1914,8 +1917,9 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
     }
 
     assert_eq!(iv, generated.as_slice());
-    assert_eq!(gcm.ulIvLen, 12);
-    assert_eq!(gcm.ulIvBits, 96);
+    let (gcm_iv_len, gcm_iv_bits) = (gcm.ulIvLen, gcm.ulIvBits);
+    assert_eq!(gcm_iv_len, 12);
+    assert_eq!(gcm_iv_bits, 96);
 }
 
 #[test]
