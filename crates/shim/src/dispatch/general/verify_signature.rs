@@ -29,7 +29,10 @@ pub unsafe extern "C" fn c_verify_signature_init(
             if rv != rv_ok() {
                 return rv;
             }
-            Some(unsafe { read_mechanism(p_mechanism) })
+            Some(match unsafe { read_mechanism(p_mechanism) } {
+                Ok(mech) => mech,
+                Err(e) => return rv_err(e),
+            })
         };
         let signature = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_signature, ul_signature_len)

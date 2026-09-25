@@ -54,3 +54,18 @@ impl TokenSelector {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // W1-L8-12: the ADR-0005 §6 policy example must use selector forms
+    // this parser accepts. Pins the exact example strings so a future
+    // doc edit that reintroduces pkcs11: URIs fails here.
+    #[test]
+    fn adr_example_selectors_parse() {
+        assert!(matches!(TokenSelector::parse("label:Audit"), Ok(TokenSelector::Label(_))));
+        assert!(matches!(TokenSelector::parse("serial:1234"), Ok(TokenSelector::Serial(_))));
+        assert!(TokenSelector::parse("pkcs11:token=Audit;serial=1234").is_err());
+    }
+}

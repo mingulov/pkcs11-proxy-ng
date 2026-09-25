@@ -292,7 +292,10 @@ pub unsafe extern "C" fn c_message_sign_init(
             if rv != rv_ok() {
                 return rv;
             }
-            Some(unsafe { read_mechanism(p_mechanism) })
+            Some(match unsafe { read_mechanism(p_mechanism) } {
+                Ok(mech) => mech,
+                Err(e) => return rv_err(e),
+            })
         };
         let successful_shape = mech.as_ref().map(|_| MessageParameterShape::Unmodeled);
         let saved_shape = operation.shape.take();
@@ -365,7 +368,10 @@ pub unsafe extern "C" fn c_message_verify_init(
             if rv != rv_ok() {
                 return rv;
             }
-            Some(unsafe { read_mechanism(p_mechanism) })
+            Some(match unsafe { read_mechanism(p_mechanism) } {
+                Ok(mech) => mech,
+                Err(e) => return rv_err(e),
+            })
         };
         let successful_shape = mech.as_ref().map(|_| MessageParameterShape::Unmodeled);
         let saved_shape = operation.shape.take();

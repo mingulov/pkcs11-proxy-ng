@@ -76,6 +76,7 @@ pub(crate) async fn digest_init(
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestInitResponse { ck_rv: ck_rv_only(result) }))
 }
 
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn digest(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestRequest>,
@@ -183,6 +184,7 @@ pub(crate) async fn digest_key(
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestKeyResponse { ck_rv: ck_rv_only(result) }))
 }
 
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn digest_final(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestFinalRequest>,

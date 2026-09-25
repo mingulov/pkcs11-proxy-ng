@@ -43,7 +43,7 @@ Each listener in the daemon configuration specifies one of three authentication 
 
 #### `none` -- No authentication
 
-No client identity is established. Intended exclusively for development and testing. The daemon refuses to start if `auth = "none"` is configured on a TCP listener unless a separate `allow_insecure_tcp = true` flag is also set (this flag exists only to support rare integration-test scenarios and emits a startup warning). For Unix socket or loopback-only use.
+No client identity is established. Intended exclusively for development and testing. The daemon refuses to start if `auth = "none"` is configured on a TCP listener unless a separate `allow_insecure_tcp = true` flag is also set (this flag exists only to support rare integration-test scenarios and emits a startup warning). A Unix socket listener with `auth = "none"` is likewise gated behind an explicit `allow_insecure_unix = true`, refused at startup otherwise, with a loud warning while unauthenticated. For Unix socket or loopback-only use.
 
 #### `peer_cred` -- Unix socket peer credentials
 
@@ -170,9 +170,9 @@ auth = "peer_cred"        # default for unix; shown explicitly for clarity
 type = "tcp"
 bind = "0.0.0.0:7512"
 auth = "mtls"             # default for tcp; shown explicitly for clarity
-ca_cert = "/etc/pkcs11-proxy/ca.pem"
-server_cert = "/etc/pkcs11-proxy/server.pem"
-server_key = "/etc/pkcs11-proxy/server-key.pem"
+ca_cert = "/etc/pkcs11-proxy-ng/ca.pem"
+server_cert = "/etc/pkcs11-proxy-ng/server.pem"
+server_key = "/etc/pkcs11-proxy-ng/server-key.pem"
 
 [auth]
 allow_all_authenticated = false
@@ -181,6 +181,7 @@ allow_all_authenticated = false
 type = "unix"
 path = "/tmp/pkcs11-proxy-ng-dev.sock"
 auth = "none"             # DEVELOPMENT ONLY -- never use in production
+allow_insecure_unix = true  # required opt-in for auth = "none" on unix
 
 # --- Optional token-level access policy ---
 
@@ -189,7 +190,7 @@ auth = "none"             # DEVELOPMENT ONLY -- never use in production
 # Values specify which tokens the identity may access.
 
 "x509:issuer=CN=Example Root,O=Example;subject=CN=pki-service,O=Example" = { tokens = "all" }
-"x509:issuer=CN=Example Root,O=Example;subject=CN=audit-reader,O=Example" = { tokens = ["pkcs11:token=Audit;serial=1234"] }
+"x509:issuer=CN=Example Root,O=Example;subject=CN=audit-reader,O=Example" = { tokens = ["label:Audit", "serial:1234"] }
 "uid=1000" = { tokens = "all" }
 ```
 
@@ -198,6 +199,7 @@ auth = "none"             # DEVELOPMENT ONLY -- never use in production
 The daemon validates auth configuration at startup and refuses to start if any of the following are true:
 
 - A TCP listener has `auth = "none"` without `allow_insecure_tcp = true`.
+- A Unix socket listener has `auth = "none"` without `allow_insecure_unix = true`.
 - A listener has `auth = "mtls"` but is missing `ca_cert`, `server_cert`, or `server_key`.
 - An authenticated listener exists with no policy entries and
   `allow_all_authenticated` is not explicitly set to `true`.
@@ -246,7 +248,7 @@ The following capabilities are explicitly out of scope for Phase 1. They are lis
 
 ### What becomes easier
 
-- **Safe-by-default deployment.** TCP listeners require mTLS out of the box. There is no accidental path to running an unauthenticated daemon on the network.
+- **Safe-by-default deployment.** TCP listeners require mTLS out of the box: the schema-level default for `[listener.remote].auth` is `mtls`, and `auth = "none"` on TCP refuses to start without an explicit `allow_insecure_tcp = true`. The one exception is the shipped `packaging/config/proxy.toml.default`, which explicitly opts into `auth = "none"` + `allow_insecure_tcp = true` for loopback/dev and network-protected (k8s NetworkPolicy / VPC) deployments — an explicit, visible choice, never a silent default: the daemon logs a loud `WARN` at every startup while it listens unauthenticated (W1-L8-13 amendment, 2026-09-21).
 - **Incremental policy adoption.** Deployments can start with explicit broad
   access (`allow_all_authenticated = true`) and later add token-level
   restrictions without changing the auth mode or the daemon binary.

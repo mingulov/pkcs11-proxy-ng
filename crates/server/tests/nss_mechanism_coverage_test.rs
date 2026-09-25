@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! NSS mechanism coverage tests.
 //!
 //! Verify that the proxy in transparent mode faithfully forwards all mechanisms
@@ -11,7 +14,8 @@ mod support;
 
 use pkcs11_proxy_ng_types::{
     CkAttribute, CkAttributeType, CkAttributeValue, CkInBuf, CkKeyType, CkMechanism,
-    CkMechanismParams, CkMechanismType, CkObjectClass, GcmParams, IvParams, RsaPkcsPssParams,
+    CkMechanismParams, CkMechanismType, CkMgf, CkObjectClass, GcmParams, IvParams,
+    RsaPkcsPssParams,
 };
 use support::{
     DaemonHarness, ProviderFixture, ensure_user_token, generate_named_rsa_key_pair,
@@ -171,9 +175,6 @@ async fn nss_full_rsa_workflow_through_proxy() -> Result<(), String> {
 // Parameterized mechanism tests
 // ---------------------------------------------------------------------------
 
-/// CKG_MGF1_SHA256 — mask generation function identifier for PSS/OAEP.
-const CKG_MGF1_SHA256: u64 = 0x00000002;
-
 /// CKM_SHA256_RSA_PKCS_PSS (0x0043) — combined hash-and-sign PSS mechanism.
 /// Not yet a named constant in `CkMechanismType`, so we construct it inline.
 const CKM_SHA256_RSA_PKCS_PSS: CkMechanismType = CkMechanismType(0x0043);
@@ -214,7 +215,7 @@ async fn nss_rsa_pss_sign_verify_parameterized() -> Result<(), String> {
         mechanism_type: CKM_SHA256_RSA_PKCS_PSS,
         params: Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
             hash_alg: CkMechanismType::SHA256,
-            mgf: CKG_MGF1_SHA256,
+            mgf: CkMgf::MGF1_SHA256,
             salt_len: 32,
         })),
     };

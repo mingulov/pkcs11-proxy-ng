@@ -25,6 +25,11 @@ struct LoginGate {
     proceed: Arc<(Mutex<bool>, Condvar)>,
 }
 
+/// Predicate over a `find_objects_init` template: installed with
+/// [`MockBackend::set_find_template_gate`] so `find_objects` can simulate
+/// class-sensitive search.
+type FindTemplateGate = Arc<dyn Fn(&[CkAttribute]) -> bool + Send + Sync>;
+
 mod crypto_ops;
 pub mod echo;
 mod historical_flags;
@@ -157,6 +162,10 @@ pub struct MockBackend {
     /// Optional blocking delay before `close_session` settles, used to prove
     /// timeout-safe lifecycle completion without a real slow provider.
     close_session_delay: Mutex<Option<std::time::Duration>>,
+    /// Optional blocking delay before `logout` settles. The `close_session`
+    /// analogue for teardown tests (W1-C2-03): wedges the last-holder
+    /// logout so eviction boundedness is provable without a real stuck HSM.
+    logout_delay: Mutex<Option<std::time::Duration>>,
     /// Error that `login` specifically returns (before `login_impl`). Used to
     /// simulate PIN failures (e.g. CKR_PIN_INCORRECT) so tests can exercise
     /// the per-slot failed-login budget without a real PKCS#11 module.
@@ -208,7 +217,16 @@ pub struct MockBackend {
     /// default 2.40/3.0/3.2 catalog with no NULL functions.
     interface_capabilities: Mutex<Option<InterfaceCapabilities>>,
     login_calls: AtomicUsize,
+    login_user_calls: AtomicUsize,
+    /// Presence-only observations of backend `login_user` (`C_LoginUser`)
+    /// calls: `(username_is_none, pin_is_none)` per call, in arrival order.
+    /// Records pointer-presence only — never secret bytes — so NULL-vs-empty
+    /// proxying (W1-C6-07) is observable without retaining credentials.
+    login_user_presence: Mutex<Vec<(bool, bool)>>,
     token_info_calls: AtomicUsize,
+    /// Count of backend `find_objects` (`C_FindObjects`) calls. Used by the
+    /// W1-C1-07 scan-bound test to prove bounded backend round-trips.
+    find_objects_calls: AtomicUsize,
     /// Count of backend data-operation calls (sign, verify, digest, encrypt,
     /// decrypt and their variants). Incremented inside `resolve_input` so
     /// every migrated data op that calls it contributes. Used by
@@ -240,6 +258,10 @@ pub struct MockBackend {
     /// One-shot structured response override for server contract tests. The
     /// next structured Begin/one-shot/Next call consumes it.
     next_message_parameter_response: Mutex<Option<MessageParameter>>,
+    /// One-shot random-bytes override for wrong-length contract tests
+    /// (W1-L3-08). The next `generate_random` call consumes it verbatim,
+    /// even when the length differs from the requested one.
+    next_random_bytes: Mutex<Option<Vec<u8>>>,
     close_session_calls: AtomicUsize,
     /// Count of `C_GetAttributeValue` calls reaching the backend (regular path).
     /// Used by R2 coalescer tests to assert whether the backend was bypassed on
@@ -251,6 +273,9 @@ pub struct MockBackend {
     /// Test-only gate (M5 harness): when `Some`, each real backend `login`
     /// signals + blocks on it. `None` (default) makes `login` a no-op gate.
     login_gate: Mutex<Option<LoginGate>>,
+    /// Test-only gate (W1-C1-02 harness): the `C_LoginUser` analogue of
+    /// `login_gate`. `None` (default) makes `login_user` a no-op gate.
+    login_user_gate: Mutex<Option<LoginGate>>,
     /// The backend ABI this mock emulates on the wire (ADR-0011): ulong
     /// width for values/lengths, CK_ATTRIBUTE stride for nested templates.
     abi: MockAbi,
@@ -277,6 +302,17 @@ pub struct MockBackend {
     /// `find_objects_init` resets it to 0. Enables multi-batch test scenarios where
     /// successive calls return successive slices (batch1 → batch2 → [] exhausted).
     find_objects_cursor: Mutex<usize>,
+    /// Log of every `find_objects_init` template, in call order. Tests drain it
+    /// with [`MockBackend::take_find_init_templates`] to assert which searches
+    /// a client issued (e.g. primary-class search followed by a SECRET_KEY
+    /// fallback). Unbounded by design — test-only, tiny templates.
+    find_init_templates: Mutex<Vec<Vec<CkAttribute>>>,
+    /// Optional gate (W1-C11-04 harness): when `Some`, `find_objects` serves
+    /// the override list only if the gate accepts the most recent init
+    /// template, and returns `[]` otherwise. `None` (default) keeps the
+    /// historical template-blind behavior. Lets tests simulate a backend
+    /// where only a specific class (e.g. SECRET_KEY) matches the search.
+    find_template_gate: Mutex<Option<FindTemplateGate>>,
 }
 
 /// Which mechanisms require parameters and which forbid them, snapshot
@@ -330,6 +366,7 @@ impl MockBackend {
             injected_error: Mutex::new(None),
             injected_close_error: Mutex::new(None),
             close_session_delay: Mutex::new(None),
+            logout_delay: Mutex::new(None),
             injected_login_rv: Mutex::new(None),
             encrypt_init_output: Mutex::new(None),
             encrypt_operation_output: Mutex::new(None),
@@ -342,7 +379,10 @@ impl MockBackend {
             verify_signature_accumulator: Mutex::new(HashMap::new()),
             interface_capabilities: Mutex::new(None),
             login_calls: AtomicUsize::new(0),
+            login_user_calls: AtomicUsize::new(0),
+            login_user_presence: Mutex::new(Vec::new()),
             token_info_calls: AtomicUsize::new(0),
+            find_objects_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
             message_begin_calls: AtomicUsize::new(0),
             message_init_contract: Mutex::new(None),
@@ -353,16 +393,20 @@ impl MockBackend {
             message_parameter_calls: AtomicUsize::new(0),
             next_message_parameter_ack: Mutex::new(None),
             next_message_parameter_response: Mutex::new(None),
+            next_random_bytes: Mutex::new(None),
             close_session_calls: AtomicUsize::new(0),
             attr_get_calls: AtomicUsize::new(0),
             attr_get_exact_calls: AtomicUsize::new(0),
             login_gate: Mutex::new(None),
+            login_user_gate: Mutex::new(None),
             abi: MockAbi::host(),
             advertised_byte_order: None,
             param_presence: None,
             cryptoki_version: (3, 0),
             find_objects_override: Mutex::new(None),
             find_objects_cursor: Mutex::new(0),
+            find_init_templates: Mutex::new(Vec::new()),
+            find_template_gate: Mutex::new(None),
         }
     }
 
@@ -376,6 +420,19 @@ impl MockBackend {
         proceed: Arc<(Mutex<bool>, Condvar)>,
     ) {
         *self.login_gate.lock().unwrap() = Some(LoginGate { entered, proceed });
+    }
+
+    /// Install a gate so the next `login_user` call(s) signal `entered` and
+    /// block until `proceed`'s flag is set and the condvar notified. The
+    /// `C_LoginUser` analogue of [`MockBackend::set_login_gate`]: lets a test
+    /// deterministically hold the first client inside `C_LoginUser` while it
+    /// starts a second, forcing the race.
+    pub fn set_login_user_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        proceed: Arc<(Mutex<bool>, Condvar)>,
+    ) {
+        *self.login_user_gate.lock().unwrap() = Some(LoginGate { entered, proceed });
     }
 
     /// Build a mock backend that advertises every mechanism registered by
@@ -452,6 +509,35 @@ impl MockBackend {
         *self.find_objects_override.lock().unwrap() = Some(objects);
     }
 
+    /// Install a gate so `find_objects` serves the override list only when
+    /// the gate accepts the most recent `find_objects_init` template, and
+    /// returns `[]` otherwise. Simulate class-sensitive search by matching
+    /// on the template's `CKA_CLASS` entry.
+    pub fn set_find_template_gate(
+        &self,
+        gate: impl Fn(&[CkAttribute]) -> bool + Send + Sync + 'static,
+    ) {
+        *self.find_template_gate.lock().unwrap() = Some(Arc::new(gate));
+    }
+
+    /// Drain the log of `find_objects_init` templates, in call order.
+    pub fn take_find_init_templates(&self) -> Vec<Vec<CkAttribute>> {
+        std::mem::take(&mut self.find_init_templates.lock().unwrap())
+    }
+
+    /// Whether the installed find gate (if any) accepts the most recent
+    /// init template. No gate installed means "serve the override".
+    fn find_template_gate_passes(&self) -> bool {
+        let gate = self.find_template_gate.lock().unwrap().clone();
+        match gate {
+            None => true,
+            Some(gate) => {
+                let templates = self.find_init_templates.lock().unwrap();
+                templates.last().is_some_and(|t| gate(t))
+            }
+        }
+    }
+
     /// Enqueue a slot event to be returned by the next `wait_for_slot_event` call.
     ///
     /// Events are returned FIFO. If multiple events are queued, each call to
@@ -492,6 +578,24 @@ impl MockBackend {
 
     pub fn login_call_count(&self) -> usize {
         self.login_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of backend `login_user` (`C_LoginUser`) calls. The `C_LoginUser`
+    /// analogue of [`MockBackend::login_call_count`].
+    pub fn login_user_call_count(&self) -> usize {
+        self.login_user_calls.load(Ordering::SeqCst)
+    }
+
+    /// Snapshot of the presence-only `login_user` observations recorded so
+    /// far: `(username_is_none, pin_is_none)` per call, in arrival order.
+    /// Presence only — no secret bytes are ever retained.
+    pub fn login_user_presence_observations(&self) -> Vec<(bool, bool)> {
+        self.login_user_presence.lock().unwrap().clone()
+    }
+
+    /// Number of backend `find_objects` (`C_FindObjects`) calls.
+    pub fn find_objects_call_count(&self) -> usize {
+        self.find_objects_calls.load(Ordering::SeqCst)
     }
 
     /// Number of backend data-operation calls (sign, verify, digest, encrypt,
@@ -544,6 +648,10 @@ impl MockBackend {
 
     pub fn set_next_message_parameter_response(&self, parameter: MessageParameter) {
         *self.next_message_parameter_response.lock().unwrap() = Some(parameter);
+    }
+
+    pub fn set_next_random_bytes(&self, bytes: Vec<u8>) {
+        *self.next_random_bytes.lock().unwrap() = Some(bytes);
     }
 
     fn next_message_parameter_response_or(&self, default: MessageParameter) -> MessageParameter {
@@ -649,6 +757,28 @@ impl MockBackend {
 
     pub fn close_session_call_count(&self) -> usize {
         self.close_session_calls.load(Ordering::SeqCst)
+    }
+
+    /// Block `logout` for `delay` before settling. The `close_session`
+    /// analogue for teardown tests (W1-C2-03).
+    pub fn set_logout_delay(&self, delay: std::time::Duration) {
+        *self.logout_delay.lock().unwrap() = Some(delay);
+    }
+
+    pub fn clear_logout_delay(&self) {
+        *self.logout_delay.lock().unwrap() = None;
+    }
+
+    /// Number of currently open backend sessions. Leak accounting for
+    /// stress/eviction tests (W1-C2-03, W1-C2-07).
+    pub fn open_session_count(&self) -> usize {
+        self.state.lock().unwrap().open_sessions.len()
+    }
+
+    /// Number of live backend objects. Leak accounting for stress tests
+    /// (W1-C2-07).
+    pub fn live_object_count(&self) -> usize {
+        self.state.lock().unwrap().live_objects.len()
     }
 
     /// Make subsequent `login` calls return `rv` instead of the normal
@@ -979,7 +1109,7 @@ impl MockBackend {
 
         match params {
             CkMechanismParams::ObjectHandle(params) => {
-                self.require_live_object(state, CkObjectHandle(params.handle as u64))?;
+                self.require_live_object(state, params.handle)?;
             }
             CkMechanismParams::Kip(params)
                 if matches!(
@@ -987,22 +1117,22 @@ impl MockBackend {
                     CkMechanismType::KIP_DERIVE | CkMechanismType::KIP_MAC
                 ) =>
             {
-                self.require_live_object_if_nonzero(state, params.key_handle)?;
+                self.require_live_object_if_nonzero(state, params.key_handle.0)?;
             }
             CkMechanismParams::Ecdh2Derive(params) => {
-                self.require_live_object(state, CkObjectHandle(params.private_data_handle as u64))?;
+                self.require_live_object(state, params.private_data_handle)?;
             }
             CkMechanismParams::EcmqvDerive(params) => {
                 for handle in [params.private_data_handle, params.public_key_handle] {
-                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
+                    self.require_live_object(state, handle)?;
                 }
             }
             CkMechanismParams::X942Dh2Derive(params) => {
-                self.require_live_object(state, CkObjectHandle(params.private_data_handle as u64))?;
+                self.require_live_object(state, params.private_data_handle)?;
             }
             CkMechanismParams::X942MqvDerive(params) => {
                 for handle in [params.private_data_handle, params.public_key_handle] {
-                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
+                    self.require_live_object(state, handle)?;
                 }
             }
             CkMechanismParams::X3dhInitiate(params) => {
@@ -1014,14 +1144,11 @@ impl MockBackend {
                     params.own_identity_handle,
                     params.own_ephemeral_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
+                    self.require_live_object(state, handle)?;
                 }
             }
             CkMechanismParams::X3dhRespond(params) => {
-                self.require_live_object(
-                    state,
-                    CkObjectHandle(params.initiator_identity_handle as u64),
-                )?;
+                self.require_live_object(state, params.initiator_identity_handle)?;
             }
             CkMechanismParams::X2RatchetInitialize(params) => {
                 for handle in [
@@ -1029,7 +1156,7 @@ impl MockBackend {
                     params.peer_public_identity_handle,
                     params.own_public_identity_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
+                    self.require_live_object(state, handle)?;
                 }
             }
             CkMechanismParams::X2RatchetRespond(params) => {
@@ -1038,13 +1165,13 @@ impl MockBackend {
                     params.initiator_identity_handle,
                     params.own_identity_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
+                    self.require_live_object(state, handle)?;
                 }
             }
             CkMechanismParams::CmsSig(params) => {
                 // The spec permits an absent certificate; this transport uses
                 // CK_OBJECT_HANDLE(0) for that absent value.
-                self.require_live_object_if_nonzero(state, params.certificate_handle)?;
+                self.require_live_object_if_nonzero(state, params.certificate_handle.0)?;
             }
             _ => {}
         }
@@ -1134,7 +1261,7 @@ impl MockBackend {
         let Some(CkMechanismParams::GcmWrap(p)) = &mechanism.params else {
             return None;
         };
-        if p.iv_generator <= 1 || p.iv.is_empty() {
+        if p.iv_generator.0 <= 1 || p.iv.is_empty() {
             return None;
         }
         let fixed_bytes = ((p.iv_fixed_bits as usize) / 8).min(p.iv.len());
@@ -1205,13 +1332,11 @@ impl MockBackend {
             {
                 let mut params = params.clone();
                 for derived_key in &mut params.additional_derived_keys {
-                    derived_key.key_handle = self
-                        .allocate_session_object_with_template(
-                            &mut state,
-                            session,
-                            &derived_key.template,
-                        )?
-                        .0;
+                    derived_key.key_handle = self.allocate_session_object_with_template(
+                        &mut state,
+                        session,
+                        &derived_key.template,
+                    )?;
                 }
                 Some(CkMechanismParams::Sp800108Kdf(params))
             }
@@ -1220,13 +1345,11 @@ impl MockBackend {
             {
                 let mut params = params.clone();
                 for derived_key in &mut params.additional_derived_keys {
-                    derived_key.key_handle = self
-                        .allocate_session_object_with_template(
-                            &mut state,
-                            session,
-                            &derived_key.template,
-                        )?
-                        .0;
+                    derived_key.key_handle = self.allocate_session_object_with_template(
+                        &mut state,
+                        session,
+                        &derived_key.template,
+                    )?;
                 }
                 Some(CkMechanismParams::Sp800108FeedbackKdf(params))
             }
@@ -1252,7 +1375,7 @@ impl MockBackend {
             _ => return Ok(()),
         };
 
-        if !sp800_108_prf_type_valid(prf_type) {
+        if !sp800_108_prf_type_valid(prf_type.0) {
             return Err(CkRv::MECHANISM_PARAM_INVALID);
         }
 
@@ -1372,14 +1495,14 @@ fn sp800_108_template_failure_output(mechanism: &CkMechanism) -> Option<CkMechan
             let failure_index =
                 sp800_108_additional_template_failure_index(&params.additional_derived_keys)?;
             let mut output = params.clone();
-            output.additional_derived_keys[failure_index].key_handle = 0;
+            output.additional_derived_keys[failure_index].key_handle = CkObjectHandle(0);
             Some(CkMechanismParams::Sp800108Kdf(output))
         }
         CkMechanismParams::Sp800108FeedbackKdf(params) => {
             let failure_index =
                 sp800_108_additional_template_failure_index(&params.additional_derived_keys)?;
             let mut output = params.clone();
-            output.additional_derived_keys[failure_index].key_handle = 0;
+            output.additional_derived_keys[failure_index].key_handle = CkObjectHandle(0);
             Some(CkMechanismParams::Sp800108FeedbackKdf(output))
         }
         _ => None,
@@ -1575,8 +1698,9 @@ impl Pkcs11Backend for MockBackend {
     fn find_objects_init(
         &self,
         session: CkSessionHandle,
-        _t: Option<&[CkAttribute]>,
+        template: Option<&[CkAttribute]>,
     ) -> CkResult<()> {
+        self.find_init_templates.lock().unwrap().push(template.unwrap_or(&[]).to_vec());
         self.find_objects_init_impl(session)
     }
     fn find_objects(
@@ -2578,7 +2702,7 @@ impl Pkcs11Backend for MockBackend {
                 mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: true,
                 generated_stage: false,
-                auth_stage: flags.0 & cryptoki_sys::CKF_END_OF_MESSAGE as u64 != 0,
+                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE != 0,
                 rv: output.ck_rv,
             },
         );
@@ -2620,7 +2744,7 @@ impl Pkcs11Backend for MockBackend {
                 mode: ParameterEffectCallMode::from_output_spec(output_spec),
                 encrypt: false,
                 generated_stage: false,
-                auth_stage: flags.0 & cryptoki_sys::CKF_END_OF_MESSAGE as u64 != 0,
+                auth_stage: flags.0 & CkFlags::END_OF_MESSAGE != 0,
                 rv: output.ck_rv,
             },
         );
@@ -2704,13 +2828,34 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         _user_type: CkUserType,
-        _username: &[u8],
-        pin: &[u8],
+        username: Option<&[u8]>,
+        pin: Option<&[u8]>,
     ) -> CkResult<()> {
+        self.login_user_calls.fetch_add(1, Ordering::SeqCst);
+        self.login_user_presence.lock().unwrap().push((username.is_none(), pin.is_none()));
+        // W1-C1-02 test gate: same enter/block contract as the `login` gate —
+        // clone the handles out from under the gate lock, then signal + block
+        // WITHOUT holding that lock.
+        let gate = self
+            .login_user_gate
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|g| (g.entered.clone(), Arc::clone(&g.proceed)));
+        if let Some((entered, proceed)) = gate {
+            let _ = entered.send(());
+            let (lock, cv) = &*proceed;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = cv.wait(released).unwrap();
+            }
+        }
         if !self.state.lock().unwrap().has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
-        if pin == b"1234" { Ok(()) } else { Err(CkRv::PIN_INCORRECT) }
+        // A NULL (protected-path) PIN carries no verifiable bytes, so the
+        // mock cannot accept it; only the exact test PIN succeeds.
+        if pin.is_some_and(|p| p == b"1234") { Ok(()) } else { Err(CkRv::PIN_INCORRECT) }
     }
 
     fn session_cancel(&self, session: CkSessionHandle, _flags: CkFlags) -> CkResult<()> {

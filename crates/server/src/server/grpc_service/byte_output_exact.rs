@@ -31,10 +31,9 @@ pub(super) async fn byte_output_exact(
     let function = match byte_output_function_from_i32(req.function) {
         Some(f) => f,
         None => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::ByteOutputExactResponse {
-                result: None,
-                mechanism_out: None,
-            }));
+            // W1-C1-10: an unknown function id must still carry an explicit
+            // CK_RV — never a result-less response the shim cannot interpret.
+            return Ok(Response::new(error_response(CkRv::FUNCTION_NOT_SUPPORTED)));
         }
     };
 
@@ -671,5 +670,30 @@ mod sanitize_inputs_tests {
             CkRv::ARGUMENTS_BAD.0,
             "sanitize OFF: NULL mechanism must be forwarded (not rejected)"
         );
+    }
+
+    /// W1-C1-10: an unknown exact-output function id must yield a response
+    /// carrying an explicit CK_RV — never a result-less response.
+    #[tokio::test]
+    async fn unknown_function_returns_explicit_ck_rv() {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+
+        let resp = byte_output_exact(
+            &HandlerContext::for_test(&ctx_mgr, &backend),
+            Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                exact_output_effects_version: 1,
+                function: 9999,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        let result = resp.result.expect("unknown function must still carry a ck_rv");
+        assert_eq!(result.ck_rv, CkRv::FUNCTION_NOT_SUPPORTED.0);
     }
 }

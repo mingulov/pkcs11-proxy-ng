@@ -18,7 +18,7 @@ impl Pkcs11Client {
         let mut req = pkcs11_proxy_ng_proto::VerifySignatureInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: mechanism.map(Self::proto_mechanism),
+            mechanism: mechanism.map(Self::proto_mechanism).transpose()?,
             key_handle: key.0,
             signature: Vec::new(),
             signature_null_len: None,

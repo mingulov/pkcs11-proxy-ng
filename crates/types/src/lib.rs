@@ -21,8 +21,9 @@ pub use interface::{InterfaceCapabilities, InterfaceInfo};
 pub use mechanism::{
     AesCbcEncryptDataParams, AesCmacKeyDerivationParams, AesCtrParams, AriaCbcEncryptDataParams,
     CamelliaCbcEncryptDataParams, CamelliaCtrParams, CcmParams, CcmWrapParams, ChaCha20Params,
-    CkMechanism, CkMechanismFlags, CkMechanismInfo, CkMechanismParams, CkMechanismType,
-    CmsSigParams, DesCbcEncryptDataParams, DilithiumParams, Ecdh1DeriveParams, Ecdh2DeriveParams,
+    CkGeneratorFunction, CkKdf, CkMechanism, CkMechanismFlags, CkMechanismInfo, CkMechanismParams,
+    CkMechanismType, CkMgf, CkOaepSource, CkPbkdf2Prf, CkPbkdf2SaltSource, CmsSigParams,
+    DesCbcEncryptDataParams, DilithiumParams, Ecdh1DeriveParams, Ecdh2DeriveParams,
     EcdhAesKeyWrapParams, EciesParams, EcmqvDeriveParams, EddsaParams, ExtractParams, GcmParams,
     GcmWrapParams, Gostr3410DeriveParams, Gostr3410KeyWrapParams, HdKeyDeriveParams, HkdfParams,
     Ike1ExtendedDeriveParams, Ike1PrfDeriveParams, Ike2PrfPlusDeriveParams, IkePrfDeriveParams,
@@ -32,13 +33,13 @@ pub use mechanism::{
     Rc2MacGeneralParams, Rc5CbcParams, Rc5MacGeneralParams, Rc5Params, RsaAesKeyWrapParams,
     RsaPkcsOaepParams, RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, Salsa20Params,
     SeedCbcEncryptDataParams, SignAdditionalContext, SkipjackPrivateWrapParams,
-    SkipjackRelayxParams, Sp800108CounterFormat, Sp800108DerivedKey, Sp800108DkmLengthFormat,
-    Sp800108FeedbackKdfParams, Sp800108KdfParams, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams,
-    SslRandomData, Tls12ExtendedMasterKeyDeriveParams, Tls12MasterKeyDeriveParams, TlsKdfParams,
-    TlsMacParams, TlsPrfParams, VendorObjectExtractParams, VendorObjectInsertParams,
-    WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
-    X2RatchetInitializeParams, X2RatchetRespondParams, X3dhInitiateParams, X3dhRespondParams,
-    X942Dh1DeriveParams, X942Dh2DeriveParams, X942MqvDeriveParams, XeddsaParams,
+    SkipjackRelayxParams, Sp800108DerivedKey, Sp800108FeedbackKdfParams, Sp800108KdfParams,
+    Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData, Tls12ExtendedMasterKeyDeriveParams,
+    Tls12MasterKeyDeriveParams, TlsKdfParams, TlsMacParams, TlsPrfParams,
+    VendorObjectExtractParams, VendorObjectInsertParams, WtlsKeyMatParams,
+    WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData, X2RatchetInitializeParams,
+    X2RatchetRespondParams, X3dhInitiateParams, X3dhRespondParams, X942Dh1DeriveParams,
+    X942Dh2DeriveParams, X942MqvDeriveParams, XeddsaParams,
 };
 pub use mechanism_official::{PKCS11_3_2_OFFICIAL_MECHANISMS, pkcs11_3_2_official_mechanisms};
 pub use mechanism_registry::{DiscoveryMode, EMBEDDED_DEFAULT_REVISION, MechanismRegistry};
@@ -53,3 +54,47 @@ pub use session::{
     CkFlags, CkSessionFlags, CkSessionHandle, CkSessionInfo, CkSessionState, CkUserType,
 };
 pub use slot::{CkSlotFlags, CkSlotId, CkSlotInfo, CkTokenFlags, CkTokenInfo};
+
+/// Copy `src` into the fixed-width PKCS#11 field `dest`, space-padding
+/// the remainder (W1-L11-12). Overlong values truncate by bytes — a
+/// multibyte char may split at the edge, matching the historical
+/// backend `space_pad` / shim `pad_string` behavior both crates
+/// shared byte-for-byte. This is the single padding implementation;
+/// both crates call it directly.
+pub fn space_pad_into(dest: &mut [u8], src: &str) {
+    let bytes = src.as_bytes();
+    let copy_len = bytes.len().min(dest.len());
+    dest[..copy_len].copy_from_slice(&bytes[..copy_len]);
+    for b in dest[copy_len..].iter_mut() {
+        *b = b' ';
+    }
+}
+
+#[cfg(test)]
+mod space_pad_tests {
+    use super::space_pad_into;
+
+    #[test]
+    fn shared_padding_vectors() {
+        // Mirrors the backend/shim pins: byte-identical by construction.
+        let mut buf = [0u8; 8];
+        space_pad_into(&mut buf, "hi");
+        assert_eq!(&buf, b"hi      ");
+        let mut buf = [0u8; 4];
+        space_pad_into(&mut buf, "ABCD");
+        assert_eq!(&buf, b"ABCD");
+        let mut buf = [0u8; 6];
+        space_pad_into(&mut buf, "");
+        assert_eq!(&buf, b"      ");
+        let mut buf = [0u8; 4];
+        space_pad_into(&mut buf, "ABCDEFGH");
+        assert_eq!(&buf, b"ABCD");
+        let mut buf = [0u8; 4];
+        space_pad_into(&mut buf, "héllo");
+        assert_eq!(buf, [0x68, 0xC3, 0xA9, 0x6C]);
+        let mut label = [0u8; 32];
+        space_pad_into(&mut label, "My Test Token");
+        assert_eq!(&label[..13], b"My Test Token");
+        assert!(label[13..].iter().all(|&b| b == b' '));
+    }
+}

@@ -12,6 +12,10 @@ and provider tests do not qualify this new lifetime/termination contract.
 Production live FFI for v0.2 is limited to qualified targets:
 
 - Linux GNU/musl on x86_64 (64-bit) or x86 (32-bit);
+- Linux GNU/musl on aarch64 (64-bit) — cross-platform
+  ubuntu-26.04-arm leg enabled, blocking (full direct-vs-proxied
+  compare; stop stub compile- and review-proven, stop-fire not
+  natively executed);
 - Windows MSVC on x86_64 (64-bit) — tail stretch landed (T6 legs A/B/C)
   and T2run's windows-2022 compare leg green;
 - Windows MSVC on x86 (32-bit) at the stub tier — T2run's win32 leg
@@ -21,8 +25,7 @@ Production live FFI for v0.2 is limited to qualified targets:
 - macOS on aarch64 (64-bit) — T2run's macOS leg green (compare plus
   backend/shim lib suites, STOP child receipts included).
 
-Excluded: Windows GNU; Linux ARM64/aarch64 (the constructor refuses —
-native FFI fail-closes by design); macOS x86_64 runtime (the code
+Excluded: Windows GNU; macOS x86_64 runtime (the code
 admits it, but load-qualification only — no CI runtime leg); x32,
 big-/mixed-endian, and other architectures/environments. The v0.2 tail
 stretch ([ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md)) has
@@ -254,8 +257,9 @@ The exact instruction contract to implement and review is:
 | --- | --- |
 | x86_64 / 64-bit pointers, GNU or musl | `syscall`, number 231 in RAX, status 70 in RDI; RAX is return-clobbered, RCX and R11 are clobbered; `nostack` is permitted. |
 | x86 / 32-bit pointers (i686), GNU or musl | `int 0x80`, number 252 in EAX; save EBX, move status 70 from ECX into EBX, then restore EBX on hypothetical return, with balanced push/pop preserving PIC use. No `nostack`. |
+| aarch64 / 64-bit pointers, GNU or musl | `svc #0`, number 94 in X8, status 70 in X0; X0 is return-clobbered, X8 is clobbered; `nostack` is permitted. |
 
-Both stubs model a possible return, preserve required registers/stack and
+All three stubs model a possible return, preserve required registers/stack and
 default assembly memory effects, and return to the outer retry loop. No
 `noreturn` asm option, `pure`, `nomem`, `readonly`, `unreachable_unchecked`,
 libc call, abort instruction or signal fallback is permitted. A returning or
@@ -415,7 +419,7 @@ remains; the residual unqualified set is precisely the complement of
 `NATIVE_FFI_QUALIFIED`, enumerated from code:
 
 - Linux with a non-GNU/musl `target_env` (any arch), or with an
-  arch/width outside x86_64-64/x86-32 — s390x, aarch64, riscv64, ... (the
+  arch/width outside x86_64-64/x86-32/aarch64-64 — s390x, riscv64, ... (the
   s390x BE tier stays load-refused; live-BE-FFI remains BLOCKED-scope);
 - Windows with a non-MSVC `target_env`, or with an arch/width outside
   x86_64-64/x86-32 (notably aarch64 Windows);

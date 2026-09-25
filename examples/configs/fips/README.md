@@ -68,12 +68,14 @@ certutil -N -d sql:/tmp/fips-nssdb --empty-password   # init
 modutil -fips true -dbdir sql:/tmp/fips-nssdb         # flip FIPS on
 certutil -d sql:/tmp/fips-nssdb -W                    # set FIPS pin
 
-# 2. Run the daemon pointing at this config tree.
-pkcs11-proxy-ng \
-  --config examples/configs/fips/proxy.toml
+# 2. Run the daemon pointing at this config tree (CONFIG is a positional arg).
+pkcs11-proxy-ng examples/configs/fips/proxy.toml
 
 # 3. Query the published mechanism list from a client.
-pkcs11-proxy-ng-cli mechanisms list --endpoint http://127.0.0.1:7512
+# (--endpoint is a global option: it goes before the subcommand.
+# list-mechanisms takes the slot id positionally; list slots first.)
+pkcs11-proxy-ng-cli --endpoint http://127.0.0.1:7512 list-slots
+pkcs11-proxy-ng-cli --endpoint http://127.0.0.1:7512 list-mechanisms <slot-id>
 
 # Expected: no MD2/MD4/MD5, no SHA-1 signatures, no RC2/RC4/DES,
 # no Skipjack/CAST/IDEA. AES/RSA/ECDSA/SHA-2/SHA-3/HKDF/HMAC remain.

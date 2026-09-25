@@ -153,7 +153,7 @@ def free_port():
         return s.getsockname()[1]
 
 
-def wait_for_port(port, proc, timeout_s=15):
+def wait_for_port(port, proc, timeout_s=30):
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if proc.poll() is not None:
@@ -478,7 +478,7 @@ def main():
         )
     try:
         if not wait_for_port(port, proc):
-            raise SystemExit("daemon did not bind within 15s; see daemon.log")
+            raise SystemExit("daemon did not bind within 30s; see daemon.log")
         with open(daemon_log, encoding="utf-8", errors="replace") as f:
             daemon_text = f.read()
         for needle in (DAEMON_LOG_TCP_WARN, DAEMON_LOG_REGISTRY):

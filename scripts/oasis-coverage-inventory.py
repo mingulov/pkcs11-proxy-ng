@@ -75,6 +75,7 @@ RUST_TEST_RE = re.compile(r"^\s*(?:async\s+)?fn\s+([a-z][a-z0-9_]*)\s*\(")
 PROTO_MESSAGE_RE = re.compile(r"^message\s+([A-Za-z][A-Za-z0-9]+)\s*\{")
 PROTO_ONEOF_FIELD_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9]+)\s+([a-z][a-z0-9_]*)\s*=")
 CK_MECHANISM_PARAM_VARIANT_RE = re.compile(r"CkMechanismParams::([A-Z][A-Za-z0-9]+)\s*\(")
+SHIM_SHAPE_ARM_RE = re.compile(r'Some\("([^"]+)"\)\s*=>\s*\{')
 
 WORKFLOW_COLUMNS = [
     "encrypt_decrypt",
@@ -999,7 +1000,7 @@ PARAMETER_SHAPE_LOCAL_TESTS = {
     ],
     "Gcm": [
         "gcm_generated_iv_buffer_is_preserved_and_written_back",
-        "gcm_delayed_iv_round_trips_after_encrypt_data_query",
+        "gcm_encrypt_does_not_write_back_to_init_scope_memory",
         "simple_encrypt_returns_late_gcm_output_params_through_grpc",
         "multipart_encrypt_returns_cached_gcm_output_params_through_grpc",
         "multipart_encrypt_returns_late_gcm_output_params_through_grpc",
@@ -1304,6 +1305,70 @@ PARAMETER_SHAPE_SHIM_READ_UNSUPPORTED_REASONS = {
     "X3dhRespond": "lengthless_x3dh_byte_pointer_fields",
 }
 
+# W1-L4-11: CkMechanismParams variants that legitimately have no default-TOML
+# shape. Pinned so the coverage gate fails on NEW gaps instead of churning on
+# these accepted residuals.
+DEFAULT_SHAPE_COVERAGE_VARIANT_EXCLUSIONS = {
+    "Raw": "opaque_raw_fallback_never_shape_addressed",
+    "GcmWrap": "length_disambiguated_alternate_shares_mechanism_toml_entry",
+    "CcmWrap": "length_disambiguated_alternate_shares_mechanism_toml_entry",
+    "X3dhInitiate": "shim_read_policy_rejects_shape_no_default_toml_entry",
+    "X3dhRespond": "shim_read_policy_rejects_shape_no_default_toml_entry",
+    "X2RatchetInitialize": "shim_read_policy_rejects_shape_no_default_toml_entry",
+    "X2RatchetRespond": "shim_read_policy_rejects_shape_no_default_toml_entry",
+    "CmsSig": "shim_read_policy_rejects_shape_no_default_toml_entry",
+    "Ecies": "vendor_specific_param_no_default_toml_entry",
+    "AesCmacKeyDerivation": "vendor_specific_param_no_default_toml_entry",
+    "Dilithium": "vendor_specific_param_no_default_toml_entry",
+    "Kyber": "vendor_specific_param_no_default_toml_entry",
+    "HdKeyDerive": "vendor_specific_param_no_default_toml_entry",
+    "VendorObjectExtract": "vendor_specific_param_no_default_toml_entry",
+    "VendorObjectInsert": "vendor_specific_param_no_default_toml_entry",
+    "Ecdh2Derive": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+    "X942MqvDerive": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+    "WtlsPrf": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+    "Otp": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+    "Kip": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+    "SkipjackPrivateWrap": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+    "SkipjackRelayx": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+    "Kmac": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+    "MuGen": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+}
+
+# W1-L4-11: official parameter-requiring mechanisms legitimately absent from the
+# default TOML, pinned for the same reason as the variant exclusions above.
+DEFAULT_SHAPE_COVERAGE_MECHANISM_EXCLUSIONS = {
+    "CKM_AES_CMAC": "spec_prose_false_positive_base_cmac_takes_no_params",
+    "CKM_DES3_CMAC": "spec_prose_false_positive_base_cmac_takes_no_params",
+    "CKM_BLAKE2B_160_HMAC_GENERAL": (
+        "mac_general_shape_exists_but_mechanism_not_registered_in_default_toml"
+    ),
+    "CKM_BLAKE2B_256_HMAC_GENERAL": (
+        "mac_general_shape_exists_but_mechanism_not_registered_in_default_toml"
+    ),
+    "CKM_BLAKE2B_384_HMAC_GENERAL": (
+        "mac_general_shape_exists_but_mechanism_not_registered_in_default_toml"
+    ),
+    "CKM_BLAKE2B_512_HMAC_GENERAL": (
+        "mac_general_shape_exists_but_mechanism_not_registered_in_default_toml"
+    ),
+    "CKM_SHA512_T": "mac_general_shape_exists_but_mechanism_not_registered_in_default_toml",
+    "CKM_SHA512_T_HMAC_GENERAL": (
+        "mac_general_shape_exists_but_mechanism_not_registered_in_default_toml"
+    ),
+    "CKM_ECDH_X_AES_KEY_WRAP": (
+        "ecdh_aes_key_wrap_shape_exists_but_mechanism_not_registered_in_default_toml"
+    ),
+    "CKM_ECDH_COF_AES_KEY_WRAP": (
+        "ecdh_aes_key_wrap_shape_exists_but_mechanism_not_registered_in_default_toml"
+    ),
+    "CKM_CMS_SIG": "cms_sig_variant_has_no_shim_arm_or_default_toml_entry",
+    "CKM_WTLS_PRF": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+    "CKM_X9_42_MQV_DERIVE": "shim_arm_exists_but_mechanism_not_registered_in_default_toml",
+    "CKM_X3DH_INITIALIZE": "signal_extension_no_default_toml_entry_operator_override_only",
+    "CKM_X3DH_RESPOND": "signal_extension_no_default_toml_entry_operator_override_only",
+}
+
 PARAMETER_SHAPE_SHIM_READ_DECISION_LOCAL_TESTS = [
     "unsafe_official_lengthless_parameter_shapes_are_rejected_before_shim_read",
     "loaded_shim_rejects_unsafe_official_lengthless_parameter_shapes",
@@ -1555,6 +1620,10 @@ def shim_helpers(root: Path) -> Path:
 
 def shim_mechanism_writeback(root: Path) -> Path:
     return root / "crates/shim/src/dispatch/general/helpers/mechanism_writeback.rs"
+
+
+def mechanism_params_default_toml(root: Path) -> Path:
+    return root / "crates/types/src/mechanism_params_default.toml"
 
 
 def shim_message_params(root: Path) -> Path:
@@ -2541,6 +2610,96 @@ def build_parameter_shape_matrix(
     return matrix, comparison
 
 
+def parse_default_shape_toml(path: Path) -> tuple[dict[str, set[int]], set[int]]:
+    """Parse the default registry TOML into shape -> mechanism values plus the
+    parameterless set. Regex-based like the other Rust/prose parsers here."""
+    text = path.read_text(encoding="utf-8")
+    blocks = re.split(r"\[\[params\]\]\n", text)
+    shapes: dict[str, set[int]] = {}
+    for block in blocks[1:]:
+        match = re.search(r'shape\s*=\s*"([^"]+)"', block)
+        if match is None:
+            continue
+        mechanisms: set[int] = set()
+        mech_match = re.search(r"mechanisms\s*=\s*\[(.*?)\]", block, re.DOTALL)
+        if mech_match is not None:
+            needle = re.sub(r"#.*", "", mech_match.group(1))
+            mechanisms = {int(tok, 16) for tok in re.findall(r"0x[0-9A-Fa-f]+", needle)}
+        shapes[match.group(1)] = mechanisms
+    parameterless: set[int] = set()
+    head_match = re.search(r"parameterless\s*=\s*\[(.*?)\]", blocks[0], re.DOTALL)
+    if head_match is not None:
+        needle = re.sub(r"#.*", "", head_match.group(1))
+        parameterless = {int(tok, 16) for tok in re.findall(r"0x[0-9A-Fa-f]+", needle)}
+    return shapes, parameterless
+
+
+def parse_shim_shape_variants(path: Path) -> dict[str, str]:
+    """Map registry shape names to the typed CkMechanismParams variant built by
+    the shim reader arm. Each arm falls back to Raw for short buffers first, so
+    the last non-Raw construction in the arm body is the typed variant."""
+    text = path.read_text(encoding="utf-8")
+    parts = SHIM_SHAPE_ARM_RE.split(text)
+    mapping: dict[str, str] = {}
+    for index in range(1, len(parts), 2):
+        found = CK_MECHANISM_PARAM_VARIANT_RE.findall(parts[index + 1])
+        typed = [variant for variant in found if variant != "Raw"]
+        if typed:
+            mapping.setdefault(parts[index], typed[-1])
+    return mapping
+
+
+def build_default_shape_coverage(
+    root: Path,
+    parameter_shape_matrix: list[dict[str, Any]],
+    mechanism_matrix: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """W1-L4-11: every CkMechanismParams variant and every official
+    parameter-requiring mechanism must resolve to a default TOML shape.
+    Accepted residuals are pinned in DEFAULT_SHAPE_COVERAGE_*_EXCLUSIONS so
+    this fails only on new drift (e.g. a removed [[params]] entry)."""
+    toml_path = mechanism_params_default_toml(root)
+    toml_shapes, _parameterless = parse_default_shape_toml(toml_path)
+    toml_shaped_values = set().union(*toml_shapes.values()) if toml_shapes else set()
+    shim_shape_variants = parse_shim_shape_variants(shim_helpers(root))
+    variant_shapes: dict[str, list[str]] = {}
+    for shape, variant in shim_shape_variants.items():
+        variant_shapes.setdefault(variant, []).append(shape)
+
+    variant_gaps = sorted(
+        row["rust_variant"]
+        for row in parameter_shape_matrix
+        if row["rust_variant"] not in DEFAULT_SHAPE_COVERAGE_VARIANT_EXCLUSIONS
+        and not any(
+            shape in toml_shapes for shape in variant_shapes.get(row["rust_variant"], [])
+        )
+    )
+    mechanism_gaps = sorted(
+        row["name"]
+        for row in mechanism_matrix
+        if row["official_inventory_present"]
+        and row["value"] is not None
+        and row["parameter_structs"]
+        and row["name"] not in DEFAULT_SHAPE_COVERAGE_MECHANISM_EXCLUSIONS
+        and int(row["value"], 16) not in toml_shaped_values
+    )
+    return {
+        "default_toml_source": toml_path.relative_to(root).as_posix(),
+        "shim_shape_source": shim_helpers(root).relative_to(root).as_posix(),
+        "toml_shape_count": len(toml_shapes),
+        "toml_shaped_mechanism_count": len(toml_shaped_values),
+        "shim_shape_arm_count": len(shim_shape_variants),
+        "rust_variant_count": len(parameter_shape_matrix),
+        "param_variants_missing_default_shape": variant_gaps,
+        "official_param_mechanisms_missing_default_shape": mechanism_gaps,
+        "toml_shapes_without_shim_arm": sorted(set(toml_shapes) - set(shim_shape_variants)),
+        "variant_exclusions": dict(sorted(DEFAULT_SHAPE_COVERAGE_VARIANT_EXCLUSIONS.items())),
+        "mechanism_exclusions": dict(
+            sorted(DEFAULT_SHAPE_COVERAGE_MECHANISM_EXCLUSIONS.items())
+        ),
+    }
+
+
 def parse_message_parameter_shapes(path: Path) -> list[dict[str, Any]]:
     text = path.read_text(encoding="utf-8")
     struct_to_pkcs11: dict[str, str] = {}
@@ -3392,6 +3551,9 @@ def build_inventory() -> dict[str, Any]:
 
     flag_summary = mechanism_info_flag_coverage_summary(mechanism_info_flag_coverage_matrix)
     provider_summary = provider_mechanism_summary(mechanism_matrix, len(official_inventory))
+    default_shape_coverage = build_default_shape_coverage(
+        root, parameter_shape_matrix, mechanism_matrix
+    )
 
     return {
         "historical_mechanism_grounding": {
@@ -3427,6 +3589,7 @@ def build_inventory() -> dict[str, Any]:
                 "crates/shim/src/tests/interface.rs",
             ],
             "mechanism_types_source": str(mechanism_types_source(root)),
+            "mechanism_params_default_toml": str(mechanism_params_default_toml(root)),
             "mechanism_params_proto": str(mechanism_params_proto(root)),
             "message_params_source": str(message_params_source(root)),
             "types_proto": str(types_proto(root)),
@@ -3449,6 +3612,7 @@ def build_inventory() -> dict[str, Any]:
         ],
         "mechanism_parameter_shape_matrix": parameter_shape_matrix,
         "mechanism_parameter_struct_comparison": parameter_shape_comparison,
+        "default_shape_coverage": default_shape_coverage,
         "message_parameter_shape_count": len(message_parameter_shape_matrix),
         "message_parameter_shape_matrix": message_parameter_shape_matrix,
         "spec_function_count": len(spec_function_names),

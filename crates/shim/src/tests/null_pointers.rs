@@ -27,10 +27,183 @@ fn c_set_pin_before_initialize_returns_not_initialized() {
 
 #[test]
 fn c_init_pin_rejects_unserializable_pin_length_before_client_use() {
+    // W1-L3-03: oversize PIN must return CKR_ARGUMENTS_BAD (the documented
+    // stable RV for the transport-impossible class, matching classify_input),
+    // never panic-to-CKR_GENERAL_ERROR via catch_panics. Asserting
+    // ARGUMENTS_BAD (not GENERAL_ERROR) proves the catch_panics panic branch
+    // was not taken: any panic would surface as GENERAL_ERROR.
     let _guard = shim_state_test_guard();
     let pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
     let rv = unsafe { dispatch::general::c_init_pin(0, pin, CK_ULONG::MAX) };
-    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_init_token_rejects_unserializable_pin_length_before_client_use() {
+    // W1-L3-03: same class as c_init_pin — oversize SO PIN is ARGUMENTS_BAD,
+    // never a panic surfaced as GENERAL_ERROR.
+    let _guard = shim_state_test_guard();
+    let pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let rv =
+        unsafe { dispatch::general::c_init_token(0, pin, CK_ULONG::MAX, std::ptr::null_mut()) };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_set_pin_rejects_unserializable_old_pin_length_before_client_use() {
+    // W1-L3-03: oversize old PIN is ARGUMENTS_BAD even when the new PIN is valid.
+    let _guard = shim_state_test_guard();
+    let old_pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let new_pin = *b"5678";
+    let rv = unsafe {
+        dispatch::general::c_set_pin(0, old_pin, CK_ULONG::MAX, new_pin.as_ptr() as *mut _, 4)
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_set_pin_rejects_unserializable_new_pin_length_before_client_use() {
+    // W1-L3-03: oversize new PIN is ARGUMENTS_BAD even when the old PIN is valid.
+    let _guard = shim_state_test_guard();
+    let old_pin = *b"1234";
+    let new_pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let rv = unsafe {
+        dispatch::general::c_set_pin(0, old_pin.as_ptr() as *mut _, 4, new_pin, CK_ULONG::MAX)
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_init_pin_valid_pin_reaches_client_state() {
+    // W1-L3-03: valid PINs are unaffected — parsing passes through to the
+    // client gate (NOT_INITIALIZED here, since C_Initialize was never called).
+    let _guard = shim_state_test_guard();
+    let pin = *b"1234";
+    let rv = unsafe { dispatch::general::c_init_pin(0, pin.as_ptr() as *mut _, 4) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
+fn c_init_token_valid_pin_reaches_client_state() {
+    // W1-L3-03: valid SO PIN is unaffected — parsing passes through.
+    let _guard = shim_state_test_guard();
+    let pin = *b"1234";
+    let rv = unsafe {
+        dispatch::general::c_init_token(0, pin.as_ptr() as *mut _, 4, std::ptr::null_mut())
+    };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
+fn c_set_pin_valid_pins_reach_client_state() {
+    // W1-L3-03: valid old/new PINs are unaffected — parsing passes through.
+    let _guard = shim_state_test_guard();
+    let old_pin = *b"1234";
+    let new_pin = *b"5678";
+    let rv = unsafe {
+        dispatch::general::c_set_pin(
+            0,
+            old_pin.as_ptr() as *mut _,
+            4,
+            new_pin.as_ptr() as *mut _,
+            4,
+        )
+    };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
+fn c_login_rejects_unserializable_pin_length_before_client_use() {
+    // W1-L11-10: same TooLarge class as the L3-03 PIN sites — oversize
+    // C_Login PIN is ARGUMENTS_BAD, never a panic surfaced as
+    // GENERAL_ERROR via the old panicking reader.
+    let _guard = shim_state_test_guard();
+    let pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let rv = unsafe { dispatch::general::c_login(0, CKU_SO, pin, CK_ULONG::MAX) };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_login_user_rejects_unserializable_pin_length_before_client_use() {
+    // W1-L11-10: oversize C_LoginUser PIN is ARGUMENTS_BAD even when the
+    // username is valid.
+    let _guard = shim_state_test_guard();
+    let pin = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let username = *b"alice";
+    let rv = unsafe {
+        dispatch::general::c_login_user(
+            0,
+            CKU_USER,
+            pin,
+            CK_ULONG::MAX,
+            username.as_ptr() as *mut _,
+            5,
+        )
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_login_user_rejects_unserializable_username_length_before_client_use() {
+    // W1-L11-10: oversize C_LoginUser username is ARGUMENTS_BAD even when
+    // the PIN is valid.
+    let _guard = shim_state_test_guard();
+    let pin = *b"1234";
+    let username = std::ptr::dangling_mut::<CK_UTF8CHAR>();
+    let rv = unsafe {
+        dispatch::general::c_login_user(
+            0,
+            CKU_USER,
+            pin.as_ptr() as *mut _,
+            4,
+            username,
+            CK_ULONG::MAX,
+        )
+    };
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_login_valid_pin_reaches_client_state() {
+    // W1-L11-10 pin: valid C_Login PIN is unaffected — parsing passes
+    // through to the client gate.
+    let _guard = shim_state_test_guard();
+    let pin = *b"1234";
+    let rv = unsafe { dispatch::general::c_login(0, CKU_SO, pin.as_ptr() as *mut _, 4) };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
+fn c_login_user_valid_inputs_reach_client_state() {
+    // W1-L11-10 pin: valid C_LoginUser PIN/username are unaffected —
+    // parsing passes through to the client gate.
+    let _guard = shim_state_test_guard();
+    let pin = *b"1234";
+    let username = *b"alice";
+    let rv = unsafe {
+        dispatch::general::c_login_user(
+            0,
+            CKU_USER,
+            pin.as_ptr() as *mut _,
+            4,
+            username.as_ptr() as *mut _,
+            5,
+        )
+    };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+}
+
+#[test]
+fn c_init_token_valid_label_reaches_client_state() {
+    // W1-L11-10 pin: the fixed-32 label read is unaffected by the
+    // fallible-reader migration — parsing passes through.
+    let _guard = shim_state_test_guard();
+    let mut label = [b' '; 32];
+    label[..8].copy_from_slice(b"test tok");
+    let rv = unsafe {
+        dispatch::general::c_init_token(0, std::ptr::null_mut(), 0, label.as_ptr() as *mut _)
+    };
+    assert_eq!(rv, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 }
 
 #[test]
@@ -317,6 +490,29 @@ fn c_find_objects_null_outputs_returns_bad_args() {
         dispatch::general::c_find_objects(0, std::ptr::null_mut(), 0, std::ptr::null_mut())
     };
     assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+}
+
+#[test]
+fn c_find_objects_rejects_max_count_above_wire_width_before_client_use() {
+    // W1-L3-07: ulMaxObjectCount wider than the u32 wire field must be
+    // rejected with CKR_DATA_LEN_RANGE (the c_generate_random convention),
+    // never truncated via `as u32`. Recorded pre-fix state: the count was
+    // truncated and the call proceeded to the client (NOT_INITIALIZED here).
+    if CK_ULONG::BITS <= u32::BITS {
+        return;
+    }
+
+    let _guard = shim_state_test_guard();
+    state::mark_finalized();
+    let mut object: CK_OBJECT_HANDLE = CK_INVALID_HANDLE;
+    let mut count: CK_ULONG = 0;
+    let too_large = (u32::MAX as u64 + 1) as CK_ULONG;
+
+    let rv = unsafe { dispatch::general::c_find_objects(0, &mut object, too_large, &mut count) };
+
+    assert_eq!(rv, CKR_DATA_LEN_RANGE as CK_RV);
+    assert_eq!(count, 0, "rejected call must not write the count");
+    assert_eq!(object, CK_INVALID_HANDLE, "rejected call must not write handles");
 }
 
 #[test]

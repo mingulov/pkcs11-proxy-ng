@@ -14,7 +14,9 @@ use super::super::auth::request_identity::identity_from_request;
 use super::super::context_manager::{ClientContextId, ContextManager, ObjectMetadata};
 use super::super::handle_map::VirtualHandle;
 use super::HandlerContext;
-use super::service_utils::{context_exists, resolve_object_authz_context, spawn_backend};
+use super::service_utils::{
+    context_exists, resolve_object_authz_context, spawn_backend, template_declared_class,
+};
 
 pub(super) async fn context_identity(
     ctx_mgr: &Arc<ContextManager>,
@@ -87,8 +89,9 @@ pub(super) async fn slot_is_authorized(
 /// **Per-object gate (when `per_object_active()` is true):** If any grant in
 /// the policy has an `objects` list, the gate also checks for a per-object
 /// extract override for `virtual_object`. The object's `CKA_UNIQUE_ID` is
-/// resolved from the session-object metadata cache (`object_metadata`) when
-/// available, otherwise fetched from the backend and cached.
+/// resolved from the metadata cache (`object_metadata` — session objects
+/// per-handle, token objects gated by the authz generation) when available,
+/// otherwise fetched from the backend and cached.
 ///
 /// On uid-resolution failure (I1 fix — fail-closed when overrides exist):
 /// - If the principal has ANY per-object extract override (`extract.is_some()`)
@@ -182,7 +185,7 @@ pub(super) async fn extract_is_permitted(
 /// Resolve the `CKA_UNIQUE_ID` of `virtual_object` for the extract gate.
 ///
 /// Fast path: returns the cached `ObjectMetadata::unique_id` when already
-/// present in the session-object cache (populated by `gate_object_handle`
+/// present in the metadata cache (populated by `gate_object_handle`
 /// earlier in the same request). On a cache miss, resolves the backend
 /// session and object handles in one context-lock and calls
 /// `fetch_object_metadata` — the result is cached for subsequent calls.
@@ -199,8 +202,8 @@ async fn resolve_uid_for_extract(
     virtual_session: u64,
     virtual_object: u64,
 ) -> Option<SecretBytes> {
-    // Fast path: metadata already in cache (session objects only; token objects
-    // are never cached per the I2 invariant).
+    // Fast path: metadata already in cache — session objects per-handle,
+    // token objects while their authz generation is current (W1-L13-18).
     if let Some(cached) = ctx.context_manager.object_metadata(ctx_id, virtual_object).await {
         return Some(cached.unique_id);
     }
@@ -265,6 +268,43 @@ pub(super) async fn mechanism_permitted(
         return false; // fail-closed: context/slot/token unavailable
     };
     ctx.token_policy.allows_mechanism(&identity, &label, &serial, mech)
+}
+
+/// Whether the principal may MINT an object of the template's class
+/// (W1-L7-05): the mint-time companion to the USE-time class gate in
+/// `gate_object_handle`, closing the "persist a denied-class token
+/// object, use it never" hole.
+///
+/// `template` is the mint template view; `default_class` is the
+/// operation's implied class when its templates conventionally omit
+/// `CKA_CLASS` (`generate_key`/`derive_key` → `SECRET_KEY`;
+/// `generate_key_pair` checks each template with `PUBLIC_KEY` /
+/// `PRIVATE_KEY`). `create`/`copy` pass `None`: a copy without a class
+/// override inherits its (USE-allowed) source's class, and a create
+/// without `CKA_CLASS` is rejected by the backend itself
+/// (`CKR_TEMPLATE_INCOMPLETE`) — nothing persists either way, so an
+/// unknowable class falls through to the backend verdict instead of
+/// inventing a refusal (transparency; the USE-time gate fail-closes on
+/// unknown class regardless).
+pub(super) async fn class_mint_permitted(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    virtual_session: u64,
+    template: &[CkAttribute],
+    default_class: Option<CkObjectClass>,
+) -> bool {
+    if !ctx.token_policy.per_class_active() {
+        return true; // transparent when no class grants configured
+    }
+    let Some(class) = template_declared_class(template).or(default_class) else {
+        return true; // unknowable class: backend decides (see above)
+    };
+    let Some((identity, label, serial)) =
+        resolve_object_authz_context(ctx, ctx_id, virtual_session).await
+    else {
+        return false; // fail-closed: context/slot/token unavailable
+    };
+    ctx.token_policy.allows_class(&identity, &label, &serial, class)
 }
 
 /// A2 ownership gate (pure core): decide whether a request bearing a
@@ -968,6 +1008,135 @@ mod tests {
         assert!(mechanism_permitted(&ctx, &ctx_id, session, CkMechanismType::AES_GCM).await);
     }
 
+    // --- class_mint_permitted (W1-L7-05) ---
+
+    fn policy_with_class_grant(identity: &str, classes: Vec<String>) -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: false,
+            anonymous_principal: None,
+            policy: vec![PolicyEntry {
+                identity: identity.into(),
+                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
+                    token: "label:MockToken".into(),
+                    classes: Some(classes),
+                    mechanisms: None,
+                    extract: ExtractPolicyConfig::Allow,
+                    objects: None,
+                })]),
+            }],
+        })
+        .unwrap()
+    }
+
+    fn class_template(class: CkObjectClass) -> Vec<CkAttribute> {
+        vec![CkAttribute {
+            attr_type: CkAttributeType::CLASS,
+            value: Some(CkAttributeValue::Ulong(class.0)),
+        }]
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_denies_unlisted_class() {
+        let policy = policy_with_class_grant(MTLS_IDENTITY, vec!["secret_key".into()]);
+        assert!(policy.per_class_active());
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            !class_mint_permitted(
+                &ctx,
+                &ctx_id,
+                session,
+                &class_template(CkObjectClass::DATA),
+                None
+            )
+            .await,
+            "class outside the grant must be denied at mint"
+        );
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_allows_listed_class() {
+        let policy = policy_with_class_grant(MTLS_IDENTITY, vec!["secret_key".into()]);
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            class_mint_permitted(
+                &ctx,
+                &ctx_id,
+                session,
+                &class_template(CkObjectClass::SECRET_KEY),
+                None
+            )
+            .await,
+            "listed class must be permitted at mint"
+        );
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_uses_default_when_template_has_no_class() {
+        // Generate/derive templates often omit CKA_CLASS; the operation's
+        // implied class (the default) is checked instead.
+        let policy = policy_with_class_grant(MTLS_IDENTITY, vec!["secret_key".into()]);
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            class_mint_permitted(&ctx, &ctx_id, session, &[], Some(CkObjectClass::SECRET_KEY))
+                .await,
+            "allowed default class must be permitted"
+        );
+        assert!(
+            !class_mint_permitted(&ctx, &ctx_id, session, &[], Some(CkObjectClass::PRIVATE_KEY))
+                .await,
+            "denied default class must be refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_no_class_no_default_allows_backend_to_decide() {
+        // No knowable class (e.g. create without CKA_CLASS): the backend
+        // rejects the malformed mint itself (nothing persists), so the
+        // gate stays transparent instead of inventing its own refusal.
+        let policy = policy_with_class_grant(MTLS_IDENTITY, vec!["secret_key".into()]);
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            class_mint_permitted(&ctx, &ctx_id, session, &[], None).await,
+            "unknowable class must fall through to the backend verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_transparent_when_gate_off() {
+        let policy = TokenPolicy::from_config(&AuthConfig::default()).unwrap();
+        assert!(!policy.per_class_active());
+        let (ctx, ctx_id, session) = setup_extract_test(policy, Some(MTLS_IDENTITY.into())).await;
+        assert!(
+            class_mint_permitted(
+                &ctx,
+                &ctx_id,
+                session,
+                &class_template(CkObjectClass::DATA),
+                None
+            )
+            .await,
+            "gate off must permit any class"
+        );
+    }
+
+    #[tokio::test]
+    async fn class_mint_permitted_unauthenticated_always_true() {
+        let policy = policy_with_class_grant(MTLS_IDENTITY, vec!["secret_key".into()]);
+        assert!(policy.per_class_active());
+        let (ctx, ctx_id, session) = setup_extract_test(policy, None).await;
+        assert!(
+            class_mint_permitted(
+                &ctx,
+                &ctx_id,
+                session,
+                &class_template(CkObjectClass::DATA),
+                None
+            )
+            .await,
+            "unauthenticated peer must always be permitted (class grants are opt-in)"
+        );
+    }
+
     // --- fetch_object_metadata ---
 
     mod fetch_object_metadata_tests {
@@ -1064,11 +1233,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn session_object_metadata_is_cached_token_object_is_not() {
-            // I2 proof: after fetch_object_metadata, a session object (is_token=false)
-            // CAN be cached, while a token object (is_token=true) MUST NOT be cached.
-            // We verify this by checking that cache_object_metadata respects the
-            // is_token flag: session objects land in the cache, token objects do not.
+        async fn session_object_metadata_is_cached_token_object_is_gated() {
+            // W1-L13-18: a session object (is_token=false) caches per-handle,
+            // while a token object (is_token=true) caches gated by the authz
+            // generation — revocation invalidates the token entry only.
             use crate::server::context_manager::ContextManager;
 
             let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
@@ -1090,17 +1258,30 @@ mod tests {
             };
             ctx_mgr.cache_object_metadata(&ctx_id, 2, token_meta).await;
             let cached_token = ctx_mgr.object_metadata(&ctx_id, 2).await;
-            assert!(cached_token.is_none(), "token object metadata must NOT be cached (I2 fix)");
+            assert!(
+                cached_token.is_some(),
+                "token object metadata must be cached within the generation"
+            );
+
+            ctx_mgr.revoke_authz_generation();
+            assert!(
+                ctx_mgr.object_metadata(&ctx_id, 2).await.is_none(),
+                "revocation must invalidate cached token metadata"
+            );
+            assert!(
+                ctx_mgr.object_metadata(&ctx_id, 1).await.is_some(),
+                "revocation must not evict session-object entries"
+            );
         }
 
         #[tokio::test]
-        async fn token_object_refetched_on_each_gate_call() {
-            // I2 proof via mock call count: a token object (is_token=true) must
-            // trigger a backend C_GetAttributeValue on every gate invocation
-            // (no cache hit). We verify by counting get_attribute_value calls
-            // against the mock backend for two consecutive gate checks.
-            // (Uses gate_object_handle indirectly via setup_per_object_test.)
-            // This is tested in service_utils::tests as per_object_gate_token_object_not_cached.
+        async fn token_object_refetched_after_revocation() {
+            // W1-L13-18 proof via mock call count: a token object (is_token=true)
+            // is cached within the authz generation (repeated gated uses issue
+            // one backend fetch) and re-fetched after revocation. We verify by
+            // counting get_attribute_value calls against the mock backend.
+            // This is tested in service_utils::tests as
+            // per_object_gate_token_object_cached_until_revoked.
         }
 
         // --- M2: unrecognised CLASS format yields class=None, not fail-closed ---

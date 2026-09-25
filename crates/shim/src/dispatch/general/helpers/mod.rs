@@ -25,6 +25,16 @@ macro_rules! with_client {
         if !crate::state::is_initialized() {
             return rv_err(pkcs11_proxy_ng_types::CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
+        // W1-L6-29: consume the reconnect flag on the steady-state data
+        // plane. A transport failure on an earlier call (client-crate
+        // hook), a fork, or C_Finalize marks the cached channel stale;
+        // without this the flag was honored only across
+        // C_Initialize/probe, so steady-state calls never re-dialed (no
+        // DNS re-resolve, no recovery). Runs OUTSIDE block_on (the slow
+        // path block_ons itself); the fast path is two atomic loads.
+        // Best-effort: on failure the call below proceeds with the
+        // cached client and the RPC surfaces the transport error.
+        let _ = crate::state::ensure_client_connected();
         let __result = crate::state::runtime().block_on(async {
             // Take a cheap clone of the shared client and drop the
             // mutex guard before the RPC. `Pkcs11Client` wraps a tonic
@@ -37,17 +47,24 @@ macro_rules! with_client {
             let mut $client = crate::state::client().lock().await.clone();
             $call.await
         });
-        // FOLLOWUP-dns-reresolve: reconnect-on-transport-failure is driven
-        // by the client crate's transport-failure hook (registered in
-        // c_initialize), which fires ONLY when a gRPC transport `Status` is
-        // mapped to a CK_RV — never on a backend `ck_rv`. The next call then
-        // rebuilds the channel via `Endpoint::from_shared`, re-resolving the
-        // hostname, letting a shim follow a daemon whose DNS A-record changed
-        // (k8s rolling deploy / blue-green). We deliberately do NOT key the
+        // FOLLOWUP-dns-reresolve: RESOLVED (W1-L11-24, reconciling
+        // W1-L6-29). Reconnect-on-transport-failure is driven by the
+        // client crate's transport-failure hook (registered in
+        // c_initialize), which fires ONLY when a gRPC transport `Status`
+        // is mapped to a CK_RV — never on a backend `ck_rv`. The next
+        // data-plane call then rebuilds the channel via a fresh
+        // `Endpoint::from_shared` per dial, so DNS is re-resolved on
+        // every reconnect — never cached with the old `Channel` — and a
+        // long-lived shim follows a daemon whose DNS A-record changed
+        // (k8s rolling deploy / blue-green). Evidence:
+        // `steady_state_call_consumes_reconnect_flag` and
+        // `get_info_consumes_reconnect_flag` (next-call re-dial) plus
+        // `reconnect_rereads_endpoint_and_redials` (the endpoint is
+        // re-read per reconnect). We deliberately do NOT key the
         // reconnect off the returned CK_RV here: kryoptic uses
         // CKR_DEVICE_ERROR (OpenSSL catch-all) and CKR_GENERAL_ERROR
-        // (internal catch-all) as ordinary results, so doing so churned the
-        // channel on every routine backend error.
+        // (internal catch-all) as ordinary results, so doing so churned
+        // the channel on every routine backend error.
         __result
     }};
 }
@@ -61,26 +78,13 @@ pub(crate) use with_client;
 /// backend return its own error instead of the shim crashing with SIGABRT.
 pub(crate) const MAX_SERIALIZABLE_BYTES: usize = 512 * 1024 * 1024;
 
-pub(crate) unsafe fn read_input_slice<'a, T>(ptr: *const T, len: CK_ULONG) -> &'a [T] {
-    if ptr.is_null() || len == 0 {
-        return &[];
-    }
-    let count = len as usize;
-    let byte_size = count.checked_mul(std::mem::size_of::<T>());
-    match byte_size {
-        Some(n) if n <= MAX_SERIALIZABLE_BYTES => unsafe { std::slice::from_raw_parts(ptr, count) },
-        // Panic instead of returning empty — catch_panics converts
-        // to CKR_GENERAL_ERROR so the request never reaches the daemon.
-        // Returning empty silently would send broken data to the backend.
-        _ => panic!("input length {len} exceeds serializable limit"),
-    }
-}
-
-/// Pointer-class-faithful input reader (ADR-0010 Scope 2). Unlike
-/// `read_input_slice`, NULL is preserved as NULL (with the caller's claimed
-/// length) and unmaterializable lengths become a value, not a panic, so the
-/// dispatch layer can return the documented stable RV (CKR_ARGUMENTS_BAD)
-/// instead of GENERAL_ERROR.
+/// Pointer-class-faithful input reader (ADR-0010 Scope 2). NULL is
+/// preserved as NULL (with the caller's claimed length) and
+/// unmaterializable lengths become a value, not a panic, so the dispatch
+/// layer can return the documented stable RV (CKR_ARGUMENTS_BAD) instead
+/// of GENERAL_ERROR. This is the only input reader: the historical
+/// panicking reader was removed (W1-L11-10) once every call site migrated
+/// to the fallible paths, so no TooLarge panic arm remains.
 #[derive(Debug)]
 pub(crate) enum InputBuf<'a> {
     Bytes(&'a [u8]),
@@ -124,6 +128,33 @@ pub(crate) fn input_buf_to_ck_in_buf(buf: InputBuf<'_>) -> Result<CkInBuf<'_>, C
     match buf {
         InputBuf::Bytes(b) => Ok(CkInBuf::Bytes(b)),
         InputBuf::Null { len } => Ok(CkInBuf::Null { len }),
+        InputBuf::TooLarge { .. } => Err(CkRv::ARGUMENTS_BAD),
+    }
+}
+
+/// Fallible reader for optional PIN-style byte inputs (W1-L3-03,
+/// extended to every PIN/username/label site by W1-L11-10).
+///
+/// Returns the transport-impossible class as `Err(CkRv::ARGUMENTS_BAD)` —
+/// the same documented stable RV that `classify_input` +
+/// `input_buf_to_ck_in_buf` produce — and never panics. NULL maps to
+/// `None` for any claimed length, matching the historical null handling
+/// of the PIN call sites.
+///
+/// # Safety
+///
+/// When `ptr` is non-null, it must point to a valid, readable buffer of at
+/// least `len` bytes (as required by PKCS#11 semantics for input parameters).
+/// The returned slice borrows from that memory and must not outlive it. When
+/// `ptr` is null, no memory is accessed regardless of `len`. Lengths that
+/// cannot be materialized are rejected before any memory access.
+pub(crate) unsafe fn try_read_optional_bytes<'a>(
+    ptr: *const u8,
+    len: CK_ULONG,
+) -> Result<Option<&'a [u8]>, CkRv> {
+    match unsafe { classify_input(ptr, len) } {
+        InputBuf::Bytes(b) => Ok(Some(b)),
+        InputBuf::Null { .. } => Ok(None),
         InputBuf::TooLarge { .. } => Err(CkRv::ARGUMENTS_BAD),
     }
 }
@@ -197,6 +228,92 @@ pub(crate) unsafe fn write_exact_output(
         unsafe { pul_output_len.write(length) };
     }
     rv
+}
+
+/// Shared classify→spec→`byte_output_exact`→write_exact dispatch shape
+/// (W1-L11-09). One implementation for the byte-output exports; every
+/// site below delegates instead of repeating the four steps.
+///
+/// Order is load-bearing and matches every historical site: the input is
+/// classified first (TooLarge answers `CKR_ARGUMENTS_BAD` before any
+/// client use), then the output spec is captured, then the RPC runs, and
+/// finally the exact result is written back.
+///
+/// # Safety
+///
+/// When `p_input` is non-null, it must point to a valid, readable buffer
+/// of at least `ul_input_len` bytes. A non-null `pul_output_len` must
+/// point to a valid `CK_ULONG`; when the result contains data and
+/// `p_output` is non-null, `p_output` must point to a writable buffer of
+/// at least the returned length. See [`classify_input`],
+/// [`output_buffer_spec`], and [`write_exact_output`].
+pub(crate) unsafe fn dispatch_byte_output_exact(
+    h_session: CK_SESSION_HANDLE,
+    function: ByteOutputFunction,
+    p_input: CK_BYTE_PTR,
+    ul_input_len: CK_ULONG,
+    p_output: CK_BYTE_PTR,
+    pul_output_len: CK_ULONG_PTR,
+) -> CK_RV {
+    let input = match input_buf_to_ck_in_buf(unsafe { classify_input(p_input, ul_input_len) }) {
+        Ok(buf) => buf,
+        Err(e) => return rv_err(e),
+    };
+    unsafe { byte_output_exact_with_input(h_session, function, input, p_output, pul_output_len) }
+}
+
+/// Output-only variant of [`dispatch_byte_output_exact`] (W1-L11-09) for
+/// the `*_final` / state exports, which take no input pointer pair. The
+/// input sent is always empty bytes — never a classified NULL — exactly
+/// as every historical site did.
+///
+/// # Safety
+///
+/// Same output-pointer contract as [`dispatch_byte_output_exact`].
+pub(crate) unsafe fn dispatch_byte_output_exact_no_input(
+    h_session: CK_SESSION_HANDLE,
+    function: ByteOutputFunction,
+    p_output: CK_BYTE_PTR,
+    pul_output_len: CK_ULONG_PTR,
+) -> CK_RV {
+    unsafe {
+        byte_output_exact_with_input(
+            h_session,
+            function,
+            CkInBuf::Bytes(&[]),
+            p_output,
+            pul_output_len,
+        )
+    }
+}
+
+/// spec→RPC→write_exact core shared by [`dispatch_byte_output_exact`] and
+/// [`dispatch_byte_output_exact_no_input`].
+///
+/// # Safety
+///
+/// Same output-pointer contract as [`dispatch_byte_output_exact`].
+unsafe fn byte_output_exact_with_input(
+    h_session: CK_SESSION_HANDLE,
+    function: ByteOutputFunction,
+    input: CkInBuf<'_>,
+    p_output: CK_BYTE_PTR,
+    pul_output_len: CK_ULONG_PTR,
+) -> CK_RV {
+    let spec = unsafe { output_buffer_spec(p_output, pul_output_len) };
+    let result = with_client!(client => client.byte_output_exact(
+        CkSessionHandle(h_session as u64),
+        function,
+        &spec,
+        input,
+        None,
+        0,
+        0,
+    ));
+    match result {
+        Ok(r) => unsafe { write_exact_output(&spec, &r, p_output, pul_output_len) },
+        Err(e) => rv_err(e),
+    }
 }
 
 #[cfg(test)]
@@ -294,23 +411,42 @@ pub(crate) unsafe fn empty_message_parameter_roundtrip_spec(
     unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) }
 }
 
-pub(crate) fn pad_string(dest: &mut [CK_UTF8CHAR], src: &str) {
-    let bytes = src.as_bytes();
-    let copy_len = bytes.len().min(dest.len());
-    dest[..copy_len].copy_from_slice(&bytes[..copy_len]);
-    for b in dest[copy_len..].iter_mut() {
-        *b = b' ';
-    }
-}
-
 pub(crate) fn catch_panics<F>(f: F) -> CK_RV
 where
     F: FnOnce() -> CK_RV + std::panic::UnwindSafe,
 {
-    match std::panic::catch_unwind(f) {
+    match std::panic::catch_unwind(|| {
+        // W1-C7-04 forced-panic injection: fires before the export body runs,
+        // inside the boundary's own `catch_unwind`. Test builds only.
+        #[cfg(test)]
+        if panic_inject_enabled_for_test() {
+            panic!("W1-C7-04 injected panic at the extern \"C\" boundary");
+        }
+        f()
+    }) {
         Ok(rv) => rv,
         Err(_) => rv_err(CkRv::GENERAL_ERROR),
     }
+}
+
+// Thread-local forced-panic injection for the per-export runtime boundary
+// test (W1-C7-04). Thread-local (not global) so arming it cannot perturb
+// exports called concurrently by other test threads — several
+// early-return tests call exports without holding the shared state guard.
+// `#[cfg(test)]` throughout: zero impact on shipped builds.
+#[cfg(test)]
+thread_local! {
+    static PANIC_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_panic_inject_for_test(enabled: bool) {
+    PANIC_INJECT.with(|flag| flag.set(enabled));
+}
+
+#[cfg(test)]
+pub(crate) fn panic_inject_enabled_for_test() -> bool {
+    PANIC_INJECT.with(|flag| flag.get())
 }
 
 /// Maximum mechanism **parameter-struct** byte length.  No standard PKCS#11
@@ -335,20 +471,20 @@ pub(crate) use template_input::*;
 
 #[cfg(test)]
 mod tests {
-    use super::pad_string;
     use cryptoki_sys::{CK_RV, CK_ULONG};
+    use pkcs11_proxy_ng_types::space_pad_into;
 
     #[test]
     fn short_src_pads_remainder_with_spaces() {
         let mut buf = [0u8; 8];
-        pad_string(&mut buf, "hi");
+        space_pad_into(&mut buf, "hi");
         assert_eq!(&buf, b"hi      ");
     }
 
     #[test]
     fn exact_length_src_no_padding_needed() {
         let mut buf = [0u8; 4];
-        pad_string(&mut buf, "ABCD");
+        space_pad_into(&mut buf, "ABCD");
         assert_eq!(&buf, b"ABCD");
     }
 
@@ -371,21 +507,21 @@ mod tests {
     #[test]
     fn longer_src_truncated_to_dest_len() {
         let mut buf = [0u8; 4];
-        pad_string(&mut buf, "ABCDEFGH");
+        space_pad_into(&mut buf, "ABCDEFGH");
         assert_eq!(&buf, b"ABCD");
     }
 
     #[test]
     fn empty_src_fills_all_spaces() {
         let mut buf = [0u8; 6];
-        pad_string(&mut buf, "");
+        space_pad_into(&mut buf, "");
         assert_eq!(&buf, b"      ");
     }
 
     #[test]
     fn no_null_terminator_written() {
         let mut buf = [0xFFu8; 6];
-        pad_string(&mut buf, "ab");
+        space_pad_into(&mut buf, "ab");
         assert_eq!(buf[0], b'a');
         assert_eq!(buf[1], b'b');
         for &b in &buf[2..] {
@@ -396,7 +532,7 @@ mod tests {
     #[test]
     fn full_32_byte_token_label_field() {
         let mut label = [0u8; 32];
-        pad_string(&mut label, "My Test Token");
+        space_pad_into(&mut label, "My Test Token");
         assert_eq!(&label[..13], b"My Test Token");
         assert!(label[13..].iter().all(|&b| b == b' '));
     }
@@ -405,8 +541,18 @@ mod tests {
     fn overlong_label_truncated_at_32_bytes() {
         let mut label = [0u8; 32];
         let long = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBBBBB";
-        pad_string(&mut label, long);
+        space_pad_into(&mut label, long);
         assert!(label.iter().all(|&b| b == b'A'));
+    }
+
+    // W1-L11-12 pin: byte-wise copy splits a multibyte char at the
+    // edge — mirrored in the backend's `space_pad` vectors; both must
+    // agree before unification and the shared helper after.
+    #[test]
+    fn multibyte_src_truncates_by_bytes() {
+        let mut buf = [0u8; 4];
+        space_pad_into(&mut buf, "héllo");
+        assert_eq!(buf, [0x68, 0xC3, 0xA9, 0x6C]);
     }
 
     #[test]
@@ -482,6 +628,48 @@ mod tests {
         let buf = super::InputBuf::Null { len: 42 };
         let result = super::input_buf_to_ck_in_buf(buf).unwrap();
         assert!(matches!(result, pkcs11_proxy_ng_types::CkInBuf::Null { len: 42 }));
+    }
+
+    #[test]
+    fn try_read_optional_bytes_oversize_returns_arguments_bad_without_panic() {
+        // W1-L3-03: the fallible PIN reader must return Err(ARGUMENTS_BAD) for
+        // the transport-impossible class — never panic (which catch_panics
+        // would surface as CKR_GENERAL_ERROR). The outer catch_unwind proves
+        // no unwind happens at all, not just that the RV differs.
+        let buf = [0u8; 1];
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            super::try_read_optional_bytes(buf.as_ptr(), CK_ULONG::MAX)
+        }));
+        let inner = result.expect("fallible PIN reader must not panic");
+        assert_eq!(inner.unwrap_err(), pkcs11_proxy_ng_types::CkRv::ARGUMENTS_BAD);
+    }
+
+    #[test]
+    fn try_read_optional_bytes_valid_pin_roundtrips() {
+        // W1-L3-03: valid PINs are unaffected — Some(bytes) with exact content.
+        let pin = *b"1234";
+        let result = unsafe { super::try_read_optional_bytes(pin.as_ptr(), 4) }.unwrap();
+        assert_eq!(result, Some(pin.as_slice()));
+    }
+
+    #[test]
+    fn try_read_optional_bytes_null_is_none_for_any_length() {
+        // Historical null handling preserved: NULL → None regardless of the
+        // claimed length (the call sites mapped NULL to None before ever
+        // reading).
+        assert_eq!(unsafe { super::try_read_optional_bytes(std::ptr::null(), 0) }.unwrap(), None);
+        assert_eq!(
+            unsafe { super::try_read_optional_bytes(std::ptr::null(), CK_ULONG::MAX) }.unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn try_read_optional_bytes_non_null_len0_is_some_empty() {
+        // Matches the historical reader: non-NULL + len 0 → Some(&[]), not None.
+        let buf = [0u8; 1];
+        let result = unsafe { super::try_read_optional_bytes(buf.as_ptr(), 0) }.unwrap();
+        assert_eq!(result, Some([].as_slice()));
     }
 }
 

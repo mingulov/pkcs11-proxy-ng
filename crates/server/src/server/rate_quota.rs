@@ -126,8 +126,9 @@ fn begin_op_on(
 }
 
 /// Record a failed login for `slot` against the given state. Returns `true` when
-/// the budget is reached (slot enters cooldown). Records the metric once on the
-/// first trip; subsequent calls while in cooldown return `true` without re-recording.
+/// the budget is reached (slot enters cooldown). Arms the cooldown (and records
+/// the metric) on the first trip and on every post-expiry failure; calls while
+/// a window is still active return `true` without re-arming or re-recording.
 fn record_failure_on(
     login_budget: Option<u32>,
     login_cooldown: Duration,
@@ -146,8 +147,10 @@ fn record_failure_on(
         entry.count = entry.count.saturating_add(1);
     }
     if entry.count >= budget {
-        if entry.cooldown_until.is_none() {
-            // First trip: arm the cooldown and record the metric.
+        // Re-arm on the first trip AND on every post-expiry failure (same active-
+        // window predicate as `in_cooldown_on`), so sustained failures keep the
+        // backoff active instead of silently expiring into an unprotected burst.
+        if !entry.cooldown_until.is_some_and(|t| t > Instant::now()) {
             entry.cooldown_until = Some(Instant::now() + login_cooldown);
             crate::server::resilience::record_login_budget_tripped();
         }
@@ -422,6 +425,55 @@ mod tests {
         );
         // Zero-duration cooldown is already expired.
         assert!(!in_cooldown_on(&q.login_state, slot), "0-second cooldown immediately expired");
+    }
+
+    #[test]
+    fn post_expiry_failures_rearm_cooldown_each_time() {
+        // W1-C2-01: every post-expiry failure must re-arm the cooldown window so
+        // sustained failures keep the backoff active (no silent-expiry burst).
+        let q = make_quota(None, None, Some(1), 60);
+        let slot = BackendSlotId(pkcs11_proxy_ng_types::CkSlotId(104));
+        // First failure trips the budget and arms the cooldown.
+        assert!(
+            record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, slot),
+            "budget=1 trips on first failure"
+        );
+        assert!(in_cooldown_on(&q.login_state, slot), "cooldown armed after trip");
+
+        // While the window is still active, failures must NOT re-arm (no churn):
+        // the armed deadline stays put.
+        let armed = q
+            .login_state
+            .get(&slot)
+            .and_then(|e| e.cooldown_until)
+            .expect("cooldown deadline must be armed");
+        assert!(
+            record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, slot),
+            "failure while in cooldown still reports tripped"
+        );
+        let still_armed = q
+            .login_state
+            .get(&slot)
+            .and_then(|e| e.cooldown_until)
+            .expect("cooldown deadline must still be armed");
+        assert_eq!(armed, still_armed, "active window must not be re-armed");
+
+        // Two consecutive post-expiry failures must each produce a fresh window.
+        for round in 1_usize..=2 {
+            {
+                let mut entry = q.login_state.get_mut(&slot).expect("slot entry must exist");
+                entry.cooldown_until = Some(Instant::now() - Duration::from_secs(1));
+            }
+            assert!(!in_cooldown_on(&q.login_state, slot), "setup: window must read as expired");
+            assert!(
+                record_failure_on(q.login_budget, q.login_cooldown, &q.login_state, slot),
+                "round {round}: post-expiry failure at budget must still report tripped"
+            );
+            assert!(
+                in_cooldown_on(&q.login_state, slot),
+                "round {round}: post-expiry failure must re-arm the cooldown window"
+            );
+        }
     }
 
     #[test]

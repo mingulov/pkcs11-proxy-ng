@@ -1,6 +1,6 @@
 //! Abnormal native-lifetime stop: raw `exit_group(70)` on stop-qualified
 //! Linux, libSystem `_exit(70)` on stop-qualified macOS, and
-//! `TerminateProcess(70)` on stop-qualified Windows. The four stop arms
+//! `TerminateProcess(70)` on stop-qualified Windows. The five stop arms
 //! cover exactly the load-qualified set (`NATIVE_FFI_QUALIFIED`); on
 //! unqualified targets the guard compiles out and the poison path applies.
 //!
@@ -16,8 +16,9 @@
 //! (x86_64: `syscall` nr 231 with status 70 in RDI; i686: `int 0x80`
 //! nr 252 with status 70 via ECX into EBX and balanced push/pop;
 //! Windows MSVC x86_64/x86: `TerminateProcess` with status 70; macOS
-//! aarch64/x86_64: libSystem `_exit` with status 70). Both Linux stubs
-//! model a possible return; the outer loop retries on interception.
+//! aarch64/x86_64: libSystem `_exit` with status 70; aarch64 Linux:
+//! `svc #0` nr 94 with status 70 in X0). All three Linux stubs model
+//! a possible return; the outer loop retries on interception.
 
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
@@ -28,7 +29,8 @@ use std::time::{Duration, Instant};
 ///
 /// Transparent over `i32` so the modeled return stays visible in codegen
 /// instead of folding into a diverging shape. The x86_64 stub truncates
-/// the 64-bit RAX result; the i686 stub carries EAX directly.
+/// the 64-bit RAX result, the aarch64 stub truncates the 64-bit X0
+/// result, and the i686 stub carries EAX directly.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::ffi) struct RawStopAttempt(pub(in crate::ffi) i32);
@@ -227,18 +229,63 @@ mod arch {
     pub(in crate::ffi) const STOP_ARM_NAME: &str = "macos";
 }
 
+// Linux aarch64 GNU/musl: contract row 5.
+#[cfg(all(
+    target_os = "linux",
+    any(target_env = "gnu", target_env = "musl"),
+    target_arch = "aarch64",
+    target_pointer_width = "64"
+))]
+mod arch {
+    use super::RawStopAttempt;
+
+    /// One raw `exit_group(70)` attempt via `svc #0`.
+    ///
+    /// Models a possible return: on interception the call returns and the
+    /// caller retries. Never diverges by itself.
+    ///
+    /// # Safety
+    ///
+    /// Ends the process on success; on hypothetical return the value is the
+    /// raw X0 result and the caller must retry, never fall through.
+    #[inline(never)]
+    pub(in crate::ffi) unsafe fn raw_exit_group_70() -> RawStopAttempt {
+        let mut status_ret: i64 = 70;
+        let mut nr: i64 = 94;
+        // SAFETY: raw exit_group(70) with the documented register contract
+        // (aarch64 Linux syscall ABI: number in X8, first arg in X0,
+        // result in X0; X8 is clobbered).
+        unsafe {
+            core::arch::asm!(
+                "svc #0",
+                inlateout("x0") status_ret,
+                inlateout("x8") nr,
+                options(nostack)
+            );
+        }
+        // X8 carries no return value; acknowledge the clobber explicitly.
+        let _ = nr;
+        RawStopAttempt(status_ret as i32)
+    }
+
+    /// Test-only marker naming the compiled arm for the cfg-partition test.
+    #[cfg(test)]
+    pub(in crate::ffi) const STOP_ARM_NAME: &str = "linux-aarch64";
+}
+
 // Fallback: every target without a qualified stop arm. Partition proof —
 // each target lands on exactly one `arch` arm: (1) Linux x86_64 GNU/musl
 // 64-bit, (2) Linux x86 GNU/musl 32-bit, (3) Windows MSVC x86_64 64-bit /
-// x86 32-bit, (4) macOS aarch64/x86_64 64-bit, (5) this fallback. Arms 1-4
-// are pairwise disjoint (the predicates differ on target_os/target_arch),
-// and arm 5 is the exact `not(any(1, 2, 3, 4))` complement, hence
-// exhaustive and disjoint by construction.
+// x86 32-bit, (4) macOS aarch64/x86_64 64-bit, (5) Linux aarch64 GNU/musl
+// 64-bit, (6) this fallback. Arms 1-5 are pairwise disjoint (the
+// predicates differ on target_os/target_arch), and arm 6 is the exact
+// `not(any(1, 2, 3, 4, 5))` complement, hence exhaustive and disjoint
+// by construction.
 //
 // Since TC1 the stop arms cover exactly the load-qualified set
 // (`NATIVE_FFI_QUALIFIED`), so no load-qualified target reaches this
 // fallback; it covers only targets where production construction is
-// refused: non-x86/x86_64 Linux archs (s390x, aarch64, ...), non-GNU/musl
+// refused: non-x86/x86_64/aarch64 Linux archs (s390x, ...), non-GNU/musl
 // Linux envs, non-MSVC or non-x86-family Windows, non-aarch64/x86_64 or
 // non-64-bit macOS, and every other target_os.
 //
@@ -276,6 +323,12 @@ mod arch {
         target_os = "macos",
         any(target_arch = "aarch64", target_arch = "x86_64"),
         target_pointer_width = "64"
+    ),
+    all(
+        target_os = "linux",
+        any(target_env = "gnu", target_env = "musl"),
+        target_arch = "aarch64",
+        target_pointer_width = "64"
     )
 )))]
 mod arch {
@@ -293,7 +346,7 @@ mod arch {
     pub(in crate::ffi) unsafe fn raw_exit_group_70() -> RawStopAttempt {
         unimplemented!(
             "native stop: no qualified stop arm for this target \
-             (Linux x86_64/x86 GNU/musl, macOS aarch64/x86_64, \
+             (Linux x86_64/x86/aarch64 GNU/musl, macOS aarch64/x86_64, \
              or Windows MSVC x86_64/x86 required)"
         )
     }
@@ -303,8 +356,9 @@ mod arch {
     pub(in crate::ffi) const STOP_ARM_NAME: &str = "fallback";
 }
 
-/// Test-only `cfg!` mirror of the four qualified `mod arch` stop arms
-/// above (Linux x86_64, Linux x86, macOS, Windows). The `cfg` arms are the
+/// Test-only `cfg!` mirror of the five qualified `mod arch` stop arms
+/// above (Linux x86_64, Linux x86, macOS, Windows, Linux aarch64). The
+/// `cfg` arms are the
 /// source of truth; this mirror lets tests assert stop coverage equals
 /// load coverage (`NATIVE_FFI_QUALIFIED`) and agrees with the compiled
 /// arm on every target. Production cannot branch on it: the guard and the
@@ -330,6 +384,11 @@ pub(in crate::ffi) const NATIVE_STOP_QUALIFIED: bool = cfg!(all(
 )) || cfg!(all(
     target_os = "macos",
     any(target_arch = "aarch64", target_arch = "x86_64"),
+    target_pointer_width = "64"
+)) || cfg!(all(
+    target_os = "linux",
+    any(target_env = "gnu", target_env = "musl"),
+    target_arch = "aarch64",
     target_pointer_width = "64"
 ));
 
@@ -494,6 +553,24 @@ mod tests {
         assert!(DONE_SEQ.load(SeqCst) >= seq, "disarmed deadline must stay disarmed");
     }
 
+    /// Linux-aarch64 qualification pins (compile-time): both qualifiers
+    /// must be true and the compiled arm must be the aarch64 stub (name
+    /// length of "linux-aarch64", not the 8 of "fallback"). Proven by
+    /// `cargo check -p pkcs11-proxy-ng-backend --tests
+    /// --target aarch64-unknown-linux-gnu`, which compiles but cannot
+    /// execute on x86_64 hosts.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_env = "gnu", target_env = "musl"),
+        target_arch = "aarch64",
+        target_pointer_width = "64"
+    ))]
+    const _: () = {
+        assert!(crate::ffi::native_domain::NATIVE_FFI_QUALIFIED);
+        assert!(NATIVE_STOP_QUALIFIED);
+        assert!(arch::STOP_ARM_NAME.len() == "linux-aarch64".len());
+    };
+
     #[test]
     fn stop_coverage_equals_load_coverage_on_every_target() {
         // TC1: every load-qualified target has a stop arm and vice versa;
@@ -522,6 +599,13 @@ mod tests {
             target_pointer_width = "32"
         )) {
             "linux-x86"
+        } else if cfg!(all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            target_arch = "aarch64",
+            target_pointer_width = "64"
+        )) {
+            "linux-aarch64"
         } else if cfg!(all(
             target_os = "macos",
             any(target_arch = "aarch64", target_arch = "x86_64"),

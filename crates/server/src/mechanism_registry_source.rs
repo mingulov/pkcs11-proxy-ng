@@ -69,10 +69,17 @@ impl MechanismRegistrySource {
 fn load_snapshot(config_path: Option<&Path>) -> Result<RegistrySnapshot, String> {
     let registry = match config_path {
         Some(path) => {
+            // W1-C3-02: read the file ONCE. Both the revision hash and the
+            // parsed registry derive from this single snapshot, so a
+            // concurrent edit (or a SIGHUP racing an operator write) cannot
+            // pair a hash of content A with a parse of content B.
             let content = std::fs::read_to_string(path).map_err(|e| {
                 format!("failed to read mechanism registry {}: {e}", path.display())
             })?;
-            let mut registry = MechanismRegistry::load(Some(path))?;
+            let mut registry = MechanismRegistry::load_from_content(
+                &content,
+                path.parent().unwrap_or_else(|| Path::new(".")),
+            )?;
             registry.set_revision(compute_revision(&content));
             registry
         }
@@ -165,6 +172,86 @@ mod tests {
         assert!(
             reloaded.params.iter().any(|e| e.shape == "iv" && e.mechanisms.contains(&0x80000002))
         );
+    }
+
+    /// W1-C3-02: revision hash and parsed registry must come from a single
+    /// snapshot read. A writer atomically swapping the file between two
+    /// valid registries (rename is atomic, so readers never see torn
+    /// content) must never produce a snapshot whose revision names content
+    /// A while the payload parses content B.
+    #[test]
+    fn revision_and_payload_always_pair_from_single_snapshot() {
+        use sha2::Digest;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        fn rev_of(bytes: &[u8]) -> String {
+            let digest = sha2::Sha256::digest(bytes);
+            let mut s = String::with_capacity(16);
+            for &byte in &digest[..8] {
+                const HEX: &[u8] = b"0123456789abcdef";
+                s.push(HEX[(byte >> 4) as usize] as char);
+                s.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            s
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("registry.toml");
+        // Vendor-range mechanism IDs that the embedded default does not
+        // define, so each marker proves which file content was parsed.
+        let content_a = "[[params]]\nshape = \"gcm\"\nmechanisms = [0x8000C302]\n";
+        let content_b = "[[params]]\nshape = \"iv\"\nmechanisms = [0x8000C303]\n";
+        let rev_a = rev_of(content_a.as_bytes());
+        let rev_b = rev_of(content_b.as_bytes());
+        assert_ne!(rev_a, rev_b);
+        std::fs::write(&target, content_a).unwrap();
+
+        const ITERATIONS: usize = 1500;
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = stop.clone();
+        let writer_target = target.clone();
+        let writer = std::thread::spawn(move || {
+            let tmp = writer_target.with_extension("toml.tmp");
+            for i in 0..ITERATIONS {
+                let content = if i % 2 == 0 { content_b } else { content_a };
+                std::fs::write(&tmp, content).unwrap();
+                std::fs::rename(&tmp, &writer_target).unwrap();
+                if writer_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        });
+
+        let mut checked = 0usize;
+        for _ in 0..ITERATIONS {
+            let src = match MechanismRegistrySource::load(Some(target.as_path())) {
+                Ok(src) => src,
+                // A rename landing mid-read can only yield complete A or B
+                // (atomic rename); any error here is unexpected but must not
+                // mask a pairing violation, so fail loudly instead of skipping.
+                Err(e) => panic!("load must succeed on atomically-swapped valid files: {e}"),
+            };
+            let payload = src.current();
+            let has_a = payload.params.iter().any(|e| e.mechanisms.contains(&0x8000C302));
+            let has_b = payload.params.iter().any(|e| e.mechanisms.contains(&0x8000C303));
+            if payload.revision == rev_a {
+                assert!(
+                    has_a && !has_b,
+                    "W1-C3-02: revision names content A but payload parsed differently"
+                );
+            } else if payload.revision == rev_b {
+                assert!(
+                    has_b && !has_a,
+                    "W1-C3-02: revision names content B but payload parsed differently"
+                );
+            } else {
+                panic!("W1-C3-02: revision {} matches neither swapped content", payload.revision);
+            }
+            checked += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        assert_eq!(checked, ITERATIONS);
     }
 
     #[test]

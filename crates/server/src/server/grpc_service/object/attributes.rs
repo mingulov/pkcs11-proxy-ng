@@ -6,7 +6,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_audit::EventClass;
 use pkcs11_proxy_ng_types::attribute::is_value_bearing_secret;
 use pkcs11_proxy_ng_types::{
-    CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkRv, SecretBytes,
+    CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkRv, SecretBytes,
 };
 
 use super::super::super::context_manager::{CachedAttr, ClientContextId};
@@ -22,14 +22,26 @@ use super::attribute_results;
 
 // ── R2 coalescer helpers ──────────────────────────────────────────────────────
 
+/// Convert a fetched attribute value into a single wiping owner (W1-L13-15,
+/// ADR-0013 §5: consume a secret owner instead of cloning). `Bytes`/`String`
+/// payloads are adopted by move — no copy; scalar/template shapes encode
+/// fresh, byte-identically to [`attr_value_to_bytes`].
+fn attr_value_to_secret_bytes(value: CkAttributeValue) -> SecretBytes {
+    match value {
+        CkAttributeValue::Bytes(secret) | CkAttributeValue::String(secret) => secret,
+        scalar => SecretBytes::new(attr_value_to_bytes(scalar)),
+    }
+}
+
 /// Build a proto `AttributeResult` from a cached attribute entry (R2 coalescer).
 ///
 /// Serves the cached bytes directly — byte-identical to what `attribute_results`
 /// produces for a fresh backend fetch, because the bytes were stored as-is from
-/// `attr_value_to_bytes` during the previous fetch.
+/// `attr_value_to_bytes` during the previous fetch. Borrows the entry
+/// (W1-L13-15) so the hit path copies once, for the wire encoding only.
 fn proto_result_from_cache(
     attr_type: CkAttributeType,
-    cached: CachedAttr,
+    cached: &CachedAttr,
 ) -> pkcs11_proxy_ng_proto::AttributeResult {
     let actual_length = cached.value.len() as u64;
     // ADR-0013 §5: the prost response owns a plain `Vec<u8>`; the cached
@@ -227,11 +239,17 @@ pub(super) async fn get_attribute_value(
 
     for (i, attr) in template.iter().enumerate() {
         if !is_value_bearing_secret(attr.attr_type) {
-            if let Some(cached) =
-                ctx.context_manager.attr_cache_get(&ctx_id, object_handle, attr.attr_type).await
-            {
+            // W1-L13-15: build the response from a borrowed entry — the hit
+            // path copies once, for the wire encoding only.
+            let hit = ctx
+                .context_manager
+                .attr_cache_get_with(&ctx_id, object_handle, attr.attr_type, |cached| {
+                    proto_result_from_cache(attr.attr_type, cached)
+                })
+                .await;
+            if let Some(result) = hit {
                 crate::server::resilience::record_attr_coalesce_hit();
-                ordered_results[i] = Some(proto_result_from_cache(attr.attr_type, cached));
+                ordered_results[i] = Some(result);
                 continue;
             }
             crate::server::resilience::record_attr_coalesce_miss();
@@ -259,9 +277,15 @@ pub(super) async fn get_attribute_value(
 
         // Populate per-position results and store cacheable entries.
         for (fetched_attr, &orig_i) in fetched_template.into_iter().zip(fetch_positions.iter()) {
-            // Encode: move the value bytes out once for both the cache put and the result.
-            let value_bytes = fetched_attr.value.map(attr_value_to_bytes);
-            let actual_length = value_bytes.as_ref().map_or(0, |b| b.len() as u64);
+            // W1-L13-15: single-owner the bytes per ADR-0013 §5 — adopt the
+            // fetched value into one wiping owner by move (no copy for
+            // Bytes/String payloads), copy once for the prost wire boundary,
+            // and move the owner into the cache put below.
+            let secret_value = fetched_attr.value.map(attr_value_to_secret_bytes);
+            let actual_length = secret_value.as_ref().map_or(0, |b| b.len() as u64);
+            // ADR-0013 §5: the prost response owns a plain `Vec<u8>`; the
+            // single permitted copy happens here, at the wire boundary.
+            let plain_value = secret_value.as_ref().map(secret_to_plain);
 
             // Cache non-secret attrs whose value was successfully returned
             // (per-attr rv = OK, implied by value_bytes = Some).
@@ -281,22 +305,22 @@ pub(super) async fn get_attribute_value(
             // reads/writes to avoid serving an LP64-encoded value in response to
             // an exact (raw-byte) query.
             if !is_value_bearing_secret(fetched_attr.attr_type)
-                && let Some(bytes) = &value_bytes
+                && let Some(secret) = secret_value
             {
                 ctx.context_manager
                     .attr_cache_put(
                         &ctx_id,
                         object_handle,
                         fetched_attr.attr_type,
-                        // ADR-0013 §5: adopt-via-copy; `bytes` also feeds the response below.
-                        CachedAttr { value: SecretBytes::new(bytes.clone()), ck_rv: CkRv::OK.0 },
+                        // W1-L13-15: the wiping owner moves in — no cache-put clone.
+                        CachedAttr { value: secret, ck_rv: CkRv::OK.0 },
                     )
                     .await;
             }
 
             ordered_results[orig_i] = Some(pkcs11_proxy_ng_proto::AttributeResult {
                 attr_type: fetched_attr.attr_type.0,
-                result: value_bytes.map(pkcs11_proxy_ng_proto::attribute_result::Result::Value),
+                result: plain_value.map(pkcs11_proxy_ng_proto::attribute_result::Result::Value),
                 actual_length,
             });
         }
@@ -417,11 +441,18 @@ pub(super) async fn get_attribute_value_exact(
 
     for (i, query) in queries.iter().enumerate() {
         if !is_value_bearing_secret(query.attr_type) {
-            if let Some(cached) =
-                ctx.context_manager.attr_cache_get(&ctx_id, object_handle, query.attr_type).await
-            {
+            // W1-L13-15: build the result from a borrowed entry instead of
+            // cloning it out of the map (the `value` clone inside
+            // `exact_result_from_cache` is inherent — the cache retains
+            // ownership while the response takes its own owner).
+            let hit = ctx
+                .context_manager
+                .attr_cache_get_with(&ctx_id, object_handle, query.attr_type, |cached| {
+                    exact_result_from_cache(query, cached)
+                })
+                .await;
+            if let Some(result) = hit {
                 crate::server::resilience::record_attr_coalesce_hit();
-                let result = exact_result_from_cache(query, &cached);
                 cache_overall_rv = merge_exact_rv(cache_overall_rv, exact_result_rv(&result));
                 ordered_results[i] = Some(result);
                 continue;
@@ -1408,6 +1439,98 @@ mod tests {
             u64::MAX,
             "M3(b): buffer-too-small cache hit must set returned_len to CK_UNAVAILABLE_INFORMATION"
         );
+    }
+
+    /// W1-L13-15: the single-owner conversion must adopt `Bytes`/`String`
+    /// payloads by move (no second allocation) and encode scalars
+    /// byte-identically to `attr_value_to_bytes`.
+    #[test]
+    fn single_owner_adopts_secret_payloads_without_copy() {
+        for value in [
+            CkAttributeValue::Bytes(SecretBytes::new(vec![0x5au8; 64])),
+            CkAttributeValue::String(SecretBytes::new(b"label-bytes".to_vec())),
+        ] {
+            let before = match &value {
+                CkAttributeValue::Bytes(secret) | CkAttributeValue::String(secret) => {
+                    secret.expose(|bytes| bytes.as_ptr())
+                }
+                _ => unreachable!("fixture holds only secret payloads"),
+            };
+            let owned = super::attr_value_to_secret_bytes(value);
+            let after = owned.expose(|bytes| bytes.as_ptr());
+            assert_eq!(before, after, "secret payloads must be adopted by move, not copied");
+        }
+        for scalar in [
+            CkAttributeValue::Ulong(0x0102_0304_0506_0708),
+            CkAttributeValue::Bool(true),
+            CkAttributeValue::NestedTemplate(vec![]),
+        ] {
+            let expected = attr_value_to_bytes(scalar.clone());
+            let owned = super::attr_value_to_secret_bytes(scalar);
+            owned.expose(|bytes| {
+                assert_eq!(bytes, expected.as_slice(), "scalar encoding must match");
+            });
+        }
+    }
+
+    /// W1-L13-15: the single-owner coalesced path serves byte-identical
+    /// responses with one copy — a repeated read hits the cache (no second
+    /// backend call) and returns identical bytes.
+    #[tokio::test]
+    async fn single_owner_coalesced_responses_byte_identical() {
+        enable_coalesce();
+        let mock = mock_with_attrs();
+        let (ctx, ctx_id, session_handle) =
+            setup_with_mock(mock.clone(), allow_policy(), Some(MTLS_IDENTITY.into())).await;
+        ctx.context_manager
+            .get_context(&ctx_id, |c| {
+                c.object_handles.insert(BackendHandle(1)); // virtual = 1
+                c.object_private.insert(VirtualHandle(1), false);
+            })
+            .await;
+
+        let make_request = || pkcs11_proxy_ng_proto::GetAttributeValueRequest {
+            client_context_id: ctx_id.0.clone(),
+            session_handle,
+            object_handle: 1,
+            template: vec![pkcs11_proxy_ng_proto::Attribute {
+                attr_type: CkAttributeType::LABEL.0,
+                value: None,
+            }],
+        };
+
+        let resp1 = super::get_attribute_value(&ctx, Request::new(make_request()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp1.ck_rv, CkRv::OK.0);
+        assert_eq!(mock.attr_get_call_count(), 1, "first read must call the backend once");
+        let first_value = match resp1.results[0].result.clone() {
+            Some(pkcs11_proxy_ng_proto::attribute_result::Result::Value(bytes)) => bytes,
+            other => panic!("LABEL must return bytes, got {other:?}"),
+        };
+        assert_eq!(first_value, b"my-label", "response bytes must match the backend value");
+
+        let resp2 = super::get_attribute_value(&ctx, Request::new(make_request()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            mock.attr_get_call_count(),
+            1,
+            "repeated read must be served from cache (no second backend call)"
+        );
+        assert_eq!(resp1.results, resp2.results, "cached read must be byte-identical");
+
+        // The cache put received the moved owner: the entry matches the response.
+        let cached = ctx
+            .context_manager
+            .attr_cache_get(&ctx_id, 1, CkAttributeType::LABEL)
+            .await
+            .expect("LABEL must be cached after the fetch");
+        cached.value.expose(|bytes| {
+            assert_eq!(bytes, b"my-label", "cached bytes must match the response");
+        });
     }
 
     #[test]

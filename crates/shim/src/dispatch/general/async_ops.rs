@@ -40,11 +40,22 @@ pub unsafe extern "C" fn c_async_complete(
             Ok((version, value, value_len, object_handle, additional_object_handle)) => {
                 let async_data = unsafe { &mut *p_async_data };
                 async_data.ulVersion = version as CK_ULONG;
-                // Write value bytes into the async_data value buffer.
-                // The caller must provide the pValue buffer;
-                // we copy data into it if there is space.
-                if !async_data.pValue.is_null() && async_data.ulValue > 0 {
-                    let copy_len = value.len().min(async_data.ulValue as usize);
+                async_data.hObject = object_handle.0 as CK_OBJECT_HANDLE;
+                async_data.hAdditionalObject = additional_object_handle.0 as CK_OBJECT_HANDLE;
+                // Standard two-call semantics for the caller-provided value
+                // buffer: a null buffer is a length query; a buffer smaller
+                // than the result is BUFFER_TOO_SMALL with the required
+                // length — never a silent truncation (W1-C6-02).
+                if !async_data.pValue.is_null() {
+                    let capacity = async_data.ulValue as usize;
+                    if (value_len as usize) > capacity {
+                        async_data.ulValue = value_len as CK_ULONG;
+                        return rv_err(CkRv::BUFFER_TOO_SMALL);
+                    }
+                    // Capacity covers the required length; clamp the copy so
+                    // that even inconsistent over-long value bytes cannot
+                    // overrun the caller buffer.
+                    let copy_len = value.len().min(capacity);
                     if copy_len > 0 {
                         unsafe {
                             std::ptr::copy_nonoverlapping(
@@ -56,8 +67,6 @@ pub unsafe extern "C" fn c_async_complete(
                     }
                 }
                 async_data.ulValue = value_len as CK_ULONG;
-                async_data.hObject = object_handle.0 as CK_OBJECT_HANDLE;
-                async_data.hAdditionalObject = additional_object_handle.0 as CK_OBJECT_HANDLE;
                 rv_ok()
             }
             Err(e) => rv_err(e),
