@@ -19,13 +19,8 @@ use std::time::Duration;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
-use pkcs11_proxy_ng_proto::convert::message_params::{
-    MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
-};
-// ADR-0013 §5: every `secret_to_plain` use in this file is a prost wire-encoding
-// boundary (response/request construction); the standing justification lives in
-// `secret_boundary` docs. No plain copy is retained past the enclosing encode.
-use pkcs11_proxy_ng_proto::secret_boundary::secret_to_plain;
+use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::context_manager::{
@@ -499,104 +494,21 @@ async fn message_encrypt_init_with_timeout(
             }
         };
 
-        // Normal init path: resolve session + key, parse mechanism.
-        let (session, key) =
-            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
-                Ok(handles) => handles,
+        let init_param =
+            match req.init_message_parameter.as_ref().map(MessageParameter::try_from).transpose() {
+                Ok(p) => p,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
                         ck_rv: rv.0,
-                        ..Default::default()
                     }));
                 }
             };
 
-        let mut mechanism = match parse_mechanism(req.mechanism) {
-            Ok(m) => m,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
-                    ck_rv: rv.0,
-                    ..Default::default()
-                }));
-            }
-        };
-
-        // B1: remap object handles embedded in the mechanism parameters;
-        // gate each through per-object authz when active (C1).
-        if let Err(rv) =
-            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
-                .await
-        {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
-                ck_rv: rv.0,
-                ..Default::default()
-            }));
-        }
-
-        // Mechanism policy gate (G3-PR3 Task 3).
-        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
-                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
-                ..Default::default()
-            }));
-        }
-
         let backend = Arc::clone(backend_ref);
-        let init_param_for_response = init_param.clone();
-        let installed_shape = contract.as_ref().map_or_else(
-            || {
-                MessageParameterShape::from_registry_name(
-                    ctx.mechanism_registry_source
-                        .current_registry()
-                        .param_shape(mechanism.mechanism_type.0),
-                )
-            },
-            |contract| contract.shape,
-        );
-        let mut transition = MessageOperationTransition::begin(operation);
-        let result = if let Some(ref contract) = contract {
-            let provider_spec = contract.provider_spec.clone();
-            spawn_backend_with_optional_timeout(timeout_override, move || {
-                transition.mark_started();
-                let provider_result = backend.message_encrypt_init_contract(
-                    session,
-                    &mechanism,
-                    init_param.as_ref(),
-                    key,
-                    &provider_spec,
-                );
-                match provider_result {
-                    Ok(result) if parameter_result_matches_spec(&result, &provider_spec) => {
-                        let outcome = Ok(());
-                        transition.settle(&outcome, Some(installed_shape));
-                        outcome
-                    }
-                    Ok(_) => {
-                        transition.settle_ambiguous();
-                        Err(CkRv::DEVICE_ERROR)
-                    }
-                    Err(error) => {
-                        let outcome = Err(error);
-                        transition.settle(&outcome, Some(installed_shape));
-                        outcome
-                    }
-                }
-            })
-            .await?
-        } else {
-            spawn_backend_with_optional_timeout(timeout_override, move || {
-                transition.mark_started();
-                let result = backend.message_encrypt_init(
-                    session,
-                    Some(&mechanism),
-                    init_param.as_ref(),
-                    key,
-                );
-                transition.settle(&result, Some(installed_shape));
-                result
-            })
-            .await?
-        };
+        let result = spawn_backend(move || {
+            backend.message_encrypt_init(session, Some(&mechanism), init_param.as_ref(), key)
+        })
+        .await?;
 
         let ck_rv = match &result {
             Ok(()) => {
@@ -663,12 +575,8 @@ async fn message_encrypt_init_with_timeout(
         };
 
         let backend = Arc::clone(backend_ref);
-        let mut transition = MessageOperationTransition::begin(operation);
-        let result = spawn_backend_with_optional_timeout(timeout_override, move || {
-            transition.mark_started();
-            let result = backend.message_encrypt_init(session, None, None, CkObjectHandle(0));
-            transition.settle(&result, None);
-            result
+        let result = spawn_backend(move || {
+            backend.message_encrypt_init(session, None, None, CkObjectHandle(0))
         })
         .await?;
 
@@ -830,104 +738,21 @@ async fn message_decrypt_init_with_timeout(
             }
         };
 
-        // Normal init path: resolve session + key, parse mechanism.
-        let (session, key) =
-            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
-                Ok(handles) => handles,
+        let init_param =
+            match req.init_message_parameter.as_ref().map(MessageParameter::try_from).transpose() {
+                Ok(p) => p,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
                         ck_rv: rv.0,
-                        ..Default::default()
                     }));
                 }
             };
 
-        let mut mechanism = match parse_mechanism(req.mechanism) {
-            Ok(m) => m,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
-                    ck_rv: rv.0,
-                    ..Default::default()
-                }));
-            }
-        };
-
-        // B1: remap object handles embedded in the mechanism parameters;
-        // gate each through per-object authz when active (C1).
-        if let Err(rv) =
-            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
-                .await
-        {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
-                ck_rv: rv.0,
-                ..Default::default()
-            }));
-        }
-
-        // Mechanism policy gate (G3-PR3 Task 3).
-        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
-                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
-                ..Default::default()
-            }));
-        }
-
         let backend = Arc::clone(backend_ref);
-        let init_param_for_response = init_param.clone();
-        let installed_shape = contract.as_ref().map_or_else(
-            || {
-                MessageParameterShape::from_registry_name(
-                    ctx.mechanism_registry_source
-                        .current_registry()
-                        .param_shape(mechanism.mechanism_type.0),
-                )
-            },
-            |contract| contract.shape,
-        );
-        let mut transition = MessageOperationTransition::begin(operation);
-        let result = if let Some(ref contract) = contract {
-            let provider_spec = contract.provider_spec.clone();
-            spawn_backend_with_optional_timeout(timeout_override, move || {
-                transition.mark_started();
-                let provider_result = backend.message_decrypt_init_contract(
-                    session,
-                    &mechanism,
-                    init_param.as_ref(),
-                    key,
-                    &provider_spec,
-                );
-                match provider_result {
-                    Ok(result) if parameter_result_matches_spec(&result, &provider_spec) => {
-                        let outcome = Ok(());
-                        transition.settle(&outcome, Some(installed_shape));
-                        outcome
-                    }
-                    Ok(_) => {
-                        transition.settle_ambiguous();
-                        Err(CkRv::DEVICE_ERROR)
-                    }
-                    Err(error) => {
-                        let outcome = Err(error);
-                        transition.settle(&outcome, Some(installed_shape));
-                        outcome
-                    }
-                }
-            })
-            .await?
-        } else {
-            spawn_backend_with_optional_timeout(timeout_override, move || {
-                transition.mark_started();
-                let result = backend.message_decrypt_init(
-                    session,
-                    Some(&mechanism),
-                    init_param.as_ref(),
-                    key,
-                );
-                transition.settle(&result, Some(installed_shape));
-                result
-            })
-            .await?
-        };
+        let result = spawn_backend(move || {
+            backend.message_decrypt_init(session, Some(&mechanism), init_param.as_ref(), key)
+        })
+        .await?;
 
         let ck_rv = match &result {
             Ok(()) => {
@@ -994,12 +819,8 @@ async fn message_decrypt_init_with_timeout(
         };
 
         let backend = Arc::clone(backend_ref);
-        let mut transition = MessageOperationTransition::begin(operation);
-        let result = spawn_backend_with_optional_timeout(timeout_override, move || {
-            transition.mark_started();
-            let result = backend.message_decrypt_init(session, None, None, CkObjectHandle(0));
-            transition.settle(&result, None);
-            result
+        let result = spawn_backend(move || {
+            backend.message_decrypt_init(session, None, None, CkObjectHandle(0))
         })
         .await?;
 

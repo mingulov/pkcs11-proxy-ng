@@ -2021,14 +2021,32 @@ fn object_handle_param_round_trip() {
 fn sign_additional_context_round_trip() {
     let p = round_trip(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
         hedge_variant: 1, // CKH_HEDGE_REQUIRED
-        context: vec![1, 2, 3].into(),
+        context: vec![1, 2, 3],
         hash: 0,
     }));
     match p {
         CkMechanismParams::SignAdditionalContext(v) => {
             assert_eq!(v.hedge_variant, 1);
-            assert_eq!(v.context, vec![1, 2, 3].into());
+            assert_eq!(v.context, vec![1, 2, 3]);
             assert_eq!(v.hash, 0);
+        }
+        other => panic!("expected SignAdditionalContext, got {other:?}"),
+    }
+}
+
+#[test]
+fn hash_sign_additional_context_round_trip() {
+    // The generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA carry the hash mechanism.
+    let p = round_trip(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
+        hedge_variant: 1,
+        context: vec![4, 5],
+        hash: 0x0000_0250, // CKM_SHA256
+    }));
+    match p {
+        CkMechanismParams::SignAdditionalContext(v) => {
+            assert_eq!(v.hedge_variant, 1);
+            assert_eq!(v.context, vec![4, 5]);
+            assert_eq!(v.hash, 0x0000_0250);
         }
         other => panic!("expected SignAdditionalContext, got {other:?}"),
     }

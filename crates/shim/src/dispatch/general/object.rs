@@ -18,7 +18,6 @@ pub unsafe extern "C" fn c_find_objects_init(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        let template_opt = null_preserving_template(&template, p_template);
         unit_result_to_rv(with_client!(client => client.find_objects_init(
             CkSessionHandle(h_session as u64),
             template_opt,
@@ -190,9 +189,7 @@ pub unsafe extern "C" fn c_create_object(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        let template_opt = null_preserving_template(&template, p_template);
-        match with_client!(client => client.create_object(CkSessionHandle(h_session as u64), template_opt))
-        {
+        match with_client!(client => client.create_object(CkSessionHandle(h_session), &template)) {
             Ok(handle) => {
                 unsafe { write_object_handle_output(handle, ph_object) };
                 rv_ok()
@@ -217,7 +214,6 @@ pub unsafe extern "C" fn c_copy_object(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        let template_opt = null_preserving_template(&template, p_template);
         match with_client!(client => client.copy_object(
             CkSessionHandle(h_session as u64),
             CkObjectHandle(h_object as u64),
@@ -279,7 +275,6 @@ pub unsafe extern "C" fn c_set_attribute_value(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        let template_opt = null_preserving_template(&template, p_template);
         unit_result_to_rv(with_client!(client => client.set_attribute_value(
             CkSessionHandle(h_session as u64),
             CkObjectHandle(h_object as u64),

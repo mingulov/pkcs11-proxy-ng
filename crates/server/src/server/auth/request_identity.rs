@@ -1,5 +1,4 @@
 use crate::config::{TcpAuthMode, UnixAuthMode};
-#[cfg(unix)]
 use tonic::transport::server::UdsConnectInfo;
 use tonic::{Request, Status};
 
@@ -13,23 +12,17 @@ use super::identity::AuthenticatedIdentity;
 /// equivalent of mutual auth; a Unix socket has no network to run mTLS over).
 /// Every other connection is TCP and is authenticated via `tcp_auth` (mTLS).
 /// `none` on either transport yields [`AuthenticatedIdentity::Unauthenticated`].
-/// On non-Unix hosts the Unix transport does not exist (config validation
-/// rejects `[listener.local]` there), so every request is TCP.
 pub fn identity_from_request<T>(
     request: &Request<T>,
     tcp_auth: TcpAuthMode,
     unix_auth: UnixAuthMode,
 ) -> Result<AuthenticatedIdentity, Status> {
-    #[cfg(unix)]
     if let Some(uds) = request.extensions().get::<UdsConnectInfo>() {
         return identity_from_uds(uds, unix_auth);
     }
-    #[cfg(not(unix))]
-    let _ = unix_auth;
     identity_from_tcp(request, tcp_auth)
 }
 
-#[cfg(unix)]
 fn identity_from_uds(
     uds: &UdsConnectInfo,
     unix_auth: UnixAuthMode,
@@ -37,16 +30,9 @@ fn identity_from_uds(
     match unix_auth {
         UnixAuthMode::None => Ok(AuthenticatedIdentity::Unauthenticated),
         UnixAuthMode::PeerCred => {
-            // Peer credentials are captured by tonic at accept time
-            // (`UnixStream::peer_cred`, Linux SO_PEERCRED) and cannot be
+            // SO_PEERCRED is captured by tonic at accept time and cannot be
             // forged by the peer. Its absence means the kernel did not provide
             // credentials — fail closed rather than fall through unauthenticated.
-            // macOS: supported too — pinned tokio 1.50.0 implements
-            // `get_peer_cred` for target_os = "macos" via getpeereid(2) +
-            // LOCAL_PEEREPID (`impl_macos` in tokio's net/unix/ucred.rs), and
-            // tonic sets `peer_cred: self.peer_cred().ok()`, so peer-cred mode
-            // yields Some(UCred) there. `auth = "none"` on loopback and the
-            // fail-closed None arm are unaffected on every target.
             let cred = uds.peer_cred.ok_or_else(|| {
                 Status::unauthenticated("unix peer credentials unavailable (SO_PEERCRED)")
             })?;
@@ -80,7 +66,6 @@ fn identity_from_tcp<T>(
 #[cfg(test)]
 mod tests {
     use crate::config::{TcpAuthMode, UnixAuthMode};
-    #[cfg(unix)]
     use tonic::transport::server::UdsConnectInfo;
     use tonic::{Code, Request};
 
@@ -101,7 +86,6 @@ mod tests {
         assert_eq!(err.code(), Code::Unauthenticated);
     }
 
-    #[cfg(unix)]
     #[test]
     fn unix_none_auth_is_unauthenticated_even_with_uds_connect_info() {
         let mut request = Request::new(());
@@ -114,7 +98,6 @@ mod tests {
         assert_eq!(identity.to_string(), "unauthenticated");
     }
 
-    #[cfg(unix)]
     #[test]
     fn unix_peer_cred_without_credentials_fails_closed() {
         let mut request = Request::new(());

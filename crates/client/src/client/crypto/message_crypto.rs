@@ -1,7 +1,4 @@
-use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
-use pkcs11_proxy_ng_proto::convert::message_params::{
-    MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
-};
+use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
 use crate::client::Pkcs11Client;
@@ -175,8 +172,6 @@ impl Pkcs11Client {
             mechanism: mechanism.map(Self::proto_mechanism),
             key_handle: key.0,
             init_message_parameter: init_param.map(Into::into),
-            parameter_out_spec: None,
-            parameter_shape: None,
         };
         let response = self
             .grpc
@@ -284,8 +279,6 @@ impl Pkcs11Client {
             mechanism: mechanism.map(Self::proto_mechanism),
             key_handle: key.0,
             init_message_parameter: init_param.map(Into::into),
-            parameter_out_spec: None,
-            parameter_shape: None,
         };
         let response = self
             .grpc

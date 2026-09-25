@@ -10,7 +10,7 @@ use pkcs11_proxy_ng_types::*;
 
 use super::super::super::context_manager::{ClientContextId, ContextManager, LoginState};
 use super::super::super::handle_map::VirtualHandle;
-use super::super::service_utils::{login_lock_timeout, spawn_backend};
+use super::super::service_utils::spawn_backend;
 
 fn login_state_for_user_type(user_type: CkUserType) -> Option<LoginState> {
     match user_type {
@@ -25,35 +25,6 @@ fn already_logged_in_rv(current: LoginState, requested: LoginState) -> CkRv {
         CkRv::USER_ALREADY_LOGGED_IN
     } else {
         CkRv::USER_ANOTHER_ALREADY_LOGGED_IN
-    }
-}
-
-/// Resolve a virtual session to its backend session, owning slot, and current
-/// login state in a single context-locked read (shared by login/logout — M7).
-/// Returns the CK_RV the caller should surface when the context is gone
-/// (`CRYPTOKI_NOT_INITIALIZED`) or the session handle is unknown
-/// (`SESSION_HANDLE_INVALID`).
-async fn resolve_session_slot_login(
-    ctx_mgr: &Arc<ContextManager>,
-    ctx_id: &ClientContextId,
-    session_handle: u64,
-) -> Result<(CkSessionHandle, BackendSlotId, Option<LoginState>), CkRv> {
-    let resolved = ctx_mgr
-        .get_context(ctx_id, |ctx| {
-            let virtual_session = VirtualHandle(session_handle);
-            let backend_session = ctx.session_handles.resolve(virtual_session);
-            let slot = ctx.session_slots.get(&virtual_session).copied();
-            let current_login_state = slot.and_then(|slot| ctx.login_state.get(&slot).copied());
-            (backend_session, slot, current_login_state)
-        })
-        .await;
-
-    match resolved {
-        None => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
-        Some((Some(backend_session), Some(slot), current_login_state)) => {
-            Ok((CkSessionHandle(backend_session.0 as u64), slot, current_login_state))
-        }
-        Some(_) => Err(CkRv::SESSION_HANDLE_INVALID),
     }
 }
 
@@ -75,68 +46,56 @@ pub(super) async fn login(
     };
     let requested_login_state = login_state_for_user_type(user_type);
 
-    let (session, slot, current_login_state) =
-        match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
-            Ok(resolved) => resolved,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse { ck_rv: rv.0 }));
-            }
-        };
+    let session_context = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            let virtual_session = VirtualHandle(req.session_handle);
+            let backend_session = ctx.session_handles.resolve(virtual_session);
+            let slot = ctx.session_slots.get(&virtual_session).copied();
+            let current_login_state = slot.and_then(|slot| ctx.login_state.get(&slot).copied());
+            (backend_session, slot, current_login_state)
+        })
+        .await;
 
-    // Serialize login on this slot (M5): hold the per-slot lock across the
-    // cross-context login-state scan, the backend C_Login, and the login_state
-    // insert. Otherwise two clients racing the first login on the shared token
-    // both see "no other login" and both take the real-login path, and the
-    // second is answered USER_ALREADY_LOGGED_IN instead of the logical OK.
-    //
-    // Bounded acquisition (G2/V11): refuse rather than queue unboundedly when
-    // a slow/wedged backend C_Login pins the lock. CKR_DEVICE_ERROR signals a
-    // transient token-serialization failure the client can retry.
-    let login_guard = ctx_mgr.slot_login_lock(slot);
-    let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
-        Ok(guard) => guard,
-        Err(_elapsed) => {
-            // Another tenant holds the per-slot login lock past the configured
-            // bound (slow/wedged backend login on the shared token). Refuse
-            // rather than queue unboundedly; CKR_DEVICE_ERROR is a transient
-            // token-serialization failure the client can retry.
+    let (session, slot, current_login_state) = match session_context {
+        None => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-                ck_rv: CkRv::DEVICE_ERROR.0,
+                ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+            }));
+        }
+        Some((Some(backend_session), Some(slot), current_login_state)) => {
+            (CkSessionHandle(backend_session.0), slot, current_login_state)
+        }
+        Some(_) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+                ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
             }));
         }
     };
 
-    // G2-PR3: per-slot aggregate failed-login budget. Fast-reject during the
-    // cooldown window without touching the backend — the proxy stops feeding
-    // the backend's shared PIN-lockout counter. Inert (always false) when
-    // `per_slot_failed_login_budget` is unset → byte-identical to today.
-    // Indistinguishable from the lock-timeout DEVICE_ERROR above; the app
-    // already handles transient DEVICE_ERROR as a retriable failure.
-    if crate::server::rate_quota::login_slot_in_cooldown(slot) {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-            ck_rv: CkRv::DEVICE_ERROR.0,
-        }));
-    }
-
-    // Hold PIN bytes in `SecretBytes`: the backing buffer is overwritten
-    // when dropped, and Debug redacts the secret (audit/log safety net).
-    let pin = req.pin.map(SecretBytes::new);
-
-    // D6(3) reconciliation (Wave 3.5 tenancy ruling; supersedes ADR-0008): when
-    // another live context already holds a login on this slot, the shared
-    // backend token is logged in and would answer a second backend C_Login
-    // with USER_ALREADY_LOGGED_IN *without* checking the PIN. The daemon
-    // therefore cannot PIN-verify this login against the token, so it returns
-    // the backend's answer faithfully and mints NO logical login — never a
-    // login on an unverified PIN. The caller retries after the holder releases
-    // the slot (last-context-out backend logout, D6(2), bounds the window).
     if current_login_state.is_none()
         && let Some(requested) = requested_login_state
-        && let Some(other_login_state) = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id)
     {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
-            ck_rv: already_logged_in_rv(other_login_state, requested).0,
-        }));
+        if let Some(other_login_state) = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id)
+        {
+            if other_login_state == requested {
+                let _ = ctx_mgr
+                    .get_context(&ctx_id, |ctx| {
+                        ctx.login_state.insert(slot, requested);
+                    })
+                    .await;
+                info!(
+                    context_id = %ctx_id.0,
+                    user_type = req.user_type,
+                    "Login completed logically"
+                );
+                return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+                    ck_rv: CkRv::OK.0,
+                }));
+            }
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LoginResponse {
+                ck_rv: already_logged_in_rv(other_login_state, requested).0,
+            }));
+        }
     }
 
     let user_type_raw = req.user_type;
@@ -150,9 +109,6 @@ pub(super) async fn login(
 
     let ck_rv = match &result {
         Ok(()) => {
-            // G2-PR3: backend accepted the PIN → reset the slot's failure counter
-            // so the budget window starts fresh on the next wrong-PIN attempt.
-            crate::server::rate_quota::record_login_success(slot);
             if let Some(login_state) = requested_login_state {
                 let _ = ctx_mgr
                     .get_context(&ctx_id, |ctx| {
@@ -192,28 +148,28 @@ pub(super) async fn logout(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, slot, current_login_state) =
-        match resolve_session_slot_login(ctx_mgr, &ctx_id, req.session_handle).await {
-            Ok(resolved) => resolved,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv: rv.0 }));
-            }
-        };
+    let session_context = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            let virtual_session = VirtualHandle(req.session_handle);
+            let backend_session = ctx.session_handles.resolve(virtual_session);
+            let slot = ctx.session_slots.get(&virtual_session).copied();
+            let current_login_state = slot.and_then(|slot| ctx.login_state.get(&slot).copied());
+            (backend_session, slot, current_login_state)
+        })
+        .await;
 
-    // Serialize logout against concurrent login/logout on the same slot (M5),
-    // so the cross-context scan and the login_state removal stay atomic.
-    //
-    // Bounded acquisition (G2/V11): same cross-tenant DoS bound as login.
-    let login_guard = ctx_mgr.slot_login_lock(slot);
-    let _login_lock = match tokio::time::timeout(login_lock_timeout(), login_guard.lock()).await {
-        Ok(guard) => guard,
-        Err(_elapsed) => {
-            // Another tenant holds the per-slot login lock past the configured
-            // bound (slow/wedged backend login on the shared token). Refuse
-            // rather than queue unboundedly; CKR_DEVICE_ERROR is a transient
-            // token-serialization failure the client can retry.
+    let (session, slot, current_login_state) = match session_context {
+        None => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse {
-                ck_rv: CkRv::DEVICE_ERROR.0,
+                ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
+            }));
+        }
+        Some((Some(backend_session), Some(slot), current_login_state)) => {
+            (CkSessionHandle(backend_session.0), slot, current_login_state)
+        }
+        Some(_) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse {
+                ck_rv: CkRv::SESSION_HANDLE_INVALID.0,
             }));
         }
     };
@@ -232,11 +188,6 @@ pub(super) async fn logout(
                 ctx.login_state.remove(&slot);
             })
             .await;
-        // C1: per PKCS#11 §11.6, C_Logout invalidates the application's handles to
-        // private objects. The coalescer must not serve cached attributes of those
-        // handles after logout. Evicting the entire cache is conservative + correct;
-        // over-invalidating public entries is only a performance miss, not a bug.
-        ctx_mgr.attr_cache_clear(&ctx_id).await;
         info!(context_id = %ctx_id.0, "Logout completed logically");
         return Ok(Response::new(pkcs11_proxy_ng_proto::LogoutResponse { ck_rv: CkRv::OK.0 }));
     }
@@ -251,11 +202,6 @@ pub(super) async fn logout(
                     ctx.login_state.remove(&slot);
                 })
                 .await;
-            // C1: per PKCS#11 §11.6, C_Logout invalidates the application's handles to
-            // private objects. The coalescer must not serve cached attributes of those
-            // handles after logout. Evicting the entire cache is conservative + correct;
-            // over-invalidating public entries is only a performance miss, not a bug.
-            ctx_mgr.attr_cache_clear(&ctx_id).await;
             info!(context_id = %ctx_id.0, "Logout succeeded");
             CkRv::OK.0
         }

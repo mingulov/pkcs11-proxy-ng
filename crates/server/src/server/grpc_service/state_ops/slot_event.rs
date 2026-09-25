@@ -39,44 +39,26 @@ pub(super) async fn wait_for_slot_event(
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.wait_for_slot_event(flags)).await?;
 
-    let backend_slot = match result {
-        Ok(backend_slot) => BackendSlotId(backend_slot),
-        Err(error) => {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
-                ck_rv: error.0,
+    match result {
+        Ok(backend_slot) => match ctx_mgr.to_virtual_slot(backend_slot).await {
+            Some(virtual_slot) => {
+                Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
+                    ck_rv: CkRv::OK.0,
+                    slot_id: virtual_slot.0,
+                }))
+            }
+            // No virtual mapping for this client: never leak the raw backend
+            // slot id. Report no event rather than disclosing an unmapped slot.
+            // (TODO M13 follow-up: also run slot_is_authorized to suppress
+            // events for mapped-but-unauthorized tokens.)
+            None => Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
+                ck_rv: CkRv::NO_EVENT.0,
                 slot_id: 0,
-            }));
-        }
-    };
-
-    // Never leak the raw backend slot id: an event for a slot this client has
-    // no virtual mapping for is reported as no-event (M13).
-    let Some(virtual_slot) = ctx_mgr.to_virtual_slot(backend_slot).await else {
-        return Ok(no_event());
-    };
-
-    // Suppress events for tokens this client is not authorized to see, so the
-    // insertion/removal of a token outside its policy is not disclosed (M13).
-    // An unauthenticated context bypasses the policy (slot_is_authorized → true),
-    // preserving prior behavior; any policy denial or token-info error fails
-    // closed to no-event rather than leaking the slot.
-    match slot_is_authorized(ctx_mgr, backend_ref, token_policy, &ctx_id, backend_slot).await? {
-        Ok(true) => Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
-            ck_rv: CkRv::OK.0,
-            slot_id: virtual_slot.0,
+            })),
+        },
+        Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
+            ck_rv: error.0,
+            slot_id: 0,
         })),
-        // Ownership §"Slot-event scope": a policy follow-up refused by a
-        // sealed backend (or a context that disappeared mid-call) answers
-        // local NOT_INITIALIZED with no slot output — the wait's actual OK
-        // observation is retained, never published as an event and never
-        // downgraded to NO_EVENT. Every other denial or backend error
-        // still suppresses to no-event.
-        Err(error) if error == CkRv::CRYPTOKI_NOT_INITIALIZED => {
-            Ok(Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
-                ck_rv: CkRv::CRYPTOKI_NOT_INITIALIZED.0,
-                slot_id: 0,
-            }))
-        }
-        _ => Ok(no_event()),
     }
 }

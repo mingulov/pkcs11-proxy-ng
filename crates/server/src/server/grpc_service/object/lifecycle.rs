@@ -2,10 +2,9 @@ use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_types::CkRv;
 
-use super::super::super::context_manager::ClientContextId;
+use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::super::handle_map::VirtualHandle;
-use super::super::HandlerContext;
-use super::super::convert_template_opt;
+use super::super::convert_template;
 use super::super::service_utils::{
     ck_rv_only, ensure_private_mint_allowed, object_is_private, register_session_object_handle,
     resolve_session, resolve_session_and_object, spawn_backend, template_declares_private_object,
@@ -194,28 +193,11 @@ pub(super) async fn destroy_object(
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || backend.destroy_object(session, object)).await?;
 
-    // On successful destroy, evict the virtual→backend mapping, the cached
-    // unique ID, the created-set entry, the recorded privacy bit, and all
-    // cached attribute entries so a recycled virtual handle cannot alias stale
-    // data, inherit created-status or privacy, or serve stale coalesced
-    // attributes for the now-destroyed object (B2, G3, G3-PR3 Task 2, R2 I1,
-    // D6(1)).
+    // On successful destroy, evict the virtual->backend mapping so a recycled
+    // backend object number can never alias this now-stale handle (B2).
     if result.is_ok() {
         let virtual_object = VirtualHandle(req.object_handle);
-        let _ = ctx
-            .context_manager
-            .get_context(&ctx_id, |client_ctx| {
-                client_ctx.object_handles.remove(virtual_object);
-                client_ctx.object_metadata.remove(&virtual_object);
-                client_ctx.created_objects.remove(&virtual_object);
-                client_ctx.object_private.remove(&virtual_object);
-                // I1: evict cached attribute entries for this object (R2 coalescer).
-                // Mirrors object_metadata + created_objects eviction so a recycled
-                // virtual handle cannot return stale cached attributes. Matches the
-                // eviction contract documented on the attr_cache field (context_manager.rs).
-                client_ctx.attr_cache.retain(|(vh, _), _| *vh != virtual_object);
-            })
-            .await;
+        let _ = ctx_mgr.get_context(&ctx_id, |ctx| ctx.object_handles.remove(virtual_object)).await;
     }
 
     Ok(Response::new(pkcs11_proxy_ng_proto::DestroyObjectResponse { ck_rv: ck_rv_only(result) }))

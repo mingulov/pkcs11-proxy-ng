@@ -353,7 +353,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         self.generate_key(session, mechanism, template).map(|h| (h, None))
     }

@@ -25,16 +25,6 @@ per instance contains a backend crash to that instance's clients — what the or
 sought — and the remaining client-visible failures are handled by **client reconnect/re-open**,
 not a daemon-side change.
 
-The selected v0.2 [native ownership contract](../release/native-mechanism-ownership.md)
-preserves this choice. One managed provider chain per embedding process avoids
-independent project-constructor aliases; it does not isolate tenants inside a
-daemon. The qualified Linux abnormal lifetime stop ends that entire thread
-group with status 70, affecting all co-located clients (and unrelated threads
-for direct embedders). Its implementation/qualification remains pending.
-Operators must configure a supervisor policy covering an ordinary nonzero exit;
-`on-abnormal`/`on-abort` alone do not cover it. Independent chains require
-separate processes. This amendment does not adopt the worker proposal below.
-
 The proposal below, plus the design spec
 `doc/plans/2026-05-30-backend-process-isolation-design.md`, is kept as a documented fallback
 for a future single-endpoint, many-client deployment that needs crash-survivable connections

@@ -1153,14 +1153,6 @@ message MessageEncryptInitRequest {
   // `mechanism` carries only the type and this carries the message params;
   // the backend reconstructs the *_MESSAGE_PARAMS struct for C_MessageEncryptInit.
   optional MessageParameter init_message_parameter = 5;
-  optional ParameterRoundtripSpec parameter_out_spec = 6;
-  optional MessageParameterShape parameter_shape = 7;
-}
-message MessageEncryptInitResponse {
-  uint64 ck_rv = 1;
-  optional ParameterRoundtripResult parameter_result = 2;
-  optional MessageParameter init_message_parameter = 3;
-  optional MessageParameterShape parameter_shape = 4;
 }
 
 // C_EncryptMessage
@@ -1233,14 +1225,6 @@ message MessageDecryptInitRequest {
   // AEAD message-based init params (CK_GCM/CCM_MESSAGE_PARAMS); see
   // MessageEncryptInitRequest.init_message_parameter.
   optional MessageParameter init_message_parameter = 5;
-  optional ParameterRoundtripSpec parameter_out_spec = 6;
-  optional MessageParameterShape parameter_shape = 7;
-}
-message MessageDecryptInitResponse {
-  uint64 ck_rv = 1;
-  optional ParameterRoundtripResult parameter_result = 2;
-  optional MessageParameter init_message_parameter = 3;
-  optional MessageParameterShape parameter_shape = 4;
 }
 
 // C_DecryptMessage

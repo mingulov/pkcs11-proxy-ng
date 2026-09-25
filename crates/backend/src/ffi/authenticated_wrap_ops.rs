@@ -95,14 +95,23 @@ impl FfiBackend {
                     },
                 ));
             }
-        };
-        let returned_len = bytes.len() as u64;
-        let value =
-            if param_out_spec.buffer_present && !bytes.is_empty() { Some(bytes) } else { None };
-        let parameter = CkParameterRoundtripResult { ck_rv: main.ck_rv, returned_len, value };
-        Ok((main, parameter))
-    }
-}
+        } else {
+            // Data query: allocate caller-specified buffer.
+            let capped = super::call_helpers::capped_output_len(output_spec.buffer_len as u64);
+            out_len = capped as cryptoki_sys::CK_ULONG;
+            let mut buf = vec![0u8; capped];
+            let rv = unsafe {
+                f(
+                    Self::session_handle(session),
+                    &mut ffi_mech.ck_mechanism,
+                    Self::object_handle(wrapping_key),
+                    Self::object_handle(key),
+                    aad.as_ptr() as *mut cryptoki_sys::CK_BYTE,
+                    Self::ulong_len(aad.len()),
+                    buf.as_mut_ptr(),
+                    &mut out_len,
+                )
+            };
 
 #[cfg(all(test, unix))]
 mod tests {

@@ -41,7 +41,7 @@ pub unsafe extern "C" fn c_wrap_key(
                 // the main output pointer. Ordinary size queries keep the
                 // historical no-writeback behavior.
                 if rv == rv_ok()
-                    && (spec.buffer_present || spec.length_pointer_null)
+                    && spec.buffer_present
                     && let Some(params) = mechanism_out
                 {
                     unsafe { write_mechanism_output_params(p_mechanism, &params) };
@@ -71,18 +71,12 @@ pub unsafe extern "C" fn c_unwrap_key(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        let template_opt = null_preserving_template(&template, p_template);
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let wrapped_key = match input_buf_to_ck_in_buf(unsafe {
-            classify_input(p_wrapped_key, ul_wrapped_key_len)
-        }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
+        let wrapped_key = unsafe { read_input_slice(p_wrapped_key, ul_wrapped_key_len) };
         match with_client!(client => client.unwrap_key(
             CkSessionHandle(h_session as u64),
             &mech,
@@ -122,7 +116,6 @@ pub unsafe extern "C" fn c_derive_key(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        let template_opt = null_preserving_template(&template, p_template);
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -178,16 +171,15 @@ pub unsafe extern "C" fn c_generate_key(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        let template_opt = null_preserving_template(&template, p_template);
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
         match with_client!(client => client.generate_key_with_mechanism_out(
-            CkSessionHandle(h_session as u64),
+            CkSessionHandle(h_session),
             &mech,
-            template_opt,
+            &template,
         )) {
             Ok((handle, mechanism_out)) => {
                 // Write any HSM-mutated mechanism field back into the caller's
@@ -225,14 +217,12 @@ pub unsafe extern "C" fn c_generate_key_pair(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        let pub_opt = null_preserving_template(&pub_tmpl, p_public_key_template);
         let priv_tmpl = match unsafe {
             ck_attrs_to_rust_checked(p_private_key_template, ul_private_key_attribute_count)
         } {
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        let priv_opt = null_preserving_template(&priv_tmpl, p_private_key_template);
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;

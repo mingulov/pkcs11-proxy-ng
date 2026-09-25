@@ -1138,7 +1138,7 @@ pub struct KeyDerivationStringData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignAdditionalContext {
     pub hedge_variant: u64,
-    pub context: SecretBytes,
+    pub context: Vec<u8>,
     /// 0 = plain CK_SIGN_ADDITIONAL_CONTEXT; non-zero = CK_HASH_SIGN_ADDITIONAL_CONTEXT.
     pub hash: u64,
 }

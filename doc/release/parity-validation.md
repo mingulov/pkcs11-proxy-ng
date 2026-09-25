@@ -1,17 +1,10 @@
-# Parity Validation for public `v0.1.0` (direct vs. proxied)
+# Parity Validation (direct vs. proxied)
 
-Public `v0.1.0`'s core claim is behavioral transparency: for the validated providers,
+The beta's core claim is behavioral transparency: for the validated providers,
 running through `pkcs11-proxy-ng` produces the same observable PKCS#11 behavior
 as loading the backend module directly. This document describes how that is
 established and how mismatches are triaged. It is reproducible by anyone with the
 provider module and a PKCS#11 behavior suite (`pkcs11-check`).
-
-The local `v0.2.0` target is unreleased. Its local unit and integration coverage
-does not constitute a provenance-complete transparency matrix, so it has no
-parity or public support claim. A candidate must preserve the intended check
-commit, clean framework/test-data provenance, dated direct/proxied/comparison
-artifacts for the three representative providers, and an explicit 30-provider
-non-mock matrix before public-release language is considered.
 
 ## Method
 
@@ -58,7 +51,6 @@ property of preserving the backend's behavior, not of re-implementing it.
 
 ## Reporting
 
-Capture, per provider, the intended check commit, clean framework/test-data
-provenance, dated direct report, proxied report, and comparison result.
-Differences that survive triage as proxy bugs block the release; the rest are
-recorded as known differences/limitations with evidence.
+Capture, per provider, the direct report, the proxied report, and the comparison
+result. Differences that survive triage as proxy bugs block the release; the rest
+are recorded as known differences/limitations with evidence.

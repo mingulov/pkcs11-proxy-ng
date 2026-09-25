@@ -1,15 +1,14 @@
 # 32/64-bit Cross-Platform Compatibility Strategy
 
 **Document:** ADR-0006  
-**Status:** Accepted — 32-bit / mixed-arch **deferred** for public `v0.1.0`; v0.2 scope amended below
-
+**Status:** Accepted — 32-bit / mixed-arch **deferred** (out of scope for the `0.x` beta)  
 **Date:** 2026-03-29 (decision recorded 2026-06-04)
 
 ---
 
 ## Decision (scope for the beta)
 
-The public `v0.1.0` beta supports **Linux `x86_64` only**. 32-bit and mixed
+The `0.x` public beta supports **Linux `x86_64` only**. 32-bit and mixed
 32/64-bit deployments are **deferred**: they are not supported and not a beta
 claim (see [beta support matrix](../release/beta-support-matrix.md)).
 
@@ -23,67 +22,6 @@ instance** by the daemon (see
 [ADR-0002](./ADR-0002-handle-session-identity-model.md)); backend handle values
 are not exposed to clients. Handle-width concerns therefore live at the
 daemon↔backend boundary, not on the wire to the client.
-
----
-
-## Amendment (2026-06-29): narrow-`CK_ULONG` bridging & the three ABIs → see ADR-0011
-
-**v0.2 superseding amendment (2026-09-13; implementation/qualification pending):**
-Production live FFI is limited to qualified Linux GNU/musl x86_64/64-bit and
-x86/32-bit (i686). This supersedes the Windows native-provider daemon support
-intent below and in ADR-0011 for v0.2. Windows native loading is deferred,
-lower priority/stretch work. Portable Windows client/shim/proto/types,
-mock-only backend/server builds and Windows-client/Linux-daemon interoperation
-remain under their existing contracts. Nonqualified hosts must refuse FFI
-construction before loading/discovery; retain Windows compile CI and add that
-refusal coverage. No unsafe fallback is selected. See the exact platform,
-native-width/slot-event and evidence rules in the
-[native ownership contract](../release/native-mechanism-ownership.md).
-The ABI analysis below does not itself qualify any v0.2 native runtime.
-
-[Tail-stretch closure, 2026-09-17: the Windows-native-loading deferral in
-this amendment — and the "Deferred for v0.2" Windows x64/LLP64
-native-provider-server row in the support-intent table below — is closed:
-[ADR-0014](./ADR-0014-v020-tail-platform-stretch.md) is Implemented, with
-real-Windows daemon-host receipts in workspace-root
-`artifacts/v020-tail-windows-2026-09-16/` legs A and C, and shim-direction
-receipts in leg B. The amendment text and bridge analysis are retained as
-history.]
-
-This ADR's original analysis modelled two ABIs on a single axis (LP64 vs ILP32,
-where pointer width and `CK_ULONG` width move *together*). That is incomplete:
-**Windows x64 is LLP64** — `CK_ULONG` is 32-bit while pointers are 64-bit and
-structs are `pack(1)` — so **`CK_ULONG` width is independent of pointer width**.
-
-[ADR-0011](./ADR-0011-narrow-ck-ulong-client-width-bridging.md) supersedes the
-"NOT SUPPORTED" rows of the matrix below for the **bridged** cases. Key results:
-
-- The gRPC wire is width-agnostic (`u64`); the only properties that cross the
-  wire are each edge's **`CK_ULONG` width + byte order**. **Pointer width and
-  struct packing are purely local** to each edge (handled by `cryptoki-sys`
-  per-target bindings), so they never reach the wire.
-- A width bridge translates `CK_ULONG`-semantic *attribute values* (the only
-  outputs carried as raw native-width bytes) to the destination width — **both
-  directions** — with checked narrowing and explicit sentinel handling. The
-  narrowing/reject edge moves with direction (client-output for a narrow client;
-  server-*input* for a narrow backend). Handles remain virtualised (per ADR-0002).
-- Three ABIs (LP64 / ILP32 / **LLP64**) may appear on **either** edge; one bridge
-  covers all combinations. A 32-bit-`CK_ULONG` **server** is therefore possible —
-  notably a **Windows x64 (LLP64) server** proxying a Windows-only PKCS#11 `.dll`.
-
-**Updated support intent** (still beta-gated on the standard x86_64 Linux build):
-
-| Topology | Status |
-|---|---|
-| 64-bit client ↔ 64-bit Linux server/backend | Supported (beta) |
-| **32-bit-`CK_ULONG` client** (i686, armv7, Windows x64) ↔ 64-bit server | **Designed (ADR-0011); the narrow-client shipping track** |
-| 64-bit client ↔ **32-bit-`CK_ULONG` Linux server/backend** (i686) | v0.2 qualification target; complete native owner/stop receipts required |
-| Client ↔ **Windows x64/LLP64 native-provider server** | Deferred for v0.2 by the 2026-09-13 amendment; historical bridge/port analysis retained |
-| mixed / big-endian | Out of scope — detected & refused at probe (D6) |
-
-The `CK_UNAVAILABLE_INFORMATION` sentinel analysis below remains the reference for
-*why* widths matter; ADR-0011 specifies the bidirectional handling (narrow = free
-truncation; widen = explicit all-ones mapping).
 
 ---
 
@@ -103,22 +41,6 @@ This creates potential compatibility issues when:
 ---
 
 ## Current Architecture Assessment
-
-### Shared target-layout facts
-
-Target-memory layout facts live in the rev-pinned upstream `pkcs11-abi`
-crate (consumed from `pkcs11-components` via `crates/backend/Cargo.toml`),
-not in this repository. Its default `native` feature provides
-compiler-derived offsets from the `cryptoki-sys` bindings; with default
-features disabled it is `no_std` and dependency-free and exposes
-allocation-free facts for conventional little-endian Linux LP64 and ILP32
-function lists and `CK_INTERFACE` entries. One ordered 104-name catalog
-generates both the native offset tables and pure name/ordinal lookup, and the
-shared version/provenance selector feeds the native `tables_for` adapter, so
-the layout facts do not change which legacy or standard-interface versions
-may be walked. This is a layout primitive for consumers that read another
-process. It does not itself identify a process ABI, authorize a provider
-interface, read process memory, or establish 32-bit runtime support.
 
 ### ✅ Strengths
 
@@ -288,7 +210,7 @@ debug_assert!(
 );
 ```
 
-**Location:** `crates/shim/src/dispatch/general/helpers/mod.rs`  
+**Location:** `crates/pkcs11-proxy-ng-shim/src/dispatch/general/helpers.rs`  
 **Impact:** Developer experience — clear error message when truncation would occur
 
 #### 3. Document Handle Range Requirements

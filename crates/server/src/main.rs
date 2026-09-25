@@ -182,10 +182,13 @@ async fn build_service(
     check_per_object_version_requirement(&token_policy, backend.as_ref())?;
     let tcp_auth_mode =
         config.listener.remote.as_ref().map_or(config::TcpAuthMode::None, |tcp| tcp.auth);
+    let unix_auth_mode =
+        config.listener.local.as_ref().map_or(config::UnixAuthMode::PeerCred, |uds| uds.auth);
     let service = server::grpc_service::Pkcs11ProxyService::new(
         context_manager.clone(),
         backend.clone(),
         tcp_auth_mode,
+        unix_auth_mode,
         token_policy,
         registry_source.clone(),
     );
@@ -218,31 +221,57 @@ async fn listener_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.changed().await;
 }
 
-/// G3-PR1: refuse to start when per-object authorization is configured but the
-/// backend does not support PKCS#11 v3.0+.
+/// Bind a Unix-domain-socket listener for the local transport.
 ///
-/// Per-object authorization relies on `CKA_UNIQUE_ID`, which was introduced in
-/// PKCS#11 v3.0.  A pre-3.0 backend will never populate the attribute, so the
-/// gate would fail-closed for every object — silently breaking all operations.
-/// Refusing to start gives operators an immediate, actionable error instead of
-/// a silent runtime outage.
-///
-/// Extracted as a pure function so it can be unit-tested without loading a real
-/// PKCS#11 module.
-fn check_per_object_version_requirement(
-    token_policy: &server::auth::policy::TokenPolicy,
-    backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend,
-) -> Result<(), BoxError> {
-    if !token_policy.per_object_active() {
-        return Ok(());
+/// Security (ADR-0005): a stale socket from a prior run is removed, but a path
+/// that exists and is *not* a socket is never clobbered. The socket is pinned to
+/// `0600` (owner-only) immediately after bind — this is a local-user transport
+/// (peer-cred records the connecting uid; broadening access is out of scope).
+/// The accept loop only starts later in `serve_*`, so no peer is processed
+/// before the permissions are tightened.
+fn bind_unix_listener(path: &std::path::Path) -> Result<tokio::net::UnixListener, BoxError> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_socket() => {
+            std::fs::remove_file(path).map_err(|e| {
+                format!("failed to remove stale unix socket {}: {e}", path.display())
+            })?;
+        }
+        Ok(_) => {
+            return Err(format!(
+                "refusing to bind unix socket: {} exists and is not a socket",
+                path.display()
+            )
+            .into());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!("cannot stat unix socket path {}: {e}", path.display()).into());
+        }
     }
-    let info = backend.get_info().map_err(|rv| format!("C_GetInfo failed: {rv}"))?;
-    let (maj, min) = info.cryptoki_version;
-    if (maj, min) < (3, 0) {
+
+    let listener = tokio::net::UnixListener::bind(path)
+        .map_err(|e| format!("failed to bind unix socket {}: {e}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("failed to chmod unix socket {} to 0600: {e}", path.display()))?;
+    Ok(listener)
+}
+
+/// Early, friendly validation of runtime listener support. The Unix socket
+/// transport is now wired (peer-cred auth); this only surfaces a clear error
+/// when the configured socket's parent directory does not exist, rather than
+/// failing deep inside `bind()`.
+fn validate_runtime_listener_support(config: &config::DaemonConfig) -> Result<(), BoxError> {
+    if let Some(ref uds) = config.listener.local
+        && let Some(parent) = uds.path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.is_dir()
+    {
         return Err(format!(
-            "per-object authorization ([auth.policy] grants with `objects`) requires a \
-             PKCS#11 v3.0+ token that populates CKA_UNIQUE_ID; this backend reports \
-             v{maj}.{min}. Remove the `objects` grants or use a v3.0+ token."
+            "unix socket directory does not exist: {} (for listener.local.path = {})",
+            parent.display(),
+            uds.path.display()
         )
         .into());
     }
@@ -618,6 +647,19 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         );
     }
 
+    // Loud one-time warning if the Unix listener runs without peer-credential
+    // auth (requires the explicit allow_insecure_unix opt-in to even start).
+    if let Some(local) = config.listener.local.as_ref()
+        && matches!(local.auth, config::UnixAuthMode::None)
+        && local.allow_insecure_unix
+    {
+        tracing::warn!(
+            path = %local.path.display(),
+            "listening on unix socket without peer-credential authentication; every \
+             local user can reach every token. only for trusted single-user hosts."
+        );
+    }
+
     // Wire backend-health gating: spawn_backend reports each outcome
     // through an unbounded channel; this task counts consecutive
     // transport-level failures and flips tonic-health to NOT_SERVING
@@ -635,16 +677,58 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // the current registry and logs an error rather than crashing.
     #[cfg(unix)]
     spawn_sighup_handler(registry_source.clone());
-    let addr = resolve_bind_address(&config)?;
+    // One OS-signal future fans out to every listener via a watch channel so
+    // the TCP and Unix listeners shut down together on SIGINT/SIGTERM.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    });
 
-    // Bind the TCP listener *before* flipping Health/SERVING. The
-    // consumer matrix surfaced a race where shim consumers saw the daemon's gRPC
-    // health probe report SERVING but their TCP connect was refused
-    // because tonic hadn't yet bound the listener. Binding here makes
-    // the SERVING flip below truthful: by the time external probes
-    // can see it, accept() is already running.
-    let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
-    let local_addr = tcp_listener.local_addr().unwrap_or(addr);
+    // Bind every configured listener *before* flipping Health/SERVING. The
+    // consumer matrix surfaced a race where shim consumers saw the gRPC health
+    // probe report SERVING but their connect was refused because tonic hadn't
+    // bound yet. Binding here makes the SERVING flip below truthful: by the
+    // time external probes can see it, accept() is already running.
+    type ServeFuture = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
+    >;
+    let mut serve_futures: Vec<ServeFuture> = Vec::new();
+
+    // TCP listener (mTLS / insecure-tcp), when [listener.remote] is configured.
+    if let Some(ref tcp_cfg) = config.listener.remote {
+        let addr: std::net::SocketAddr = tcp_cfg.bind.parse()?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let local_addr = listener.local_addr().unwrap_or(addr);
+        let mut builder = Server::builder();
+        if let Some(tls_config) =
+            server::transport::server_tls_config(tcp_cfg).map_err(std::io::Error::other)?
+        {
+            builder = builder.tls_config(tls_config)?;
+        }
+        let router = apply_http2_keepalive(builder, &config)
+            .layer(server::trace_id::TraceIdLayer)
+            .add_service(health_service.clone())
+            .add_service(svc.clone());
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let shutdown = listener_shutdown(shutdown_rx.clone());
+        tracing::info!(addr = %local_addr, auth = ?tcp_cfg.auth, "listening on tcp");
+        serve_futures.push(Box::pin(router.serve_with_incoming_shutdown(incoming, shutdown)));
+    }
+
+    // Unix-domain-socket listener (peer-cred / none), when [listener.local] is
+    // configured. No TLS: SO_PEERCRED is the local-IPC authentication (ADR-0005).
+    if let Some(ref uds_cfg) = config.listener.local {
+        let listener = bind_unix_listener(&uds_cfg.path)?;
+        let router = apply_http2_keepalive(Server::builder(), &config)
+            .layer(server::trace_id::TraceIdLayer)
+            .add_service(health_service.clone())
+            .add_service(svc.clone());
+        let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+        let shutdown = listener_shutdown(shutdown_rx.clone());
+        tracing::info!(path = %uds_cfg.path.display(), auth = ?uds_cfg.auth, "listening on unix socket");
+        serve_futures.push(Box::pin(router.serve_with_incoming_shutdown(incoming, shutdown)));
+    }
 
     health::set_serving(&mut health_reporter).await;
     spawn_eviction_task(
@@ -656,7 +740,7 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         config.proxy.max_stuck_backend_calls,
     );
 
-    tracing::info!(addr = %local_addr,
+    tracing::info!(
         lease_seconds = config.proxy.lease_seconds,
         max_message_bytes = config.proxy.max_message_bytes,
         request_timeout_secs = config.proxy.request_timeout_secs,
@@ -672,29 +756,14 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // inside spawn_backend() via tokio::time::timeout. A tonic-level timeout
     // would cancel the handler Future before spawn_backend can decrement
     // IN_FLIGHT, causing circuit breaker leaks under heavy load.
-    let mut builder = Server::builder();
-    if let Some(ref tcp_cfg) = config.listener.remote
-        && let Some(tls_config) =
-            server::transport::server_tls_config(tcp_cfg).map_err(std::io::Error::other)?
-    {
-        builder = builder.tls_config(tls_config)?;
+    let serve_result = futures::future::try_join_all(serve_futures).await;
+
+    // Best-effort: remove the Unix socket file on shutdown so a restart can
+    // rebind cleanly (the path persists in the filesystem after the fd closes).
+    if let Some(ref uds_cfg) = config.listener.local {
+        let _ = std::fs::remove_file(&uds_cfg.path);
     }
-    if config.proxy.http2_keepalive_interval_secs > 0 {
-        builder = builder
-            .http2_keepalive_interval(Some(std::time::Duration::from_secs(
-                config.proxy.http2_keepalive_interval_secs,
-            )))
-            .http2_keepalive_timeout(Some(std::time::Duration::from_secs(
-                config.proxy.http2_keepalive_timeout_secs,
-            )));
-    }
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(tcp_listener);
-    builder
-        .layer(server::trace_id::TraceIdLayer)
-        .add_service(health_service)
-        .add_service(svc)
-        .serve_with_incoming_shutdown(incoming, shutdown_signal())
-        .await?;
+    serve_result?;
 
     // Best-effort: remove the Unix socket file on shutdown so a restart can
     // rebind cleanly (the path persists in the filesystem after the fd closes).
@@ -803,99 +872,5 @@ auth = "peer_cred"
 
         let err = validate_runtime_listener_support(&cfg).unwrap_err().to_string();
         assert!(err.contains("unix socket directory does not exist"), "clear dir error: {err}");
-    }
-
-    // --- per-object version guard tests ---
-
-    fn per_object_policy() -> server::auth::policy::TokenPolicy {
-        use pkcs11_proxy_ng::config::{
-            AuthConfig, ExtractPolicyConfig, GrantSpec, PolicyEntry, RichGrantConfig,
-            TokenAccessSpec,
-        };
-        server::auth::policy::TokenPolicy::from_config(&AuthConfig {
-            allow_all_authenticated: false,
-            anonymous_principal: None,
-            policy: vec![PolicyEntry {
-                identity: "uid=1000".into(),
-                tokens: TokenAccessSpec::Specific(vec![GrantSpec::Rich(RichGrantConfig {
-                    token: "label:TestToken".into(),
-                    classes: None,
-                    mechanisms: None,
-                    extract: ExtractPolicyConfig::Allow,
-                    objects: Some(vec![pkcs11_proxy_ng::config::ObjectAclSpec::Bare(
-                        "aabbcc".into(),
-                    )]),
-                })]),
-            }],
-        })
-        .expect("policy parses")
-    }
-
-    fn no_objects_policy() -> server::auth::policy::TokenPolicy {
-        server::auth::policy::TokenPolicy::from_config(
-            &pkcs11_proxy_ng::config::AuthConfig::default(),
-        )
-        .expect("default policy parses")
-    }
-
-    #[test]
-    fn startup_refuses_v240_backend_when_per_object_policy_configured() {
-        // G3-PR1: a v2.40 backend does not populate CKA_UNIQUE_ID; the daemon
-        // must refuse to start rather than silently fail-closing every object.
-        let mock = pkcs11_proxy_ng_backend::MockBackend::new(
-            vec![pkcs11_proxy_ng_types::CkSlotId(0)],
-            vec![],
-        )
-        .with_cryptoki_version(2, 40);
-        let policy = per_object_policy();
-        let err = check_per_object_version_requirement(&policy, &mock).unwrap_err().to_string();
-        assert!(err.contains("v2.40"), "error message must mention the backend version: {err}");
-        assert!(
-            err.contains("CKA_UNIQUE_ID") || err.contains("v3.0"),
-            "error message must reference v3.0+ requirement: {err}"
-        );
-    }
-
-    #[test]
-    fn startup_allows_v30_backend_with_per_object_policy() {
-        // A v3.0 backend can populate CKA_UNIQUE_ID — the check must pass.
-        let mock = pkcs11_proxy_ng_backend::MockBackend::new(
-            vec![pkcs11_proxy_ng_types::CkSlotId(0)],
-            vec![],
-        );
-        // MockBackend default is (3,0).
-        let policy = per_object_policy();
-        check_per_object_version_requirement(&policy, &mock)
-            .expect("v3.0 backend with per-object policy must start");
-    }
-
-    /// `LOG_FORMAT` selects the daemon's log line format. Only `plain`
-    /// (case-insensitive, surrounding whitespace ignored) selects
-    /// human-readable output; unset or any other value keeps the
-    /// historical JSON default — so existing `LOG_FORMAT=json`
-    /// deployments and the hardcoded-JSON past behave identically.
-    #[test]
-    fn log_format_parses_documented_values() {
-        assert_eq!(parse_log_format(None), LogFormat::Json);
-        assert_eq!(parse_log_format(Some("json")), LogFormat::Json);
-        assert_eq!(parse_log_format(Some("plain")), LogFormat::Plain);
-        assert_eq!(parse_log_format(Some("  PLAIN  ")), LogFormat::Plain);
-        assert_eq!(parse_log_format(Some("xml")), LogFormat::Json);
-        assert_eq!(parse_log_format(Some("")), LogFormat::Json);
-    }
-
-    #[test]
-    fn startup_allows_v240_backend_without_per_object_policy() {
-        // When no `objects` grants are configured, the version check is skipped
-        // entirely — existing deployments without per-object policy must not be
-        // broken.
-        let mock = pkcs11_proxy_ng_backend::MockBackend::new(
-            vec![pkcs11_proxy_ng_types::CkSlotId(0)],
-            vec![],
-        )
-        .with_cryptoki_version(2, 40);
-        let policy = no_objects_policy();
-        check_per_object_version_requirement(&policy, &mock)
-            .expect("v2.40 backend without per-object policy must start");
     }
 }

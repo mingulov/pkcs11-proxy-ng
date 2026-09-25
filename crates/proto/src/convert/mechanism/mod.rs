@@ -358,7 +358,7 @@ impl From<&CkMechanism> for v1_proto::Mechanism {
                 Some(v1_proto::mechanism::Params::SignAdditionalContext(
                     v1_proto::SignAdditionalContext {
                         hedge_variant: p.hedge_variant,
-                        context: secret_to_plain(&p.context),
+                        context: p.context.clone(),
                         hash: p.hash,
                     },
                 ))
@@ -729,7 +729,7 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
             Some(v1_proto::mechanism::Params::SignAdditionalContext(p)) => {
                 Some(CkMechanismParams::SignAdditionalContext(SignAdditionalContext {
                     hedge_variant: p.hedge_variant,
-                    context: SecretBytes::copy_from_slice(&p.context),
+                    context: p.context.clone(),
                     hash: p.hash,
                 }))
             }

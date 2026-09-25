@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::config::{AuthConfig, TcpAuthMode};
+use crate::config::{AuthConfig, TcpAuthMode, UnixAuthMode};
 use crate::mechanism_registry_source::MechanismRegistrySource;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::Pkcs11Proxy;
@@ -45,6 +45,7 @@ pub struct Pkcs11ProxyService {
     context_manager: Arc<ContextManager>,
     backend: Arc<dyn Pkcs11Backend>,
     tcp_auth_mode: TcpAuthMode,
+    unix_auth_mode: UnixAuthMode,
     token_policy: Arc<TokenPolicy>,
     /// Holds the current registry payload to publish over
     /// `GetBackendInterfaces`. Wrapped in a `MechanismRegistrySource`
@@ -61,7 +62,14 @@ impl Pkcs11ProxyService {
         token_policy: Arc<TokenPolicy>,
         mechanism_registry_source: MechanismRegistrySource,
     ) -> Self {
-        Self { context_manager, backend, tcp_auth_mode, token_policy, mechanism_registry_source }
+        Self {
+            context_manager,
+            backend,
+            tcp_auth_mode,
+            unix_auth_mode,
+            token_policy,
+            mechanism_registry_source,
+        }
     }
 
     pub fn insecure_for_tests(
@@ -72,7 +80,14 @@ impl Pkcs11ProxyService {
             Arc::new(TokenPolicy::from_config(&AuthConfig::default()).expect("default policy"));
         let registry = MechanismRegistrySource::load(None)
             .expect("embedded mechanism registry must always load");
-        Self::new(context_manager, backend, TcpAuthMode::None, token_policy, registry)
+        Self::new(
+            context_manager,
+            backend,
+            TcpAuthMode::None,
+            UnixAuthMode::None,
+            token_policy,
+            registry,
+        )
     }
 }
 
@@ -121,8 +136,8 @@ macro_rules! impl_proxy_service {
                     &self.ctx.context_manager,
                     &self.ctx.backend,
                     request,
-                    self.ctx.tcp_auth_mode,
-                    self.ctx.unix_auth_mode,
+                    self.tcp_auth_mode,
+                    self.unix_auth_mode,
                 )
                 .await
             }
@@ -340,47 +355,17 @@ macro_rules! impl_proxy_service {
                     &self,
                     request: Request<pkcs11_proxy_ng_proto::$request>,
                 ) -> Result<Response<pkcs11_proxy_ng_proto::$response>, Status> {
-                    // A2: bind the caller's transport identity to the context it
-                    // claims before touching any state.
-                    self.check_context_owner(
-                        &request,
-                        &request.get_ref().client_context_id,
-                    )
-                    .await?;
                     // Hold the context un-evictable for the whole operation so a
                     // long backend call (keygen/derive on a slow HSM, larger than
-                    // the lease) is never reaped MID-CALL, AND enforce the
-                    // per-context in-flight cap so one noisy client cannot drain
-                    // the shared backend-call budget and DEVICE_ERROR every tenant
-                    // (M2). A context that is already gone yields Ok(None) and the
-                    // handler returns the right CKR.
-                    let operation_guard = match self.ctx.context_manager.begin_operation_capped(
+                    // the lease) is never reaped MID-CALL. Every dispatched
+                    // request carries client_context_id; if the context is already
+                    // gone the guard is None and the handler returns the right CKR.
+                    let _op = self.context_manager.begin_operation(
                         &$crate::server::context_manager::ClientContextId(
                             request.get_ref().client_context_id.clone(),
                         ),
-                        service_utils::per_context_max_in_flight() as i64,
-                    ) {
-                        Ok(guard) => guard,
-                        Err(()) => {
-                            return Err(Status::resource_exhausted(
-                                "per-context concurrency limit exceeded",
-                            ));
-                        }
-                    };
-                    service_utils::scope_context_operation(operation_guard, async {
-                        // G2-PR3: per-principal in-flight cap (opt-in; zero-cost
-                        // no-op when per_principal_max_in_flight is unset →
-                        // byte-identical to the pre-quota path). Acquired AFTER
-                        // context-owner validation and the per-context cap.
-                        // Never reaches the backend → rejection does NOT increment
-                        // the backend-health failure counter.
-                        let _pguard = acquire_principal_op_guard(
-                            &self.ctx,
-                            &request.get_ref().client_context_id,
-                        )?;
-                        $module(&self.ctx, request).await
-                    })
-                    .await
+                    );
+                    $module(&self.context_manager, &self.backend, request).await
                 }
             )+
         }

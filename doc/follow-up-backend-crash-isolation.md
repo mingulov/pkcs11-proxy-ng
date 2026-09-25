@@ -1,5 +1,15 @@
 # Follow-up: isolate the backend so its crash doesn't take down all clients
 
+> **STATUS (2026-05-30): DEFERRED — superseded by operational multi-daemon isolation.**
+> After a deep review, the in-process-worker approach below was **not adopted**. It does not
+> make a backend crash transparent (PKCS#11 session/login/op state is un-serializable; the
+> client must re-establish it regardless), and its unique wins are low-value for a project
+> that accepts full restarts + client reconnection. The chosen strategy is to **run multiple
+> daemon instances + sticky client routing + client reconnect**, supervised by the
+> orchestrator. This document and ADR-0007
+> (`doc/adr/ADR-0007-backend-process-isolation.md`) are kept as a
+> documented fallback. See the A2 entry in `follow-up-index.md`.
+
 ## The gap
 
 The backend PKCS#11 module is loaded **in-process** in the daemon (the gRPC

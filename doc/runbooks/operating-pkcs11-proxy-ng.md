@@ -112,6 +112,41 @@ breaker trips before the HSM rejects.
 (via a single ConfigMap). Drift would cause shim consumers to see
 revision-flap warnings.
 
+## 4a. Crash isolation & blast radius — run multiple instances
+
+**The vendor PKCS#11 module is loaded in-process in each daemon.** A SIGSEGV inside
+the vendor `.so` therefore takes down **that daemon process** and drops the consumers
+pinned to it. (In-process worker isolation — ADR-0007 / the parent-repo design spec
+`doc/plans/2026-05-30-backend-process-isolation-design.md` — was evaluated and
+**deliberately deferred**: it cannot make a crash transparent, because PKCS#11
+session/login/operation state is un-serializable and dies with the backend regardless,
+and its remaining wins were not worth the complexity. See the A2 entry in
+`doc/follow-up-index.md`.)
+
+**Supported mitigation — "safety" / stable-channel deployment: run multiple daemon
+instances and partition consumers across them.** This is the same multi-replica
+topology as §4. A backend crash is then contained to the **one** replica's consumers;
+the other replicas and their consumers are unaffected, and the orchestrator restarts
+the dead replica. No in-process feature is needed.
+
+**Sticky routing is mandatory.** A PKCS#11 session handle is valid **only on the
+replica that created it** (sessions live in that replica's backend process). So:
+
+* ✅ Pin each consumer to one replica for its lifetime — the reference manifests do
+  this with `sessionAffinity: ClientIP` (§4); a static per-consumer endpoint works too.
+* ❌ Never put a round-robin L4 load balancer that spreads a single consumer's calls
+  across replicas — you will get `CKR_SESSION_HANDLE_INVALID` storms.
+
+**Consumers must reconnect after a replica restart.** A restart re-initialises the
+backend fresh, so the consumer's sessions/login/in-progress operations are gone. The
+shim auto-reconnects the gRPC channel with bounded backoff, but the **application** must
+re-open its session, re-`C_Login`, and retry — see §6 `CKR_DEVICE_ERROR`. A consumer
+that keeps using its pre-crash handles keeps failing.
+
+**For stronger containment,** partition more finely: a dedicated instance per token /
+trust-domain, or per high-value consumer, so one consumer's crash-inducing input cannot
+affect another's. The cost is N× backend `C_Initialize` and N× resource use.
+
 ## 5. Updating mechanism registry (vendor extensions, e.g. CloudHSM)
 
 ```bash
@@ -172,8 +207,16 @@ volumes:
 
 ### CKR_DEVICE_ERROR (0x30)
 
-**Most likely cause.** Transport-level failure to the daemon — pod
-restart, network partition, daemon overload (circuit-breaker trip).
+**Most likely cause — ambiguous, two sources.** Either (a) a transport-level
+failure to the daemon — pod restart, network partition, daemon overload
+(circuit-breaker trip); or (b) a **backend-reported error** forwarded unchanged.
+Some modules use `CKR_DEVICE_ERROR` as a catch-all: e.g. kryoptic returns it for its
+crypto-backend (OpenSSL) path, so a rejected `C_Verify`, an integrity failure, or an
+unmapped crypto error surfaces here too. The proxy does not invent a "network error"
+code (ADR-0003 §5), so this value alone cannot tell the two apart. **To distinguish:**
+a transport failure clears on the shim's automatic reconnect/retry; a backend error
+persists on retry. The authoritative "daemon restarted, re-initialize" signal is
+`CKR_CRYPTOKI_NOT_INITIALIZED` (below), **not** this code.
 
 **Triage.**
 
@@ -362,10 +405,10 @@ encounter; they are scope of follow-up rounds:
 | Limitation | Workaround | Owner |
 | --- | --- | --- |
 | FOLLOWUP-fork-safety: forked children of a `C_Initialize`d shim must `C_Finalize`+`C_Initialize` to recover | Use fork-then-exec in consumer apps | Application code (not daemon-side) |
+| Backend crash blast radius: a vendor-`.so` SIGSEGV downs the whole daemon process (backend is in-process; A2/in-process-worker deferred) | Run **multiple instances + sticky routing** (§4a); consumers reconnect + re-open (§6) | Deployment + application code |
 
 Earlier follow-ups (DNS re-resolve, slow-backend test, per-RPC
-trace ID, gRPC health probe, rate-limiter) are closed; the
-umbrella audit history lives in the parent repo.
+trace ID, gRPC health probe, rate-limiter) are closed.
 
 ## 10. Escalation
 

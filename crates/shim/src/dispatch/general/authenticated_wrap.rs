@@ -102,35 +102,13 @@ pub unsafe extern "C" fn c_unwrap_key_authenticated(
             Ok(template) => template,
             Err(e) => return rv_err(e),
         };
-        let template_opt = null_preserving_template(&template, p_template);
-        let call = match unsafe {
-            AuthenticatedCall::read(
-                p_mechanism,
-                MessageParameterDirection::Decrypt,
-                MessageCallMemory::output(
-                    p_aad,
-                    ul_aad_len,
-                    p_wrapped_key,
-                    ul_wrapped_key_len,
-                    ph_key.cast(),
-                    std::mem::size_of::<CK_OBJECT_HANDLE>() as u64,
-                    std::ptr::null_mut(),
-                ),
-            )
-        } {
-            Ok(call) => call,
-            Err(rv) => return rv_err(rv),
-        };
-        let wrapped_key = match input_buf_to_ck_in_buf(unsafe {
-            classify_input(p_wrapped_key, ul_wrapped_key_len)
-        }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let aad = match input_buf_to_ck_in_buf(unsafe { classify_input(p_aad, ul_aad_len) }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
+        let rv = unsafe { validate_mechanism(p_mechanism) };
+        if rv != rv_ok() {
+            return rv;
+        }
+        let mech = unsafe { read_mechanism(p_mechanism) };
+        let wrapped_key = unsafe { read_input_slice(p_wrapped_key, ul_wrapped_key_len) };
+        let aad = unsafe { read_input_slice(p_aad, ul_aad_len) };
 
         match with_client!(client => client.unwrap_key_authenticated_typed(
             CkSessionHandle(h_session as u64),

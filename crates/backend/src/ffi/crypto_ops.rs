@@ -255,19 +255,8 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_verify_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        // Forward C_VerifyInit(NULL mechanism) verbatim, like the five sibling
-        // init-cancel paths, so the module's native RV reaches the client
-        // (ADR-0010 transparent forwarding). A module that SEGVs on it crashes
-        // the daemon — its direct-load behavior, accepted by ADR-0010.
-        let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(
-            &admission,
-            unsafe { (*self.func_list).C_VerifyInit },
-            |function| unsafe { function(h_session, std::ptr::null_mut(), 0) },
-        )?;
-        self.drop_mech_cache_family(session, OperationFamily::Verify);
+        self.ffi_session_cancel(session, CkFlags(cryptoki_sys::CKF_VERIFY as u64))?;
+        self.drop_mech_cache(session);
         Ok(())
     }
 
@@ -336,19 +325,8 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_digest_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
-        // Forward C_DigestInit(NULL mechanism) verbatim (ADR-0010): the module
-        // decides — softhsm2/kryoptic cancel the active digest, others reject.
-        // NSS softokn SEGVs on it; that is its direct-load behavior and an
-        // accepted shared-daemon trade-off per ADR-0010.
-        let admission = self.lifecycle_domain.admit_ordinary()?;
-        let h_session = Self::session_handle(session)?;
-        let _session_fence = self.session_fences.enter(&admission, session)?;
-        Self::call_unit(
-            &admission,
-            unsafe { (*self.func_list).C_DigestInit },
-            |function| unsafe { function(h_session, std::ptr::null_mut()) },
-        )?;
-        self.drop_mech_cache_family(session, OperationFamily::Digest);
+        self.ffi_session_cancel(session, CkFlags(cryptoki_sys::CKF_DIGEST as u64))?;
+        self.drop_mech_cache(session);
         Ok(())
     }
 

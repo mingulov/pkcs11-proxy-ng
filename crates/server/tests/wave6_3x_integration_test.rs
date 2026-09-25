@@ -235,9 +235,8 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
     let part2 = b"message begin-next";
 
     client.message_encrypt_init(session, Some(&mechanism), None, key).await.unwrap();
-    let encrypt_parameter =
-        client.encrypt_message_begin(session, parameter, CkInBuf::Bytes(aad)).await.unwrap();
-    assert!(encrypt_parameter.is_empty());
+    let encrypt_parameter = client.encrypt_message_begin(session, parameter, aad).await.unwrap();
+    assert_eq!(encrypt_parameter, parameter);
 
     let (encrypt_parameter, ciphertext1) = client
         .encrypt_message_next(session, &encrypt_parameter, CkInBuf::Bytes(part1), CkFlags(0))
@@ -253,11 +252,9 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
     client.message_encrypt_final(session).await.unwrap();
 
     client.message_decrypt_init(session, Some(&mechanism), None, key).await.unwrap();
-    let decrypt_parameter = client
-        .decrypt_message_begin(session, &encrypt_parameter, CkInBuf::Bytes(aad))
-        .await
-        .unwrap();
-    assert!(decrypt_parameter.is_empty());
+    let decrypt_parameter =
+        client.decrypt_message_begin(session, &encrypt_parameter, aad).await.unwrap();
+    assert_eq!(decrypt_parameter, parameter);
 
     let (decrypt_parameter, recovered1) = client
         .decrypt_message_next(session, &decrypt_parameter, CkInBuf::Bytes(&ciphertext1), CkFlags(0))

@@ -3,12 +3,6 @@
 ## Status
 Proposed
 
-**v0.2 amendment (2026-09-13): selected contract, implementation pending.**
-The [native ownership contract](../release/native-mechanism-ownership.md) is
-the detailed authority for constructor reservation, native lifecycle, supported
-slot-wait mode and the qualified Linux abnormal stop. Independent review and
-native qualification remain required; this amendment supplies no runtime receipt.
-
 ## Context
 
 The proxy daemon must load and communicate with PKCS#11 modules on the server
@@ -79,12 +73,10 @@ platform's dynamic linker and calls into it via FFI.
 
 **Loading sequence:**
 
-1. Validate the qualified Linux GNU/musl x86_64/64-bit or x86/32-bit platform
-   and local configuration, then reserve the single process-managed provider
-   chain before any `dlopen` or discovery. All constructors share that authority;
-   competing loads fail locally with no loader/provider attempt, regardless of
-   path. Open through `libloading` only after reservation. Nonqualified hosts
-   refuse construction before native exposure; portable mock builds remain.
+1. Open the shared library using the platform dynamic-loading API:
+   - Linux: `dlopen` (via `libloading` crate)
+   - macOS: `dlopen` (same API, `.dylib` extension)
+   - Windows (future): `LoadLibrary` (`.dll` extension)
 
 2. Resolve the entry-point symbol:
    - If `C_GetInterface` is present, request the highest standard `"PKCS 11"`
@@ -147,15 +139,6 @@ but that is explicitly out of scope for Phase 1. The configuration format is
 chosen to be forward-compatible: adding a `[[backend.modules]]` array later
 does not break the single-module `backend.module` key.
 
-The v0.2 bound applies to the embedding process, including direct-backend users,
-not merely the daemon configuration. Share one FfiBackend through `Arc`. The
-chain includes aggregator dependencies. The host must supply one linked backend
-runtime with exclusive native/lifecycle access: another runtime copy, unmanaged
-provider calls and separately managed aggregator aliases are excluded. Loader
-handles/paths/`RTLD_LOCAL` do not establish isolation; independent chains need
-separate processes. The registry detects competing project constructors, not
-violations by unrelated code.
-
 ### 5. Module Lifecycle
 
 The backend module is loaded once and kept resident for the lifetime of the daemon process.
@@ -167,39 +150,8 @@ The backend module is loaded once and kept resident for the lifetime of the daem
   should fail startup unless the daemon is explicitly reusing a previously owned
   managed module instance during an intentional reload path.
 - **Steady state:** All client operations dispatch through the stored function pointers. The module remains loaded in memory. There is no per-request or per-session load/unload.
-- **Shutdown:** Seal admission and drain every ordinary worker, including the
-  sole supported nonblocking slot waiter, through native return and settlement.
-  Invoke native `C_Finalize` once with all retained storage/library live. Only
-  success plus all worker/control/frame retirement receipts permits dependent
-  destruction and normal unload. Logical client Finalize is not this native
-  module transition. Failure/uncertainty retains ownership.
+- **Shutdown:** The daemon calls `C_Finalize` and then drops the library handle. This happens on clean daemon shutdown or when the last logical client disconnects (if configured for on-demand lifecycle).
 - **Error recovery:** If the module returns `CKR_DEVICE_REMOVED` or `CKR_TOKEN_NOT_PRESENT` for an operation, the daemon propagates the error to the affected client(s). The daemon does not automatically reinitialize the module; operator intervention (restart or reload signal) is required. This avoids hidden state resets that could invalidate other clients' sessions.
-
-One short-held constructor registry uses Vacant/Reserved/Active/Retiring/Poisoned
-states and checked epochs. Reservation survives initialization uncertainty,
-workers, Finalize, dependent retirement and completed unload; only that exact
-owner may then release it. Safe rollback after discovery requires the synchronous
-loader/discovery no-unresolved-user contract and completed close, not merely a
-failed return or absence of Initialize. Poison denies new loads until restart.
-Registry locks never span native work/unload, and vacancy is not a quiescence
-proof. The linked contract defines the full transition and stale-release rules.
-
-Only `CKF_DONT_BLOCK` slot waits are in v0.2 scope; blocking requests are locally
-unsupported, without polling. All supported waits keep ordinary lifecycle
-exclusion and the sole reservation through settlement; none overlaps Finalize.
-The native event source is shared across logical clients, not independently
-initialized per client. Input/output/RV narrowing and refusal precedence follow
-the linked contract and ADR-0010/0011.
-
-Final-domain Drop checks a private epoch-qualified proof before any dependent
-field destruction. No implicit native cleanup occurs in Drop. Without proof,
-or on unresolved shutdown at grace expiry, the selected private return-aware
-raw Linux `exit_group(70)` stops the entire embedding thread group under its
-documented target/environment assumptions. Its independent controller cannot
-wait on stalled native/session/registry locks. No wiping, complete audit tail,
-cleanup, token deletion, strict termination deadline or global no-core guarantee
-is made. This mandatory backstop and the constructor/mode/platform enforcement
-remain future implementation; ordinary release panics continue unwinding.
 
 ### 6. Testing Strategy
 

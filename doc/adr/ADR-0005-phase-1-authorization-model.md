@@ -5,22 +5,6 @@ Proposed
 
 ## Context
 
-Wrapping adapters share admission in this order: context/session and direct
-objects, mechanism parsing, embedded-handle remapping and authorization,
-mechanism permission, then extraction permission for the wrapped object.
-This covers ordinary/exact `C_WrapKey` and `C_WrapKeyAuthenticated` identically;
-authenticated unwrap also remaps embedded handles before native entry. Object
-and class-only policy both apply. AAD sanitation remains adapter-local, after
-shared wrapping admission. Denied/unknown direct handles retain ADR-0012's
-zero-handle forwarding and provider RV precedence; denied/foreign nonzero
-embedded handles fail with `CKR_OBJECT_HANDLE_INVALID` before native wrap.
-Zero forwarding preserves provider precedence when no independent mechanism
-or extraction denial applies. In particular, an unknown wrapped object cannot
-resolve its UID; an active per-object extraction override then fails closed
-with `CKR_KEY_FUNCTION_NOT_PERMITTED`, matching ordinary wrapping. Visibility
-denial alone does not imply extraction denial for a mapped object whose UID
-can still be resolved.
-
 The PKCS#11 proxy daemon exposes remote access to PKCS#11 tokens and HSMs over Unix sockets and TCP. Before any production deployment, the daemon needs authentication and authorization to prevent unauthorized access to cryptographic material.
 
 The design tension is between security completeness and Phase 1 pragmatism. The project has one design partner and needs a working, auditable auth layer -- not a full multi-tenant RBAC system. The authorization model must be layered and configurable so that development, single-machine, and networked deployments each use the appropriate level of security without requiring code changes.
@@ -58,16 +42,9 @@ identity is represented in a canonical form derived from the certificate
 
 `x509:issuer=CN=Example Root,O=Example;subject=CN=pki-service,O=Example`
 
-The daemon canonicalizes issuer and subject using the RFC 4514 string form
-(via `x509-parser`) before building the identity string. Within that identity
-string a literal `\` and `;` in either DN are escaped (`\\`, `\;`) so the
-`;subject=` join delimiter is unambiguous: the string form is **injective**
-(distinct issuer/subject DN pairs can never collide on the same key, which would
-otherwise let one certificate match another's policy entry or slip past the
-per-request ownership check of ADR-0009). A certificate with an **empty subject
-DN** is rejected — Phase 1 does not consult the SubjectAltName, and an empty
-subject would collapse every such certificate from a CA onto one identity. This
-mTLS mode is required for any TCP listener that carries production traffic.
+The daemon canonicalizes issuer and subject using RFC 4514 string form before
+building the identity string. This is the required mode for any TCP listener
+that carries production traffic.
 
 ### 2. Default behavior per listener type
 
@@ -106,41 +83,8 @@ The `client_context_id` issued by the daemon (see ADR-0002) is bound to the auth
 - The daemon records which authenticated identity created each context.
 - A request that presents a `client_context_id` created by a different identity is rejected. One client cannot adopt, resume, or inspect another client's context.
 - A single authenticated identity may hold multiple concurrent contexts. This is normal when the same identity is used by multiple processes or service replicas.
-- **Per-request identity ownership** is enforced on every request: a request is
-  re-bound to the caller's transport identity and rejected on mismatch (ADR-0009).
-- **Token-access policy** is enforced at the points where a client *gains*
-  access to a token — slot/token/mechanism **discovery** and **C_OpenSession /
-  C_InitToken** all run `slot_is_authorized` against the bound identity
-  (`C_WaitForSlotEvent` too; see M13). Operations on an **already-open session**
-  (crypto, object access) are not re-evaluated against the policy per request;
-  they inherit the authorization established when the session was opened.
-  Consequently a policy *tightening* does not retroactively revoke an open
-  session — its effective revocation latency is the session's lifetime, and a
-  client must reopen to pick up the change. Per-request policy re-evaluation is
-  deliberately deferred for Phase 1 because it would add a backend
-  `C_GetTokenInfo` to every crypto/object call (the M14 decision).
-
-  This coarse session grant is separate from the opt-in per-mechanism and
-  per-object/class restrictions in ADR-0012. Mechanism-bearing initializers
-  enforce the calling identity's mechanism grant against the session's recorded
-  backend slot. `C_DigestInit`, `C_VerifySignatureInit`, `C_EncapsulateKey`,
-  `C_DecapsulateKey`, and exact encapsulation reject a denied mechanism with
-  `CKR_MECHANISM_INVALID` before native initialization. A failed token-metadata
-  lookup also denies; cold lookups use the backend slot, never its virtual ID.
-  Session and primary-object resolution retain their existing precedence.
-  NULL-mechanism cancellation bypasses mechanism admission; updates, finals,
-  and combined operations consume initialized state. Restoring opaque state
-  with `C_SetOperationState` is not a mechanism-policy enforcement boundary.
-
-  The corrected initializers translate typed embedded object handles through the calling
-  context and enforce either active object or class restrictions. A missing or
-  denied nonzero embedded handle returns `CKR_OBJECT_HANDLE_INVALID` before
-  native dispatch; it must not be rewritten to the optional-zero parameter.
-  Explicit optional zeros retain their existing meaning. SP800-108 derivation
-  applies the same denial rule to byte-encoded input handles, preserves 4/8-byte
-  encoding, rejects narrowing overflow, and uses the real native session for
-  metadata reads. See the [operation coverage](../release/mechanism-authorization.md)
-  for adapter boundaries and remaining gaps.
+- Policy checks still run on every request against the identity bound to the
+  context. Existing contexts do not bypass later policy changes.
 
 ### 5. Auth failure error mapping (relationship to ADR-0003)
 

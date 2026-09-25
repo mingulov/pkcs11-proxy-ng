@@ -1,52 +1,23 @@
 use cryptoki_sys::*;
-use pkcs11_proxy_ng_client::MessageCallErrorOrigin;
-use pkcs11_proxy_ng_proto::convert::message_params::{MessageParameter, MessageParameterShape};
+use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
 use crate::state;
 
 use super::helpers::*;
 
-type MessageInitRead = (
-    Option<CkMechanism>,
-    Option<MessageParameter>,
-    Option<CkParameterRoundtripSpec>,
-    Option<MessageParameterShape>,
-);
-
-#[inline]
-fn pointer_safe_message_capability_error() -> Option<CK_RV> {
-    if !state::is_initialized() {
-        Some(rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED))
-    } else if !crate::interface_probe::pointer_safe_message_parameters() {
-        Some(rv_err(CkRv::FUNCTION_NOT_SUPPORTED))
-    } else {
-        None
-    }
-}
-
-fn settle_message_init_error(
-    operation: &mut state::MessageOperationState,
-    saved_shape: Option<MessageParameterShape>,
-    error: &pkcs11_proxy_ng_client::MessageCallError,
-) -> CkRv {
-    if error.origin == MessageCallErrorOrigin::Backend && error.ck_rv != CkRv::DEVICE_ERROR {
-        operation.shape = saved_shape;
-    }
-    error.ck_rv
-}
-
 /// Read a message-based encrypt/decrypt init mechanism.
 ///
-/// PKCS#11 v3.0 passes AEAD parameters (`CK_GCM_MESSAGE_PARAMS`,
-/// `CK_CCM_MESSAGE_PARAMS`, …) to `C_Message{Encrypt,Decrypt}Init`. The active
-/// mechanism registry selects the message shape for this operation and
-/// `read_message_parameter_call_for_shape_with_memory` enforces that exact
-/// client-native layout, direction, and memory contract. The wire mechanism is
-/// type-only; the backend reconstructs the structured parameter in its native
-/// ABI. A NULL mechanism is the cancel path. Empty unmodelled parameters remain
-/// valid, while materialized unmodelled parameters fail closed rather than
-/// falling back to raw or classic mechanism bytes.
+/// PKCS#11 v3.0 passes the AEAD parameters (`CK_GCM_MESSAGE_PARAMS`,
+/// `CK_CCM_MESSAGE_PARAMS`, …) to `C_Message{Encrypt,Decrypt}Init` — but the
+/// same mechanism type (`CKM_AES_GCM`, …) is also used by classic single-shot
+/// encryption with a *different* parameter struct, so the param shape cannot be
+/// inferred from the mechanism type via the registry. In the message-init path
+/// we therefore interpret the params as the message variant: when a recognised
+/// `CK_*_MESSAGE_PARAMS` struct is present we send the mechanism TYPE only plus
+/// the structured `MessageParameter`, which the backend reconstructs into the
+/// correct C struct. A NULL mechanism is the cancel path; a parameterless or
+/// unrecognised param falls back to the classic `read_mechanism` behaviour.
 ///
 /// Returns the mechanism (None = cancel) and the optional structured init param,
 /// or a `CK_RV` to return directly.
@@ -55,40 +26,28 @@ fn settle_message_init_error(
 /// `p_mechanism` is either NULL or a valid `CK_MECHANISM`.
 unsafe fn read_message_init_mechanism(
     p_mechanism: CK_MECHANISM_PTR,
-    direction: MessageParameterDirection,
-) -> Result<MessageInitRead, CK_RV> {
+) -> Result<(Option<CkMechanism>, Option<MessageParameter>), CK_RV> {
     if p_mechanism.is_null() {
-        return Ok((None, None, None, None)); // cancel path
+        return Ok((None, None)); // cancel path
     }
-    validate_message_mechanism_outer(p_mechanism).map_err(rv_err)?;
-    let c_mech = unsafe { std::ptr::read_unaligned(p_mechanism) };
-    let registry = state::mechanism_registry();
-    let shape =
-        MessageParameterShape::from_registry_name(registry.param_shape(c_mech.mechanism as u64));
-    let envelope =
-        unsafe { message_parameter_roundtrip_spec(c_mech.pParameter, c_mech.ulParameterLen) }
+    let rv = unsafe { validate_mechanism(p_mechanism) };
+    if rv != rv_ok() {
+        return Err(rv);
+    }
+    let c_mech = unsafe { &*p_mechanism };
+    let msg_param =
+        unsafe { try_read_message_parameter(c_mech.pParameter as *const _, c_mech.ulParameterLen) }
             .map_err(rv_err)?;
-    let msg_param = unsafe {
-        read_message_parameter_call_for_shape_with_memory(
-            c_mech.pParameter.cast_const(),
-            c_mech.ulParameterLen,
-            shape,
-            direction,
-            MessageParameterStage::Init,
-            MessageCallMemory::init(p_mechanism),
-        )
+    match msg_param {
+        // Recognised AEAD message params: ship the mechanism type only and let
+        // the backend rebuild the CK_*_MESSAGE_PARAMS struct from this.
+        Some(mp) if !matches!(mp, MessageParameter::Raw(_)) => Ok((
+            Some(CkMechanism { mechanism_type: CkMechanismType(c_mech.mechanism), params: None }),
+            Some(mp),
+        )),
+        // Parameterless / unrecognised: preserve the classic shim behaviour.
+        _ => Ok((Some(unsafe { read_mechanism(p_mechanism) }), None)),
     }
-    .map_err(rv_err)?
-    .into_parameter();
-    Ok((
-        Some(CkMechanism {
-            mechanism_type: CkMechanismType(c_mech.mechanism as u64),
-            params: None,
-        }),
-        msg_param,
-        Some(envelope),
-        Some(shape),
-    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -101,47 +60,16 @@ pub unsafe extern "C" fn c_message_encrypt_init(
     h_key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Encrypt);
-        let mut operation = operation.lock().expect("message encrypt state poisoned");
-        let (mech, init_param, envelope, shape) = match unsafe {
-            read_message_init_mechanism(p_mechanism, MessageParameterDirection::Encrypt)
-        } {
+        let (mech, init_param) = match unsafe { read_message_init_mechanism(p_mechanism) } {
             Ok(parts) => parts,
             Err(rv) => return rv,
         };
-        let saved_shape = operation.shape.take();
-        let result = if let (Some(mech), Some(envelope), Some(shape)) =
-            (mech.as_ref(), envelope.as_ref(), shape)
-        {
-            match with_client!(client => client.message_encrypt_init_contract(
-                CkSessionHandle(h_session as u64),
-                mech,
-                init_param.as_ref(),
-                CkObjectHandle(h_key as u64),
-                envelope,
-                shape,
-            )) {
-                Ok(()) => {
-                    operation.shape = Some(shape);
-                    Ok(())
-                }
-                Err(error) => Err(settle_message_init_error(&mut operation, saved_shape, &error)),
-            }
-        } else {
-            let result = with_client!(client => client.message_encrypt_init_stateful(
-                CkSessionHandle(h_session as u64),
-                None,
-                None,
-                CkObjectHandle(h_key as u64),
-            ));
-            match result {
-                Ok(()) => Ok(()),
-                Err(error) => Err(settle_message_init_error(&mut operation, saved_shape, &error)),
-            }
-        };
+        let result = with_client!(client => client.message_encrypt_init(
+            CkSessionHandle(h_session),
+            mech.as_ref(),
+            init_param.as_ref(),
+            CkObjectHandle(h_key),
+        ));
         if result.is_ok() {
             state::clear_message_encrypt_output_cache(h_session);
             state::clear_operation_state_cache(h_session);
@@ -194,47 +122,16 @@ pub unsafe extern "C" fn c_message_decrypt_init(
     h_key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     catch_panics(|| {
-        if let Some(rv) = pointer_safe_message_capability_error() {
-            return rv;
-        }
-        let operation = state::message_operation_state(h_session, state::MessageOperation::Decrypt);
-        let mut operation = operation.lock().expect("message decrypt state poisoned");
-        let (mech, init_param, envelope, shape) = match unsafe {
-            read_message_init_mechanism(p_mechanism, MessageParameterDirection::Decrypt)
-        } {
+        let (mech, init_param) = match unsafe { read_message_init_mechanism(p_mechanism) } {
             Ok(parts) => parts,
             Err(rv) => return rv,
         };
-        let saved_shape = operation.shape.take();
-        let result = if let (Some(mech), Some(envelope), Some(shape)) =
-            (mech.as_ref(), envelope.as_ref(), shape)
-        {
-            match with_client!(client => client.message_decrypt_init_contract(
-                CkSessionHandle(h_session as u64),
-                mech,
-                init_param.as_ref(),
-                CkObjectHandle(h_key as u64),
-                envelope,
-                shape,
-            )) {
-                Ok(()) => {
-                    operation.shape = Some(shape);
-                    Ok(())
-                }
-                Err(error) => Err(settle_message_init_error(&mut operation, saved_shape, &error)),
-            }
-        } else {
-            let result = with_client!(client => client.message_decrypt_init_stateful(
-                CkSessionHandle(h_session as u64),
-                None,
-                None,
-                CkObjectHandle(h_key as u64),
-            ));
-            match result {
-                Ok(()) => Ok(()),
-                Err(error) => Err(settle_message_init_error(&mut operation, saved_shape, &error)),
-            }
-        };
+        let result = with_client!(client => client.message_decrypt_init(
+            CkSessionHandle(h_session),
+            mech.as_ref(),
+            init_param.as_ref(),
+            CkObjectHandle(h_key),
+        ));
         if result.is_ok() {
             state::clear_message_decrypt_output_cache(h_session);
             state::clear_operation_state_cache(h_session);

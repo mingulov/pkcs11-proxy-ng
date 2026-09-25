@@ -143,7 +143,8 @@ pub(super) async fn close_session_with_timeout(
     // so a later login PIN-verifies against a logged-out token.
     let held_login_slot = ctx_mgr
         .get_context(&ctx_id, |ctx| {
-            ctx.session_slots.get(&vh).copied().filter(|slot| ctx.login_state.contains_key(slot))
+            let vh = VirtualHandle(req.session_handle);
+            ctx.remove_session(vh)
         })
         .await
         .flatten();

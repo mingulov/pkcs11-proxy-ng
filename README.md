@@ -7,54 +7,14 @@ token/HSM and returns the exact result. The goal is **transparency**: an
 application should not be able to tell it is loading the shim rather than the
 backend module directly, apart from network latency.
 
-## Quick start (local dev, no Kubernetes)
-
-The fastest end-to-end path on a laptop, using SoftHSM2 as the
-backend and `pkcs11-tool` as the consumer.
-
-```bash
-# 1. System prereqs (Debian/Ubuntu — adjust for your distro).
-sudo apt install -y softhsm2 opensc gnutls-bin
-
-# 2. Initialise a SoftHSM2 token. The PIN here is for local dev only.
-softhsm2-util --init-token --slot 0 --label dev \
-    --so-pin 1234 --pin 1234
-
-# 3. Build the workspace (~5 min cold).
-cargo build --workspace --release
-
-# 4. Start the daemon with the dev config (loopback, no TLS).
-RUST_LOG=pkcs11_proxy_ng=info LOG_FORMAT=plain \
-    ./target/release/pkcs11-proxy-ng examples/configs/dev/proxy.toml &
-
-# 5. Drive a sign through the shim.
-PKCS11_PROXY_ENDPOINT=http://127.0.0.1:7512 \
-    pkcs11-tool --module ./target/release/libpkcs11_proxy_ng_shim.so \
-    --pin 1234 --list-slots
+```
+app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkcs11-proxy-ng (daemon) ──FFI──▶ backend .so (HSM/token)
 ```
 
-Things to read next:
-
-- [`examples/configs/`](./examples/configs/) — dev / staging / prod
-  TOML templates (use them as starting points, don't hand-roll).
-- [Runbook](./doc/runbooks/operating-pkcs11-proxy-ng.md) — operations
-  guide (deploy, rollout, ConfigMap edits, troubleshooting).
-  See §8a for daemon env vars (`PKCS11_PROXY_BIND`,
-  `PKCS11_PROXY_BACKEND_MODULE`, …) and §8b for shim env vars
-  (`PKCS11_PROXY_ENDPOINT`, `PKCS11_PROXY_TLS_*`, …).
-- [Error reference](./doc/error-reference.md) — every `CK_RV` the
-  proxy can return, cause + operator action + application action.
-- [`doc/oasis-profile-coverage.md`](./doc/oasis-profile-coverage.md) — PKCS#11 spec coverage matrix.
-
-## Release Dry Run
-
-> **Public latest: `v0.1.0`.**
->
-> The local target is `v0.2.0`; its gateway, authorization, resilience, and audit
-> work is implemented locally, partially covered, and unreleased. Local unit and
-> integration coverage is not a
-> provenance-complete transparency matrix, so there is no public `v0.2.0` parity
-> or support claim. See [Beta scope](#beta-scope).
+> **Status: `0.x` public beta.** Validated on Linux `x86_64` against SoftHSM2,
+> NSS softokn, and Kryoptic using direct-vs-proxied parity checking. This is a
+> bounded beta claim, **not** a general production-readiness or broad
+> vendor-compatibility claim. See [Beta scope](#beta-scope).
 
 ## Quick start (local dev, no Kubernetes)
 
@@ -63,9 +23,7 @@ The fastest end-to-end path on a laptop, using SoftHSM2 as the backend and
 
 ```bash
 # 1. System prereqs (Debian/Ubuntu — adjust for your distro).
-# Install Rust stable through rustup first; see doc/development.md.
-sudo apt install -y build-essential pkg-config protobuf-compiler \
-    softhsm2 opensc gnutls-bin
+sudo apt install -y softhsm2 opensc gnutls-bin
 
 # 2. Initialise a SoftHSM2 token. The PIN here is for local dev only.
 softhsm2-util --init-token --slot 0 --label dev \
@@ -91,55 +49,31 @@ hand-rolling a config.
 
 ## Beta scope
 
-The selected v0.2 [native ownership contract](./doc/release/native-mechanism-ownership.md)
-is partially implemented locally and unreleased: mechanism roots and nested
-output cells live in persistent native allocations (Miri-checked under both
-borrow models), one provider chain per process is enforced by the
-constructor domain with lifecycle-honest retirement, and wire widths are
-checked with rejection proven on i686 hardware. Still pending: DONT_BLOCK-only
-slot waits with shared native event flags, the qualified Linux
-whole-process lifetime stop, session operation slots, subprocess/topology
-qualification, and the provider parity round. The v0.2.0 tail stretch (see
-[ADR-0014](./doc/adr/ADR-0014-v020-tail-platform-stretch.md), Implemented
-2026-09-17) evidences Windows x64/MSVC daemon + shim in both interoperation
-directions on real Windows Server 2022
-(`artifacts/v020-tail-windows-2026-09-16/` legs A/B/C at the workspace root),
-the 32-bit/mixed width claim (four Linux legs plus the NSS-i386 second
-provider, `scripts/run-cross-width-*-live-test.sh` in nightly), the per-PR
-Tier 0f `windows-client-llp64` `--all-targets` gate, and the deterministic
-Windows ZIP bundle (`scripts/release-windows.sh`, `SHA256SUMS-windows`).
-This is not a v0.2 parity/support receipt.
-
-**Public `v0.1.0` support**
+**Supported and validated**
 
 - Linux `x86_64`
 - Remote daemon over **TCP + mTLS** (baseline public transport), and
   **Unix-domain socket + peer-credential auth** for same-host deployments
 - Backends validated with direct-vs-proxied parity: **SoftHSM2**, **NSS
   softokn**, **Kryoptic**
-- The released daemon, client, CLI, and shim architecture and TOML config model
+- The current daemon, client, CLI, and shim architecture and TOML config model
 
 **Explicitly not claimed for this beta**
 
 - General production-readiness / operational guarantees
-- Windows GNU, 32-bit Windows (PE32), and macOS/ARM/big-endian runtime claims
+- 32-bit or mixed 32/64-bit deployments (deferred — see
+  [ADR-0006](./doc/adr/ADR-0006-32-64-bit-cross-platform-compatibility.md))
 - Plain TCP **without** mTLS as a public-supported mode (undecided)
 - Backends beyond the validated matrix (others may work but are unvalidated)
 
-The public `v0.1.0` beta claim — "the proxy does not materially change observed PKCS#11
+The core beta claim — "the proxy does not materially change observed PKCS#11
 behavior for the validated providers" — is backed by repeatable direct-vs-proxied
 checking, not by assertion. See the full
 [beta support matrix](./doc/release/beta-support-matrix.md) and the
 [parity methodology](./doc/release/parity-validation.md).
 
-The local `v0.2.0` target adds opt-in gateway, authorization, resilience, and
-audit increments. They remain unreleased until the release blockers in the
-candidate [release notes](./doc/release/v0.2.0-release-notes.md) are satisfied.
-
 ## Documentation
 
-- [`doc/development.md`](./doc/development.md) — native tools, optional mise
-  setup, MSRV, and local validation commands
 - [`prd.md`](./prd.md) — product requirements
 - [`doc/architecture-overview.md`](./doc/architecture-overview.md) — how the
   shim, daemon, and backend fit together

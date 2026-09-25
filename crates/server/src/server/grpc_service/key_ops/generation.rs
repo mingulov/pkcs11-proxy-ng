@@ -309,44 +309,16 @@ async fn generate_key_impl(
         }
     };
 
-    // A NULL template carries no attributes; classification treats it as empty.
-    let template_view = template.as_deref().unwrap_or(&[]);
-
-    // D6(1): refuse minting a private object while logically logged out.
-    if let Err(rv) =
-        ensure_private_mint_allowed(ctx_mgr, &ctx_id, req.session_handle, template_view).await
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::GenerateKeyResponse {
-            ck_rv: rv.0,
-            key_handle: 0,
-            mechanism_out: None,
-        }));
-    }
-
     let mechanism_type = mechanism.mechanism_type;
-    // A generated key is a session object unless its template marks CKA_TOKEN;
-    // classify before the template moves into the backend call (B2). The
-    // privacy bit is recorded for the D6(1) USE enforcement.
-    let is_token = template_declares_token_object(template_view);
-    let is_private = template_declares_private_object(template_view);
-    let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
-    let result = spawn_backend(move || {
-        backend.generate_key_with_output(session, &mechanism, template.as_deref())
-    })
-    .await?;
+    let result =
+        spawn_backend(move || backend.generate_key_with_output(session, &mechanism, &template))
+            .await?;
 
     match result {
         Ok((object, mechanism_out_params)) => {
-            let key_handle = register_session_object_handle(
-                ctx_mgr,
-                &ctx_id,
-                virtual_session,
-                CkObjectHandle(object.0 as u64),
-                is_token,
-                Some(is_private),
-            )
-            .await;
+            let key_handle =
+                register_object_handle(ctx_mgr, &ctx_id, CkObjectHandle(object.0)).await;
             let mechanism_out = mechanism_out_params.map(|params| {
                 pkcs11_proxy_ng_proto::Mechanism::from(&pkcs11_proxy_ng_types::CkMechanism {
                     mechanism_type,

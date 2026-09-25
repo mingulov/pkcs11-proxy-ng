@@ -3,6 +3,4 @@ pub mod error;
 pub mod tls;
 
 pub use client::Pkcs11Client;
-pub use error::{
-    MessageCallError, MessageCallErrorOrigin, grpc_status_to_ck_rv, set_transport_failure_hook,
-};
+pub use error::{grpc_status_to_ck_rv, set_transport_failure_hook};

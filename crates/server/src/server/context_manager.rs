@@ -208,76 +208,16 @@ pub struct LogicalClientInstance {
     pub created_at: Instant,
     pub last_active: Instant,
     pub session_handles: HandleMap, // virtual session → backend session
-    pub session_slots: HashMap<VirtualHandle, BackendSlotId>, // session → slot ownership (ADR-0002 §7)
-    pub object_handles: HandleMap,                            // virtual object → backend object
-    /// Per-virtual-object cached `ObjectMetadata` (G3). **Only session objects
-    /// (`CKA_TOKEN=false`) are cached.** Token objects are never stored here —
-    /// they are re-fetched on every gate call so a cross-client backend handle
-    /// recycling event cannot cause a stale authorization decision (I2 fix).
-    ///
-    /// Entries are evicted wherever `object_handles` entries are removed —
-    /// on explicit `C_DestroyObject`, on session close (for session objects),
-    /// and on context teardown — so a recycled virtual handle can never return
-    /// stale metadata within one context.
-    pub object_metadata: HashMap<VirtualHandle, ObjectMetadata>,
-    /// Virtual object handles created as SESSION objects (CKA_TOKEN=false) in
-    /// each virtual session. Evicted when that session closes so a recycled
-    /// backend object number can never alias a stale handle (B2). Token objects
-    /// are intentionally absent — their handles persist across the application's
-    /// sessions.
-    pub session_objects: HashMap<VirtualHandle, Vec<VirtualHandle>>,
-    pub login_state: HashMap<BackendSlotId, LoginState>, // per-token login
-    pub authenticated_identity: Option<String>,          // bound at creation (ADR-0005 §4)
-    /// Virtual object handles minted by this context (via generate/wrap/create,
-    /// NOT via find). Used by `gate_object_handle` to allow a principal to use
-    /// keys it generated, even when its `objects` grant does not list the new
-    /// object's `CKA_UNIQUE_ID` (which is backend-assigned and therefore
-    /// unknown at configuration time).
-    ///
-    /// Entries are evicted in the SAME removal hooks that evict `object_metadata`
-    /// (per-handle removal on session close and on `C_DestroyObject`, plus full
-    /// teardown) so a recycled virtual handle cannot inherit created-status from
-    /// a prior object.
-    ///
-    /// FIND results (`register_object_handles`) are intentionally NOT inserted
-    /// here — only minting operations insert.
-    pub created_objects: HashSet<VirtualHandle>,
-    /// Template-declared `CKA_PRIVATE` bit per virtual object handle, recorded
-    /// at mint time (create/copy/generate/derive/unwrap/encapsulate/decapsulate)
-    /// for the D6(1) logical-login enforcement. `true` = known-private (refuse
-    /// USE while logged out without a backend probe); `false` = known-public
-    /// (proceed without a probe). ABSENT = unknown (find results and
-    /// backend-minted mechanism-out handles, which carry no client template):
-    /// logged-out USE probes `CKA_PRIVATE` from the backend once per operation.
-    /// `CKA_PRIVATE` is immutable after creation, so a recorded bit never goes
-    /// stale within the handle's lifetime.
-    ///
-    /// Entries are evicted in the SAME removal hooks as `object_metadata` and
-    /// `created_objects` (per-handle removal on session close and on
-    /// `C_DestroyObject`, plus full teardown) so a recycled virtual handle
-    /// cannot inherit a stale privacy bit.
-    pub object_private: HashMap<VirtualHandle, bool>,
-    /// Session-scoped attribute result cache (R2 coalescer).
-    ///
-    /// Keys are `(virtual object handle, attribute type)`. Entries are evicted
-    /// in the SAME hooks that evict `object_metadata` and `created_objects`
-    /// (per-handle removal on session close and `C_DestroyObject`, plus full
-    /// teardown) so a recycled virtual handle can never return stale cached
-    /// attributes within one context. The map is always allocated; it is only
-    /// populated when `resilience::coalesce_enabled()` is `true` (Task 2 wires
-    /// the serving path).
-    pub attr_cache: HashMap<(VirtualHandle, CkAttributeType), CachedAttr>,
+    pub session_slots: HashMap<VirtualHandle, CkSlotId>, // session → slot ownership (ADR-0002 §7)
+    pub object_handles: HandleMap,  // virtual object → backend object
+    pub login_state: HashMap<CkSlotId, LoginState>, // per-token login
+    pub authenticated_identity: Option<String>, // bound at creation (ADR-0005 §4)
     /// Count of backend operations currently in flight for this context.
     /// Eviction never reaps a context with `in_flight > 0`, so a single
     /// long backend call (DH/RSA keygen, slow-HSM op) is not evicted MID-CALL
     /// even when it outlasts the lease. `Arc` so an `OperationGuard` can hold
     /// and decrement it after the DashMap shard lock is released.
     pub in_flight: Arc<AtomicI64>,
-    /// Per-virtual-session message-operation serialization/state. The owned
-    /// Tokio guard can travel into a blocking backend closure, so timeout of
-    /// the gRPC future cannot release this state while the provider still runs.
-    pub(crate) message_operations:
-        HashMap<(VirtualHandle, MessageOperation), Arc<Mutex<MessageOperationState>>>,
 }
 
 impl LogicalClientInstance {
@@ -298,7 +238,6 @@ impl LogicalClientInstance {
             login_state: HashMap::new(),
             authenticated_identity: identity,
             in_flight: Arc::new(AtomicI64::new(0)),
-            message_operations: HashMap::new(),
         }
     }
 
@@ -350,35 +289,11 @@ impl LogicalClientInstance {
         backend_handles
     }
 
-    /// Record `object` as a session object (CKA_TOKEN=false) created in
-    /// `session`, so its virtual handle is evicted when that session closes (B2).
-    pub fn record_session_object(&mut self, session: VirtualHandle, object: VirtualHandle) {
-        self.session_objects.entry(session).or_default().push(object);
-    }
-
     /// Remove one session. If it was the final session this logical client
     /// held for the slot, clear the corresponding logical login state.
     pub fn remove_session(&mut self, session: VirtualHandle) -> Option<BackendHandle> {
         let slot = self.session_slots.remove(&session);
         let backend_handle = self.session_handles.remove(session);
-        self.message_operations.retain(|(owned_session, _), _| *owned_session != session);
-        // Evict the session's session objects: the backend destroys them on
-        // close, so the virtual handles must not linger and alias a recycled
-        // backend object number (B2).  Cached unique IDs and created-set
-        // entries are evicted alongside object handles so a recycled virtual
-        // handle cannot return stale metadata or inherit created-status.
-        if let Some(objects) = self.session_objects.remove(&session) {
-            for object in objects {
-                self.object_handles.remove(object);
-                self.object_metadata.remove(&object);
-                self.created_objects.remove(&object);
-                self.object_private.remove(&object);
-                // Evict all cached attribute entries for this object (R2). Mirrors
-                // the object_metadata + created_objects eviction so a recycled
-                // virtual handle cannot return stale cached attributes.
-                self.attr_cache.retain(|(attr_vh, _), _| *attr_vh != object);
-            }
-        }
         if let Some(slot) = slot {
             let has_remaining_session_for_slot = self.session_slots.values().any(|s| *s == slot);
             if !has_remaining_session_for_slot {
@@ -503,6 +418,25 @@ impl Drop for OperationGuardInner {
             self.counter.fetch_sub(1, Ordering::Relaxed);
         } else {
             self.counter.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// RAII guard marking a backend operation in flight for one context. While it
+/// lives, eviction skips that context (see `ContextManager::begin_operation`).
+pub struct OperationGuard {
+    manager: Arc<ContextManager>,
+    id: ClientContextId,
+    counter: Arc<AtomicI64>,
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+        // Refresh last_active (sync DashMap access) so a long op that just
+        // finished isn't evicted before the client's next call.
+        if let Some(mut ctx) = self.manager.contexts.get_mut(&self.id) {
+            ctx.touch();
         }
     }
 }
@@ -871,7 +805,7 @@ impl ContextManager {
             let expired: Vec<_> = self
                 .contexts
                 .iter()
-                .filter(|entry| now.duration_since(entry.value().last_active) > self.lease_duration)
+                .filter(|entry| self.is_reapable(entry.value(), now))
                 .map(|entry| entry.key().clone())
                 .collect();
             for id in &expired {
@@ -921,6 +855,29 @@ impl ContextManager {
             ctx.touch();
             f(ctx.value_mut())
         })
+    }
+
+    pub fn first_login_state_for_slot_excluding(
+        &self,
+        slot: CkSlotId,
+        excluded_id: &ClientContextId,
+    ) -> Option<LoginState> {
+        self.contexts.iter().find_map(|ctx| {
+            if ctx.key() == excluded_id { None } else { ctx.login_state.get(&slot).copied() }
+        })
+    }
+
+    /// Begin a backend operation for `id`: bump its in-flight counter and return
+    /// a guard. While the guard lives the context is NOT evicted even past the
+    /// lease, so a single long backend call (DH/RSA keygen, slow-HSM op) is never
+    /// reaped MID-CALL. On drop the guard decrements the counter and refreshes
+    /// `last_active` so a long op that just finished isn't evicted before the
+    /// client's next call. Returns `None` when the context doesn't exist — the
+    /// caller then errors out normally and no guard is needed.
+    pub fn begin_operation(self: &Arc<Self>, id: &ClientContextId) -> Option<OperationGuard> {
+        let counter = self.contexts.get(id)?.in_flight.clone();
+        counter.fetch_add(1, Ordering::Relaxed);
+        Some(OperationGuard { manager: Arc::clone(self), id: id.clone(), counter })
     }
 
     pub async fn context_identity(&self, id: &ClientContextId) -> Option<String> {
@@ -1217,10 +1174,18 @@ impl ContextManager {
         expired
     }
 
+    /// A context is reapable only when its lease has expired AND it has no
+    /// backend operation in flight (a long in-flight op must never be evicted
+    /// mid-call — that is the whole point of the in-flight counter).
+    fn is_reapable(&self, ctx: &LogicalClientInstance, now: Instant) -> bool {
+        ctx.in_flight.load(Ordering::Relaxed) == 0
+            && now.duration_since(ctx.last_active) > self.lease_duration
+    }
+
     fn collect_expired_context_ids(&self, now: Instant) -> Vec<ClientContextId> {
         self.contexts
             .iter()
-            .filter(|entry| now.duration_since(entry.value().last_active) > self.lease_duration)
+            .filter(|entry| self.is_reapable(entry.value(), now))
             .map(|entry| entry.key().clone())
             .collect()
     }
@@ -1233,10 +1198,8 @@ impl ContextManager {
         let now = Instant::now();
         let mut backend_sessions = Vec::new();
         for id in expired {
-            let still_expired = self
-                .contexts
-                .get(id)
-                .is_some_and(|entry| now.duration_since(entry.last_active) > self.lease_duration);
+            let still_expired =
+                self.contexts.get(id).is_some_and(|entry| self.is_reapable(&entry, now));
             if !still_expired {
                 continue;
             }

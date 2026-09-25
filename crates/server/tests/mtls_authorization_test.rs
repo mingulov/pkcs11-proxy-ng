@@ -5,10 +5,65 @@ use pkcs11_proxy_ng_proto::{InitializeRequest, Pkcs11ProxyClient};
 use pkcs11_proxy_ng_types::*;
 use std::sync::Arc;
 use tonic::Code;
-use tonic::transport::{Certificate as TonicCertificate, ClientTlsConfig, Endpoint};
-#[path = "support/mtls_fixture.rs"]
-mod mtls_fixture;
-use mtls_fixture::MtlsFixture;
+use tonic::transport::{Certificate as TonicCertificate, ClientTlsConfig, Endpoint, Server};
+
+struct LeafCert {
+    cert_pem: String,
+    key_pem: String,
+    der: Vec<u8>,
+}
+
+struct MtlsFixture {
+    endpoint: String,
+    ca_cert: PathBuf,
+    client_a: ClientTlsFiles,
+    client_b: ClientTlsFiles,
+    _temp: TempDir,
+    _shutdown: tokio::sync::watch::Sender<bool>,
+}
+
+fn new_ca() -> (Certificate, Issuer<'static, KeyPair>) {
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.distinguished_name.push(DnType::CommonName, "Root CA");
+    params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+    params.key_usages.push(KeyUsagePurpose::KeyCertSign);
+    params.key_usages.push(KeyUsagePurpose::CrlSign);
+
+    let key = KeyPair::generate().unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    (cert, Issuer::new(params, key))
+}
+
+fn new_leaf(
+    issuer: &Issuer<'static, KeyPair>,
+    common_name: &str,
+    subject_alt_names: Vec<String>,
+    usage: ExtendedKeyUsagePurpose,
+) -> LeafCert {
+    let mut params = CertificateParams::new(subject_alt_names).unwrap();
+    params.distinguished_name.push(DnType::CommonName, common_name);
+    params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+    params.extended_key_usages.push(usage);
+
+    let key = KeyPair::generate().unwrap();
+    let cert = params.signed_by(&key, issuer).unwrap();
+    LeafCert { cert_pem: cert.pem(), key_pem: key.serialize_pem(), der: cert.der().to_vec() }
+}
+
+fn write_file(dir: &TempDir, name: &str, contents: &str) -> PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, contents).unwrap();
+    // The daemon rejects mTLS private keys with group/other access (mode must
+    // be 0600 or stricter). The test host's umask can leave freshly written
+    // files at 0664, so tighten every credential file we emit to owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    path
+}
 
 async fn start_mtls_daemon() -> MtlsFixture {
     let temp = tempfile::tempdir().unwrap();
@@ -51,6 +106,7 @@ async fn start_mtls_daemon() -> MtlsFixture {
         context_manager,
         backend,
         TcpAuthMode::Mtls,
+        pkcs11_proxy_ng::config::UnixAuthMode::None,
         Arc::new(token_policy),
         pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource::load(None).unwrap(),
     );

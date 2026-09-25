@@ -143,7 +143,7 @@ auth = "none"
 fn validate_unix_insecure_requires_opt_in() {
     let toml = r#"
 [backend]
-module = "."
+module = "/dev/null"
 
 [listener.local]
 path = "/tmp/pkcs11-proxy-ng-test.sock"
@@ -162,7 +162,7 @@ auth = "none"
 fn validate_unix_insecure_with_opt_in_accepted() {
     let toml = r#"
 [backend]
-module = "."
+module = "/dev/null"
 
 [listener.local]
 path = "/tmp/pkcs11-proxy-ng-test.sock"

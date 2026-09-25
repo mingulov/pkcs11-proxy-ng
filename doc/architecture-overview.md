@@ -24,15 +24,13 @@ see the individual ADRs in `doc/adr/`.
 └─────────────────────────────┘    └──────────────────────────────┘
 ```
 
-## Current Crate Structure
+## Planned Crate Structure (pkcs11-proxy-ng/ workspace)
 
 | Crate | Type | Purpose |
 |-------|------|---------|
-| `audit` | lib | Tamper-evident audit records, hash chain, signed checkpoints, verification |
 | `types` | lib | Pure Rust PKCS#11 type definitions (CK_RV, mechanisms, attributes) |
 | `proto` | lib | Protobuf definitions + tonic generated code + type conversions |
 | `backend` | lib | Backend trait + FFI (dlopen) implementation + mock backend |
-| `pkcs11-module` / `pkcs11-abi` | external git dep | Shared module-FFI facts from `pkcs11-components` (rev-pinned): raw function-table acquisition, field-offset tables, layout selection; consumed by backend |
 | `pkcs11-proxy-ng` | bin | Daemon: gRPC server, context/session management, auth |
 | `pkcs11-proxy-ng-client` | lib | Rust client library: gRPC client, error mapping, reconnect |
 | `pkcs11-proxy-ng-cli` | bin | CLI tool for diagnostics and automation |
@@ -43,13 +41,8 @@ see the individual ADRs in `doc/adr/`.
 Full details in `doc/adr/`:
 
 **ADR-0001 — Function & Mechanism Coverage Policy**
-- The standard `cryptoki-sys` function-list tables expose 104 PKCS#11 fields,
-  all represented by the proxy with local test citations. Six `C_DigestXof*`
-  declarations remain explicit spec-only gaps because the published headers and
-  bindings provide no standard function-list slots for them.
-- Parameter modeling covers 79 mechanism shapes and three message-parameter
-  shapes. See `doc/oasis-profile-coverage.md` for generated, source-grounded
-  coverage and the exact-output inventory.
+- Phase 1 targets an explicit seed set of ~28 PKCS#11 functions; long-term goal
+  is complete coverage of 2.40 through 3.2.
 - Parameterless mechanism calls always forwarded (no parameter data to interpret).
 - Parameterized mechanisms require explicit protobuf modeling; unmodeled params
   rejected with `CKR_MECHANISM_PARAM_INVALID`.
@@ -67,9 +60,8 @@ Full details in `doc/adr/`:
   handles never exposed.
 - Login state scoped to logical client instance + token.
 - Lease-based reconnect preserves state across transient transport interruptions.
-- v0.2 selects one managed provider chain per embedding process, with separate
-  daemons for independent chains. Another loader handle is not isolation.
-  Worker isolation and independent per-client event streams remain deferred.
+- Backend isolation fallback ladder: shared process → separate module instance
+  → separate worker process (Phase 1 implements shared-process tier).
 
 **ADR-0003 — Error Model**
 - `ck_rv` field (uint64) in every protobuf response carries the exact PKCS#11
@@ -85,9 +77,7 @@ Full details in `doc/adr/`:
 - Primary implementation: direct FFI via `dlopen` (`libloading` crate).
 - Any PKCS#11 `.so` is a valid backend: vendor HSM libs, SoftHSM2, p11-kit.
 - p11-kit is just one example module path, not an architectural dependency.
-- One managed chain per embedding process, including aggregator dependencies
-  and direct-backend users. Share through Arc; one linked backend runtime and
-  exclusive provider access are required.
+- Single backend module per daemon instance in Phase 1.
 
 **ADR-0005 — Phase 1 Authorization Model**
 - Three auth modes per listener: `none` (dev only), `peer_cred` (Unix
@@ -98,9 +88,6 @@ Full details in `doc/adr/`:
 - Transport authentication failures use gRPC status. Token visibility failures
   on PKCS#11 calls are mapped to PKCS#11 return values that hide unauthorized
   slots.
-- ADR-0012 extends this with opt-in mTLS leaf-SPKI identities, deny-default
-  class/mechanism/object policy, extract denial, rate/session quotas, login
-  budgets, tamper-evident auditing, and the attribute cache.
 
 ### Current Listener Support Matrix
 
@@ -110,12 +97,12 @@ Runtime support and production intent are tracked separately.
 | --- | --- | --- |
 | TCP with `auth = "mtls"` | Production remote transport | Starts with tonic/rustls mTLS, requires CA/server cert/server key, and binds peer certificate identity to `client_context_id` |
 | TCP with `auth = "none"` and `allow_insecure_tcp = true` | Development and local integration tests | Starts only with the explicit unsafe opt-in |
-| Unix socket with `auth = "peer_cred"` | Authenticated local transport on supported Unix platforms | Implemented; binds kernel-supplied UID identity, validates policy identity form, and creates the socket with restrictive permissions |
-| Unix socket with `auth = "none"` | Development and local integration tests | Implemented only with explicit insecure configuration and emits a startup warning |
+| Unix socket | Development and test-only local transport | Fails closed in the production daemon; any future implementation must require an explicit dev/test opt-in and socket permissions |
 
-Unauthenticated Unix sockets are not a production security boundary. Production
-local deployments use `peer_cred`; unauthenticated mode remains an explicit
-development escape hatch.
+Unix sockets are not a production security boundary for this project. If a Unix
+listener is enabled for tests later, the daemon must print a startup warning and
+bind the socket with restrictive permissions such as `0600` for single-user
+tests or `0660` for a dedicated test group.
 
 ## Tech Stack
 
@@ -126,57 +113,19 @@ development escape hatch.
 - **clap** — CLI argument parsing
 - **serde + toml** — configuration parsing
 - **tracing** — structured logging
-- **ed25519-dalek + sha2** — signed checkpoints and audit hash-chain integrity
 - **rustls** — TLS 1.3 for mTLS
 - **nix** — SO_PEERCRED for Unix socket peer credentials
 - **cryptoki-sys** — raw PKCS#11 C FFI type definitions
 
-## Current Scope
+## Phase 1 Scope
 
-**In scope:** Linux daemon and shim, Rust client library, CLI, gRPC over mTLS
-TCP and authenticated Unix sockets, represented PKCS#11 2.40/3.x function-list
-coverage, explicitly modeled mechanisms, exact-output semantics, SoftHSM2/NSS
-integration, and optional gateway/audit controls.
+**In scope:** Linux daemon, Linux shim, Rust client lib, CLI, gRPC over TCP,
+mTLS TCP transport, PKCS#11 2.40 full function coverage plus 3.0/3.2
+functions (message-based APIs, KEM, VerifySignature, authenticated wrap, async
+polling), SoftHSM2 integration tests, pkcs11-tool / p11tool compatibility
+validation.
 
-**Out of scope:** macOS native-provider daemon targets (Windows x64/MSVC is
-covered via the implemented tail stretch,
-[ADR-0014](adr/ADR-0014-v020-tail-platform-stretch.md) — see below),
-automatic support for future PKCS#11 versions or unmodeled parameter
-layouts, backend worker-process isolation, callbacks, and multi-module
-aggregation within a single daemon.
-The proxy is a forwarding layer; provider conformance is validated externally.
-
-### Selected v0.2 native contract (implementation/qualification pending)
-
-The [native ownership contract](release/native-mechanism-ownership.md)
-requires constructor reservation before loading/discovery, epoch-qualified
-workers/frames and explicit retirement before storage/library destruction.
-Slot waiting supports DONT_BLOCK only; blocking mode returns local
-FUNCTION_NOT_SUPPORTED without polling. One waiter keeps ordinary lifecycle
-exclusion through settlement and cannot overlap native Finalize. Checked
-input/output/RV widths and the specified local-refusal order are mandatory.
-Logical clients compete for shared native pending flags; logical Initialize
-creates no independent bitmap or full native per-application event equivalence.
-
-Live FFI qualification covers Linux GNU/musl x86_64/64-bit and x86/32-bit, and
-— via the implemented tail stretch
-([ADR-0014](adr/ADR-0014-v020-tail-platform-stretch.md)) — Windows x64 MSVC.
-Portable Windows client/shim/proto/types, mock-only backend/server builds and
-Windows-client/Linux-daemon interoperation remain. Nonqualified hosts must
-refuse construction before loading; all four Linux width pairs need native
-loaded-shim receipts.
-
-[Tail-stretch closure, 2026-09-17: the Linux-only qualification line, the
-supersession of ADR-0011/0006's Windows native-provider daemon scope, and the
-Native-Windows-deferred line here were the 2026-09-13 P0 amendment posture —
-ADR-0014 is Implemented, with real-Windows daemon-host receipts in
-workspace-root `artifacts/v020-tail-windows-2026-09-16/` legs A and C, and
-shim-direction receipts in leg B.]
-
-Unresolved shutdown or final-domain Drop without private quiescence proof
-selects return-aware raw Linux `exit_group(70)` for the whole embedding thread
-group. Its target/seccomp/environment contract is explicit; it promises no
-wiping, complete audit tail, cleanup, token deletion, strict disappearance
-deadline or global no-core policy. The controller must progress without stalled
-native/session/registry locks. These are required future enforcement and test
-gates, not claims that this documentation amendment implements them.
+**Out of scope:** Windows/macOS, full PKCS#11 conformance across every mechanism
+and parameter structure, automatic support for future PKCS#11 versions,
+C_AsyncGetID/C_AsyncJoin persistence (returns spec-compliant refusal codes),
+callbacks, multi-module aggregation within a single daemon.

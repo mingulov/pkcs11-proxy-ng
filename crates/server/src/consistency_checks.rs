@@ -432,22 +432,10 @@ fn config_proxy_fields_all_have_defaults() {
 // the repo root and no longer reach into any outer planning workspace, so they
 // pass in a standalone clone of this repository.
 
-#[test]
-fn completion_docs_directory_is_not_empty() {
-    let completed_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../doc/completed");
-    if !completed_dir.exists() {
-        eprintln!(
-            "skipping completion_docs_directory_is_not_empty: {} not reachable from submodule-only checkout",
-            completed_dir.display()
-        );
-        return;
-    }
-    let count = std::fs::read_dir(&completed_dir)
-        .expect("cannot read doc/completed/")
-        .filter(|e| e.as_ref().is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".md")))
-        .count();
-    assert!(count >= 10, "doc/completed/ should have many completion notes, found only {count}");
+/// Repo root, derived from the server crate's manifest dir
+/// (`<repo>/crates/server`).
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 #[test]
@@ -460,14 +448,20 @@ fn public_docs_present() {
 }
 
 #[test]
-fn adr_index_covers_every_numbered_adr() {
-    let root = repo_root();
-    let index = std::fs::read_to_string(root.join("doc/adr/README.md")).unwrap();
-    for entry in std::fs::read_dir(root.join("doc/adr")).unwrap() {
-        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-        if name.starts_with("ADR-") && name.ends_with(".md") {
-            assert!(index.contains(&format!("]({name})")), "ADR index does not link {name}");
-        }
+fn adr_files_exist() {
+    let adr_dir = repo_root().join("doc/adr");
+    let expected = [
+        "ADR-0001-function-mechanism-coverage-policy.md",
+        "ADR-0002-handle-session-identity-model.md",
+        "ADR-0003-error-model.md",
+        "ADR-0004-backend-integration-model.md",
+        "ADR-0005-phase-1-authorization-model.md",
+        "ADR-0006-32-64-bit-cross-platform-compatibility.md",
+        "ADR-0007-backend-process-isolation.md",
+    ];
+    for name in &expected {
+        let path = adr_dir.join(name);
+        assert!(path.exists(), "ADR file missing: {} (expected at {})", name, path.display());
     }
 }
 

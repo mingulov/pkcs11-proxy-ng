@@ -929,7 +929,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         self.ffi_generate_key_with_output(session, mechanism, template)
     }
@@ -1163,17 +1163,6 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_message_encrypt_init(session, mechanism, init_param, key)
     }
 
-    fn message_encrypt_init_contract(
-        &self,
-        session: CkSessionHandle,
-        mechanism: &CkMechanism,
-        init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
-        key: CkObjectHandle,
-        provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<CkParameterRoundtripResult> {
-        self.ffi_message_encrypt_init_contract(session, mechanism, init_param, key, provider_spec)
-    }
-
     fn message_encrypt_final(&self, session: CkSessionHandle) -> CkResult<()> {
         self.ffi_message_encrypt_final(session)
     }
@@ -1186,17 +1175,6 @@ impl Pkcs11Backend for FfiBackend {
         key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_message_decrypt_init(session, mechanism, init_param, key)
-    }
-
-    fn message_decrypt_init_contract(
-        &self,
-        session: CkSessionHandle,
-        mechanism: &CkMechanism,
-        init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
-        key: CkObjectHandle,
-        provider_spec: &CkParameterRoundtripSpec,
-    ) -> CkResult<CkParameterRoundtripResult> {
-        self.ffi_message_decrypt_init_contract(session, mechanism, init_param, key, provider_spec)
     }
 
     fn message_decrypt_final(&self, session: CkSessionHandle) -> CkResult<()> {

@@ -141,7 +141,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         mechanism: &CkMechanism,
-        template: Option<&[CkAttribute]>,
+        template: &[CkAttribute],
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
         let ctx = self.context_id()?;
         let proto_mech = Self::proto_mechanism(mechanism);
