@@ -62,14 +62,13 @@ pub unsafe extern "C" fn c_async_complete(
                     // that even inconsistent over-long value bytes cannot
                     // overrun the caller buffer.
                     let copy_len = value.len().min(capacity);
+                    // T13: SecretBytes is closure-scoped — hoist the raw
+                    // destination so the copy stays inside `expose`.
+                    let dst = async_data.pValue;
                     if copy_len > 0 {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                value.as_ptr(),
-                                async_data.pValue,
-                                copy_len,
-                            );
-                        }
+                        value.expose(|bytes| unsafe {
+                            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, copy_len);
+                        });
                     }
                 }
                 async_data.ulValue = value_len as CK_ULONG;

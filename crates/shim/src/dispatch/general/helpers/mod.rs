@@ -179,6 +179,34 @@ pub(crate) unsafe fn try_read_optional_bytes<'a>(
     }
 }
 
+/// Validate caller-memory extent arithmetic before constructing any slice or
+/// performing any multi-byte unaligned copy (T03).
+///
+/// Checks, in order: `count` fits `usize` (32-bit `CK_ULONG` hosts),
+/// `count * stride` does not overflow, the byte extent is within `cap` and
+/// `isize::MAX` (the slice limit), and `address + extent` does not wrap the
+/// address space. Returns the byte extent only — it does NOT certify that the
+/// range is mapped or allocated; callers still rely on the FFI contract for
+/// readability and must never treat a passing extent as proof of validity.
+///
+/// The rejection is `ARGUMENTS_BAD` (arithmetic-invalid input). Mechanism
+/// readers map it to `MECHANISM_PARAM_INVALID` at their wrappers to match
+/// the entry-gate convention.
+pub(crate) fn checked_extent(
+    address: usize,
+    count: u64,
+    stride: usize,
+    cap: usize,
+) -> CkResult<usize> {
+    let count = usize::try_from(count).map_err(|_| CkRv::ARGUMENTS_BAD)?;
+    let extent = count.checked_mul(stride).ok_or(CkRv::ARGUMENTS_BAD)?;
+    if extent > cap || extent > isize::MAX as usize {
+        return Err(CkRv::ARGUMENTS_BAD);
+    }
+    address.checked_add(extent).ok_or(CkRv::ARGUMENTS_BAD)?;
+    Ok(extent)
+}
+
 /// Build a `CkOutputBufferSpec` from the C caller's pointer pair.
 ///
 /// This captures exactly what the PKCS#11 caller passed:
@@ -199,7 +227,9 @@ pub(crate) unsafe fn output_buffer_spec(
         buffer_len: if length_pointer_null || !buffer_present {
             0
         } else {
-            (unsafe { *pul_output_len }) as u64
+            // Unaligned load (T06): the capacity cell carries no alignment
+            // promise beyond the FFI readability contract.
+            (unsafe { pul_output_len.read_unaligned() }) as u64
         },
         length_pointer_null,
     }
@@ -313,7 +343,8 @@ pub(crate) unsafe fn write_exact_output(
         });
     }
     if let Some(length) = length {
-        unsafe { pul_output_len.write(length) };
+        // Unaligned store (T06); the length cell needs no alignment promise.
+        unsafe { pul_output_len.write_unaligned(length) };
     }
     rv
 }
@@ -491,33 +522,61 @@ pub(crate) unsafe fn write_session_handle_output(
     unsafe { *p_handle = handle.0 as CK_SESSION_HANDLE };
 }
 
+/// Narrow a daemon-returned `u64` to a native caller-width integer (T06).
+///
+/// Infallible where the target is 64 bits; on narrow hosts an
+/// unrepresentable value is malformed daemon output
+/// (`GENERAL_ERROR`), never a truncation (mirrors the
+/// [`ck_rv_width_fallback`] precedent). The `u32` instantiation pins the
+/// checking machinery itself on 64-bit CI.
+pub(crate) fn narrow_u64_to_native<T>(value: u64) -> CkResult<T>
+where
+    T: TryFrom<u64>,
+{
+    T::try_from(value).map_err(|_| CkRv::GENERAL_ERROR)
+}
+
 /// Store an object handle into the caller's out-pointer (W1-L1-04).
+///
+/// The handle is validated before the store (T06): unrepresentable on a
+/// narrow host fails without writing. The store itself assumes no
+/// alignment.
 ///
 /// # Safety
 ///
-/// `p_handle` must be non-null and writable for one handle.
+/// `p_handle` must be non-null and writable for one handle (alignment
+/// not required).
 pub(crate) unsafe fn write_object_handle_output(
     handle: CkObjectHandle,
     p_handle: CK_OBJECT_HANDLE_PTR,
-) {
-    unsafe { *p_handle = handle.0 as CK_OBJECT_HANDLE };
+) -> CkResult<()> {
+    let native = narrow_u64_to_native(handle.0)?;
+    unsafe { p_handle.write_unaligned(native) };
+    Ok(())
 }
 
 /// Store a generated key pair into the caller's out-pointers (W1-L1-04).
 ///
+/// Both handles are validated before either store (T06), so a malformed
+/// second handle preserves the first cell.
+///
 /// # Safety
 ///
-/// Both out-pointers must be non-null and writable for one handle each.
+/// Both out-pointers must be non-null and writable for one handle each
+/// (alignment not required).
 pub(crate) unsafe fn write_object_handle_pair_output(
     public_handle: CkObjectHandle,
     private_handle: CkObjectHandle,
     p_public_handle: CK_OBJECT_HANDLE_PTR,
     p_private_handle: CK_OBJECT_HANDLE_PTR,
-) {
+) -> CkResult<()> {
+    let public = narrow_u64_to_native(public_handle.0)?;
+    let private = narrow_u64_to_native(private_handle.0)?;
     unsafe {
-        *p_public_handle = public_handle.0 as CK_OBJECT_HANDLE;
-        *p_private_handle = private_handle.0 as CK_OBJECT_HANDLE;
+        p_public_handle.write_unaligned(public);
+        p_private_handle.write_unaligned(private);
     }
+    Ok(())
 }
 
 /// Build a message-parameter roundtrip spec after validating the caller's
@@ -618,7 +677,7 @@ pub(crate) use template_input::*;
 #[cfg(test)]
 mod tests {
     use cryptoki_sys::{CK_RV, CK_TOKEN_INFO, CK_ULONG};
-    use pkcs11_proxy_ng_types::{PKCS11_TOKEN_LABEL_LEN, space_pad_into};
+    use pkcs11_proxy_ng_types::{CkRv, PKCS11_TOKEN_LABEL_LEN, space_pad_into};
 
     #[test]
     fn short_src_pads_remainder_with_spaces() {
@@ -847,6 +906,28 @@ mod tests {
         let result = unsafe { super::try_read_optional_bytes(buf.as_ptr(), 0) }.unwrap();
         assert_eq!(result, Some([].as_slice()));
     }
+
+    #[test]
+    fn checked_extent_pins_arithmetic_rejection_without_dereference() {
+        // Pure arithmetic: sentinel addresses are never dereferenced.
+        assert_eq!(super::checked_extent(8, 2, 4, 64), Ok(8));
+        assert!(super::checked_extent(usize::MAX - 3, 2, 4, 64).is_err());
+        assert!(super::checked_extent(8, u64::MAX, 8, 64).is_err());
+        assert!(super::checked_extent(8, 65_537, 1, 65_536).is_err());
+    }
+
+    #[test]
+    fn narrow_u64_to_native_checks_before_storing() {
+        // T06: the u32 instantiation pins the checking machinery on any
+        // host; the native instantiation is exact for fittable values.
+        assert_eq!(super::narrow_u64_to_native::<u32>(0), Ok(0));
+        assert_eq!(super::narrow_u64_to_native::<u32>(u32::MAX as u64), Ok(u32::MAX));
+        assert_eq!(
+            super::narrow_u64_to_native::<u32>(u32::MAX as u64 + 1),
+            Err(CkRv::GENERAL_ERROR)
+        );
+        assert_eq!(super::narrow_u64_to_native::<CK_ULONG>(7), Ok(7 as CK_ULONG));
+    }
 }
 
 // Mechanism/message parameter conversion tests live in sibling files (M6) so
@@ -854,5 +935,7 @@ mod tests {
 // modules of `helpers`, so their `use super::*` still reaches private items.
 #[cfg(test)]
 mod mechanism_parameter_tests;
+#[cfg(test)]
+mod mechanism_writeback_tests;
 #[cfg(test)]
 mod message_parameter_tests;

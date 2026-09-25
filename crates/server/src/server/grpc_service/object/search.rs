@@ -1400,6 +1400,113 @@ mod tests {
         );
     }
 
+    // ── T20 visibility: "other"-class objects without storage attributes ────
+
+    #[tokio::test]
+    async fn other_class_objects_without_token_private_stay_visible() {
+        // T20: HW_FEATURE / MECHANISM / PROFILE / VALIDATION are spec
+        // "other" objects with no storage attributes — spec-compliant
+        // backends answer CKA_TOKEN / CKA_PRIVATE with
+        // ATTRIBUTE_TYPE_INVALID (observed natively on kryoptic
+        // mechanism objects). Failing closed on that absence hid them
+        // from logged-in (CROSS-PROC-001 token probe) and logged-out
+        // (F-04 privacy probe) finds alike, while direct shows them.
+        // Attribute-absence now fails open by class; storage and vendor
+        // classes without attributes stay hidden.
+        let policy = Arc::new(TokenPolicy::from_config(&AuthConfig::default()).unwrap());
+
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION;
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+
+        // Four "other"-class objects with CLASS set but no TOKEN/PRIVATE,
+        // plus storage-class and vendor-class controls in the same shape.
+        // Deliberately NOT pre-registered: unmapped objects must pass the
+        // token probe (ownership) and the privacy probe (F-04) on their
+        // own — pre-registration would skip both filters.
+        let mut visible = Vec::new();
+        let mut all = Vec::new();
+        for class in [
+            CkObjectClass::HW_FEATURE,
+            CkObjectClass::MECHANISM,
+            CkObjectClass::PROFILE,
+            CkObjectClass::VALIDATION,
+        ] {
+            let obj = mock.create_object(backend_session, Some(&[])).unwrap();
+            mock.set_attribute(
+                obj,
+                CkAttributeType::CLASS,
+                MockAttributeSlot::Value(CkAttributeValue::Ulong(class.0)),
+            );
+            visible.push(obj);
+            all.push(obj);
+        }
+        for class in [CkObjectClass::SECRET_KEY.0, 0x8000_0001] {
+            let obj = mock.create_object(backend_session, Some(&[])).unwrap();
+            mock.set_attribute(
+                obj,
+                CkAttributeType::CLASS,
+                MockAttributeSlot::Value(CkAttributeValue::Ulong(class)),
+            );
+            all.push(obj);
+        }
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(BackendSlotId(CkSlotId(0)), "MockToken".into(), "0001".into());
+        let ctx_id = ctx_mgr.create_context(Some(CONFINED_IDENTITY.into())).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(BackendHandle(backend_session.0), BackendSlotId(CkSlotId(0)))
+            })
+            .await
+            .unwrap();
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+
+        // Logged out: the token-probe absence (ownership) and the
+        // privacy-probe absence (F-04) both fail open by class — exactly
+        // the four "other"-class objects, never the controls.
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(all.clone());
+        let resp = run_find_objects(&ctx, &ctx_id, virtual_session.0).await;
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "filtering must not surface an error");
+        assert_eq!(
+            resp.object_handles.len(),
+            4,
+            "logged-out find must return exactly the four other-class objects"
+        );
+        for (vh, want) in resp.object_handles.iter().zip(visible.iter()) {
+            assert_eq!(
+                resolve_virtual(&ctx, &ctx_id, *vh).await,
+                Some(want.0),
+                "logged-out find must map back to the other-class backends in order"
+            );
+        }
+
+        // Logged in: F-04 no longer filters, but CROSS-PROC-001
+        // ownership still must admit the "other"-class objects.
+        log_in_fixture(&ctx, &ctx_id).await;
+        mock.find_objects_final(backend_session).unwrap();
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(all.clone());
+        let resp = run_find_objects(&ctx, &ctx_id, virtual_session.0).await;
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(
+            resp.object_handles.len(),
+            4,
+            "logged-in find must return exactly the four other-class objects"
+        );
+        for (vh, want) in resp.object_handles.iter().zip(visible.iter()) {
+            assert_eq!(
+                resolve_virtual(&ctx, &ctx_id, *vh).await,
+                Some(want.0),
+                "logged-in find must map back to the other-class backends in order"
+            );
+        }
+    }
+
     // ── F-04 Test 4: login filter composes with the authz filter ─────────────
 
     #[tokio::test]

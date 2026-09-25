@@ -123,6 +123,51 @@ fn invalidate_token_info_drops_the_entry() {
     assert_eq!(mgr.cached_token_info(crate::server::slot_map::BackendSlotId(CkSlotId(0))), None);
 }
 
+#[test]
+fn reinit_invalidation_drops_entry_and_advances_generation() {
+    // T09: the reinit path removes the slot entry AND advances the
+    // generation (other slots untouched), so a concurrent old-generation
+    // lookup cannot reinsert stale label/serial afterwards.
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    let other = crate::server::slot_map::BackendSlotId(CkSlotId(1));
+    mgr.cache_token_info(slot, "Old".into(), "SN".into());
+    mgr.cache_token_info(other, "Other".into(), "SN2".into());
+    let before = mgr.authz_generation();
+    mgr.invalidate_token_info_on_reinit(slot);
+    assert_eq!(mgr.cached_token_info(slot), None);
+    assert_eq!(
+        mgr.cached_token_info(other),
+        Some(("Other".into(), "SN2".into())),
+        "other slots are unaffected by reinit invalidation"
+    );
+    assert_eq!(mgr.authz_generation(), before + 1);
+}
+
+#[test]
+fn generation_checked_publication_skips_stale_lookup() {
+    // T09: capture → reinit → publish must skip (stale); capture →
+    // publish with no intervening reinit must store.
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    let slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+    let stale = mgr.authz_generation();
+    mgr.cache_token_info(slot, "Old".into(), "SN".into());
+    mgr.invalidate_token_info_on_reinit(slot);
+    assert!(!mgr.cache_token_info_if_generation(slot, "Old".into(), "SN".into(), stale));
+    assert_eq!(
+        mgr.cached_token_info(slot),
+        None,
+        "a lookup started before reinit must not reinsert stale label/serial"
+    );
+    let fresh = mgr.authz_generation();
+    assert!(mgr.cache_token_info_if_generation(slot, "New".into(), "SN".into(), fresh));
+    assert_eq!(
+        mgr.cached_token_info(slot),
+        Some(("New".into(), "SN".into())),
+        "a lookup at the current generation publishes normally"
+    );
+}
+
 #[tokio::test]
 async fn capacity_eviction_skips_contexts_with_open_backend_sessions() {
     // M4: the inline capacity-eviction path must NOT drop an expired context

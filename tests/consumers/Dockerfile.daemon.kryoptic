@@ -2,6 +2,12 @@
 # Kryoptic is a Rust-based PKCS#11 module by latchset (Simo Sorce et al.)
 # https://github.com/latchset/kryoptic — modern, FIPS-targeted token.
 # Built from source against rustup-managed stable.
+#
+# FIXTURE RESIDUAL (not reproducible, not a release image): unpinned
+# `alpine:3.23` bases below, an unhashed kryoptic checkout, an unhashed
+# OpenSSL source pull, and an unlocked rustup stable toolchain.
+# Provider-matrix testing only — fixture pinning is separate, optional
+# work outside the release dependency closure.
 
 FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng
 

@@ -4,13 +4,17 @@
 //! cover exactly the load-qualified set (`NATIVE_FFI_QUALIFIED`); on
 //! unqualified targets the guard compiles out and the poison path applies.
 //!
-//! The final-owner guard (`Drop` in `ffi/loading.rs`) and the
-//! shutdown-deadline controller below are the only production callers. Both
-//! reach `abnormal_stop_native_lifetime`, which retries the raw stop
-//! until the process is gone: a return means interception — retry, never
-//! fall through to dependent destruction. (The Windows stub models
-//! non-return and spins itself, and the macOS `_exit` call diverges, so
-//! the outer loop is unreachable on those arms.)
+//! The deadline-enforcement family reaches `abnormal_stop_native_lifetime`
+//! at three logical callers / four sites: the final-owner guard (two
+//! `Drop` legs in `ffi/loading.rs`), the shutdown-deadline controller
+//! below, and the seal arm-1 suicide (`begin_finalize_with_deadline`
+//! in `ffi/native_domain.rs`; the `begin_finalize()` wrapper keeps the
+//! fixed-grace arm for direct `finalize()` callers). All reach the raw
+//! stop, which retries until
+//! the process is gone: a return means interception — retry, never fall
+//! through to dependent destruction. (The Windows stub models non-return
+//! and spins itself, and the macOS `_exit` call diverges, so the outer
+//! loop is unreachable on those arms.)
 //!
 //! Contract rows live in `doc/release/native-mechanism-ownership.md`
 //! (x86_64: `syscall` nr 231 with status 70 in RDI; i686: `int 0x80`

@@ -155,7 +155,7 @@ async fn login_user_inner(
     // Close takes the same lock around suspend, so a session closed between
     // the pre-resolve and here now resolves to None — fail cleanly instead
     // of driving the backend with a stale handle.
-    let (session, current_login_state) = match super::service_utils::resolve_session_slot_login(
+    let (session, _current_login_state) = match super::service_utils::resolve_session_slot_login(
         ctx_mgr,
         &ctx_id,
         req.session_handle,
@@ -187,19 +187,11 @@ async fn login_user_inner(
         }));
     }
 
-    // D6(3) reconciliation, same as `C_Login`: when another live context
-    // already holds a login on this slot, the shared backend token is logged
-    // in and would answer a second backend login with USER_ALREADY_LOGGED_IN
-    // *without* checking the PIN — so return the backend's answer faithfully
-    // and mint NO logical login, never a login on an unverified PIN.
-    if current_login_state.is_none()
-        && let Some(requested) = requested_login_state
-        && let Some(other_login_state) = ctx_mgr.first_login_state_for_slot_excluding(slot, &ctx_id)
-    {
-        return Ok(Response::new(pkcs11_proxy_ng_proto::LoginUserResponse {
-            ck_rv: super::session::auth::already_logged_in_rv(other_login_state, requested).0,
-        }));
-    }
+    // T20: no D6(3) short-circuit — same ruling as `C_Login`. Re-validating
+    // backends answer a second login with their real verdict (e.g.
+    // PIN_INCORRECT), not the asserted ALREADY, so every attempt is
+    // forwarded and the backend's answer returned verbatim. ALREADY still
+    // mints nothing (never a login on an unverified PIN).
 
     let user_type_raw = req.user_type;
     // Hold the PIN and username in `SecretBytes`: wiped on drop and redacted
@@ -781,10 +773,10 @@ mod tests {
         }
     }
 
-    /// W1-C1-02 (D6(3)): when another live context already holds a login on
-    /// the slot, `C_LoginUser` must return the backend's ALREADY answer
-    /// faithfully and mint NO logical login — without touching the backend
-    /// (the token would answer ALREADY without checking the PIN).
+    /// W1-C1-02 (D6(3) with T20 forward): when another live context already
+    /// holds a login on the slot, `C_LoginUser` is forwarded and the
+    /// backend's ALREADY answer returned faithfully, minting NO logical
+    /// login (never a login on an unverified PIN).
     #[tokio::test]
     async fn login_user_second_context_gets_faithful_already() {
         let (ctx_mgr, mock, backend, ctx_a, ctx_b, session_a, session_b, slot) =
@@ -803,20 +795,24 @@ mod tests {
             CkRv::USER_ALREADY_LOGGED_IN.0,
             "second-context login_user must be a faithful ALREADY (D6(3)), not a minted login"
         );
-        assert_eq!(mock.login_user_call_count(), 1, "D6(3) refusal must not reach the backend");
+        assert_eq!(
+            mock.login_user_call_count(),
+            2,
+            "D6(3) refusal must reach the backend (T20 forward) and mint nothing"
+        );
         let b_state =
             ctx_mgr.get_context(&ctx_b, |ctx| ctx.login_state.get(&slot).copied()).await.unwrap();
         assert_eq!(b_state, None, "D6(3) refusal must mint no LoginState");
     }
 
     /// W1-C1-02 (M5): two clients racing the FIRST `C_LoginUser` on the same
-    /// shared token must not both take the real-login path. Mirrors
-    /// `concurrent_first_login_serializes_to_one_backend_login`: the first
-    /// does the real backend login and the second — after blocking on the
-    /// per-slot lock and seeing A's state — takes the faithful-ALREADY path.
-    /// Exactly one backend `C_LoginUser`.
+    /// shared token must not both mint a login. Mirrors
+    /// `concurrent_first_login_serializes_to_one_mint`: the first does the
+    /// real backend login and mints; the second — after blocking on the
+    /// per-slot lock — forwards and takes the faithful-ALREADY path (T20
+    /// forward). Exactly one OK, two backend `C_LoginUser` calls.
     #[tokio::test(flavor = "multi_thread")]
-    async fn concurrent_first_login_user_serializes_to_one_backend_login() {
+    async fn concurrent_first_login_user_serializes_to_one_mint() {
         let (ctx_mgr, mock, backend, ctx_a, ctx_b, session_a, session_b, _slot) =
             setup_login_user().await;
 
@@ -855,7 +851,7 @@ mod tests {
         };
 
         // Release A; it finishes the real login, mints its login state, and
-        // drops the lock; B then sees A's login state and answers ALREADY.
+        // drops the lock; B then forwards and answers the backend's ALREADY.
         {
             let (lock, cv) = &*proceed;
             *lock.lock().unwrap() = true;
@@ -873,8 +869,8 @@ mod tests {
         );
         assert_eq!(
             mock.login_user_call_count(),
-            1,
-            "per-slot serialization must yield exactly one real backend C_LoginUser"
+            2,
+            "both raced login_users reach the backend (T20 forward); serialization yields one OK"
         );
     }
 

@@ -1049,6 +1049,16 @@ fn backend_methods_have_proto_rpcs() {
             "session_output_mechanism_params",
             "populates mechanism_out on existing crypto-op responses; not its own RPC",
         ),
+        // T10a slot-wait admission runs daemon-side inside the
+        // WaitForSlotEvent handler before dispatch; not its own RPC.
+        ("admit_slot_wait", "daemon-local admission for the WaitForSlotEvent RPC; not its own RPC"),
+        // T10 shutdown coordination runs daemon-side inside the process
+        // teardown path; neither finalize entry is a wire method.
+        ("finalize_with_grace", "daemon-local coordinator-path finalize; not its own RPC"),
+        (
+            "finalize_is_natively_bounded",
+            "pure daemon-local predicate for the coordinator wait; not its own RPC",
+        ),
         // NULL-mechanism init cancellation is carried by the existing *Init
         // RPCs with `mechanism: None`, not by separate proto methods.
         ("sign_init_cancel", "carried by the SignInit RPC with mechanism: None"),

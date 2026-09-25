@@ -116,7 +116,11 @@ candidate [release notes](./doc/release/v0.2.0-release-notes.md) are satisfied.
   [`doc/oasis-profile-coverage.md`](./doc/oasis-profile-coverage.md) — provider
   and PKCS#11 spec coverage
 - [`doc/release/`](./doc/release/) — beta support matrix, mTLS setup, parity
-  validation methodology, and the `0.x` release checklist
+  validation methodology, and the `0.x` release checklist. Scope rule for
+  every direct-vs-proxied mismatch: proxy bugs get fixed here,
+  provider-conformance issues go upstream — never normalized by the proxy
+  ([ADR-0010](./doc/adr/ADR-0010-transparent-forwarding-by-default.md),
+  [parity triage](./doc/release/parity-validation.md#triage-of-mismatches))
 
 ## Release dry run
 

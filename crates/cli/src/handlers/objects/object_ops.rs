@@ -147,7 +147,7 @@ pub(crate) async fn create_object(
     slot_id: u64,
     pin: SecretBytes,
     label: String,
-    value: Option<String>,
+    value: Option<zeroize::Zeroizing<String>>,
 ) -> CliResult {
     let session =
         open_session(client, slot_id, CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION)
@@ -169,10 +169,12 @@ pub(crate) async fn create_object(
         },
     ];
     if let Some(value) = value {
-        let bytes = hex::decode(&value).map_err(|e| format!("Invalid hex value: {e}"))?;
+        // T14: decode into a wiping owner that moves straight into the
+        // template (no plain working copy).
+        let bytes = crate::secrets::decode_hex_secret(&value, "Invalid hex value")?;
         template.push(CkAttribute {
             attr_type: CkAttributeType::VALUE,
-            value: Some(CkAttributeValue::Bytes(bytes.into())),
+            value: Some(CkAttributeValue::Bytes(bytes)),
         });
     }
 

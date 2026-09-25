@@ -225,11 +225,20 @@ async fn message_encrypt_decrypt_round_trip() {
     client.message_decrypt_init(session, Some(&test_mechanism()), None, key).await.unwrap();
 
     // Decrypt
+    // T13: `expose` cannot lend across `.await`; materialize the parameter copy.
+    let param_out_bytes = param_out.expose(|bytes| bytes.to_vec());
     let (_param_out2, recovered) = client
-        .decrypt_message(session, &param_out, CkInBuf::Bytes(&[]), CkInBuf::Bytes(&ciphertext))
+        .decrypt_message(
+            session,
+            &param_out_bytes,
+            CkInBuf::Bytes(&[]),
+            CkInBuf::Bytes(&ciphertext),
+        )
         .await
         .unwrap();
-    assert_eq!(recovered, plaintext.to_vec(), "decrypted plaintext should match original");
+    recovered.expose(|bytes| {
+        assert_eq!(bytes, &plaintext[..], "decrypted plaintext should match original")
+    });
 
     // Finalize decrypt
     client.message_decrypt_final(session).await.unwrap();
@@ -253,12 +262,15 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
         client.encrypt_message_begin(session, parameter, CkInBuf::Bytes(aad)).await.unwrap();
     assert!(encrypt_parameter.is_empty());
 
+    // T13: `expose` cannot lend across `.await`; materialize the parameter copy.
+    let encrypt_parameter_bytes = encrypt_parameter.expose(|bytes| bytes.to_vec());
     let (encrypt_parameter, ciphertext1) = client
-        .encrypt_message_next(session, &encrypt_parameter, CkInBuf::Bytes(part1), CkFlags(0))
+        .encrypt_message_next(session, &encrypt_parameter_bytes, CkInBuf::Bytes(part1), CkFlags(0))
         .await
         .unwrap();
+    let encrypt_parameter_bytes = encrypt_parameter.expose(|bytes| bytes.to_vec());
     let (encrypt_parameter, ciphertext2) = client
-        .encrypt_message_next(session, &encrypt_parameter, CkInBuf::Bytes(part2), CkFlags(0))
+        .encrypt_message_next(session, &encrypt_parameter_bytes, CkInBuf::Bytes(part2), CkFlags(0))
         .await
         .unwrap();
     assert!(encrypt_parameter.is_empty());
@@ -267,23 +279,36 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
     client.message_encrypt_final(session).await.unwrap();
 
     client.message_decrypt_init(session, Some(&mechanism), None, key).await.unwrap();
+    let encrypt_parameter_bytes = encrypt_parameter.expose(|bytes| bytes.to_vec());
     let decrypt_parameter = client
-        .decrypt_message_begin(session, &encrypt_parameter, CkInBuf::Bytes(aad))
+        .decrypt_message_begin(session, &encrypt_parameter_bytes, CkInBuf::Bytes(aad))
         .await
         .unwrap();
     assert!(decrypt_parameter.is_empty());
 
+    let decrypt_parameter_bytes = decrypt_parameter.expose(|bytes| bytes.to_vec());
     let (decrypt_parameter, recovered1) = client
-        .decrypt_message_next(session, &decrypt_parameter, CkInBuf::Bytes(&ciphertext1), CkFlags(0))
+        .decrypt_message_next(
+            session,
+            &decrypt_parameter_bytes,
+            CkInBuf::Bytes(&ciphertext1),
+            CkFlags(0),
+        )
         .await
         .unwrap();
+    let decrypt_parameter_bytes = decrypt_parameter.expose(|bytes| bytes.to_vec());
     let (decrypt_parameter, recovered2) = client
-        .decrypt_message_next(session, &decrypt_parameter, CkInBuf::Bytes(&ciphertext2), CkFlags(0))
+        .decrypt_message_next(
+            session,
+            &decrypt_parameter_bytes,
+            CkInBuf::Bytes(&ciphertext2),
+            CkFlags(0),
+        )
         .await
         .unwrap();
     assert!(decrypt_parameter.is_empty());
-    assert_eq!(recovered1, part1);
-    assert_eq!(recovered2, part2);
+    recovered1.expose(|bytes| assert_eq!(bytes, &part1[..]));
+    recovered2.expose(|bytes| assert_eq!(bytes, &part2[..]));
     client.message_decrypt_final(session).await.unwrap();
 }
 
@@ -734,8 +759,10 @@ async fn message_sign_verify_round_trip() {
     client.message_verify_init(session, Some(&test_mechanism()), key).await.unwrap();
 
     // Verify message
+    // T13: `expose` cannot lend across `.await`; materialize the parameter copy.
+    let param_out_bytes = param_out.expose(|bytes| bytes.to_vec());
     let result = client
-        .verify_message(session, &param_out, CkInBuf::Bytes(data), CkInBuf::Bytes(&signature))
+        .verify_message(session, &param_out_bytes, CkInBuf::Bytes(data), CkInBuf::Bytes(&signature))
         .await;
     assert!(result.is_ok(), "verify_message should succeed for matching signature");
 
@@ -759,15 +786,18 @@ async fn message_sign_verify_begin_next_round_trip() {
     let sign_parameter = client.sign_message_begin(session, parameter).await.unwrap();
     assert!(sign_parameter.is_empty());
 
+    // T13: `expose` cannot lend across `.await`; materialize the parameter copy.
+    let sign_parameter_bytes = sign_parameter.expose(|bytes| bytes.to_vec());
     let (sign_parameter, nonfinal_signature) = client
-        .sign_message_next(session, &sign_parameter, CkInBuf::Bytes(nonfinal_data), false)
+        .sign_message_next(session, &sign_parameter_bytes, CkInBuf::Bytes(nonfinal_data), false)
         .await
         .unwrap();
     assert!(sign_parameter.is_empty());
     assert!(nonfinal_signature.is_empty());
 
+    let sign_parameter_bytes = sign_parameter.expose(|bytes| bytes.to_vec());
     let (sign_parameter, signature) = client
-        .sign_message_next(session, &sign_parameter, CkInBuf::Bytes(final_data), true)
+        .sign_message_next(session, &sign_parameter_bytes, CkInBuf::Bytes(final_data), true)
         .await
         .unwrap();
     let expected_signature: Vec<u8> = final_data.iter().rev().copied().collect();
@@ -776,11 +806,12 @@ async fn message_sign_verify_begin_next_round_trip() {
     client.message_sign_final(session).await.unwrap();
 
     client.message_verify_init(session, Some(&mechanism), key).await.unwrap();
-    client.verify_message_begin(session, &sign_parameter).await.unwrap();
+    let sign_parameter_bytes = sign_parameter.expose(|bytes| bytes.to_vec());
+    client.verify_message_begin(session, &sign_parameter_bytes).await.unwrap();
     client
         .verify_message_next(
             session,
-            &sign_parameter,
+            &sign_parameter_bytes,
             CkInBuf::Bytes(nonfinal_data),
             false,
             CkInBuf::Bytes(&[]),
@@ -790,7 +821,7 @@ async fn message_sign_verify_begin_next_round_trip() {
     client
         .verify_message_next(
             session,
-            &sign_parameter,
+            &sign_parameter_bytes,
             CkInBuf::Bytes(final_data),
             true,
             CkInBuf::Bytes(&signature),
@@ -875,7 +906,9 @@ async fn async_complete_returns_result() {
         client.async_complete(session, "C_Sign").await.unwrap();
 
     assert_eq!(version, 1, "async_complete should return version 1");
-    assert_eq!(value, vec![0xA5; 8], "async_complete should return synthetic data");
+    value.expose(|bytes| {
+        assert_eq!(bytes, vec![0xA5; 8].as_slice(), "async_complete should return synthetic data")
+    });
     assert_eq!(value_len, 8, "async_complete should return correct value_len");
 }
 
@@ -961,21 +994,29 @@ async fn wrap_unwrap_key_authenticated_round_trip() {
         )
         .await
         .unwrap();
-    assert_eq!(wrapped_key, vec![0xBB; 16], "wrapped_key should be synthetic 0xBB bytes");
-    assert_eq!(mech_param_out, vec![0xCC; 12], "mechanism_parameter_out should be 0xCC bytes");
+    wrapped_key.expose(|bytes| {
+        assert_eq!(bytes, vec![0xBB; 16].as_slice(), "wrapped_key should be synthetic 0xBB bytes")
+    });
+    mech_param_out.expose(|bytes| {
+        assert_eq!(bytes, vec![0xCC; 12].as_slice(), "mechanism_parameter_out should be 0xCC bytes")
+    });
 
     // Unwrap
+    // T13: `expose` cannot lend across `.await`; materialize the input copy.
+    let wrapped_key_bytes = wrapped_key.expose(|bytes| bytes.to_vec());
     let (new_key, mech_param_out2) = client
         .unwrap_key_authenticated(
             session,
             &test_mechanism(),
             wrapping_key,
-            CkInBuf::Bytes(&wrapped_key),
+            CkInBuf::Bytes(&wrapped_key_bytes),
             Some(&[]),
             CkInBuf::Bytes(&[]),
         )
         .await
         .unwrap();
     assert_ne!(new_key, CkObjectHandle(0), "unwrapped key handle should be nonzero");
-    assert_eq!(mech_param_out2, vec![0xCC; 12], "mechanism_parameter_out should be 0xCC bytes");
+    mech_param_out2.expose(|bytes| {
+        assert_eq!(bytes, vec![0xCC; 12].as_slice(), "mechanism_parameter_out should be 0xCC bytes")
+    });
 }

@@ -110,7 +110,7 @@ pub(crate) async fn wrap_key(
         )
         .await
         .map_err(crate::handlers::cli_err("C_WrapKey"))?;
-    println!("{}", hex::encode(&wrapped));
+    println!("{}", wrapped.expose(|bytes| hex::encode(bytes)));
     close_session(client, session, true).await;
     Ok(())
 }
@@ -122,7 +122,7 @@ pub(crate) async fn unwrap_key(
     mechanism: String,
     params_file: Option<std::path::PathBuf>,
     unwrapping_key_handle: u64,
-    wrapped_key: String,
+    wrapped_key: zeroize::Zeroizing<String>,
     label: Option<String>,
 ) -> CliResult {
     let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
@@ -131,7 +131,10 @@ pub(crate) async fn unwrap_key(
             .await?;
     login_user(client, session, pin).await?;
 
-    let wrapped_key = hex::decode(&wrapped_key).map_err(|e| format!("Invalid hex: {e}"))?;
+    // T14: decode into a wiping owner, then lend the wiping allocation
+    // across the RPC (no plain working copy).
+    let wrapped_key =
+        crate::secrets::decode_hex_secret(&wrapped_key, "Invalid hex")?.into_zeroizing();
     let mut template = vec![
         CkAttribute {
             attr_type: CkAttributeType::TOKEN,

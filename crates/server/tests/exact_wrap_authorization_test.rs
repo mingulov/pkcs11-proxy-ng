@@ -214,7 +214,9 @@ async fn invoke(
     let associated_data = b"aad-canary-wrap-policy".to_vec();
     Ok(match route {
         Route::Wrap => {
-            let r = c
+            // T12: `WrapKeyResponse` is `ZeroizeOnDrop`; take the owned
+            // field out with `mem::take` instead of moving it.
+            let mut r = c
                 .rpc
                 .wrap_key(WrapKeyRequest {
                     client_context_id,
@@ -225,10 +227,16 @@ async fn invoke(
                 })
                 .await?
                 .into_inner();
-            Reply { rv: r.ck_rv, value: Some(r.wrapped_key), ..Default::default() }
+            Reply {
+                rv: r.ck_rv,
+                value: Some(std::mem::take(&mut r.wrapped_key)),
+                ..Default::default()
+            }
         }
         Route::Authenticated => {
-            let r = c
+            // T12: `WrapKeyAuthenticatedResponse` is `ZeroizeOnDrop`; take
+            // owned fields out with `mem::take` instead of moving them.
+            let mut r = c
                 .rpc
                 .wrap_key_authenticated(WrapKeyAuthenticatedRequest {
                     authenticated_parameters: Some(AuthenticatedParameters::default()),
@@ -244,13 +252,15 @@ async fn invoke(
                 .into_inner();
             Reply {
                 rv: r.ck_rv,
-                value: Some(r.wrapped_key),
-                parameter: Some(r.mechanism_parameter_out),
-                authenticated_output: r.authenticated_output,
+                value: Some(std::mem::take(&mut r.wrapped_key)),
+                parameter: Some(std::mem::take(&mut r.mechanism_parameter_out)),
+                authenticated_output: std::mem::take(&mut r.authenticated_output),
                 ..Default::default()
             }
         }
         Route::Exact => {
+            // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`;
+            // struct-update syntax is forbidden — all fields spelled out.
             let r = c
                 .rpc
                 .byte_output_exact(ByteOutputExactRequest {
@@ -262,20 +272,25 @@ async fn invoke(
                     key_handle,
                     function: ByteOutputFunction::WrapKey as i32,
                     output_spec: Some(spec),
-                    ..Default::default()
+                    input_data: Vec::new(),
+                    input_data_null_len: None,
                 })
                 .await?
                 .into_inner();
-            let out = r.result.expect("wrap exact result");
+            // T12: `OutputBufferResult` is `ZeroizeOnDrop`; take the owned
+            // field out with `mem::take` instead of moving it.
+            let mut out = r.result.expect("wrap exact result");
             Reply {
                 rv: out.ck_rv,
                 len: out.returned_len,
-                value: out.value,
+                value: std::mem::take(&mut out.value),
                 mechanism: r.mechanism_out,
                 ..Default::default()
             }
         }
         Route::AuthenticatedExact => {
+            // T12: `ParameterOutputExactRequest` is `ZeroizeOnDrop`;
+            // struct-update syntax is forbidden — all fields spelled out.
             let r = c
                 .rpc
                 .parameter_output_exact(ParameterOutputExactRequest {
@@ -295,26 +310,36 @@ async fn invoke(
                         buffer_len: 0,
                         value: None,
                     }),
-                    ..Default::default()
+                    input_data: Vec::new(),
+                    parameter: Vec::new(),
+                    flags: 0,
+                    message_parameter: None,
+                    input_data_null_len: None,
                 })
                 .await?
                 .into_inner();
             assert!(r.message_parameter_out.is_none());
-            let out = r.output_result.expect("authenticated exact output");
-            let param = r.parameter_result.expect("authenticated exact parameter");
+            // T12: the result carriers are `ZeroizeOnDrop`; take owned
+            // fields out with `mem::take` instead of moving them.
+            let mut out = r.output_result.expect("authenticated exact output");
+            let mut param = r.parameter_result.expect("authenticated exact parameter");
             Reply {
                 rv: out.ck_rv,
                 len: out.returned_len,
-                value: out.value,
-                parameter: param.value,
+                value: std::mem::take(&mut out.value),
+                parameter: std::mem::take(&mut param.value),
                 parameter_len: param.returned_len,
                 authenticated_output: r.authenticated_output,
                 ..Default::default()
             }
         }
         Route::UnwrapAuthenticated => {
-            let r = c
+            // T12: `UnwrapKeyAuthenticatedResponse` is `ZeroizeOnDrop`; take
+            // owned fields out with `mem::take` instead of moving them.
+            let mut r = c
                 .rpc
+                // T12: `UnwrapKeyAuthenticatedRequest` is `ZeroizeOnDrop`;
+                // struct-update syntax is forbidden — all fields spelled out.
                 .unwrap_key_authenticated(UnwrapKeyAuthenticatedRequest {
                     authenticated_parameters: Some(AuthenticatedParameters::default()),
                     client_context_id,
@@ -322,17 +347,19 @@ async fn invoke(
                     mechanism,
                     unwrapping_key_handle: wrapping_key_handle,
                     wrapped_key: vec![1; 16],
+                    template: Vec::new(),
                     associated_data,
+                    wrapped_key_null_len: None,
                     associated_data_null_len: c.aad_null_len,
-                    ..Default::default()
+                    template_null: false,
                 })
                 .await?
                 .into_inner();
             Reply {
                 rv: r.ck_rv,
                 key: r.key_handle,
-                authenticated_output: r.authenticated_output,
-                parameter: Some(r.mechanism_parameter_out),
+                authenticated_output: std::mem::take(&mut r.authenticated_output),
+                parameter: Some(std::mem::take(&mut r.mechanism_parameter_out)),
                 ..Default::default()
             }
         }

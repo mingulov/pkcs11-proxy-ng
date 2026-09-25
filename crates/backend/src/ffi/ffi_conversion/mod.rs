@@ -17,6 +17,15 @@ pub(super) fn narrow_wire_ulong(value: u64) -> CkResult<cryptoki_sys::CK_ULONG> 
     cryptoki_sys::CK_ULONG::try_from(value).map_err(|_| CkRv::FUNCTION_FAILED)
 }
 
+/// T05: checked wire-`u32` to native `CK_BYTE` narrowing for mechanism
+/// parameter bytes (TLS/SSL/WTLS versions, OAEP `bBC`, IKE key numbers).
+/// Routes through the shared [`narrow_u32_to_u8`] helper; a value that
+/// does not fit is malformed mechanism input
+/// (`CKR_MECHANISM_PARAM_INVALID`), never a truncation.
+pub(super) fn narrow_wire_byte(value: u32) -> CkResult<cryptoki_sys::CK_BYTE> {
+    narrow_u32_to_u8(value).map_err(|_| CkRv::MECHANISM_PARAM_INVALID)
+}
+
 /// Trim trailing spaces/nulls from a fixed-size byte array and convert to String.
 /// Uses lossy UTF-8 decoding so that ISO 8859-1 bytes from real HSMs are preserved
 /// rather than silently replaced with an empty string.

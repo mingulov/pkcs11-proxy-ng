@@ -983,11 +983,13 @@ mod tests {
         );
     }
 
-    /// F-02: the SP800-108 byte-encoded input key handle is a USE of the
-    /// embedded key — refused with `CKR_USER_NOT_LOGGED_IN` while the caller
-    /// is logically logged out, resolved normally once logged in.
+    /// F-02 with the T20 D6(1) refinement: the SP800-108 byte-encoded input
+    /// key handle is a USE of the embedded key. Logged out with no other
+    /// holder, the backend's verdict decides (forward); logged out while
+    /// another tenant holds the slot login, refuse (anti-riding); logged
+    /// in, resolve normally.
     #[tokio::test]
-    async fn sp800_108_private_embedded_key_use_while_logged_out_is_refused() {
+    async fn sp800_108_private_embedded_key_use_while_logged_out() {
         use crate::server::context_manager::LoginState;
         use crate::server::slot_map::BackendSlotId;
 
@@ -1016,21 +1018,7 @@ mod tests {
             additional_derived_keys: Vec::new(),
         });
 
-        // Logged out → refused.
-        assert_eq!(
-            resolve_sp800_108_key_handle_data_params(
-                &ctx,
-                &ctx_id,
-                virtual_session.0,
-                CkSessionHandle(77),
-                &mut params,
-            )
-            .await,
-            Err(CkRv::USER_NOT_LOGGED_IN)
-        );
-
-        // Logged in → resolves to the backend handle bytes.
-        ctx_mgr.get_context(&ctx_id, |c| c.login_state.insert(slot, LoginState::User)).await;
+        // Logged out, no other holder → forwarded (backend decides).
         resolve_sp800_108_key_handle_data_params(
             &ctx,
             &ctx_id,
@@ -1042,6 +1030,51 @@ mod tests {
         .unwrap();
         let CkMechanismParams::Sp800108Kdf(params) = params else { unreachable!() };
         assert_eq!(params.data_params[0].value, backend_key.0.to_ne_bytes().to_vec().into());
+
+        // Logged out while another tenant holds the slot login → refused.
+        let ctx_other = ctx_mgr.create_context(None).await.unwrap();
+        ctx_mgr.get_context(&ctx_other, |c| c.login_state.insert(slot, LoginState::User)).await;
+        let mut params2 = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+            prf_type: CkMechanismType::SHA256,
+            data_params: vec![PrfDataParam {
+                type_: CK_SP800_108_KEY_HANDLE,
+                value: virtual_key.0.to_ne_bytes().to_vec().into(),
+            }],
+            additional_derived_keys: Vec::new(),
+        });
+        assert_eq!(
+            resolve_sp800_108_key_handle_data_params(
+                &ctx,
+                &ctx_id,
+                virtual_session.0,
+                CkSessionHandle(77),
+                &mut params2,
+            )
+            .await,
+            Err(CkRv::USER_NOT_LOGGED_IN)
+        );
+
+        // Logged in → resolves to the backend handle bytes.
+        ctx_mgr.get_context(&ctx_id, |c| c.login_state.insert(slot, LoginState::User)).await;
+        let mut params3 = CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+            prf_type: CkMechanismType::SHA256,
+            data_params: vec![PrfDataParam {
+                type_: CK_SP800_108_KEY_HANDLE,
+                value: virtual_key.0.to_ne_bytes().to_vec().into(),
+            }],
+            additional_derived_keys: Vec::new(),
+        });
+        resolve_sp800_108_key_handle_data_params(
+            &ctx,
+            &ctx_id,
+            virtual_session.0,
+            CkSessionHandle(77),
+            &mut params3,
+        )
+        .await
+        .unwrap();
+        let CkMechanismParams::Sp800108Kdf(params3) = params3 else { unreachable!() };
+        assert_eq!(params3.data_params[0].value, backend_key.0.to_ne_bytes().to_vec().into());
     }
 
     /// F6: key-mat OUT handles in a successful derive's `mechanism_out` must
@@ -1132,13 +1165,14 @@ mod tests {
         assert!(matches!(other, CkMechanismParams::Sp800108Kdf(_)));
     }
 
-    /// m-1: virtualized key-mat / SP800-108 OUT handles are always private
-    /// secret keys, so registration records `object_private=true` and
-    /// logged-out USE refuses even when the backend `CKA_PRIVATE` probe
-    /// fails. (Pre-fix the bit was unknown and the probe failure failed
-    /// open to the backend verdict.)
+    /// m-1 with the T20 D6(1) refinement: virtualized key-mat / SP800-108
+    /// OUT handles are always private secret keys, so registration records
+    /// `object_private=true`. Logged-out USE forwards when no other tenant
+    /// holds the slot login (backend decides, even with a failing probe)
+    /// and refuses only while another tenant holds it (anti-riding).
     #[tokio::test]
-    async fn virtualized_out_handles_recorded_private_refuse_logged_out_use() {
+    async fn virtualized_out_handles_recorded_private_gate_logged_out_use() {
+        use crate::server::context_manager::LoginState;
         use crate::server::slot_map::BackendSlotId;
         use pkcs11_proxy_ng_types::{CkSlotId, Ssl3KeyMatParams, SslRandomData};
 
@@ -1201,6 +1235,31 @@ mod tests {
                 Some(true),
                 "{name}: virtualized OUT handle must be recorded private at registration"
             );
+            // No other tenant holds the slot login → forward verbatim so
+            // the backend verdict is authoritative (even though the
+            // CKA_PRIVATE probe would fail: backend session 77 is unknown
+            // to the mock).
+            assert_eq!(
+                ensure_private_use_allowed(
+                    &ctx,
+                    &ctx_id,
+                    virtual_session.0,
+                    virtual_handle.0,
+                    CkSessionHandle(77),
+                    CkObjectHandle(backend_handle),
+                )
+                .await,
+                Ok(()),
+                "{name}: logged-out USE with no other login holder must forward"
+            );
+        }
+        // A second tenant holding the slot login → logged-out USE on this
+        // tenant refuses (anti-riding, same verdict as direct).
+        let ctx_other = ctx_mgr.create_context(None).await.unwrap();
+        ctx_mgr.get_context(&ctx_other, |c| c.login_state.insert(slot, LoginState::User)).await;
+        for (name, virtual_handle, backend_handle) in
+            [("key-mat", v_key_mat, 0xA2), ("sp800-108", v_kdf, 0xC1)]
+        {
             assert_eq!(
                 ensure_private_use_allowed(
                     &ctx,
@@ -1212,7 +1271,7 @@ mod tests {
                 )
                 .await,
                 Err(CkRv::USER_NOT_LOGGED_IN),
-                "{name}: logged-out USE with a failing backend probe must still refuse"
+                "{name}: logged-out USE while another tenant holds the login must refuse"
             );
         }
     }
@@ -1223,9 +1282,12 @@ mod tests {
     /// session then resolves unknown — skipping the privacy gate instead of
     /// over-refusing 257 — and the backend verdict (130) decides. A
     /// token-template SP800-108 additional key survives the close with its
-    /// privacy bit intact and still refuses logged-out USE.
+    /// privacy bit intact; its logged-out USE forwards with no other login
+    /// holder (backend decides) and refuses while another tenant holds the
+    /// slot login (anti-riding).
     #[tokio::test]
     async fn virtualized_out_handles_evict_on_owner_session_close() {
+        use crate::server::context_manager::LoginState;
         use crate::server::slot_map::BackendSlotId;
         use pkcs11_proxy_ng_types::{
             CkAttribute, CkAttributeType, CkAttributeValue, Ssl3KeyMatParams, SslRandomData,
@@ -1342,11 +1404,17 @@ mod tests {
             CkObjectHandle(0),
             "evicted OUT handle must resolve unknown so the backend verdict decides"
         );
-        // ... while the surviving private token key still refuses.
+        // ... while the surviving private token key forwards (no other
+        // login holder, so the backend verdict decides).
+        resolve_session_and_object(&ctx, &ctx_id, fresh_session.0, v_token_key.0).await.unwrap();
+        // Another tenant holding the slot login → logged-out USE of the
+        // surviving private token key refuses (anti-riding).
+        let ctx_other = ctx_mgr.create_context(None).await.unwrap();
+        ctx_mgr.get_context(&ctx_other, |c| c.login_state.insert(slot, LoginState::User)).await;
         assert_eq!(
             resolve_session_and_object(&ctx, &ctx_id, fresh_session.0, v_token_key.0).await,
             Err(CkRv::USER_NOT_LOGGED_IN),
-            "surviving private token key must still refuse logged-out USE"
+            "surviving private token key must refuse while another tenant holds the login"
         );
     }
 }

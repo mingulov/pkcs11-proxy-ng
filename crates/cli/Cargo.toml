@@ -19,6 +19,8 @@ clap.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
 # CLI is a gRPC client: `channel` transport + `codegen` + `tls-ring`. No server.
 tonic = { workspace = true, features = ["channel", "codegen", "tls-ring"] }
+# T14: wiping `Zeroizing<String>` hex/text working buffers.
+zeroize = { workspace = true }
 tonic-health.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

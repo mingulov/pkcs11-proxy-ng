@@ -6,7 +6,7 @@ use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
 use pkcs11_proxy_ng_proto::convert::message_params::{
     CcmMessageParams, GcmMessageParams, MessageParameter, MessageParameterShape,
-    Salsa20ChaCha20Poly1305MessageParams,
+    Salsa20ChaCha20Poly1305MessageParams, salsa_nonce_len,
 };
 use pkcs11_proxy_ng_types::{CkResult, CkRv};
 
@@ -505,11 +505,12 @@ pub(crate) unsafe fn read_message_parameter_call_for_shape_with_memory(
                     p_parameter.cast::<CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS>(),
                 )
             };
+            // T20: ulNonceLen arrives in bits (OASIS text) or bytes (field
+            // name, backend practice, legacy path) — accept both via the
+            // shared unit rule. The original value round-trips verbatim in
+            // `nonce_bits`; only the extent reading is unit-aware.
             let nonce_bits = outer.ulNonceLen as u64;
-            if !matches!(nonce_bits, 64 | 96 | 192) {
-                return Err(CkRv::MECHANISM_PARAM_INVALID);
-            }
-            let nonce_len = nonce_bits.div_ceil(8);
+            let nonce_len = salsa_nonce_len(nonce_bits).ok_or(CkRv::MECHANISM_PARAM_INVALID)?;
             validate_message_caller_ranges(
                 memory,
                 p_parameter,

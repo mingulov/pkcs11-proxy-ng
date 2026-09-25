@@ -19,6 +19,17 @@ impl MockBackend {
     }
 
     pub(super) fn finalize_backend(&self) -> CkResult<()> {
+        // Scripted one-shot outcome first (mirrors the wait path): no
+        // state change, so a failed provider finalize is observable.
+        if let Some(outcome) = self.next_finalize_outcome.lock().unwrap().take() {
+            return outcome;
+        }
+        // Wedged-provider simulation: park until released.
+        let mut parked = self.park_finalize.lock().unwrap();
+        while *parked {
+            parked = self.finalize_condvar.wait(parked).unwrap();
+        }
+        drop(parked);
         {
             let mut state = self.state.lock().unwrap();
             if !state.initialized {

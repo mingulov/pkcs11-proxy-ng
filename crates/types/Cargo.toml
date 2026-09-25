@@ -13,6 +13,7 @@ tracing = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+cryptoki-sys.workspace = true
 tempfile = "3"
 
 [lints]

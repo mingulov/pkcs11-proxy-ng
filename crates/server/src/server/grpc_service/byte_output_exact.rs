@@ -24,12 +24,14 @@ pub(super) async fn byte_output_exact(
 ) -> Result<Response<pkcs11_proxy_ng_proto::ByteOutputExactResponse>, Status> {
     let started = std::time::Instant::now();
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
+    // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
     // W1-L5-04: compatibility-range gate, never an equality literal.
     if !exact_output_effects_version_supported(req.exact_output_effects_version) {
         return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
-    let ctx_id = ClientContextId(req.client_context_id);
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     // Parse the function discriminator
     let function = match byte_output_function_from_i32(req.function) {
@@ -61,7 +63,7 @@ pub(super) async fn byte_output_exact(
             length_pointer_null: false,
         });
 
-    let input_data = SecretBytes::new(req.input_data);
+    let input_data = SecretBytes::new(std::mem::take(&mut req.input_data));
     let input_data_null_len = req.input_data_null_len;
 
     match function {
@@ -74,7 +76,7 @@ pub(super) async fn byte_output_exact(
                     req.session_handle,
                     req.wrapping_key_handle,
                     req.key_handle,
-                    req.mechanism,
+                    std::mem::take(&mut req.mechanism),
                 )
                 .await?
                 {
@@ -410,6 +412,8 @@ mod sanitize_inputs_tests {
 
         let resp = byte_output_exact(
             &service.ctx,
+            // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`;
+            // struct-update syntax is forbidden — all fields spelled out.
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
                 exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
@@ -423,7 +427,9 @@ mod sanitize_inputs_tests {
                     buffer_len: 64,
                     length_pointer_null: false,
                 }),
-                ..Default::default()
+                mechanism: None,
+                wrapping_key_handle: 0,
+                key_handle: 0,
             }),
         )
         .await
@@ -459,6 +465,8 @@ mod sanitize_inputs_tests {
 
         let _resp = byte_output_exact(
             &service.ctx,
+            // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`;
+            // struct-update syntax is forbidden — all fields spelled out.
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
                 exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
@@ -471,7 +479,9 @@ mod sanitize_inputs_tests {
                     buffer_len: 64,
                     length_pointer_null: false,
                 }),
-                ..Default::default()
+                mechanism: None,
+                wrapping_key_handle: 0,
+                key_handle: 0,
             }),
         )
         .await
@@ -492,6 +502,8 @@ mod sanitize_inputs_tests {
 
         let response = byte_output_exact(
             &HandlerContext::for_test(&ctx_mgr, &backend),
+            // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`;
+            // struct-update syntax is forbidden — all fields spelled out.
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
                 exact_output_effects_version: 1,
                 client_context_id: ctx_id.0.clone(),
@@ -503,7 +515,10 @@ mod sanitize_inputs_tests {
                     buffer_len: 0,
                     length_pointer_null: true,
                 }),
-                ..Default::default()
+                mechanism: None,
+                wrapping_key_handle: 0,
+                key_handle: 0,
+                input_data_null_len: None,
             }),
         )
         .await
@@ -723,10 +738,19 @@ mod sanitize_inputs_tests {
 
         let resp = byte_output_exact(
             &HandlerContext::for_test(&ctx_mgr, &backend),
+            // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`;
+            // struct-update syntax is forbidden — all fields spelled out.
             Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
                 exact_output_effects_version: 1,
                 function: 9999,
-                ..Default::default()
+                client_context_id: String::new(),
+                session_handle: 0,
+                output_spec: None,
+                input_data: Vec::new(),
+                mechanism: None,
+                wrapping_key_handle: 0,
+                key_handle: 0,
+                input_data_null_len: None,
             }),
         )
         .await

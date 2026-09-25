@@ -74,18 +74,32 @@ async fn exact_preprovider_rejections_leave_all_caller_outputs_untouched() {
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     assert_eq!(backend.data_op_call_count(), 0);
+    // T12: the `*MessageBeginRequest`s are `ZeroizeOnDrop`, so
+    // struct-update syntax is forbidden — all fields are spelled out.
     let error = client
         .encrypt_message_begin(wire::EncryptMessageBeginRequest {
+            exact_output_effects_version: 0,
+            client_context_id: String::new(),
+            session_handle: 0,
+            parameter: Vec::new(),
+            associated_data: Vec::new(),
+            associated_data_null_len: None,
             parameter_out_spec: Some(Default::default()),
-            ..Default::default()
+            message_parameter: None,
         })
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     let error = client
         .decrypt_message_begin(wire::DecryptMessageBeginRequest {
+            exact_output_effects_version: 0,
+            client_context_id: String::new(),
+            session_handle: 0,
+            parameter: Vec::new(),
+            associated_data: Vec::new(),
+            associated_data_null_len: None,
             parameter_out_spec: Some(Default::default()),
-            ..Default::default()
+            message_parameter: None,
         })
         .await
         .unwrap_err();

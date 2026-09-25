@@ -41,6 +41,11 @@ pub struct CcmMessageParams {
 }
 
 /// CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS — per-message Salsa20/ChaCha20-Poly1305 parameters.
+///
+/// `nonce_bits` carries the caller's `ulNonceLen` VERBATIM (T20): the OASIS
+/// text says bits, but the field name, the proxy's legacy path, and shipping
+/// backends (kryoptic, NSS) use bytes, so both forms are accepted and the
+/// original value round-trips to the backend untouched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Salsa20ChaCha20Poly1305MessageParams {
     pub nonce: Vec<u8>,
@@ -48,6 +53,27 @@ pub struct Salsa20ChaCha20Poly1305MessageParams {
     pub nonce_null_len: Option<u64>,
     pub tag: Vec<u8>,
     pub tag_null_len: Option<u64>,
+}
+
+/// T20: nonce-length unit tolerance for
+/// `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS.ulNonceLen`. Accepts the bits
+/// form (64/96/192, per the OASIS text) and the bytes form (8/12/24, per
+/// the field name, backend practice, and the proxy's legacy path). The
+/// value itself always round-trips verbatim — only the extent reading is
+/// unit-aware. Single home for the accepted sets (shim reader and all
+/// validators); keep the two forms disjoint.
+pub fn salsa_nonce_len(value: u64) -> Option<u64> {
+    match value {
+        64 | 96 | 192 => Some(value / 8),
+        8 | 12 | 24 => Some(value),
+        _ => None,
+    }
+}
+
+/// Expected nonce extent when `value` and `extent` are a consistent pair
+/// in either accepted unit.
+pub fn salsa_nonce_extent(value: u64, extent: u64) -> Option<u64> {
+    salsa_nonce_len(value).filter(|len| *len == extent)
 }
 
 /// CK_ASYNC_DATA — result structure for C_AsyncComplete.
@@ -157,8 +183,8 @@ fn validate_salsa_fields(
     tag_len: usize,
     tag_null_len: Option<u64>,
 ) -> Result<(), pkcs11_proxy_ng_types::CkRv> {
-    if !matches!(nonce_bits, 64 | 96 | 192)
-        || pointer_extent_len(nonce_len, nonce_null_len)? != nonce_bits.div_ceil(8)
+    let nonce_extent = pointer_extent_len(nonce_len, nonce_null_len)?;
+    if salsa_nonce_extent(nonce_bits, nonce_extent).is_none()
         || pointer_extent_len(tag_len, tag_null_len)? != 16
     {
         Err(pkcs11_proxy_ng_types::CkRv::MECHANISM_PARAM_INVALID)
@@ -582,6 +608,46 @@ impl TryFrom<&v1_proto::MessageParameter> for MessageParameter {
     }
 }
 
+impl MessageParameter {
+    /// T13 owned entry point: identical validation to the borrowed
+    /// `TryFrom`, but the secret-classified `Raw` arm adopts the buffer
+    /// with `mem::take` instead of copying it. Structured arms convert
+    /// from the owned message with the same reviewed copies (their
+    /// destinations are FFI-shape structs, not wiping owners). The caller
+    /// must own the message.
+    pub fn try_from_owned(
+        mut p: v1_proto::MessageParameter,
+    ) -> Result<Self, pkcs11_proxy_ng_types::CkRv> {
+        // Validate structured arms through a shared borrow first (same
+        // checks, same errors as the borrowed `TryFrom` — `&mut` is not
+        // `Copy`, so the `@` bindings the borrowed form uses cannot move
+        // twice), then adopt through `&mut`: payloads cannot move out of
+        // the `ZeroizeOnDrop` oneof enum, so the secret arm adopts its
+        // buffer with `mem::take`.
+        let mut taken = p.params.take();
+        if let Some(params) = taken.as_ref()
+            && !matches!(params, v1_proto::message_parameter::Params::Raw(_))
+        {
+            validate_structured_wire_params(params)?;
+        }
+        match taken.as_mut() {
+            Some(v1_proto::message_parameter::Params::Raw(data)) => {
+                Ok(MessageParameter::Raw(SecretBytes::new(std::mem::take(data))))
+            }
+            Some(v1_proto::message_parameter::Params::GcmMessageParams(p)) => {
+                Ok(MessageParameter::GcmMessage((&*p).into()))
+            }
+            Some(v1_proto::message_parameter::Params::CcmMessageParams(p)) => {
+                Ok(MessageParameter::CcmMessage((&*p).into()))
+            }
+            Some(v1_proto::message_parameter::Params::SalsaChachaMessageParams(p)) => {
+                Ok(MessageParameter::SalaChacha((&*p).into()))
+            }
+            None => Err(super::ABSENT_MESSAGE_ONEOF_RV),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,6 +730,21 @@ mod tests {
         let proto: v1_proto::Salsa20ChaCha20Poly1305MessageParams = (&original).into();
         let back = Salsa20ChaCha20Poly1305MessageParams::from(&proto);
         assert_eq!(back, original);
+    }
+
+    #[test]
+    fn salsa_nonce_len_accepts_bits_and_bytes_forms() {
+        // T20: OASIS text says bits (64/96/192); field name, backend
+        // practice (kryoptic, NSS), and the legacy path say bytes
+        // (8/12/24). Both map to the same extents; anything else rejects.
+        for (value, extent) in [(64, 8), (96, 12), (192, 24), (8, 8), (12, 12), (24, 24)] {
+            assert_eq!(super::salsa_nonce_len(value), Some(extent), "value {value}");
+            assert_eq!(super::salsa_nonce_extent(value, extent), Some(extent));
+            assert_eq!(super::salsa_nonce_extent(value, extent + 1), None);
+        }
+        for value in [0, 7, 11, 13, 16, 32, 48, 95, 97, 128, 191, 193, 256] {
+            assert_eq!(super::salsa_nonce_len(value), None, "value {value}");
+        }
     }
 
     #[test]
@@ -894,7 +975,9 @@ mod tests {
     }
 
     #[test]
-    fn salsa_nonce_scalar_is_bits_not_bytes() {
+    fn salsa_nonce_scalar_accepts_bits_and_bytes_forms() {
+        // T20: was bits-only; bytes form (12) is what shipping backends
+        // accept, so both validate (value round-trips verbatim).
         let valid = v1_proto::MessageParameter {
             params: Some(v1_proto::message_parameter::Params::SalsaChachaMessageParams(
                 v1_proto::Salsa20ChaCha20Poly1305MessageParams {
@@ -906,15 +989,24 @@ mod tests {
                 },
             )),
         };
+        let mut bytes_form = valid.clone();
+        let Some(v1_proto::message_parameter::Params::SalsaChachaMessageParams(params)) =
+            bytes_form.params.as_mut()
+        else {
+            unreachable!()
+        };
+        params.nonce_bits = 12;
+
         let mut invalid = valid.clone();
         let Some(v1_proto::message_parameter::Params::SalsaChachaMessageParams(params)) =
             invalid.params.as_mut()
         else {
             unreachable!()
         };
-        params.nonce_bits = 12;
+        params.nonce_bits = 13;
 
         assert!(MessageParameter::try_from(&valid).is_ok());
+        assert!(MessageParameter::try_from(&bytes_form).is_ok());
         assert!(MessageParameter::try_from(&invalid).is_err());
     }
 

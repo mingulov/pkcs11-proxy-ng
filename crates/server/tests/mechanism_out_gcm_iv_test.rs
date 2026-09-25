@@ -151,7 +151,9 @@ async fn aes_gcm_aws_convention_iv_round_trip() -> Result<(), String> {
         .decrypt(session, &ciphertext)
         .await
         .map_err(|rv| format!("C_Decrypt failed: CKR 0x{:08X}", rv.0))?;
-    assert_eq!(recovered.as_slice(), plaintext, "returned IV must decrypt the ciphertext");
+    recovered.expose(|bytes| {
+        assert_eq!(bytes, &plaintext[..], "returned IV must decrypt the ciphertext")
+    });
 
     Ok(())
 }

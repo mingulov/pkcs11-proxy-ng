@@ -30,6 +30,24 @@ pub(super) async fn wait_for_slot_event_with_policy(
     slot_event::wait_for_slot_event(ctx_mgr, backend_ref, token_policy, request).await
 }
 
+#[cfg(test)]
+pub(super) async fn wait_for_slot_event_with_policy_and_grace(
+    ctx_mgr: &Arc<ContextManager>,
+    backend_ref: &Arc<dyn Pkcs11Backend>,
+    token_policy: &TokenPolicy,
+    request: Request<pkcs11_proxy_ng_proto::WaitForSlotEventRequest>,
+    nonblocking_grace: std::time::Duration,
+) -> Result<Response<pkcs11_proxy_ng_proto::WaitForSlotEventResponse>, Status> {
+    slot_event::wait_for_slot_event_with_grace(
+        ctx_mgr,
+        backend_ref,
+        token_policy,
+        request,
+        nonblocking_grace,
+    )
+    .await
+}
+
 pub(super) async fn get_operation_state(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetOperationStateRequest>,

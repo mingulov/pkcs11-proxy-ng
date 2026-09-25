@@ -34,7 +34,6 @@ pub(super) async fn init_token(
             return Ok(Response::new(pkcs11_proxy_ng_proto::InitTokenResponse { ck_rv: error.0 }));
         }
     };
-
     match authorization::slot_is_authorized(
         ctx_mgr,
         backend_ref,
@@ -60,19 +59,28 @@ pub(super) async fn init_token(
     let label_for_log = req.label.clone();
     let label = std::mem::take(&mut req.label);
     let backend = backend_ref.clone();
+    let ctx_mgr_task = ctx_mgr.clone();
     let result = spawn_backend(move || {
         let so_pin = so_pin.map(SecretBytes::into_zeroizing);
-        backend.init_token(backend_slot.0, so_pin.as_deref().map(Vec::as_slice), &label)
+        let outcome =
+            backend.init_token(backend_slot.0, so_pin.as_deref().map(Vec::as_slice), &label);
+        // T09: invalidate inside backend-completion ownership — before the
+        // result is published — so a successful reinit drops the slot's
+        // cached label/serial and advances the authz generation even if the
+        // RPC future already timed out or was cancelled. W1-L13-18: the
+        // reinit destroys the token's objects, so no cached token-object
+        // metadata may survive either. Error returns invalidate nothing:
+        // sessions, logins and handles stay intact.
+        if outcome.is_ok() {
+            ctx_mgr_task.invalidate_token_info_on_reinit(backend_slot);
+        }
+        outcome
     })
     .await?;
 
     let ck_rv = match &result {
         Ok(()) => {
             info!(context_id = %ctx_id.0, label = %label_for_log, "Token initialized");
-            // W1-L13-18: initializing the token destroys its objects — revoke
-            // the daemon-wide authz generation so no cached token-object
-            // metadata survives the wipe.
-            ctx_mgr.revoke_authz_generation();
             CkRv::OK.0
         }
         Err(error) => {

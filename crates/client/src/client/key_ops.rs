@@ -18,7 +18,7 @@ impl Pkcs11Client {
         mechanism: &CkMechanism,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::WrapKeyRequest {
             client_context_id: ctx,
@@ -27,8 +27,11 @@ impl Pkcs11Client {
             wrapping_key_handle: wrapping_key.0,
             key_handle: key.0,
         };
-        let resp = pkcs11_unary_call!(self.grpc.wrap_key(req), true);
-        Ok(resp.wrapped_key)
+        // T12: `WrapKeyResponse` is `ZeroizeOnDrop`; take the owned field
+        // out with `mem::take` instead of moving it. T13: adopt the wrapped
+        // blob into `SecretBytes` (no copy).
+        let mut resp = pkcs11_unary_call!(self.grpc.wrap_key(req), true);
+        Ok(SecretBytes::new(std::mem::take(&mut resp.wrapped_key)))
     }
 
     pub async fn unwrap_key(
@@ -194,14 +197,17 @@ impl Pkcs11Client {
         Ok(CkSlotId(resp.slot_id))
     }
 
-    pub async fn get_operation_state(&mut self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub async fn get_operation_state(&mut self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::GetOperationStateRequest {
             client_context_id: ctx,
             session_handle: session.0,
         };
-        let resp = pkcs11_unary_call!(self.grpc.get_operation_state(req), true);
-        Ok(resp.operation_state)
+        // T12: `GetOperationStateResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it. T13: adopt
+        // the state blob into `SecretBytes` (no copy).
+        let mut resp = pkcs11_unary_call!(self.grpc.get_operation_state(req), true);
+        Ok(SecretBytes::new(std::mem::take(&mut resp.operation_state)))
     }
 
     pub async fn set_operation_state(
@@ -265,15 +271,18 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         len: u32,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::GenerateRandomRequest {
             client_context_id: ctx,
             session_handle: session.0,
             length: len,
         };
-        let resp = pkcs11_unary_call!(self.grpc.generate_random(req), true);
-        Ok(resp.random_data)
+        // T12: `GenerateRandomResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it. T13: adopt
+        // the random bytes into `SecretBytes` (no copy).
+        let mut resp = pkcs11_unary_call!(self.grpc.generate_random(req), true);
+        Ok(SecretBytes::new(std::mem::take(&mut resp.random_data)))
     }
 }
 

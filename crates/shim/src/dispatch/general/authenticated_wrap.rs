@@ -146,8 +146,10 @@ pub unsafe extern "C" fn c_unwrap_key_authenticated(
                 if rv != CKR_OK {
                     return rv;
                 }
-                unsafe { write_object_handle_output(key_handle, ph_key) };
-                rv_ok()
+                match unsafe { write_object_handle_output(key_handle, ph_key) } {
+                    Ok(()) => rv_ok(),
+                    Err(e) => rv_err(e),
+                }
             }
             Err(e) => rv_err(e),
         }

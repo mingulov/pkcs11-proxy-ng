@@ -1,3 +1,6 @@
+// `as CK_ULONG` casts below are identity on 64-bit targets but load-bearing
+// on 32-bit targets (CK_ULONG=u32); the allow keeps them portable.
+#![allow(clippy::unnecessary_cast)]
 use super::{
     MessageCallMemory, MessageParameterCall, MessageParameterDirection, MessageParameterStage,
     empty_message_parameter_roundtrip_spec, message_parameter_roundtrip_spec,
@@ -1287,6 +1290,37 @@ fn salsa_reader_treats_nonce_length_as_bits() {
 }
 
 #[test]
+fn salsa_reader_accepts_nonce_length_in_bytes_verbatim() {
+    // T20: ulNonceLen arrives in bytes from shipping backends (kryoptic,
+    // NSS accept 12) and the field name says Len, not Bits — accept the
+    // bytes form and round-trip the original value verbatim so each
+    // backend sees what its callers send.
+    let mut nonce = [0x33u8; 12];
+    let mut tag = [0x44u8; 16];
+    let params = CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS {
+        pNonce: nonce.as_mut_ptr(),
+        ulNonceLen: 12,
+        pTag: tag.as_mut_ptr(),
+    };
+
+    let parameter = unsafe {
+        read_message_parameter_for_shape(
+            (&params as *const CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS).cast(),
+            std::mem::size_of_val(&params) as CK_ULONG,
+            MessageParameterShape::SalsaChacha,
+            MessageParameterDirection::Encrypt,
+            MessageParameterStage::OneShot,
+        )
+    }
+    .unwrap()
+    .unwrap();
+
+    let MessageParameter::SalaChacha(parameter) = parameter else { panic!("expected Salsa") };
+    assert_eq!(parameter.nonce_bits, 12, "original value must round-trip verbatim");
+    assert_eq!(parameter.nonce, nonce);
+}
+
+#[test]
 fn write_mechanism_output_params_writes_tls12_pversion() {
     // Verify that the shim's writeback function fills in the
     // CK_VERSION buffer pointed at by
@@ -1307,10 +1341,10 @@ fn write_mechanism_output_params_writes_tls12_pversion() {
             ulServerRandomLen: 0,
         },
         pVersion: &mut version,
-        prfHashMechanism: CkMechanismType::SHA256.0,
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0,
+        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_TLS12_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
     };
@@ -1323,7 +1357,9 @@ fn write_mechanism_output_params_writes_tls12_pversion() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     assert_eq!(version.major, 3);
@@ -1349,7 +1385,7 @@ fn write_mechanism_output_params_writes_pbe_init_vector() {
         ulIteration: 1000,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::PBE_SHA1_DES3_EDE_CBC.0,
+        mechanism: CkMechanismType::PBE_SHA1_DES3_EDE_CBC.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
     };
@@ -1363,7 +1399,9 @@ fn write_mechanism_output_params_writes_pbe_init_vector() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     // The generated IV landed in the caller's buffer; password/salt intact.
@@ -1387,7 +1425,7 @@ fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
         ulIteration: 1,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::PBA_SHA1_WITH_SHA1_HMAC.0,
+        mechanism: CkMechanismType::PBA_SHA1_WITH_SHA1_HMAC.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_PBE_PARAMS>() as CK_ULONG,
     };
@@ -1399,7 +1437,9 @@ fn write_mechanism_output_params_pbe_safe_when_init_vector_null() {
     });
     // Must not panic / deref NULL.
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 }
 
@@ -1420,7 +1460,7 @@ fn write_mechanism_output_params_writes_tls_prf_output() {
         pulOutputLen: &mut out_len,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::TLS_PRF.0,
+        mechanism: CkMechanismType::TLS_PRF.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
     };
@@ -1434,7 +1474,9 @@ fn write_mechanism_output_params_writes_tls_prf_output() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     assert_eq!(&out_buf[..32], prf_bytes.as_slice());
@@ -1459,7 +1501,7 @@ fn write_mechanism_output_params_writes_wtls_prf_output() {
         pulOutputLen: &mut out_len,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::WTLS_PRF.0,
+        mechanism: CkMechanismType::WTLS_PRF.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_WTLS_PRF_PARAMS>() as CK_ULONG,
     };
@@ -1474,7 +1516,9 @@ fn write_mechanism_output_params_writes_wtls_prf_output() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     assert_eq!(&out_buf[..], prf_bytes.as_slice());
@@ -1495,7 +1539,7 @@ fn write_mechanism_output_params_prf_safe_when_output_null() {
         pulOutputLen: std::ptr::null_mut(),
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::TLS_PRF.0,
+        mechanism: CkMechanismType::TLS_PRF.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
     };
@@ -1506,7 +1550,9 @@ fn write_mechanism_output_params_prf_safe_when_output_null() {
         output: vec![0x5Au8; 8].into(),
     });
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
     // Did not crash, did not write through NULL.
 }
@@ -1530,7 +1576,7 @@ fn write_mechanism_output_params_writes_ssl3_master_key_version() {
         pVersion: &mut version,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::SSL3_MASTER_KEY_DERIVE.0,
+        mechanism: CkMechanismType::SSL3_MASTER_KEY_DERIVE.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_SSL3_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
     };
@@ -1542,7 +1588,9 @@ fn write_mechanism_output_params_writes_ssl3_master_key_version() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     assert_eq!(version.major, 3);
@@ -1566,10 +1614,10 @@ fn write_mechanism_output_params_tls12_safe_when_pversion_null() {
             ulServerRandomLen: 0,
         },
         pVersion: std::ptr::null_mut(),
-        prfHashMechanism: CkMechanismType::SHA256.0,
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
     };
     let mut mechanism = CK_MECHANISM {
-        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0,
+        mechanism: CkMechanismType::TLS12_MASTER_KEY_DERIVE.0 as CK_ULONG,
         pParameter: &mut params as *mut _ as CK_VOID_PTR,
         ulParameterLen: std::mem::size_of::<CK_TLS12_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG,
     };
@@ -1582,7 +1630,9 @@ fn write_mechanism_output_params_tls12_safe_when_pversion_null() {
     });
 
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
     // Did not crash, did not write through NULL.
 }
@@ -1599,7 +1649,7 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
     let mut server_random = [0xB1u8, 0xB2];
     let mut version = 1u8;
     let mut params = CK_WTLS_MASTER_KEY_DERIVE_PARAMS {
-        DigestMechanism: CkMechanismType::SHA256.0,
+        DigestMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
         RandomInfo: CK_WTLS_RANDOM_DATA {
             pClientRandom: client_random.as_mut_ptr(),
             ulClientRandomLen: client_random.len() as CK_ULONG,
@@ -1637,7 +1687,9 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
         version: 2,
     });
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     assert_eq!(version, 2);
@@ -1656,7 +1708,7 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
     let mut iv = [0u8; 4];
     let mut key_mat_out = CK_WTLS_KEY_MAT_OUT { hMacSecret: 0, hKey: 0, pIV: iv.as_mut_ptr() };
     let mut params = CK_WTLS_KEY_MAT_PARAMS {
-        DigestMechanism: CkMechanismType::SHA256.0,
+        DigestMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
         ulMacSizeInBits: 160,
         ulKeySizeInBits: 128,
         ulIVSizeInBits: 32,
@@ -1713,7 +1765,9 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
     });
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     // E0793: params structs are packed on Windows; assert on by-value copies.
@@ -1755,7 +1809,7 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             ulServerRandomLen: server_random.len() as CK_ULONG,
         },
         pReturnedKeyMaterial: &mut key_mat_out,
-        prfHashMechanism: CkMechanismType::SHA256.0,
+        prfHashMechanism: CkMechanismType::SHA256.0 as CK_ULONG,
     };
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_TLS12_KEY_AND_MAC_DERIVE,
@@ -1804,7 +1858,9 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         server_iv: vec![0xB1, 0xB2, 0xB3, 0xB4].into(),
     });
     unsafe {
-        super::write_mechanism_output_params(&mut mechanism, &mech_out);
+        super::prepare_mechanism_output_params(&mut mechanism, &mech_out)
+            .expect("valid output prepares")
+            .commit()
     }
 
     let (h_client_mac, h_server_mac, h_client_key, h_server_key) = (

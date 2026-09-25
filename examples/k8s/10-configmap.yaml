@@ -16,6 +16,10 @@ data:
 
     [listener.remote]
     bind = "0.0.0.0:7512"
+    # Fixture-only posture: unauthenticated TCP so the audit exercises
+    # the proxy without credential provisioning. Never promote — start
+    # production from examples/configs/{prod,staging} with mTLS (see
+    # doc/release/mtls-setup.md).
     auth = "none"
     allow_insecure_tcp = true
 

@@ -133,7 +133,14 @@ pub unsafe extern "C" fn c_get_mechanism_list(
         }
         match with_client!(client => client.get_mechanism_list(CkSlotId(slot_id as u64))) {
             Ok(mechs) => {
-                let registry = state::mechanism_registry();
+                // Behind with_client!'s init-guard, but a call racing
+                // C_Initialize can still observe the
+                // flag-set/registry-uninstalled window: fail closed
+                // instead of panicking (T07, C-B2).
+                let registry = match state::try_mechanism_registry() {
+                    Ok(registry) => registry,
+                    Err(e) => return rv_err(e),
+                };
                 let filtered: Vec<u64> =
                     registry.filter_mechanisms(&mechs.iter().map(|m| m.0).collect::<Vec<_>>());
                 let count = filtered.len() as CK_ULONG;

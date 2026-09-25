@@ -412,7 +412,7 @@ pub async fn rsa_encrypt_and_decrypt(
     public_key: CkObjectHandle,
     private_key: CkObjectHandle,
     plaintext: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<SecretBytes, String> {
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
     client
         .encrypt_init(session, &mechanism, public_key)
@@ -555,7 +555,7 @@ pub async fn rsa_sign_recover_and_verify_recover(
     private_key: CkObjectHandle,
     public_key: CkObjectHandle,
     data: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<SecretBytes, String> {
     let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
 
     client

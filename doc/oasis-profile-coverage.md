@@ -415,6 +415,34 @@ both broad and explicit about semantic limits.
 
 CKM_RSA_PKCS, CKM_RSA_PKCS_KEY_PAIR_GEN, CKM_SHA256, CKM_AES_KEY_GEN, CKM_EC_KEY_PAIR_GEN, and all others without params.
 
+### FFI Reader Support Limits (2026-09-22)
+
+Shape-bound FFI readers bound what untrusted caller memory can drive
+(v0.2.0-T03; the nesting constant is mirrored on shim and backend sides):
+
+- **Nesting budget:** at most 16 nested mechanism nodes per mechanism
+  parameter (`MAX_NESTED_MECHANISMS`); the 17th nested node — and any
+  repeated active caller address (a reference cycle) — is rejected before
+  recursion;
+- **Copy caps:** whole-struct and raw-fallback copies are bounded by
+  `MAX_MECHANISM_PARAM_STRUCT_LEN` (65,536 bytes); embedded data payloads
+  (seed, label, AAD, IV, …) by `MAX_SERIALIZABLE_BYTES` (512 MiB
+  transport cap, ADR-0010);
+- **Extent arithmetic:** every variable-length read validates
+  count-fits-usize, count*stride overflow, cap/`isize::MAX` bounds, and
+  end-address wrap before constructing a slice. This checks arithmetic,
+  not mapping: embedded sub-pointers stay independent caller pointers
+  under the FFI readability contract and are not contained in
+  `ulParameterLen`;
+- **Alignment:** callers may pass arbitrarily aligned (including packed)
+  `CK_*` structs; readers copy via `read_unaligned` and never form
+  aligned references into caller memory (pinned by the `misaligned_*`
+  tests).
+
+Over-budget mechanism inputs fail with `CKR_MECHANISM_PARAM_INVALID` on
+both the shim readers and the backend typed conversion instead of
+truncating or guessing.
+
 ## Exact Output Semantics (2026-04-04)
 
 The shim uses exact/raw output semantics for all output-bearing PKCS#11

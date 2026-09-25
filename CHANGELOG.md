@@ -157,6 +157,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nested: it carries proxy-specific exact-output contracts and registry
   policy (effect validation, apply flags, operator exclusion, wiping secret
   owners) that the generic upstream `pkcs11-types` does not provide.
+- Secret-classified `Pkcs11Client` results now return the wiping
+  `SecretBytes` owner instead of `Vec<u8>` (T13; pre-release API migration,
+  no compatibility shim): `wrap_key`, `wrap_key_authenticated` (both tuple
+  members), `wrap_key_authenticated_typed` (wrapped blob),
+  `unwrap_key_authenticated` (opaque parameter member),
+  `get_operation_state`, `generate_random`, `async_complete` (payload
+  member), `async_join`, the decrypt family (`decrypt`, `decrypt_update`,
+  `decrypt_final`, the three `*_with_mechanism_out` byte members,
+  `decrypt_digest_update`, `decrypt_verify_update`), `verify_recover`,
+  and the message-API opaque members (`encrypt_message`,
+  `encrypt_message_begin/next`, `decrypt_message`,
+  `decrypt_message_begin/next` bytes and recovered data, `sign_message`,
+  `sign_message_begin/next` parameter members). Read bytes inside
+  `SecretBytes::expose`; exact-output result shapes are unchanged and
+  their buffers are now adopted without copying. Public outputs stay
+  plain `Vec<u8>`: ciphertext, digests, signatures, KEM ciphertext, and
+  generated mechanism parameters (IVs).
 
 ### Removed
 

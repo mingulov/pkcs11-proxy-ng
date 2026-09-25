@@ -62,6 +62,18 @@ impl TestDaemon {
             .get_or_init(|| Self::start_configured(MockAbi::host(), Some(foreign)))
     }
 
+    /// An owned (non-singleton) daemon with a cold server discovery
+    /// cache (T11): the fresh backend `Arc` is a cache key no prior
+    /// probe could have stored, so the first probe deterministically
+    /// reaches the backend instead of a shared-singleton cache hit.
+    /// Assumes no (backend, payload) address reuse by a later `fresh()`
+    /// within the 5 s cache TTL (a hit would surface loudly as a 15 s
+    /// rendezvous timeout). Dropping it stops its server; the caller
+    /// must restore the endpoint env + reconnect flag for later tests.
+    pub(super) fn fresh() -> Self {
+        Self::start(MockAbi::host())
+    }
+
     fn start(abi: MockAbi) -> Self {
         Self::start_configured(abi, None)
     }
@@ -4204,7 +4216,10 @@ fn shim_async_complete_oversized_result_returns_buffer_too_small() {
         )
     };
     assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "C_AsyncComplete(oversized)");
-    assert_eq!(async_data.ulValue, 8, "required length must be reported");
+    // By-value copy: CK_ASYNC_DATA is packed on Windows MSVC, where borrowing
+    // the field inside assert_eq! is E0793.
+    let ul_value = async_data.ulValue;
+    assert_eq!(ul_value, 8, "required length must be reported");
     assert_eq!(buf, [0xAA_u8; 4], "no bytes may be copied on BUFFER_TOO_SMALL");
 
     drop(shim);
@@ -4234,7 +4249,10 @@ fn shim_async_complete_fitting_result_copies_bytes() {
         )
     };
     assert_eq!(rv, CKR_OK as CK_RV, "C_AsyncComplete(fitting)");
-    assert_eq!(async_data.ulValue, 8);
+    // By-value copy: CK_ASYNC_DATA is packed on Windows MSVC, where borrowing
+    // the field inside assert_eq! is E0793.
+    let ul_value = async_data.ulValue;
+    assert_eq!(ul_value, 8);
     assert_eq!(buf, [0xA5_u8; 8], "fitting value must be copied verbatim");
 
     drop(shim);
@@ -4264,7 +4282,10 @@ fn shim_async_complete_null_buffer_returns_required_length() {
         )
     };
     assert_eq!(rv, CKR_OK as CK_RV, "C_AsyncComplete(length query)");
-    assert_eq!(async_data.ulValue, 8, "required length must be reported");
+    // By-value copy: CK_ASYNC_DATA is packed on Windows MSVC, where borrowing
+    // the field inside assert_eq! is E0793.
+    let ul_value = async_data.ulValue;
+    assert_eq!(ul_value, 8, "required length must be reported");
 
     drop(shim);
 }

@@ -5,9 +5,11 @@
 # CKM_ECDH_X_AES_KEY_WRAP and CKM_ECDH_COF_AES_KEY_WRAP take the same
 # CK_ECDH_AES_KEY_WRAP_PARAMS struct as CKM_ECDH_AES_KEY_WRAP (the X/COF
 # variants differ in KDF semantics, not parameter layout), so they reuse
-# the proxy's "ecdh_aes_key_wrap" shape. They stay operator opt-in (not
-# defaults) pending dedicated shapes that can attest the X/COF semantics;
-# enable per deployment where the backend offers them. Wave 3 F2.
+# the proxy's "ecdh_aes_key_wrap" shape. They were promoted to the
+# defaults in T20 (the Wave 3 F2 sketch held them opt-in pending
+# dedicated attesting shapes; the proxy only forwards the layout and the
+# backend implements the semantics). This file stays valid and merges
+# idempotently for operators who pin it explicitly.
 #
 # Reference: OASIS PKCS#11 v3.2 (ECDH-X / ECDH-COF AES key wrap).
 

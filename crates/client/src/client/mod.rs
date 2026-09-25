@@ -14,6 +14,14 @@ macro_rules! pkcs11_unary_call {
 }
 
 macro_rules! pkcs11_unary_map {
+    // T12: `mut resp` arm for `ZeroizeOnDrop` responses, whose owned fields
+    // must come out with `mem::take` instead of moving them.
+    ($call:expr, $is_session_scoped:expr, mut $resp:ident => $body:expr) => {{
+        let mut $resp =
+            $crate::client::unary_prologue($call, $is_session_scoped, |response| response.ck_rv)
+                .await?;
+        Ok($body)
+    }};
     ($call:expr, $is_session_scoped:expr, $resp:ident => $body:expr) => {{
         let $resp =
             $crate::client::unary_prologue($call, $is_session_scoped, |response| response.ck_rv)

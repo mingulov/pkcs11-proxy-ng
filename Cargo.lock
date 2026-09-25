@@ -1370,6 +1370,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
@@ -1422,6 +1423,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
@@ -1447,6 +1449,7 @@ dependencies = [
 name = "pkcs11-proxy-ng-proto"
 version = "0.2.0"
 dependencies = [
+ "heck",
  "pkcs11-proxy-ng-types",
  "prost",
  "toml",
@@ -1481,6 +1484,7 @@ dependencies = [
 name = "pkcs11-proxy-ng-types"
 version = "0.2.0"
 dependencies = [
+ "cryptoki-sys",
  "serde",
  "tempfile",
  "toml",

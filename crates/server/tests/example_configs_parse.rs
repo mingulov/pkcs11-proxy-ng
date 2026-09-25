@@ -31,8 +31,26 @@ fn rewrite_for_test(orig: &str) -> String {
     // fail the file-exists check; mechanism registry handling is
     // tested elsewhere).
     let mut out = String::with_capacity(orig.len());
+    // T16: `[[auth.policy]]` blocks are commented out while set — policy
+    // entries are refused on the downgraded auth="none" listener (same H1
+    // rationale as allow-all below). The undowngraded mTLS posture is
+    // covered by example_prod_staging_mtls_policy_parses.
+    let mut in_policy_block = false;
     for line in orig.lines() {
         let trimmed = line.trim_start();
+        if trimmed.starts_with("[[auth.policy]]") {
+            in_policy_block = true;
+            out.push_str("# stripped for downgraded test parse: [[auth.policy]]\n");
+            continue;
+        }
+        if in_policy_block {
+            if trimmed.starts_with('[') {
+                in_policy_block = false;
+            } else {
+                out.push_str("# stripped for downgraded test parse\n");
+                continue;
+            }
+        }
         if trimmed.starts_with("module ") || trimmed.starts_with("module=") {
             out.push_str(&format!("module = \"{}\"\n", dummy_backend_module()));
         } else if trimmed.starts_with("config_path ") || trimmed.starts_with("config_path=") {
@@ -110,6 +128,86 @@ fn example_prod_parses() {
 #[test]
 fn example_fips_parses() {
     assert_example_parses("fips");
+}
+
+/// T16: prod/staging guidance shows explicit mTLS identity/token grants
+/// and deliberate quotas — validate the REAL posture, not just the
+/// downgraded parse. Only filesystem paths are redirected (module,
+/// certs) to test doubles; auth=mtls, the policy, and the quotas load
+/// exactly as shipped. (The intentional auth="none" fixtures — dev,
+/// k8s, r2 — are covered by their own tests; nothing here prohibits
+/// them.)
+#[test]
+fn example_prod_staging_mtls_policy_parses() {
+    for tier in ["prod", "staging"] {
+        let p = submodule_root().join(format!("examples/configs/{tier}/proxy.toml"));
+        let raw = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{tier}/proxy.toml: {e}"));
+        assert!(
+            raw.contains("auth = \"mtls\""),
+            "{tier} guidance must stay mTLS (fixture posture lives in dev/k8s)"
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Existence-only doubles: `load` checks cert files exist;
+        // permission/content checks run at TLS load, not parse.
+        for name in ["ca.crt", "server.crt", "server.key"] {
+            std::fs::write(dir.path().join(name), b"test double").expect("write cert double");
+        }
+        let mut out = String::with_capacity(raw.len());
+        for line in raw.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("module ") || trimmed.starts_with("module=") {
+                out.push_str(&format!("module = \"{}\"\n", dummy_backend_module()));
+            } else if trimmed.starts_with("config_path ") || trimmed.starts_with("config_path=") {
+                out.push_str("# config_path = stripped for test\n");
+            } else if let Some(key) = ["ca_cert", "server_cert", "server_key"].iter().find(|k| {
+                trimmed.starts_with(&format!("{k} ")) || trimmed.starts_with(&format!("{k}="))
+            }) {
+                let file = match *key {
+                    "ca_cert" => "ca.crt",
+                    "server_cert" => "server.crt",
+                    _ => "server.key",
+                };
+                out.push_str(&format!("{key} = \"{}\"\n", dir.path().join(file).display()));
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        let tmp = write_temp(&out);
+        let cfg = pkcs11_proxy_ng::config::DaemonConfig::load(tmp.path())
+            .unwrap_or_else(|e| panic!("{tier} mTLS posture parses: {e:?}"));
+        // Explicit grants, no allow-all baseline (a successful load
+        // already ran the full policy validation: identity form, token
+        // selectors, classes, mechanisms, extract).
+        assert!(!cfg.auth.allow_all_authenticated, "{tier} must not allow-all");
+        assert_eq!(cfg.auth.policy.len(), 1, "{tier} must carry one explicit policy");
+        assert!(
+            cfg.auth.policy[0].identity.starts_with("x509:spki="),
+            "{tier} identity must be an SPKI pin"
+        );
+        match &cfg.auth.policy[0].tokens {
+            pkcs11_proxy_ng::config::TokenAccessSpec::Specific(grants) => {
+                assert!(!grants.is_empty(), "{tier} policy must grant tokens");
+            }
+            pkcs11_proxy_ng::config::TokenAccessSpec::All(_) => {
+                panic!("{tier} guidance must show explicit grants, not tokens = \"all\"")
+            }
+        }
+        // Deliberate quotas, pinned per tier (an absent section would be
+        // all-None = no limiting at all).
+        let (in_flight, sessions, budget, cooldown) = match tier {
+            "prod" => (64usize, 16usize, 10u32, 60u64 * 5),
+            _ => (256usize, 64usize, 50u32, 60u64),
+        };
+        assert_eq!(cfg.rate_limit.per_principal_max_in_flight, Some(in_flight), "{tier} quota");
+        assert_eq!(cfg.rate_limit.per_principal_max_sessions, Some(sessions), "{tier} quota");
+        assert_eq!(cfg.rate_limit.per_slot_failed_login_budget, Some(budget), "{tier} quota");
+        assert_eq!(
+            cfg.rate_limit.per_slot_failed_login_cooldown_secs,
+            Some(cooldown),
+            "{tier} quota"
+        );
+    }
 }
 
 #[test]

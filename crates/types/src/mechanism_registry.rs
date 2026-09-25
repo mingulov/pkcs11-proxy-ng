@@ -44,7 +44,7 @@ pub const EMBEDDED_DEFAULT_REVISION: &str = "embedded-default";
 /// operator-excluded mechanisms, and discovery mode. Built from an embedded
 /// TOML default plus an optional operator override, or reconstructed from a
 /// server-published payload.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MechanismRegistry {
     param_shapes: HashMap<u64, String>,
     parameterless: HashSet<u64>,
@@ -1707,11 +1707,18 @@ mod tests {
             assert!(reg.is_parameterless(CKM_RSA_PKCS));
         }
 
-        // ...and neither overlay is in the defaults (operator opt-in).
+        // T20: the BLAKE2b and ECDH-X/COF IDs are OASIS v3.2 standard with
+        // standard layouts, so both were promoted to the defaults (the
+        // overlay files stay valid and merge idempotently). Nothing stays
+        // opt-in from these two overlays anymore.
         let reg = MechanismRegistry::load_with_override_str(None).unwrap();
-        for mech in [0x400Eu64, 0x4013, 0x4018, 0x401D, 0x4038, 0x4039] {
-            assert_eq!(reg.param_shape(mech), None, "mechanism {mech:#06x} must stay opt-in");
-            assert_eq!(reg.check_operation(mech, true), Err(CkRv::MECHANISM_PARAM_INVALID));
+        for mech in [0x400Eu64, 0x4013, 0x4018, 0x401D] {
+            assert_eq!(reg.param_shape(mech), Some("mac_general"), "mechanism {mech:#06x}");
+            assert!(reg.check_operation(mech, true).is_ok());
+        }
+        for mech in [0x4038u64, 0x4039] {
+            assert_eq!(reg.param_shape(mech), Some("ecdh_aes_key_wrap"), "mechanism {mech:#06x}");
+            assert!(reg.check_operation(mech, true).is_ok());
         }
     }
 

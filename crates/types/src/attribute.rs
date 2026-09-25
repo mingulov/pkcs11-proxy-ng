@@ -36,8 +36,9 @@ impl CkAttributeType {
     pub const EC_POINT: Self = Self(0x00000181);
     pub const ID: Self = Self(0x00000102);
     /// `CKA_UNIQUE_ID` — PKCS#11 v3.0 mandatory, immutable byte-string
-    /// globally unique identifier for storage objects (CK_BYTE_PTR, value 0x0000_002E).
-    pub const UNIQUE_ID: Self = Self(0x0000_002E);
+    /// globally unique identifier for storage objects (CK_BYTE_PTR, value
+    /// 0x0000_0004 per the v3.x published headers; absent from v2.40).
+    pub const UNIQUE_ID: Self = Self(0x0000_0004);
     pub const VALUE_LEN: Self = Self(0x00000161);
     pub const LOCAL: Self = Self(0x00000163);
 
@@ -299,9 +300,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unique_id_attribute_has_correct_value() {
-        // CKA_UNIQUE_ID = 0x0000_002E per PKCS#11 v3.0 spec.
-        assert_eq!(CkAttributeType::UNIQUE_ID.0, 0x0000_002E);
+    // `u64::from` is identity on 64-bit targets but widens `CK_ULONG` on
+    // 32-bit targets; the conversion keeps this oracle portable.
+    #[allow(clippy::useless_conversion)]
+    fn unique_id_matches_published_header() {
+        assert_eq!(CkAttributeType::UNIQUE_ID.0, u64::from(cryptoki_sys::CKA_UNIQUE_ID));
+        assert_eq!(CkAttributeType::UNIQUE_ID.0, 0x04);
     }
 
     #[test]

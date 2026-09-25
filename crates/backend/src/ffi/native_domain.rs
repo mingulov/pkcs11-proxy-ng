@@ -366,7 +366,7 @@ impl ConstructionPermit {
     /// Test-only permit that matches no live registry epoch: in-crate test
     /// backends built from `Library::this()` bypass the process reservation
     /// without consuming or freeing it. Must never back production dispatch.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "native-owner-test-hooks"))]
     pub(in crate::ffi) fn unmanaged_test_only() -> Self {
         // `u64::MAX` is never issued (`Vacant { u64::MAX }` rejects with
         // `EpochExhausted`), so this sentinel matches no live epoch and every
@@ -398,7 +398,7 @@ impl RetirementSentinel {
 
     /// Test-only sentinel matching no live registry epoch, pairing with
     /// [`ConstructionPermit::unmanaged_test_only`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "native-owner-test-hooks"))]
     pub(in crate::ffi) fn unmanaged_test_only() -> Self {
         Self { epoch: u64::MAX }
     }
@@ -1021,6 +1021,19 @@ impl LifecycleDomain {
     /// Poison or epoch exhaustion denies fail-closed WITHOUT native
     /// entry (the provider stays initialized; shutdown still exits).
     pub(in crate::ffi) fn begin_finalize(&self) -> CkResult<FinalizeTicket<'_>> {
+        self.begin_finalize_with_deadline(Instant::now() + shutdown_grace())
+    }
+
+    /// T10 coordinator-path seal: arm-1 suicide uses the caller-supplied
+    /// absolute deadline (the shared overall-deadline `Instant`, sampled
+    /// once by the caller) instead of the fixed `shutdown_grace()` read,
+    /// so arm-1 and the controller agree on `D` within scheduling
+    /// jitter (the controller re-samples its clock at arm time). Direct
+    /// `finalize()` callers keep `begin_finalize()` (env-overridable arm).
+    pub(in crate::ffi) fn begin_finalize_with_deadline(
+        &self,
+        deadline: Instant,
+    ) -> CkResult<FinalizeTicket<'_>> {
         // Tripwire: same write-behind-own-read hazard as begin_initialize
         // (a control write under a live guard self-deadlocks silently).
         debug_assert!(
@@ -1028,7 +1041,6 @@ impl LifecycleDomain {
             "control begin under a live OrdinaryGuard: write behind own read \
              self-deadlocks; control paths must never admit"
         );
-        let deadline = Instant::now() + shutdown_grace();
         let mut misses = 0u32;
         let mut write = loop {
             match self.inner.try_write() {

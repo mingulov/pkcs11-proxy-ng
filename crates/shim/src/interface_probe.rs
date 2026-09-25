@@ -639,7 +639,16 @@ fn probe_backend(_install: &std::sync::MutexGuard<'_, ()>) -> Result<InterfaceSt
     let rt = state::runtime();
     let probe = rt
         .block_on(async {
-            let mut client = state::client().lock().await;
+            // T11: clone the shared client under the mutex and release
+            // the guard BEFORE the RPC (same shape as `with_client!`):
+            // a slow probe response must not serialize unrelated
+            // initialized calls behind the client mutex. Install
+            // serialization still comes from `PROBE_INSTALL_LOCK`
+            // (held by the caller, not this mutex).
+            let mut client = {
+                let guard = state::client().lock().await;
+                guard.clone()
+            };
             client.get_backend_interfaces().await
         })
         .map_err(|e| ProbeFailure::Transient(e.to_string()))?;

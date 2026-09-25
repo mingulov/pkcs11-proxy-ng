@@ -95,6 +95,27 @@ impl TryFrom<&v1_proto::OutputBufferResult> for CkOutputBufferResult {
     }
 }
 
+/// T13 owned entry point: identical validation to the borrowed `TryFrom`,
+/// but adopts the value buffer with `mem::take` instead of cloning it — no
+/// transient second copy. The caller must own the message (typically a
+/// `mem::take`n response field). On validation failure the message drops
+/// and wipes via T12. (Free function rather than an inherent method: the
+/// `Ck` project types live in the `types` crate, which must not depend on
+/// the wire schema.)
+pub fn output_buffer_result_from_owned(
+    mut result: v1_proto::OutputBufferResult,
+) -> Result<CkOutputBufferResult, CkRv> {
+    let apply = result.apply_returned_len.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+    if !apply && (result.returned_len != 0 || result.value.is_some()) {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    Ok(CkOutputBufferResult {
+        ck_rv: CkRv(result.ck_rv),
+        returned_len: apply.then_some(result.returned_len),
+        value: result.value.take().map(SecretBytes::new),
+    })
+}
+
 impl From<&CkParameterRoundtripSpec> for v1_proto::ParameterRoundtripSpec {
     fn from(spec: &CkParameterRoundtripSpec) -> Self {
         Self {
@@ -115,6 +136,18 @@ impl From<&v1_proto::ParameterRoundtripSpec> for CkParameterRoundtripSpec {
     }
 }
 
+/// T13 owned entry point: adopts the value buffer with `mem::take`
+/// instead of cloning it. The caller must own the message.
+pub fn parameter_roundtrip_spec_from_owned(
+    mut spec: v1_proto::ParameterRoundtripSpec,
+) -> CkParameterRoundtripSpec {
+    CkParameterRoundtripSpec {
+        buffer_present: spec.buffer_present,
+        buffer_len: spec.buffer_len,
+        value: spec.value.take().map(SecretBytes::new),
+    }
+}
+
 impl From<&CkParameterRoundtripResult> for v1_proto::ParameterRoundtripResult {
     fn from(result: &CkParameterRoundtripResult) -> Self {
         Self {
@@ -132,6 +165,18 @@ impl From<&v1_proto::ParameterRoundtripResult> for CkParameterRoundtripResult {
             returned_len: result.returned_len,
             value: result.value.clone().map(SecretBytes::new),
         }
+    }
+}
+
+/// T13 owned entry point: adopts the value buffer with `mem::take`
+/// instead of cloning it. The caller must own the message.
+pub fn parameter_roundtrip_result_from_owned(
+    mut result: v1_proto::ParameterRoundtripResult,
+) -> CkParameterRoundtripResult {
+    CkParameterRoundtripResult {
+        ck_rv: CkRv(result.ck_rv),
+        returned_len: result.returned_len,
+        value: result.value.take().map(SecretBytes::new),
     }
 }
 
@@ -166,6 +211,29 @@ impl TryFrom<&v1_proto::OutputAndHandleResult> for CkOutputAndHandleResult {
             object_handle: handle.then_some(CkObjectHandle(result.object_handle)),
         })
     }
+}
+
+/// T13 owned entry point: identical validation to the borrowed
+/// `TryFrom`, but adopts the value buffer with `mem::take` instead of
+/// cloning it. The caller must own the message. On validation failure
+/// the message drops and wipes via T12.
+pub fn output_and_handle_result_from_owned(
+    mut result: v1_proto::OutputAndHandleResult,
+) -> Result<CkOutputAndHandleResult, CkRv> {
+    let apply = result.apply_returned_len.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+    let handle = result.apply_object_handle.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+    if (!apply && (result.returned_len != 0 || result.value.is_some()))
+        || (!handle && result.object_handle != 0)
+        || (handle && result.ck_rv != CkRv::OK.0)
+    {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    Ok(CkOutputAndHandleResult {
+        ck_rv: CkRv(result.ck_rv),
+        returned_len: apply.then_some(result.returned_len),
+        value: result.value.take().map(SecretBytes::new),
+        object_handle: handle.then_some(CkObjectHandle(result.object_handle)),
+    })
 }
 
 impl From<&CkAttributeQuery> for v1_proto::AttributeQuery {
@@ -223,6 +291,50 @@ impl TryFrom<&v1_proto::AttributeQueryResult> for CkAttributeQueryResult {
     fn try_from(result: &v1_proto::AttributeQueryResult) -> Result<Self, CkRv> {
         decode_attribute_result(result, 0)
     }
+}
+
+/// T13 owned entry point: identical validation to the borrowed `TryFrom`
+/// (including the depth-1 nesting cap), but adopts every value buffer
+/// with `mem::take` instead of cloning it. The caller must own the
+/// message. On validation failure the message drops and wipes via T12.
+pub fn attribute_query_result_from_owned(
+    result: v1_proto::AttributeQueryResult,
+) -> Result<CkAttributeQueryResult, CkRv> {
+    decode_attribute_result_owned(result, 0)
+}
+
+fn decode_attribute_result_owned(
+    mut result: v1_proto::AttributeQueryResult,
+    depth: usize,
+) -> Result<CkAttributeQueryResult, CkRv> {
+    let apply_returned_len = result.apply_returned_len.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+    let apply_type = result.apply_type.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
+    if !apply_returned_len
+        && (result.returned_len != 0 || result.value.is_some() || result.nested.is_some())
+    {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    if depth > 1 {
+        return Err(CkRv::FUNCTION_NOT_SUPPORTED);
+    }
+    Ok(CkAttributeQueryResult {
+        apply_returned_len,
+        apply_type,
+        attr_type: CkAttributeType(result.attr_type),
+        returned_len: result.returned_len,
+        value: result.value.take().map(SecretBytes::new),
+        ck_rv: result.ck_rv.map(CkRv),
+        nested: result
+            .nested
+            .take()
+            .map(|mut list| {
+                std::mem::take(&mut list.results)
+                    .into_iter()
+                    .map(|sub| decode_attribute_result_owned(sub, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?,
+    })
 }
 
 fn decode_attribute_result(
@@ -753,10 +865,19 @@ mod tests {
 
     #[test]
     fn byte_output_exact_request_null_len_roundtrip() {
+        // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`; struct-update
+        // syntax is forbidden — all fields are spelled out.
         let req = v1_proto::ByteOutputExactRequest {
-            exact_output_effects_version: 1,
+            client_context_id: String::new(),
+            session_handle: 0,
+            function: 0,
+            output_spec: None,
+            input_data: Vec::new(),
+            mechanism: None,
+            wrapping_key_handle: 0,
+            key_handle: 0,
             input_data_null_len: Some(42),
-            ..Default::default()
+            exact_output_effects_version: 1,
         };
         let bytes = prost::Message::encode_to_vec(&req);
         let back = v1_proto::ByteOutputExactRequest::decode(&bytes[..]).unwrap();
@@ -858,10 +979,19 @@ mod tests {
     fn null_len_present_with_zero_is_distinct_from_absent() {
         // NULL pointer with claimed length 0 is a real client input class; the
         // wire must distinguish Some(0) (NULL, len 0) from None (valid pointer).
+        // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`; struct-update
+        // syntax is forbidden — all fields are spelled out.
         let req = v1_proto::ByteOutputExactRequest {
-            exact_output_effects_version: 1,
+            client_context_id: String::new(),
+            session_handle: 0,
+            function: 0,
+            output_spec: None,
+            input_data: Vec::new(),
+            mechanism: None,
+            wrapping_key_handle: 0,
+            key_handle: 0,
             input_data_null_len: Some(0),
-            ..Default::default()
+            exact_output_effects_version: 1,
         };
         let bytes = prost::Message::encode_to_vec(&req);
         let back = v1_proto::ByteOutputExactRequest::decode(&bytes[..]).unwrap();

@@ -449,9 +449,12 @@ pub struct ProxyConfig {
     /// complete at startup. On timeout the daemon exits 1.
     #[serde(default = "default_startup_timeout_secs")]
     pub startup_timeout_secs: u64,
-    /// On SIGTERM/SIGINT, drain in-flight RPCs for up to this many
-    /// seconds before forcing shutdown. k8s
-    /// `terminationGracePeriodSeconds` should be at least this value.
+    /// T10: on SIGTERM/SIGINT (or a stuck-call trip), the WHOLE
+    /// shutdown — listener drain, eviction stop, audit completion and
+    /// native retirement — must complete within this many seconds of
+    /// the shutdown start (single overall deadline; phases share it,
+    /// none gets a fresh grace). k8s `terminationGracePeriodSeconds`
+    /// should exceed this value plus the 10s runtime-teardown tail.
     #[serde(default = "default_shutdown_grace_secs")]
     pub shutdown_grace_secs: u64,
     /// Consecutive backend-call failures before `tonic-health` flips to

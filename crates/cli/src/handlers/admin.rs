@@ -48,9 +48,11 @@ pub(crate) async fn seed_random(
     client: &mut Pkcs11Client,
     slot_id: u64,
     pin: Option<SecretBytes>,
-    seed: String,
+    seed: zeroize::Zeroizing<String>,
 ) -> CliResult {
-    let seed = hex::decode(&seed).map_err(|e| format!("Invalid hex seed: {e}"))?;
+    // T14: decode into a wiping owner, then lend the wiping allocation
+    // across the RPC (no plain working copy).
+    let seed = crate::secrets::decode_hex_secret(&seed, "Invalid hex seed")?.into_zeroizing();
     let session = open_session(client, slot_id, CkSessionFlags::SERIAL_SESSION).await?;
     // W1-C11-33: the PIN is optional like digest/session-info/verify —
     // log in only when one was given, so PIN-less seeding works where
@@ -160,7 +162,7 @@ mod tests {
     #[tokio::test]
     async fn seed_random_without_pin_succeeds() {
         let mut fx = fixture().await;
-        seed_random(&mut fx.client, fx.slot, None, "aabb".to_string())
+        seed_random(&mut fx.client, fx.slot, None, zeroize::Zeroizing::new("aabb".to_string()))
             .await
             .expect("PIN-less seed must succeed");
         assert_eq!(fx.backend.login_call_count(), 0, "no login without a PIN");
@@ -169,9 +171,14 @@ mod tests {
     #[tokio::test]
     async fn seed_random_with_pin_logs_in() {
         let mut fx = fixture().await;
-        seed_random(&mut fx.client, fx.slot, Some(SecretBytes::from("1234")), "aabb".to_string())
-            .await
-            .expect("seed with PIN must succeed");
+        seed_random(
+            &mut fx.client,
+            fx.slot,
+            Some(SecretBytes::from("1234")),
+            zeroize::Zeroizing::new("aabb".to_string()),
+        )
+        .await
+        .expect("seed with PIN must succeed");
         assert_eq!(fx.backend.login_call_count(), 1, "a provided PIN must log in");
     }
 }

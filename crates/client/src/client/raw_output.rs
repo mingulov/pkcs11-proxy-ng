@@ -19,23 +19,26 @@ pub type ParameterOutputExactDecoded =
     (CkOutputBufferResult, CkParameterRoundtripResult, Option<MessageEffects>);
 
 fn decode_parameter_output_exact_response(
-    response: pkcs11_proxy_ng_proto::ParameterOutputExactResponse,
+    mut response: pkcs11_proxy_ng_proto::ParameterOutputExactResponse,
     output_spec: &CkOutputBufferSpec,
     parameter_spec: &CkParameterRoundtripSpec,
     request_parameter: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
     function: ParameterOutputFunction,
     flags: u64,
 ) -> Result<ParameterOutputExactDecoded, CkRv> {
+    // T13: adopt the owned result buffers instead of cloning them. The
+    // effects part stays borrowed (its project type is not a wiping
+    // owner and is outside the T13 conversion scope).
     let output = response
         .output_result
-        .as_ref()
-        .map(CkOutputBufferResult::try_from)
+        .take()
+        .map(pkcs11_proxy_ng_proto::convert::output::output_buffer_result_from_owned)
         .transpose()?
         .ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
     let parameter = response
         .parameter_result
-        .as_ref()
-        .map(CkParameterRoundtripResult::from)
+        .take()
+        .map(pkcs11_proxy_ng_proto::convert::output::parameter_roundtrip_result_from_owned)
         .ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
 
     output.validate_for(output_spec, u64::MAX).map_err(|_| CkRv::FUNCTION_NOT_SUPPORTED)?;
@@ -163,22 +166,13 @@ impl Pkcs11Client {
         queries.iter().map(v1_proto::AttributeQuery::from).collect()
     }
 
-    pub(crate) fn output_buffer_result_from_proto(
-        result: &v1_proto::OutputBufferResult,
-    ) -> Result<CkOutputBufferResult, CkRv> {
-        result.try_into()
-    }
-
-    pub(crate) fn output_and_handle_result_from_proto(
-        result: &v1_proto::OutputAndHandleResult,
-    ) -> Result<CkOutputAndHandleResult, CkRv> {
-        result.try_into()
-    }
-
-    pub(crate) fn attribute_query_results_from_proto(
-        results: &[v1_proto::AttributeQueryResult],
+    pub(crate) fn attribute_query_results_from_owned(
+        results: Vec<v1_proto::AttributeQueryResult>,
     ) -> Result<Vec<CkAttributeQueryResult>, CkRv> {
-        results.iter().map(CkAttributeQueryResult::try_from).collect()
+        results
+            .into_iter()
+            .map(pkcs11_proxy_ng_proto::convert::output::attribute_query_result_from_owned)
+            .collect()
     }
 
     pub async fn get_attribute_value_exact(
@@ -196,7 +190,8 @@ impl Pkcs11Client {
             object_handle: object.0,
             queries: Self::proto_attribute_queries(queries),
         };
-        let resp = self
+        // T13: adopt the owned results instead of cloning them.
+        let mut resp = self
             .grpc
             .get_attribute_value_exact(req)
             .await
@@ -205,7 +200,8 @@ impl Pkcs11Client {
         if !exact_output_effects_version_supported(resp.exact_output_effects_version) {
             return Err(CkRv::FUNCTION_NOT_SUPPORTED);
         }
-        Ok((CkRv(resp.ck_rv), Self::attribute_query_results_from_proto(&resp.results)?))
+        let ck_rv = CkRv(resp.ck_rv);
+        Ok((ck_rv, Self::attribute_query_results_from_owned(std::mem::take(&mut resp.results))?))
     }
 
     /// Send a `ParameterOutputExact` RPC for any of the 7 parameter-output functions.
@@ -356,7 +352,10 @@ impl Pkcs11Client {
             .map_err(|status| grpc_status_to_ck_rv(status.code(), true))?
             .into_inner();
         match resp.result {
-            Some(ref result) => Self::output_and_handle_result_from_proto(result),
+            // T13: adopt the owned result instead of cloning it.
+            Some(result) => {
+                pkcs11_proxy_ng_proto::convert::output::output_and_handle_result_from_owned(result)
+            }
             None => Err(CkRv::FUNCTION_NOT_SUPPORTED),
         }
     }
@@ -448,7 +447,11 @@ impl Pkcs11Client {
             None => None,
         };
         match resp.result {
-            Some(result) => Ok((Self::output_buffer_result_from_proto(&result)?, mechanism_out)),
+            // T13: adopt the owned result instead of cloning it.
+            Some(result) => Ok((
+                pkcs11_proxy_ng_proto::convert::output::output_buffer_result_from_owned(result)?,
+                mechanism_out,
+            )),
             None => Err(CkRv::FUNCTION_NOT_SUPPORTED),
         }
     }

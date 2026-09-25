@@ -195,7 +195,7 @@ async fn softhsm_aes_cbc_pad_encrypt_decrypt() -> Result<(), String> {
         .await
         .map_err(|rv| format!("C_Decrypt(AES-CBC-PAD) failed: {rv}"))?;
 
-    if decrypted.as_slice() != plaintext.as_slice() {
+    if decrypted.expose(|bytes| bytes != plaintext.as_slice()) {
         return Err("AES-CBC-PAD round-trip should recover plaintext".into());
     }
     eprintln!(
@@ -276,7 +276,7 @@ async fn softhsm_des3_cbc_encrypt_decrypt() -> Result<(), String> {
         .await
         .map_err(|rv| format!("C_Decrypt(DES3-CBC) failed: {rv}"))?;
 
-    if decrypted.as_slice() != plaintext.as_slice() {
+    if decrypted.expose(|bytes| bytes != plaintext.as_slice()) {
         return Err("DES3-CBC round-trip should recover plaintext".into());
     }
     eprintln!("DES3-CBC encrypt+decrypt with IvParams (8-byte IV): OK");
@@ -538,7 +538,7 @@ async fn softhsm_aes_gcm_encrypt_decrypt() -> Result<(), String> {
         .await
         .map_err(|rv| format!("C_Decrypt(AES-GCM) failed: {rv}"))?;
 
-    if decrypted.as_slice() != plaintext.as_slice() {
+    if decrypted.expose(|bytes| bytes != plaintext.as_slice()) {
         return Err("AES-GCM round-trip should recover plaintext".into());
     }
     eprintln!("AES-GCM encrypt+decrypt with GcmParams: OK");

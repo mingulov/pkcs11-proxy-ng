@@ -215,6 +215,14 @@ proxy-latency class, a documented known-diff — not a transparency bug).
   the backend receives it byte-identically to a direct call (registry-only;
   AGENTS.md §12.6). Verified on real bouncyhsm: GMAC 418/418 outcomes == direct
   (411 pass + 7 skip), 0 regressions.
+  T20 addendum (2026-09-23): the "iv" mapping broke 3.x-style callers
+  (freehsm-c, cryptoki 3.2), which pass a `CK_GCM_PARAMS` struct for GMAC:
+  verbatim-forwarding the struct handed the backend stale client pointers
+  and segfaulted the daemon (32 freehsm-c regressions, `CKR_DEVICE_ERROR`).
+  Fix: new `gcm_compat` shape — buffers shorter than the struct still
+  forward verbatim as IV bytes (BouncyHSM unchanged), struct-sized buffers
+  are parsed as `CK_GCM_PARAMS`. Re-proofed on real freehsm-c (GMAC 32/32
+  pass) and bouncyhsm (GMAC outcomes == direct).
 - MCT multiblock timeouts (~12) — known proxy-latency, already a known-diff class.
 
 ## Separate repo — pkcs11-check

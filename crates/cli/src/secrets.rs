@@ -1,4 +1,4 @@
-//! Secret CLI inputs (W1-C11-15, W1-L2-11).
+//! Secret CLI inputs (W1-C11-15, W1-L2-11; T14 wiping migration).
 //!
 //! Secret hex args (`--input`, `--wrapped-key`, `--value`, Verify's
 //! `--data`/`--signature`) and PINs must be loadable without argv (which
@@ -7,10 +7,18 @@
 //! `--<flag>-stdin`, and `--pin` accepts `--pin-stdin`. An explicit argv
 //! value still works but prints a stderr warning naming the safer
 //! alternatives.
+//!
+//! T14 ownership: hex text travels in `Zeroizing<String>` (adopted, never
+//! copied: clap's inline allocation is wrapped on arrival, file/stdin
+//! bodies are read straight into wiping storage, normalization drains in
+//! place, and hex decodes into a pre-sized wiping vector). PINs resolve to
+//! `SecretBytes` as before. Explicit-argv detection comes from clap's own
+//! value-source metadata ([`SecretOrigins`]), not from a retained argv copy.
 
 use std::path::PathBuf;
 
 use pkcs11_proxy_ng_types::SecretBytes;
+use zeroize::Zeroizing;
 
 /// One secret hex argument: its argv flag stem plus its env fallback.
 pub(crate) struct SecretSpec<'a> {
@@ -33,31 +41,96 @@ pub(crate) const SIGNATURE_SPEC: SecretSpec<'static> =
 
 /// The three sources one secret hex arg can come from.
 pub(crate) struct SecretSources {
-    /// `--<flag>` value (argv or env — argv detection needs `argv`).
-    pub inline: Option<String>,
+    /// `--<flag>` value (argv or env — argv detection needs [`SecretOrigins`]).
+    /// Wrapped on arrival: clap's allocation is adopted, never copied.
+    pub inline: Option<Zeroizing<String>>,
     /// `--<flag>-file` path (argv only, no env binding).
     pub file: Option<PathBuf>,
     /// `--<flag>-stdin` (argv only, no env binding).
     pub stdin: bool,
 }
 
-/// True when `argv` explicitly passes `--long`, either as `--long value`
-/// or `--long=value`. Never matches a longer sibling (`--input` does not
-/// match `--input-file`).
-pub(crate) fn argv_uses_long_flag(argv: &[String], long: &str) -> bool {
-    let bare = format!("--{long}");
-    let joined = format!("--{long}=");
-    argv.iter().any(|arg| arg == &bare || arg.starts_with(&joined))
+/// Which inline secret flags were passed explicitly on argv (T14).
+///
+/// Captured once from clap's `ArgMatches` (`ValueSource::CommandLine`) so
+/// resolvers can tell an explicit `--flag` value (warned) from an
+/// env-filled one (silent) without retaining the raw argv — the old
+/// `Vec<String>` copy held every secret value in plain memory.
+///
+/// Residuals (documented, not fixed here): clap keeps the parsed values
+/// (plain `String`s, released at exit, never wiped); the OS keeps the
+/// original argv/environ pages of this process (and the operator's shell
+/// history file keeps whatever was typed). This metadata records flag
+/// presence only — never values — and we never overwrite external argv
+/// memory: it is borrowed process state, not ours to mutate.
+#[derive(Debug, Default)]
+pub(crate) struct SecretOrigins {
+    pub input: bool,
+    pub wrapped_key: bool,
+    pub value: bool,
+    pub data: bool,
+    pub signature: bool,
+    pub pin: bool,
+    pub so_pin: bool,
+    pub new_pin: bool,
+}
+
+impl SecretOrigins {
+    /// Capture from the active subcommand's matches (`None` when no
+    /// subcommand matched). Flag ids are clap derive field names; ids
+    /// absent from this subcommand read as not-on-argv (`value_source`
+    /// and `contains_id` both panic on undeclared ids, so membership is
+    /// established through the `ids()` iterator first).
+    pub fn from_subcommand_matches(matches: Option<&clap::ArgMatches>) -> Self {
+        let known: std::collections::HashSet<&str> =
+            matches.map(|m| m.ids().map(|id| id.as_str()).collect()).unwrap_or_default();
+        let on_argv = |id: &str| {
+            known.contains(id)
+                && matches
+                    .and_then(|m| m.value_source(id))
+                    .is_some_and(|s| s == clap::parser::ValueSource::CommandLine)
+        };
+        Self {
+            input: on_argv("input"),
+            wrapped_key: on_argv("wrapped_key"),
+            value: on_argv("value"),
+            data: on_argv("data"),
+            signature: on_argv("signature"),
+            pin: on_argv("pin"),
+            so_pin: on_argv("so_pin"),
+            new_pin: on_argv("new_pin"),
+        }
+    }
+
+    /// Explicit-argv bit for a secret-hex spec.
+    pub fn for_spec(&self, spec: &SecretSpec) -> bool {
+        match spec.flag {
+            "input" => self.input,
+            "wrapped-key" => self.wrapped_key,
+            "value" => self.value,
+            "data" => self.data,
+            "signature" => self.signature,
+            unknown => unreachable!("no origins bit for secret flag --{unknown}"),
+        }
+    }
+}
+
+/// Read a whole stream into wiping storage (T14). Buffer-growth
+/// reallocations are transient allocator copies, never retained; a
+/// mid-read I/O error drops the partial body with the wiping owner.
+/// The error names the source, never the bytes.
+fn read_external_string(
+    reader: &mut dyn std::io::Read,
+    what: &str,
+) -> Result<Zeroizing<String>, Box<dyn core::error::Error>> {
+    let mut body = Zeroizing::new(String::new());
+    reader.read_to_string(&mut body).map_err(|e| format!("cannot read {what}: {e}"))?;
+    Ok(body)
 }
 
 /// Read the whole stdin stream as a secret string (production reader).
-pub(crate) fn read_stdin_string() -> Result<String, Box<dyn core::error::Error>> {
-    use std::io::Read as _;
-    let mut body = String::new();
-    std::io::stdin()
-        .read_to_string(&mut body)
-        .map_err(|e| format!("cannot read secret from stdin: {e}"))?;
-    Ok(body)
+pub(crate) fn read_stdin_string() -> Result<Zeroizing<String>, Box<dyn core::error::Error>> {
+    read_external_string(&mut std::io::stdin(), "secret from stdin")
 }
 
 /// Warning printed when a secret travels on argv.
@@ -68,27 +141,56 @@ pub(crate) fn argv_secret_warning(flag: &str, alternatives: &str) -> String {
     )
 }
 
-/// Normalize a file/stdin secret body: strip one UTF-8 BOM, trim
-/// surrounding whitespace (trailing newlines from `echo`), and reject
-/// empty bodies loudly instead of sending an empty secret.
+/// Normalize a file/stdin secret body in place (T14): strip one UTF-8
+/// BOM, trim surrounding whitespace (trailing newlines from `echo`), and
+/// reject empty bodies loudly instead of sending an empty secret. The
+/// surviving range is computed from a borrow, then the outside ranges are
+/// drained inside the same wiping allocation — no second copy.
 fn normalize_external_secret(
-    body: String,
+    body: &mut Zeroizing<String>,
     what: &str,
-) -> Result<String, Box<dyn core::error::Error>> {
-    let body = body.strip_prefix('\u{FEFF}').unwrap_or(&body).trim();
+) -> Result<(), Box<dyn core::error::Error>> {
+    let (start, end) = {
+        let text: &str = body;
+        let trimmed = text.strip_prefix('\u{FEFF}').unwrap_or(text).trim();
+        let start = trimmed.as_ptr() as usize - text.as_ptr() as usize;
+        (start, start + trimmed.len())
+    };
+    body.drain(end..);
+    body.drain(..start);
     if body.is_empty() {
         return Err(format!("{what} provided an empty secret").into());
     }
-    Ok(body.to_string())
+    Ok(())
 }
 
 fn read_secret_file(
     path: &std::path::Path,
     what: &str,
-) -> Result<String, Box<dyn core::error::Error>> {
-    let body = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read {what} '{}': {e}", path.display()))?;
-    normalize_external_secret(body, what)
+) -> Result<Zeroizing<String>, Box<dyn core::error::Error>> {
+    let located = format!("{what} '{}'", path.display());
+    let mut file = std::fs::File::open(path).map_err(|e| format!("cannot read {located}: {e}"))?;
+    let mut body = read_external_string(&mut file, &located)?;
+    normalize_external_secret(&mut body, what)?;
+    Ok(body)
+}
+
+/// Decode hex text into a wiping owner (T14). Even length is validated
+/// before sizing; the destination is pre-sized and wiped on drop, so a
+/// mid-decode error (an invalid digit after a valid prefix) leaves
+/// nothing plain. Error text never echoes the input.
+pub(crate) fn decode_hex_secret(
+    encoded: &Zeroizing<String>,
+    what: &str,
+) -> Result<SecretBytes, Box<dyn core::error::Error>> {
+    let text: &str = encoded;
+    if !text.len().is_multiple_of(2) {
+        return Err(format!("{what}: Odd number of digits").into());
+    }
+    let mut decoded = Zeroizing::new(vec![0u8; text.len() / 2]);
+    hex::decode_to_slice(text.as_bytes(), decoded.as_mut_slice())
+        .map_err(|e| format!("{what}: {e}"))?;
+    Ok(SecretBytes::from(decoded))
 }
 
 /// Resolve one secret hex arg. At most one argv-explicit source wins
@@ -98,13 +200,12 @@ fn read_secret_file(
 pub(crate) fn resolve_optional_secret(
     spec: &SecretSpec,
     sources: SecretSources,
-    argv: &[String],
-    read_stdin: impl FnOnce() -> Result<String, Box<dyn core::error::Error>>,
+    inline_argv: bool,
+    read_stdin: impl FnOnce() -> Result<Zeroizing<String>, Box<dyn core::error::Error>>,
     warn: impl FnOnce(String),
-) -> Result<Option<String>, Box<dyn core::error::Error>> {
+) -> Result<Option<Zeroizing<String>>, Box<dyn core::error::Error>> {
     let file_flag = format!("{}-file", spec.flag);
     let stdin_flag = format!("{}-stdin", spec.flag);
-    let inline_argv = argv_uses_long_flag(argv, spec.flag);
     let explicit =
         [inline_argv, sources.file.is_some(), sources.stdin].into_iter().filter(|b| *b).count();
     if explicit > 1 {
@@ -116,7 +217,9 @@ pub(crate) fn resolve_optional_secret(
         return Ok(Some(read_secret_file(&path, &format!("--{file_flag}"))?));
     }
     if sources.stdin {
-        return Ok(Some(normalize_external_secret(read_stdin()?, &format!("--{stdin_flag}"))?));
+        let mut body = read_stdin()?;
+        normalize_external_secret(&mut body, &format!("--{stdin_flag}"))?;
+        return Ok(Some(body));
     }
     if let Some(inline) = sources.inline {
         if inline_argv {
@@ -138,11 +241,11 @@ pub(crate) fn resolve_optional_secret(
 pub(crate) fn resolve_required_secret(
     spec: &SecretSpec,
     sources: SecretSources,
-    argv: &[String],
-    read_stdin: impl FnOnce() -> Result<String, Box<dyn core::error::Error>>,
+    inline_argv: bool,
+    read_stdin: impl FnOnce() -> Result<Zeroizing<String>, Box<dyn core::error::Error>>,
     warn: impl FnOnce(String),
-) -> Result<String, Box<dyn core::error::Error>> {
-    resolve_optional_secret(spec, sources, argv, read_stdin, warn)?.ok_or_else(|| {
+) -> Result<Zeroizing<String>, Box<dyn core::error::Error>> {
+    resolve_optional_secret(spec, sources, inline_argv, read_stdin, warn)?.ok_or_else(|| {
         format!(
             "missing --{}: pass --{}, --{}-file, --{}-stdin, or set {}",
             spec.flag, spec.flag, spec.flag, spec.flag, spec.env_var
@@ -155,19 +258,20 @@ pub(crate) fn resolve_required_secret(
 pub(crate) fn resolve_optional_pin(
     inline: Option<SecretBytes>,
     stdin: bool,
-    argv: &[String],
-    read_stdin: impl FnOnce() -> Result<String, Box<dyn core::error::Error>>,
+    inline_argv: bool,
+    read_stdin: impl FnOnce() -> Result<Zeroizing<String>, Box<dyn core::error::Error>>,
     warn: impl FnOnce(String),
 ) -> Result<Option<SecretBytes>, Box<dyn core::error::Error>> {
-    let inline_argv = argv_uses_long_flag(argv, "pin");
     if inline_argv && stdin {
         return Err("pass only one of --pin, --pin-stdin".into());
     }
     if stdin {
-        return Ok(Some(SecretBytes::from(normalize_external_secret(
-            read_stdin()?,
-            "--pin-stdin",
-        )?)));
+        let mut body = read_stdin()?;
+        normalize_external_secret(&mut body, "--pin-stdin")?;
+        // Ownership transfer, not a copy: the wiping wrapper keeps an
+        // empty String (zeroize has no `into_inner`; `mem::take` moves
+        // the live allocation out).
+        return Ok(Some(SecretBytes::from(std::mem::take(&mut *body))));
     }
     if let Some(inline) = inline {
         if inline_argv {
@@ -186,11 +290,11 @@ pub(crate) fn resolve_optional_pin(
 pub(crate) fn resolve_required_pin(
     inline: Option<SecretBytes>,
     stdin: bool,
-    argv: &[String],
-    read_stdin: impl FnOnce() -> Result<String, Box<dyn core::error::Error>>,
+    inline_argv: bool,
+    read_stdin: impl FnOnce() -> Result<Zeroizing<String>, Box<dyn core::error::Error>>,
     warn: impl FnOnce(String),
 ) -> Result<SecretBytes, Box<dyn core::error::Error>> {
-    resolve_optional_pin(inline, stdin, argv, read_stdin, warn)?.ok_or_else(|| {
+    resolve_optional_pin(inline, stdin, inline_argv, read_stdin, warn)?.ok_or_else(|| {
         "missing PIN: pass --pin, --pin-stdin, or set PKCS11_PROXY_PIN".to_string().into()
     })
 }
@@ -201,11 +305,11 @@ pub(crate) fn resolve_required_inline_pin(
     inline: Option<SecretBytes>,
     flag: &str,
     env_var: &str,
-    argv: &[String],
+    inline_argv: bool,
     warn: impl FnOnce(String),
 ) -> Result<SecretBytes, Box<dyn core::error::Error>> {
     if let Some(inline) = inline {
-        if argv_uses_long_flag(argv, flag) {
+        if inline_argv {
             warn(argv_secret_warning(flag, &format!("the {env_var} environment variable")));
         }
         return Ok(inline);
@@ -217,15 +321,15 @@ pub(crate) fn resolve_required_inline_pin(
 mod tests {
     use super::*;
 
-    fn argv(words: &[&str]) -> Vec<String> {
-        words.iter().map(|w| w.to_string()).collect()
+    fn wiping(text: &str) -> Zeroizing<String> {
+        Zeroizing::new(text.to_string())
     }
 
     fn sources(inline: Option<&str>, file: Option<PathBuf>, stdin: bool) -> SecretSources {
-        SecretSources { inline: inline.map(str::to_string), file, stdin }
+        SecretSources { inline: inline.map(|s| Zeroizing::new(s.to_string())), file, stdin }
     }
 
-    fn fail_stdin() -> Result<String, Box<dyn core::error::Error>> {
+    fn fail_stdin() -> Result<Zeroizing<String>, Box<dyn core::error::Error>> {
         unreachable!("stdin must not be read on this path")
     }
 
@@ -233,16 +337,150 @@ mod tests {
         panic!("no warning expected on this path")
     }
 
-    // W1-C11-15: argv detection matches `--flag value` and `--flag=value`
-    // but never a longer sibling such as `--input-file`.
+    // T14: clap value-source metadata replaces the argv scan — `--flag
+    // value` and `--flag=value` both read as explicit, a longer sibling
+    // (`--input-file`) never lights the `--input` bit, and absent flags
+    // read silent.
     #[test]
-    fn argv_flag_detection_ignores_longer_siblings() {
-        assert!(argv_uses_long_flag(&argv(&["cli", "sign", "--input", "ab"]), "input"));
-        assert!(argv_uses_long_flag(&argv(&["cli", "sign", "--input=ab"]), "input"));
-        assert!(!argv_uses_long_flag(&argv(&["cli", "sign", "--input-file", "p"]), "input"));
-        assert!(!argv_uses_long_flag(&argv(&["cli", "sign", "--input-stdin"]), "input"));
-        assert!(!argv_uses_long_flag(&argv(&["cli", "sign"]), "input"));
-        assert!(argv_uses_long_flag(&argv(&["cli", "--pin-stdin"]), "pin-stdin"));
+    fn origins_capture_explicit_argv_flags() {
+        use clap::CommandFactory as _;
+
+        fn origins_for(argv: &[&str]) -> SecretOrigins {
+            let matches =
+                crate::cli::Cli::command().try_get_matches_from(argv).expect("must parse");
+            SecretOrigins::from_subcommand_matches(matches.subcommand().map(|(_, m)| m))
+        }
+
+        // `sign` declares `--input`/`--pin` (among others); ids it does
+        // not declare read silent.
+        let sign = origins_for(&[
+            "pkcs11-proxy-ng-cli",
+            "sign",
+            "--slot-id",
+            "1",
+            "--pin",
+            "1234",
+            "--key-label",
+            "k",
+            "--mechanism",
+            "SHA256_RSA_PKCS",
+            "--input",
+            "ab",
+        ]);
+        assert!(sign.input, "--input value form must read explicit");
+        assert!(sign.pin, "--pin must read explicit");
+        assert!(!sign.wrapped_key, "undeclared id must read silent");
+        assert!(!sign.so_pin, "absent flag must read silent");
+
+        let joined = origins_for(&[
+            "pkcs11-proxy-ng-cli",
+            "sign",
+            "--slot-id",
+            "1",
+            "--key-label",
+            "k",
+            "--mechanism",
+            "SHA256_RSA_PKCS",
+            "--input=ab",
+        ]);
+        assert!(joined.input, "--input=value form must read explicit");
+        assert!(!joined.pin, "env-or-absent pin must read silent");
+
+        let sibling = origins_for(&[
+            "pkcs11-proxy-ng-cli",
+            "sign",
+            "--slot-id",
+            "1",
+            "--key-label",
+            "k",
+            "--mechanism",
+            "SHA256_RSA_PKCS",
+            "--input-file",
+            "p",
+        ]);
+        assert!(!sibling.input, "--input-file must not light the --input bit");
+
+        let init = origins_for(&[
+            "pkcs11-proxy-ng-cli",
+            "init-pin",
+            "--slot-id",
+            "1",
+            "--so-pin",
+            "so",
+            "--new-pin",
+            "new",
+        ]);
+        assert!(init.so_pin && init.new_pin, "kebab longs map to field ids");
+        assert!(!init.pin, "absent pin must read silent");
+
+        // Every remaining secret id, proven against its own command (a
+        // mistyped id would read silent forever).
+        let unwrap = origins_for(&[
+            "pkcs11-proxy-ng-cli",
+            "unwrap-key",
+            "--slot-id",
+            "1",
+            "--mechanism",
+            "AES_KEY_WRAP",
+            "--unwrapping-key-handle",
+            "7",
+            "--wrapped-key",
+            "cd",
+        ]);
+        assert!(unwrap.wrapped_key, "--wrapped-key must light its bit");
+        assert!(!unwrap.input, "other bits stay silent");
+
+        let create = origins_for(&[
+            "pkcs11-proxy-ng-cli",
+            "create-object",
+            "--slot-id",
+            "1",
+            "--label",
+            "l",
+            "--value",
+            "ef",
+        ]);
+        assert!(create.value, "--value must light its bit");
+
+        let verify = origins_for(&[
+            "pkcs11-proxy-ng-cli",
+            "verify",
+            "--slot-id",
+            "1",
+            "--key-label",
+            "k",
+            "--mechanism",
+            "SHA256_RSA_PKCS",
+            "--data",
+            "aa",
+            "--signature",
+            "bb",
+        ]);
+        assert!(verify.data && verify.signature, "--data/--signature must light their bits");
+
+        let none = SecretOrigins::from_subcommand_matches(None);
+        assert!(!none.for_spec(&INPUT_SPEC), "no subcommand reads silent");
+        assert!(!SecretOrigins::default().for_spec(&DATA_SPEC), "default reads silent");
+    }
+
+    // T14: every spec maps to its own origins bit (a new spec without a
+    // bit fails loudly in `for_spec`, not silently).
+    #[test]
+    fn origins_map_every_secret_spec() {
+        let all_true = SecretOrigins {
+            input: true,
+            wrapped_key: true,
+            value: true,
+            data: true,
+            signature: true,
+            pin: true,
+            so_pin: true,
+            new_pin: true,
+        };
+        for spec in [&INPUT_SPEC, &WRAPPED_KEY_SPEC, &VALUE_SPEC, &DATA_SPEC, &SIGNATURE_SPEC] {
+            assert!(all_true.for_spec(spec), "--{} must map to a bit", spec.flag);
+            assert!(!SecretOrigins::default().for_spec(spec), "--{} defaults silent", spec.flag);
+        }
     }
 
     // W1-C11-15: the warning names the leak and the alternatives.
@@ -262,23 +500,23 @@ mod tests {
         let out = resolve_required_secret(
             &INPUT_SPEC,
             sources(Some("ab12"), None, false),
-            &argv(&["cli", "sign", "--input", "ab12"]),
+            true,
             fail_stdin,
             |m| warned.push(m),
         )
         .unwrap();
-        assert_eq!(out, "ab12");
+        assert_eq!(out.as_str(), "ab12");
         assert_eq!(warned.len(), 1, "argv inline must warn");
 
         let out = resolve_required_secret(
             &INPUT_SPEC,
             sources(Some("ab12"), None, false),
-            &argv(&["cli", "sign"]),
+            false,
             fail_stdin,
             fail_warn,
         )
         .unwrap();
-        assert_eq!(out, "ab12");
+        assert_eq!(out.as_str(), "ab12");
     }
 
     // W1-C11-15: file and stdin sources resolve (trimmed) without warnings.
@@ -290,22 +528,63 @@ mod tests {
         let out = resolve_required_secret(
             &INPUT_SPEC,
             sources(None, Some(path), false),
-            &argv(&["cli", "sign", "--input-file", "input.hex"]),
+            false,
             fail_stdin,
             fail_warn,
         )
         .unwrap();
-        assert_eq!(out, "ab12");
+        assert_eq!(out.as_str(), "ab12");
 
         let out = resolve_required_secret(
             &INPUT_SPEC,
             sources(None, None, true),
-            &argv(&["cli", "sign", "--input-stdin"]),
-            || Ok("cd34\r\n".to_string()),
+            false,
+            || Ok(wiping("cd34\r\n")),
             fail_warn,
         )
         .unwrap();
-        assert_eq!(out, "cd34");
+        assert_eq!(out.as_str(), "cd34");
+    }
+
+    // T14: one UTF-8 BOM plus surrounding whitespace normalizes away in
+    // wiping storage (file and stdin); the bytes are otherwise unchanged.
+    #[test]
+    fn bom_and_whitespace_normalize_in_wiping_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.hex");
+        std::fs::write(&path, "\u{FEFF}  ab12\t\n").unwrap();
+        let out = resolve_required_secret(
+            &INPUT_SPEC,
+            sources(None, Some(path), false),
+            false,
+            fail_stdin,
+            fail_warn,
+        )
+        .unwrap();
+        assert_eq!(out.as_str(), "ab12");
+
+        let out = resolve_required_secret(
+            &DATA_SPEC,
+            sources(None, None, true),
+            false,
+            || Ok(wiping("\u{FEFF}cd34  ")),
+            fail_warn,
+        )
+        .unwrap();
+        assert_eq!(out.as_str(), "cd34");
+
+        // A BOM alone (nothing but trimmable content) is an empty secret.
+        let err = resolve_required_secret(
+            &INPUT_SPEC,
+            sources(None, None, true),
+            false,
+            || Ok(wiping("\u{FEFF} \t\n")),
+            fail_warn,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("empty secret"), "must reject loudly: {err}");
+        assert!(!err.contains('\u{FEFF}'), "must not echo the body: {err}");
     }
 
     // W1-C11-15: two argv-explicit sources are a loud error, not silent
@@ -313,20 +592,15 @@ mod tests {
     // explicit file/stdin choice.
     #[test]
     fn conflicting_argv_sources_error_env_fallback_yields() {
-        for extra in [
-            sources(Some("aa"), Some(PathBuf::from("f")), false),
-            sources(Some("aa"), None, true),
-            sources(None, Some(PathBuf::from("f")), true),
+        for (extra, inline_argv) in [
+            (sources(Some("aa"), Some(PathBuf::from("f")), false), true),
+            (sources(Some("aa"), None, true), true),
+            (sources(None, Some(PathBuf::from("f")), true), false),
         ] {
-            let err = resolve_required_secret(
-                &INPUT_SPEC,
-                extra,
-                &argv(&["cli", "sign", "--input", "aa", "--input-file", "f", "--input-stdin"]),
-                fail_stdin,
-                fail_warn,
-            )
-            .unwrap_err()
-            .to_string();
+            let err =
+                resolve_required_secret(&INPUT_SPEC, extra, inline_argv, fail_stdin, fail_warn)
+                    .unwrap_err()
+                    .to_string();
             assert!(err.contains("--input-file"), "must name spellings: {err}");
             assert!(err.contains("--input-stdin"), "must name spellings: {err}");
         }
@@ -338,12 +612,23 @@ mod tests {
         let out = resolve_required_secret(
             &INPUT_SPEC,
             sources(Some("aa"), Some(path), false),
-            &argv(&["cli", "sign", "--input-file", "input.hex"]),
+            false,
             fail_stdin,
             fail_warn,
         )
         .unwrap();
-        assert_eq!(out, "bb");
+        assert_eq!(out.as_str(), "bb");
+
+        // Env-filled inline + explicit stdin: stdin wins, no conflict.
+        let out = resolve_required_secret(
+            &INPUT_SPEC,
+            sources(Some("aa"), None, true),
+            false,
+            || Ok(wiping("cc\n")),
+            fail_warn,
+        )
+        .unwrap();
+        assert_eq!(out.as_str(), "cc");
     }
 
     // W1-C11-15: missing required secrets error naming every source;
@@ -353,7 +638,7 @@ mod tests {
         let err = resolve_required_secret(
             &INPUT_SPEC,
             sources(None, None, false),
-            &argv(&["cli", "sign"]),
+            false,
             fail_stdin,
             fail_warn,
         )
@@ -365,7 +650,7 @@ mod tests {
         let out = resolve_optional_secret(
             &VALUE_SPEC,
             sources(None, None, false),
-            &argv(&["cli", "create-object"]),
+            false,
             fail_stdin,
             fail_warn,
         )
@@ -384,7 +669,7 @@ mod tests {
             resolve_required_secret(
                 &INPUT_SPEC,
                 sources(None, Some(path), false),
-                &argv(&["cli", "sign", "--input-file", "empty.hex"]),
+                false,
                 fail_stdin,
                 fail_warn,
             )
@@ -394,8 +679,8 @@ mod tests {
             resolve_required_secret(
                 &INPUT_SPEC,
                 sources(None, None, true),
-                &argv(&["cli", "sign", "--input-stdin"]),
-                || Ok("  \n".to_string()),
+                false,
+                || Ok(wiping("  \n")),
                 fail_warn,
             )
             .is_err()
@@ -404,12 +689,83 @@ mod tests {
             resolve_optional_secret(
                 &VALUE_SPEC,
                 sources(None, None, true),
-                &argv(&["cli", "create-object", "--value-stdin"]),
-                || Ok(String::new()),
+                false,
+                || Ok(wiping("")),
                 fail_warn,
             )
             .is_err()
         );
+    }
+
+    // T14: a mid-stream read failure surfaces the source, never the
+    // partial bytes; the partial body stays inside the dropped wiping
+    // owner by construction (the reader below yields a secret prefix,
+    // then fails).
+    #[test]
+    fn partial_read_errors_name_source_not_bytes() {
+        struct FailAfterPrefix {
+            prefix: &'static [u8],
+            failed: bool,
+        }
+
+        impl std::io::Read for FailAfterPrefix {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.failed {
+                    return Err(std::io::Error::other("boom"));
+                }
+                self.failed = true;
+                let len = self.prefix.len().min(buf.len());
+                buf[..len].copy_from_slice(&self.prefix[..len]);
+                Ok(len)
+            }
+        }
+
+        let mut reader = FailAfterPrefix { prefix: b"ab12ffff", failed: false };
+        let err = read_external_string(&mut reader, "--input-stdin").unwrap_err().to_string();
+        assert!(err.contains("--input-stdin"), "must name the source: {err}");
+        assert!(err.contains("boom"), "must carry the I/O cause: {err}");
+        assert!(!err.contains("ab12"), "must not echo partial bytes: {err}");
+
+        // The injected stdin seam reports reader errors the same way.
+        let err = resolve_required_secret(
+            &INPUT_SPEC,
+            sources(None, None, true),
+            false,
+            || Err("cannot read --input-stdin: boom".to_string().into()),
+            fail_warn,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("--input-stdin"), "must name the source: {err}");
+    }
+
+    // T14: hex decodes into a wiping owner with unchanged bytes; an
+    // invalid digit after a valid prefix, an odd length, and empty input
+    // behave exactly like `hex::decode` without echoing the input.
+    #[test]
+    fn hex_decode_matches_plain_decoder_without_echo() {
+        let canary = "ab12ZZ";
+        let err = decode_hex_secret(&wiping(canary), "Invalid hex input").unwrap_err().to_string();
+        assert_eq!(
+            err,
+            format!("Invalid hex input: {}", hex::decode(canary).unwrap_err()),
+            "invalid digit must match hex::decode"
+        );
+        assert!(!err.contains(canary), "must not echo the input: {err}");
+
+        for odd in ["a", "abc"] {
+            let err = decode_hex_secret(&wiping(odd), "Invalid hex input").unwrap_err().to_string();
+            assert_eq!(
+                err,
+                format!("Invalid hex input: {}", hex::decode(odd).unwrap_err()),
+                "odd length must match hex::decode"
+            );
+        }
+
+        let out = decode_hex_secret(&wiping("ab12"), "Invalid hex input").unwrap();
+        out.expose(|bytes| assert_eq!(bytes, &[0xAB, 0x12]));
+        let empty = decode_hex_secret(&wiping(""), "Invalid hex input").unwrap();
+        assert!(empty.is_empty(), "empty hex stays empty (as hex::decode)");
     }
 
     // W1-L2-11: PINs resolve from argv (warned), env (silent), or stdin
@@ -417,41 +773,32 @@ mod tests {
     #[test]
     fn pin_resolution_warns_on_argv_only() {
         let mut warned = Vec::new();
-        let pin = resolve_required_pin(
-            Some(SecretBytes::from("1234")),
-            false,
-            &argv(&["cli", "sign", "--pin", "1234"]),
-            fail_stdin,
-            |m| warned.push(m),
-        )
-        .unwrap();
+        let pin =
+            resolve_required_pin(Some(SecretBytes::from("1234")), false, true, fail_stdin, |m| {
+                warned.push(m)
+            })
+            .unwrap();
         pin.expose(|b| assert_eq!(b, b"1234"));
         assert_eq!(warned.len(), 1, "argv PIN must warn");
 
         let pin = resolve_required_pin(
             Some(SecretBytes::from("1234")),
             false,
-            &argv(&["cli", "sign"]),
+            false,
             fail_stdin,
             fail_warn,
         )
         .unwrap();
         pin.expose(|b| assert_eq!(b, b"1234"));
 
-        let pin = resolve_required_pin(
-            None,
-            true,
-            &argv(&["cli", "sign", "--pin-stdin"]),
-            || Ok("5678\n".to_string()),
-            fail_warn,
-        )
-        .unwrap();
+        let pin =
+            resolve_required_pin(None, true, false, || Ok(wiping("5678\n")), fail_warn).unwrap();
         pin.expose(|b| assert_eq!(b, b"5678"));
 
         let err = resolve_required_pin(
             Some(SecretBytes::from("1234")),
             true,
-            &argv(&["cli", "sign", "--pin", "1234", "--pin-stdin"]),
+            true,
             fail_stdin,
             fail_warn,
         )
@@ -459,23 +806,13 @@ mod tests {
         .to_string();
         assert!(err.contains("--pin-stdin"), "must name spellings: {err}");
 
-        let err = resolve_required_pin(None, false, &argv(&["cli", "sign"]), fail_stdin, fail_warn)
+        let err = resolve_required_pin(None, false, false, fail_stdin, fail_warn)
             .unwrap_err()
             .to_string();
         for spelling in ["--pin", "--pin-stdin", "PKCS11_PROXY_PIN"] {
             assert!(err.contains(spelling), "must name {spelling}: {err}");
         }
-        assert!(
-            resolve_optional_pin(
-                None,
-                false,
-                &argv(&["cli", "find-objects"]),
-                fail_stdin,
-                fail_warn
-            )
-            .unwrap()
-            .is_none()
-        );
+        assert!(resolve_optional_pin(None, false, false, fail_stdin, fail_warn).unwrap().is_none());
     }
 
     // W1-L2-11: argv-or-env-only PINs warn on the argv path and error
@@ -487,7 +824,7 @@ mod tests {
             Some(SecretBytes::from("so")),
             "so-pin",
             "PKCS11_PROXY_SO_PIN",
-            &argv(&["cli", "init-token", "--so-pin", "so"]),
+            true,
             |m| warned.push(m),
         )
         .unwrap();
@@ -498,20 +835,15 @@ mod tests {
             Some(SecretBytes::from("so")),
             "so-pin",
             "PKCS11_PROXY_SO_PIN",
-            &argv(&["cli", "init-token"]),
+            false,
             fail_warn,
         )
         .unwrap();
 
-        let err = resolve_required_inline_pin(
-            None,
-            "new-pin",
-            "PKCS11_PROXY_NEW_PIN",
-            &argv(&["cli", "init-pin"]),
-            fail_warn,
-        )
-        .unwrap_err()
-        .to_string();
+        let err =
+            resolve_required_inline_pin(None, "new-pin", "PKCS11_PROXY_NEW_PIN", false, fail_warn)
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("PKCS11_PROXY_NEW_PIN"), "must name env: {err}");
     }
 }

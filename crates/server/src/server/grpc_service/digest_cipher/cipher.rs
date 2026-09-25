@@ -136,8 +136,10 @@ pub(crate) async fn encrypt(
     let started = Instant::now();
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `EncryptRequest` is `ZeroizeOnDrop`; take owned fields out with
+    // `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
         Ok(session) => session,
@@ -150,7 +152,7 @@ pub(crate) async fn encrypt(
         }
     };
 
-    let data = SecretBytes::new(req.data);
+    let data = SecretBytes::new(std::mem::take(&mut req.data));
     let backend = Arc::clone(backend_ref);
     let result =
         spawn_backend(move || data.expose(|raw| backend.encrypt(session, CkInBuf::Bytes(raw))))
@@ -184,8 +186,10 @@ pub(crate) async fn encrypt_update(
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptUpdateResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `EncryptUpdateRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
         Ok(session) => session,
@@ -198,7 +202,7 @@ pub(crate) async fn encrypt_update(
         }
     };
 
-    let part = SecretBytes::new(req.part);
+    let part = SecretBytes::new(std::mem::take(&mut req.part));
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         part.expose(|raw| backend.encrypt_update(session, CkInBuf::Bytes(raw)))

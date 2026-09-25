@@ -9,8 +9,8 @@ use crate::state;
 
 use super::helpers::{
     catch_panics, classify_input, dispatch_byte_output_exact, dispatch_byte_output_exact_no_input,
-    input_buf_to_ck_in_buf, read_mechanism, rv_err, rv_ok, unit_result_to_rv, validate_mechanism,
-    with_client, write_mechanism_output_params,
+    input_buf_to_ck_in_buf, prepare_mechanism_output_params, read_mechanism, rv_err, rv_ok,
+    unit_result_to_rv, validate_mechanism, with_client,
 };
 
 pub unsafe extern "C" fn c_digest_init(
@@ -149,8 +149,13 @@ pub unsafe extern "C" fn c_encrypt_init(
                 // the call whose caller memory is live. No caller address
                 // is retained: C_Encrypt receives no mechanism pointer, so
                 // there is no live target a later write could use.
+                // Transactional (T06): malformed output fails before any
+                // store instead of silently skipping fields.
                 if let Some(params) = output_params {
-                    unsafe { write_mechanism_output_params(p_mechanism, &params) };
+                    match unsafe { prepare_mechanism_output_params(p_mechanism, &params) } {
+                        Ok(plan) => unsafe { plan.commit() },
+                        Err(e) => return rv_err(e),
+                    }
                 }
                 rv_ok()
             }

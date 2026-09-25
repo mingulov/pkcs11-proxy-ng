@@ -1,11 +1,13 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
+use crate::state;
+
 use super::helpers::{
-    catch_panics, ck_attrs_to_rust_checked, classify_input, input_buf_to_ck_in_buf,
-    null_preserving_template, output_buffer_spec, read_mechanism, read_wrap_key_mechanism, rv_err,
-    rv_ok, unit_result_to_rv, validate_mechanism, with_client, write_exact_output,
-    write_mechanism_output_params, write_object_handle_output, write_object_handle_pair_output,
+    catch_panics, ck_attrs_to_rust_checked, classify_input, derive_key_post_rpc,
+    generate_key_post_rpc, input_buf_to_ck_in_buf, null_preserving_template, output_buffer_spec,
+    read_mechanism, read_wrap_key_mechanism, rv_err, rv_ok, unit_result_to_rv, validate_mechanism,
+    with_client, wrap_key_post_rpc, write_object_handle_output, write_object_handle_pair_output,
 };
 
 pub unsafe extern "C" fn c_wrap_key(
@@ -19,6 +21,12 @@ pub unsafe extern "C" fn c_wrap_key(
     catch_panics(|| {
         if p_mechanism.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
+        }
+        // T07: gate before registry access (validate/read below) so a
+        // pre-init call returns CRYPTOKI_NOT_INITIALIZED instead of
+        // panicking on the uninstalled registry.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
@@ -40,21 +48,21 @@ pub unsafe extern "C" fn c_wrap_key(
             h_key.into(),
         ));
         match result {
-            Ok((r, mechanism_out)) => {
-                let rv =
-                    unsafe { write_exact_output(&spec, &r, p_wrapped_key, pul_wrapped_key_len) };
-                // A missing length pointer remains a genuine provider call, so
-                // preserve any successful mechanism writeback independently of
-                // the main output pointer. Ordinary size queries keep the
+            Ok((r, mechanism_out)) => unsafe {
+                // Transactional post-RPC outputs (T06): the mechanism plan
+                // prepares before the byte plan writes. A missing length
+                // pointer remains a genuine provider call with independent
+                // mechanism writeback; ordinary size queries keep the
                 // historical no-writeback behavior.
-                if rv == rv_ok()
-                    && (spec.buffer_present || spec.length_pointer_null)
-                    && let Some(params) = mechanism_out
-                {
-                    unsafe { write_mechanism_output_params(p_mechanism, &params) };
-                }
-                rv
-            }
+                wrap_key_post_rpc(
+                    &spec,
+                    &r,
+                    mechanism_out.as_ref(),
+                    p_mechanism,
+                    p_wrapped_key,
+                    pul_wrapped_key_len,
+                )
+            },
             Err(e) => rv_err(e),
         }
     })
@@ -79,6 +87,13 @@ pub unsafe extern "C" fn c_unwrap_key(
             Err(e) => return rv_err(e),
         };
         let template_opt = null_preserving_template(&template, p_template);
+        // T07: gate after pure-local argument parsing but before registry
+        // access (validate/read below) so a pre-init call returns
+        // CRYPTOKI_NOT_INITIALIZED instead of panicking on the
+        // uninstalled registry.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -100,10 +115,10 @@ pub unsafe extern "C" fn c_unwrap_key(
             wrapped_key,
             template_opt,
         )) {
-            Ok(handle) => {
-                unsafe { write_object_handle_output(handle, ph_key) };
-                rv_ok()
-            }
+            Ok(handle) => match unsafe { write_object_handle_output(handle, ph_key) } {
+                Ok(()) => rv_ok(),
+                Err(e) => rv_err(e),
+            },
             Err(e) => rv_err(e),
         }
     })
@@ -133,6 +148,13 @@ pub unsafe extern "C" fn c_derive_key(
             Err(e) => return rv_err(e),
         };
         let template_opt = null_preserving_template(&template, p_template);
+        // T07: gate after pure-local argument parsing but before registry
+        // access (validate/read below) so a pre-init call returns
+        // CRYPTOKI_NOT_INITIALIZED instead of panicking on the
+        // uninstalled registry.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -147,30 +169,18 @@ pub unsafe extern "C" fn c_derive_key(
             CkObjectHandle(h_base_key as u64),
             template_opt,
         )) {
-            Ok(result) => {
-                // Write HSM-mutated mechanism fields back into the caller's
-                // CK_MECHANISM: TLS12 master-key-derive's pVersion, and the
-                // key-and-mac derives' pReturnedKeyMaterial (4 key handles + IVs).
-                // A no-op for mechanisms without output params.
-                if let Some(params) = result.mechanism_out {
-                    unsafe { write_mechanism_output_params(p_mechanism, &params) };
-                }
-                if result.rv.is_ok() {
-                    // A plain C_DeriveKey returns one handle via ph_key; the
-                    // key-material mechanisms return theirs via the param above
-                    // and pass ph_key == NULL. Only write the single handle when
-                    // the caller supplied a location for it.
-                    if !ph_key.is_null() {
-                        let Some(handle) = result.key_handle else {
-                            return rv_err(CkRv::GENERAL_ERROR);
-                        };
-                        unsafe { write_object_handle_output(handle, ph_key) };
-                    }
-                    rv_ok()
-                } else {
-                    rv_err(result.rv)
-                }
-            }
+            // Transactional post-RPC outputs (T06): HSM-mutated mechanism
+            // fields (TLS12 pVersion, key-material handles + IVs) prepare
+            // before any store; a no-op for mechanisms without outputs.
+            Ok(result) => unsafe {
+                derive_key_post_rpc(
+                    result.rv,
+                    result.key_handle,
+                    result.mechanism_out.as_ref(),
+                    p_mechanism,
+                    ph_key,
+                )
+            },
             Err(e) => rv_err(e),
         }
     })
@@ -192,6 +202,13 @@ pub unsafe extern "C" fn c_generate_key(
             Err(e) => return rv_err(e),
         };
         let template_opt = null_preserving_template(&template, p_template);
+        // T07: gate after pure-local argument parsing but before registry
+        // access (validate/read below) so a pre-init call returns
+        // CRYPTOKI_NOT_INITIALIZED instead of panicking on the
+        // uninstalled registry.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -205,17 +222,12 @@ pub unsafe extern "C" fn c_generate_key(
             &mech,
             template_opt,
         )) {
-            Ok((handle, mechanism_out)) => {
-                // Write any HSM-mutated mechanism field back into the caller's
-                // CK_MECHANISM — for PBE key generation this is the generated
-                // CK_PBE_PARAMS.pInitVector. A no-op for mechanisms without
-                // output params.
-                if let Some(params) = mechanism_out {
-                    unsafe { write_mechanism_output_params(p_mechanism, &params) };
-                }
-                unsafe { write_object_handle_output(handle, ph_key) };
-                rv_ok()
-            }
+            // Transactional post-RPC outputs (T06): HSM-mutated mechanism
+            // fields (PBE pInitVector) and the handle validate before
+            // either writes. A no-op for mechanisms without outputs.
+            Ok((handle, mechanism_out)) => unsafe {
+                generate_key_post_rpc(handle, mechanism_out.as_ref(), p_mechanism, ph_key)
+            },
             Err(e) => rv_err(e),
         }
     })
@@ -249,6 +261,13 @@ pub unsafe extern "C" fn c_generate_key_pair(
             Err(e) => return rv_err(e),
         };
         let priv_opt = null_preserving_template(&priv_tmpl, p_private_key_template);
+        // T07: gate after pure-local argument parsing but before registry
+        // access (validate/read below) so a pre-init call returns
+        // CRYPTOKI_NOT_INITIALIZED instead of panicking on the
+        // uninstalled registry.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -264,15 +283,17 @@ pub unsafe extern "C" fn c_generate_key_pair(
             priv_opt,
         )) {
             Ok((public_handle, private_handle)) => {
-                unsafe {
+                match unsafe {
                     write_object_handle_pair_output(
                         public_handle,
                         private_handle,
                         ph_public_key,
                         ph_private_key,
                     )
-                };
-                rv_ok()
+                } {
+                    Ok(()) => rv_ok(),
+                    Err(e) => rv_err(e),
+                }
             }
             Err(e) => rv_err(e),
         }
@@ -317,9 +338,11 @@ pub unsafe extern "C" fn c_generate_random(
                 if data.len() != random_len as usize {
                     return rv_err(CkRv::GENERAL_ERROR);
                 }
-                unsafe {
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), p_random_data, data.len());
-                }
+                // T13: SecretBytes is closure-scoped; the length was
+                // already validated against `random_len` above.
+                data.expose(|bytes| unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), p_random_data, bytes.len());
+                });
                 rv_ok()
             }
             Err(e) => rv_err(e),

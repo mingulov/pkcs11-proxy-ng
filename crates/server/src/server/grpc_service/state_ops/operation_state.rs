@@ -119,8 +119,10 @@ async fn set_operation_state_with_timeout(
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetOperationStateResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `SetOperationStateRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let (session, mut encryption_key, mut authentication_key) = match resolve_state_handles(
         ctx_mgr,
@@ -189,7 +191,7 @@ async fn set_operation_state_with_timeout(
         }
     }
 
-    let operation_state = SecretBytes::new(req.operation_state);
+    let operation_state = SecretBytes::new(std::mem::take(&mut req.operation_state));
     let operation_state_null_len = req.operation_state_null_len;
     // ADR-0010 sanitize_inputs: validate NULL operation_state pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, operation_state_null_len) {

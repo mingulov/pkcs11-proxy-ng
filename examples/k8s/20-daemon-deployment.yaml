@@ -24,9 +24,11 @@ spec:
       labels:
         app: daemon
     spec:
-      # k8s terminationGracePeriodSeconds must be >= the daemon's
-      # proxy.shutdown_grace_secs (default 30) so an in-flight
-      # signing request can complete during graceful drain.
+      # k8s terminationGracePeriodSeconds must exceed the daemon's
+      # proxy.shutdown_grace_secs (default 30: the WHOLE post-signal
+      # shutdown — drain, eviction stop, audit completion, native
+      # retirement) plus the 10s runtime-teardown tail, so an
+      # in-flight signing request can complete during graceful drain.
       terminationGracePeriodSeconds: 45
       containers:
         - name: daemon
@@ -61,6 +63,9 @@ spec:
               slots.mechanisms = ALL
               library.reset_on_fork = false
               EOF
+              # Fixture-only PIN setup: baked-in demo PINs so the audit runs
+              # without credential provisioning. Production provisions
+              # real PINs out of band — never bake them into manifests.
               if ! softhsm2-util --show-slots 2>/dev/null | grep -q "Label:[[:space:]]*demo-token"; then
                   softhsm2-util --init-token --free \
                       --label demo-token --so-pin abcd --pin 1234 >/dev/null

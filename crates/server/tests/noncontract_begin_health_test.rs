@@ -136,7 +136,9 @@ impl Harness {
     async fn init(&mut self, decrypt: bool) {
         self.scenario(CKR_OK);
         let mechanism =
-            Some(wire::Mechanism { mechanism_type: CKM_AES_GCM as u64, ..Default::default() });
+            // T12: `Mechanism` is `ZeroizeOnDrop`; struct-update syntax is
+            // forbidden — all fields are spelled out.
+            Some(wire::Mechanism { mechanism_type: CKM_AES_GCM as u64, params: None });
         let rv = if decrypt {
             self.rpc
                 .message_decrypt_init(wire::MessageDecryptInitRequest {
@@ -171,44 +173,58 @@ impl Harness {
     // shape. Both version-zero clients and version-one clients remain valid.
     async fn begin(&mut self, decrypt: bool, version: u32, parameter: Vec<u8>) -> u64 {
         let (rv, bytes, acknowledgement, old_parameter, effects) = if decrypt {
-            let out = self
+            // T12: `DecryptMessageBeginResponse` is `ZeroizeOnDrop`; take
+            // owned fields out with `mem::take` instead of moving them.
+            let mut out = self
                 .rpc
+                // T12: `DecryptMessageBeginRequest` is `ZeroizeOnDrop`;
+                // struct-update syntax is forbidden — all fields spelled out.
                 .decrypt_message_begin(wire::DecryptMessageBeginRequest {
+                    exact_output_effects_version: version,
                     client_context_id: self.context.clone(),
                     session_handle: self.session,
                     parameter,
-                    exact_output_effects_version: version,
-                    ..Default::default()
+                    associated_data: Vec::new(),
+                    associated_data_null_len: None,
+                    parameter_out_spec: None,
+                    message_parameter: None,
                 })
                 .await
                 .unwrap()
                 .into_inner();
             (
                 out.ck_rv,
-                out.parameter_out,
-                out.parameter_result,
-                out.message_parameter_out,
-                out.message_effects,
+                std::mem::take(&mut out.parameter_out),
+                std::mem::take(&mut out.parameter_result),
+                std::mem::take(&mut out.message_parameter_out),
+                std::mem::take(&mut out.message_effects),
             )
         } else {
-            let out = self
+            // T12: `EncryptMessageBeginResponse` is `ZeroizeOnDrop`; take
+            // owned fields out with `mem::take` instead of moving them.
+            let mut out = self
                 .rpc
+                // T12: `EncryptMessageBeginRequest` is `ZeroizeOnDrop`;
+                // struct-update syntax is forbidden — all fields spelled out.
                 .encrypt_message_begin(wire::EncryptMessageBeginRequest {
+                    exact_output_effects_version: version,
                     client_context_id: self.context.clone(),
                     session_handle: self.session,
                     parameter,
-                    exact_output_effects_version: version,
-                    ..Default::default()
+                    associated_data: Vec::new(),
+                    associated_data_null_len: None,
+                    parameter_out_spec: None,
+                    message_parameter: None,
                 })
                 .await
                 .unwrap()
                 .into_inner();
             (
                 out.ck_rv,
-                out.parameter_out,
-                out.parameter_result,
-                out.message_parameter_out,
-                out.message_effects,
+                std::mem::take(&mut out.parameter_out),
+                std::mem::take(&mut out.parameter_result),
+                std::mem::take(&mut out.message_parameter_out),
+                std::mem::take(&mut out.message_effects),
             )
         };
         assert!(bytes.is_empty(), "legacy Begin must not gain a raw output");
@@ -226,6 +242,8 @@ impl Harness {
         self.scenario(CKR_DEVICE_REMOVED);
         let out = self
             .rpc
+            // T12: `ByteOutputExactRequest` is `ZeroizeOnDrop`;
+            // struct-update syntax is forbidden — all fields spelled out.
             .byte_output_exact(wire::ByteOutputExactRequest {
                 client_context_id: self.context.clone(),
                 session_handle: self.session,
@@ -236,7 +254,11 @@ impl Harness {
                     length_pointer_null: false,
                 }),
                 exact_output_effects_version: 1,
-                ..Default::default()
+                input_data: Vec::new(),
+                mechanism: None,
+                wrapping_key_handle: 0,
+                key_handle: 0,
+                input_data_null_len: None,
             })
             .await
             .unwrap()

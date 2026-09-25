@@ -10,7 +10,7 @@ use std::path::Path;
 /// arm is the historical `dlopen(NULL)` self handle (null handle on static
 /// musl, where `dlopen` is unsupported — see below); the Windows arm is the
 /// process image handle (`GetModuleHandleExW(0, NULL, _)`, libloading 0.8.9).
-#[cfg(test)]
+#[cfg(any(test, feature = "native-owner-test-hooks"))]
 #[cfg(all(unix, not(target_env = "musl")))]
 pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
     libloading::os::unix::Library::this().into()
@@ -22,7 +22,7 @@ pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
 /// suffices; its `Drop` calls `dlclose(NULL)`, which musl answers with an
 /// error (no crash) that libloading ignores. Proven natively on both musl
 /// widths (C3M Task 4 fix).
-#[cfg(test)]
+#[cfg(any(test, feature = "native-owner-test-hooks"))]
 #[cfg(all(unix, target_env = "musl"))]
 pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
     // SAFETY: never used for lookup; dropping only calls `dlclose(NULL)`,
@@ -31,7 +31,7 @@ pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
 }
 
 /// Portable test-only stand-in for the provider-module handle (Windows arm).
-#[cfg(test)]
+#[cfg(any(test, feature = "native-owner-test-hooks"))]
 #[cfg(windows)]
 pub(in crate::ffi) fn test_library_handle() -> libloading::Library {
     libloading::os::windows::Library::this().expect("test process image handle").into()

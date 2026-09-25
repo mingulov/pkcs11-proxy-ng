@@ -175,8 +175,14 @@ fn live_daemon_bridges_ulong_widths_end_to_end() {
     assert_eq!(CK_ULONG::from_ne_bytes(class_buf), CKO_DATA, "CKA_CLASS value");
 
     // Too-small buffer: exact/raw semantics forward the backend's
-    // CKR_BUFFER_TOO_SMALL, and the CK_UNAVAILABLE_INFORMATION length
-    // sentinel must arrive at the CLIENT's width (D10 end-to-end).
+    // answer verbatim (ADR-0010), and backends disagree here — so the
+    // expectation is classified per provider like the wait path below.
+    // SoftHSM2 natively reports CKR_BUFFER_TOO_SMALL with a
+    // CK_UNAVAILABLE_INFORMATION length, which must arrive at the
+    // CLIENT's width (D10 end-to-end). NSS natively answers lenient
+    // OK with the required length and no data written, which the
+    // bridge rescales to one client ulong.
+    let provider = std::env::var("PKCS11_PROXY_CROSS_PROVIDER").unwrap_or_default();
     let mut tiny = [0u8; 2];
     let mut attr = CK_ATTRIBUTE {
         type_: CKA_CLASS,
@@ -184,13 +190,28 @@ fn live_daemon_bridges_ulong_widths_end_to_end() {
         ulValueLen: tiny.len() as CK_ULONG,
     };
     let rv = unsafe { dispatch::general::c_get_attribute_value(session, object, &mut attr, 1) };
-    assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "too-small CKA_CLASS query");
     // E0793: CK_ATTRIBUTE is packed on Windows; assert on a by-value copy.
     let ul_value_len = attr.ulValueLen;
-    assert_eq!(
-        ul_value_len, CK_UNAVAILABLE_INFORMATION,
-        "sentinel must be the client-width all-ones value"
-    );
+    match provider.as_str() {
+        "softhsm2" => {
+            assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV, "too-small CKA_CLASS query");
+            assert_eq!(
+                ul_value_len, CK_UNAVAILABLE_INFORMATION,
+                "sentinel must be the client-width all-ones value"
+            );
+        }
+        "nss" => {
+            assert_eq!(rv, CKR_OK as CK_RV, "NSS lenient too-small CKA_CLASS query");
+            assert_eq!(
+                ul_value_len as usize,
+                std::mem::size_of::<CK_ULONG>(),
+                "NSS required length must arrive at the client width"
+            );
+        }
+        other => panic!(
+            "unclassified too-small provider (runner must set PKCS11_PROXY_CROSS_PROVIDER): {other:?}"
+        ),
+    }
 
     let rv = unsafe { dispatch::general::c_close_session(session) };
     assert_eq!(rv, CKR_OK as CK_RV, "C_CloseSession");

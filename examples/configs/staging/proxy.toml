@@ -43,9 +43,32 @@ server_key = "/etc/pkcs11-proxy-ng/tls/server.key"
 allow_insecure_tcp = false
 
 [auth]
-# Tighten further in prod; staging mirrors prod's allow-all-authenticated
-# baseline so authorised mTLS clients can hit any slot.
-allow_all_authenticated = true
+# Explicit grants even in staging: no allow-all baseline. Bare and rich
+# grants may mix in one policy — the bare form keeps the runtime
+# bare-grant default (extraction allowed, all classes/mechanisms).
+allow_all_authenticated = false
+
+[[auth.policy]]
+# Staging client identity (SPKI pin — replace with your own). The
+# daemon authenticates the mTLS peer; this policy decides what the
+# authenticated identity may touch.
+identity = "x509:spki=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+tokens = [
+  # Bare grant: full use of the staging token (runtime default).
+  "label:staging-token",
+  # Rich grant alongside: the shared CI token is use-only, so CI keys
+  # can never leave the token even though the staging grant above
+  # permits extraction.
+  { token = "label:ci-shared", extract = "deny" },
+]
+
+[rate_limit]
+# Same knobs as prod, looser for test traffic (absent section = no
+# limiting; 0 is rejected at startup).
+per_principal_max_in_flight = 256
+per_principal_max_sessions = 64
+per_slot_failed_login_budget = 50
+per_slot_failed_login_cooldown_secs = 60
 
 [mechanisms]
 config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"

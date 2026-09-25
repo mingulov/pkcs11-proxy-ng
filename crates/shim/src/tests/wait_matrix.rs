@@ -137,6 +137,68 @@ fn wait_wide_response_rv_checked_against_caller_width() {
     assert_eq!(slot, CANARY_SLOT, "RV path must not write the caller slot");
 }
 
+/// Hang-release backstop: clearing the injected hang on drop (including
+/// test panic) so a parked daemon worker is always released.
+struct HangRelease {
+    backend: std::sync::Arc<pkcs11_proxy_ng_backend::mock::MockBackend>,
+}
+
+impl Drop for HangRelease {
+    fn drop(&mut self) {
+        self.backend.inject_slot_event_hang(false);
+    }
+}
+
+/// T10a shim boundary: a provider grace expiry surfaces end to end as a
+/// transport deadline — FUNCTION_FAILED with the caller slot cell
+/// untouched (never a synthesized NO_EVENT, never a slot write).
+#[test]
+fn wait_provider_grace_expiry_leaves_canary_intact() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    ensure_mock_initialized(daemon);
+    let _session = ShimSession::with_endpoint(&daemon.endpoint);
+    assert_eq!(
+        daemon.backend.slot_event_queue_len(),
+        0,
+        "wait-matrix tests must not leak queued events"
+    );
+    daemon.backend.inject_slot_event_hang(true);
+    let _release = HangRelease { backend: daemon.backend.clone() };
+
+    // The C call blocks on the daemon's 5s provider grace; run it on a
+    // worker thread so a never-answering daemon fails the test instead
+    // of wedging the suite.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut slot = CANARY_SLOT;
+        let rv = unsafe {
+            dispatch::general::c_wait_for_slot_event(wait_flags(), &mut slot, std::ptr::null_mut())
+        };
+        let _ = tx.send((rv, slot));
+    });
+    let (rv, slot) = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("daemon must answer the parked poll at its provider grace");
+    assert_eq!(rv, CKR_FUNCTION_FAILED as CK_RV);
+    assert_eq!(slot, CANARY_SLOT, "deadline must not write the caller slot");
+
+    // Settle the detached daemon worker before exit: feed it a sacrificial
+    // event, then release the hang and await the drained queue. Without
+    // this rendezvous a later enqueue-based test on the shared daemon
+    // could lose its event to the still-parked zombie.
+    daemon.backend.enqueue_slot_event(CkSlotId(0));
+    drop(_release);
+    let start = std::time::Instant::now();
+    while daemon.backend.slot_event_queue_len() != 0 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "released worker must settle promptly"
+        );
+        std::thread::yield_now();
+    }
+}
+
 #[test]
 fn wait_unmapped_wide_backend_slot_suppresses_to_no_event() {
     // A wide backend slot id has no virtual mapping, so the service

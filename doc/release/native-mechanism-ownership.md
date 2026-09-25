@@ -427,6 +427,260 @@ remains; the residual unqualified set is precisely the complement of
   such Rust target in practice);
 - every other `target_os`.
 
+## Daemon shutdown coordination (T10 design)
+
+This section is the exact integration design for bounded complete
+shutdown. It was ACCEPTED by an independent native-ownership reviewer
+before any stop-API change (T10 gate 1; verdict recorded 2026-09-22
+after two CHANGES_REQUESTED rounds, all findings resolved against code
+reality). Implementation: the shutdown coordinator in the server
+binary (`main.rs`, factored for testing), `finalize_with_grace` on the
+backend trait, and `crates/server/tests/shutdown_lifetime_test.rs`.
+
+### Authority: who requests, who owns
+
+- The shutdown coordinator OWNS eviction cancellation/join, listener
+  drain, audit-flush completion and native retirement sequencing. It
+  requests stop; it never claims native quiescence.
+- The native domain (FFI lifecycle + seal/drain + shutdown-deadline
+  controller + final-owner guard) OWNS native state and is the SOLE
+  authority for native retirement. Only its deadline-enforcement
+  family may end the process over outstanding native work, and only
+  through the reviewed raw arm (`abnormal_stop_native_lifetime`,
+  status 70) on qualified targets: three logical callers at four
+  sites — the final-owner guard (two `Drop` legs in `loading.rs`),
+  the shutdown-deadline controller (`native_stop.rs`), and the seal
+  arm-1 suicide (`native_domain.rs` `begin_finalize_with_deadline`).
+  This design
+  adds NO callers. No server path may `std::process::exit`, return
+  past unresolved native work, or finalize "anyway".
+- Ordinary graceful errors (listener error, audit-flush failure,
+  eviction overrun, backend `C_Finalize` error return) and unresolved
+  native-lifetime stops are DISTINCT outcomes with distinct statuses
+  (table below). A graceful error never triggers the raw arm; an
+  unresolved native stop never runs destructors, logging, allocation,
+  flushing or wiping after commitment.
+
+### The single overall deadline
+
+One absolute deadline bounds the whole post-signal shutdown:
+`D = signal receipt + proxy.shutdown_grace_secs` (default 30s; the knob
+keeps its name but now budgets the ENTIRE shutdown, not just the
+listener drain — `config.rs` docs and k8s guidance are updated at
+implementation). Phases run in order, each awaiting at most
+`D - now` (saturating; an exhausted budget means phases 1–3 are
+skipped/abandoned immediately, never granted a fresh grace):
+
+1. Listener drain (existing `serve_with_grace`, now passed the
+   remaining budget instead of the full knob). On expiry the serve
+   futures drop, aborting in-flight connections; detached backend
+   workers keep their admission guards.
+2. Eviction stop: cancel new ticks (watch/cancellation channel), then
+   join the retained task within the remaining budget. Cancellation
+   never cancels an already-running native call; a joining tick is
+   itself bounded (per-call teardown timeouts). On join expiry the
+   coordinator proceeds; the still-running tick's workers hold their
+   guards into phase 4's seal/drain.
+3. Audit completion within the remaining budget: `drop(svc)` first
+   to release the service's sender (no handler can emit past this
+   point), then bounded audit completion — flush (ack-based, works
+   on the open channel), abort the checkpoint timer task (its
+   `AbortHandle` is retained at spawn), drop the coordinator's sink,
+   and join the retained writer thread. The writer exits only on
+   channel close, so all three sender releases precede the join; on
+   flush/join expiry (or flush error) the coordinator logs and
+   proceeds: no complete audit tail is promised on this path (same
+   non-claim as the abnormal path), and a lost tail never blocks
+   native retirement. In-flight handlers are already gone (phase 1
+   drained or aborted them with their sender clones), so no emitter
+   can wedge the close.
+4. Native retirement: ALWAYS runs, never skipped (skipping it would
+   return past unresolved native work — forbidden above).
+   `backend.finalize_with_grace(remaining)` on a blocking worker,
+   attempted ONCE (no retry: a failed attempt proves nothing and a
+   retry would re-enter an uncertain incarnation). The FFI override
+   arms the shutdown-deadline controller with exactly the saturating
+   `remaining` and seals through a deadline-parameterized
+   `begin_finalize_with_deadline(now + remaining)` (the fixed-30s
+   `begin_finalize()` arm-1 read stays for direct `finalize()`
+   callers only), then runs seal/drain and the exclusive native
+   `C_Finalize`. Unresolved work routes through the existing
+   seal/drain/deadline authority — never "finalize anyway". At ~0
+   remaining the arm is hair-trigger (likely immediate 70 on
+   qualified targets); at exact 0 a benign race decides between an
+   instant orderly return and 70 — both honest, since the budget is
+   exhausted either way.
+
+No general stop callback is exposed. The only new surface is the grace
+parameter on the existing finalize path plus one pure predicate (see
+Target qualification); the stop predicate (deadline expiry with
+outstanding work) stays inside the native controller, and
+`abnormal_stop_native_lifetime` keeps its existing callers (no additions).
+
+### How the independent deadlines remain live
+
+- The native controller arm (phase 4) is the enforcement mechanism
+  for the tail of the overall deadline on qualified targets: at `D`
+  with native work outstanding, the controller — not the coordinator
+  — ends the process via the raw arm. The coordinator awaits the
+  finalize worker WITHOUT its own timeout there; the worker either
+  returns (orderly) or the process dies (70). After the overall
+  deadline expires with native outstanding, the coordinator performs
+  no logging, allocation, flushing or destructors — it only awaits
+  death, so the "final stop performs nothing" rule holds end to end.
+  Boundedness holds modulo controller-spawn success (pre-existing
+  best-effort posture: if the controller thread failed to spawn, the
+  no-timeout await can hang past `D`; the seal arm-1 local check
+  covers only its own spin).
+- The per-call request timeouts, teardown timeouts and the seal/drain
+  spin-then-block discipline are unchanged and stay live underneath:
+  they bound every phase except a truly stuck provider, which only
+  the controller can bound. The seal's arm-1 local suicide on the
+  coordinator path uses the same parameterized deadline
+  (`begin_finalize_with_deadline`): the implementation computes ONE
+  absolute `Instant` for the seal and passes the same `grace` to the
+  controller arm (which re-samples its own clock at arm time), so
+  arm-1 and the controller agree on `D` within scheduling jitter.
+- `PKCS11_PROXY_NATIVE_STOP_GRACE_MS` still overrides only the
+  proactive (direct-`finalize()`: fixed arm + fixed arm-1 read) path,
+  never the coordinator-driven arm (controller arm and seal deadline
+  both come from `remaining`) and never the final-owner guard.
+
+### Stuck-call path
+
+The eviction loop's `max_stuck_backend_calls` trip no longer calls
+`std::process::exit` (which runs atexit handlers and flushes stdio).
+Instead it requests coordinator shutdown immediately (same channel as
+the OS signal, with the stuck reason recorded) and the eviction task
+returns. The coordinator then runs phases 1–4: a wedged native call
+drains through seal into the controller arm and ends 70 on qualified
+targets; settled work finalizes orderly. The pre-commit stuck warning
+log is retained; nothing runs after abnormal-stop commitment.
+Operators note: a stuck trip now takes up to the full remaining grace
+to resolve (lifecycle stop) instead of exiting immediately — bounded,
+supervised, and status-preserving (70 still means native-lifetime).
+
+### Target qualification
+
+The coordinator branches the finalize wait on one backend predicate,
+`finalize_is_natively_bounded()` (trait default `false`; FFI override
+returns `NATIVE_STOP_QUALIFIED`, pin-tested to cover exactly the load-
+qualified set; mock/test backends keep the default):
+
+| Backend / target | Phase-4 wait | Unresolved outcome |
+| --- | --- | --- |
+| FFI on a stop arm (`NATIVE_STOP_QUALIFIED`) | Await worker, no coordinator timeout; native arm = remaining | Raw `exit_group(70)`/`_exit(70)`/`TerminateProcess(70)` by the controller; no destructor/log/flush after commitment. Worker panic/`JoinError` on this await → coordinator returns → final-owner guard backstop fires 70 (reliable: a panicked finalize implies poison or initialized-without-fresh-finalize, both `Poison`) |
+| FFI off every stop arm | `timeout(remaining)` around the worker | Timeout/error/`JoinError` → coordinator error → bounded runtime shutdown (below) → exit 2; backend drop takes the poison path (retain ownership, deny reloads) if dropped — a still-stuck worker `Arc` is leaked at runtime shutdown and the process exits regardless. NO new stop claim: no raw arm is added for these targets |
+| Mock/test backends (no native work) | `timeout(remaining)`; a wedged mock finalize (test hook) yields coordinator error → exit 2 | Coordinator error only on wedge/timeout; exit 2 |
+
+Suggested-but-REJECTED alternative: a server-side unconditional
+timeout around finalize plus a raw-stop fallback in the server. It
+would duplicate the stop predicate outside native authority and need a
+general stop callback — both forbidden by this contract.
+
+### Runtime-shutdown ownership
+
+`async_main` returning does NOT prove process exit: tokio's
+`Runtime::Drop` waits forever for blocking threads (tokio 1.50.0 per
+`Cargo.lock`; `runtime.rs` module docs: "The `Drop` implementation
+waits forever"; `BlockingPool::drop` joins with no timeout). A wedged
+audit writer or a stuck native worker would pin process teardown.
+Therefore `main` shuts the runtime down explicitly with
+`shutdown_timeout(SHUTDOWN_RUNTIME_TIMEOUT)` pinned at 10s — an
+additive bounded tail AFTER `D`, not a phase budget: it must cover
+healthy worker-shutdown + writer close-flush latency (normally
+milliseconds; child tests assert prompt exit far below it), and on
+expiry the stuck thread is leaked per tokio semantics and the process
+exits. Total process-exit bound on non-abnormal paths: `D + 10s`
+(+ kernel/driver tail, per the no-strict-bound rule above).
+Order at teardown: coordinator completes → `async_main` locals drop
+→ bounded runtime shutdown → process exit with the coordinator's
+status. The backend drop is a final-owner guard backstop, not a path:
+on a qualified target it fires 70 if the coordinator ever returned
+with unproven retirement (worker `JoinError`, or a bug); in-flight
+`Arc`s (eviction task after join expiry, finalize worker abandoned on
+the non-bounded path) may defer that drop onto a scheduler worker
+during runtime shutdown — or leak it, in which case the process still
+exits. The audit timer task is aborted explicitly in phase 3 (retained
+`AbortHandle`); if phase 3 was skipped or its abort failed, the
+scheduler close during `shutdown_timeout` still drops the timer, so
+the writer observes channel close inside that window — only a
+genuinely stuck writer outlives it and gets leaked.
+
+### Exit-status table
+
+| Outcome | Status |
+| --- | --- |
+| Orderly shutdown (drain/eviction/flush/finalize complete; flush may have logged a bounded error) | 0 |
+| `C_Finalize` error return, mock/test backends (no native uncertainty: the scripted error returns without state change and the child exits) | 1 (existing `C_Finalize failed` error propagation) |
+| `C_Finalize` error return, qualified FFI: the failure proves nothing (incarnation uncertain, `abandon_finalize`), so `retirement_decision` is `Poison` and the final-owner guard stop-fires during unwind — a DESIGNED 70 path with the same no-post-commitment-marker proofs, not an accident | 70 (raw arm; supervisor `Restart=on-failure`) |
+| Listener bind/serve error, config error | 1 (unchanged) |
+| Coordinator error: phase-4 timeout/error/`JoinError` on a non-natively-bounded backend, or unrecoverable coordinator failure | 2 (via `main() -> ExitCode` mapping — never `std::process::exit`, which would run atexit handlers and flush stdio) |
+| Abnormal native-lifetime stop (qualified targets): overall deadline expired with native outstanding, or final-owner guard unproven | 70 (raw arm; supervisor `Restart=on-failure`) |
+
+`main()` returns `ExitCode` over a three-variant error enum:
+`Startup` (config/load/bind/serve errors) → 1,
+`Finalize(CkRv)` (provider error return on a backend without native
+uncertainty) → 1, `Coordinator` (phase-4 timeout/`JoinError` on a
+non-natively-bounded backend, or unrecoverable coordinator failure) →
+2 (`Termination` runs no atexit handlers beyond normal main-return
+teardown — unlike `std::process::exit`, which is forbidden here).
+Mock/test hooks needed for the matrix: `set_next_finalize_outcome`
+(one-shot finalize result, checked before any state change, mirroring
+`set_next_wait_outcome`) and `inject_finalize_park` /
+`release_finalize` (gate the mock finalize worker; the parked worker
+is a child-contained leak on the exit-2 path).
+
+### Test plan (`shutdown_lifetime_test.rs`)
+
+Parent-watched child scenarios (re-spawned test binary, marker files
++ pipes, bounded parent waits, child killed on parent failure; no
+immortal blocking task stays in the test runner):
+
+- `normal`: real coordinator + audit sink (temp dir, signer) + mock
+  backend; SIGTERM-equivalent → exit 0; audit flushed exactly once
+  (checkpoint present, no duplicate final markers); backend finalized
+  exactly once; no stuck/wedged threads (prompt exit proves the
+  runtime-shutdown ordering).
+- `wedge_audit`: writer parked on flush (test hook) → bounded flush
+  expiry → finalize still runs once → exit 0 with the flush error
+  logged; process exits within the overall budget (proves the flush
+  bound + runtime-shutdown leak path).
+- `wedge_native_call`: FFI backend with a parked native call, overall
+  budget short → seal/drain cannot complete → controller fires →
+  exit 70; marker proof of NO native `C_Finalize` entry over the
+  outstanding call and NO provider finalizer/destructor markers after
+  commitment.
+- `wedge_native_finalize`: FFI backend whose `C_Finalize` parks →
+  exit 70 within budget + controller tail; same no-entry/no-marker
+  proofs for post-commitment work.
+- `wedge_eviction` (mock): teardown call parked past the remaining
+  budget → join expiry → coordinator proceeds; phase 4 finds an
+  exhausted budget → exact exit 2. Exactly one close attempt (no
+  runaway re-ticking). Cancellation responsiveness itself is a fast
+  lib unit test (`spawn_eviction_task` + cancel → prompt task end).
+- `wedge_eviction_ffi`: teardown close parked NATIVELY (guard held)
+  → same join expiry → qualified phase-4 seal cannot drain → exact
+  exit 70 with NO native Finalize entry (unqualified → exit 2).
+- `wedge_mock_finalize`: mock finalize parked (test hook) past the
+  remaining budget → phase-4 `timeout(remaining)` expires →
+  coordinator error → exact exit 2; bounded exit well under the
+  parent backstop; no runner-stranded tasks (the wedge lives in the
+  child, leaked at its runtime shutdown).
+- `failed_finalize_mock`: mock `C_Finalize` returns an error RV →
+  recorded, retired, exact exit 1.
+- `failed_finalize_ffi`: FFI `C_Finalize` returns an error RV →
+  incarnation uncertain → final-owner guard stop-fires during unwind
+  → exact exit 70 with the same no-post-commitment-marker proofs as
+  the wedge cases (qualified targets; on unqualified targets the
+  poison path yields exit 1 — asserted per-target).
+- `stuck_trip`: stuck counter over the limit → coordinator shutdown
+  requested (no direct exit) → exact status per branch (0 settled /
+  70 natively stuck on qualified targets).
+
+Each abnormal case asserts the EXACT status (70 vs 0/1/2), pipe EOF +
+reaping, and absence of post-commitment provider markers.
+
 ## Required acceptance evidence
 
 All cases below are RECEIPTED (TO26a groups 1+4+5+6,

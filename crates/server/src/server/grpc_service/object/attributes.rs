@@ -1534,8 +1534,10 @@ mod tests {
             .into_inner();
         assert_eq!(resp1.ck_rv, CkRv::OK.0);
         assert_eq!(mock.attr_get_call_count(), 1, "first read must call the backend once");
-        let first_value = match resp1.results[0].result.clone() {
-            Some(pkcs11_proxy_ng_proto::attribute_result::Result::Value(bytes)) => bytes,
+        // T12: the oneof enum is `ZeroizeOnDrop`, so the payload cannot
+        // move out of it even through a clone — match by reference instead.
+        let first_value = match &resp1.results[0].result {
+            Some(pkcs11_proxy_ng_proto::attribute_result::Result::Value(bytes)) => bytes.clone(),
             other => panic!("LABEL must return bytes, got {other:?}"),
         };
         assert_eq!(first_value, b"my-label", "response bytes must match the backend value");
