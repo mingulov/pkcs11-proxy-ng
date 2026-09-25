@@ -57,6 +57,7 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 
 | File | Reason | Requirements | Command |
 |------|--------|--------------|---------|
+| `crates/server/tests/ccm_pointer_presence_test.rs` | Kryoptic AES-CCM empty-AAD round trips | Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE; initialized token and PKCS11_PROXY_KRYOPTIC_* settings | `cargo test -p pkcs11-proxy-ng --test ccm_pointer_presence_test -- --ignored --test-threads=1` |
 | `crates/server/tests/cli_hardening_test.rs` | SoftHSM2-backed CLI subprocess coverage | SoftHSM2 module and softhsm2-util; built workspace binaries | `cargo test -p pkcs11-proxy-ng --test cli_hardening_test -- --ignored --test-threads=1` |
 | `crates/server/tests/concurrency_and_recovery_test.rs` | SoftHSM2-backed multi-client and recovery coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored --test-threads=1` |
 | `crates/server/tests/consumer_p11tool_test.rs` | SoftHSM2-backed GnuTLS p11tool consumer coverage | SoftHSM2 module and softhsm2-util; GnuTLS p11tool; built workspace binaries | `cargo test -p pkcs11-proxy-ng --test consumer_p11tool_test -- --ignored --test-threads=1` |

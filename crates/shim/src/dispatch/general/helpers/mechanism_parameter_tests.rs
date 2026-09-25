@@ -733,11 +733,20 @@ fn reads_aead_and_chacha_parameter_structs() {
         .params
         .expect("mechanism params")
     {
-        CkMechanismParams::Ccm(CcmParams { data_len, nonce, aad, mac_len }) => {
+        CkMechanismParams::Ccm(CcmParams {
+            data_len,
+            nonce,
+            aad,
+            mac_len,
+            nonce_null,
+            aad_null,
+        }) => {
             assert_eq!(data_len, 2048);
             assert_eq!(nonce, [0x31; 11]);
             assert_eq!(aad, SecretBytes::copy_from_slice(&[0xC1, 0xC2]));
             assert_eq!(mac_len, 12);
+            assert!(!nonce_null);
+            assert!(!aad_null);
         }
         other => panic!("unexpected CCM params: {other:?}"),
     }
@@ -2640,6 +2649,47 @@ fn gcm_null_vs_empty_iv_aad_survive_the_read() {
                 assert_eq!(gcm.aad_null, aad_null, "pAAD nullness must survive");
             }
             other => panic!("unexpected GCM params: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn ccm_null_vs_empty_nonce_aad_survive_the_read() {
+    // (NULL, 0) vs (ptr, 0) for pNonce/pAAD must remain distinguishable
+    // after the shim read so the daemon can materialize the caller's shape.
+    // wolfpkcs11 rejects (ptr, 0) at DecryptInit but accepts (NULL, 0).
+    const CKM_TEST_CCM_NULL: CK_MECHANISM_TYPE = 0x8000_1043;
+    for (p_nonce, nonce_null, p_aad, aad_null) in [
+        (std::ptr::null_mut(), true, std::ptr::null_mut(), true),
+        (std::ptr::null_mut(), true, std::ptr::dangling_mut(), false),
+        (std::ptr::dangling_mut(), false, std::ptr::null_mut(), true),
+        (std::ptr::dangling_mut(), false, std::ptr::dangling_mut(), false),
+    ] {
+        let mut ccm = CK_CCM_PARAMS {
+            ulDataLen: 16,
+            pNonce: p_nonce,
+            ulNonceLen: 0,
+            pAAD: p_aad,
+            ulAADLen: 0,
+            ulMACLen: 12,
+        };
+        let mechanism = CK_MECHANISM {
+            mechanism: CKM_TEST_CCM_NULL,
+            pParameter: &mut ccm as *mut _ as CK_VOID_PTR,
+            ulParameterLen: std::mem::size_of::<CK_CCM_PARAMS>() as CK_ULONG,
+        };
+        match unsafe { read_mechanism_with_shape(&mechanism, Some("ccm")) }
+            .expect("read mechanism")
+            .params
+            .expect("mechanism params")
+        {
+            CkMechanismParams::Ccm(ccm) => {
+                assert!(ccm.nonce.is_empty());
+                assert!(ccm.aad.expose(|b| b.is_empty()));
+                assert_eq!(ccm.nonce_null, nonce_null, "pNonce nullness must survive");
+                assert_eq!(ccm.aad_null, aad_null, "pAAD nullness must survive");
+            }
+            other => panic!("unexpected CCM params: {other:?}"),
         }
     }
 }

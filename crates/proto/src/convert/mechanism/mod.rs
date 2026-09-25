@@ -170,6 +170,8 @@ impl TryFrom<&CkMechanism> for v1_proto::Mechanism {
                     nonce: p.nonce.clone(),
                     aad: secret_to_plain(&p.aad),
                     mac_len: p.mac_len,
+                    nonce_null: p.nonce_null,
+                    aad_null: p.aad_null,
                 }))
             }
             Some(CkMechanismParams::ChaCha20(p)) => {
@@ -552,6 +554,8 @@ impl TryFrom<&v1_proto::Mechanism> for CkMechanism {
                     nonce: p.nonce.clone(),
                     aad: SecretBytes::copy_from_slice(&p.aad),
                     mac_len: p.mac_len,
+                    nonce_null: p.nonce_null,
+                    aad_null: p.aad_null,
                 }))
             }
             Some(v1_proto::mechanism::Params::Chacha20Params(p)) => {
