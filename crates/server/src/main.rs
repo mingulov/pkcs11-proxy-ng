@@ -8,7 +8,6 @@ use pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource;
 use pkcs11_proxy_ng::server;
 use pkcs11_proxy_ng::server::health;
 
-type BoxError = Box<dyn core::error::Error>;
 type Backend = Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>;
 
 #[derive(Debug, Parser)]
@@ -200,12 +199,15 @@ fn init_tracing() {
     }
 }
 
-fn load_backend(config: &config::DaemonConfig) -> Result<Backend, BoxError> {
-    let backend: Backend = Arc::new(pkcs11_proxy_ng_backend::FfiBackend::load_with_init_args(
-        &config.backend.module,
-        config.backend.initialize_args.as_deref(),
-    )?);
-    backend.initialize().map_err(|rv| format!("C_Initialize failed: {rv}"))?;
+fn load_backend(config: &config::DaemonConfig) -> Result<Backend, server::shutdown::ShutdownError> {
+    let backend: Backend = Arc::new(
+        pkcs11_proxy_ng_backend::FfiBackend::load_with_init_args(
+            &config.backend.module,
+            config.backend.initialize_args.as_deref(),
+        )
+        .map_err(startup_err)?,
+    );
+    backend.initialize().map_err(|rv| startup_err(format!("C_Initialize failed: {rv}")))?;
     Ok(backend)
 }
 
@@ -219,7 +221,7 @@ async fn build_service(
         Arc<server::context_manager::ContextManager>,
         MechanismRegistrySource,
     ),
-    BoxError,
+    server::shutdown::ShutdownError,
 > {
     // Warn if the deprecated mechanism_discovery setting is explicitly set to
     // a non-default value.  The server is now a pure proxy for mechanism
@@ -342,69 +344,6 @@ fn apply_http2_keepalive(builder: Server, config: &config::DaemonConfig) -> Serv
     }
 }
 
-/// A per-listener graceful-shutdown future driven by the shared signal channel.
-/// Resolves when the OS-signal task flips the watch value (or drops the sender).
-async fn listener_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
-    let _ = rx.changed().await;
-}
-
-type ServeFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<(), tonic::transport::Error>> + Send>,
->;
-
-/// Serve until the shutdown signal, then drain bounded by
-/// `proxy.shutdown_grace_secs` (W1-L6-07).
-///
-/// The grace clock starts at **signal receipt**, not at startup: the join
-/// over the serve futures races the `signal` future, and only the
-/// post-signal drain runs under `timeout(grace, …)`. Pre-signal serve
-/// time is unbounded (a listener that never exits and no signal means
-/// the daemon keeps serving); a join that completes on its own
-/// (listener error exit) propagates immediately without waiting for
-/// the signal.
-///
-/// Returns `Some(outcome)` when the join finishes — either before the
-/// signal or inside the post-signal grace (errors propagate unchanged);
-/// returns `None` when the post-signal grace expires first — the serve
-/// futures are then dropped, aborting in-flight connections, and the
-/// caller proceeds with forced shutdown (socket cleanup, audit flush,
-/// backend finalize) instead of pinning SIGTERM forever on a wedged
-/// backend.
-async fn serve_with_grace(
-    serve_futures: Vec<ServeFuture>,
-    signal: impl std::future::Future<Output = ()>,
-    grace: std::time::Duration,
-) -> Option<Result<Vec<()>, tonic::transport::Error>> {
-    let mut drain = Box::pin(futures::future::try_join_all(serve_futures));
-    tokio::pin!(signal);
-    // Phase 1 (unbounded): serve until the listeners exit on their own
-    // or the shutdown signal arrives, whichever comes first. Biased
-    // toward the listener outcome so a concurrent listener error still
-    // propagates as the exit cause.
-    let pre_signal_outcome = tokio::select! {
-        biased;
-        outcome = &mut drain => Some(outcome),
-        () = &mut signal => None,
-    };
-    // Phase 2 (bounded): only after the signal, drain under the grace.
-    // (A separate step rather than a third select branch so `drain`
-    // moves into the timeout cleanly once the phase-1 borrows end.)
-    match pre_signal_outcome {
-        Some(outcome) => Some(outcome),
-        None => match tokio::time::timeout(grace, drain).await {
-            Ok(outcome) => Some(outcome),
-            Err(_elapsed) => {
-                tracing::error!(
-                    grace_secs = grace.as_secs(),
-                    "shutdown grace expired with listeners still draining; \
-                     forcing shutdown (in-flight connections aborted)"
-                );
-                None
-            }
-        },
-    }
-}
-
 /// G3-PR1: refuse to start when per-object authorization is configured but the
 /// backend does not support PKCS#11 v3.0+.
 ///
@@ -416,22 +355,26 @@ async fn serve_with_grace(
 ///
 /// Extracted as a pure function so it can be unit-tested without loading a real
 /// PKCS#11 module.
+/// Map any displayable startup failure into `ShutdownError::Startup`.
+fn startup_err(e: impl ToString) -> server::shutdown::ShutdownError {
+    server::shutdown::ShutdownError::Startup(e.to_string())
+}
+
 fn check_per_object_version_requirement(
     token_policy: &server::auth::policy::TokenPolicy,
     backend: &dyn pkcs11_proxy_ng_backend::Pkcs11Backend,
-) -> Result<(), BoxError> {
+) -> Result<(), server::shutdown::ShutdownError> {
     if !token_policy.per_object_active() {
         return Ok(());
     }
-    let info = backend.get_info().map_err(|rv| format!("C_GetInfo failed: {rv}"))?;
+    let info = backend.get_info().map_err(|rv| startup_err(format!("C_GetInfo failed: {rv}")))?;
     let (maj, min) = info.cryptoki_version;
     if (maj, min) < (3, 0) {
-        return Err(format!(
+        return Err(startup_err(format!(
             "per-object authorization ([auth.policy] grants with `objects`) requires a \
              PKCS#11 v3.0+ token that populates CKA_UNIQUE_ID; this backend reports \
              v{maj}.{min}. Remove the `objects` grants or use a v3.0+ token."
-        )
-        .into());
+        )));
     }
     Ok(())
 }
@@ -440,26 +383,28 @@ fn check_per_object_version_requirement(
 /// transport is now wired (peer-cred auth); this only surfaces a clear error
 /// when the configured socket's parent directory does not exist, rather than
 /// failing deep inside `bind()`.
-fn validate_runtime_listener_support(config: &config::DaemonConfig) -> Result<(), BoxError> {
+fn validate_runtime_listener_support(
+    config: &config::DaemonConfig,
+) -> Result<(), server::shutdown::ShutdownError> {
     // The Unix-socket transport (and its SO_PEERCRED authentication) does not
     // exist on non-Unix hosts; a Windows daemon serves mTLS TCP only.
     #[cfg(not(unix))]
     if config.listener.local.is_some() {
-        return Err("[listener.local] (unix socket + peer-cred) is not supported on this OS; \
-             configure [listener.remote] with auth = 'mtls' instead"
-            .into());
+        return Err(startup_err(
+            "[listener.local] (unix socket + peer-cred) is not supported on this OS; \
+             configure [listener.remote] with auth = 'mtls' instead",
+        ));
     }
     if let Some(ref uds) = config.listener.local
         && let Some(parent) = uds.path.parent()
         && !parent.as_os_str().is_empty()
         && !parent.is_dir()
     {
-        return Err(format!(
+        return Err(startup_err(format!(
             "unix socket directory does not exist: {} (for listener.local.path = {})",
             parent.display(),
             uds.path.display()
-        )
-        .into());
+        )));
     }
     Ok(())
 }
@@ -569,59 +514,17 @@ fn spawn_backend_health_gate(
     });
 }
 
-fn spawn_eviction_task(
-    context_manager: Arc<server::context_manager::ContextManager>,
-    backend: Backend,
-    eviction_interval_secs: u64,
-    max_contexts: usize,
-    max_concurrent_backend_calls: usize,
-    max_stuck_backend_calls: Option<u64>,
-) {
-    tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(eviction_interval_secs));
-        loop {
-            interval.tick().await;
-            let expired = context_manager.evict_expired(&backend).await;
-            if !expired.is_empty() {
-                tracing::info!(count = expired.len(), "Evicted expired contexts");
-            }
-
-            // Resource-aware logging
-            let ctx_count = context_manager.context_count();
-            if max_contexts > 0 && ctx_count > max_contexts * 80 / 100 {
-                tracing::warn!(contexts = ctx_count, max = max_contexts, "context usage above 80%");
-            }
-            let in_flight = server::grpc_service::service_utils::backend_in_flight();
-            if in_flight > max_concurrent_backend_calls * 80 / 100 {
-                tracing::warn!(
-                    in_flight,
-                    max = max_concurrent_backend_calls,
-                    "backend call usage above 80%"
-                );
-            }
-
-            // Opt-in fail-fast: a token wedged past the configured stuck-call
-            // limit is a permanent condition the daemon can only escape via a
-            // supervisor restart. Exit nonzero so systemd/k8s recycles us.
-            let stuck = server::grpc_service::service_utils::stuck_backend_calls();
-            if stuck > 0 {
-                tracing::warn!(stuck_calls = stuck, "backend calls wedged past their timeout");
-            }
-            if config::should_exit_on_stuck_calls(stuck as u64, max_stuck_backend_calls) {
-                tracing::error!(
-                    stuck_calls = stuck,
-                    limit = ?max_stuck_backend_calls,
-                    "stuck backend calls exceeded proxy.max_stuck_backend_calls; \
-                     exiting for supervisor restart"
-                );
-                std::process::exit(70); // EX_SOFTWARE
-            }
+fn main() -> std::process::ExitCode {
+    match fallible_main() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!(error = %e, "daemon exiting with failure");
+            e.exit_code()
         }
-    });
+    }
 }
 
-fn main() -> Result<(), BoxError> {
+fn fallible_main() -> Result<(), server::shutdown::ShutdownError> {
     // Parse early so --print-env-vars doesn't pull in JSON tracing.
     let args = Args::parse();
     if args.print_env_vars {
@@ -654,16 +557,24 @@ fn main() -> Result<(), BoxError> {
         .max_blocking_threads(config.proxy.max_blocking_threads)
         .build()?;
 
-    runtime.block_on(async_main(config))
+    let outcome = runtime.block_on(async_main(config));
+    // T10: `async_main` returning does NOT prove process exit — a bare
+    // runtime drop waits forever for blocking threads. Bound the
+    // teardown join (healthy shutdown leaves no running workers) and
+    // leak-then-exit past it.
+    runtime.shutdown_timeout(server::shutdown::SHUTDOWN_RUNTIME_TIMEOUT);
+    outcome
 }
 
-async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
+async fn async_main(config: config::DaemonConfig) -> Result<(), server::shutdown::ShutdownError> {
     validate_runtime_listener_support(&config)?;
 
     // Initialise the audit sink (off by default → Ok(None); zero behaviour change
-    // when [audit] is absent or audit.dir is not set).
-    let audit_sink = server::audit::spawn_audit_sink(&config.audit)
+    // when [audit] is absent or audit.dir is not set). The managed form
+    // retains the writer/timer handles for the T10 coordinator.
+    let managed_audit = server::audit::spawn_managed_audit_sink(&config.audit)
         .map_err(|e| format!("audit sink failed to initialise: {e}"))?;
+    let audit_sink = managed_audit.as_ref().map(|m| m.sink.clone());
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health::set_not_serving(&mut health_reporter).await;
@@ -772,12 +683,22 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // a registry change requires a daemon restart there.
     #[cfg(not(unix))]
     let _ = &registry_source;
-    // One OS-signal future fans out to every listener via a watch channel so
-    // the TCP and Unix listeners shut down together on SIGINT/SIGTERM.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        let _ = shutdown_tx.send(true);
+    // One shutdown reason fans out to every listener via a watch channel
+    // so the TCP and Unix listeners shut down together on SIGINT/SIGTERM
+    // (or on a stuck-call trip from the eviction task, which shares this
+    // channel first-wins with the signal below).
+    let (shutdown_tx, shutdown_rx) =
+        tokio::sync::watch::channel(None::<server::shutdown::ShutdownReason>);
+    tokio::spawn({
+        let shutdown_tx = shutdown_tx.clone();
+        async move {
+            shutdown_signal().await;
+            shutdown_tx.send_modify(|reason| {
+                if reason.is_none() {
+                    *reason = Some(server::shutdown::ShutdownReason::Signal);
+                }
+            });
+        }
     });
 
     // Bind every configured listener *before* flipping Health/SERVING. The
@@ -785,18 +706,18 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // probe report SERVING but their connect was refused because tonic hadn't
     // bound yet. Binding here makes the SERVING flip below truthful: by the
     // time external probes can see it, accept() is already running.
-    let mut serve_futures: Vec<ServeFuture> = Vec::new();
+    let mut serve_futures: Vec<server::shutdown::ServeFuture> = Vec::new();
 
     // TCP listener (mTLS / insecure-tcp), when [listener.remote] is configured.
     if let Some(ref tcp_cfg) = config.listener.remote {
-        let addr: std::net::SocketAddr = tcp_cfg.bind.parse()?;
+        let addr: std::net::SocketAddr = tcp_cfg.bind.parse().map_err(startup_err)?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr().unwrap_or(addr);
         let mut builder = Server::builder();
         if let Some(tls_config) =
             server::transport::server_tls_config(tcp_cfg).map_err(std::io::Error::other)?
         {
-            builder = builder.tls_config(tls_config)?;
+            builder = builder.tls_config(tls_config).map_err(startup_err)?;
         }
         let router = apply_transport_limits(apply_http2_keepalive(builder, &config), &config)
             .layer(server::trace_id::TraceIdLayer)
@@ -809,7 +730,7 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
             .add_service(health_service.clone())
             .add_service(svc.clone());
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-        let shutdown = listener_shutdown(shutdown_rx.clone());
+        let shutdown = server::shutdown::listener_shutdown(shutdown_rx.clone());
         tracing::info!(addr = %local_addr, auth = ?tcp_cfg.auth, "listening on tcp");
         serve_futures.push(Box::pin(router.serve_with_incoming_shutdown(incoming, shutdown)));
     }
@@ -832,19 +753,23 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
                 .add_service(health_service.clone())
                 .add_service(svc.clone());
         let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
-        let shutdown = listener_shutdown(shutdown_rx.clone());
+        let shutdown = server::shutdown::listener_shutdown(shutdown_rx.clone());
         tracing::info!(path = %uds_cfg.path.display(), auth = ?uds_cfg.auth, "listening on unix socket");
         serve_futures.push(Box::pin(router.serve_with_incoming_shutdown(incoming, shutdown)));
     }
 
     health::set_serving(&mut health_reporter).await;
-    spawn_eviction_task(
+    // T10: the eviction task is joined by the coordinator (handle
+    // retained); a stuck-call trip requests shutdown on the shared
+    // channel instead of exiting directly.
+    let eviction = server::shutdown::spawn_eviction_task(
         context_manager,
         backend.clone(),
-        config.proxy.eviction_interval_secs,
+        std::time::Duration::from_secs(config.proxy.eviction_interval_secs),
         config.proxy.max_contexts,
         config.proxy.max_concurrent_backend_calls,
         config.proxy.max_stuck_backend_calls,
+        shutdown_tx.clone(),
     );
 
     tracing::info!(
@@ -866,43 +791,34 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // inside spawn_backend() via tokio::time::timeout. A tonic-level timeout
     // would cancel the handler Future before spawn_backend can decrement
     // IN_FLIGHT, causing circuit breaker leaks under heavy load.
-    // W1-L6-07: the post-signal drain honors proxy.shutdown_grace_secs
-    // (previously the validated knob was never read and a wedged backend
-    // pinned SIGTERM forever). The grace clock starts when the shared
-    // signal channel flips — pre-signal serve time is unbounded — and on
-    // expiry the serve futures are dropped (aborting in-flight
-    // connections) and shutdown proceeds forced.
-    let serve_result = serve_with_grace(
+    // T10: the whole post-signal shutdown (drain → eviction stop →
+    // audit completion → native retirement) runs under the single
+    // overall deadline `proxy.shutdown_grace_secs`, owned by the
+    // coordinator. The managed audit sink splits here: the emitter
+    // clone went to the service above; the shutdown owner joins below.
+    // Main's own emitter clone is dropped first so the coordinator's
+    // sink is the last sender once the service is dropped in phase 3.
+    drop(audit_sink);
+    let audit_phase = managed_audit.map(|m| (m.sink, m.shutdown));
+    #[cfg(unix)]
+    let unix_socket_path = config.listener.local.as_ref().map(|u| u.path.clone());
+    #[cfg(not(unix))]
+    let unix_socket_path: Option<std::path::PathBuf> = None;
+    let outcome = server::shutdown::coordinate_shutdown(
         serve_futures,
-        listener_shutdown(shutdown_rx),
+        server::shutdown::listener_shutdown(shutdown_rx),
+        svc,
+        eviction,
+        audit_phase,
+        backend,
+        unix_socket_path,
         std::time::Duration::from_secs(config.proxy.shutdown_grace_secs),
     )
     .await;
-
-    // Best-effort: remove the Unix socket file on shutdown so a restart can
-    // rebind cleanly (the path persists in the filesystem after the fd closes).
-    #[cfg(unix)]
-    if let Some(ref uds_cfg) = config.listener.local {
-        let _ = std::fs::remove_file(&uds_cfg.path);
+    if outcome.is_ok() {
+        tracing::info!("Daemon stopped");
     }
-    if let Some(result) = serve_result {
-        result?;
-    }
-
-    // Flush the audit log before finalising the backend.
-    if let Some(ref s) = audit_sink
-        && let Err(e) = s.flush().await
-    {
-        tracing::error!(error = %e, "audit flush on shutdown failed");
-    }
-
-    let finalize_outcome = backend.finalize();
-    if let Err(rv) = &finalize_outcome {
-        tracing::error!(error = %rv, "C_Finalize failed; backend drop follows");
-    }
-    finalize_outcome.map_err(|rv| format!("C_Finalize failed: {rv}"))?;
-    tracing::info!("Daemon stopped");
-    Ok(())
+    outcome
 }
 
 #[cfg(test)]
@@ -1115,103 +1031,6 @@ auth = "peer_cred"
         let policy = no_objects_policy();
         check_per_object_version_requirement(&policy, &mock)
             .expect("v2.40 backend without per-object policy must start");
-    }
-
-    /// W1-L6-07: listeners that exit on their own (pre-signal) return
-    /// their `try_join_all` outcome unchanged, without waiting for the
-    /// signal.
-    #[tokio::test]
-    async fn serve_with_grace_returns_outcome_when_drained_in_time() {
-        let futures: Vec<ServeFuture> =
-            vec![Box::pin(async { Ok(()) }), Box::pin(async { Ok(()) })];
-        let outcome =
-            serve_with_grace(futures, std::future::pending(), std::time::Duration::from_secs(30))
-                .await;
-        assert!(matches!(outcome, Some(Ok(_))), "drained listeners must propagate Ok");
-    }
-
-    /// W1-L6-07: after the signal, a wedged listener (never resolves)
-    /// must not pin SIGTERM forever — the grace bounds the post-signal
-    /// drain, then the serve futures are dropped (aborting in-flight
-    /// connections) and shutdown proceeds.
-    #[tokio::test]
-    async fn serve_with_grace_bounds_a_wedged_listener() {
-        let futures: Vec<ServeFuture> =
-            vec![Box::pin(async { Ok(()) }), Box::pin(std::future::pending())];
-        let start = std::time::Instant::now();
-        let outcome =
-            serve_with_grace(futures, std::future::ready(()), std::time::Duration::from_millis(50))
-                .await;
-        assert!(outcome.is_none(), "wedged listeners must time out to forced shutdown");
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
-            "grace wait must be bounded, took {:?}",
-            start.elapsed()
-        );
-    }
-
-    /// W1-L6-07: a pre-signal serve error propagates immediately (the
-    /// daemon must exit on listener failure without waiting for a
-    /// signal that may never come).
-    #[tokio::test]
-    async fn serve_with_grace_propagates_serve_errors() {
-        // try_join_all short-circuits on the first error; a ready error
-        // must surface even with ample grace left. (A malformed endpoint
-        // URI is the cheapest way to fabricate a transport::Error.)
-        let err = tonic::transport::Endpoint::from_shared("http://exa mple.com").unwrap_err();
-        let futures: Vec<ServeFuture> = vec![Box::pin(async move { Err(err) })];
-        let outcome =
-            serve_with_grace(futures, std::future::pending(), std::time::Duration::from_secs(30))
-                .await;
-        assert!(matches!(outcome, Some(Err(_))), "serve errors must propagate");
-    }
-
-    /// W1-L6-07 fix round: the grace clock must start at signal receipt,
-    /// not at startup. With no signal and no listener exit, the helper
-    /// stays pending far past the grace (pre-signal serve time is
-    /// unbounded) — the daemon must not force-exit `grace` after boot.
-    #[tokio::test]
-    async fn serve_with_grace_does_not_bound_pre_signal_uptime() {
-        let futures: Vec<ServeFuture> = vec![Box::pin(std::future::pending())];
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            serve_with_grace(futures, std::future::pending(), std::time::Duration::from_millis(50)),
-        )
-        .await;
-        assert!(
-            outcome.is_err(),
-            "pre-signal serve must stay pending past the grace (10x overrun)"
-        );
-    }
-
-    /// W1-L6-07 fix round: post-signal drain obeys the grace the other
-    /// way — a drain that finishes inside the grace returns its outcome
-    /// (the wedged-listener test above pins the expiry way).
-    #[tokio::test]
-    async fn serve_with_grace_returns_post_signal_drain_outcome() {
-        let (tx, mut signal_rx) = tokio::sync::watch::channel(false);
-        let mut serve_rx = tx.subscribe();
-        // Signal future: resolves when the "SIGTERM" flips the channel.
-        let signal = async move {
-            let _ = signal_rx.changed().await;
-        };
-        // Serve future: drains only after the signal, then succeeds
-        // inside the grace.
-        let serve: ServeFuture = Box::pin(async move {
-            let _ = serve_rx.changed().await;
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            Ok(())
-        });
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            let _ = tx.send(true);
-        });
-        let outcome =
-            serve_with_grace(vec![serve], signal, std::time::Duration::from_secs(5)).await;
-        assert!(
-            matches!(outcome, Some(Ok(_))),
-            "post-signal drain inside the grace must propagate Ok"
-        );
     }
 
     #[test]

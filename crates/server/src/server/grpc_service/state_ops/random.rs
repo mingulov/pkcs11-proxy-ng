@@ -49,8 +49,10 @@ pub(super) async fn seed_random(
     sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SeedRandomRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SeedRandomResponse>, Status> {
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `SeedRandomRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
         Ok(session) => session,
@@ -59,7 +61,7 @@ pub(super) async fn seed_random(
         }
     };
 
-    let seed = SecretBytes::new(req.seed);
+    let seed = SecretBytes::new(std::mem::take(&mut req.seed));
     let seed_null_len = req.seed_null_len;
     // ADR-0010 sanitize_inputs: validate NULL seed pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, seed_null_len) {

@@ -107,8 +107,10 @@ async fn unwrap_key_impl(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `UnwrapKeyRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let (session, unwrapping_key) = match resolve_session_and_object(
         ctx,
@@ -127,7 +129,7 @@ async fn unwrap_key_impl(
         }
     };
 
-    let mut mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(std::mem::take(&mut req.mechanism)) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyResponse {
@@ -189,7 +191,7 @@ async fn unwrap_key_impl(
     let is_token = template_declares_token_object(template_view);
     let is_private = template_declares_private_object(template_view);
     let virtual_session = VirtualHandle(req.session_handle);
-    let wrapped_key = SecretBytes::new(req.wrapped_key);
+    let wrapped_key = SecretBytes::new(std::mem::take(&mut req.wrapped_key));
     let wrapped_key_null_len = req.wrapped_key_null_len;
     // ADR-0010 sanitize_inputs: validate NULL wrapped_key pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, wrapped_key_null_len) {

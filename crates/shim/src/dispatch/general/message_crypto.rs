@@ -62,7 +62,10 @@ unsafe fn read_message_init_mechanism(
     }
     validate_message_mechanism_outer(p_mechanism).map_err(rv_err)?;
     let c_mech = unsafe { std::ptr::read_unaligned(p_mechanism) };
-    let registry = state::mechanism_registry();
+    // Behind the entry init-guard, but a call racing C_Initialize can
+    // still observe the flag-set/registry-uninstalled window: fail
+    // closed with NOT_INITIALIZED instead of panicking (T07, C-B2).
+    let registry = state::try_mechanism_registry().map_err(rv_err)?;
     let shape =
         MessageParameterShape::from_registry_name(registry.param_shape(c_mech.mechanism as u64));
     let envelope =

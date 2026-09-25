@@ -290,6 +290,18 @@ pub struct LogicalClientInstance {
     /// `C_DestroyObject`, plus full teardown) so a recycled virtual handle
     /// cannot inherit a stale privacy bit.
     pub object_private: HashMap<VirtualHandle, bool>,
+    /// Virtual object handles removed by an explicit `C_DestroyObject`
+    /// (T20 tombstones). A later use of a tombstoned handle answers the
+    /// handle-invalid family locally instead of forwarding 0, whose
+    /// backend verdict is backend-specific (bouncyhsm answers
+    /// `DEVICE_ERROR` on copy-of-0 but `OBJECT_HANDLE_INVALID` on
+    /// copy-of-destroyed). Session-close evictions (B2) intentionally do
+    /// NOT tombstone (pinned forward-0 semantic). The virtual allocator
+    /// is monotonic (no reuse), so entries never collide with future
+    /// handles; the set dies with the context on teardown. Bounded by
+    /// explicit destroys per context (live mappings stay bounded by live
+    /// objects as before).
+    pub destroyed_objects: HashSet<VirtualHandle>,
     /// Session-scoped attribute result cache (R2 coalescer).
     ///
     /// Keys are `(virtual object handle, attribute type)`. Entries are evicted
@@ -328,6 +340,7 @@ impl LogicalClientInstance {
             session_objects: HashMap::new(),
             created_objects: HashSet::new(),
             object_private: HashMap::new(),
+            destroyed_objects: HashSet::new(),
             attr_cache: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
@@ -493,6 +506,16 @@ pub struct ContextManager {
     /// re-read within at most the TTL — the cache never authorizes against a
     /// token-identity older than that.
     token_info_cache: Arc<DashMap<BackendSlotId, (Instant, String, String)>>,
+    /// Mutation serialization for the token-info cache (T09). Every cache
+    /// write (insert, generation-checked insert, remove) and every
+    /// reinit invalidation (remove + generation advance) holds this lock,
+    /// so a publication's generation check and a reinit's advance cannot
+    /// interleave: either the publication lands before the invalidation
+    /// (and is removed by it) or it observes the new generation and skips.
+    /// The critical sections touch only the map and the atomic — no
+    /// backend operation — so this cannot wedge a call. A poisoned mutex
+    /// (unreachable: the sections cannot panic) recovers via `into_inner`.
+    token_info_publication: Arc<std::sync::Mutex<()>>,
     /// Per-slot serialization lock for login/logout (M5). The cross-context
     /// login-state scan, the backend `C_Login`, and the `login_state` insert
     /// must be atomic per slot. Without it, two clients racing the FIRST login
@@ -614,6 +637,7 @@ impl ContextManager {
             lease_duration,
             max_contexts,
             token_info_cache: Arc::new(DashMap::new()),
+            token_info_publication: Arc::new(std::sync::Mutex::new(())),
             login_locks: Arc::new(DashMap::new()),
             slot_login_holders: Arc::new(DashMap::new()),
             authz_generation: AtomicU64::new(0),
@@ -977,13 +1001,69 @@ impl ContextManager {
     }
 
     /// Record the `(label, serial)` read for `backend_slot`.
+    ///
+    /// Serialized under the publication lock with every other cache
+    /// mutation. Backend-fetch publishers must prefer
+    /// [`cache_token_info_if_generation`](Self::cache_token_info_if_generation):
+    /// this unconditional form is for values known fresh (tests, slot
+    /// discovery) and must never publish a fetch that started before a
+    /// possible reinit.
     pub fn cache_token_info(&self, backend_slot: BackendSlotId, label: String, serial: String) {
+        let _guard =
+            self.token_info_publication.lock().unwrap_or_else(|poison| poison.into_inner());
         self.token_info_cache.insert(backend_slot, (Instant::now(), label, serial));
+    }
+
+    /// Record the `(label, serial)` read for `backend_slot` only if no
+    /// daemon-wide invalidation happened since `generation` was captured
+    /// (T09). Returns `true` when published.
+    ///
+    /// A metadata lookup started before a reinit must not reinsert stale
+    /// label/serial after the invalidation: the caller captures
+    /// [`authz_generation`](Self::authz_generation) BEFORE the backend
+    /// fetch and publishes through here AFTER. The generation check and
+    /// the insert run atomically under the publication lock, and the
+    /// reinit path removes + advances under the same lock — a bare
+    /// check-then-insert without the lock would still race. A skipped
+    /// publication is only a cache miss (the caller already holds the
+    /// fetched values for its own decision); the next lookup refetches.
+    pub fn cache_token_info_if_generation(
+        &self,
+        backend_slot: BackendSlotId,
+        label: String,
+        serial: String,
+        generation: u64,
+    ) -> bool {
+        let _guard =
+            self.token_info_publication.lock().unwrap_or_else(|poison| poison.into_inner());
+        if self.authz_generation.load(Ordering::SeqCst) != generation {
+            return false;
+        }
+        self.token_info_cache.insert(backend_slot, (Instant::now(), label, serial));
+        true
     }
 
     /// Drop any cached token info for `backend_slot` (the token may have changed).
     pub fn invalidate_token_info(&self, backend_slot: BackendSlotId) {
+        let _guard =
+            self.token_info_publication.lock().unwrap_or_else(|poison| poison.into_inner());
         self.token_info_cache.remove(&backend_slot);
+    }
+
+    /// Drop the cached token info for `backend_slot` AND advance the authz
+    /// generation, atomically under the publication lock (T09). Called from
+    /// the InitToken backend-completion closure on actual success — before
+    /// the result is published — so the invalidation lands even if the RPC
+    /// future already timed out or was cancelled, and so a concurrent
+    /// old-generation lookup cannot reinsert stale label/serial after it.
+    /// Sessions, logins and handles are untouched: a successful reinit is a
+    /// metadata event, not a session eviction (OASIS reports SESSION_EXISTS
+    /// when sessions are open; the daemon never fabricates destruction).
+    pub fn invalidate_token_info_on_reinit(&self, backend_slot: BackendSlotId) {
+        let _guard =
+            self.token_info_publication.lock().unwrap_or_else(|poison| poison.into_inner());
+        self.token_info_cache.remove(&backend_slot);
+        self.authz_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Populate slot map from backend's C_GetSlotList.
@@ -1360,6 +1440,24 @@ impl ContextManager {
     /// True when any live context holds logical login for `slot`.
     pub fn any_login_state_for_slot(&self, slot: BackendSlotId) -> bool {
         self.contexts.iter().any(|entry| entry.value().login_state.contains_key(&slot))
+    }
+
+    /// T20 (D6(1) refinement): true when any live context OTHER than
+    /// `exclude` holds a logical login on `slot`. Authoritative scan for
+    /// the private gates: a logged-out context may forward private ops
+    /// only when no other tenant holds the slot login (the backend is
+    /// then truly logged out, so its verdict is unpolluted); while
+    /// another tenant holds it, forwarding would ride their backend
+    /// login, so the gates refuse. Deliberately NOT the lossy holder
+    /// index — a missed holder here would forward onto a held login.
+    pub fn other_login_state_for_slot(
+        &self,
+        slot: BackendSlotId,
+        exclude: &ClientContextId,
+    ) -> bool {
+        self.contexts
+            .iter()
+            .any(|entry| entry.key() != exclude && entry.value().login_state.contains_key(&slot))
     }
 
     /// True when any live context's session map still references `handle`

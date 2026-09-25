@@ -64,6 +64,11 @@ tonic-prost-build = "0.14"
 sha2 = "0.10"
 serde_json = "1"
 hex = "0.4"
+# T12: build.rs mirrors prost's Rust type names (`AsyncGetIDResponse` ->
+# `AsyncGetIdResponse`) with the same `heck` prost-build 0.14 uses
+# (`src/ident.rs::to_upper_camel`), so the Copy cross-validation compares
+# identical spellings. Already in the lockfile via prost-build.
+heck = "0.5"
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 zeroize = { version = "1", features = ["derive"] }
 

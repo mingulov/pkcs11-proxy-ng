@@ -32,7 +32,7 @@ async fn softhsm_smoke_workflow() -> Result<(), String> {
 
     let random = client.generate_random(session, 32).await.map_err(|rv| rv.to_string())?;
     assert_eq!(random.len(), 32);
-    assert!(random.iter().any(|b| *b != 0));
+    assert!(random.expose(|bytes| bytes.iter().any(|b| *b != 0)));
 
     let (public_key, private_key) =
         generate_rsa_key_pair(&mut client, session, "smoke", false).await?;
@@ -44,7 +44,7 @@ async fn softhsm_smoke_workflow() -> Result<(), String> {
 
     let decrypted =
         rsa_encrypt_and_decrypt(&mut client, session, public_key, private_key, payload).await?;
-    assert_eq!(decrypted, payload);
+    decrypted.expose(|bytes| assert_eq!(bytes, &payload[..]));
 
     if supports_mechanism(&mut client, slot, CkMechanismType::SHA256).await? {
         sha256_digest_matches(&mut client, session, payload).await?;
@@ -113,7 +113,9 @@ async fn nss_sign_recover_and_verify_recover() -> Result<(), String> {
         rsa_sign_recover_and_verify_recover(&mut client, session, private_key, public_key, payload)
             .await?;
 
-    assert_eq!(recovered, payload, "C_VerifyRecover must return the original plaintext");
+    recovered.expose(|bytes| {
+        assert_eq!(bytes, &payload[..], "C_VerifyRecover must return the original plaintext")
+    });
 
     client.logout(session).await.map_err(|rv| rv.to_string())?;
     client.close_session(session).await.map_err(|rv| rv.to_string())?;

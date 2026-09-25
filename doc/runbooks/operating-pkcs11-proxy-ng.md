@@ -595,6 +595,11 @@ encounter; they are scope of follow-up rounds:
 | Backend crash blast radius: a vendor-`.so` SIGSEGV downs the whole daemon process (backend is in-process; A2/in-process-worker deferred) | Run **multiple instances + sticky routing** (§4a); consumers reconnect + re-open (§6) | Deployment + application code |
 | Multiplexed daemon vs pristine token: N logical clients share one backend instance per slot — no per-context pristine state (see below) | Rotate/restart the daemon for pristine-state cases; partition daemons per tenant (§4a) | Test harness / deployment |
 | Message-Init struct strictness: classic param structs on message Init fail closed (`CKR_MECHANISM_PARAM_INVALID`); lenient backends accept them direct (see below) | Pack the `CK_*_MESSAGE_PARAMS` struct for the mechanism on message Init | Application code |
+| Login-timing observer: an authorized session owner can tell proxy-cooldown `CKR_PIN_LOCKED` (fast, no backend contact) from a forwarded attempt, and observes its own login state (see below) | Accepted residual — no constant-latency guarantee by design | — |
+| Suspended session handles count toward the per-principal session quota; unset quotas bound nothing (see below) | Set `per_principal_max_sessions` where tenants are untrusted | Deployment |
+| Daemon memory lock is best-effort (`mlockall`, loud on denial); shim has no process-wide lock; swap residual stands (see below) | Grant `CAP_IPC_LOCK` / `LimitMEMLOCK`, confirm the startup log line | Deployment |
+| Git-sourced dependencies need network unless the cargo cache is pre-populated; no vendored sources ship (see below) | Pre-populate the cargo cache for air-gapped builds | Build |
+| `tests/consumers/Dockerfile.daemon.kryoptic` is unpinned/unhashed fixture-only (see below) | Never use fixture images outside provider-matrix testing | Test harness |
 
 ### Multiplexed daemon vs pristine token (in-memory backends)
 
@@ -650,6 +655,65 @@ the proxy, check the packed struct first.
 
 Earlier follow-ups (DNS re-resolve, slow-backend test, per-RPC
 trace ID, gRPC health probe, rate-limiter) are closed.
+
+### Login-timing observer (accepted residual)
+
+After context/session checks pass, a login attempt that hits the
+shared per-slot failed-login budget answers `CKR_PIN_LOCKED` fast,
+without contacting the backend — measurably faster than a forwarded
+attempt. An authorized session owner can therefore observe (a) whether
+the slot is in proxy cooldown (shared budget state) and (b) its own
+resulting login state. There is deliberately no constant-latency
+guarantee: no jitter, no generic return code, no extra HSM calls to
+mask the difference. The observer must already hold an authorized
+session, which bounds the exposure; accept it as designed.
+
+### Suspended handles and session quotas (accepted residual)
+
+A session close in flight parks its handle "suspended" (safety
+quarantine): stale completions are no-ops, and the handle either
+reactivates on transient failure or is removed on terminal
+completion. Suspended handles keep their slot registration, so the
+opt-in per-principal session quota counts them — fail-closed against
+quota evasion via rapid open/close churn. With quotas unset (the
+default), in-flight closes are unbounded in principle: completions
+always resolve them, but no bound was proven under adversarial
+scheduling. A new cap needs resource-policy design and is deferred;
+set `per_principal_max_sessions` where tenants are untrusted.
+
+### Memory lock and swap residual (accepted residual)
+
+At startup the daemon attempts `mlockall(MCL_CURRENT | MCL_FUTURE)` so
+PIN/key pages cannot swap; denial (typically missing `CAP_IPC_LOCK`
+or a restrictive `RLIMIT_MEMLOCK`) and non-Unix platforms log a loud
+warning with remediation and the daemon still starts. The shim has no
+process-wide lock. Without the lock, daemon pages can reach swap
+under memory pressure and outlive the process — wiping clears live
+copies on drop but cannot reach already-swapped pages (see
+[privacy](../release/privacy.md)). Operators who need the guarantee
+grant the capability (systemd `LimitMEMLOCK=infinity` +
+`CapabilityBoundingSet=CAP_IPC_LOCK`, or `setcap cap_ipc_lock+ep`)
+and confirm the startup log shows the pages-locked line.
+
+### Git-sourced dependencies (accepted residual)
+
+`pkcs11-module` (backend, shim) is consumed from a rev-pinned git URL
+(`pkcs11-components`), not from crates.io, and no vendored sources
+ship with the release. Builds fetch it over the network unless the
+cargo cache is already populated. For air-gapped builds, pre-populate
+the cache (a normal online build once) — offline distribution beyond
+that is deferred, not part of v0.2.
+
+### Unpinned provider-matrix fixtures (accepted residual)
+
+`tests/consumers/Dockerfile.daemon.kryoptic` builds from unpinned
+`alpine:3.23` bases, an unhashed kryoptic checkout, an unhashed
+OpenSSL source pull, and an unlocked rustup stable toolchain: the
+image is not reproducible and makes no release claim. It is a
+provider-matrix test fixture only. Fixture pinning is separate,
+optional work — it is not part of the release dependency closure,
+which stays fully locked (`Cargo.lock`, digest-pinned release
+images).
 
 ## 10. Escalation
 

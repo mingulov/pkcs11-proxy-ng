@@ -78,23 +78,28 @@ pub(crate) fn dispatched_before_client_init(command: &Commands) -> bool {
     )
 }
 
-pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) -> CliResult {
+pub(crate) async fn run_command(
+    client: &mut Pkcs11Client,
+    command: Commands,
+    origins: &crate::secrets::SecretOrigins,
+) -> CliResult {
     use crate::secrets as s;
     debug_assert!(
         !dispatched_before_client_init(&command),
         "main must dispatch this command before client init"
     );
-    // Secret resolvers need the raw argv to tell an explicit `--flag`
-    // value (warned) from an env-filled one (silent).
-    let argv: Vec<String> =
-        std::env::args_os().map(|arg| arg.to_string_lossy().into_owned()).collect();
+    // T14: explicit-argv detection comes from clap value-source metadata
+    // (`origins`), never from a retained argv copy (which held every
+    // secret value in plain memory).
     // Production secret IO: real stdin, warnings on stderr.
     let stdin = s::read_stdin_string;
     let warn = |message: String| eprintln!("{message}");
-    let input_sources =
-        |inline: Option<String>, file: Option<std::path::PathBuf>, stdin_flag: bool| {
-            s::SecretSources { inline, file, stdin: stdin_flag }
-        };
+    // Wrap clap's inline allocation on arrival (adopted, never copied).
+    let input_sources = |inline: Option<String>,
+                         file: Option<std::path::PathBuf>,
+                         stdin_flag: bool| {
+        s::SecretSources { inline: inline.map(zeroize::Zeroizing::new), file, stdin: stdin_flag }
+    };
     match command {
         Commands::ListSlots { token_present } => query::list_slots(client, token_present).await,
         Commands::SlotInfo { slot_id } => query::slot_info(client, slot_id).await,
@@ -102,7 +107,7 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
         Commands::ListMechanisms { slot_id } => query::list_mechanisms(client, slot_id).await,
         Commands::GetInfo => query::get_info(client).await,
         Commands::SessionInfo { slot_id, pin, pin_stdin } => {
-            let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_optional_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             query::session_info(client, slot_id, pin).await
         }
         Commands::Random { slot_id, len, format } => {
@@ -120,7 +125,7 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             unreachable!("audit subcommands are dispatched in main before client init")
         }
         Commands::FindObjects { slot_id, pin, pin_stdin, label, verbose } => {
-            let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_optional_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             objects::find_objects(client, slot_id, pin, label, verbose).await
         }
         Commands::DestroyObject { slot_id, pin, pin_stdin, object_handle, force } => {
@@ -135,11 +140,11 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
                 force,
                 &mut std::io::stdin().lock(),
             )?;
-            let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_optional_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             objects::destroy_object(client, slot_id, pin, object_handle).await
         }
         Commands::GetObjectSize { slot_id, pin, pin_stdin, object_handle } => {
-            let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_optional_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             objects::get_object_size(client, slot_id, pin, object_handle).await
         }
         Commands::CreateObject {
@@ -151,22 +156,22 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             value_file,
             value_stdin,
         } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             let value = s::resolve_optional_secret(
                 &s::VALUE_SPEC,
                 input_sources(value, value_file, value_stdin),
-                &argv,
+                origins.for_spec(&s::VALUE_SPEC),
                 stdin,
                 warn,
             )?;
             objects::create_object(client, slot_id, pin, label, value).await
         }
         Commands::GetAttribute { slot_id, pin, pin_stdin, object_handle, attr, redact } => {
-            let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_optional_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             objects::get_attribute(client, slot_id, pin, object_handle, attr, redact).await
         }
         Commands::ImportCertificate { slot_id, pin, pin_stdin, label, file } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             objects::import_certificate(client, slot_id, pin, label, file).await
         }
         Commands::WrapKey {
@@ -178,7 +183,7 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             wrapping_key_handle,
             key_handle,
         } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             objects::wrap_key(
                 client,
                 slot_id,
@@ -202,11 +207,11 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             wrapped_key_stdin,
             label,
         } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             let wrapped_key = s::resolve_required_secret(
                 &s::WRAPPED_KEY_SPEC,
                 input_sources(wrapped_key, wrapped_key_file, wrapped_key_stdin),
-                &argv,
+                origins.for_spec(&s::WRAPPED_KEY_SPEC),
                 stdin,
                 warn,
             )?;
@@ -231,7 +236,7 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             base_key_handle,
             label,
         } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             objects::derive_key(
                 client,
                 slot_id,
@@ -252,7 +257,7 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             label,
             key_size,
         } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             objects::generate_key(client, slot_id, pin, mechanism, params_file, label, key_size)
                 .await
         }
@@ -266,7 +271,7 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             key_size,
             ec_params,
         } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             objects::generate_key_pair(
                 client,
                 slot_id,
@@ -290,11 +295,11 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             input_file,
             input_stdin,
         } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             let input = s::resolve_required_secret(
                 &s::INPUT_SPEC,
                 input_sources(input, input_file, input_stdin),
-                &argv,
+                origins.for_spec(&s::INPUT_SPEC),
                 stdin,
                 warn,
             )?;
@@ -304,7 +309,7 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             let input = s::resolve_required_secret(
                 &s::INPUT_SPEC,
                 input_sources(input, input_file, input_stdin),
-                &argv,
+                origins.for_spec(&s::INPUT_SPEC),
                 stdin,
                 warn,
             )?;
@@ -321,11 +326,11 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             input_file,
             input_stdin,
         } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             let input = s::resolve_required_secret(
                 &s::INPUT_SPEC,
                 input_sources(input, input_file, input_stdin),
-                &argv,
+                origins.for_spec(&s::INPUT_SPEC),
                 stdin,
                 warn,
             )?;
@@ -343,11 +348,11 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             input_stdin,
             redact,
         } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             let input = s::resolve_required_secret(
                 &s::INPUT_SPEC,
                 input_sources(input, input_file, input_stdin),
-                &argv,
+                origins.for_spec(&s::INPUT_SPEC),
                 stdin,
                 warn,
             )?;
@@ -368,18 +373,18 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
             signature_file,
             signature_stdin,
         } => {
-            let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_optional_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             let data = s::resolve_required_secret(
                 &s::DATA_SPEC,
                 input_sources(data, data_file, data_stdin),
-                &argv,
+                origins.for_spec(&s::DATA_SPEC),
                 stdin,
                 warn,
             )?;
             let signature = s::resolve_required_secret(
                 &s::SIGNATURE_SPEC,
                 input_sources(signature, signature_file, signature_stdin),
-                &argv,
+                origins.for_spec(&s::SIGNATURE_SPEC),
                 stdin,
                 warn,
             )?;
@@ -391,7 +396,7 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
                 Some(so_pin),
                 "so-pin",
                 "PKCS11_PROXY_SO_PIN",
-                &argv,
+                origins.so_pin,
                 warn,
             )?;
             confirm_destructive(
@@ -409,30 +414,32 @@ pub(crate) async fn run_command(client: &mut Pkcs11Client, command: Commands) ->
                 Some(so_pin),
                 "so-pin",
                 "PKCS11_PROXY_SO_PIN",
-                &argv,
+                origins.so_pin,
                 warn,
             )?;
             let new_pin = s::resolve_required_inline_pin(
                 Some(new_pin),
                 "new-pin",
                 "PKCS11_PROXY_NEW_PIN",
-                &argv,
+                origins.new_pin,
                 warn,
             )?;
             admin::init_pin(client, slot_id, so_pin, new_pin).await
         }
         Commands::SeedRandom { slot_id, pin, pin_stdin, seed } => {
             // W1-C11-33: optional PIN like digest/session-info/verify.
-            let pin = s::resolve_optional_pin(pin, pin_stdin, &argv, stdin, warn)?;
-            admin::seed_random(client, slot_id, pin, seed).await
+            let pin = s::resolve_optional_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
+            // T14: adopt clap's seed allocation into wiping storage
+            // (`--seed` has no file/stdin variants; no new flags here).
+            admin::seed_random(client, slot_id, pin, zeroize::Zeroizing::new(seed)).await
         }
         Commands::SetPin { slot_id, pin, pin_stdin, new_pin } => {
-            let pin = s::resolve_required_pin(pin, pin_stdin, &argv, stdin, warn)?;
+            let pin = s::resolve_required_pin(pin, pin_stdin, origins.pin, stdin, warn)?;
             let new_pin = s::resolve_required_inline_pin(
                 Some(new_pin),
                 "new-pin",
                 "PKCS11_PROXY_NEW_PIN",
-                &argv,
+                origins.new_pin,
                 warn,
             )?;
             admin::set_pin(client, slot_id, pin, new_pin).await

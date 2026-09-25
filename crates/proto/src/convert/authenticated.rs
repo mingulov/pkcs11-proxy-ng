@@ -204,6 +204,31 @@ impl TryFrom<&wire::AuthenticatedMechanismOutput> for AuthenticatedOutput {
     }
 }
 
+impl AuthenticatedOutput {
+    /// T13 owned entry point: identical validation to the borrowed
+    /// `TryFrom`, but the `Iv` arm adopts the buffer with `mem::take`
+    /// instead of copying it. Structured/message arms delegate to the
+    /// reviewed borrowed conversions (their destinations are FFI-shape
+    /// project types, not wiping owners). The caller must own the message.
+    pub fn try_from_owned(mut output: wire::AuthenticatedMechanismOutput) -> CkResult<Self> {
+        use wire::authenticated_mechanism_output::Output;
+        // Through `&mut`: payloads cannot move out of the `ZeroizeOnDrop`
+        // oneof enum, so each arm adopts its buffer with `mem::take`.
+        let mut taken = output.output.take();
+        match taken.as_mut() {
+            Some(Output::Unchanged(true)) => Ok(Self::Unchanged),
+            Some(Output::Iv(iv)) => Ok(Self::Iv(SecretBytes::new(std::mem::take(iv)))),
+            Some(Output::MessageParameter(message)) => {
+                validate_structured_wire_parameter(message)?;
+                Ok(Self::Message(MessageParameter::try_from_owned(std::mem::take(message))?))
+            }
+            Some(Output::MessageEffects(effects)) => Ok(Self::Effects((&*effects).try_into()?)),
+            Some(Output::Unchanged(false)) => Err(CkRv::MECHANISM_PARAM_INVALID),
+            None => Err(super::ABSENT_MESSAGE_ONEOF_RV),
+        }
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn invalid_authenticated_native_completion_cannot_serialize_as_empty_wire_output() {

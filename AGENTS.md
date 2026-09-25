@@ -31,6 +31,13 @@ AI agents, automation, and human contributors.
   lengths, or invent per-attribute results.
 - Preserve exact `CK_RV` values whenever possible; do not collapse multiple
   PKCS#11 errors into one generic error.
+- Scope split: a difference the provider shows without the proxy is a
+  **provider** matter, not a proxy bug — triage every direct-vs-proxied
+  mismatch per [parity-validation](./doc/release/parity-validation.md),
+  fix proxy bugs in the proxy, and report provider-conformance issues
+  upstream. Never normalize provider behavior inside the proxy (see
+  [ADR-0010](./doc/adr/ADR-0010-transparent-forwarding-by-default.md)):
+  provider conformance fixes are out of proxy scope.
 - Do not invent compatibility claims such as “full PKCS#11 support”.
 - Keep the current discovery and mechanism policy intact unless a design change
   is explicitly intended and documented.

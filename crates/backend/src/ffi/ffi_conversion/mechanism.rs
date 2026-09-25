@@ -1220,7 +1220,27 @@ pub(in crate::ffi) struct FfiMuGenParams {
 /// IV + 8 B AAD) + `output_params` + `output_params_equal` ≈ 1 µs/iter
 /// (debug build, 2000 iters) — noise next to one protobuf decode plus
 /// one backend round-trip per `*Init`.
+/// Maximum nested (non-top-level) mechanisms `mechanism_to_ffi` will
+/// descend into (T03/RV-N2 backend half). Mirrors the shim reader bound
+/// (`MAX_NESTED_MECHANISMS` = 16); the typed tree is owned (acyclic by
+/// construction), so a depth counter suffices. The 17th nested mechanism
+/// is rejected before recursion.
+const MAX_NESTED_MECHANISMS: u8 = 16;
+
 pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiMechanism> {
+    mechanism_to_ffi_at_depth(mechanism, 0)
+}
+
+/// Recurse one nesting level (KIP/CMS nested mechanisms), rejecting the
+/// 17th nested mechanism before descending.
+fn nested_mechanism_to_ffi(mechanism: &CkMechanism, depth: u8) -> CkResult<FfiMechanism> {
+    if depth >= MAX_NESTED_MECHANISMS {
+        return Err(CkRv::MECHANISM_PARAM_INVALID);
+    }
+    mechanism_to_ffi_at_depth(mechanism, depth + 1)
+}
+
+fn mechanism_to_ffi_at_depth(mechanism: &CkMechanism, depth: u8) -> CkResult<FfiMechanism> {
     let mech_type = narrow_wire_ulong(mechanism.mechanism_type.0)?;
 
     let params = match &mechanism.params {
@@ -1800,8 +1820,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             // pVersion = NULL for DH variants (version is 0.0 sentinel)
             let version_is_null = p.version_major == 0 && p.version_minor == 0;
             let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
-                major: p.version_major as cryptoki_sys::CK_BYTE,
-                minor: p.version_minor as cryptoki_sys::CK_BYTE,
+                major: narrow_wire_byte(p.version_major)?,
+                minor: narrow_wire_byte(p.version_minor)?,
             }));
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
@@ -1931,8 +1951,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
             let version_is_null = p.version_major == 0 && p.version_minor == 0;
             let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
-                major: p.version_major as cryptoki_sys::CK_BYTE,
-                minor: p.version_minor as cryptoki_sys::CK_BYTE,
+                major: narrow_wire_byte(p.version_major)?,
+                minor: narrow_wire_byte(p.version_minor)?,
             }));
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
@@ -1967,8 +1987,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             let mut session_hash = Zeroizing::new(p.session_hash.clone());
             let version_is_null = p.version_major == 0 && p.version_minor == 0;
             let version = NativeAllocation::from_box(Box::new(cryptoki_sys::CK_VERSION {
-                major: p.version_major as cryptoki_sys::CK_BYTE,
-                minor: p.version_minor as cryptoki_sys::CK_BYTE,
+                major: narrow_wire_byte(p.version_major)?,
+                minor: narrow_wire_byte(p.version_minor)?,
             }));
             let hash_ptr = if session_hash.is_empty() {
                 std::ptr::null_mut()
@@ -2326,7 +2346,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
             let mut x = p.x.expose(|b| Zeroizing::new(b.to_vec()));
             let x_ptr = if x.is_empty() { std::ptr::null_mut() } else { x.as_mut_ptr() };
             let kw = Box::new(cryptoki_sys::CK_KEY_WRAP_SET_OAEP_PARAMS {
-                bBC: p.bc as cryptoki_sys::CK_BYTE,
+                bBC: narrow_wire_byte(p.bc)?,
                 pX: x_ptr,
                 ulXLen: x.len() as cryptoki_sys::CK_ULONG,
             });
@@ -2404,7 +2424,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
                 ulCKYiLen: ckyi.len() as cryptoki_sys::CK_ULONG,
                 pCKYr: ckyr_ptr,
                 ulCKYrLen: ckyr.len() as cryptoki_sys::CK_ULONG,
-                keyNumber: p.key_number as cryptoki_sys::CK_BYTE,
+                keyNumber: narrow_wire_byte(p.key_number)?,
             });
             Ok(FfiMechanism::from_box(mech_type, ike, |b| {
                 FfiParamBacking::Ike1PrfDerive(b, ckyi, ckyr)
@@ -2456,7 +2476,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
         CkMechanismParams::WtlsMasterKeyDerive(p) => {
             let mut client_random = Zeroizing::new(p.random_info.client_random.clone());
             let mut server_random = Zeroizing::new(p.random_info.server_random.clone());
-            let mut version_buf = Zeroizing::new(vec![p.version as u8]);
+            let mut version_buf = Zeroizing::new(vec![narrow_wire_byte(p.version)?]);
             let client_ptr = if client_random.is_empty() {
                 std::ptr::null_mut()
             } else {
@@ -2755,7 +2775,7 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- KIP: nested mechanism pointer + seed + handle ----------------------
         CkMechanismParams::Kip(p) => {
-            let inner_ffi = mechanism_to_ffi(&p.mechanism)?;
+            let inner_ffi = nested_mechanism_to_ffi(&p.mechanism, depth)?;
             let inner_mech = NativeAllocation::from_box(Box::new(inner_ffi.ck_mechanism()));
             let mut seed = p.seed.expose(|b| Zeroizing::new(b.to_vec()));
             let seed_ptr = if seed.is_empty() { std::ptr::null_mut() } else { seed.as_mut_ptr() };
@@ -2781,8 +2801,8 @@ pub(in crate::ffi) fn mechanism_to_ffi(mechanism: &CkMechanism) -> CkResult<FfiM
 
         // -- CMS Sig: nested mechanisms + content type + attribute buffers -------
         CkMechanismParams::CmsSig(p) => {
-            let sign_ffi = mechanism_to_ffi(&p.signing_mechanism)?;
-            let digest_ffi = mechanism_to_ffi(&p.digest_mechanism)?;
+            let sign_ffi = nested_mechanism_to_ffi(&p.signing_mechanism, depth)?;
+            let digest_ffi = nested_mechanism_to_ffi(&p.digest_mechanism, depth)?;
             let sign_mech = NativeAllocation::from_box(Box::new(sign_ffi.ck_mechanism()));
             let digest_mech = NativeAllocation::from_box(Box::new(digest_ffi.ck_mechanism()));
             let mut content_type = Zeroizing::new(p.content_type.as_bytes().to_vec());
