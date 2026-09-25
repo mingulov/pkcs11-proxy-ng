@@ -2011,43 +2011,8 @@ fn examples_use_default_daemon_paths() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// W1-L8-12: ADR-0005 §6 must teach label:/serial: selectors (the forms
-// TokenSelector::parse accepts), not pkcs11: URIs (which parse rejects).
-// ---------------------------------------------------------------------------
-
-#[test]
-fn adr_policy_example_uses_supported_selectors() {
-    let adr = submodule_file("doc/adr/ADR-0005-phase-1-authorization-model.md");
-    assert!(
-        !adr.contains("pkcs11:token="),
-        "ADR-0005 must not teach pkcs11: URI selectors (TokenSelector::parse rejects them)"
-    );
-    assert!(
-        adr.contains("label:Audit"),
-        "ADR-0005 policy example must use the label: selector form"
-    );
-    assert!(
-        adr.contains("serial:1234"),
-        "ADR-0005 policy example must use the serial: selector form"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// W1-L8-13: ADR-0005 must reconcile the mTLS-by-default promise with the
-// shipped auth=none default (amendment recorded in the ADR; the insecure
-// default is explicit + loudly warned, never silent).
-// ---------------------------------------------------------------------------
-
-#[test]
-fn adr_records_insecure_default_reconciliation() {
-    let adr = submodule_file("doc/adr/ADR-0005-phase-1-authorization-model.md");
-    assert!(
-        adr.contains("proxy.toml.default"),
-        "ADR-0005 must name the shipped default file in the W1-L8-13 reconciliation"
-    );
-    assert!(adr.contains("W1-L8-13"), "ADR-0005 must record the W1-L8-13 amendment marker");
-}
+// The W1-L8-12/13 ADR checks moved with ADR-0005 to the umbrella workspace's
+// scripts/test_planning_docs.py. Runtime/configuration checks remain here.
 
 // ---------------------------------------------------------------------------
 // W1-L8-14: AGENTS.md must not claim a default registry file path — with

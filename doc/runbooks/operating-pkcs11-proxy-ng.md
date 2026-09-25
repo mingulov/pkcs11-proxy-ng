@@ -164,12 +164,10 @@ revision-flap warnings.
 
 **The vendor PKCS#11 module is loaded in-process in each daemon.** A SIGSEGV inside
 the vendor `.so` therefore takes down **that daemon process** and drops the consumers
-pinned to it. (In-process worker isolation — ADR-0007 / the parent-repo design spec
-`doc/plans/2026-05-30-backend-process-isolation-design.md` — was evaluated and
+pinned to it. (In-process worker isolation was evaluated and
 **deliberately deferred**: it cannot make a crash transparent, because PKCS#11
 session/login/operation state is un-serializable and dies with the backend regardless,
-and its remaining wins were not worth the complexity. See the A2 entry in
-`doc/follow-up-index.md`.)
+and its remaining wins were not worth the complexity.)
 
 **Supported mitigation — "safety" / stable-channel deployment: run multiple daemon
 instances and partition consumers across them.** This is the same multi-replica

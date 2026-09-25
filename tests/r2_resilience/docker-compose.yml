@@ -11,16 +11,21 @@
 # poke that endpoint to add/remove `toxics`.
 #
 # Usage:
+#   docker build -f packaging/alpine/Dockerfile.alpine -t pkcs11-proxy-ng:test-alpine3.23 .
 #   docker compose -f tests/r2_resilience/docker-compose.yml build
 #   docker compose -f tests/r2_resilience/docker-compose.yml up -d
-#   tests/r2_resilience/run_scenario.sh <N>     # 1..6
+#   docker compose -f tests/r2_resilience/docker-compose.yml exec runner /scenarios/run_scenario.sh <N>  # 1..6
 #   docker compose -f tests/r2_resilience/docker-compose.yml down -v
+#
+# Run from the repository root, with the checkout directory named
+# pkcs11-proxy-ng. Build contexts are its parent directory, and Dockerfile/COPY
+# paths include that checkout name.
 #
 # The runner image is built once from tests/r2_resilience/Dockerfile.runner;
 # the daemon and SoftHSM2 share a small alpine-based image built from
-# tests/r2_resilience/Dockerfile.daemon. Both images embed binaries
-# produced by `cargo build --release --workspace` on the host, so the
-# fixture is fast to iterate on.
+# tests/r2_resilience/Dockerfile.daemon. Both images install musl-built
+# APKs from the separately built pkcs11-proxy-ng:test-alpine3.23 carrier
+# image; see packaging/alpine/Dockerfile.alpine.
 
 services:
   daemon:

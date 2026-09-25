@@ -1,16 +1,15 @@
 // W1-L12-03: report lines go to stdout/stderr by design; the workspace
 // lint table denies these sinks elsewhere.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
-//! Latency histogram for shim→daemon→shim overhead.
+//! Latency histogram for Rust client→daemon round trips.
 //!
-//! Runs N C_Sign operations against a real gRPC daemon backed by
-//! MockBackend over loopback, records each call's latency in a
+//! Runs N SignInit + Sign pairs against a real gRPC daemon backed by
+//! MockBackend over loopback, records each pair's latency in a
 //! HdrHistogram, and prints p50/p90/p99/p99.9.
 //!
-//! Uses MockBackend to keep the backend FFI time near-zero; this is
-//! the "shim+daemon+gRPC overhead only" measurement. The
-//! direct-SoftHSM2-subtraction measurement lives in
-//! `scripts/perf/measure_softhsm_latency.sh`.
+//! Uses the Rust client directly and MockBackend rather than a native provider.
+//! The measurement includes the gRPC/service path and mock execution; it does
+//! not load the shim or subtract a direct-provider timing baseline.
 //!
 //! Run: `cargo bench --bench proxy_latency_histogram -- 10000`
 //! (positional arg = sample count; default 10_000).
@@ -34,7 +33,7 @@ fn main() {
     let (endpoint, _shutdown) = rt.block_on(start_daemon());
 
     // Hot path: each iteration does sign_init + sign over a session
-    // that was set up once. This measures the per-call overhead of
+    // that was set up once. This measures the pair's overhead through
     // the gRPC + service-layer path, not session setup.
     let state = rt.block_on(async {
         let mut c = Pkcs11Client::connect(&endpoint).await.unwrap();

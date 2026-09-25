@@ -62,9 +62,8 @@ constructor domain with lifecycle-honest retirement, and wire widths are
 checked with rejection proven on i686 hardware. Still pending: DONT_BLOCK-only
 slot waits with shared native event flags, the qualified Linux
 whole-process lifetime stop, session operation slots, subprocess/topology
-qualification, and the provider parity round. The v0.2.0 tail stretch (see
-[ADR-0014](./doc/adr/ADR-0014-v020-tail-platform-stretch.md), Implemented
-2026-09-17) evidences Windows x64/MSVC daemon + shim in both interoperation
+qualification, and the provider parity round. The v0.2.0 tail stretch
+(implemented 2026-09-17) evidences Windows x64/MSVC daemon + shim in both interoperation
 directions on real Windows Server 2022
 (`artifacts/v020-tail-windows-2026-09-16/` legs A/B/C at the workspace root),
 the 32-bit/mixed width claim (four Linux legs plus the NSS-i386 second
@@ -103,11 +102,6 @@ candidate [release notes](./doc/release/v0.2.0-release-notes.md) are satisfied.
 
 - [`doc/development.md`](./doc/development.md) — native tools, optional mise
   setup, MSRV, and local validation commands
-- [`prd.md`](./prd.md) — product requirements
-- [`doc/architecture-overview.md`](./doc/architecture-overview.md) — how the
-  shim, daemon, and backend fit together
-- [`doc/adr/`](./doc/adr/) — architecture decision records (error model, handle
-  identity, authorization, backend integration, …)
 - [`doc/error-reference.md`](./doc/error-reference.md) — every `CK_RV` the proxy
   can return, with cause + operator action + application action
 - [`doc/runbooks/operating-pkcs11-proxy-ng.md`](./doc/runbooks/operating-pkcs11-proxy-ng.md)
@@ -119,8 +113,12 @@ candidate [release notes](./doc/release/v0.2.0-release-notes.md) are satisfied.
   validation methodology, and the `0.x` release checklist. Scope rule for
   every direct-vs-proxied mismatch: proxy bugs get fixed here,
   provider-conformance issues go upstream — never normalized by the proxy
-  ([ADR-0010](./doc/adr/ADR-0010-transparent-forwarding-by-default.md),
-  [parity triage](./doc/release/parity-validation.md#triage-of-mismatches))
+  ([parity triage](./doc/release/parity-validation.md#triage-of-mismatches))
+
+The PRD, ADRs, architecture overview, audits, and follow-up notes are maintained
+in the separate `pkcs11-proxy-ng-ws` planning workspace. This repository builds,
+tests, and packages releases independently. See the
+[script inventory](./scripts/README.md) for CI, release, and manual tooling.
 
 ## Release dry run
 

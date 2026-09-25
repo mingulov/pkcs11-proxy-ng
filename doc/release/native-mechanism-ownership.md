@@ -28,11 +28,9 @@ Production live FFI for v0.2 is limited to qualified targets:
 Excluded: Windows GNU; macOS x86_64 runtime (the code
 admits it, but load-qualification only — no CI runtime leg); x32,
 big-/mixed-endian, and other architectures/environments. The v0.2 tail
-stretch ([ADR-0014](../adr/ADR-0014-v020-tail-platform-stretch.md)) has
+stretch has
 landed, so Windows x64 native-provider daemon support is re-admitted
-(the [ADR-0011](../adr/ADR-0011-narrow-ck-ulong-client-width-bridging.md) /
-[ADR-0006](../adr/ADR-0006-32-64-bit-cross-platform-compatibility.md)
-deferral stands only for the still-excluded hosts above); the
+(the native-provider deferral stands only for the still-excluded hosts above); the
 constructor refusal below stays in force for those hosts.
 
 Portable Windows client/shim/proto/types builds and their existing contracts
@@ -141,8 +139,7 @@ Verify) keep separate owners. Dual operations retain both. Message, recovery,
 VerifySignature and one-shot migration does not claim new arbitrary post-Init
 retention support. A `CKR_PENDING` result, unknown entry or unwind after entry
 keeps the complete frame and affected owners; zero running counters or empty
-maps are insufficient. Native AsyncComplete support remains unimplemented;
-see [the async decision](../adr/async-persistence-decision.md).
+maps are insufficient. Native AsyncComplete support remains unimplemented.
 
 Normal teardown issues a private epoch-qualified destruction proof only for a
 safe never-initialized/unentered loading state under the loading contract, or
