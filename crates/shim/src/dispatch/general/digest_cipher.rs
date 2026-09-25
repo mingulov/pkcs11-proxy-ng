@@ -49,7 +49,10 @@ pub unsafe extern "C" fn c_digest(
         if pul_digest_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let data = unsafe { read_input_slice(p_data, ul_data_len) };
+        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_digest, pul_digest_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session),
@@ -73,7 +76,10 @@ pub unsafe extern "C" fn c_digest_update(
     ul_part_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let part = unsafe { read_input_slice(p_part, ul_part_len) };
+        let part = match input_buf_to_ck_in_buf(unsafe { classify_input(p_part, ul_part_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         unit_result_to_rv(
             with_client!(client => client.digest_update(CkSessionHandle(h_session), part)),
         )
@@ -106,7 +112,7 @@ pub unsafe extern "C" fn c_digest_final(
             CkSessionHandle(h_session),
             ByteOutputFunction::DigestFinal,
             &spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             None,
             0,
             0,
@@ -178,7 +184,10 @@ pub unsafe extern "C" fn c_encrypt(
         if pul_encrypted_data_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let data = unsafe { read_input_slice(p_data, ul_data_len) };
+        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_encrypted_data, pul_encrypted_data_len) };
         let result = with_client!(client => client.byte_output_exact_with_mechanism_out(
             CkSessionHandle(h_session),
@@ -253,7 +262,10 @@ pub unsafe extern "C" fn c_encrypt_update(
         if pul_encrypted_part_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let part = unsafe { read_input_slice(p_part, ul_part_len) };
+        let part = match input_buf_to_ck_in_buf(unsafe { classify_input(p_part, ul_part_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_encrypted_part, pul_encrypted_part_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session),
@@ -286,7 +298,7 @@ pub unsafe extern "C" fn c_encrypt_final(
             CkSessionHandle(h_session),
             ByteOutputFunction::EncryptFinal,
             &spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             None,
             0,
             0,
@@ -344,7 +356,12 @@ pub unsafe extern "C" fn c_decrypt(
         if pul_data_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let encrypted_data = unsafe { read_input_slice(p_encrypted_data, ul_encrypted_data_len) };
+        let encrypted_data = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_encrypted_data, ul_encrypted_data_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_data, pul_data_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session),
@@ -373,7 +390,12 @@ pub unsafe extern "C" fn c_decrypt_update(
         if pul_part_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let encrypted_part = unsafe { read_input_slice(p_encrypted_part, ul_encrypted_part_len) };
+        let encrypted_part = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_encrypted_part, ul_encrypted_part_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_part, pul_part_len) };
         let result = with_client!(client => client.byte_output_exact(
             CkSessionHandle(h_session),
@@ -405,7 +427,7 @@ pub unsafe extern "C" fn c_decrypt_final(
             CkSessionHandle(h_session),
             ByteOutputFunction::DecryptFinal,
             &spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             None,
             0,
             0,

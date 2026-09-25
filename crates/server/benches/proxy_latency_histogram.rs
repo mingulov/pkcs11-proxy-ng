@@ -78,24 +78,23 @@ fn main() {
     let payload = vec![0xABu8; 256];
     let mut hist: Histogram<u64> = Histogram::new(3).unwrap();
 
-    let (client, session, key) = state;
-    let client = std::sync::Mutex::new(client);
+    // Single-threaded sequential driver: own the client directly (no Mutex) so
+    // each block_on borrows it for the duration of one op and releases on return.
+    let (mut client, session, key) = state;
 
     // Warmup: 100 ops, discarded.
     for _ in 0..100 {
         rt.block_on(async {
-            let mut c = client.lock().unwrap();
-            c.sign_init(session, &mech, key).await.unwrap();
-            let _ = c.sign(session, &payload).await.unwrap();
+            client.sign_init(session, &mech, key).await.unwrap();
+            let _ = client.sign(session, &payload).await.unwrap();
         });
     }
     let total_start = Instant::now();
     for _ in 0..n {
         rt.block_on(async {
-            let mut c = client.lock().unwrap();
             let t0 = Instant::now();
-            c.sign_init(session, &mech, key).await.unwrap();
-            let _sig = c.sign(session, &payload).await.unwrap();
+            client.sign_init(session, &mech, key).await.unwrap();
+            let _sig = client.sign(session, &payload).await.unwrap();
             let elapsed = t0.elapsed().as_micros() as u64;
             hist.record(elapsed).unwrap();
         });

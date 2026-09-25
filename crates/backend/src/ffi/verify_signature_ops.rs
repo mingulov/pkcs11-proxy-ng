@@ -8,11 +8,12 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
         key: CkObjectHandle,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         match mechanism {
             Some(mech) => {
                 let mut ffi_mech = mechanism_to_ffi(mech)?;
+                let (sig_ptr, sig_len) = signature.as_ptr_len();
                 call_3x_fn!(
                     self,
                     func_list_3_2,
@@ -20,8 +21,8 @@ impl FfiBackend {
                     Self::session_handle(session),
                     &mut ffi_mech.ck_mechanism as *mut cryptoki_sys::CK_MECHANISM,
                     Self::object_handle(key),
-                    signature.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-                    Self::ulong_len(signature.len())
+                    sig_ptr as *mut cryptoki_sys::CK_BYTE,
+                    Self::ulong_len_u64(sig_len)
                 )
             }
             None => {
@@ -43,30 +44,32 @@ impl FfiBackend {
     pub(super) fn ffi_verify_signature(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
     ) -> CkResult<()> {
+        let (data_ptr, data_len) = data.as_ptr_len();
         call_3x_fn!(
             self,
             func_list_3_2,
             C_VerifySignature,
             Self::session_handle(session),
-            data.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-            Self::ulong_len(data.len())
+            data_ptr as *mut cryptoki_sys::CK_BYTE,
+            Self::ulong_len_u64(data_len)
         )
     }
 
     pub(super) fn ffi_verify_signature_update(
         &self,
         session: CkSessionHandle,
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
     ) -> CkResult<()> {
+        let (dp_ptr, dp_len) = data_part.as_ptr_len();
         call_3x_fn!(
             self,
             func_list_3_2,
             C_VerifySignatureUpdate,
             Self::session_handle(session),
-            data_part.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-            Self::ulong_len(data_part.len())
+            dp_ptr as *mut cryptoki_sys::CK_BYTE,
+            Self::ulong_len_u64(dp_len)
         )
     }
 

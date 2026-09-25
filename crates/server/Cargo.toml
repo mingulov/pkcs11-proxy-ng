@@ -14,7 +14,9 @@ pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
 pkcs11-proxy-ng-backend = { path = "../backend" }
 clap.workspace = true
-tonic.workspace = true
+# Daemon: server-side transport (`Server::builder().add_service`) needs `server`
+# + `router`; `codegen` for the generated service trait; `tls-ring` for mTLS.
+tonic = { workspace = true, features = ["server", "router", "codegen", "tls-ring"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

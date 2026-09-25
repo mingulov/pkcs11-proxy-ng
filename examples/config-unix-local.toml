@@ -33,6 +33,9 @@ module = "/usr/lib/softhsm/libsofthsm2.so"
 mechanism_discovery = "transparent"
 lease_seconds = 600
 request_timeout_secs = 60
+# Reject NULL data pointers (len>0) and NULL mechanisms before the backend module.
+# OFF by default (ADR-0010 transparent forwarding). Enable for modules that crash on them.
+# sanitize_inputs = true
 
 [listener.local]
 path = "/tmp/pkcs11-proxy-ng.sock"

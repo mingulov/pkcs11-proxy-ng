@@ -2,6 +2,96 @@ use super::*;
 use crate::server::handle_map::BackendHandle;
 
 #[tokio::test]
+async fn begin_operation_capped_enforces_the_per_context_limit() {
+    // M2: a context can hold at most `max_in_flight` concurrent operations; the
+    // next is rejected (Err) so one client cannot drain the shared budget. A
+    // freed slot allows a new op, and a missing context yields Ok(None).
+    let mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+    let ctx = mgr.create_context(None).await.unwrap();
+    let cap = 3;
+    let mut guards = Vec::new();
+    for _ in 0..cap {
+        guards.push(
+            mgr.begin_operation_capped(&ctx, cap).expect("under cap").expect("context exists"),
+        );
+    }
+    assert!(mgr.begin_operation_capped(&ctx, cap).is_err(), "must reject at the per-context cap");
+
+    guards.pop(); // free one in-flight slot
+    assert!(mgr.begin_operation_capped(&ctx, cap).is_ok(), "a freed slot must allow a new op");
+
+    let gone = ClientContextId("nonexistent".into());
+    assert!(
+        matches!(mgr.begin_operation_capped(&gone, cap), Ok(None)),
+        "a missing context yields Ok(None), not a cap rejection"
+    );
+}
+
+#[test]
+fn token_info_cache_serves_within_ttl_and_expires_after() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "SN1".into());
+    assert_eq!(
+        mgr.cached_token_info_within(CkSlotId(0), std::time::Duration::from_secs(60)),
+        Some(("MockToken".to_string(), "SN1".to_string())),
+        "a fresh entry must be served"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    assert_eq!(
+        mgr.cached_token_info_within(CkSlotId(0), std::time::Duration::from_millis(1)),
+        None,
+        "an entry older than the TTL must not be served"
+    );
+}
+
+#[test]
+fn invalidate_token_info_drops_the_entry() {
+    let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
+    mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "SN1".into());
+    mgr.invalidate_token_info(CkSlotId(0));
+    assert_eq!(mgr.cached_token_info(CkSlotId(0)), None);
+}
+
+#[tokio::test]
+async fn capacity_eviction_skips_contexts_with_open_backend_sessions() {
+    // M4: the inline capacity-eviction path must NOT drop an expired context
+    // that still holds open backend sessions — it cannot close them (no backend
+    // ref here), so doing so would leak them. Those are left to the background
+    // reaper (evict_expired), which closes them properly. At capacity with only
+    // such a context present, creation is rejected rather than leaking.
+    let mgr = ContextManager::new(std::time::Duration::from_millis(1), 1);
+    let ctx_a = mgr.create_context(None).await.unwrap();
+    mgr.get_context(&ctx_a, |c| {
+        c.register_session(BackendHandle(100), CkSlotId(0));
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await; // expire ctx_a
+
+    let result = mgr.create_context(None).await;
+    assert!(result.is_err(), "must not inline-evict a context with open backend sessions");
+    assert!(
+        mgr.get_context(&ctx_a, |_| ()).await.is_some(),
+        "ctx_a with an open backend session must survive inline capacity-eviction"
+    );
+}
+
+#[tokio::test]
+async fn capacity_eviction_reclaims_sessionless_expired_contexts() {
+    // A sessionless expired context leaks nothing, so it IS reclaimed inline to
+    // make room (M4).
+    let mgr = ContextManager::new(std::time::Duration::from_millis(1), 1);
+    let ctx_a = mgr.create_context(None).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await; // expire ctx_a
+
+    let ctx_b = mgr.create_context(None).await;
+    assert!(ctx_b.is_ok(), "a sessionless expired context must be inline-reclaimed");
+    assert!(
+        mgr.get_context(&ctx_a, |_| ()).await.is_none(),
+        "the sessionless expired context should be evicted"
+    );
+}
+
+#[tokio::test]
 async fn create_and_get_context() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let id = mgr.create_context(None).await.unwrap();
@@ -20,7 +110,7 @@ async fn unknown_context_returns_none() {
 async fn remove_context() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let id = mgr.create_context(None).await.unwrap();
-    assert!(mgr.remove_context(&id).await.is_some());
+    assert!(mgr.remove_context(&id).is_some());
     assert!(mgr.get_context(&id, |_| ()).await.is_none());
 }
 
@@ -68,6 +158,48 @@ fn teardown_clears_login_state() {
 }
 
 #[test]
+fn remove_session_evicts_only_its_recorded_session_objects() {
+    // B2: closing a session evicts the session objects recorded under it, but
+    // leaves other sessions' objects (and unrecorded token objects) intact.
+    let mut ctx = LogicalClientInstance::new(None);
+    let session_a = ctx.session_handles.insert(BackendHandle(10));
+    let session_b = ctx.session_handles.insert(BackendHandle(20));
+
+    let sess_obj_a = ctx.object_handles.insert(BackendHandle(100));
+    let sess_obj_b = ctx.object_handles.insert(BackendHandle(200));
+    let token_obj = ctx.object_handles.insert(BackendHandle(300)); // not recorded
+    ctx.record_session_object(session_a, sess_obj_a);
+    ctx.record_session_object(session_b, sess_obj_b);
+
+    ctx.remove_session(session_a);
+
+    assert_eq!(ctx.object_handles.resolve(sess_obj_a), None, "A's session object evicted");
+    assert_eq!(
+        ctx.object_handles.resolve(sess_obj_b),
+        Some(BackendHandle(200)),
+        "B's session object untouched"
+    );
+    assert_eq!(
+        ctx.object_handles.resolve(token_obj),
+        Some(BackendHandle(300)),
+        "unrecorded (token) object persists"
+    );
+}
+
+#[test]
+fn remove_sessions_for_slot_evicts_their_session_objects() {
+    let mut ctx = LogicalClientInstance::new(None);
+    let session = ctx.session_handles.insert(BackendHandle(11));
+    ctx.session_slots.insert(session, CkSlotId(7));
+    let obj = ctx.object_handles.insert(BackendHandle(111));
+    ctx.record_session_object(session, obj);
+
+    ctx.remove_sessions_for_slot(CkSlotId(7));
+
+    assert_eq!(ctx.object_handles.resolve(obj), None, "slot-close evicts session objects");
+}
+
+#[test]
 fn session_and_object_handle_spaces_are_independent() {
     let mut ctx = LogicalClientInstance::new(None);
     let svirt = ctx.session_handles.insert(BackendHandle(1));
@@ -106,7 +238,7 @@ async fn remove_context_removes_exactly_one() {
     let mgr = ContextManager::new(std::time::Duration::from_secs(300), 0);
     let id1 = mgr.create_context(None).await.unwrap();
     let id2 = mgr.create_context(None).await.unwrap();
-    mgr.remove_context(&id1).await;
+    mgr.remove_context(&id1);
     assert!(mgr.get_context(&id1, |_| ()).await.is_none());
     assert!(mgr.get_context(&id2, |_| ()).await.is_some());
 }
@@ -274,7 +406,7 @@ async fn virtual_handles_from_removed_context_invisible_in_other_context() {
     let id2 = mgr.create_context(None).await.unwrap();
     let virt =
         mgr.get_context(&id1, |ctx| ctx.session_handles.insert(BackendHandle(99))).await.unwrap();
-    mgr.remove_context(&id1).await;
+    mgr.remove_context(&id1);
     let resolved = mgr.get_context(&id2, |ctx| ctx.session_handles.resolve(virt)).await.unwrap();
     assert_eq!(resolved, None, "removed context handles must not bleed into other contexts");
 }

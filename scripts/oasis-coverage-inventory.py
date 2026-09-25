@@ -1490,7 +1490,7 @@ def shim_interface_tests(root: Path) -> Path:
 
 
 def shim_helpers(root: Path) -> Path:
-    return root / "crates/shim/src/dispatch/general/helpers.rs"
+    return root / "crates/shim/src/dispatch/general/helpers/mod.rs"
 
 
 def provider_artifacts_root(root: Path) -> Path:

@@ -61,6 +61,20 @@ fn invalid_der_is_error() {
 }
 
 #[test]
+fn empty_subject_dn_is_rejected() {
+    // G1: a cert with no subject DN would rely on the SubjectAltName for its
+    // identity, which Phase 1 does not consult. Accepting it would collapse
+    // every such cert from a CA onto one ambiguous empty-subject identity, so
+    // it must be rejected (fail closed) rather than silently shared.
+    let mut ca_dn = DistinguishedName::new();
+    ca_dn.push(DnType::CommonName, "Root CA");
+    let empty_subject = DistinguishedName::new();
+    let der = gen_ca_signed(&ca_dn, &empty_subject);
+    let err = extract_identity(&der).unwrap_err();
+    assert!(err.contains("empty subject"), "error: {err}");
+}
+
+#[test]
 fn self_signed_cn_only() {
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "TestCA");
@@ -206,6 +220,28 @@ fn validate_cert_file_expired() {
 }
 
 #[test]
+fn validate_cert_file_rejects_expired_cert_in_a_bundle() {
+    // L3: a PEM file may hold a chain (leaf + intermediate/CA). EVERY
+    // certificate must be validated, not just the first — an expired second
+    // entry must be rejected rather than silently accepted.
+    let now = OffsetDateTime::now_utc();
+    let leaf = gen_self_signed_pem_with_validity(
+        "leaf",
+        now - Duration::hours(1),
+        now + Duration::days(30),
+    );
+    let expired_ca = gen_self_signed_pem_with_validity(
+        "intermediate",
+        now - Duration::days(365),
+        now - Duration::hours(1),
+    );
+    let bundle = format!("{leaf}{expired_ca}");
+    let f = write_pem_to_tempfile(&bundle);
+    let err = super::validate_cert_file(f.path()).unwrap_err();
+    assert!(err.contains("expired"), "an expired cert in the bundle must be rejected: {err}");
+}
+
+#[test]
 fn validate_cert_file_not_yet_valid() {
     let now = OffsetDateTime::now_utc();
     let pem = gen_self_signed_pem_with_validity(
@@ -231,8 +267,14 @@ fn validate_cert_file_not_pem() {
     let mut f = tempfile::NamedTempFile::new().unwrap();
     f.write_all(b"this is not a PEM file").unwrap();
     f.flush().unwrap();
+    // A file with no certificate PEM blocks is rejected (the message changed
+    // from "invalid PEM" to "no certificate" when validation began iterating the
+    // whole bundle — L3).
     let err = super::validate_cert_file(f.path()).unwrap_err();
-    assert!(err.contains("invalid PEM"), "error: {err}");
+    assert!(
+        err.contains("no certificate") || err.contains("invalid PEM"),
+        "a non-certificate file must be rejected: {err}"
+    );
 }
 
 #[test]

@@ -34,19 +34,21 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
-        wrapped_key: &[u8],
+        wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
         let ctx = self.context_id()?;
         let proto_template = Self::proto_template(template);
-        let req = pkcs11_proxy_ng_proto::UnwrapKeyRequest {
+        let mut req = pkcs11_proxy_ng_proto::UnwrapKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
             mechanism: Some(Self::proto_mechanism(mechanism)),
             unwrapping_key_handle: unwrapping_key.0,
-            wrapped_key: wrapped_key.to_vec(),
+            wrapped_key: Vec::new(),
             template: proto_template,
+            wrapped_key_null_len: None,
         };
+        Self::fill_input(wrapped_key, &mut req.wrapped_key, &mut req.wrapped_key_null_len);
         let resp = pkcs11_unary_call!(self.grpc.unwrap_key(req), true);
         Ok(CkObjectHandle(resp.key_handle))
     }
@@ -195,28 +197,36 @@ impl Pkcs11Client {
     pub async fn set_operation_state(
         &mut self,
         session: CkSessionHandle,
-        state: &[u8],
+        state: CkInBuf<'_>,
         enc_key: CkObjectHandle,
         auth_key: CkObjectHandle,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::SetOperationStateRequest {
+        let mut req = pkcs11_proxy_ng_proto::SetOperationStateRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            operation_state: state.to_vec(),
+            operation_state: Vec::new(),
             encryption_key_handle: enc_key.0,
             authentication_key_handle: auth_key.0,
+            operation_state_null_len: None,
         };
+        Self::fill_input(state, &mut req.operation_state, &mut req.operation_state_null_len);
         pkcs11_unary_ok!(self.grpc.set_operation_state(req), true)
     }
 
-    pub async fn seed_random(&mut self, session: CkSessionHandle, seed: &[u8]) -> CkResult<()> {
+    pub async fn seed_random(
+        &mut self,
+        session: CkSessionHandle,
+        seed: CkInBuf<'_>,
+    ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::SeedRandomRequest {
+        let mut req = pkcs11_proxy_ng_proto::SeedRandomRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            seed: seed.to_vec(),
+            seed: Vec::new(),
+            seed_null_len: None,
         };
+        Self::fill_input(seed, &mut req.seed, &mut req.seed_null_len);
         pkcs11_unary_ok!(self.grpc.seed_random(req), true)
     }
 
