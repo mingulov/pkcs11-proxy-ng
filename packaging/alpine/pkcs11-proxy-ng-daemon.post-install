@@ -1,0 +1,26 @@
+#!/bin/sh
+set -e
+
+cat <<'EOF'
+
+pkcs11-proxy-ng-daemon installed.
+
+NEXT STEPS:
+1. Edit /etc/pkcs11-proxy-ng/proxy.toml and replace the
+   [backend].module placeholder with a real PKCS#11 .so path
+   (e.g. /usr/lib/softhsm/libsofthsm2.so).
+2. Start the service:
+       rc-service pkcs11-proxy-ng start
+3. Enable on boot (after you've verified step 2 works):
+       rc-update add pkcs11-proxy-ng default
+
+The default config listens on 0.0.0.0:7512 with auth="none". This is
+intended for deployments behind external network protection
+(Kubernetes NetworkPolicy, VPC private subnet, sidecar/mesh policy).
+The daemon emits a loud WARN at startup so the choice is visible in
+operator log scans. Switch to mTLS via the commented template in
+/etc/pkcs11-proxy-ng/proxy.toml if you cannot guarantee the network
+boundary.
+EOF
+
+exit 0

@@ -1,0 +1,32 @@
+# daemon image — SoftHSM2 stock backend.
+# Reuses the same pattern as tests/r2_resilience/Dockerfile.daemon.
+
+FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng
+
+FROM alpine:3.23
+
+RUN apk add --no-cache softhsm opensc bash
+
+RUN --mount=type=bind,from=pkcs11ng,source=/apk,target=/apk \
+    apk --no-cache add --allow-untrusted --repository /apk \
+        pkcs11-proxy-ng-daemon \
+        pkcs11-proxy-ng-cli
+
+ENV SOFTHSM2_LIB=/usr/lib/softhsm/libsofthsm2.so
+ENV SOFTHSM2_CONF=/etc/softhsm2.conf
+
+RUN mkdir -p /var/lib/softhsm/tokens \
+  && printf 'directories.tokendir = /var/lib/softhsm/tokens\nobjectstore.backend = file\nlog.level = INFO\n' \
+      > /etc/softhsm2.conf \
+  && softhsm2-util --init-token --free \
+      --label matrix-token --so-pin abcd --pin 1234
+
+# Daemon config: no-auth TCP on 7512.
+COPY pkcs11-proxy-ng/tests/consumers/proxy.toml /etc/pkcs11-proxy-ng/proxy.toml
+
+# Replace the backend module placeholder.
+RUN sed -i 's|@BACKEND_MODULE@|/usr/lib/softhsm/libsofthsm2.so|' \
+        /etc/pkcs11-proxy-ng/proxy.toml
+
+EXPOSE 7512
+ENTRYPOINT ["/usr/bin/pkcs11-proxy-ng", "/etc/pkcs11-proxy-ng/proxy.toml"]

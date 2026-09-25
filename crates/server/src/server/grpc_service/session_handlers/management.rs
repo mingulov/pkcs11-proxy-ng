@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
@@ -53,12 +54,15 @@ pub(super) async fn init_token(
         }
     }
 
-    let so_pin = req.so_pin;
+    // Zeroize SO PIN bytes when the closure drops.
+    let so_pin = req.so_pin.map(Zeroizing::new);
     let label_for_log = req.label.clone();
     let label = req.label;
     let backend = backend_ref.clone();
-    let result =
-        spawn_backend(move || backend.init_token(backend_slot, so_pin.as_deref(), &label)).await?;
+    let result = spawn_backend(move || {
+        backend.init_token(backend_slot, so_pin.as_deref().map(Vec::as_slice), &label)
+    })
+    .await?;
 
     let ck_rv = match &result {
         Ok(()) => {
@@ -89,9 +93,11 @@ pub(super) async fn init_pin(
         }
     };
 
-    let pin = req.pin;
+    // Zeroize user PIN on closure drop.
+    let pin = req.pin.map(Zeroizing::new);
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.init_pin(session, pin.as_deref())).await?;
+    let result =
+        spawn_backend(move || backend.init_pin(session, pin.as_deref().map(Vec::as_slice))).await?;
 
     let ck_rv = match &result {
         Ok(()) => {
@@ -122,12 +128,18 @@ pub(super) async fn set_pin(
         }
     };
 
-    let old_pin = req.old_pin;
-    let new_pin = req.new_pin;
+    // Zeroize both old and new PINs on closure drop.
+    let old_pin = req.old_pin.map(Zeroizing::new);
+    let new_pin = req.new_pin.map(Zeroizing::new);
     let backend = backend_ref.clone();
-    let result =
-        spawn_backend(move || backend.set_pin(session, old_pin.as_deref(), new_pin.as_deref()))
-            .await?;
+    let result = spawn_backend(move || {
+        backend.set_pin(
+            session,
+            old_pin.as_deref().map(Vec::as_slice),
+            new_pin.as_deref().map(Vec::as_slice),
+        )
+    })
+    .await?;
 
     let ck_rv = match &result {
         Ok(()) => {

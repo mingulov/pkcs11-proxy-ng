@@ -1,0 +1,72 @@
+# pkcs11-proxy-ng default configuration.
+#
+# Edit [backend].module before starting the daemon. The shipped value
+# is a placeholder — the daemon refuses to start until you replace it
+# with a real path to a PKCS#11 .so on the host.
+#
+# Every value below can also be overridden at runtime by an env var
+# (PKCS11_PROXY_*), so this file is suitable for use as a Kubernetes
+# ConfigMap with secrets/paths injected by the deployment.
+
+[backend]
+# REQUIRED. Path to the backend PKCS#11 module (HSM driver, SoftHSM2,
+# kryoptic, NSS softokn, etc.).
+# Override:  PKCS11_PROXY_BACKEND_MODULE=/usr/lib/softhsm/libsofthsm2.so
+module = "/CHANGE_ME/path/to/backend.so"
+
+# Optional backend initialize args (vendor-specific). Most backends
+# don't need this.
+# Override:  PKCS11_PROXY_BACKEND_ARGS="..."
+# initialize_args = ""
+
+[proxy]
+# Backend-call timeout (also gRPC request timeout).
+request_timeout_secs = 60
+
+# Backend probe timeout at daemon startup. The daemon refuses to start
+# if populate_slots() exceeds this. Raise for slow hardware HSMs.
+startup_timeout_secs = 30
+
+# Graceful shutdown grace period on SIGTERM/SIGINT.
+# Kubernetes:  terminationGracePeriodSeconds should be >= this value.
+shutdown_grace_secs = 30
+
+# Consecutive backend-call failures before tonic-health flips to
+# NOT_SERVING (drives k8s readiness probes).
+backend_health_consecutive_failures = 3
+
+# Other timeouts and pool sizes use the documented ProxyConfig
+# defaults; see crates/server/src/config.rs.
+
+[listener.remote]
+# Default operational mode: TCP without authentication, behind
+# external network protection (k8s NetworkPolicy / VPC).
+# The daemon logs a loud WARN at startup so this configuration is
+# visible in operator log scans — do NOT use this in untrusted
+# networks.
+# Override:  PKCS11_PROXY_BIND="0.0.0.0:7512"
+bind = "0.0.0.0:7512"
+auth = "none"
+allow_insecure_tcp = true
+
+# To enable mTLS, replace the [listener.remote] block above with the
+# template below and remove allow_insecure_tcp.
+#
+# [listener.remote]
+# bind = "0.0.0.0:7512"
+# auth = "mtls"
+# ca_cert = "/etc/pkcs11-proxy-ng/tls/ca.crt"
+# server_cert = "/etc/pkcs11-proxy-ng/tls/server.crt"
+# server_key = "/etc/pkcs11-proxy-ng/tls/server.key"
+
+[auth]
+# Token-level identity ACL is bypassed under auth="none". Configure
+# [[auth.policy]] entries only when running with auth="mtls".
+
+[mechanisms]
+# Path to the mechanism parameter registry served to shims over the
+# GetBackendInterfaces RPC. Leave unset to serve the daemon's embedded
+# default (compiled from mechanism_params_default.toml in the types
+# crate).
+# Override:  PKCS11_PROXY_MECHANISMS_CONFIG="/etc/pkcs11-proxy-ng/mechanism_params.toml"
+config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"

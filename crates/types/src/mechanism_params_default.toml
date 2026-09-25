@@ -245,6 +245,32 @@ parameterless = [
     0x0017,  # CKM_ML_KEM
     0x001C,  # CKM_ML_DSA_KEY_PAIR_GEN
     0x001D,  # CKM_ML_DSA
+    0x002D,  # CKM_SLH_DSA_KEY_PAIR_GEN
+    0x002E,  # CKM_SLH_DSA
+    # Hash-specific ML-DSA / SLH-DSA take an OPTIONAL CK_SIGN_ADDITIONAL_CONTEXT
+    # (the hash is implied by the mechanism). Listed here for the no-context call
+    # and under the sign_additional_context shape below for the with-context call,
+    # mirroring pure CKM_ML_DSA. OASIS PKCS#11 v3.2 ml_dsa.md / slh_dsa.md.
+    0x0023,  # CKM_HASH_ML_DSA_SHA224
+    0x0024,  # CKM_HASH_ML_DSA_SHA256
+    0x0025,  # CKM_HASH_ML_DSA_SHA384
+    0x0026,  # CKM_HASH_ML_DSA_SHA512
+    0x0027,  # CKM_HASH_ML_DSA_SHA3_224
+    0x0028,  # CKM_HASH_ML_DSA_SHA3_256
+    0x0029,  # CKM_HASH_ML_DSA_SHA3_384
+    0x002A,  # CKM_HASH_ML_DSA_SHA3_512
+    0x002B,  # CKM_HASH_ML_DSA_SHAKE128
+    0x002C,  # CKM_HASH_ML_DSA_SHAKE256
+    0x0036,  # CKM_HASH_SLH_DSA_SHA224
+    0x0037,  # CKM_HASH_SLH_DSA_SHA256
+    0x0038,  # CKM_HASH_SLH_DSA_SHA384
+    0x0039,  # CKM_HASH_SLH_DSA_SHA512
+    0x003A,  # CKM_HASH_SLH_DSA_SHA3_224
+    0x003B,  # CKM_HASH_SLH_DSA_SHA3_256
+    0x003C,  # CKM_HASH_SLH_DSA_SHA3_384
+    0x003D,  # CKM_HASH_SLH_DSA_SHA3_512
+    0x003E,  # CKM_HASH_SLH_DSA_SHAKE128
+    0x003F,  # CKM_HASH_SLH_DSA_SHAKE256
 ]
 
 # ─── Parameterized mechanism shapes ─────────────────────────────────────────
@@ -536,13 +562,38 @@ mechanisms = [
     0x1054,  # CKM_RSA_AES_KEY_WRAP
 ]
 
-# Sign additional context: CK_SIGN_ADDITIONAL_CONTEXT (hedge mode + context)
-# CKM_ML_DSA is also in the parameterless list for the default-hedge case.
-# When called with a parameter, the proxy uses this shape.
+# Sign additional context: CK_SIGN_ADDITIONAL_CONTEXT (hedge mode + context).
+# These mechanisms are also in the parameterless list for the default no-context
+# case; when called WITH a parameter the proxy uses this shape. The hash-specific
+# ML-DSA / SLH-DSA mechanisms use the PLAIN CK_SIGN_ADDITIONAL_CONTEXT (the hash
+# is implied by the mechanism) — only the generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA
+# use CK_HASH_SIGN_ADDITIONAL_CONTEXT (separate shape, not yet wired). OASIS
+# PKCS#11 v3.2 ml_dsa.md §"CKM_HASH_ML_DSA_*" / slh_dsa.md.
 [[params]]
 shape = "sign_additional_context"
 mechanisms = [
     0x001D,  # CKM_ML_DSA (optional — hedge mode)
+    0x002E,  # CKM_SLH_DSA (optional — hedge mode)
+    0x0023,  # CKM_HASH_ML_DSA_SHA224
+    0x0024,  # CKM_HASH_ML_DSA_SHA256
+    0x0025,  # CKM_HASH_ML_DSA_SHA384
+    0x0026,  # CKM_HASH_ML_DSA_SHA512
+    0x0027,  # CKM_HASH_ML_DSA_SHA3_224
+    0x0028,  # CKM_HASH_ML_DSA_SHA3_256
+    0x0029,  # CKM_HASH_ML_DSA_SHA3_384
+    0x002A,  # CKM_HASH_ML_DSA_SHA3_512
+    0x002B,  # CKM_HASH_ML_DSA_SHAKE128
+    0x002C,  # CKM_HASH_ML_DSA_SHAKE256
+    0x0036,  # CKM_HASH_SLH_DSA_SHA224
+    0x0037,  # CKM_HASH_SLH_DSA_SHA256
+    0x0038,  # CKM_HASH_SLH_DSA_SHA384
+    0x0039,  # CKM_HASH_SLH_DSA_SHA512
+    0x003A,  # CKM_HASH_SLH_DSA_SHA3_224
+    0x003B,  # CKM_HASH_SLH_DSA_SHA3_256
+    0x003C,  # CKM_HASH_SLH_DSA_SHA3_384
+    0x003D,  # CKM_HASH_SLH_DSA_SHA3_512
+    0x003E,  # CKM_HASH_SLH_DSA_SHAKE128
+    0x003F,  # CKM_HASH_SLH_DSA_SHAKE256
 ]
 
 # PKCS#5 PBKD2: CK_PKCS5_PBKD2_PARAMS2 (salt, iterations, PRF, password)

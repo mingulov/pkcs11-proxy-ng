@@ -25,10 +25,32 @@ macro_rules! with_client {
         if !crate::state::is_initialized() {
             return rv_err(pkcs11_proxy_ng_types::CkRv::CRYPTOKI_NOT_INITIALIZED);
         }
-        crate::state::runtime().block_on(async {
-            let mut $client = crate::state::client().lock().await;
+        let __result = crate::state::runtime().block_on(async {
+            // Take a cheap clone of the shared client and drop the
+            // mutex guard before the RPC. `Pkcs11Client` wraps a tonic
+            // `Channel` (Arc'd, HTTP/2 multiplexed), so concurrent
+            // shim calls now share the connection instead of
+            // serializing on the mutex. The mutex remains as the
+            // swap point for reconnect (state::ensure_client_connected
+            // overwrites the stored client on reconnect; in-flight
+            // RPCs keep using their pre-swap clones).
+            let mut $client = crate::state::client().lock().await.clone();
             $call.await
-        })
+        });
+        // FOLLOWUP-dns-reresolve: if the call surfaced a
+        // transport-level failure (CkRv::DEVICE_ERROR from a session-
+        // scoped RPC or CkRv::GENERAL_ERROR from a lifecycle RPC),
+        // mark the client for reconnect. The next call rebuilds the
+        // channel via `Endpoint::from_shared`, which re-resolves the
+        // hostname — this is what lets a shim follow a daemon whose
+        // DNS A-record changed (k8s rolling deploy, blue/green).
+        if let Err(rv) = &__result {
+            use pkcs11_proxy_ng_types::CkRv;
+            if matches!(*rv, CkRv::DEVICE_ERROR | CkRv::GENERAL_ERROR) {
+                crate::state::mark_client_reconnect_required();
+            }
+        }
+        __result
     }};
 }
 
@@ -384,7 +406,11 @@ pub(crate) unsafe fn validate_mechanism(p_mechanism: *const CK_MECHANISM) -> CK_
 /// `ulParameterLen` bytes containing the appropriate C struct.
 pub(crate) unsafe fn read_mechanism(p_mechanism: *const CK_MECHANISM) -> CkMechanism {
     let c_mech = unsafe { &*p_mechanism };
-    let shape = crate::state::mechanism_registry().param_shape(c_mech.mechanism);
+    // Hold the Arc until after we have copied the shape string out — the
+    // returned `&str` borrows from the Arc, so dropping it before the call
+    // below would leave a dangling reference.
+    let registry = crate::state::mechanism_registry();
+    let shape = registry.param_shape(c_mech.mechanism);
     unsafe { read_mechanism_with_shape(c_mech, shape) }
 }
 
@@ -3232,7 +3258,7 @@ mod mechanism_parameter_tests {
 
     fn ensure_registry() {
         let registry = MechanismRegistry::load(None).expect("default mechanism registry");
-        let _ = crate::state::init_mechanism_registry(registry);
+        crate::state::replace_mechanism_registry(registry);
     }
 
     unsafe fn read_ck_mechanism(mechanism: &CK_MECHANISM) -> CkMechanismParams {

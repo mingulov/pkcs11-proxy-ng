@@ -14,7 +14,7 @@ macro_rules! pkcs11_unary_call {
             })?
             .into_inner();
         let rv = CkRv(response.ck_rv);
-        if !rv.is_ok() {
+        if rv.is_err() {
             return Err(rv);
         }
         response
@@ -48,7 +48,7 @@ macro_rules! pkcs11_unary_ok {
             })?
             .into_inner();
         let rv = CkRv(response.ck_rv);
-        if !rv.is_ok() {
+        if rv.is_err() {
             return Err(rv);
         }
         Ok::<(), CkRv>(())
@@ -80,6 +80,13 @@ enum ConnectionSource {
 ///
 /// All methods are `async` because they perform gRPC calls. The shim layer
 /// (pkcs11-proxy-shim) bridges async to sync via `tokio::runtime::Runtime::block_on`.
+///
+/// `Clone` is cheap: the underlying tonic `Channel` is `Arc`'d, the
+/// `context_id` is a short `String`, and `ConnectionSource` is plain
+/// data. Cloning lets multiple concurrent shim calls each hold an
+/// owned `Pkcs11Client` and multiplex over the same HTTP/2 connection
+/// instead of serializing on a `Mutex`.
+#[derive(Clone)]
 pub struct Pkcs11Client {
     grpc: GrpcClient<tonic::transport::Channel>,
     context_id: Option<String>,

@@ -61,7 +61,7 @@ fn grpc_handler_rpcs() -> Vec<String> {
         if let Some(rest) = trimmed.strip_prefix("async fn ") {
             let name = rest.split('(').next().unwrap().trim();
             if name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-                && !handlers.iter().any(|handler| handler == name)
+                && !handlers.contains(&name.to_string())
             {
                 handlers.push(name.to_string());
             }
@@ -89,8 +89,8 @@ fn grpc_handler_rpcs() -> Vec<String> {
             ')' => {
                 if depth == 1 {
                     let name = tuple.split(',').next().unwrap().trim();
-                    if name.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false)
-                        && !handlers.iter().any(|handler| handler == name)
+                    if name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                        && !handlers.contains(&name.to_string())
                     {
                         handlers.push(name.to_string());
                     }
@@ -409,9 +409,7 @@ fn completion_docs_directory_is_not_empty() {
     }
     let count = std::fs::read_dir(&completed_dir)
         .expect("cannot read doc/completed/")
-        .filter(|e| {
-            e.as_ref().map(|e| e.file_name().to_string_lossy().ends_with(".md")).unwrap_or(false)
-        })
+        .filter(|e| e.as_ref().is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".md")))
         .count();
     assert!(count >= 10, "doc/completed/ should have many completion notes, found only {count}");
 }

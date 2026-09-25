@@ -1,0 +1,64 @@
+# Chaos daemon image — pkcs11-proxy-ng daemon backed by the
+# slow_backend stub (.so).  Lets us inject backend hangs, OOM-style
+# CKR_HOST_MEMORY returns, and other chaos states the production
+# backend never produces naturally.
+#
+# Build (from submodule root):
+#   docker build --build-arg ALPINE_VER=3.23 \
+#       -f packaging/alpine/Dockerfile.alpine \
+#       -t pkcs11-proxy-ng:test-alpine3.23 .
+#   (cd tests/r2_resilience/slow_backend && cargo build --release)
+#   docker build -f tests/chaos/Dockerfile.chaos-daemon \
+#       -t pkcs11-proxy-ng:chaos-daemon .
+
+FROM pkcs11-proxy-ng:test-alpine3.23 AS pkcs11ng
+
+FROM alpine:3.23
+
+RUN apk add --no-cache bash opensc
+
+RUN --mount=type=bind,from=pkcs11ng,source=/apk,target=/apk \
+    apk --no-cache add --allow-untrusted --repository /apk \
+        pkcs11-proxy-ng-daemon \
+        pkcs11-proxy-ng-cli
+
+# slow_backend.so is host-built per the comment above. The chaos
+# fixture mounts the host's target/release as /opt/slow_backend.
+ENV BACKEND_MODULE=/opt/slow_backend/libslow_backend.so
+
+# Chaos config: short request_timeout_secs (2 s) and aggressive
+# backend_health_consecutive_failures (2) so circuit-breaker + health
+# flip trigger quickly under fault-injection.
+RUN cat > /etc/proxy.toml <<EOF
+[backend]
+module = "@BACKEND_MODULE@"
+
+[proxy]
+request_timeout_secs = 2
+startup_timeout_secs = 5
+shutdown_grace_secs = 1
+backend_health_consecutive_failures = 2
+
+[listener.remote]
+bind = "0.0.0.0:7512"
+auth = "none"
+allow_insecure_tcp = true
+
+[auth]
+
+[mechanisms]
+# Real config_path so scenario 4 (mid-write configmap) can exercise
+# the TOML parse-failure path. The file is provisioned by the
+# scenario script before SIGHUP.
+config_path = "/etc/pkcs11-proxy-ng/mechanism_params.toml"
+EOF
+
+# Provision a valid baseline mechanism_params.toml so the daemon's
+# first-boot registry load succeeds. Scenarios overwrite it with
+# garbage to exercise the parse-failure path.
+RUN mkdir -p /etc/pkcs11-proxy-ng \
+ && printf '[[params]]\nshape = "gcm"\nmechanisms = [0x80001087]\n' \
+        > /etc/pkcs11-proxy-ng/mechanism_params.toml
+
+EXPOSE 7512
+ENTRYPOINT ["sh", "-c", "sed -i \"s|@BACKEND_MODULE@|$BACKEND_MODULE|\" /etc/proxy.toml && exec /usr/bin/pkcs11-proxy-ng /etc/proxy.toml"]

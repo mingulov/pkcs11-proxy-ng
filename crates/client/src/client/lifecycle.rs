@@ -1,8 +1,37 @@
-use pkcs11_proxy_ng_proto::Pkcs11ProxyClient as GrpcClient;
+use pkcs11_proxy_ng_proto::{MechanismRegistryPayload, Pkcs11ProxyClient as GrpcClient};
 use pkcs11_proxy_ng_types::*;
 use tonic::transport::Channel;
 
 use super::{ConnectionSource, Pkcs11Client};
+use crate::error::{RpcKind, grpc_status_to_ck_rv_kind};
+
+/// Per-call message size cap (64 MiB), matching the server's
+/// `proxy.max_message_bytes` ceiling defined in `crates/server/src/config.rs`.
+///
+/// Tonic's default decode limit is 4 MiB, so without this an operator
+/// who raises the server's `max_message_bytes` (e.g. for large
+/// `C_Decrypt` plaintexts or wrapped-key blobs) would silently get a
+/// `CKR_GENERAL_ERROR` on the client side from the decode-too-large
+/// status. Keep the client cap aligned with the server's cap so large
+/// payloads succeed end-to-end and oversized payloads fail at the
+/// server (where the operator can configure the bound) rather than
+/// invisibly at the client.
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
+fn new_grpc_client(channel: Channel) -> GrpcClient<Channel> {
+    GrpcClient::new(channel)
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES)
+}
+
+/// Result of a `get_backend_interfaces` probe — the backend's interface
+/// capabilities plus the server's mechanism registry payload (absent on
+/// older daemons predating the field).
+#[derive(Debug, Clone)]
+pub struct BackendProbe {
+    pub interfaces: Vec<(u8, u8, Vec<String>)>,
+    pub mechanism_registry: Option<MechanismRegistryPayload>,
+}
 
 async fn connect_channel(
     endpoint: &str,
@@ -30,7 +59,7 @@ impl Pkcs11Client {
     /// Connect to the proxy daemon at `endpoint` (e.g. `"http://127.0.0.1:50051"`).
     pub async fn connect(endpoint: &str) -> Result<Self, String> {
         let channel = connect_channel(endpoint, None).await?;
-        let grpc = GrpcClient::new(channel);
+        let grpc = new_grpc_client(channel);
         Ok(Self {
             grpc,
             context_id: None,
@@ -44,7 +73,7 @@ impl Pkcs11Client {
         tls_files: crate::tls::ClientTlsFiles,
     ) -> Result<Self, String> {
         let channel = connect_channel(endpoint, Some(tls_files.clone())).await?;
-        let grpc = GrpcClient::new(channel);
+        let grpc = new_grpc_client(channel);
         Ok(Self {
             grpc,
             context_id: None,
@@ -59,7 +88,7 @@ impl Pkcs11Client {
     /// channel sharing). Reconnection will not be available.
     pub fn from_channel(channel: tonic::transport::Channel) -> Self {
         Self {
-            grpc: GrpcClient::new(channel),
+            grpc: new_grpc_client(channel),
             context_id: None,
             source: ConnectionSource::SharedChannel,
         }
@@ -67,28 +96,57 @@ impl Pkcs11Client {
 
     /// Call `C_Initialize` on the proxy. Stores the returned `context_id` for
     /// use in all subsequent requests.
+    ///
+    /// Transport errors are mapped via `RpcKind::Lifecycle` because
+    /// `C_Initialize` has a stricter spec-permitted CK_RV set than the
+    /// session-scoped RPCs (PKCS#11 v3.0 §5.4): `CKR_TOKEN_NOT_PRESENT`
+    /// is NOT in that set, so a daemon-unreachable failure surfaces as
+    /// `CKR_GENERAL_ERROR` instead.
     pub async fn initialize(&mut self) -> CkResult<()> {
         let req = pkcs11_proxy_ng_proto::InitializeRequest { client_context_id: String::new() };
-        let resp = pkcs11_unary_call!(self.grpc.initialize(req), false);
-        self.context_id = Some(resp.client_context_id);
+        let response = self
+            .grpc
+            .initialize(req)
+            .await
+            .map_err(|status| grpc_status_to_ck_rv_kind(status.code(), RpcKind::Lifecycle))?
+            .into_inner();
+        let rv = CkRv(response.ck_rv);
+        if rv.is_err() {
+            return Err(rv);
+        }
+        self.context_id = Some(response.client_context_id);
         Ok(())
     }
 
     /// Call `C_Finalize` on the proxy. Clears the stored `context_id`.
+    ///
+    /// Like `initialize`, uses `RpcKind::Lifecycle` for transport-error
+    /// mapping per PKCS#11 v3.0 §5.5.
     pub async fn finalize(&mut self) -> CkResult<()> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::FinalizeRequest { client_context_id: ctx };
-        pkcs11_unary_ok!(self.grpc.finalize(req), false)?;
+        let response = self
+            .grpc
+            .finalize(req)
+            .await
+            .map_err(|status| grpc_status_to_ck_rv_kind(status.code(), RpcKind::Lifecycle))?
+            .into_inner();
+        let rv = CkRv(response.ck_rv);
+        if rv.is_err() {
+            return Err(rv);
+        }
         self.context_id = None;
         Ok(())
     }
 
-    /// Query the daemon for the backend's interface capabilities.
+    /// Query the daemon for the backend's interface capabilities. Also
+    /// pulls the server-published mechanism registry payload when the
+    /// daemon includes it (older daemons predate the field and the
+    /// caller must fall back to its embedded default).
     ///
-    /// This is context-free (no `C_Initialize` required) and can be called
-    /// before `initialize()`. Used by the shim to dynamically build
-    /// function lists matching the backend.
-    pub async fn get_backend_interfaces(&mut self) -> Result<Vec<(u8, u8, Vec<String>)>, String> {
+    /// Context-free (no `C_Initialize` required); safe to call before
+    /// `initialize()`.
+    pub async fn get_backend_interfaces(&mut self) -> Result<BackendProbe, String> {
         let req = pkcs11_proxy_ng_proto::GetBackendInterfacesRequest {};
         let resp = self
             .grpc
@@ -97,11 +155,13 @@ impl Pkcs11Client {
             .map_err(|e| format!("GetBackendInterfaces failed: {e}"))?
             .into_inner();
 
-        Ok(resp
+        let interfaces = resp
             .interfaces
             .into_iter()
             .map(|info| (info.version_major as u8, info.version_minor as u8, info.null_functions))
-            .collect())
+            .collect();
+
+        Ok(BackendProbe { interfaces, mechanism_registry: resp.mechanism_registry })
     }
 
     /// Re-dial the endpoint (if it was created via `connect`) and probe the
@@ -112,7 +172,7 @@ impl Pkcs11Client {
                 let channel = connect_channel(endpoint, tls_files.clone())
                     .await
                     .map_err(|_| CkRv::DEVICE_ERROR)?;
-                self.grpc = GrpcClient::new(channel);
+                self.grpc = new_grpc_client(channel);
                 if let Some(ref ctx) = self.context_id {
                     let req = pkcs11_proxy_ng_proto::GetSlotListRequest {
                         client_context_id: ctx.clone(),

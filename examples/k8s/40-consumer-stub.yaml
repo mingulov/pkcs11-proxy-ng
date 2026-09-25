@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: consumer-load
+  namespace: pkcs11-proxy-demo
+  labels:
+    app: consumer-load
+spec:
+  serviceName: consumer-load
+  replicas: 1
+  selector:
+    matchLabels:
+      app: consumer-load
+  template:
+    metadata:
+      labels:
+        app: consumer-load
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: consumer
+          # Runner image from tests/r2_resilience/Dockerfile.runner.
+          # It already bundles the shim, pkcs11-tool, the CLI, and
+          # the docker socket utilities. We use only the
+          # shim + the 10-rps load harness baked in below.
+          image: r2_resilience-runner:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PKCS11_PROXY_ENDPOINT
+              value: "http://daemon.pkcs11-proxy-demo.svc:7512"
+            - name: PKCS11_MODULE_PATH
+              value: "/usr/lib/pkcs11/libpkcs11_proxy_ng_shim.so"
+            - name: TOKEN_LABEL
+              value: "demo-token"
+            - name: USER_PIN
+              value: "1234"
+            - name: TARGET_RPS
+              value: "10"
+            - name: DURATION_SECS
+              value: "120"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Wait for the daemon Service to be reachable.
+              for _ in $(seq 1 60); do
+                if (echo > "/dev/tcp/daemon.pkcs11-proxy-demo.svc/7512") 2>/dev/null; then break; fi
+                sleep 1
+              done
+
+              # One-time: generate the test key in the first
+              # daemon's SoftHSM2 token. After this, every signing
+              # request hits the same key (CKA_ID = 01).
+              pkcs11-tool --module "$PKCS11_MODULE_PATH" \
+                  --token-label "$TOKEN_LABEL" --login --pin "$USER_PIN" \
+                  --keypairgen --key-type rsa:2048 \
+                  --label demo-key --id 01 || true
+
+              # 10-rps signing loop.
+              interval_ms=$(( 1000 / TARGET_RPS ))
+              end=$(( $(date +%s) + DURATION_SECS ))
+              success=0
+              recoverable=0
+              unrecoverable=0
+              start=$(date +%s)
+              while [ $(date +%s) -lt $end ]; do
+                  if pkcs11-tool --module "$PKCS11_MODULE_PATH" \
+                          --token-label "$TOKEN_LABEL" \
+                          --login --pin "$USER_PIN" \
+                          --sign --mechanism SHA256-RSA-PKCS \
+                          --input-file /etc/hostname \
+                          --output-file /tmp/sig.bin >/tmp/sign.log 2>&1; then
+                      success=$((success+1))
+                  elif grep -qE 'CKR_(DEVICE_ERROR|GENERAL_ERROR|CRYPTOKI_NOT_INITIALIZED|FUNCTION_CANCELED|FUNCTION_FAILED|TOKEN_NOT_PRESENT|SESSION_HANDLE_INVALID)' /tmp/sign.log; then
+                      recoverable=$((recoverable+1))
+                  else
+                      unrecoverable=$((unrecoverable+1))
+                      echo "[$(date -u +%H:%M:%S)] UNRECOVERABLE error:"
+                      cat /tmp/sign.log
+                  fi
+                  if [ $(( (success + recoverable + unrecoverable) % 20 )) -eq 0 ]; then
+                      elapsed=$(( $(date +%s) - start ))
+                      echo "[$(date -u +%H:%M:%S)] elapsed=${elapsed}s ok=${success} recoverable=${recoverable} unrecoverable=${unrecoverable}"
+                  fi
+                  sleep "0.$(( interval_ms / 10 ))"
+              done
+              echo
+              echo "FINAL: success=${success} recoverable=${recoverable} unrecoverable=${unrecoverable}"
+              # Loop forever so kubectl logs can replay the line.
+              # In CI you would replace this with `exit $unrecoverable`.
+              sleep infinity
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
