@@ -23,26 +23,7 @@ pub(super) use exact_completion::{ExactCompletion, spawn_backend_exact};
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();
-static LOGIN_LOCK_TIMEOUT: OnceLock<Duration> = OnceLock::new();
-static HEALTH_EVENT_TX: OnceLock<mpsc::Sender<BackendHealthEvent>> = OnceLock::new();
-
-tokio::task_local! {
-    static CONTEXT_OPERATION_GUARD: Option<OperationGuard>;
-}
-
-/// Scope one already-admitted context operation around a service handler.
-/// Backend tasks clone the same guard, so a timeout cannot make the context
-/// reapable while its blocking provider call is still running.
-pub(super) async fn scope_context_operation<T, F>(guard: Option<OperationGuard>, future: F) -> T
-where
-    F: Future<Output = T>,
-{
-    CONTEXT_OPERATION_GUARD.scope(guard, future).await
-}
-
-pub(super) fn current_context_operation_guard() -> Option<OperationGuard> {
-    CONTEXT_OPERATION_GUARD.try_with(|guard| guard.clone()).ok().flatten()
-}
+static HEALTH_EVENT_TX: OnceLock<mpsc::UnboundedSender<BackendHealthEvent>> = OnceLock::new();
 /// Tracks whether the LAST sent health event was `Success`. Initialized
 /// to `true` because the health-gate task assumes the daemon starts in
 /// `SERVING`. Used by [`report_backend_outcome`] to suppress
@@ -53,10 +34,10 @@ static LAST_SENT_HEALTHY: AtomicBool = AtomicBool::new(true);
 
 /// Outcome reported by [`spawn_backend`] for the health-gating task
 /// in `main.rs` to consume. `Success` = backend produced any
-/// completed application-level outcome; `Failure` = transport failure
-/// (timeout, blocking-pool panic, circuit-breaker trip) or an established
-/// provider-down RV (DEVICE_REMOVED/HOST_MEMORY). Exact pre-native rejection
-/// emits neither event, so it cannot degrade readiness or signal recovery.
+/// `CkResult` (including a PKCS#11 error code that is a normal
+/// application-level outcome); `Failure` = transport-level failure
+/// (timeout, blocking-pool panic, circuit-breaker trip) — those are
+/// the only conditions that flip `tonic-health` to NOT_SERVING.
 #[derive(Debug, Clone, Copy)]
 pub enum BackendHealthEvent {
     Success,
@@ -69,43 +50,32 @@ pub fn configure_backend_guard(timeout_secs: u64, max_calls: usize) {
     MAX_BACKEND_CALLS.set(max_calls).ok();
 }
 
-/// Called once at server startup to configure the per-slot login-lock
-/// acquisition timeout (cross-tenant DoS bound).
-pub fn configure_login_lock_timeout(secs: u64) {
-    LOGIN_LOCK_TIMEOUT.set(Duration::from_secs(secs)).ok();
-}
-
-/// Returns the configured login-lock acquisition timeout.
-/// Falls back to 10 seconds if `configure_login_lock_timeout` was never called.
-pub fn login_lock_timeout() -> Duration {
-    *LOGIN_LOCK_TIMEOUT.get().unwrap_or(&Duration::from_secs(10))
-}
-
 /// Wire up the channel that `spawn_backend` uses to report outcomes
 /// to the health-gating task. Called once at startup. If never called,
 /// backend outcomes are silently dropped — health gating is disabled
 /// and `tonic-health` stays at whatever startup last set it to.
-pub fn configure_backend_health_events(tx: mpsc::Sender<BackendHealthEvent>) {
+pub fn configure_backend_health_events(tx: mpsc::UnboundedSender<BackendHealthEvent>) {
     HEALTH_EVENT_TX.set(tx).ok();
 }
 
 fn report_backend_outcome(success: bool) {
     let Some(tx) = HEALTH_EVENT_TX.get() else { return };
-    // The channel is BOUNDED (L11): use non-blocking try_send from this sync
-    // data-plane path. Dropping on a full buffer is safe — Success events are
-    // already coalesced to unhealthy->healthy transitions (rare; the buffer is
-    // draining by then), and a dropped Failure is harmless because a full buffer
-    // already holds far more consecutive failures than the gate's flip threshold.
     if success {
-        // Only signal Success on a transition from a previously-unhealthy state:
-        // the gate uses it solely to reset its consecutive-failure counter, so
-        // repeated successes are noise on every data-plane RPC.
+        // Coalesce: only send a Success event when transitioning from
+        // a previously-unhealthy state. The gate's only use for
+        // Success is to reset its consecutive_failures counter; once
+        // reset, repeated Success events do nothing. Suppressing them
+        // removes one MPSC push (+ allocation) from every successful
+        // data-plane RPC.
         if !LAST_SENT_HEALTHY.swap(true, Ordering::Relaxed) {
-            let _ = tx.try_send(BackendHealthEvent::Success);
+            let _ = tx.send(BackendHealthEvent::Success);
         }
     } else {
+        // Failures always go through: the gate counts consecutive
+        // failures toward its threshold. Coalescing would make the
+        // counter never advance.
         LAST_SENT_HEALTHY.store(false, Ordering::Relaxed);
-        let _ = tx.try_send(BackendHealthEvent::Failure);
+        let _ = tx.send(BackendHealthEvent::Failure);
     }
 }
 
@@ -300,8 +270,7 @@ where
             max = max_calls,
             "Backend circuit breaker tripped — too many in-flight calls"
         );
-        // A flood of breaker trips means the daemon is overloaded (or the
-        // backend is wedged and every slot is held by a stuck call) and
+        // A flood of breaker trips means the daemon is overloaded and
         // downstream traffic should be diverted — count as a failure
         // for the health gate.
         report_backend_outcome(false);
@@ -309,29 +278,7 @@ where
     };
     let context_operation_guard = current_context_operation_guard();
 
-    // Set when the caller's timeout fires: tells the task's completion
-    // path to decrement the stuck gauge it was counted into.
-    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let timed_out_task = std::sync::Arc::clone(&timed_out);
-    let task = spawn_task(move || {
-        // Hold the slot for the TRUE lifetime of the backend call: a
-        // blocking task always runs to completion, so the guard drops
-        // exactly when the FFI returns (even if the caller timed out or
-        // the gRPC future was cancelled long before).
-        let _guard = guard;
-        let _context_operation_guard = context_operation_guard;
-        let result = operation();
-        if timed_out_task.load(Ordering::Acquire) {
-            let remaining = stuck_gauge.fetch_sub(1, Ordering::Relaxed) - 1;
-            tracing::info!(
-                stuck_calls = remaining,
-                "a previously stuck backend call returned; slot released"
-            );
-        }
-        result
-    });
-
-    let result = match tokio::time::timeout(timeout, task).await {
+    let result = match tokio::time::timeout(backend_timeout(), spawn_task(operation)).await {
         Ok(result) => result,
         Err(_elapsed) => {
             // Order matters: count the call as stuck BEFORE publishing the
@@ -357,56 +304,52 @@ where
         }
     };
 
-    if let Some(healthy) = classify(&result) {
-        tracing::debug!(healthy, "backend outcome classified");
-        report_backend_outcome(healthy);
-    }
+    let healthy = classify_backend_outcome::<T>(&result);
+    tracing::debug!(healthy, "backend outcome classified");
+    report_backend_outcome(healthy);
 
     result
+    // _guard drops here (or when Future is cancelled) → IN_FLIGHT decremented
 }
 
 /// Classify a `spawn_backend` result as healthy (true) or unhealthy
 /// (false) from the daemon-level readiness gauge's perspective.
 ///
-/// Transport failures are classified separately from provider responses:
-///   * timeouts (reported before returning proxy-generated DEVICE_ERROR),
+/// Health gating triggers ONLY on transport-level failures:
+///   * timeouts (mapped to `Ok(Err(CkRv::DEVICE_ERROR))` by
+///     [`spawn_backend`] above, distinguishable because PKCS#11
+///     application errors must never produce `CKR_DEVICE_ERROR`),
 ///   * `spawn_blocking` panics (`Err(Status)`),
 ///   * circuit-breaker trips (also `Ok(Err(CkRv::DEVICE_ERROR))` —
 ///     reported separately by `spawn_backend` before this function is
 ///     called).
 ///
-/// Native DEVICE_REMOVED/HOST_MEMORY also retain their provider-down meaning.
-/// Other PKCS#11 application errors (CKR_PIN_INCORRECT, CKR_DATA_INVALID,
+/// PKCS#11 application errors (CKR_PIN_INCORRECT, CKR_DATA_INVALID,
 /// CKR_MECHANISM_INVALID, …) are normal client-side outcomes; they
 /// must NOT trip the readiness gauge, or a noisy authentication user
 /// could take the daemon out of the load-balancer rotation.
 ///
 /// Extracted as a pure function so the contract is testable without
 /// the global `HEALTH_EVENT_TX` channel state.
-fn provider_rv_is_healthy(rv: CkRv) -> bool {
-    rv != CkRv::DEVICE_REMOVED && rv != CkRv::HOST_MEMORY
-}
-
 fn classify_backend_outcome<T>(result: &Result<CkResult<T>, Status>) -> bool {
     match result {
         Ok(Ok(_)) => true,
-        // Genuine backend/HSM-down signals: the device reports that it is gone
-        // or out of memory. A single client's request shape cannot induce these,
-        // so repeated occurrences remain a daemon-readiness signal.
-        Ok(Err(rv)) if !provider_rv_is_healthy(*rv) => {
+        // CkRv values that indicate the backend ITSELF is unhealthy
+        // (not just that the application's request was malformed).
+        // After N consecutive of these, the daemon flips
+        // tonic-health to NOT_SERVING so k8s pulls the pod out of
+        // the Service endpoint pool. Chaos scenario 2 verifies this.
+        Ok(Err(rv))
+            if *rv == CkRv::DEVICE_ERROR        // timeout / breaker trip
+                || *rv == CkRv::HOST_MEMORY     // HSM resource exhaustion
+                || *rv == CkRv::DEVICE_REMOVED  // HSM disconnected
+                || *rv == CkRv::TOKEN_NOT_PRESENT =>
+        {
             tracing::debug!(?rv, "backend outcome: unhealthy");
             false
         }
-        // Any OTHER backend-RETURNED CK_RV is a per-request response, NOT daemon
-        // health — including the `CKR_DEVICE_ERROR` catch-all (kryoptic & other
-        // backends return it for many request-specific conditions) and
-        // `CKR_TOKEN_NOT_PRESENT`. Letting these flip readiness would let one
-        // noisy client evict the pod for every tenant (M1). The daemon's own
-        // transport failures — timeout, circuit-breaker trip, blocking-pool
-        // panic — are reported separately and are the only request-path inputs
-        // that flip readiness.
-        Ok(Err(_)) => true,
-        Err(_) => false, // blocking-pool panic / transport break
+        Ok(Err(_)) => true, // normal application-level PKCS#11 error
+        Err(_) => false,    // blocking-pool panic / transport break
     }
 }
 
@@ -775,35 +718,8 @@ pub(super) async fn resolve_session_and_key(
     // CKR_KEY_HANDLE_INVALID locally.  This preserves transparency: the
     // backend decides the error priority (e.g., CKR_FUNCTION_NOT_SUPPORTED
     // vs CKR_KEY_HANDLE_INVALID).
-    let backend_key = key.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
-    // D6(1): a logically-logged-out caller must not USE a private object even
-    // when the shared backend token is logged in by other tenants. Unknown
-    // handles (0) skip the check — the backend decides their error. Authn
-    // runs before the authz gate below.
-    if backend_key.0 != 0 {
-        ensure_private_use_allowed(
-            ctx,
-            ctx_id,
-            session_handle,
-            key_handle,
-            CkSessionHandle(backend_session.0),
-            backend_key,
-        )
-        .await?;
-    }
-    // Per-object / per-class gate: enter when any object or class grant is
-    // active AND the key resolved to a real handle. When both flags are false
-    // (no policy configured) this is a zero-overhead transparent pass-through.
-    let backend_key = if (ctx.token_policy.per_object_active()
-        || ctx.token_policy.per_class_active())
-        && backend_key.0 != 0
-    {
-        gate_object_handle(ctx, ctx_id, session_handle, key_handle, backend_session, backend_key)
-            .await
-    } else {
-        backend_key
-    };
-    Ok((CkSessionHandle(backend_session.0 as u64), backend_key))
+    let backend_key = key.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
+    Ok((CkSessionHandle(backend_session.0), backend_key))
 }
 
 pub(super) async fn resolve_session_and_object(
@@ -828,40 +744,8 @@ pub(super) async fn resolve_session_and_object(
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
     // Forward CK_INVALID_HANDLE to backend when object is unknown — see
     // resolve_session_and_key for rationale.
-    let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
-    // D6(1): refuse private-object USE while logically logged out (authn
-    // before authz; unknown handles skip — the backend decides their error).
-    if backend_object.0 != 0 {
-        ensure_private_use_allowed(
-            ctx,
-            ctx_id,
-            session_handle,
-            object_handle,
-            CkSessionHandle(backend_session.0),
-            backend_object,
-        )
-        .await?;
-    }
-    // Per-object / per-class gate: see gate_object_handle for the invisible-denial
-    // contract. Zero-overhead when both per_object_active() and per_class_active()
-    // are false.
-    let backend_object = if (ctx.token_policy.per_object_active()
-        || ctx.token_policy.per_class_active())
-        && backend_object.0 != 0
-    {
-        gate_object_handle(
-            ctx,
-            ctx_id,
-            session_handle,
-            object_handle,
-            backend_session,
-            backend_object,
-        )
-        .await
-    } else {
-        backend_object
-    };
-    Ok((CkSessionHandle(backend_session.0 as u64), backend_object))
+    let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
+    Ok((CkSessionHandle(backend_session.0), backend_object))
 }
 
 pub(super) async fn resolve_session_and_two_objects(
@@ -889,62 +773,8 @@ pub(super) async fn resolve_session_and_two_objects(
     // Forward CK_INVALID_HANDLE to backend when either object is unknown; see
     // resolve_session_and_key for rationale. Local context/session validation
     // remains explicit; backend-visible object handle priority stays backend-owned.
-    let first_backend_object =
-        first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
-    let second_backend_object =
-        second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
-    // D6(1): refuse private-object USE while logically logged out (each
-    // handle independently; unknown handles skip — the backend decides).
-    for (virtual_object, backend_object) in
-        [(first_object_handle, first_backend_object), (second_object_handle, second_backend_object)]
-    {
-        if backend_object.0 != 0 {
-            ensure_private_use_allowed(
-                ctx,
-                ctx_id,
-                session_handle,
-                virtual_object,
-                CkSessionHandle(backend_session.0),
-                backend_object,
-            )
-            .await?;
-        }
-    }
-    // Per-object / per-class gate: gate each object independently (the two-object
-    // operations are wrapping/unwrapping where BOTH handles must be authorized).
-    // Zero-overhead when both per_object_active() and per_class_active() are false.
-    let (first_backend_object, second_backend_object) =
-        if ctx.token_policy.per_object_active() || ctx.token_policy.per_class_active() {
-            let first = if first_backend_object.0 != 0 {
-                gate_object_handle(
-                    ctx,
-                    ctx_id,
-                    session_handle,
-                    first_object_handle,
-                    backend_session,
-                    first_backend_object,
-                )
-                .await
-            } else {
-                first_backend_object
-            };
-            let second = if second_backend_object.0 != 0 {
-                gate_object_handle(
-                    ctx,
-                    ctx_id,
-                    session_handle,
-                    second_object_handle,
-                    backend_session,
-                    second_backend_object,
-                )
-                .await
-            } else {
-                second_backend_object
-            };
-            (first, second)
-        } else {
-            (first_backend_object, second_backend_object)
-        };
+    let first_backend_object = first_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
+    let second_backend_object = second_object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0));
 
     Ok((CkSessionHandle(backend_session.0 as u64), first_backend_object, second_backend_object))
 }
@@ -1671,28 +1501,24 @@ mod tests {
     }
 
     #[test]
-    fn classify_backend_returned_device_error_and_token_not_present_are_healthy() {
-        // M1: a backend-RETURNED CKR_DEVICE_ERROR (kryoptic's request-specific
-        // catch-all) or CKR_TOKEN_NOT_PRESENT is a per-request response, not a
-        // daemon-health signal — they must NOT flip readiness, or one noisy
-        // client could evict the pod. The daemon's own timeout/breaker DEVICE_ERROR
-        // is reported separately in spawn_backend before classification.
-        for rv in [CkRv::DEVICE_ERROR, CkRv::TOKEN_NOT_PRESENT] {
-            let result: Result<CkResult<()>, Status> = Ok(Err(rv));
-            assert!(
-                classify_backend_outcome(&result),
-                "backend-returned CkRv {:?} must be classified as healthy",
-                rv
-            );
-        }
+    fn classify_device_error_is_unhealthy() {
+        // CKR_DEVICE_ERROR is what spawn_backend produces on the
+        // timeout and circuit-breaker-trip paths. PKCS#11
+        // application errors must NOT use CKR_DEVICE_ERROR — that
+        // invariant is enforced by the proto layer (see
+        // ADR-0003 §3).
+        let result: Result<CkResult<()>, Status> = Ok(Err(CkRv::DEVICE_ERROR));
+        assert!(!classify_backend_outcome(&result));
     }
 
     #[test]
-    fn classify_genuine_hsm_down_signals_are_unhealthy() {
-        // CKR_HOST_MEMORY (HSM out of memory) and CKR_DEVICE_REMOVED (HSM
-        // disconnected) report that the device itself is down — not inducible
-        // by one client's request shape — so they remain readiness signals.
-        for rv in [CkRv::HOST_MEMORY, CkRv::DEVICE_REMOVED] {
+    fn classify_resource_exhaustion_is_unhealthy() {
+        // Chaos scenario 2: persistent CKR_HOST_MEMORY (HSM out of
+        // memory), CKR_DEVICE_REMOVED (HSM disconnected), or
+        // CKR_TOKEN_NOT_PRESENT (token gone) are backend-health
+        // signals, not application errors. Repeated occurrences
+        // flip readiness so k8s pulls the pod out of the Service.
+        for rv in [CkRv::HOST_MEMORY, CkRv::DEVICE_REMOVED, CkRv::TOKEN_NOT_PRESENT] {
             let result: Result<CkResult<()>, Status> = Ok(Err(rv));
             assert!(
                 !classify_backend_outcome(&result),

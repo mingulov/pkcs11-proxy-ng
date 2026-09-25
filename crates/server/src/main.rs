@@ -152,6 +152,21 @@ async fn build_service(
         );
     }
 
+    // Load mechanism registry from configured file (or embedded default).
+    // Logged so the operator can see the served revision at startup.
+    let registry_source = MechanismRegistrySource::load(config.mechanisms.config_path.as_deref())
+        .map_err(|e| format!("Mechanism registry load failed: {e}"))?;
+    {
+        let payload = registry_source.current();
+        tracing::info!(
+            revision = %payload.revision,
+            discovery_mode = %payload.discovery_mode,
+            parameterless = payload.parameterless.len(),
+            param_shapes = payload.params.len(),
+            "mechanism registry ready"
+        );
+    }
+
     // The authorization (token) policy is loaded ONCE at startup and is NOT
     // reloaded on SIGHUP (unlike the mechanism registry — see
     // spawn_sighup_handler). Changing `[auth.policy]` therefore requires a
@@ -167,21 +182,13 @@ async fn build_service(
     check_per_object_version_requirement(&token_policy, backend.as_ref())?;
     let tcp_auth_mode =
         config.listener.remote.as_ref().map_or(config::TcpAuthMode::None, |tcp| tcp.auth);
-    let unix_auth_mode =
-        config.listener.local.as_ref().map_or(config::UnixAuthMode::PeerCred, |uds| uds.auth);
-    let sanitize_inputs = config.proxy.sanitize_inputs;
-    let service = {
-        let svc = server::grpc_service::Pkcs11ProxyService::new(
-            context_manager.clone(),
-            backend.clone(),
-            tcp_auth_mode,
-            unix_auth_mode,
-            token_policy,
-            registry_source.clone(),
-            audit_sink,
-        );
-        if sanitize_inputs { svc.with_sanitize_inputs() } else { svc }
-    };
+    let service = server::grpc_service::Pkcs11ProxyService::new(
+        context_manager.clone(),
+        backend.clone(),
+        tcp_auth_mode,
+        token_policy,
+        registry_source.clone(),
+    );
     let grpc_service = pkcs11_proxy_ng_proto::Pkcs11ProxyServer::new(service)
         .max_decoding_message_size(config.proxy.max_message_bytes)
         .max_encoding_message_size(config.proxy.max_message_bytes);
@@ -242,42 +249,10 @@ fn check_per_object_version_requirement(
     Ok(())
 }
 
-/// Early, friendly validation of runtime listener support. The Unix socket
-/// transport is now wired (peer-cred auth); this only surfaces a clear error
-/// when the configured socket's parent directory does not exist, rather than
-/// failing deep inside `bind()`.
-fn validate_runtime_listener_support(config: &config::DaemonConfig) -> Result<(), BoxError> {
-    // The Unix-socket transport (and its SO_PEERCRED authentication) does not
-    // exist on non-Unix hosts; a Windows daemon serves mTLS TCP only.
-    #[cfg(not(unix))]
-    if config.listener.local.is_some() {
-        return Err("[listener.local] (unix socket + peer-cred) is not supported on this OS; \
-             configure [listener.remote] with auth = 'mtls' instead"
-            .into());
-    }
-    if let Some(ref uds) = config.listener.local
-        && let Some(parent) = uds.path.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.is_dir()
-    {
-        return Err(format!(
-            "unix socket directory does not exist: {} (for listener.local.path = {})",
-            parent.display(),
-            uds.path.display()
-        )
-        .into());
-    }
-    Ok(())
-}
-
 /// On SIGHUP the daemon reloads `mechanisms.config_path` and swaps the
 /// served payload atomically. Reload failures retain the current
 /// registry — the daemon must never crash because the operator pushed
 /// a malformed TOML file mid-rollout.
-///
-/// NOTE: only the mechanism registry is reloaded. The `[auth.policy]`
-/// authorization policy is load-once (see `token_policy` in `main`); changing
-/// it requires a daemon restart.
 #[cfg(unix)]
 fn spawn_sighup_handler(registry_source: MechanismRegistrySource) {
     tokio::spawn(async move {
@@ -314,7 +289,9 @@ fn spawn_sighup_handler(registry_source: MechanismRegistrySource) {
 /// reaches `threshold`, and flips it back to `SERVING` on the next
 /// successful backend call. Driven by `proxy.backend_health_consecutive_failures`.
 fn spawn_backend_health_gate(
-    mut rx: tokio::sync::mpsc::Receiver<server::grpc_service::service_utils::BackendHealthEvent>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<
+        server::grpc_service::service_utils::BackendHealthEvent,
+    >,
     mut reporter: tonic_health::server::HealthReporter,
     threshold: u32,
 ) {
@@ -617,6 +594,58 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         serve_futures.push(Box::pin(router.serve_with_incoming_shutdown(incoming, shutdown)));
     }
 
+    // Configure per-peer rate limiter for GetBackendInterfaces.
+    // Disabled by default (max_per_window=0); production deployments
+    // can set proxy.rate_limit_get_backend_interfaces to enable.
+    server::rate_limit::configure(
+        std::time::Duration::from_secs(config.proxy.rate_limit_window_secs),
+        config.proxy.rate_limit_get_backend_interfaces,
+    );
+
+    let (svc, context_manager, registry_source) = build_service(&config, &backend).await?;
+
+    // Loud one-time warning if TCP listener is running without auth
+    // (the design's default for SaaS deployments behind external
+    // network protection). Stays visible in operator log scans.
+    if let Some(tcp) = config.listener.remote.as_ref()
+        && matches!(tcp.auth, config::TcpAuthMode::None)
+        && tcp.allow_insecure_tcp
+    {
+        tracing::warn!(
+            bind = %tcp.bind,
+            "listening on tcp without authentication; relying on external network \
+             protection (k8s NetworkPolicy / VPC). do not use in untrusted networks."
+        );
+    }
+
+    // Wire backend-health gating: spawn_backend reports each outcome
+    // through an unbounded channel; this task counts consecutive
+    // transport-level failures and flips tonic-health to NOT_SERVING
+    // once `proxy.backend_health_consecutive_failures` is exceeded.
+    let (health_tx, health_rx) = tokio::sync::mpsc::unbounded_channel();
+    server::grpc_service::service_utils::configure_backend_health_events(health_tx);
+    spawn_backend_health_gate(
+        health_rx,
+        health_reporter.clone(),
+        config.proxy.backend_health_consecutive_failures,
+    );
+
+    // Install SIGHUP handler so operators can reload the mechanism
+    // registry without restarting the daemon. Reload failure retains
+    // the current registry and logs an error rather than crashing.
+    #[cfg(unix)]
+    spawn_sighup_handler(registry_source.clone());
+    let addr = resolve_bind_address(&config)?;
+
+    // Bind the TCP listener *before* flipping Health/SERVING. The
+    // consumer matrix surfaced a race where shim consumers saw the daemon's gRPC
+    // health probe report SERVING but their TCP connect was refused
+    // because tonic hadn't yet bound the listener. Binding here makes
+    // the SERVING flip below truthful: by the time external probes
+    // can see it, accept() is already running.
+    let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = tcp_listener.local_addr().unwrap_or(addr);
+
     health::set_serving(&mut health_reporter).await;
     spawn_eviction_task(
         context_manager,
@@ -627,7 +656,7 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
         config.proxy.max_stuck_backend_calls,
     );
 
-    tracing::info!(
+    tracing::info!(addr = %local_addr,
         lease_seconds = config.proxy.lease_seconds,
         max_message_bytes = config.proxy.max_message_bytes,
         request_timeout_secs = config.proxy.request_timeout_secs,
@@ -643,7 +672,29 @@ async fn async_main(config: config::DaemonConfig) -> Result<(), BoxError> {
     // inside spawn_backend() via tokio::time::timeout. A tonic-level timeout
     // would cancel the handler Future before spawn_backend can decrement
     // IN_FLIGHT, causing circuit breaker leaks under heavy load.
-    let serve_result = futures::future::try_join_all(serve_futures).await;
+    let mut builder = Server::builder();
+    if let Some(ref tcp_cfg) = config.listener.remote
+        && let Some(tls_config) =
+            server::transport::server_tls_config(tcp_cfg).map_err(std::io::Error::other)?
+    {
+        builder = builder.tls_config(tls_config)?;
+    }
+    if config.proxy.http2_keepalive_interval_secs > 0 {
+        builder = builder
+            .http2_keepalive_interval(Some(std::time::Duration::from_secs(
+                config.proxy.http2_keepalive_interval_secs,
+            )))
+            .http2_keepalive_timeout(Some(std::time::Duration::from_secs(
+                config.proxy.http2_keepalive_timeout_secs,
+            )));
+    }
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(tcp_listener);
+    builder
+        .layer(server::trace_id::TraceIdLayer)
+        .add_service(health_service)
+        .add_service(svc)
+        .serve_with_incoming_shutdown(incoming, shutdown_signal())
+        .await?;
 
     // Best-effort: remove the Unix socket file on shutdown so a restart can
     // rebind cleanly (the path persists in the filesystem after the fd closes).

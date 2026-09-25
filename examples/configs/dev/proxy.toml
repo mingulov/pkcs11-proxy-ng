@@ -21,9 +21,6 @@ backend_health_consecutive_failures = 3
 # Conservative concurrency on a developer box.
 max_concurrent_backend_calls = 20
 max_blocking_threads = 64
-# Reject NULL data pointers (len>0) and NULL mechanisms before the backend module.
-# OFF by default (ADR-0010 transparent forwarding). Enable for modules that crash on them.
-# sanitize_inputs = true
 
 [listener.remote]
 bind = "127.0.0.1:7512"

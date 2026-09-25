@@ -11,14 +11,95 @@ mod mtls_fixture;
 use mtls_fixture::MtlsFixture;
 
 async fn start_mtls_daemon() -> MtlsFixture {
-    mtls_fixture::start_mtls_daemon(
-        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS])),
-        [
-            TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:MockToken".into())]),
-            TokenAccessSpec::Specific(vec![]),
-        ],
-    )
-    .await
+    let temp = tempfile::tempdir().unwrap();
+    let (ca_cert, ca_issuer) = new_ca();
+    let server = new_leaf(
+        &ca_issuer,
+        "localhost",
+        vec!["localhost".into()],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    );
+    let client_a =
+        new_leaf(&ca_issuer, "client-a", Vec::new(), ExtendedKeyUsagePurpose::ClientAuth);
+    let client_b =
+        new_leaf(&ca_issuer, "client-b", Vec::new(), ExtendedKeyUsagePurpose::ClientAuth);
+
+    let ca_path = write_file(&temp, "ca.pem", &ca_cert.pem());
+    let server_cert = write_file(&temp, "server.pem", &server.cert_pem);
+    let server_key = write_file(&temp, "server-key.pem", &server.key_pem);
+    let client_a_cert = write_file(&temp, "client-a.pem", &client_a.cert_pem);
+    let client_a_key = write_file(&temp, "client-a-key.pem", &client_a.key_pem);
+    let client_b_cert = write_file(&temp, "client-b.pem", &client_b.cert_pem);
+    let client_b_key = write_file(&temp, "client-b-key.pem", &client_b.key_pem);
+
+    let (issuer, subject) = mtls::extract_identity(&client_a.der).unwrap();
+    let client_a_identity = format!("x509:issuer={issuer};subject={subject}");
+    let token_policy = TokenPolicy::from_config(&AuthConfig {
+        allow_all_authenticated: false,
+        policy: vec![PolicyEntry {
+            identity: client_a_identity,
+            tokens: TokenAccessSpec::Specific(vec!["label:MockToken".into()]),
+        }],
+    })
+    .unwrap();
+
+    let backend: Arc<dyn Pkcs11Backend> =
+        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+    let context_manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+    context_manager.populate_slots(&backend).await.unwrap();
+    let service = Pkcs11ProxyService::new(
+        context_manager,
+        backend,
+        TcpAuthMode::Mtls,
+        Arc::new(token_policy),
+        pkcs11_proxy_ng::mechanism_registry_source::MechanismRegistrySource::load(None).unwrap(),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let tcp = TcpListenerConfig {
+        bind: addr.to_string(),
+        auth: TcpAuthMode::Mtls,
+        ca_cert: Some(ca_path.clone()),
+        server_cert: Some(server_cert),
+        server_key: Some(server_key),
+        allow_insecure_tcp: false,
+    };
+    let tls_config = pkcs11_proxy_ng::server::transport::server_tls_config(&tcp).unwrap().unwrap();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        let incoming = TcpListenerStream::new(listener);
+        let _ = Server::builder()
+            .tls_config(tls_config)
+            .unwrap()
+            .add_service(Pkcs11ProxyServer::new(service))
+            .serve_with_incoming_shutdown(incoming, async move {
+                let mut shutdown_rx = shutdown_rx;
+                let _ = shutdown_rx.changed().await;
+            })
+            .await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    MtlsFixture {
+        endpoint: format!("https://127.0.0.1:{}", addr.port()),
+        ca_cert: ca_path.clone(),
+        client_a: ClientTlsFiles {
+            ca_cert: ca_path.clone(),
+            client_cert: client_a_cert,
+            client_key: client_a_key,
+            domain_name: Some("localhost".into()),
+        },
+        client_b: ClientTlsFiles {
+            ca_cert: ca_path,
+            client_cert: client_b_cert,
+            client_key: client_b_key,
+            domain_name: Some("localhost".into()),
+        },
+        _temp: temp,
+        _shutdown: shutdown_tx,
+    }
 }
 
 #[tokio::test]

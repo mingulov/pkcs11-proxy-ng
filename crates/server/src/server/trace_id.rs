@@ -61,10 +61,10 @@ where
 
         // Make the ID available to handler-side logic too, even though
         // most handlers will read it only via the tracing context.
-        if !req.headers().contains_key(REQUEST_ID_HEADER)
-            && let Ok(val) = HeaderValue::from_str(&request_id)
-        {
-            req.headers_mut().insert(REQUEST_ID_HEADER, val);
+        if !req.headers().contains_key(REQUEST_ID_HEADER) {
+            if let Ok(val) = HeaderValue::from_str(&request_id) {
+                req.headers_mut().insert(REQUEST_ID_HEADER, val);
+            }
         }
         let method = req.uri().path().to_owned();
         let span = tracing::info_span!(

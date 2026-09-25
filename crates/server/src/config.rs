@@ -9,7 +9,7 @@ pub fn env_var_help() -> String {
         (
             "PKCS11_PROXY_BIND",
             "listener.remote.bind",
-            "TCP listen address; with no [listener.remote] block it creates an unauthenticated listener only if PKCS11_PROXY_ALLOW_INSECURE=1.",
+            "TCP listen address; creates an insecure-TCP listener if [listener.remote] is absent.",
         ),
         (
             "PKCS11_PROXY_BACKEND_MODULE",
@@ -25,26 +25,6 @@ pub fn env_var_help() -> String {
             "PKCS11_PROXY_MECHANISMS_CONFIG",
             "mechanisms.config_path",
             "Path to the mechanism_params.toml registry served to shims.",
-        ),
-        (
-            "PKCS11_PROXY_ALLOW_INSECURE",
-            "listener.remote.allow_insecure_tcp",
-            "Set to 1 to let PKCS11_PROXY_BIND create an unauthenticated TCP listener.",
-        ),
-        (
-            "PKCS11_PROXY_RESILIENCE_METRICS_SOCKET",
-            "resilience.metrics_socket",
-            "Unix-domain metrics endpoint path; serves Prometheus text on GET /metrics (mode 0600).",
-        ),
-        (
-            "PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD",
-            "resilience.find_result_warn_threshold",
-            "C_FindObjects result size above which a pathological-population event is counted and logged.",
-        ),
-        (
-            "PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET",
-            "test_hooks.control_socket",
-            "Hook-gated control endpoint path (mode 0600); requires a native-owner-test-hooks build, default builds fail closed.",
         ),
     ];
     let var_w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
@@ -69,28 +49,6 @@ pub struct DaemonConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub mechanisms: MechanismsConfig,
-    #[serde(default)]
-    pub resilience: ResilienceConfig,
-    #[serde(default)]
-    pub audit: AuditConfig,
-    #[serde(default)]
-    pub rate_limit: RateLimitConfig,
-    #[serde(default)]
-    pub test_hooks: TestHooksConfig,
-}
-
-/// Hook-gated daemon control plane (C3M.6 row 18). Absent section => all
-/// fields `None` => inert (byte-identical to today). A configured control
-/// socket requires a `native-owner-test-hooks` build; default builds fail
-/// closed at startup (see `server::validate_test_hooks_config`) instead of
-/// silently ignoring it.
-#[derive(Debug, Deserialize, Default)]
-pub struct TestHooksConfig {
-    /// If set, a Unix-domain control endpoint (mode 0600) is bound here,
-    /// serving the hook surface (`GET /hooks/instance`,
-    /// `GET /hooks/last-mechanism`, `POST /hooks/fail-next-close`) for
-    /// subprocess/topology fault-injection tests.
-    pub control_socket: Option<PathBuf>,
 }
 
 /// Mechanism registry source. The daemon loads the file at startup and
@@ -332,36 +290,6 @@ pub struct ProxyConfig {
     /// Window length for the per-peer rate limiter, in seconds.
     #[serde(default = "default_rate_limit_window_secs")]
     pub rate_limit_window_secs: u64,
-    /// Reject spec-invalid inputs (NULL data pointer with len>0, NULL mechanism
-    /// on operation init) with CKR_ARGUMENTS_BAD at the daemon, before they
-    /// reach the module — protects a shared daemon from modules that crash on
-    /// them. OFF by default per ADR-0010 (trades transparency for availability).
-    /// NOTE: a sanitize-mode reject does NOT terminate the active backend
-    /// operation the way a module-returned error would (documented divergence).
-    #[serde(default)]
-    pub sanitize_inputs: bool,
-    /// If set, the daemon exits (nonzero) once the number of stuck backend
-    /// calls — calls that outlived `request_timeout_secs` and are still
-    /// wedged inside the token — exceeds this limit, so a supervisor
-    /// (systemd/k8s) restarts it. This is the restart-based recovery for a
-    /// PERMANENTLY wedged token (see ADR-0011 A2 alignment); opt-in only.
-    /// Unset (default) = never self-exit; the daemon keeps serving other
-    /// tokens and self-recovers if the wedged one unsticks.
-    #[serde(default)]
-    pub max_stuck_backend_calls: Option<u64>,
-    /// How long (in seconds) to hold the per-slot login lock while a
-    /// `C_Login` or `C_Logout` is in flight. Used by the slot-login
-    /// serialization logic to prevent concurrent login/logout races on
-    /// shared slots. Default 10 seconds.
-    #[serde(default = "default_login_lock_timeout_secs")]
-    pub login_lock_timeout_secs: u64,
-}
-
-/// Whether the daemon should self-exit given the stuck-call gauge and the
-/// configured limit. Pure so the policy is unit-tested without a process
-/// exit; the single caller performs the actual exit.
-pub fn should_exit_on_stuck_calls(stuck: u64, limit: Option<u64>) -> bool {
-    matches!(limit, Some(max) if stuck > max)
 }
 
 impl Default for ProxyConfig {
@@ -382,9 +310,6 @@ impl Default for ProxyConfig {
             backend_health_consecutive_failures: default_backend_health_consecutive_failures(),
             rate_limit_get_backend_interfaces: default_rate_limit_get_backend_interfaces(),
             rate_limit_window_secs: default_rate_limit_window_secs(),
-            sanitize_inputs: false,
-            max_stuck_backend_calls: None,
-            login_lock_timeout_secs: default_login_lock_timeout_secs(),
         }
     }
 }
@@ -432,9 +357,6 @@ fn default_shutdown_grace_secs() -> u64 {
 }
 fn default_backend_health_consecutive_failures() -> u32 {
     3
-}
-fn default_login_lock_timeout_secs() -> u64 {
-    10
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -754,14 +676,6 @@ impl DaemonConfig {
         let mut config: Self = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse config '{}': {e}", path.display()))?;
         config.apply_env_overrides();
-        // Security: refuse to start if config file or backend module is group/world-writable
-        // — a writable code-execution surface reachable by unprivileged users.
-        check_not_group_or_world_writable(path, "config file")?;
-        if config.backend.module.as_os_str() != BACKEND_MODULE_PLACEHOLDER
-            && config.backend.module != std::path::Path::new("/dev/null")
-        {
-            check_not_group_or_world_writable(&config.backend.module, "backend module")?;
-        }
         config.validate()?;
         Ok(config)
     }
@@ -775,13 +689,10 @@ impl DaemonConfig {
     /// HSM .sos without rewriting the ConfigMap, etc.).
     ///
     /// Documented env vars:
-    /// - `PKCS11_PROXY_BIND`                          → `listener.remote.bind`
-    /// - `PKCS11_PROXY_BACKEND_MODULE`                → `backend.module`
-    /// - `PKCS11_PROXY_BACKEND_ARGS`                  → `backend.initialize_args`
-    /// - `PKCS11_PROXY_MECHANISMS_CONFIG`             → `mechanisms.config_path`
-    /// - `PKCS11_PROXY_RESILIENCE_METRICS_SOCKET`     → `resilience.metrics_socket`
-    /// - `PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD`     → `resilience.find_result_warn_threshold`
-    /// - `PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET`     → `test_hooks.control_socket`
+    /// - `PKCS11_PROXY_BIND`              → `listener.remote.bind`
+    /// - `PKCS11_PROXY_BACKEND_MODULE`    → `backend.module`
+    /// - `PKCS11_PROXY_BACKEND_ARGS`      → `backend.initialize_args`
+    /// - `PKCS11_PROXY_MECHANISMS_CONFIG` → `mechanisms.config_path`
     pub fn apply_env_overrides(&mut self) {
         // Keep this list in sync with env_var_help() below — both surface the
         // same canonical env-var → TOML-field mapping.
@@ -796,39 +707,23 @@ impl DaemonConfig {
         }
         if let Ok(v) = std::env::var("PKCS11_PROXY_BIND") {
             // Bind override applies to whichever TCP listener is already
-            // configured; if there's no [listener.remote] block, the env var
-            // creates an unauthenticated TCP listener — but only when
-            // PKCS11_PROXY_ALLOW_INSECURE is explicitly set; otherwise
-            // validate() rejects it, so a single env var can never silently
-            // provision an open listener. Tighter listener semantics (auth,
-            // TLS) still have to come from the TOML.
+            // configured; if there's no [listener.remote] block, the env
+            // var implicitly creates a TCP listener with insecure-TCP
+            // default. Tighter listener semantics (auth, TLS) still have
+            // to come from the TOML.
             match self.listener.remote.as_mut() {
                 Some(tcp) => tcp.bind = v,
                 None => {
-                    let allow_insecure_tcp = std::env::var("PKCS11_PROXY_ALLOW_INSECURE")
-                        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
-                        .unwrap_or(false);
                     self.listener.remote = Some(TcpListenerConfig {
                         bind: v,
                         auth: TcpAuthMode::None,
                         ca_cert: None,
                         server_cert: None,
                         server_key: None,
-                        allow_insecure_tcp,
+                        allow_insecure_tcp: true,
                     });
                 }
             }
-        }
-        if let Ok(v) = std::env::var("PKCS11_PROXY_RESILIENCE_METRICS_SOCKET") {
-            self.resilience.metrics_socket = Some(std::path::PathBuf::from(v));
-        }
-        if let Ok(v) = std::env::var("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD")
-            && let Ok(n) = v.parse::<usize>()
-        {
-            self.resilience.find_result_warn_threshold = Some(n);
-        }
-        if let Ok(v) = std::env::var("PKCS11_PROXY_TEST_HOOKS_CONTROL_SOCKET") {
-            self.test_hooks.control_socket = Some(std::path::PathBuf::from(v));
         }
     }
 

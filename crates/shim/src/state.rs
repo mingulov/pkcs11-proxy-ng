@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -160,45 +160,6 @@ type SessionMechanismParamMap = Mutex<HashMap<CK_SESSION_HANDLE, usize>>;
 static SESSION_SLOTS: LazyLock<SessionSlotMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static DELAYED_GCM_WRITEBACK: LazyLock<SessionMechanismParamMap> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum MessageOperation {
-    Encrypt,
-    Decrypt,
-    Sign,
-    Verify,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct MessageOperationState {
-    pub(crate) shape: Option<MessageParameterShape>,
-}
-
-type MessageOperationStateMap =
-    Mutex<HashMap<(CK_SESSION_HANDLE, MessageOperation), Arc<Mutex<MessageOperationState>>>>;
-static MESSAGE_OPERATION_STATES: LazyLock<MessageOperationStateMap> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Return the stable per-session/per-operation guard object without retaining
-/// the global map lock. Callers lock this object across parsing, RPC and
-/// writeback so a concurrent Init cannot change shape mid-call.
-pub(crate) fn message_operation_state(
-    h_session: CK_SESSION_HANDLE,
-    operation: MessageOperation,
-) -> Arc<Mutex<MessageOperationState>> {
-    MESSAGE_OPERATION_STATES
-        .lock()
-        .expect("message-operation state map poisoned")
-        .entry((h_session, operation))
-        .or_insert_with(|| Arc::new(Mutex::new(MessageOperationState::default())))
-        .clone()
-}
-
-fn evict_message_operations(h_session: CK_SESSION_HANDLE) {
-    if let Ok(mut map) = MESSAGE_OPERATION_STATES.lock() {
-        map.retain(|(session, _), _| *session != h_session);
-    }
-}
 
 pub(crate) fn remember_session_slot(h_session: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
     if let Ok(mut map) = SESSION_SLOTS.lock() {
@@ -457,9 +418,6 @@ pub(crate) fn clear_all_caches() {
         map.clear();
     }
     if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
-        map.clear();
-    }
-    if let Ok(mut map) = MESSAGE_OPERATION_STATES.lock() {
         map.clear();
     }
 }
@@ -730,18 +688,6 @@ fn apply_jitter(base: Duration, jitter_pct: u32) -> Duration {
 /// `MAX_ATTEMPTS` failures. Each attempt's connect call is itself
 /// bounded by `timeout_secs` so a hung TCP handshake cannot block the
 /// retry loop indefinitely.
-///
-/// `PKCS11_PROXY_CONNECT_ATTEMPTS` lowers the attempt cap (clamped to
-/// `1..=MAX_ATTEMPTS`) for deployments — and the test suite — that
-/// must fail fast on an unreachable daemon. It cannot raise the cap:
-/// the resilience contract's bound on how long `C_Initialize` can
-/// block stays intact.
-pub(crate) fn connect_attempts_from_value(raw: Option<&str>) -> u32 {
-    raw.and_then(|s| s.trim().parse::<u32>().ok())
-        .map(|n| n.clamp(1, MAX_ATTEMPTS))
-        .unwrap_or(MAX_ATTEMPTS)
-}
-
 async fn connect_with_retry(
     endpoint: &str,
     tls_files: Option<pkcs11_proxy_ng_client::tls::ClientTlsFiles>,
@@ -751,7 +697,7 @@ async fn connect_with_retry(
     let max_attempts =
         connect_attempts_from_value(std::env::var("PKCS11_PROXY_CONNECT_ATTEMPTS").ok().as_deref());
 
-    for attempt in 0..max_attempts {
+    for attempt in 0..MAX_ATTEMPTS {
         let delay = backoff_for_attempt(attempt);
         if !delay.is_zero() {
             tracing::debug!(
@@ -773,7 +719,7 @@ async fn connect_with_retry(
             Ok(Err(e)) => {
                 tracing::warn!(
                     attempt = attempt + 1,
-                    max_attempts,
+                    max_attempts = MAX_ATTEMPTS,
                     error = %e,
                     "gRPC connect failed, retrying"
                 );
@@ -781,14 +727,14 @@ async fn connect_with_retry(
             Err(_) => {
                 tracing::warn!(
                     attempt = attempt + 1,
-                    max_attempts,
+                    max_attempts = MAX_ATTEMPTS,
                     timeout_secs,
                     "gRPC connect timed out, retrying"
                 );
             }
         }
     }
-    Err(format!("all {max_attempts} connect attempts failed"))
+    Err(format!("all {MAX_ATTEMPTS} connect attempts failed"))
 }
 
 #[cfg(test)]
@@ -847,34 +793,6 @@ mod backoff_tests {
     #[test]
     fn jitter_on_zero_delay_stays_zero() {
         assert_eq!(apply_jitter(Duration::ZERO, JITTER_PCT), Duration::ZERO);
-    }
-
-    #[test]
-    fn connect_attempts_defaults_to_max() {
-        assert_eq!(connect_attempts_from_value(None), MAX_ATTEMPTS);
-    }
-
-    #[test]
-    fn connect_attempts_accepts_lower_values() {
-        assert_eq!(connect_attempts_from_value(Some("1")), 1);
-        assert_eq!(connect_attempts_from_value(Some("3")), 3);
-    }
-
-    #[test]
-    fn connect_attempts_clamps_zero_to_one() {
-        assert_eq!(connect_attempts_from_value(Some("0")), 1);
-    }
-
-    #[test]
-    fn connect_attempts_cannot_exceed_contract_cap() {
-        assert_eq!(connect_attempts_from_value(Some("50")), MAX_ATTEMPTS);
-    }
-
-    #[test]
-    fn connect_attempts_ignores_unparseable_values() {
-        assert_eq!(connect_attempts_from_value(Some("junk")), MAX_ATTEMPTS);
-        assert_eq!(connect_attempts_from_value(Some("")), MAX_ATTEMPTS);
-        assert_eq!(connect_attempts_from_value(Some("-2")), MAX_ATTEMPTS);
     }
 
     #[test]

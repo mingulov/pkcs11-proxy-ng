@@ -3,8 +3,7 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::output::byte_output_function_from_i32;
 use pkcs11_proxy_ng_types::{
-    ByteOutputFunction, CkInBuf, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
-    SecretBytes,
+    ByteOutputFunction, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
 };
 
 use super::super::context_manager::ClientContextId;
@@ -41,7 +40,6 @@ pub(super) async fn byte_output_exact(
     fn error_response(error: CkRv) -> pkcs11_proxy_ng_proto::ByteOutputExactResponse {
         pkcs11_proxy_ng_proto::ByteOutputExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
-                apply_returned_len: Some(false),
                 ck_rv: error.0,
                 returned_len: 0,
                 value: None,
@@ -49,6 +47,13 @@ pub(super) async fn byte_output_exact(
             mechanism_out: None,
         }
     }
+
+    // Build the output buffer spec
+    let spec = req
+        .output_spec
+        .as_ref()
+        .map(|s| CkOutputBufferSpec { buffer_present: s.buffer_present, buffer_len: s.buffer_len })
+        .unwrap_or(CkOutputBufferSpec { buffer_present: false, buffer_len: 0 });
 
     // Build the output buffer spec
     let spec =
@@ -64,42 +69,30 @@ pub(super) async fn byte_output_exact(
     match function {
         // Shape: (session, mechanism, wrapping_key, key, spec) -> wrap_key_exact
         ByteOutputFunction::WrapKey => {
-            let outcome = async {
-                let p = match super::key_ops::wrap_preparation::prepare_wrap(
-                    ctx,
-                    &ctx_id,
-                    req.session_handle,
-                    req.wrapping_key_handle,
-                    req.key_handle,
-                    req.mechanism,
-                )
-                .await?
-                {
-                    Ok(p) => p,
-                    Err(rv) => return Ok(Err(rv)),
-                };
-                let backend = ctx.backend.clone();
-                spawn_backend_exact(move || {
-                    ExactCompletion::capture(backend.wrap_key_exact_with_output(
-                        p.session,
-                        &p.mechanism,
-                        p.wrapping_key,
-                        p.key,
-                        &spec,
-                    ))
-                })
-                .await
-            }
-            .await;
-            let result = super::audit_events::audit_key_outcome(
-                ctx,
+            let mechanism = match parse_mechanism(req.mechanism) {
+                Ok(m) => m,
+                Err(error) => return Ok(Response::new(error_response(error))),
+            };
+
+            let (session, wrapping_key, key) = match resolve_session_and_two_objects(
+                ctx_mgr,
                 &ctx_id,
                 "C_WrapKey",
                 req.session_handle,
-                started,
-                outcome,
-                |(output, _)| output.ck_rv,
-            )?;
+                req.wrapping_key_handle,
+                req.key_handle,
+            )
+            .await
+            {
+                Ok(handles) => handles,
+                Err(error) => return Ok(Response::new(error_response(error))),
+            };
+
+            let backend = backend_ref.clone();
+            let result = spawn_backend(move || {
+                backend.wrap_key_exact_with_output(session, &mechanism, wrapping_key, key, &spec)
+            })
+            .await?;
             let (wrap_result, mechanism_out) = match result {
                 Ok((output, mech_out)) => (Ok(output), mech_out),
                 Err(error) => (Err(error), None),
@@ -116,11 +109,10 @@ pub(super) async fn byte_output_exact(
         | ByteOutputFunction::EncryptFinal
         | ByteOutputFunction::DecryptFinal
         | ByteOutputFunction::GetOperationState => {
-            let session =
-                match resolve_session(&ctx.context_manager, &ctx_id, req.session_handle).await {
-                    Ok(s) => s,
-                    Err(error) => return Ok(Response::new(error_response(error))),
-                };
+            let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
+                Ok(s) => s,
+                Err(error) => return Ok(Response::new(error_response(error))),
+            };
 
             let backend = ctx.backend.clone();
             let result = spawn_backend_exact(move || {
@@ -136,11 +128,10 @@ pub(super) async fn byte_output_exact(
 
         // Shape: (session, data, spec) -> all remaining functions
         _ => {
-            let session =
-                match resolve_session(&ctx.context_manager, &ctx_id, req.session_handle).await {
-                    Ok(s) => s,
-                    Err(error) => return Ok(Response::new(error_response(error))),
-                };
+            let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
+                Ok(s) => s,
+                Err(error) => return Ok(Response::new(error_response(error))),
+            };
 
             // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
             if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {

@@ -9,7 +9,7 @@
 #       apk --no-cache add --allow-untrusted --repository /apk pkcs11-proxy-ng-shim
 #
 # Supported ALPINE_VER values for Phase 1: 3.22, 3.23. Older Alpine
-# releases ship a Rust toolchain below the workspace MSRV (1.88) — the
+# releases ship a Rust toolchain below the workspace MSRV (1.85) — the
 # matrix is intentionally narrow.
 
 ARG ALPINE_VER=3.23
@@ -20,7 +20,7 @@ ARG READY_IMAGE=scratch
 ARG BUILD_DATE=unknown
 ARG GIT_COMMIT=unknown
 
-# ─── Stage 1: build APKs using rustup-managed Rust toolchain ──────────────────
+# ─── Stage 1: build APKs using stock Alpine toolchain ──────────────────────
 
 FROM ${ALPINE_BUILD_IMAGE} AS buildapk
 

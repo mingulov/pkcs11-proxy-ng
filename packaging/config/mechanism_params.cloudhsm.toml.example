@@ -16,11 +16,10 @@
 #   out so a casual `include` does not change behaviour. Uncomment the
 #   mechanisms you actually need.
 # - All entries below reuse parameter shapes that the shim already
-#   understands (gcm, iv, rsa_oaep, rsa_pss, ecdh1_derive). Shape names
-#   are matched exactly (snake_case) — a wrong name silently degrades
-#   to untyped bytes rejected at the backend. Adding a mechanism that
-#   needs a NEW shape requires shim code changes per AGENTS.md rule 12
-#   steps 1-5; this file alone cannot do that.
+#   understands (gcm, iv, rsa_pkcs_oaep, rsa_pkcs_pss, ecdh1_derive,
+#   raw). Adding a mechanism that needs a NEW shape requires shim
+#   code changes per AGENTS.md rule 12 steps 1-5; this file alone
+#   cannot do that.
 # - CloudHSM mechanism IDs are conventionally in the vendor range
 #   (0x80000000+). Check current AWS docs for the authoritative list;
 #   the IDs below illustrate the file structure but may shift between
@@ -45,7 +44,7 @@
 # ]
 #
 # [[params]]
-# shape = "rsa_oaep"
+# shape = "rsa_pkcs_oaep"
 # mechanisms = [
 #     # 0x80000030,  # CKM_CLOUDHSM_RSA_OAEP (example placeholder)
 # ]

@@ -1,16 +1,5 @@
 # Follow-up: make context eviction in-flight aware
 
-> **STATUS: FIXED (2026-05-30).** `LogicalClientInstance` now carries an
-> `in_flight: Arc<AtomicI64>`; `ContextManager::begin_operation()` returns an
-> `OperationGuard` (RAII) that bumps it and, on drop, decrements + `touch()`es.
-> Eviction (`is_reapable`) skips any context with `in_flight > 0`. The guard is
-> taken once, generically, in the gRPC dispatch macro `$name` arm (every
-> dispatched request carries `client_context_id`), so all backend ops are covered
-> in ONE place — no per-handler churn. Verified: softhsm2 DH param-gen (~37s single
-> op) 2 failed → **6 passed at the default lease=30** (previously evicted mid-call),
-> plus a unit test (`evict_expired_skips_context_with_in_flight_operation`). The
-> design notes below are retained as the record.
-
 ## The bug
 
 `ContextManager` evicts a logical client context once

@@ -29,26 +29,8 @@ fn new_grpc_client(channel: Channel) -> GrpcClient<Channel> {
 /// older daemons predating the field).
 #[derive(Debug, Clone)]
 pub struct BackendProbe {
-    pub exact_output_effects_version: Option<u32>,
     pub interfaces: Vec<(u8, u8, Vec<String>)>,
     pub mechanism_registry: Option<MechanismRegistryPayload>,
-    /// Backend `sizeof(CK_ULONG)` in bytes (4 or 8), advertised for the width
-    /// bridge (ADR-0011 D2). `None` against an older daemon that predates the
-    /// field — the caller falls back to 8 with a warning (D9).
-    pub backend_ulong_size: Option<u32>,
-    /// Backend `CK_ULONG` byte order (1 = little, 2 = big; ADR-0011 D6).
-    /// `None` against an older daemon.
-    pub backend_byte_order: Option<u32>,
-    /// The backend's native sizeof(CK_ATTRIBUTE) (D2 extension), if advertised.
-    pub backend_attribute_stride: Option<u32>,
-    /// True only when the daemon supports shape-bound message parameters.
-    /// Older daemons omit the field and are therefore unsafe.
-    pub pointer_safe_message_parameters: bool,
-    pub pointer_safe_authenticated_parameters: bool,
-}
-
-fn pointer_safe_message_parameters_from_wire(advertised: Option<bool>) -> bool {
-    advertised.unwrap_or(false)
 }
 
 async fn connect_channel(
@@ -160,7 +142,6 @@ impl Pkcs11Client {
     /// channel sharing). Reconnection will not be available.
     pub fn from_channel(channel: tonic::transport::Channel) -> Self {
         Self {
-            exact_effects_version: Default::default(),
             grpc: new_grpc_client(channel),
             context_id: None,
             source: ConnectionSource::SharedChannel,
@@ -228,29 +209,13 @@ impl Pkcs11Client {
             .map_err(|e| format!("GetBackendInterfaces failed: {e}"))?
             .into_inner();
 
-        self.exact_effects_version.store(
-            resp.exact_output_effects_version.unwrap_or(0),
-            std::sync::atomic::Ordering::Release,
-        );
         let interfaces = resp
             .interfaces
             .into_iter()
             .map(|info| (info.version_major as u8, info.version_minor as u8, info.null_functions))
             .collect();
 
-        Ok(BackendProbe {
-            exact_output_effects_version: resp.exact_output_effects_version,
-            pointer_safe_authenticated_parameters: resp.pointer_safe_authenticated_parameters
-                == Some(true),
-            interfaces,
-            mechanism_registry: resp.mechanism_registry,
-            backend_ulong_size: resp.backend_ulong_size,
-            backend_byte_order: resp.backend_byte_order,
-            backend_attribute_stride: resp.backend_attribute_stride,
-            pointer_safe_message_parameters: pointer_safe_message_parameters_from_wire(
-                resp.pointer_safe_message_parameters,
-            ),
-        })
+        Ok(BackendProbe { interfaces, mechanism_registry: resp.mechanism_registry })
     }
 
     /// Re-dial the endpoint (if it was created via `connect`) and probe the
@@ -262,7 +227,6 @@ impl Pkcs11Client {
                     .await
                     .map_err(|_| CkRv::DEVICE_ERROR)?;
                 self.grpc = new_grpc_client(channel);
-                self.exact_effects_version = Default::default();
                 if let Some(ref ctx) = self.context_id {
                     let req = pkcs11_proxy_ng_proto::GetSlotListRequest {
                         client_context_id: ctx.clone(),

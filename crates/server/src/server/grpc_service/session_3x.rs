@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_types::*;
 
@@ -61,11 +62,10 @@ pub(super) async fn login_user(
     };
 
     let user_type_raw = req.user_type;
-    // Hold the PIN and username in `SecretBytes`: wiped on drop and redacted
-    // in Debug. DO NOT log pin or username at any tracing level.
-    // (build.rs flags LoginUserRequest.username secret-bearing.)
-    let pin = SecretBytes::new(req.pin);
-    let username = SecretBytes::new(req.username);
+    // PIN bytes are zeroized when the closure drops.
+    // DO NOT log pin or username at any tracing level.
+    let pin = Zeroizing::new(req.pin);
+    let username = req.username;
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
         let pin = pin.into_zeroizing();

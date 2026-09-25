@@ -7,7 +7,6 @@
 //! get the static (all-non-null) function lists; post-`C_Initialize`
 //! callers get the patched versions.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use cryptoki_sys::*;
@@ -554,50 +553,18 @@ fn build_patched_function_list_3_2(null_names: &[String]) -> CK_FUNCTION_LIST_3_
 
 /// Contact the backend and build an `InterfaceState` with patched function
 /// lists reflecting the backend's capabilities. Also pulls the server's
-/// Why a probe failed — the two classes propagate differently.
-///
-/// A transient failure (transport, daemon restart) keeps the previous
-/// state and is retried later. An ABI refusal (D6 byte-order mismatch,
-/// hostile advertisement) is a hard incompatibility: every ulong byte
-/// the daemon would send is unparseable, so `C_Initialize` must fail.
-pub(crate) enum ProbeFailure {
-    Transient(String),
-    AbiMismatch(String),
-}
-
-impl std::fmt::Display for ProbeFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Transient(e) => write!(f, "{e}"),
-            Self::AbiMismatch(e) => write!(f, "incompatible backend ABI: {e}"),
-        }
-    }
-}
-
 /// mechanism registry payload (when provided) and atomically swaps the
 /// shim's in-memory registry to match.
-fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
+fn probe_backend() -> Result<InterfaceState, String> {
     // Ensure the gRPC channel is up (returns Err(CkRv) on failure).
     state::ensure_client_connected()
         .map_err(|e| ProbeFailure::Transient(format!("connect failed: {e:?}")))?;
 
     let rt = state::runtime();
-    let probe = rt
-        .block_on(async {
-            let mut client = state::client().lock().await;
-            client.get_backend_interfaces().await
-        })
-        .map_err(ProbeFailure::Transient)?;
-
-    // Record the backend CK_ULONG width/byte order for the value bridge
-    // (ADR-0011 D2/D6) before anything else uses it. A refusal here is
-    // FATAL: the wire representation itself is incompatible.
-    record_backend_abi(
-        probe.backend_ulong_size,
-        probe.backend_byte_order,
-        probe.backend_attribute_stride,
-    )
-    .map_err(ProbeFailure::AbiMismatch)?;
+    let probe = rt.block_on(async {
+        let mut client = state::client().lock().await;
+        client.get_backend_interfaces().await
+    })?;
 
     // Install the server-published registry whenever the daemon
     // includes one. Older daemons predate the field — in that case we

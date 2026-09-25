@@ -1,7 +1,6 @@
 use super::handle_map::{BackendHandle, HandleMap, VirtualHandle};
-use super::slot_map::{BackendSlotId, SlotMap, VirtualSlotId};
+use super::slot_map::SlotMap;
 use dashmap::DashMap;
-use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -867,20 +866,12 @@ impl ContextManager {
         // transiently by the number of racing creators — acceptable
         // because the limit is a soft cap, not a correctness gate.
         if self.max_contexts > 0 && self.contexts.len() >= self.max_contexts {
-            // Try evicting expired contexts first — but ONLY those holding no
-            // open backend sessions. This path has no backend handle and so
-            // cannot close backend sessions; dropping a context that holds them
-            // would leak them. Contexts with open sessions are reclaimed by the
-            // background reaper (`evict_expired`), which closes them properly
-            // (M4).
+            // Try evicting expired contexts first.
             let now = std::time::Instant::now();
             let expired: Vec<_> = self
                 .contexts
                 .iter()
-                .filter(|entry| {
-                    self.is_reapable(entry.value(), now)
-                        && entry.value().session_handles.backend_handles().next().is_none()
-                })
+                .filter(|entry| now.duration_since(entry.value().last_active) > self.lease_duration)
                 .map(|entry| entry.key().clone())
                 .collect();
             for id in &expired {
@@ -904,14 +895,12 @@ impl ContextManager {
     }
 
     /// Returns the current number of active contexts.
-    // Not `async`: a DashMap read needs no `.await` (L5).
-    pub fn context_count(&self) -> usize {
+    pub async fn context_count(&self) -> usize {
         self.contexts.len()
     }
 
     /// Returns the currently active context IDs.
-    // Not `async`: a DashMap read needs no `.await` (L5).
-    pub fn context_ids(&self) -> Vec<ClientContextId> {
+    pub async fn context_ids(&self) -> Vec<ClientContextId> {
         self.contexts.iter().map(|entry| entry.key().clone()).collect()
     }
 
@@ -934,62 +923,12 @@ impl ContextManager {
         })
     }
 
-    pub fn first_login_state_for_slot_excluding(
-        &self,
-        slot: BackendSlotId,
-        excluded_id: &ClientContextId,
-    ) -> Option<LoginState> {
-        self.contexts.iter().find_map(|ctx| {
-            if ctx.key() == excluded_id { None } else { ctx.login_state.get(&slot).copied() }
-        })
+    pub async fn context_identity(&self, id: &ClientContextId) -> Option<String> {
+        self.contexts.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
     }
 
-    /// Begin a backend operation for `id`: bump its in-flight counter and return
-    /// a guard. While the guard lives the context is NOT evicted even past the
-    /// lease, so a single long backend call (DH/RSA keygen, slow-HSM op) is never
-    /// reaped MID-CALL. On drop the guard decrements the counter and refreshes
-    /// `last_active` so a long op that just finished isn't evicted before the
-    /// client's next call. Returns `None` when the context doesn't exist — the
-    /// caller then errors out normally and no guard is needed.
-    /// Like [`begin_operation`](Self::begin_operation) but enforces a
-    /// per-context in-flight cap (M2): `Ok(Some(guard))` when the context exists
-    /// and is under `max_in_flight`, `Ok(None)` when the context is gone (the
-    /// handler then returns the right CK_RV), and `Err(())` when the context is
-    /// at its cap (the caller should reject the request so one client cannot
-    /// monopolise the shared backend-call budget).
-    ///
-    /// `pub(crate)`: a crate-internal helper, so the `Err(())` at-capacity signal
-    /// needs no richer error type (it would otherwise trip `result_unit_err`).
-    pub(crate) fn begin_operation_capped(
-        self: &Arc<Self>,
-        id: &ClientContextId,
-        max_in_flight: i64,
-    ) -> Result<Option<OperationGuard>, ()> {
-        let counter = {
-            let Some(entry) = self.contexts.get(id) else { return Ok(None) };
-            // Reserve a slot with a CAS so the cap is exact even under concurrent
-            // reservations on the same context (all under this shard read lock).
-            loop {
-                let current = entry.in_flight.load(Ordering::Relaxed);
-                if max_in_flight > 0 && current >= max_in_flight {
-                    return Err(());
-                }
-                if entry
-                    .in_flight
-                    .compare_exchange_weak(
-                        current,
-                        current + 1,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
-                    break;
-                }
-            }
-            entry.in_flight.clone()
-        };
-        Ok(Some(OperationGuard::new(Arc::clone(self), id.clone(), counter)))
+    pub async fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
+        self.contexts.remove(id).map(|(_k, v)| v)
     }
 
     pub fn begin_operation(self: &Arc<Self>, id: &ClientContextId) -> Option<OperationGuard> {
@@ -1273,23 +1212,36 @@ impl ContextManager {
     ) -> Vec<ClientContextId> {
         let now = Instant::now();
         let expired = self.collect_expired_context_ids(now);
-        let mut evicted = Vec::with_capacity(expired.len());
-        let mut plans = Vec::with_capacity(expired.len());
-        for id in &expired {
-            // Re-check expiry and remove ATOMICALLY under the per-shard write
-            // lock: `remove_if` evaluates the predicate while holding the lock,
-            // so a context touched (last_active bumped) or that started an
-            // operation (in_flight incremented under the read lock) since the
-            // best-effort first scan is not evicted on stale data — closing the
-            // get-then-remove TOCTOU (L10). The first scan is just a cheap
-            // candidate filter. Sequential remove-then-plan keeps multi-expire
-            // login accounting exact: an earlier plan still sees a later
-            // candidate as a live holder.
-            if let Some((_, mut ctx)) =
-                self.contexts.remove_if(id, |_, ctx| self.is_reapable(ctx, now))
-            {
-                evicted.push(id.clone());
-                plans.push(self.plan_removed_context_teardown(&mut ctx));
+        let all_backend_sessions = self.drain_expired_contexts(&expired);
+        Self::close_backend_sessions(backend, all_backend_sessions).await;
+        expired
+    }
+
+    fn collect_expired_context_ids(&self, now: Instant) -> Vec<ClientContextId> {
+        self.contexts
+            .iter()
+            .filter(|entry| now.duration_since(entry.value().last_active) > self.lease_duration)
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    fn drain_expired_contexts(&self, expired: &[ClientContextId]) -> Vec<u64> {
+        // Re-check expiry under the per-shard lock so a context that
+        // got touched between `collect_expired_context_ids` and here
+        // is not evicted on stale data. The first scan is best-effort
+        // (no lock held across shards); this scan is authoritative.
+        let now = Instant::now();
+        let mut backend_sessions = Vec::new();
+        for id in expired {
+            let still_expired = self
+                .contexts
+                .get(id)
+                .is_some_and(|entry| now.duration_since(entry.last_active) > self.lease_duration);
+            if !still_expired {
+                continue;
+            }
+            if let Some((_, mut ctx)) = self.contexts.remove(id) {
+                backend_sessions.extend(ctx.teardown());
             }
         }
         self.execute_teardown_plans(backend, plans).await;

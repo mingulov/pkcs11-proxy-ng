@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::config::{AuthConfig, TcpAuthMode, UnixAuthMode};
+use crate::config::{AuthConfig, TcpAuthMode};
 use crate::mechanism_registry_source::MechanismRegistrySource;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::Pkcs11Proxy;
@@ -42,12 +42,14 @@ pub(crate) use context::HandlerContext;
 /// panic).
 #[derive(Clone)]
 pub struct Pkcs11ProxyService {
-    /// All cross-cutting, request-independent handler state (context manager,
-    /// backend, token policy, mechanism registry, transport auth modes,
-    /// `sanitize_inputs`, audit sink). Aggregated so a new gateway concern is a
-    /// field on `HandlerContext`, not another positional parameter threaded
-    /// through every dispatched handler.
-    pub(super) ctx: HandlerContext,
+    context_manager: Arc<ContextManager>,
+    backend: Arc<dyn Pkcs11Backend>,
+    tcp_auth_mode: TcpAuthMode,
+    token_policy: Arc<TokenPolicy>,
+    /// Holds the current registry payload to publish over
+    /// `GetBackendInterfaces`. Wrapped in a `MechanismRegistrySource`
+    /// so SIGHUP can swap the payload while live requests are in flight.
+    mechanism_registry_source: MechanismRegistrySource,
 }
 
 impl Pkcs11ProxyService {
@@ -58,27 +60,8 @@ impl Pkcs11ProxyService {
         unix_auth_mode: UnixAuthMode,
         token_policy: Arc<TokenPolicy>,
         mechanism_registry_source: MechanismRegistrySource,
-        audit: Option<AuditSink>,
     ) -> Self {
-        Self {
-            ctx: HandlerContext {
-                object_cleanup: Arc::default(),
-                context_manager,
-                backend,
-                tcp_auth_mode,
-                unix_auth_mode,
-                token_policy,
-                mechanism_registry_source,
-                sanitize_inputs: false,
-                audit,
-            },
-        }
-    }
-
-    /// Enable sanitize_inputs mode for tests that need daemon-side input rejection.
-    pub fn with_sanitize_inputs(mut self) -> Self {
-        self.ctx.sanitize_inputs = true;
-        self
+        Self { context_manager, backend, tcp_auth_mode, token_policy, mechanism_registry_source }
     }
 
     pub fn insecure_for_tests(
@@ -89,37 +72,7 @@ impl Pkcs11ProxyService {
             Arc::new(TokenPolicy::from_config(&AuthConfig::default()).expect("default policy"));
         let registry = MechanismRegistrySource::load(None)
             .expect("embedded mechanism registry must always load");
-        Self::new(
-            context_manager,
-            backend,
-            TcpAuthMode::None,
-            UnixAuthMode::None,
-            token_policy,
-            registry,
-            None, // audit: tests that need emission will pass a sink explicitly
-        )
-        // sanitize_inputs defaults to false — transparent forwarding (ADR-0010)
-    }
-
-    /// A2: reject any request whose live transport identity does not own the
-    /// `client_context_id` it presents. The id is an unauthenticated bearer
-    /// token, so it is re-bound to the caller's identity on every RPC (the
-    /// identity is captured once at C_Initialize). `raw_ctx_id` is the request's
-    /// `client_context_id` field; an unknown context passes here and the handler
-    /// returns the proper CK_RV.
-    async fn check_context_owner<T>(
-        &self,
-        request: &Request<T>,
-        raw_ctx_id: &str,
-    ) -> Result<(), Status> {
-        authorization::enforce_context_owner(
-            &self.ctx.context_manager,
-            request,
-            &super::context_manager::ClientContextId(raw_ctx_id.to_owned()),
-            self.ctx.tcp_auth_mode,
-            self.ctx.unix_auth_mode,
-        )
-        .await
+        Self::new(context_manager, backend, TcpAuthMode::None, token_policy, registry)
     }
 }
 
@@ -136,260 +89,19 @@ pub(super) fn convert_template(
     attrs.iter().map(|a| CkAttribute::try_from(a).map_err(|e| e.0)).collect()
 }
 
-/// `convert_template` with Wave 3.5 D2 NULL-template preservation: a set
-/// `template_null` bit yields `None` (the caller's NULL template pointer),
-/// which the FFI backend materializes as NULL instead of (ptr, 0). A NULL
-/// bit with a non-empty attribute list is a malformed request.
-pub(super) fn convert_template_opt(
-    attrs: &[pkcs11_proxy_ng_proto::Attribute],
-    template_null: bool,
-) -> Result<Option<Vec<CkAttribute>>, u64> {
-    if template_null {
-        if !attrs.is_empty() {
-            return Err(CkRv::ARGUMENTS_BAD.0);
-        }
-        Ok(None)
-    } else {
-        convert_template(attrs).map(Some)
-    }
-}
-
 /// Encode a `CkAttributeValue` into the on-wire `bytes` representation
 /// the proto uses for `AttributeResult.value`.
 ///
-/// Consumes the value by move. The `Bytes`/`String` variants copy through
-/// the [`secret_to_plain`] ADR-0013 §5 boundary (the owned `SecretBytes`
-/// is dropped and wiped afterwards); the scalar variants (`Bool`, `Ulong`)
-/// construct a fresh small `Vec`.
+/// Consumes the value by move: the `Bytes` and `String` variants return
+/// their inner allocation directly (no clone). The two scalar variants
+/// (`Bool`, `Ulong`) construct a fresh small `Vec` because there's no
+/// owned buffer to move out of an integer.
 pub(super) fn attr_value_to_bytes(v: CkAttributeValue) -> Vec<u8> {
     match v {
         CkAttributeValue::Bool(b) => vec![u8::from(b)],
-        // Native order (not LE): this path shares the attr_cache key space
-        // with the exact path's raw backend bytes, so both encodings must
-        // agree on every host order (see the M1 encoding notes).
-        CkAttributeValue::Ulong(u) => u.to_ne_bytes().to_vec(),
-        CkAttributeValue::Bytes(b) => secret_to_plain(&b),
-        CkAttributeValue::String(s) => secret_to_plain(&s),
-        // Nested templates never travel through AttributeResult's flat
-        // bytes field — the exact path carries them structurally. Empty
-        // rather than fabricated struct bytes.
-        CkAttributeValue::NestedTemplate(_) => Vec::new(),
-    }
-}
-
-/// Resolve the principal key for `client_context_id` and acquire one in-flight
-/// slot from the per-principal cap (G2-PR3).
-///
-/// Returns `Ok(guard)` on success (the guard is a zero-cost no-op when
-/// `per_principal_max_in_flight` is unset — byte-identical to having no rate
-/// limiting). Returns `Err(Status::resource_exhausted)` when the principal is
-/// at its cap; the rejection metric is incremented internally by the rate-quota
-/// module.
-///
-/// Must be called AFTER `check_context_owner` so an unauthorized
-/// `client_context_id` is rejected before consuming any rate-quota slot.
-/// Never touches the backend — a rejection does NOT increment the backend-health
-/// failure counter.
-fn acquire_principal_op_guard(
-    ctx: &HandlerContext,
-    client_context_id: &str,
-) -> Result<crate::server::rate_quota::PrincipalOpGuard, Status> {
-    let ctx_id = super::context_manager::ClientContextId(client_context_id.to_owned());
-    let principal = ctx
-        .context_manager
-        .context_identity(&ctx_id)
-        .unwrap_or_else(|| client_context_id.to_owned());
-    crate::server::rate_quota::try_begin_principal_op(&principal)
-        .ok_or_else(|| Status::resource_exhausted("per-principal concurrency limit exceeded"))
-}
-
-// ── Dispatch rate-quota tests (G2-PR3) ────────────────────────────────────────
-//
-// Placed BEFORE `macro_rules! impl_proxy_service!` so the consistency-check
-// source scanner does not mistake the test `async fn` names for RPC handlers.
-// The scanner activates on `impl Pkcs11Proxy for ` (which appears inside the
-// macro body below) and then counts every subsequent `async fn` as a handler.
-// Inserting the tests here keeps them before that trigger line.
-//
-// These tests verify the per-principal cap at the dispatch seam level.
-// The core cap logic (at-limit, drop, principal independence) is tested
-// exhaustively by `rate_quota::tests` using local RateQuota instances.
-// The tests here focus on three properties:
-//   1. The shared helper is inert (always Ok) when the global limit is
-//      unconfigured — the default for all CI tests.
-//   2. `open_session` and a macro-generated handler pass through end-to-end
-//      with the limit unset (regression guard: no behaviour change when off).
-//   3. The principal key falls back to `client_context_id` when no identity
-//      is bound to the context (unauthenticated / no transport auth).
-#[cfg(test)]
-mod dispatch_rate_quota_tests {
-    use super::*;
-    use crate::server::context_manager::ContextManager;
-    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
-    use std::sync::Arc;
-    use tonic::Request;
-
-    fn make_ctx_mgr() -> Arc<ContextManager> {
-        Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0))
-    }
-
-    fn make_backend() -> Arc<dyn Pkcs11Backend> {
-        let mock = MockBackend::default_test();
-        mock.initialize().unwrap();
-        Arc::new(mock)
-    }
-
-    // ── Helper unit tests ─────────────────────────────────────────────────────
-
-    /// With no `per_principal_max_in_flight` configured (the opt-in default),
-    /// `acquire_principal_op_guard` must always return `Ok` — zero-cost no-op
-    /// path that is byte-identical to having no rate limiting.
-    #[tokio::test]
-    async fn principal_guard_no_limit_always_ok() {
-        let ctx_mgr = make_ctx_mgr();
-        let backend = make_backend();
-        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
-        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
-
-        // Many guards from the same principal must all succeed.
-        let guards: Vec<_> = (0..50)
-            .map(|_| acquire_principal_op_guard(&ctx, &ctx_id.0))
-            .collect::<Result<Vec<_>, _>>()
-            .expect("all guards must succeed with no limit configured");
-        drop(guards);
-    }
-
-    /// Without a configured limit, two different principals can hold guards
-    /// simultaneously (independence property, no-op path).
-    #[tokio::test]
-    async fn principal_guard_no_limit_different_principals_ok() {
-        let ctx_mgr = make_ctx_mgr();
-        let backend = make_backend();
-        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
-        // Bind distinct identities so the helper sees two different principals.
-        let ctx_a = ctx_mgr.create_context(Some("alice".into())).await.unwrap();
-        let ctx_b = ctx_mgr.create_context(Some("bob".into())).await.unwrap();
-
-        let g_a = acquire_principal_op_guard(&ctx, &ctx_a.0).expect("alice ok");
-        let g_b = acquire_principal_op_guard(&ctx, &ctx_b.0).expect("bob ok (independent)");
-        drop(g_a);
-        drop(g_b);
-    }
-
-    /// An unauthenticated context (no stored identity) must have the helper
-    /// fall back to the `client_context_id` string as the principal key.
-    /// With no limit configured the guard is still Ok.
-    #[tokio::test]
-    async fn principal_guard_falls_back_to_ctx_id_when_no_identity() {
-        let ctx_mgr = make_ctx_mgr();
-        let backend = make_backend();
-        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
-        // create_context(None) stores no identity.
-        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
-        assert!(
-            ctx_mgr.context_identity(&ctx_id).is_none(),
-            "setup: context must have no identity"
-        );
-
-        let g = acquire_principal_op_guard(&ctx, &ctx_id.0)
-            .expect("fallback to ctx_id as principal must succeed with no limit");
-        drop(g);
-    }
-
-    // ── Integration tests through Pkcs11ProxyService ─────────────────────────
-
-    /// `open_session` (hand-written handler) passes end-to-end with no
-    /// per-principal limit configured — the guard is a no-op and existing
-    /// behaviour is unchanged.
-    #[tokio::test]
-    async fn open_session_through_service_inert_with_no_limit() {
-        let ctx_mgr = make_ctx_mgr();
-        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
-        let backend = make_backend();
-        let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend);
-
-        // create_context(None) stores no identity → owner check passes for any
-        // transport (context_owner_allowed(None, _) = true).
-        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
-        let virtual_slot = ctx_mgr.virtual_slots().await[0];
-
-        let resp = svc
-            .open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
-                client_context_id: ctx_id.0.clone(),
-                slot_id: virtual_slot.0,
-                flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(
-            resp.ck_rv,
-            CkRv::OK.0,
-            "open_session must succeed when per-principal limit is unset"
-        );
-    }
-
-    /// A macro-generated handler (`get_info`) passes end-to-end with no
-    /// per-principal limit configured — the `_pguard` is a no-op and existing
-    /// behaviour is unchanged.
-    #[tokio::test]
-    async fn macro_handler_get_info_inert_with_no_limit() {
-        let ctx_mgr = make_ctx_mgr();
-        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
-        let backend = make_backend();
-        let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend);
-        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
-
-        let resp = svc
-            .get_info(Request::new(pkcs11_proxy_ng_proto::GetInfoRequest {
-                client_context_id: ctx_id.0.clone(),
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(
-            resp.ck_rv,
-            CkRv::OK.0,
-            "macro-generated get_info must succeed when per-principal limit is unset"
-        );
-    }
-
-    /// Multiple concurrent `open_session` calls from the same principal all
-    /// proceed when the limit is unset (transparency: no behaviour change).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn open_session_many_concurrent_no_limit() {
-        let ctx_mgr = make_ctx_mgr();
-        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
-        let backend = make_backend();
-        let svc = Arc::new(Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend));
-        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
-        let virtual_slot = ctx_mgr.virtual_slots().await[0];
-
-        let handles: Vec<_> = (0..20)
-            .map(|_| {
-                let svc = Arc::clone(&svc);
-                let cid = ctx_id.0.clone();
-                tokio::spawn(async move {
-                    svc.open_session(Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
-                        client_context_id: cid,
-                        slot_id: virtual_slot.0,
-                        flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
-                    }))
-                    .await
-                    .unwrap()
-                    .into_inner()
-                    .ck_rv
-                })
-            })
-            .collect();
-
-        for handle in handles {
-            assert_eq!(
-                handle.await.unwrap(),
-                CkRv::OK.0,
-                "all concurrent open_session calls must succeed with no limit"
-            );
-        }
+        CkAttributeValue::Ulong(u) => u.to_le_bytes().to_vec(),
+        CkAttributeValue::Bytes(b) => b,
+        CkAttributeValue::String(s) => s.into_bytes(),
     }
 }
 
@@ -557,6 +269,19 @@ macro_rules! impl_proxy_service {
                     &self.ctx.context_manager,
                     &self.ctx.backend,
                     self.ctx.token_policy.as_ref(),
+                    request,
+                )
+                .await
+            }
+
+            async fn get_backend_interfaces(
+                &self,
+                request: Request<pkcs11_proxy_ng_proto::GetBackendInterfacesRequest>,
+            ) -> Result<Response<pkcs11_proxy_ng_proto::GetBackendInterfacesResponse>, Status> {
+                general::get_backend_interfaces(
+                    &self.context_manager,
+                    &self.backend,
+                    &self.mechanism_registry_source,
                     request,
                 )
                 .await

@@ -43,9 +43,9 @@ async fn resolve_state_handles(
 
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
     let encryption_key =
-        encryption_key.map_or(CkObjectHandle(0), |handle| CkObjectHandle(handle.0 as u64));
+        encryption_key.map_or(CkObjectHandle(0), |handle| CkObjectHandle(handle.0));
     let authentication_key =
-        authentication_key.map_or(CkObjectHandle(0), |handle| CkObjectHandle(handle.0 as u64));
+        authentication_key.map_or(CkObjectHandle(0), |handle| CkObjectHandle(handle.0));
 
     Ok((CkSessionHandle(backend_session.0 as u64), encryption_key, authentication_key))
 }

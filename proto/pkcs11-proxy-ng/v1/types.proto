@@ -1687,27 +1687,6 @@ message GetBackendInterfacesResponse {
   // emit it. Field number 2 is permanently reserved; do not reuse if
   // ever removed.
   optional MechanismRegistryPayload mechanism_registry = 2;
-  // Backend `sizeof(CK_ULONG)` in bytes (4 or 8) — ADR-0011 D2. The narrow
-  // client uses this to bridge ulong-typed attribute values/lengths between
-  // its own width and the backend's. Absent from older daemons; a client that
-  // sees it absent falls back to 8 with a warning (D9).
-  optional uint32 backend_ulong_size = 3;
-  // Backend `CK_ULONG` byte order — ADR-0011 D6: 1 = little-endian,
-  // 2 = big-endian (0/absent = unspecified). The client refuses at probe on a
-  // byte-order mismatch rather than silently mis-decoding ulong value bytes.
-  // All supported targets are little-endian; this guards a future BE backend.
-  optional uint32 backend_byte_order = 4;
-
-  // The backend's native sizeof(CK_ATTRIBUTE) — the stride of nested
-  // CKA_*_TEMPLATE byte lengths on the wire (ADR-0011 D2 extension).
-  // On LLP64 backends the packed stride (16) is not derivable from the
-  // ulong width; absent => client falls back to 3 * backend_ulong_size.
-  optional uint32 backend_attribute_stride = 5;
-  // True only when the daemon implements the shape-bound message-parameter
-  // contract. Absent from older daemons and therefore treated as false.
-  optional bool pointer_safe_message_parameters = 6;
-  optional bool pointer_safe_authenticated_parameters = 7;
-  optional uint32 exact_output_effects_version = 8;
 }
 
 // Server-driven mechanism parameter registry payload. Carries the
@@ -1727,11 +1706,6 @@ message MechanismRegistryPayload {
   repeated uint64 parameterless = 3;
   // shape -> mechanisms mapping (one entry per known shape name).
   repeated MechanismParamEntry params = 4;
-  // CK_MECHANISM_TYPE values the operator hard-disabled via the registry
-  // `exclude` list. The shim rejects these at operation time (even without
-  // params) and hides them from discovery in every discovery mode.
-  // Absent from older daemons and therefore treated as empty.
-  repeated uint64 excluded = 5;
 }
 
 message MechanismParamEntry {

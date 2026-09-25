@@ -3,9 +3,9 @@
 //! [`crate::MechanismRegistryPayload`].
 //!
 //! The conversion is intentionally lossless for the registry's data
-//! (parameterless set, param-shape map, operator-excluded set, discovery
-//! mode, revision). The payload is what the daemon publishes to shims over
-//! the `GetBackendInterfaces` RPC.
+//! (parameterless set, param-shape map, discovery mode, revision). The
+//! payload is what the daemon publishes to shims over the
+//! `GetBackendInterfaces` RPC.
 
 use std::collections::{HashMap, HashSet};
 
@@ -42,15 +42,11 @@ impl From<&MechanismRegistry> for MechanismRegistryPayload {
         let mut parameterless: Vec<u64> = registry.parameterless_view().iter().copied().collect();
         parameterless.sort_unstable();
 
-        let mut excluded: Vec<u64> = registry.excluded_view().iter().copied().collect();
-        excluded.sort_unstable();
-
         MechanismRegistryPayload {
             revision: registry.revision().to_string(),
             discovery_mode: discovery_mode_to_str(registry.discovery_mode()).to_string(),
             parameterless,
             params,
-            excluded,
         }
     }
 }
@@ -72,21 +68,13 @@ impl From<&MechanismRegistryPayload> for MechanismRegistry {
             }
         }
         let parameterless: HashSet<u64> = payload.parameterless.iter().copied().collect();
-        // Absent from older daemons; an empty list means "nothing excluded".
-        let disabled: HashSet<u64> = payload.excluded.iter().copied().collect();
         let discovery_mode = parse_discovery_mode(&payload.discovery_mode);
         let revision = if payload.revision.is_empty() {
             EMBEDDED_DEFAULT_REVISION.to_string()
         } else {
             payload.revision.clone()
         };
-        MechanismRegistry::from_parts(
-            param_shapes,
-            parameterless,
-            disabled,
-            discovery_mode,
-            revision,
-        )
+        MechanismRegistry::from_parts(param_shapes, parameterless, discovery_mode, revision)
     }
 }
 
@@ -108,7 +96,7 @@ fn parse_discovery_mode(s: &str) -> DiscoveryMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pkcs11_proxy_ng_types::{CkRv, MechanismRegistry};
+    use pkcs11_proxy_ng_types::MechanismRegistry;
 
     #[test]
     fn embedded_default_round_trips() {
@@ -153,31 +141,12 @@ mod tests {
     }
 
     #[test]
-    fn excluded_round_trips() {
-        let override_toml = r#"
-            exclude = [0x80000001, 0x0001]
-        "#;
-        let original = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap();
-        let payload: MechanismRegistryPayload = (&original).into();
-
-        assert!(payload.excluded.contains(&0x80000001));
-        assert!(payload.excluded.contains(&0x0001));
-
-        let recovered: MechanismRegistry = (&payload).into();
-        assert_eq!(recovered.check_operation(0x80000001, false), Err(CkRv::MECHANISM_INVALID));
-        assert_eq!(recovered.check_operation(0x0001, false), Err(CkRv::MECHANISM_INVALID));
-        // Non-excluded mechanisms survive the round trip unaffected.
-        assert!(recovered.check_operation(0x1087, true).is_ok());
-    }
-
-    #[test]
     fn empty_revision_falls_back_to_embedded_default() {
         let payload = MechanismRegistryPayload {
             revision: String::new(),
             discovery_mode: "transparent".to_string(),
             parameterless: vec![],
             params: vec![],
-            excluded: vec![],
         };
         let registry: MechanismRegistry = (&payload).into();
         assert_eq!(registry.revision(), EMBEDDED_DEFAULT_REVISION);
@@ -190,7 +159,6 @@ mod tests {
             discovery_mode: "garbage".to_string(),
             parameterless: vec![],
             params: vec![],
-            excluded: vec![],
         };
         let registry: MechanismRegistry = (&payload).into();
         assert_eq!(registry.discovery_mode(), DiscoveryMode::Transparent);

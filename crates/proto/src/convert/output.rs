@@ -40,7 +40,6 @@ fn attribute_query_results_into_proto(
     }
 }
 
-#[cfg(test)]
 fn attribute_query_results_from_proto(
     results: &v1_proto::AttributeQueryResultList,
 ) -> Result<Vec<CkAttributeQueryResult>, CkRv> {
@@ -204,6 +203,18 @@ impl From<&CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
 
 impl From<CkAttributeQueryResult> for v1_proto::AttributeQueryResult {
     fn from(result: CkAttributeQueryResult) -> Self {
+        Self {
+            attr_type: result.attr_type.0,
+            returned_len: result.returned_len,
+            value: result.value,
+            ck_rv: result.ck_rv.map(|rv| rv.0),
+            nested: result.nested.map(attribute_query_results_into_proto),
+        }
+    }
+}
+
+impl From<&v1_proto::AttributeQueryResult> for CkAttributeQueryResult {
+    fn from(result: &v1_proto::AttributeQueryResult) -> Self {
         Self {
             apply_returned_len: Some(result.apply_returned_len),
             apply_type: Some(result.apply_type),

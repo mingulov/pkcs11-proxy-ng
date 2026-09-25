@@ -670,7 +670,7 @@ fn validate_max_concurrent_backend_calls_must_not_exceed_max_blocking_threads() 
     // catches this at startup so it never reaches production.
     let toml = r#"
 [backend]
-module = "."
+module = "/dev/null"
 
 [proxy]
 max_concurrent_backend_calls = 200

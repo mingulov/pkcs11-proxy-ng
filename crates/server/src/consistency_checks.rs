@@ -432,10 +432,22 @@ fn config_proxy_fields_all_have_defaults() {
 // the repo root and no longer reach into any outer planning workspace, so they
 // pass in a standalone clone of this repository.
 
-/// Repo root, derived from the server crate's manifest dir
-/// (`<repo>/crates/server`).
-fn repo_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+#[test]
+fn completion_docs_directory_is_not_empty() {
+    let completed_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../doc/completed");
+    if !completed_dir.exists() {
+        eprintln!(
+            "skipping completion_docs_directory_is_not_empty: {} not reachable from submodule-only checkout",
+            completed_dir.display()
+        );
+        return;
+    }
+    let count = std::fs::read_dir(&completed_dir)
+        .expect("cannot read doc/completed/")
+        .filter(|e| e.as_ref().is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".md")))
+        .count();
+    assert!(count >= 10, "doc/completed/ should have many completion notes, found only {count}");
 }
 
 #[test]

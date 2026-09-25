@@ -25,12 +25,9 @@ for the codes themselves; this reference is about the proxy's
 **Cause.** Used by the proxy as the canonical "the call could not
 reach the backend, or the backend reported a hard failure" code.
 Specifically:
-- gRPC transport failure (daemon unreachable, TLS handshake fail) on a
-  **session-scoped** call. For lifecycle calls the same transport failure maps
-  to `CKR_GENERAL_ERROR`, and for slot/token calls to `CKR_TOKEN_NOT_PRESENT`.
-- Daemon's `spawn_backend` timeout (`proxy.request_timeout_secs`). Note the
-  **client-side** gRPC request timeout (`DeadlineExceeded`) instead maps to
-  `CKR_FUNCTION_FAILED` ("the operation may not have executed").
+- gRPC transport failure (daemon unreachable, TLS handshake fail,
+  request timeout).
+- Daemon's `spawn_backend` timeout (`proxy.request_timeout_secs`).
 - `classify_backend_outcome` widens this to fold `HOST_MEMORY`,
   `DEVICE_REMOVED`, `TOKEN_NOT_PRESENT` into the health-gate's
   unhealthy set, but the **return value to the caller is still the
@@ -247,17 +244,6 @@ or the application.
    readiness to NOT_SERVING`. The pod will be pulled from the
    Service after `backend_health_consecutive_failures` consecutive
    failures.
-
-## Daemon startup failures (not CK_RV)
-
-These surface as process-startup errors before any PKCS#11 call is served:
-
-| Message fragment | Meaning | Operator action |
-|---|---|---|
-| `already reserved (epoch N)` | A second backend provider chain was registered in this process | Run one provider chain per daemon process (see `doc/release/native-mechanism-ownership.md`, "One provider chain per embedding process") |
-| `constructor registry poisoned` / `constructor registry lock poisoned` | A constructor panicked during registration, or the registry mutex was poisoned | Restart the daemon; if it recurs, inspect the panic backtrace and fix the backend module |
-| `native FFI unavailable on this platform` | A native constructor was used off supported Linux targets | Run the daemon on Linux GNU/musl x86_64 or x86, or use a portable/mock constructor |
-| `constructor epoch exhausted` | Internal epoch counter overflow (defensive; not expected in service) | Restart the daemon and report the incident |
 
 ## Related docs
 

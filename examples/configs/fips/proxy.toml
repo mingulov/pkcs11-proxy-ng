@@ -32,9 +32,6 @@ http2_keepalive_interval_secs = 15
 http2_keepalive_timeout_secs = 5
 rate_limit_get_backend_interfaces = 0
 rate_limit_window_secs = 1
-# Reject NULL data pointers (len>0) and NULL mechanisms before the backend module.
-# OFF by default (ADR-0010 transparent forwarding). Enable for modules that crash on them.
-# sanitize_inputs = true
 
 [listener.remote]
 bind = "0.0.0.0:7512"

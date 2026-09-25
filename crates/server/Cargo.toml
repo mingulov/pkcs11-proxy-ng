@@ -2,7 +2,6 @@
 name = "pkcs11-proxy-ng"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 publish = false
 
@@ -38,16 +37,13 @@ dashmap.workspace = true
 x509-parser.workspace = true
 tonic-health.workspace = true
 sha2.workspace = true
-hex.workspace = true
+zeroize.workspace = true
 tokio-stream = "0.1"
 tower = "0.5"
 tower-layer = "0.3"
 tower-service = "0.3"
 futures = "0.3"
 http = "1"
-bytes = "1"
-http-body = "1"
-http-body-util = "0.1"
 
 [dev-dependencies]
 pkcs11-proxy-ng-client = { path = "../client" }

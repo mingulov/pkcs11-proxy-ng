@@ -65,7 +65,7 @@ workflow:
 
 # Phase-1 matrix: Alpine 3.22, Alpine 3.23, Amazon Linux 2023.
 # Older Alpine versions ship a Rust toolchain below the workspace
-# MSRV (1.88); they are intentionally not part of Phase 1.
+# MSRV (1.85); they are intentionally not part of Phase 1.
 
 alpine_3_22:
   extends: .alpine_build_template

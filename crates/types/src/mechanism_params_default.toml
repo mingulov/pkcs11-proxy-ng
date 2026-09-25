@@ -632,11 +632,6 @@ mechanisms = [
     0x003D,  # CKM_HASH_SLH_DSA_SHA3_512
     0x003E,  # CKM_HASH_SLH_DSA_SHAKE128
     0x003F,  # CKM_HASH_SLH_DSA_SHAKE256
-    # Generic hash-DSA: the parameter is CK_HASH_SIGN_ADDITIONAL_CONTEXT (the
-    # plain struct PLUS an explicit `hash` mechanism). The shim/FFI select the
-    # larger struct by the non-zero hash; one shape entry, size-aware handling.
-    0x001F,  # CKM_HASH_ML_DSA  (generic — hash carried in the param)
-    0x0034,  # CKM_HASH_SLH_DSA (generic — hash carried in the param)
 ]
 
 # PKCS#5 PBKD2: CK_PKCS5_PBKD2_PARAMS2 (salt, iterations, PRF, password)

@@ -149,20 +149,3 @@ pub(crate) fn key_type_name(v: u64) -> String {
     };
     name.to_string()
 }
-
-#[cfg(test)]
-mod bytes_to_u64_tests {
-    use super::*;
-
-    #[test]
-    fn decodes_native_order_at_both_widths() {
-        // 0x0102_0304 distinguishes LE from BE absolutely: native decoding
-        // must round-trip the native encoding on every host.
-        assert_eq!(bytes_to_u64(&0x0102_0304u32.to_ne_bytes()), Some(0x0102_0304));
-        assert_eq!(
-            bytes_to_u64(&0x0102_0304_0506_0708u64.to_ne_bytes()),
-            Some(0x0102_0304_0506_0708)
-        );
-        assert_eq!(bytes_to_u64(&[1, 2, 3]), None);
-    }
-}

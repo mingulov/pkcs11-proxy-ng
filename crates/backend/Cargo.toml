@@ -2,15 +2,8 @@
 name = "pkcs11-proxy-ng-backend"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 publish = false
-
-[features]
-# C3M.6 row 18: native-owner test-hook surface (daemon identity, mech-echo
-# capture, fault injection) plus the daemon control plane. Default-off;
-# normal builds must observe no hook symbols and no control listener.
-native-owner-test-hooks = []
 
 [dependencies]
 pkcs11-proxy-ng-types = { path = "../types" }

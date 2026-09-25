@@ -2,7 +2,6 @@
 name = "pkcs11-proxy-ng-cli"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 publish = false
 
@@ -16,8 +15,7 @@ pkcs11-proxy-ng-client = { path = "../client" }
 pkcs11-proxy-ng-audit = { path = "../audit" }
 clap.workspace = true
 tokio.workspace = true
-# CLI is a gRPC client: `channel` transport + `codegen` + `tls-ring`. No server.
-tonic = { workspace = true, features = ["channel", "codegen", "tls-ring"] }
+tonic.workspace = true
 tonic-health.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -20,14 +20,13 @@ edition = "2024"
 # old MSRV; this version reflects reality.
 #
 # Distribution matrix (see AGENTS.md §5):
-#   * Alpine 3.23  — stock rustc ≥ 1.91. Supported; CI uses rustup-managed
-#                    stable uniformly across the Alpine matrix.
-#   * Alpine 3.22  — stock rustc 1.87. Supported via the rustup-managed
-#                    toolchain because stock Rust is below MSRV.
+#   * Alpine 3.23  — stock rustc ≥ 1.91. Supported by stock toolchain.
+#   * Alpine 3.22  — stock rustc 1.87. NOT supported (below MSRV).
+#                    Drop in favour of Alpine 3.23.
 #   * Amazon Linux 2023 — stock rustc ~1.86. Below MSRV; users must
 #                    install Rust via rustup or vendor toolchain.
-# If a supported build target's stock Rust is older than 1.88, use a
-# rustup-installed toolchain.
+# If a build target's stock Rust is older than 1.88, expect rustup-
+# installed toolchain rather than expanding the distro matrix.
 rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 
@@ -56,9 +55,6 @@ tonic-health = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 sha2 = "0.10"
-serde_json = "1"
-hex = "0.4"
-ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 zeroize = { version = "1", features = ["derive"] }
 
 # Release profile tuned for size and runtime over build time. The shim

@@ -7,9 +7,46 @@ token/HSM and returns the exact result. The goal is **transparency**: an
 application should not be able to tell it is loading the shim rather than the
 backend module directly, apart from network latency.
 
+## Quick start (local dev, no Kubernetes)
+
+The fastest end-to-end path on a laptop, using SoftHSM2 as the
+backend and `pkcs11-tool` as the consumer.
+
+```bash
+# 1. System prereqs (Debian/Ubuntu — adjust for your distro).
+sudo apt install -y softhsm2 opensc gnutls-bin
+
+# 2. Initialise a SoftHSM2 token. The PIN here is for local dev only.
+softhsm2-util --init-token --slot 0 --label dev \
+    --so-pin 1234 --pin 1234
+
+# 3. Build the workspace (~5 min cold).
+cargo build --workspace --release
+
+# 4. Start the daemon with the dev config (loopback, no TLS).
+RUST_LOG=pkcs11_proxy_ng=info LOG_FORMAT=plain \
+    ./target/release/pkcs11-proxy-ng examples/configs/dev/proxy.toml &
+
+# 5. Drive a sign through the shim.
+PKCS11_PROXY_ENDPOINT=http://127.0.0.1:7512 \
+    pkcs11-tool --module ./target/release/libpkcs11_proxy_ng_shim.so \
+    --pin 1234 --list-slots
 ```
-app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkcs11-proxy-ng (daemon) ──FFI──▶ backend .so (HSM/token)
-```
+
+Things to read next:
+
+- [`examples/configs/`](./examples/configs/) — dev / staging / prod
+  TOML templates (use them as starting points, don't hand-roll).
+- [Runbook](./doc/runbooks/operating-pkcs11-proxy-ng.md) — operations
+  guide (deploy, rollout, ConfigMap edits, troubleshooting).
+  See §8a for daemon env vars (`PKCS11_PROXY_BIND`,
+  `PKCS11_PROXY_BACKEND_MODULE`, …) and §8b for shim env vars
+  (`PKCS11_PROXY_ENDPOINT`, `PKCS11_PROXY_TLS_*`, …).
+- [Error reference](./doc/error-reference.md) — every `CK_RV` the
+  proxy can return, cause + operator action + application action.
+- [`doc/oasis-profile-coverage.md`](./doc/oasis-profile-coverage.md) — PKCS#11 spec coverage matrix.
+
+## Release Dry Run
 
 > **Public latest: `v0.1.0`.**
 >

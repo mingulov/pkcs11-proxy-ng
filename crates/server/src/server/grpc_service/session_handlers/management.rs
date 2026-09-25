@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
@@ -53,14 +54,13 @@ pub(super) async fn init_token(
         }
     }
 
-    // Hold the SO PIN in `SecretBytes` (wiped on drop, redacted in Debug).
-    let so_pin = req.so_pin.map(SecretBytes::new);
+    // Zeroize SO PIN bytes when the closure drops.
+    let so_pin = req.so_pin.map(Zeroizing::new);
     let label_for_log = req.label.clone();
     let label = req.label;
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
-        let so_pin = so_pin.map(SecretBytes::into_zeroizing);
-        backend.init_token(backend_slot.0, so_pin.as_deref().map(Vec::as_slice), &label)
+        backend.init_token(backend_slot, so_pin.as_deref().map(Vec::as_slice), &label)
     })
     .await?;
 
@@ -93,14 +93,11 @@ pub(super) async fn init_pin(
         }
     };
 
-    // Hold the user PIN in `SecretBytes` (wiped on drop, redacted in Debug).
-    let pin = req.pin.map(SecretBytes::new);
+    // Zeroize user PIN on closure drop.
+    let pin = req.pin.map(Zeroizing::new);
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || {
-        let pin = pin.map(SecretBytes::into_zeroizing);
-        backend.init_pin(session, pin.as_deref().map(Vec::as_slice))
-    })
-    .await?;
+    let result =
+        spawn_backend(move || backend.init_pin(session, pin.as_deref().map(Vec::as_slice))).await?;
 
     let ck_rv = match &result {
         Ok(()) => {
@@ -131,13 +128,11 @@ pub(super) async fn set_pin(
         }
     };
 
-    // Hold both PINs in `SecretBytes` (wiped on drop, redacted in Debug).
-    let old_pin = req.old_pin.map(SecretBytes::new);
-    let new_pin = req.new_pin.map(SecretBytes::new);
+    // Zeroize both old and new PINs on closure drop.
+    let old_pin = req.old_pin.map(Zeroizing::new);
+    let new_pin = req.new_pin.map(Zeroizing::new);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
-        let old_pin = old_pin.map(SecretBytes::into_zeroizing);
-        let new_pin = new_pin.map(SecretBytes::into_zeroizing);
         backend.set_pin(
             session,
             old_pin.as_deref().map(Vec::as_slice),

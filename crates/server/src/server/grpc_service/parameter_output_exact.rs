@@ -763,7 +763,9 @@ fn dispatch_message_oneshot_msg(
             output_spec,
             provider_spec,
         ),
-        ParameterOutputFunction::SignMessage => Err(CkRv::FUNCTION_NOT_SUPPORTED),
+        ParameterOutputFunction::SignMessage => {
+            backend.sign_message_exact_msg(session, msg_param, input_data, output_spec)
+        }
         // Defensive: parent dispatch routes only matching variants here; a future
         // variant added without updating the parent would otherwise panic across
         // the gRPC boundary. Return CKR_FUNCTION_NOT_SUPPORTED instead.
@@ -802,7 +804,9 @@ fn dispatch_message_next_msg(
             output_spec,
             provider_spec,
         ),
-        ParameterOutputFunction::SignMessageNext => Err(CkRv::FUNCTION_NOT_SUPPORTED),
+        ParameterOutputFunction::SignMessageNext => {
+            backend.sign_message_next_exact_msg(session, msg_param, input_data, output_spec)
+        }
         // Defensive: see `dispatch_message_oneshot` for rationale.
         _ => Err(pkcs11_proxy_ng_types::CkRv::FUNCTION_NOT_SUPPORTED),
     }

@@ -307,8 +307,8 @@ pub(super) async fn get_attribute_value(
     let results = ordered_results.into_iter().map(Option::unwrap).collect();
 
     Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueResponse {
-        ck_rv: overall_ck_rv,
-        results,
+        ck_rv: ck_rv_only(result),
+        results: attribute_results(template),
     }))
 }
 
@@ -345,30 +345,20 @@ pub(super) async fn get_attribute_value_exact(
     // whole query vector on this hot read path (M8).
     let query_types: Vec<CkAttributeType> = queries.iter().map(|q| q.attr_type).collect();
 
-    // Extract-deny gate (G2-PR2): same semantics as get_attribute_value above.
-    // I3: emit a KeyMgmt audit record for the denial; do NOT audit the allowed
-    // path (data-plane volume). No secret/attribute values in the record.
-    let has_secret_attr = query_types.iter().any(|&t| is_value_bearing_secret(t));
-    if has_secret_attr
-        && !extract_is_permitted(ctx, &ctx_id, req.session_handle, object_handle).await?
-    {
-        if emit_auth_event(
-            ctx,
-            &ctx_id,
-            "C_GetAttributeValueExact",
-            EventClass::KeyMgmt,
-            None,
-            Some(req.session_handle),
-            CkRv::KEY_FUNCTION_NOT_PERMITTED.0,
-            started,
-        )
-        .is_err()
-        {
-            return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
-                exact_output_effects_version: 1,
-                ck_rv: CkRv::FUNCTION_FAILED.0,
-                results: vec![],
-            }));
+    match result {
+        Ok((ck_rv, results)) => {
+            validate_exact_attribute_results(&queries, &results)?;
+            Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
+                ck_rv: ck_rv.0,
+                // Consume `results` by value so each attribute's owned
+                // `Vec<u8>` moves directly into the proto buffer (mirrors
+                // the `attribute_results` optimization for the
+                // non-exact path).
+                results: results
+                    .into_iter()
+                    .map(pkcs11_proxy_ng_proto::AttributeQueryResult::from)
+                    .collect(),
+            }))
         }
         return Ok(Response::new(pkcs11_proxy_ng_proto::GetAttributeValueExactResponse {
             exact_output_effects_version: 1,

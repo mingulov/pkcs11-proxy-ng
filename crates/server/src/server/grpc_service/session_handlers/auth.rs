@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
@@ -139,53 +140,13 @@ pub(super) async fn login(
     }
 
     let user_type_raw = req.user_type;
-    // A second wiping copy for a possible F-01 reconcile retry below; both
-    // copies are wiped on drop.
-    let pin_retry = pin.clone();
+    // Wrap PIN bytes in `Zeroizing` so the backing buffer is
+    // overwritten when the spawned closure is dropped.
+    let pin = req.pin.map(Zeroizing::new);
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || {
-        // Transfer into a wiping owner for the FFI boundary; the moved
-        // `SecretBytes` (and this transfer) are wiped on drop.
-        let pin = pin.map(SecretBytes::into_zeroizing);
-        backend.login(session, user_type, pin.as_deref().map(Vec::as_slice))
-    })
-    .await?;
-
-    // F-01 reconcile-on-ALREADY: the backend answers ALREADY but — rechecked
-    // under the already-held slot lock — NO live context holds this slot, so
-    // the backend login is orphaned (a best-effort last-holder logout was
-    // skipped or failed). Without this the slot bricks: every future login
-    // gets ALREADY with no state minted, and no path ever logs out. Reconcile
-    // with one backend logout through this session, then retry the login
-    // exactly once so the PIN verifies against a logged-out token.
-    let result = match result {
-        Err(rv)
-            if (rv == CkRv::USER_ALREADY_LOGGED_IN
-                || rv == CkRv::USER_ANOTHER_ALREADY_LOGGED_IN)
-                && !ctx_mgr.any_login_state_for_slot(slot) =>
-        {
-            warn!(
-                context_id = %ctx_id.0,
-                user_type = user_type_raw,
-                "Login reconciling holderless-but-logged-in backend"
-            );
-            let backend = backend_ref.clone();
-            if let Err(rv) = spawn_backend(move || backend.logout(session)).await? {
-                warn!(
-                    context_id = %ctx_id.0,
-                    rv = rv.0,
-                    "Login reconcile logout failed; retrying login once anyway"
-                );
-            }
-            let backend = backend_ref.clone();
-            spawn_backend(move || {
-                let pin = pin_retry.map(SecretBytes::into_zeroizing);
-                backend.login(session, user_type, pin.as_deref().map(Vec::as_slice))
-            })
-            .await?
-        }
-        other => other,
-    };
+    let result =
+        spawn_backend(move || backend.login(session, user_type, pin.as_deref().map(Vec::as_slice)))
+            .await?;
 
     let ck_rv = match &result {
         Ok(()) => {

@@ -1347,12 +1347,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hdrhistogram",
- "hex",
  "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-util",
  "libc",
  "libloading",
  "nix",
@@ -1380,6 +1375,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
@@ -1458,7 +1454,6 @@ version = "0.2.0"
 dependencies = [
  "cryptoki-sys",
  "libc",
- "libloading",
  "pkcs11-proxy-ng",
  "pkcs11-proxy-ng-backend",
  "pkcs11-proxy-ng-client",
@@ -1479,16 +1474,6 @@ dependencies = [
  "toml",
  "tracing",
  "zeroize",
-]
-
-[[package]]
-name = "pkcs8"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
-dependencies = [
- "der",
- "spki",
 ]
 
 [[package]]
@@ -1906,15 +1891,6 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
-]
-
-[[package]]
-name = "signature"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
-dependencies = [
- "rand_core",
 ]
 
 [[package]]

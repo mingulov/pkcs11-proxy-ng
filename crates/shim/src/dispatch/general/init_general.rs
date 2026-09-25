@@ -79,18 +79,6 @@ pub unsafe extern "C" fn c_initialize(p_init_args: CK_VOID_PTR) -> CK_RV {
             return rv_err(CkRv::CRYPTOKI_ALREADY_INITIALIZED);
         }
 
-        // Mark the cached gRPC channel for reconnect ONLY on genuine
-        // transport failures (FOLLOWUP-dns-reresolve: follow a daemon whose
-        // address changed). Registered before any RPC; idempotent. The hook
-        // fires inside the client's transport-Status mapping, so a backend
-        // `ck_rv` — e.g. kryoptic's CKR_DEVICE_ERROR (OpenSSL catch-all) or
-        // CKR_GENERAL_ERROR (internal catch-all), which arrive as ordinary
-        // results — never triggers a spurious reconnect.
-        pkcs11_proxy_ng_client::set_transport_failure_hook(|| {
-            crate::interface_probe::invalidate_pointer_safe_message_parameters();
-            state::mark_client_reconnect_required()
-        });
-
         // Seed the mechanism registry from the embedded default (plus
         // the optional PKCS11_PROXY_MECHANISMS override). The probe in
         // reprobe() below will replace this with the server-published

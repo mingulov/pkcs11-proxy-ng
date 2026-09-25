@@ -10,32 +10,6 @@
 | Reference k8s manifests | [`examples/k8s/`](../../examples/k8s/) |
 | Example configs (dev/staging/prod) | [`examples/configs/`](../../examples/configs/) |
 
-## v0.2 native-lifetime stop (pending implementation and qualification)
-
-The selected [native ownership contract](../release/native-mechanism-ownership.md)
-uses qualified Linux GNU/musl x86_64/64-bit and x86/32-bit raw `exit_group(70)`
-for unresolved native shutdown or unsafe final-owner Drop. It ends the whole
-daemon thread group, affecting every co-located client. Direct embedders also
-accept termination of unrelated application threads. One managed provider chain
-per process is required; partition independent chains into separate daemons.
-
-The supervisor must observe the actual daemon's ordinary nonzero status:
-systemd on-failure/always can cover 70, on-abnormal/on-abort alone cannot.
-Success/restart-prevention settings, rate limits and manual stops still apply;
-container entrypoints must propagate status and Docker needs an appropriate
-restart policy. Namespace PID 1 termination affects other container processes;
-global host init is excluded. No strict disappearance deadline is promised.
-
-All potential invoking threads and later filters must allow exit_group(70).
-Arbitrary seccomp denial, tracing or syscall interception is unsupported; the
-return-aware loop prevents fallthrough but cannot force a denied group exit.
-The stop runs no cleanup, wiping or audit flush, so the audit tail and token
-effects may remain unresolved. It does not intentionally trigger a core or
-enforce global dump suppression: operators own dump/collector/storage policy,
-including piped collectors not disabled by RLIMIT_CORE=0 alone. Read the linked
-contract before enabling native embeddings; these are future enforcement gates,
-not capabilities supplied by this documentation change.
-
 ## 0. Prerequisites
 
 * Kubernetes cluster ≥ 1.28 (k3s / kind / EKS / GKE / AKS / on-prem).
@@ -88,15 +62,6 @@ Service + `maxSurge: 1, maxUnavailable: 0` rollout strategy, the
 SRE/ops audit observed **zero application-visible failures** through
 a ~22-second rolling restart at 10 rps.
 
-**Shim/daemon lockstep.** The shim and daemon must be upgraded together
-(same release) — mixed-version peers are not supported. An old shim
-sends no `iv_null`/`aad_null`/`source_null` bits, so a new daemon
-materializes empty GCM/OAEP fields as non-NULL where the old daemon
-forced NULL (templates are unaffected — the default matches old
-behavior). Lockstep peers are exact; on backends that distinguish the
-shapes the skew only flips between two reject codes, never
-accept↔reject. (Wave 3.5 D2/F3 review Finding 2.)
-
 **If consumer reports unrecoverable errors during the rollout:**
 
 1. Check pod readiness: `kubectl -n <ns> get pods -l app=<daemon-deploy>`.
@@ -147,76 +112,6 @@ breaker trips before the HSM rejects.
 (via a single ConfigMap). Drift would cause shim consumers to see
 revision-flap warnings.
 
-## 4a. Crash isolation & blast radius — run multiple instances
-
-**The vendor PKCS#11 module is loaded in-process in each daemon.** A SIGSEGV inside
-the vendor `.so` therefore takes down **that daemon process** and drops the consumers
-pinned to it. (In-process worker isolation — ADR-0007 / the parent-repo design spec
-`doc/plans/2026-05-30-backend-process-isolation-design.md` — was evaluated and
-**deliberately deferred**: it cannot make a crash transparent, because PKCS#11
-session/login/operation state is un-serializable and dies with the backend regardless,
-and its remaining wins were not worth the complexity. See the A2 entry in
-`doc/follow-up-index.md`.)
-
-**Supported mitigation — "safety" / stable-channel deployment: run multiple daemon
-instances and partition consumers across them.** This is the same multi-replica
-topology as §4. A backend crash is then contained to the **one** replica's consumers;
-the other replicas and their consumers are unaffected, and the orchestrator restarts
-the dead replica. No in-process feature is needed.
-
-**Sticky routing is mandatory.** A PKCS#11 session handle is valid **only on the
-replica that created it** (sessions live in that replica's backend process). So:
-
-* ✅ Pin each consumer to one replica for its lifetime — the reference manifests do
-  this with `sessionAffinity: ClientIP` (§4); a static per-consumer endpoint works too.
-* ❌ Never put a round-robin L4 load balancer that spreads a single consumer's calls
-  across replicas — you will get `CKR_SESSION_HANDLE_INVALID` storms.
-
-**Consumers must reconnect after a replica restart.** A restart re-initialises the
-backend fresh, so the consumer's sessions/login/in-progress operations are gone. The
-shim auto-reconnects the gRPC channel with bounded backoff, but the **application** must
-re-open its session, re-`C_Login`, and retry — see §6 `CKR_DEVICE_ERROR`. A consumer
-that keeps using its pre-crash handles keeps failing.
-
-**For stronger containment,** partition more finely: a dedicated instance per token /
-trust-domain, or per high-value consumer, so one consumer's crash-inducing input cannot
-affect another's. The cost is N× backend `C_Initialize` and N× resource use.
-
-## 4b. Windows daemon operations (x64/MSVC)
-
-The Windows daemon (`pkcs11-proxy-ng.exe` from the deterministic ZIP bundle,
-`scripts/release-windows.sh`) runs Windows provider DLLs behind mTLS-over-TCP
-only. Evidenced on real Windows Server 2022; receipts at workspace-root
-`artifacts/v020-tail-windows-2026-09-16/leg-A-daemon-win/` unless noted.
-
-- **Listener: `[listener.remote]` with mTLS, no `[listener.local]`.** Unix
-  sockets + peer-cred auth do not exist on Windows; the leg-A daemon config
-  (`proxy-config-legA.toml`) carries only `[listener.remote]`. A config that
-  includes `[listener.local]` fails fast at startup, exit 1:
-  `"[listener.local] (unix socket + peer-cred) is not supported on this OS;
-  configure [listener.remote] with auth = 'mtls' instead"` (exact stderr in
-  `leg-B-shim-win/listener-local-negative.utf8.log`).
-- **No SIGHUP reload — restart to apply.** Mechanism-registry or config changes
-  require a daemon restart; there is no signal reload on Windows. The leg-A
-  run used a scheduled-task launcher (`run-daemon-legA.ps1`) because
-  session-owned processes die with the SSH session — prefer a
-  service/scheduled-task supervisor over ad-hoc shells.
-- **MSVC CRT prerequisite.** The guest needs the MSVC C runtime
-  (`vcruntime140.dll` present in System32 on the Server 2022 receipt host);
-  a missing CRT fails the binary before any proxy log line.
-- **Token provisioning via the guest `softhsm2-util.exe`.** Initialize the
-  token on the guest with the provider's own tool, with `SOFTHSM2_CONF`
-  pointed at the guest config and the SoftHSM2 `lib/` dir prepended to
-  `Path` (the leg-A run hit the PATH gotcha: without it the util cannot find
-  its DLLs). `--version` output is not proof — re-run a slot/token listing
-  and keep it (`token-show-slots.utf8.log` shows slot 1513421618, label
-  `png-t6-legA`, `Initialized: yes`).
-- **Abnormal stop is whole-process, status 70.** Same contract as Linux, via
-  `TerminateProcess(GetCurrentProcess(), 70)`; supervise with
-  `Restart=on-failure` semantics (see the stop section at the top of this
-  runbook and the
-  [native ownership contract](../release/native-mechanism-ownership.md)).
-
 ## 5. Updating mechanism registry (vendor extensions, e.g. CloudHSM)
 
 ```bash
@@ -225,7 +120,7 @@ kubectl -n <ns> edit configmap <daemon-config>
 # (Or update your Helm values and apply.)
 
 # 2) The daemon reloads the registry on SIGHUP. The simplest way
-#    to get the new registry live across all replicas is a rolling restart.
+#    to deliver SIGHUP across all replicas is a rolling restart.
 #    Alternatively, exec into each pod and `kill -HUP 1`.
 kubectl -n <ns> rollout restart deploy/<daemon-deploy>
 
@@ -245,24 +140,6 @@ kubectl -n <ns> logs deploy/<daemon-deploy> | jq -c 'select(.fields.message=="me
 
 The `revision` field is a SHA-256-prefix of the loaded TOML. New
 contents produce a new revision.
-
-### Shipped vendor overlays
-
-`examples/vendors/` carries ready-to-layer overlays for mechanisms the
-proxy understands structurally but keeps operator opt-in rather than
-enabling by default:
-
-- `bouncyhsm-blake2b.toml` — `BLAKE2B_*_HMAC_GENERAL`
-  (OASIS v3.2 standard `0x400E/0x4013/0x4018/0x401D`, single-`CK_ULONG`
-  `mac_general` shape; kept opt-in per the Wave 3 F2 sketch, promotion
-  to defaults is defensible follow-up).
-- `opencryptoki-ecdh-x-cof.toml` — `CKM_ECDH_X_AES_KEY_WRAP` /
-  `CKM_ECDH_COF_AES_KEY_WRAP` (`0x4038/0x4039`, `ecdh_aes_key_wrap`
-  shape; kept opt-in pending dedicated X/COF shapes).
-
-Point `[mechanisms].config_path` (or `PKCS11_PROXY_MECHANISMS` for a
-local shim) at the overlay, or `include` it from the daemon's registry
-file, then reload per §5.
 
 ### ConfigMap `subPath` caveat
 
@@ -295,16 +172,8 @@ volumes:
 
 ### CKR_DEVICE_ERROR (0x30)
 
-**Most likely cause — ambiguous, two sources.** Either (a) a transport-level
-failure to the daemon — pod restart, network partition, daemon overload
-(circuit-breaker trip); or (b) a **backend-reported error** forwarded unchanged.
-Some modules use `CKR_DEVICE_ERROR` as a catch-all: e.g. kryoptic returns it for its
-crypto-backend (OpenSSL) path, so a rejected `C_Verify`, an integrity failure, or an
-unmapped crypto error surfaces here too. The proxy does not invent a "network error"
-code (ADR-0003 §5), so this value alone cannot tell the two apart. **To distinguish:**
-a transport failure clears on the shim's automatic reconnect/retry; a backend error
-persists on retry. The authoritative "daemon restarted, re-initialize" signal is
-`CKR_CRYPTOKI_NOT_INITIALIZED` (below), **not** this code.
+**Most likely cause.** Transport-level failure to the daemon — pod
+restart, network partition, daemon overload (circuit-breaker trip).
 
 **Triage.**
 
@@ -374,43 +243,6 @@ down — see the SRE/ops audit's "shared backend storage" finding.
 in the daemon deployment is mounted from a shared backend (PVC,
 hostPath that's actually shared, or a network HSM endpoint). NEVER
 use `emptyDir` for the backend tokens in a multi-replica setup.
-
-### CKR_USER_ALREADY_LOGGED_IN on a consumer that never logged in (0x100)
-
-**Expected behavior — one logical login holder per slot.** All logical
-clients of a daemon share one backend token per slot (ADR-0002 §6). While
-**any** live context holds the slot login, the backend token is logged in
-and would answer a second `C_Login` with `CKR_USER_ALREADY_LOGGED_IN`
-*without checking the PIN* — so the daemon cannot PIN-verify the new login
-and returns that answer faithfully instead of minting a login on an
-unverified PIN (Wave 3.5 D6(3); a different user type gets
-`CKR_USER_ANOTHER_ALREADY_LOGGED_IN`). The presented PIN is not evaluated
-at all on this path.
-
-**Triage.**
-
-1. This is contention, not corruption: another live consumer (or a previous
-   test case whose context lease has not expired yet) holds the slot login.
-   Find it via daemon logs (`Login succeeded` with a different context id).
-2. The window is bounded: `C_Logout`, last-session close, `C_Finalize`, and
-   lease expiry each release the backend login as soon as no live context
-   holds it (D6(2)/D9). Retry the login after the holder releases.
-3. If logins starve, the holder is leaking its login (never logs out and
-   holds sessions open past its useful life). Fix the holder; do not share
-   one daemon across tenants that need concurrent independent logins on the
-   same token — partition daemons per tenant (§4a).
-4. A `Login reconciling holderless-but-logged-in backend` warning means an
-   earlier best-effort last-holder logout was skipped or failed (find the
-   cause in the matching `last-holder backend logout` warning); the login
-   self-heals with one backend logout plus a single retry. Occasional
-   reconciles after teardown races are benign; repeated ones point at a
-   token that never auto-logs-out or a wedged logout path — investigate.
-
-**Test-harness note.** Back-to-back cases sharing one daemon (e.g. the ncli
-suites) routinely hit this when a prior case's context is still within its
-lease: treat `ALREADY` after a prior login as "slot still held", rotate to a
-fresh daemon for pristine-state cases (see §9), and never work around it by
-retrying with a different PIN — the PIN is not the problem.
 
 ## 7. On-call flowchart
 
@@ -522,38 +354,6 @@ error.
 | `PKCS11_PROXY_MECHANISMS` | Path to a TOML override file the shim layers on top of its embedded default registry at `C_Initialize`. Used only until the server-published registry arrives via `GetBackendInterfaces`. |
 | `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` | If set to any value, the shim ignores the server-published registry and uses only the embedded default + `PKCS11_PROXY_MECHANISMS` override. Test/debug use only — production should leave this unset so vendor mechanisms picked up by the daemon's `[mechanisms].config_path` are honoured. |
 
-## 8c. Private diagnostic bundles
-
-Run `scripts/collect-debug-bundle.sh` to create a small diagnostic archive under
-`target/debug-bundles/`, or select an owned output directory with
-`--output-dir`. The final output directory must be owned by the invoking user
-and must not be group- or world-writable; missing components are created with
-mode `0700`. The collector retains a no-follow descriptor for that directory,
-uses a unique create-only archive name for concurrent runs, and creates the
-archive with mode `0600`. Directories and regular files represented inside the
-archive have modes `0700` and `0600` respectively. If the validated path is
-replaced while collection is running, collection fails and removes only the
-partial archive inode it created.
-
-The archive contains only explicitly allowlisted metadata: normalized system
-and tool versions, the Git commit and dirty-state boolean, presence of known
-provider/build artifacts, and whether selected environment variables are set.
-It does not contain environment values, raw logs, configuration files, command
-errors, arbitrary paths, or workspace file contents. `--include-logs` is
-intentionally rejected because arbitrary logs cannot be generically sanitized.
-Archive construction uses Python's standard-library `tarfile` and `gzip`
-implementations with fixed member names, types, modes, timestamps, numeric
-owners, and no gzip filename. It does not invoke `tar`, `gzip`, or `mktemp`, and
-does not consume `TAR_OPTIONS` or `GZIP`. The shell entrypoint therefore needs
-only Bash and Python 3.9 or newer; the collector is intended for the project's
-supported Linux environment.
-
-The private mode protects the archive on the machine where it is created; it
-does not make the contents anonymous or suitable for automatic publication.
-Always extract and review every file before sharing. If logs or configuration
-details are essential, review and redact them separately and attach only the
-minimum necessary excerpt.
-
 ## 9. Known limitations
 
 These are documented limitations that an on-call engineer may
@@ -562,77 +362,20 @@ encounter; they are scope of follow-up rounds:
 | Limitation | Workaround | Owner |
 | --- | --- | --- |
 | FOLLOWUP-fork-safety: forked children of a `C_Initialize`d shim must `C_Finalize`+`C_Initialize` to recover | Use fork-then-exec in consumer apps | Application code (not daemon-side) |
-| Backend crash blast radius: a vendor-`.so` SIGSEGV downs the whole daemon process (backend is in-process; A2/in-process-worker deferred) | Run **multiple instances + sticky routing** (§4a); consumers reconnect + re-open (§6) | Deployment + application code |
-| Multiplexed daemon vs pristine token: N logical clients share one backend instance per slot — no per-context pristine state (see below) | Rotate/restart the daemon for pristine-state cases; partition daemons per tenant (§4a) | Test harness / deployment |
-| Message-Init struct strictness: classic param structs on message Init fail closed (`CKR_MECHANISM_PARAM_INVALID`); lenient backends accept them direct (see below) | Pack the `CK_*_MESSAGE_PARAMS` struct for the mechanism on message Init | Application code |
-
-### Multiplexed daemon vs pristine token (in-memory backends)
-
-One daemon = one loaded backend module = **one token state per slot shared
-by every logical client** (ADR-0002 §6, ADR-0007). The proxy multiplexes
-handles, sessions, and login scoping, but it does **not** give each context a
-pristine token. In-memory backends (kryoptic, jcardsim, non-persistent
-SoftHSM) make this visible: token objects, backend login state, and
-find-enumeration all accumulate across tenants sharing the daemon.
-
-What the daemon does and does not reset between tenants:
-
-* **Per-context cleanup (always):** a departing context's backend sessions
-  are closed (only when unreferenced by live contexts), its virtual handles
-  invalidated, its session objects destroyed with their sessions.
-* **Shared state (by design, persists):** the backend login while any live
-  context holds it (released on last-context-out, D6(2)/D9); token objects
-  any tenant created; anything the backend itself remembers (jcardsim
-  key files, kryoptic in-memory tables).
-* **Consequences for assertions:** a case that logs in while a prior case's
-  context still lives gets `CKR_USER_ALREADY_LOGGED_IN` (§6) — correct
-  multiplexed behavior, not a bug. A case asserting an empty token, a
-  logged-out token, or a private-object population it did not create is
-  asserting **pristine** state and is invalid against a shared daemon.
-* **Find-enumeration login filtering (F-04, fixed):**
-  `C_FindObjects` results are filtered by the querying context's login
-  state: a logged-out context observes only known-public objects' bare
-  (virtual) handles/counts, even while another tenant holds the backend
-  logged in (unknown privacy hides fail-closed). Attribute reads, every
-  use path, and private-object create/copy/generate still refuse with
-  `CKR_USER_NOT_LOGGED_IN` as before.
-
-**Rule for harnesses:** cases needing pristine state must rotate to a fresh
-daemon (restart, or a per-case backend namespace/volume) — the D9-harness
-rotation option. Cases tolerant of multiplexing may share, but must treat
-`ALREADY` as "slot held" and must scope their assertions to objects they
-created. For strict tenant isolation in production, partition daemons per
-tenant exactly as for crash containment (§4a).
-
-### Message-Init struct strictness (classic structs fail closed)
-
-`C_MessageEncryptInit` / `C_MessageDecryptInit` must carry the message
-parameter struct for the mechanism (`CK_GCM_MESSAGE_PARAMS`,
-`CK_CCM_MESSAGE_PARAMS`, `CK_SALSA20_CHACHA20_POLY1305_MSG_PARAMS`).
-Passing the classic struct (`CK_GCM_PARAMS`, `CK_CCM_PARAMS`) fails
-closed with `CKR_MECHANISM_PARAM_INVALID` by design (ADR-0010
-Limits-(c)) — the call never reaches the backend. kryoptic and NSS
-leniently accept classic structs on message Init, so such calls pass
-direct and fail proxied; that is a documented strictness divergence, not
-a proxy bug (Wave 3 §7.3, Ruling 3 — see the report erratum). If a
-consumer hits `CKR_MECHANISM_PARAM_INVALID` on message Init only through
-the proxy, check the packed struct first.
 
 Earlier follow-ups (DNS re-resolve, slow-backend test, per-RPC
-trace ID, gRPC health probe, rate-limiter) are closed.
+trace ID, gRPC health probe, rate-limiter) are closed; the
+umbrella audit history lives in the parent repo.
 
 ## 10. Escalation
 
 If the daemon is repeatedly crashing or returning errors and this
 runbook does not resolve the issue:
 
-1. Run `scripts/collect-debug-bundle.sh`, extract the resulting archive, and
-   review every file before attaching it.
-2. If the allowlisted bundle is insufficient, collect only the relevant daemon
-   or consumer log interval. Review it for PINs, key material, credentials,
-   object values, and identifying metadata before sharing it. The bundle
-   collector does not sanitize or include logs.
-3. Describe the non-secret configuration fields and the change that preceded
-   the symptoms (image bump, config edit, scale change, backend HSM rotation,
-   and so on). Do not attach a rendered ConfigMap or full environment dump by
-   default; these commonly contain credentials.
+1. Collect daemon + consumer logs:
+   `kubectl -n <ns> logs -l app=<daemon> --all-containers --tail=1000 > daemon.log`
+2. Capture the rendered configmaps:
+   `kubectl -n <ns> get configmap <daemon-config> -o yaml > config.yaml`
+3. Open an issue with the above attached, plus a description of the
+   change that preceded the symptoms (image bump, config edit, scale
+   change, backend HSM rotation, …).

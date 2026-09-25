@@ -25,104 +25,6 @@
 
 discovery_mode = "filtered"
 
-# ─── Hard-excluded mechanisms (operation-time gate) ───────────────────
-#
-# `filtered` discovery only HIDES mechanisms from C_GetMechanismList; the
-# additive merge keeps the embedded default's entries, so a direct
-# invocation of e.g. CKM_RC4 would still be forwarded without this list.
-# Every ID below is rejected by check_operation (even parameterless) and
-# hidden from discovery in every discovery mode. IDs verified against
-# the embedded default (crates/types/src/mechanism_params_default.toml);
-# single-DES only — 3-key TDEA stays allowed. SHA-1 signature
-# mechanisms are omitted from the allowlist above but left to the
-# operator here (legacy-verification policy varies by deployment).
-
-exclude = [
-    # ── MD2 / MD5 family ──
-    0x0200,  # CKM_MD2
-    0x0201,  # CKM_MD2_HMAC
-    0x0202,  # CKM_MD2_HMAC_GENERAL
-    0x0004,  # CKM_MD2_RSA_PKCS
-    0x0210,  # CKM_MD5
-    0x0211,  # CKM_MD5_HMAC
-    0x0212,  # CKM_MD5_HMAC_GENERAL
-    0x0005,  # CKM_MD5_RSA_PKCS
-    0x0380,  # CKM_SSL3_MD5_MAC
-    0x0390,  # CKM_MD5_KEY_DERIVATION
-
-    # ── RC2 / RC4 ──
-    0x0100,  # CKM_RC2_KEY_GEN
-    0x0101,  # CKM_RC2_ECB
-    0x0102,  # CKM_RC2_CBC
-    0x0103,  # CKM_RC2_MAC
-    0x0104,  # CKM_RC2_MAC_GENERAL
-    0x0105,  # CKM_RC2_CBC_PAD
-    0x0110,  # CKM_RC4_KEY_GEN
-    0x0111,  # CKM_RC4
-
-    # ── single-DES (NOT DES2/DES3: TDEA and DES3 encrypt-data stay allowed) ──
-    0x0120,  # CKM_DES_KEY_GEN
-    0x0121,  # CKM_DES_ECB
-    0x0122,  # CKM_DES_CBC
-    0x0123,  # CKM_DES_MAC
-    0x0124,  # CKM_DES_MAC_GENERAL
-    0x0125,  # CKM_DES_CBC_PAD
-    0x1100,  # CKM_DES_ECB_ENCRYPT_DATA
-    0x1101,  # CKM_DES_CBC_ENCRYPT_DATA
-
-    # ── CAST / CAST3 / CAST128 ──
-    0x0300,  # CKM_CAST_KEY_GEN
-    0x0301,  # CKM_CAST_ECB
-    0x0302,  # CKM_CAST_CBC
-    0x0303,  # CKM_CAST_MAC
-    0x0304,  # CKM_CAST_MAC_GENERAL
-    0x0305,  # CKM_CAST_CBC_PAD
-    0x0310,  # CKM_CAST3_KEY_GEN
-    0x0311,  # CKM_CAST3_ECB
-    0x0312,  # CKM_CAST3_CBC
-    0x0313,  # CKM_CAST3_MAC
-    0x0314,  # CKM_CAST3_MAC_GENERAL
-    0x0315,  # CKM_CAST3_CBC_PAD
-    0x0320,  # CKM_CAST128_KEY_GEN
-    0x0321,  # CKM_CAST128_ECB
-    0x0322,  # CKM_CAST128_CBC
-    0x0323,  # CKM_CAST128_MAC
-    0x0324,  # CKM_CAST128_MAC_GENERAL
-    0x0325,  # CKM_CAST128_CBC_PAD
-
-    # ── IDEA / SEED / Camellia / ARIA ──
-    0x0340,  # CKM_IDEA_KEY_GEN
-    0x0341,  # CKM_IDEA_ECB
-    0x0342,  # CKM_IDEA_CBC
-    0x0343,  # CKM_IDEA_MAC
-    0x0344,  # CKM_IDEA_MAC_GENERAL
-    0x0345,  # CKM_IDEA_CBC_PAD
-    0x0650,  # CKM_SEED_KEY_GEN
-    0x0651,  # CKM_SEED_ECB
-    0x0652,  # CKM_SEED_CBC
-    0x0653,  # CKM_SEED_MAC
-    0x0654,  # CKM_SEED_MAC_GENERAL
-    0x0655,  # CKM_SEED_CBC_PAD
-    0x0656,  # CKM_SEED_ECB_ENCRYPT_DATA
-    0x0657,  # CKM_SEED_CBC_ENCRYPT_DATA
-    0x0550,  # CKM_CAMELLIA_KEY_GEN
-    0x0551,  # CKM_CAMELLIA_ECB
-    0x0552,  # CKM_CAMELLIA_CBC
-    0x0553,  # CKM_CAMELLIA_MAC
-    0x0554,  # CKM_CAMELLIA_MAC_GENERAL
-    0x0555,  # CKM_CAMELLIA_CBC_PAD
-    0x0556,  # CKM_CAMELLIA_ECB_ENCRYPT_DATA
-    0x0557,  # CKM_CAMELLIA_CBC_ENCRYPT_DATA
-    0x0560,  # CKM_ARIA_KEY_GEN
-    0x0561,  # CKM_ARIA_ECB
-    0x0562,  # CKM_ARIA_CBC
-    0x0563,  # CKM_ARIA_MAC
-    0x0564,  # CKM_ARIA_MAC_GENERAL
-    0x0565,  # CKM_ARIA_CBC_PAD
-    0x0566,  # CKM_ARIA_ECB_ENCRYPT_DATA
-    0x0567,  # CKM_ARIA_CBC_ENCRYPT_DATA
-]
-
 # ─── Parameterless mechanisms (FIPS-approved subset) ──────────────────
 
 parameterless = [
@@ -196,10 +98,10 @@ parameterless = [
     0x1081,  # CKM_AES_ECB
     0x1082,  # CKM_AES_CBC
     0x1085,  # CKM_AES_CBC_PAD
-    # NOTE: CKM_AES_CTR, CKM_AES_CMAC_GENERAL and CKM_AES_GMAC take
-    # parameters — they are NOT parameterless. Their shapes come from
-    # the embedded default; do not re-add their IDs here.
+    0x1086,  # CKM_AES_CTR
     0x108A,  # CKM_AES_CMAC
+    0x108B,  # CKM_AES_CMAC_GENERAL
+    0x108E,  # CKM_AES_GMAC
     0x2109,  # CKM_AES_KEY_WRAP
     0x210A,  # CKM_AES_KEY_WRAP_PAD
     0x210B,  # CKM_AES_KEY_WRAP_KWP
@@ -213,17 +115,15 @@ parameterless = [
     0x0138,  # CKM_DES3_CMAC
 
     # ── KDF / KBKDF ──
-    # Real HKDF IDs per OASIS pkcs11t.h 3.02 are 0x402A/0x402B/0x402C
-    # (0x0028-0x002A are PQC hash mechanisms, not HKDF). DERIVE/DATA
-    # take CK_HKDF_PARAMS (see [[params]] below); KEY_GEN is
-    # parameterless.
-    0x402C,  # CKM_HKDF_KEY_GEN
+    0x0028,  # CKM_HKDF_DERIVE
+    0x0029,  # CKM_HKDF_DATA
+    0x002A,  # CKM_HKDF_KEY_GEN
 ]
 
 # ─── Parameterized mechanisms (FIPS-approved parameter shapes) ────────
 
 [[params]]
-shape = "rsa_pss"
+shape = "RsaPkcsPss"
 mechanisms = [
     0x000D,  # CKM_RSA_PKCS_PSS
     0x0043,  # CKM_SHA256_RSA_PKCS_PSS
@@ -237,51 +137,39 @@ mechanisms = [
 ]
 
 [[params]]
-shape = "rsa_oaep"
+shape = "RsaPkcsOaep"
 mechanisms = [
     0x0009,  # CKM_RSA_PKCS_OAEP
 ]
 
 [[params]]
-shape = "gcm"
+shape = "AesGcm"
 mechanisms = [
     0x1087,  # CKM_AES_GCM
 ]
 
 [[params]]
-shape = "ccm"
+shape = "AesCcm"
 mechanisms = [
     0x1088,  # CKM_AES_CCM
 ]
 
 [[params]]
-shape = "ecdh1_derive"
+shape = "Ecdh1Derive"
 mechanisms = [
     0x1050,  # CKM_ECDH1_DERIVE
     0x1051,  # CKM_ECDH1_COFACTOR_DERIVE
 ]
 
 [[params]]
-shape = "iv"
+shape = "DhPkcsDerive"
 mechanisms = [
-    0x0021,  # CKM_DH_PKCS_DERIVE (raw public value bytes)
-]
-
-[[params]]
-shape = "x942_dh1_derive"
-mechanisms = [
+    0x0021,  # CKM_DH_PKCS_DERIVE
     0x0031,  # CKM_X9_42_DH_DERIVE
 ]
 
 [[params]]
-shape = "pkcs5_pbkd2"
+shape = "Pkcs5Pbkd2"
 mechanisms = [
     0x03B0,  # CKM_PKCS5_PBKD2
-]
-
-[[params]]
-shape = "hkdf"
-mechanisms = [
-    0x402A,  # CKM_HKDF_DERIVE
-    0x402B,  # CKM_HKDF_DATA
 ]
