@@ -3,6 +3,12 @@
 ## Status
 Implemented
 
+**v0.2 scope:** the mechanisms below remain required, but do not establish
+multi-client isolation. The testing baseline permits one logical client in one
+trusted domain per daemon/provider, with restart before switching independent
+clients or domains. Multi-client guarantees are deferred to
+[v0.3](../release/v0.3.0-scope.md).
+
 ## Context
 
 Wrapping adapters share admission in this order: context/session and direct
@@ -266,7 +272,9 @@ The following capabilities are explicitly out of scope for Phase 1. They are lis
 
 - **Issuer/subject collisions.** If two unrelated clients end up with the same
   canonical issuer+subject pair, they are treated as the same identity for
-  policy purposes (though their contexts remain isolated per ADR-0002).
+  policy purposes (their context ownership and handle namespaces remain
+  distinct under ADR-0002; multi-client native-authentication isolation is
+  outside the v0.2 testing scope).
   Operators must ensure client-certificate identity uniqueness within their PKI.
 - **`peer_cred` trust boundary.** `SO_PEERCRED` trusts the local kernel's process identity. If the host is compromised, `peer_cred` provides no protection. This is inherent to Unix socket peer credentials and is acceptable for same-machine deployments where host compromise is already a catastrophic event.
 - **PIN handling is out of scope.** This ADR does not cover PKCS#11 `C_Login` PIN handling. PINs are passed through to the backend as opaque data. The security properties of PIN transmission depend on the transport encryption (TLS for TCP, filesystem permissions for Unix sockets) and are not further constrained by this authorization model.

@@ -4,6 +4,12 @@
 **Relates to:** ADR-0005 §4 (Phase-1 authorization model), ADR-0002 §3
 (client-context identity), ADR-0007 / A2 backend isolation (deferred)
 
+**v0.2 scope:** the mechanisms below remain required, but do not establish
+multi-client isolation. The testing baseline permits one logical client in one
+trusted domain per daemon/provider, with restart before switching independent
+clients or domains. Multi-client guarantees are deferred to
+[v0.3](../release/v0.3.0-scope.md).
+
 ## Context
 
 A logical client is identified on the wire by a `client_context_id` string,

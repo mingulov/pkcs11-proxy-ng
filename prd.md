@@ -73,21 +73,29 @@ Phase 1 is intentionally narrower than "full PKCS#11 support".
 - built-in token implementation
 - Windows and macOS parity in phase 1
 
-#### 6.3 Selected v0.2 Native Boundary (2026-09-13)
+#### 6.3 Selected v0.2 Native Boundary
 
 The [native ownership contract](doc/release/native-mechanism-ownership.md)
-is required for v0.2; implementation and native qualification remain pending.
-Live production FFI is limited to qualified Linux GNU/musl x86_64/64-bit and
-x86/32-bit (i686). This supersedes Windows native-provider daemon support in
-ADR-0011/0006 for this release. Portable Windows client/shim/proto/types and
-mock-only backend/server builds remain, including Windows clients using a
-qualified Linux daemon.
+is implemented in the unreleased v0.2 testing candidate. Historical acceptance
+records remain tied to their original source and environment; qualification of
+the final candidate is separate and remains incomplete.
 
-[Tail-stretch closure, 2026-09-17: the Windows deferral above was the
-2026-09-13 posture — ADR-0014 is Implemented, re-admitting the Windows
-x64/MSVC native daemon and the Windows client shim to the v0.2.0 tail
-stretch, qualified on real Windows Server 2022 (T6 legs A/B/C receipts in
-workspace-root `artifacts/v020-tail-windows-2026-09-16/`).]
+The current target boundaries are recorded in that contract and
+[ADR-0014](doc/adr/ADR-0014-v020-tail-platform-stretch.md): Linux x86_64,
+i686 and aarch64; Windows MSVC x64; Windows MSVC x86 at the stub-provider
+tier; and macOS aarch64. macOS x86_64 has load coverage only. The s390x
+build/QEMU tier does not qualify live native FFI. Windows GNU is excluded.
+Linux aarch64's stop arm has compile/review evidence, without a native stop-fire
+receipt. These distinctions do not establish provider parity for the current
+candidate.
+
+v0.2.0 is a **single-logical-client testing baseline**: use one trusted
+security domain per daemon and provider instance. Do not connect mutually
+untrusted clients or share a daemon/provider between independent domains.
+Restart the daemon and its provider instance before changing to an independent
+client or security domain. `[proxy] max_contexts = 1` is an admission guardrail,
+not a repair for isolation or residual native authentication state.
+Multi-client isolation is deferred to the [v0.3 scope](doc/release/v0.3.0-scope.md).
 
 One managed provider chain per embedding process, reserved before loading or
 discovery, owns lifecycle and retirement. Callers share one backend via Arc;

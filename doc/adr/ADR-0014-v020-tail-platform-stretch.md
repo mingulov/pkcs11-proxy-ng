@@ -11,12 +11,11 @@
 ## Context
 
 The P0 amendment deferred Windows native daemon work and the 32-bit/mixed
-claim out of v0.2.0 as lower-priority stretch that could be dropped. The
-v0.2.0 release program (`doc/plans/2026-09-13-v0.2.0-release-program-design.md`,
-workstreams 9-10, gates 5/7) already describes both Windows directions as
-conditional W2 topology legs. The user decision of 2026-09-14 re-admits the
-deferred platform scope to v0.2.0 — at the end of the program, low priority,
-after the Linux correction/parity work — instead of dropping it.
+claim out of v0.2.0 as lower-priority stretch. The 2026-09-14 scope decision
+re-admitted Windows-daemon/Linux-client and Linux-daemon/Windows-client
+interoperation, together with the Linux width topologies below. This ADR
+records that scope and its historical implementation; qualification of later
+candidate revisions requires new evidence.
 
 ## Decision
 
@@ -72,7 +71,8 @@ implemented with named receipts — no item was waived or handed off:
 
 1. Windows x64/MSVC native daemon — T6 leg A (Windows daemon + SoftHSM2-win
    DLL over mTLS, Linux client) and leg C (BouncyHsm-win second provider),
-   workspace-root `artifacts/v020-tail-windows-2026-09-16/`.
+   exercised in the 2026-09-16 development runs. Those historical artifacts
+   are not part of this standalone repository or a current-candidate receipt.
 2. Windows x64 client shim — T6 leg B (Windows shim DLL +
    `cross_width_smoke.exe` vs Linux daemon, exit 0, LLP64 width line).
 3. Both W2 directions — legs A and B above, including the `[listener.local]`
@@ -97,7 +97,7 @@ leg first):
 
 The Consequences interim rule is discharged: tail implementation has landed,
 so nonqualified-host refusal now applies only to the still-excluded hosts
-(Windows GNU, Linux ARM64) plus big-endian for live FFI (BE is
+(Windows GNU) plus big-endian for live FFI (BE is
 build-and-QEMU proven only — see [be-qemu-tier.md](../release/be-qemu-tier.md)),
 and Windows compile CI continues via the per-PR Tier 0f
 `windows-client-llp64` job. PE32 left the refusal set —
@@ -106,8 +106,7 @@ and Windows compile CI continues via the per-PR Tier 0f
 landed the runtime qualification at the win32 CI tier stated in the
 Decision section above.
 
-Note: the Context section's
-`doc/plans/2026-09-13-v0.2.0-release-program-design.md` reference is dangling
-— no `doc/plans/` directory exists in this repo. It is superseded by the
-release program plan and the Windows tail plan held at the workspace root;
-the §9 row order above is quoted from that program design.
+The topology table above is self-contained. Historical implementation and CI
+coverage do not establish provider parity or final-candidate qualification.
+Current claims must retain the stub/load/runtime distinctions in this ADR and
+the target-specific stop evidence limits in the native-ownership contract.

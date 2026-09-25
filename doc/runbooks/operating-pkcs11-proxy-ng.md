@@ -10,7 +10,26 @@
 | Reference k8s manifests | [`examples/k8s/`](../../examples/k8s/) |
 | Example configs (dev/staging/prod) | [`examples/configs/`](../../examples/configs/) |
 
-## v0.2 native-lifetime stop (pending implementation and qualification)
+## v0.2 single-client testing boundary
+
+v0.2.0 is a **single-logical-client testing baseline**: use one trusted
+security domain per daemon and provider instance. Do not connect mutually
+untrusted clients or share a daemon/provider between independent domains.
+Restart the daemon and its provider instance before changing to an independent
+client or security domain. `[proxy] max_contexts = 1` is an admission guardrail,
+not a repair for isolation or residual native authentication state.
+Multi-client isolation is deferred to the [v0.3 scope](../release/v0.3.0-scope.md).
+
+Apply the restart boundary even if the previous client disconnected or its
+context expired. A context limit does not establish native logout, clear a
+provider's process-global state, or authorize handing the same live instance
+to another independent client. Existing authentication and policy checks remain
+required. For deployments requiring concurrent independent clients, use
+separate daemon/provider instances and independently establish any external
+HSM/token isolation; this testing baseline does not qualify shared-token
+multi-tenancy.
+
+## v0.2 native-lifetime stop (implemented; candidate qualification separate)
 
 The selected [native ownership contract](../release/native-mechanism-ownership.md)
 uses qualified Linux GNU/musl x86_64/64-bit and x86/32-bit raw `exit_group(70)`
@@ -106,9 +125,18 @@ a ~22-second rolling restart at 10 rps.
 sends no `iv_null`/`aad_null`/`source_null` bits, so a new daemon
 materializes empty GCM/OAEP fields as non-NULL where the old daemon
 forced NULL (templates are unaffected — the default matches old
-behavior). Lockstep peers are exact; on backends that distinguish the
-shapes the skew only flips between two reject codes, never
-accept↔reject. (Wave 3.5 D2/F3 review Finding 2.)
+behavior). Providers may distinguish NULL from a present empty buffer, so
+mixed versions can change return values or whether an operation succeeds.
+Do not assume the difference is confined to two rejection codes. Validate
+pointer/length fidelity for the parameter shapes used by the deployment;
+matching release versions alone do not prove every shape's fidelity. Classic
+CCM also carries IV/AAD NULL flags; an older peer that omits them cannot
+preserve the same caller shape. The focused Kryoptic round-trip check covers
+a valid 12-byte nonce and empty AAD supplied as NULL or present. Kryoptic
+accepts both forms, so these live operations do not distinguish native pointer
+identity; separate shim/protobuf/FFI structural tests check pointer presence.
+Neither evidence establishes other CCM pointer shapes, CCM/wrap layouts, or
+mixed-version support.
 
 **If consumer reports unrecoverable errors during the rollout:**
 
@@ -261,21 +289,19 @@ contents produce a new revision.
 
 ### Shipped vendor overlays
 
-`examples/vendors/` carries ready-to-layer overlays for mechanisms the
-proxy understands structurally but keeps operator opt-in rather than
-enabling by default:
+`examples/vendors/` retains example registry entries for provider integration.
+The following standard mechanisms are already in the embedded default registry:
 
 - `bouncyhsm-blake2b.toml` — `BLAKE2B_*_HMAC_GENERAL`
   (OASIS v3.2 standard `0x400E/0x4013/0x4018/0x401D`, single-`CK_ULONG`
-  `mac_general` shape; kept opt-in per the Wave 3 F2 sketch, promotion
-  to defaults is defensible follow-up).
+  `mac_general` shape).
 - `opencryptoki-ecdh-x-cof.toml` — `CKM_ECDH_X_AES_KEY_WRAP` /
   `CKM_ECDH_COF_AES_KEY_WRAP` (`0x4038/0x4039`, `ecdh_aes_key_wrap`
-  shape; kept opt-in pending dedicated X/COF shapes).
+  shape).
 
-Point `[mechanisms].config_path` (or `PKCS11_PROXY_MECHANISMS` for a
-local shim) at the overlay, or `include` it from the daemon's registry
-file, then reload per §5.
+No overlay is needed to enable those standard entries. For a customized registry,
+set `[mechanisms].config_path` (or `PKCS11_PROXY_MECHANISMS` for a local shim),
+then reload per §5. Mechanism discovery still reflects the selected provider.
 
 ### ConfigMap `subPath` caveat
 
@@ -593,51 +619,46 @@ encounter; they are scope of follow-up rounds:
 | --- | --- | --- |
 | FOLLOWUP-fork-safety: forked children of a `C_Initialize`d shim must `C_Finalize`+`C_Initialize` to recover | Use fork-then-exec in consumer apps | Application code (not daemon-side) |
 | Backend crash blast radius: a vendor-`.so` SIGSEGV downs the whole daemon process (backend is in-process; A2/in-process-worker deferred) | Run **multiple instances + sticky routing** (§4a); consumers reconnect + re-open (§6) | Deployment + application code |
-| Multiplexed daemon vs pristine token: N logical clients share one backend instance per slot — no per-context pristine state (see below) | Rotate/restart the daemon for pristine-state cases; partition daemons per tenant (§4a) | Test harness / deployment |
+| v0.2 supports one logical client per trusted daemon/provider domain; native state is not an isolated per-context environment (see below) | Restart daemon/provider before independent-client handover; separately provision pristine tokens when tests require them | Test harness / deployment |
 | Message-Init struct strictness: classic param structs on message Init fail closed (`CKR_MECHANISM_PARAM_INVALID`); lenient backends accept them direct (see below) | Pack the `CK_*_MESSAGE_PARAMS` struct for the mechanism on message Init | Application code |
 | Login-timing observer: an authorized session owner can tell proxy-cooldown `CKR_PIN_LOCKED` (fast, no backend contact) from a forwarded attempt, and observes its own login state (see below) | Accepted residual — no constant-latency guarantee by design | — |
-| Suspended session handles count toward the per-principal session quota; unset quotas bound nothing (see below) | Set `per_principal_max_sessions` where tenants are untrusted | Deployment |
+| Suspended session handles count toward the per-principal session quota; unset quotas bound nothing (see below) | Configure the quota for the trusted testing client; quotas do not qualify untrusted multi-tenancy | Deployment |
 | Daemon memory lock is best-effort (`mlockall`, loud on denial); shim has no process-wide lock; swap residual stands (see below) | Grant `CAP_IPC_LOCK` / `LimitMEMLOCK`, confirm the startup log line | Deployment |
 | Git-sourced dependencies need network unless the cargo cache is pre-populated; no vendored sources ship (see below) | Pre-populate the cargo cache for air-gapped builds | Build |
 | `tests/consumers/Dockerfile.daemon.kryoptic` is unpinned/unhashed fixture-only (see below) | Never use fixture images outside provider-matrix testing | Test harness |
 
-### Multiplexed daemon vs pristine token (in-memory backends)
+### Single-client lifetime and backend-authoritative login
 
-One daemon = one loaded backend module = **one token state per slot shared
-by every logical client** (ADR-0002 §6, ADR-0007). The proxy multiplexes
-handles, sessions, and login scoping, but it does **not** give each context a
-pristine token. In-memory backends (kryoptic, jcardsim, non-persistent
-SoftHSM) make this visible: token objects, backend login state, and
-find-enumeration all accumulate across tenants sharing the daemon.
+v0.2 permits one logical client in one trusted security domain per daemon/provider
+instance. Mutually untrusted clients and independent domains must not share it.
+Restart the daemon and provider before switching to an independent client or
+domain, even after disconnect, context expiry or apparent logout. Token objects
+can persist across restart according to the provider; tests requiring a pristine
+token also need their own token provisioning. `max_contexts = 1` limits admission
+but does not repair isolation or prove native authentication state was cleared.
 
-What the daemon does and does not reset between tenants:
+After local authorization, handle, user-type, credential-shape and configured
+login-budget checks, admitted login attempts reach the backend. This includes
+repeated attempts while the native token is logged in. The backend decides
+whether to revalidate the PIN and which RV to return; do not assume the answer
+must be `CKR_USER_ALREADY_LOGGED_IN`. An `ALREADY` answer establishes no logical
+login. The holderless reconciliation path can perform one logout and one login
+retry as documented in ADR-0002.
 
-* **Per-context cleanup (always):** a departing context's backend sessions
-  are closed (only when unreferenced by live contexts), its virtual handles
-  invalidated, its session objects destroyed with their sessions.
-* **Shared state (by design, persists):** the backend login while any live
-  context holds it (released on last-context-out, D6(2)/D9); token objects
-  any tenant created; anything the backend itself remembers (jcardsim
-  key files, kryoptic in-memory tables).
-* **Consequences for assertions:** a case that logs in while a prior case's
-  context still lives gets `CKR_USER_ALREADY_LOGGED_IN` (§6) — correct
-  multiplexed behavior, not a bug. A case asserting an empty token, a
-  logged-out token, or a private-object population it did not create is
-  asserting **pristine** state and is invalid against a shared daemon.
-* **Find-enumeration login filtering (F-04, fixed):**
-  `C_FindObjects` results are filtered by the querying context's login
-  state: a logged-out context observes only known-public objects' bare
-  (virtual) handles/counts, even while another tenant holds the backend
-  logged in (unknown privacy hides fail-closed). Attribute reads, every
-  use path, and private-object create/copy/generate still refuse with
-  `CKR_USER_NOT_LOGGED_IN` as before.
+Context cleanup and object filters remain implemented mechanisms, not a
+multi-client isolation guarantee. The find filter uses login state and object
+classification, with separate rules for recognized non-storage metadata
+classes; unknown storage privacy is hidden for logged-out queries. Private
+create/copy/use checks do not mean that every logged-out operation is refused:
+when no other logical context holds the login, the backend's verdict remains
+authoritative. Cross-client privacy defaults, cache invalidation and
+native-lifetime authentication synchronization remain unqualified and deferred
+to the [v0.3 scope](../release/v0.3.0-scope.md).
 
-**Rule for harnesses:** cases needing pristine state must rotate to a fresh
-daemon (restart, or a per-case backend namespace/volume) — the D9-harness
-rotation option. Cases tolerant of multiplexing may share, but must treat
-`ALREADY` as "slot held" and must scope their assertions to objects they
-created. For strict tenant isolation in production, partition daemons per
-tenant exactly as for crash containment (§4a).
+Harnesses must retain the same single-client/restart boundary. A case being
+tolerant of shared state does not authorize multiplexing independent clients.
+Separate daemon/provider instances are required for independent domains;
+shared external HSM/token isolation requires its own qualification.
 
 ### Message-Init struct strictness (classic structs fail closed)
 
@@ -679,7 +700,8 @@ quota evasion via rapid open/close churn. With quotas unset (the
 default), in-flight closes are unbounded in principle: completions
 always resolve them, but no bound was proven under adversarial
 scheduling. A new cap needs resource-policy design and is deferred;
-set `per_principal_max_sessions` where tenants are untrusted.
+set `per_principal_max_sessions` to bound the trusted testing client's session
+use. Quotas do not extend v0.2 support to mutually untrusted clients.
 
 ### Memory lock and swap residual (accepted residual)
 

@@ -4,11 +4,16 @@
 
 Implemented
 
-**v0.2 P0 amendment (2026-09-13): selected contract; implementation pending.**
+**v0.2 scope amendment:** one logical client in one trusted security domain
+per daemon/provider instance. Restart that instance before switching independent
+clients or domains; `max_contexts = 1` is an admission guardrail, not an isolation
+fix. The context model below describes implemented mechanisms and design goals;
+it does not establish multi-client privacy or authentication-state isolation.
+That work is deferred to [v0.3](../release/v0.3.0-scope.md).
+
 The [native ownership contract](../release/native-mechanism-ownership.md)
-specifies one provider-chain domain, ordinary lifecycle exclusion for the sole
-nonblocking slot waiter, checked widths/epochs and quiescent retirement. It
-does not establish completed implementation or native-provider qualification.
+is implemented, with current-candidate qualification separate from historical
+acceptance records. Its lifecycle, width and stop requirements remain binding.
 
 ## Context
 
@@ -142,9 +147,14 @@ Audit session events retain the virtual slot namespace used by slot requests.
   so handles from different clients never collide and cannot be used
   cross-instance.
 - Session-object handles are valid only while the owning session is open.
-  Token-object handles remain valid within the logical client instance for as
-  long as the underlying object exists, but are still virtual and become invalid
-  on context teardown or daemon restart.
+  Token-object handles with known token classification remain valid within
+  the logical client instance while the underlying object exists, but become
+  invalid on context teardown or daemon restart. After successful `C_CopyObject`,
+  classification uses the copy's actual `CKA_TOKEN` when readable, otherwise
+  retaining a valid explicit template value. If lifetime cannot be established,
+  native success is preserved with a session-scoped virtual handle; it can
+  expire on copying-session close even if the native
+  object persists. This fallback is a documented metadata limit.
 
 ### 6. Login State
 
@@ -155,41 +165,34 @@ Login state is scoped to **logical client instance + token**:
   per-application semantics.
 - `C_Logout` from any session in the logical client instance returns all of that
   instance's sessions with the token to the public state.
-- One logical client instance's login has no effect on another logical client
-  instance's sessions, even if both are authenticated by the same mTLS
-  certificate.
+- Independence of login state across logical clients is a v0.3 requirement,
+  not a v0.2 guarantee. A shared native provider has authentication state beyond
+  the proxy's per-context bookkeeping, even if clients use distinct identities.
 
-**Backend-authoritative login (D6(3); supersedes ADR-0008).** When another
-live logical client already holds the slot login, the shared backend token is
-logged in and would answer a second backend `C_Login` with
-`CKR_USER_ALREADY_LOGGED_IN` *without* checking the PIN — so the daemon
-**cannot** PIN-verify the new login against the token. It therefore returns
-the backend's answer faithfully (`CKR_USER_ALREADY_LOGGED_IN`, or
-`CKR_USER_ANOTHER_ALREADY_LOGGED_IN` across user types) and mints **no**
-logical login: never a login on an unverified PIN, and the presented PIN is
-not evaluated at all on this path. At most one logical client holds the login
-for a slot at a time; the holder releases it via `C_Logout`, session close,
-or context teardown (last-context-out performs a real backend logout, D6(2) /
-D9-proxy), after which the next login PIN-verifies against the token
-normally. Operators and test harnesses must therefore treat a held slot login
-as exclusive and short-lived, and must not share one daemon across tenants
-that expect concurrent independent logins on the same token.
+**Backend-authoritative login (supersedes ADR-0008).** After local authorization,
+handle, user-type and configured login-budget checks, `C_Login` and
+`C_LoginUser` attempts are forwarded even when this or another logical client
+holds the slot login. The backend determines whether to revalidate the PIN and
+which return value to produce, including `CKR_PIN_INCORRECT` or an `ALREADY`
+variant. The proxy must not assume that an already-logged-in backend ignores
+the presented PIN. An `ALREADY` result establishes no logical login; successful
+ordinary login records the requesting context's login state. Context-specific
+login does not establish ordinary per-slot login state.
 
-**Per-slot login serialization (M5).** The cross-context check for an existing
-per-slot login, the backend `C_Login`/`C_Logout`, and the recording of the new
-login state are performed under a **per-slot login lock** (`ContextManager::
-slot_login_lock`, one `tokio::sync::Mutex` keyed by slot id). Without it, two
-logical clients logging into the *same* slot concurrently could both observe
-"no other login" and both take the real-login path, issuing two backend
-`C_Login` calls for one logical outcome. The lock makes the first client
-perform the real `C_Login` while the second blocks, then sees the first
-client's state and takes the faithful-`ALREADY` path (D6(3)), so exactly one
-backend `C_Login` occurs. The lock is held across the backend call but is
-per-slot, so logins on different slots proceed concurrently; the shared token
-already serialises same-slot logins internally, so no real concurrency is
-lost. Verified by a deterministic concurrency test
-(`concurrent_first_login_serializes_to_one_backend_login`) that gates the first
-client inside the backend `C_Login` while the second races in.
+The holderless-but-logged-in reconciliation path remains an explicit exception:
+an `ALREADY` result with no live logical holder triggers one backend logout and
+one login retry, as specified below. Operators must account for the shared
+native token login state; independent per-tenant native login environments
+require separate provider processes.
+
+**Per-slot login serialization (M5).** Session resolution, each native login
+attempt and its logical-state update use the per-slot login lock
+(`ContextManager::slot_login_lock`, one `tokio::sync::Mutex` keyed by slot id).
+Concurrent attempts on one slot are serialized; the second attempt still
+reaches the backend and receives its verdict. Serialization does not promise
+exactly one native `C_Login` across two requests. The holderless reconciliation
+path releases the lock across logout and reacquires it for the checked retry.
+Login attempts on different slots use different locks.
 
 ### 7. Session Cleanup
 
@@ -258,7 +261,9 @@ State teardown follows a clear precedence:
    all virtual handles, releases login state, decrements the backend reference
    count. Backend sessions are reaped only when unreferenced by any live
    context (refcount check, D9-proxy), and the backend login is released only
-   on last-context-out (D6(2)) -- never disturbing live tenants.
+   on last-context-out (D6(2)). These checks describe the intended cleanup
+   coordination; they do not establish multi-client isolation under native
+   failures or cancellation.
 2. **Transport disconnect:** The daemon starts the lease timer. If the client
    reconnects and presents a valid `client_context_id` before expiry, state is
    preserved. If the lease expires, teardown proceeds as in (1).
@@ -284,10 +289,10 @@ single process. v0.2 uses one managed chain per embedding process and the
 multi-daemon strategy of ADR-0007. The stronger alternatives below remain
 deferred and are not available in-process safety guarantees:
 
-- **Default: Shared daemon process.** Multiple logical client instances share
-  one loaded backend module within the daemon process. Virtual handle namespaces
-  provide caller isolation at the proxy layer. This is correct when the backend
-  module properly isolates sessions and handles across concurrent callers.
+- **v0.2: One logical client per daemon/provider instance.** Virtual handles
+  and context ownership remain implemented mechanisms; they do not qualify
+  shared-process multi-client isolation. Use one trusted domain and restart
+  the daemon/provider before assigning it to an independent client or domain.
 
 - **Deferred: Separate backend module instance per logical context.** Another
   `dlopen` handle or `RTLD_LOCAL` does not establish independent native globals,
@@ -295,12 +300,10 @@ deferred and are not available in-process safety guarantees:
   is refused before loading under the v0.2 contract. A future shared-domain or
   namespace design would need its own identity/lifecycle proof.
 
-- **Fallback 2: Separate worker process per logical context (or per
-  tenant/principal).** For the strongest isolation guarantee, or when the
-  backend library is known to be unsafe for in-process multi-tenancy, the daemon
-  forks a dedicated worker process for each logical client instance or group of
-  instances. This provides a true OS-process isolation boundary when shared
-  in-process loading is not trustworthy enough.
+- **Deferred: Separate worker process per logical context or principal.**
+  Dedicated workers would provide an OS address-space boundary. This fallback
+  is a design option, not an implemented v0.2 daemon feature or a guarantee
+  of isolation in a shared external token.
 
 Independent chains currently require separate processes. Another linked backend
 runtime, unmanaged calls or shared downstream aggregator aliasing falls outside
@@ -349,21 +352,19 @@ These are recorded for resolution during implementation or in follow-on ADRs:
 
 ### What becomes easier
 
-- **Correct per-application semantics.** The logical client instance model
-  preserves PKCS#11's per-application isolation guarantees (`C_CloseAllSessions`,
-  per-application login, handle ownership) across the network boundary. An
-  implementer can reason about proxy-side state using the same mental model as
-  the PKCS#11 spec.
+- **Per-application state model.** Contexts represent session and handle
+  ownership across the network boundary. Full multi-client isolation remains
+  a v0.3 requirement; v0.2 is constrained to one logical client.
 
 - **Transport resilience.** Transient network interruptions do not destroy
   application state. The lease mechanism provides a window for transparent
   reconnect without requiring the application to re-initialize, re-login, and
   re-open sessions.
 
-- **Multi-tenancy.** Multiple clients -- potentially authenticated by the same
-  mTLS certificate -- can safely coexist on one daemon without cross-client
-  state leakage. The logical client instance is a natural attachment point for
-  future authorization policy, quotas, and audit logging.
+- **Future multi-client work.** Logical contexts provide attachment points
+  for policy, quotas and audit records. Safe coexistence of independent clients
+  requires the v0.3 privacy and native-authentication work and its validation;
+  it is not a v0.2 support claim.
 
 - **Incremental isolation.** The fallback ladder lets the project start with the
   simplest (shared-process) backend model and escalate to stronger isolation per

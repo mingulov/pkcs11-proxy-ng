@@ -1321,16 +1321,13 @@ pub(super) async fn session_slot_login_state(
         .flatten()
 }
 
-/// D6(1) enforcement for object-MINTING operations (create/copy/generate/
-/// derive/unwrap), as refined in T20: when the calling context is logically
-/// logged out on the session's slot and `template` declares the new object
-/// private, refuse with `CKR_USER_NOT_LOGGED_IN` — but ONLY while another
-/// live tenant holds the slot login (forwarding would ride their backend
-/// login). With no other holder the backend is truly logged out, so its
-/// verdict is unpolluted and authoritative: forward and return whatever it
-/// says (lenient backends such as NSS allow logged-out private session
-/// mints; strict backends refuse — both match direct exactly). The old
-/// unconditional refusal diverged from every lenient backend (21 lanes).
+/// Refuse a template-declared private mint when this context is logged out
+/// and another logical context holds the slot login. Otherwise leave the
+/// provider's verdict unchanged. The holder snapshot does not prove physical
+/// logout: native calls can outlive their waits, and cleanup can fail.
+/// Missing privacy attributes also need provider-default interpretation.
+/// These are deferred isolation limits; v0.2 supports one trusted logical
+/// client per daemon/provider instance (doc/release/v0.3.0-scope.md).
 /// Unknown sessions fail closed (refuse), preserving error precedence for
 /// the downstream handle resolve.
 pub(super) async fn ensure_private_mint_allowed(
@@ -1587,27 +1584,10 @@ pub(super) async fn find_result_visible_to_context(
     backend_object_known_token(ctx, backend_session, backend_object).await
 }
 
-/// D6(1) enforcement for object/key USE (sign/verify/encrypt/decrypt/digest
-/// init, get/set attributes, wrap/unwrap/derive keys, ...), as refined in
-/// T20: when the calling context is logically logged out on the session's
-/// slot and the object is private, refuse with `CKR_USER_NOT_LOGGED_IN` —
-/// but ONLY while another live tenant holds the slot login (forwarding
-/// would ride their backend login). With no other holder the backend is
-/// truly logged out, so its verdict is unpolluted and authoritative:
-/// forward and return whatever it says (lenient backends such as NSS
-/// allow logged-out use of own private session objects; strict backends
-/// refuse — both match direct exactly). The old unconditional refusal
-/// diverged from every lenient backend (21 lanes).
-///
-/// Cost: the logged-in path costs one in-memory map read. The logged-out path
-/// decides from the mint-recorded privacy bit when known (still no backend
-/// call, so cache-hit and coalescer semantics are unchanged) and probes
-/// `CKA_PRIVATE` from the backend — a read-only probe that never disturbs
-/// other tenants — only for unknown (find-registered / backend-minted)
-/// objects.
-/// Privacy bit for one object: the mint-recorded bit when known, else a
-/// single backend `CKA_PRIVATE` probe (fail-open `false` — the caller falls
-/// through to the backend's own faithful verdict).
+/// Read the cached privacy bit, or probe CKA_PRIVATE when it is uncached.
+/// The current boolean representation can conflate unknown metadata with
+/// false and can retain stale defaults. It is not authoritative evidence
+/// for multi-client isolation; see the deferred v0.3 privacy contract.
 pub(super) async fn object_is_private(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,
@@ -1626,6 +1606,9 @@ pub(super) async fn object_is_private(
     }
 }
 
+/// Refuse a private-object use by a logged-out context while another logical
+/// holder is recorded. An empty holder map does not prove native logout;
+/// v0.2's supported deployment has one trusted logical client per instance.
 pub(super) async fn ensure_private_use_allowed(
     ctx: &HandlerContext,
     ctx_id: &ClientContextId,

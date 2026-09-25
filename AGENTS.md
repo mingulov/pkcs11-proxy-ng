@@ -21,8 +21,9 @@ AI agents, automation, and human contributors.
 - The selected v0.2 P0 amendment deliberately limits `C_WaitForSlotEvent` to
   `CKF_DONT_BLOCK`, with shared native event flags, checked widths and documented
   local refusals. It also requires one managed provider chain and a qualified
-  Linux whole-process lifetime stop. These are pending implementation contracts,
-  not behavior-preserving refactors or completed support claims; follow
+  Linux whole-process lifetime stop. These contracts are implemented in the
+  unreleased v0.2 testing candidate; historical acceptance evidence does not
+  establish qualification of each later revision. Follow
   `doc/release/native-mechanism-ownership.md` and the amended ADRs.
 - The shim uses exact/raw output semantics: it sends the caller's buffer
   specification to the backend, the backend performs one PKCS#11 call with
@@ -41,6 +42,18 @@ AI agents, automation, and human contributors.
 - Do not invent compatibility claims such as “full PKCS#11 support”.
 - Keep the current discovery and mechanism policy intact unless a design change
   is explicitly intended and documented.
+
+### v0.2 testing scope
+
+- v0.2 supports one logical client in one trusted security domain per
+  daemon/provider instance. Mutually untrusted clients and independent domains
+  must not share it. Restart the daemon/provider before switching independent
+  clients or domains.
+- `max_contexts = 1` is an admission guardrail, not an isolation repair.
+  Multi-client authentication-state and object-privacy work is deferred to
+  `doc/release/v0.3.0-scope.md`; do not describe it as completed.
+- Preserve native semantics within the stated scope. A narrower testing scope
+  does not authorize removing authorization checks or normalizing provider RVs.
 
 ## 3. FFI Safety Is Non-Negotiable
 
