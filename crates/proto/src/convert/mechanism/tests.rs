@@ -1036,6 +1036,8 @@ fn ccm_params_round_trip() {
         nonce: vec![0x01; 12],
         aad: vec![0xAA, 0xBB].into(),
         mac_len: 16,
+        nonce_null: false,
+        aad_null: false,
     }));
     match p {
         CkMechanismParams::Ccm(v) => {
@@ -1043,6 +1045,8 @@ fn ccm_params_round_trip() {
             assert_eq!(v.nonce, vec![0x01; 12]);
             assert_eq!(v.aad, vec![0xAA, 0xBB].into());
             assert_eq!(v.mac_len, 16);
+            assert!(!v.nonce_null);
+            assert!(!v.aad_null);
         }
         _ => panic!("wrong variant"),
     }
@@ -2609,6 +2613,28 @@ fn gcm_null_flags_round_trip() {
         match p {
             CkMechanismParams::Gcm(v) => {
                 assert_eq!(v.iv_null, iv_null);
+                assert_eq!(v.aad_null, aad_null);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+}
+
+#[test]
+fn ccm_null_flags_round_trip() {
+    // nonce_null/aad_null must survive the proto crossing.
+    for (nonce_null, aad_null) in [(true, true), (true, false), (false, true), (false, false)] {
+        let p = round_trip(CkMechanismParams::Ccm(CcmParams {
+            data_len: 16,
+            nonce: Vec::new(),
+            aad: Vec::new().into(),
+            mac_len: 12,
+            nonce_null,
+            aad_null,
+        }));
+        match p {
+            CkMechanismParams::Ccm(v) => {
+                assert_eq!(v.nonce_null, nonce_null);
                 assert_eq!(v.aad_null, aad_null);
             }
             _ => panic!("wrong variant"),

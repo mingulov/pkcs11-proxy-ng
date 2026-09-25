@@ -283,6 +283,8 @@ pub fn all_shape_cases() -> Vec<ShapeCase> {
                     nonce: vec![0x01; 12],
                     aad: vec![0xAA, 0xBB].into(),
                     mac_len: 16,
+                    nonce_null: false,
+                    aad_null: false,
                 })),
             },
             key: ShapeKeyHint::Aes,

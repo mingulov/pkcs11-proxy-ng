@@ -639,6 +639,10 @@ pub struct CcmParams {
     pub nonce: Vec<u8>,
     pub aad: SecretBytes,
     pub mac_len: u64,
+    /// True when the caller passed `(NULL, 0)` for `pNonce` / `pAAD`.
+    /// Distinguishes it from `(ptr, 0)`, which some backends reject.
+    pub nonce_null: bool,
+    pub aad_null: bool,
 }
 
 /// CK_CHACHA20_PARAMS

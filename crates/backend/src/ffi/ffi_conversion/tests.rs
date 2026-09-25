@@ -9,9 +9,9 @@ use super::*;
 mod mechanism_to_ffi_tests {
     use super::mechanism_to_ffi;
     use pkcs11_proxy_ng_types::{
-        AesCmacKeyDerivationParams, AesCtrParams, CkMechanism, CkMechanismParams, CkMechanismType,
-        CkMgf, CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv,
-        DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams,
+        AesCmacKeyDerivationParams, AesCtrParams, CcmParams, CkMechanism, CkMechanismParams,
+        CkMechanismType, CkMgf, CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource,
+        CkRv, DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams,
         Ike1PrfDeriveParams, IvParams, KeyDerivationStringData, KeyWrapSetOaepParams, KipParams,
         KmacParams, KyberParams, MuGenParams, ObjectHandleParam, PbeParams, Pkcs5Pbkd2Params,
         RawMechanismParams, RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams, SecretBytes,
@@ -1241,6 +1241,35 @@ mod mechanism_to_ffi_tests {
                 (gcm.pIv, gcm.ulIvLen, gcm.pAAD, gcm.ulAADLen);
             assert_eq!(p_iv.is_null(), iv_null, "pIv nullness");
             assert_eq!(ul_iv_len, 0);
+            assert_eq!(p_aad.is_null(), aad_null, "pAAD nullness");
+            assert_eq!(ul_aad_len, 0);
+        }
+    }
+
+    #[test]
+    fn ccm_null_flags_materialize_null_pointers() {
+        // Only caller-NULL fields materialize NULL; empty non-NULL
+        // fields keep a non-NULL pointer with len 0.
+        for (nonce_null, aad_null) in [(true, true), (true, false), (false, true), (false, false)] {
+            let ffi = convert(
+                CkMechanismType::AES_CCM,
+                CkMechanismParams::Ccm(CcmParams {
+                    data_len: 16,
+                    nonce: Vec::new(),
+                    aad: Vec::new().into(),
+                    mac_len: 12,
+                    nonce_null,
+                    aad_null,
+                }),
+            );
+            // E0793: CK structs are packed on Windows; assert on by-value copies.
+            let ccm = unsafe {
+                ffi.ck_mechanism().pParameter.cast::<cryptoki_sys::CK_CCM_PARAMS>().read_unaligned()
+            };
+            let (p_nonce, ul_nonce_len, p_aad, ul_aad_len) =
+                (ccm.pNonce, ccm.ulNonceLen, ccm.pAAD, ccm.ulAADLen);
+            assert_eq!(p_nonce.is_null(), nonce_null, "pNonce nullness");
+            assert_eq!(ul_nonce_len, 0);
             assert_eq!(p_aad.is_null(), aad_null, "pAAD nullness");
             assert_eq!(ul_aad_len, 0);
         }

@@ -66,6 +66,8 @@ const EXPECTED_ALLOW_FILES: &[&str] = &[
     "crates/server/tests/consumer_pkcs11_tool_test.rs",
     "crates/server/tests/consumer_python_test.rs",
     "crates/server/tests/kryoptic_mechanism_test.rs",
+    // Only the exercised CCM AAD shape and ciphertext length, never contents.
+    "crates/server/tests/ccm_pointer_presence_test.rs",
     "crates/server/tests/nss_mechanism_coverage_test.rs",
     "crates/server/tests/provider_matrix_test.rs",
     // Re-entrant child-entry diagnostics (unknown-scenario / fixture
