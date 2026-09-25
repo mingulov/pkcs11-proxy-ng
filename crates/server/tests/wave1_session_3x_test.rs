@@ -91,19 +91,20 @@ async fn login_user_null_vs_empty_presence_survives_full_stack() {
 
 #[tokio::test]
 async fn login_user_all_user_types() {
-    let backend = Arc::new(mock(&[0], &[0x00000001]));
-    let (endpoint, _shutdown) = mock_daemon(backend).await;
-    let mut client = init_client(&endpoint).await;
-
-    let slots = client.get_slot_list(false).await.unwrap();
-    let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
-
-    // All valid CkUserType variants should reach the backend.
+    // A successful login holds the mock token's slot-wide login state. Give
+    // each user type a fresh token so each first login reaches the backend.
     for user_type in [CkUserType::So, CkUserType::User, CkUserType::ContextSpecific] {
+        let backend = Arc::new(mock(&[0], &[0x00000001]));
+        let (endpoint, _shutdown) = mock_daemon(backend.clone()).await;
+        let mut client = init_client(&endpoint).await;
+        let slots = client.get_slot_list(false).await.unwrap();
+        let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
+
         client
             .login_user(session, user_type, Some(b"user".as_slice()), Some(b"1234".as_slice()))
             .await
             .unwrap();
+        assert_eq!(backend.login_user_call_count(), 1, "{user_type:?} must reach the backend");
     }
 }
 

@@ -372,9 +372,9 @@ async fn login(client: &mut Client, index: usize, pin: &[u8]) -> u64 {
 
 #[tokio::test]
 async fn login_state_is_keyed_by_backend_slot_and_second_context_gets_already() {
-    // D6(3): per-slot logical login state is keyed by backend slot, and a
-    // second live context logging into a held slot gets the faithful
-    // USER_ALREADY_LOGGED_IN on every slot (no PIN evaluation, no minting).
+    // Per-slot logical login state is keyed by backend slot. A second
+    // context reaches the backend, whose mock token answers ALREADY without
+    // checking the PIN; the proxy must not mint a login for that context.
     let f = fixture().await;
     let mut a = open(&f, false).await;
     let mut b = open(&f, true).await;
@@ -390,13 +390,13 @@ async fn login_state_is_keyed_by_backend_slot_and_second_context_gets_already() 
         assert_eq!(state, Some(LoginState::User));
     }
     assert_eq!(f.backend.login_call_count(), 2);
-    // Both slots are held by `a`: `b` gets ALREADY on both, whatever PIN it
-    // presents, and the refused logins never reach the backend.
+    // Both slots are held by `a`: `b` gets the mock backend's ALREADY on
+    // both, whatever PIN it presents. All four attempts reach the backend.
     assert_eq!(login(&mut b, 0, b"slot1-pin").await, CkRv::USER_ALREADY_LOGGED_IN.0);
     assert_eq!(login(&mut b, 1, b"slot42-pin").await, CkRv::USER_ALREADY_LOGGED_IN.0);
     assert_eq!(login(&mut b, 0, b"slot42-pin").await, CkRv::USER_ALREADY_LOGGED_IN.0);
     assert_eq!(login(&mut b, 1, b"slot1-pin").await, CkRv::USER_ALREADY_LOGGED_IN.0);
-    assert_eq!(f.backend.login_call_count(), 2);
+    assert_eq!(f.backend.login_call_count(), 6, "all four refused logins must reach the backend");
     for slot in [42, 1] {
         let state = f
             .context_manager

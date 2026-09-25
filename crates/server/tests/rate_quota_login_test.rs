@@ -345,6 +345,10 @@ async fn per_slot_failed_login_budget_end_to_end() {
             .unwrap();
         assert_eq!(mock_e.login_user_call_count(), 3, "success must reach the backend");
 
+        // A successful LoginUser holds the token-wide login. Release it so
+        // the next attempts can test the reset wrong-PIN budget.
+        client.logout(session).await.unwrap();
+
         for i in 1_usize..=3 {
             let rv = client
                 .login_user(
