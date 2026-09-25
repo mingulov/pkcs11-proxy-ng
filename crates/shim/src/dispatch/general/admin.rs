@@ -1,7 +1,9 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
-use super::helpers::{catch_panics, rv_err, rv_ok, try_read_optional_bytes, with_client};
+use super::helpers::{
+    catch_panics, rv_err, rv_ok, try_read_credential_bytes, try_read_optional_bytes, with_client,
+};
 
 pub unsafe extern "C" fn c_init_token(
     slot_id: CK_SLOT_ID,
@@ -10,7 +12,7 @@ pub unsafe extern "C" fn c_init_token(
     p_label: CK_UTF8CHAR_PTR,
 ) -> CK_RV {
     catch_panics(|| {
-        let so_pin = match unsafe { try_read_optional_bytes(p_pin, ul_pin_len) } {
+        let so_pin = match unsafe { try_read_credential_bytes(p_pin, ul_pin_len) } {
             Ok(pin) => pin,
             Err(e) => return rv_err(e),
         };
@@ -43,7 +45,7 @@ pub unsafe extern "C" fn c_init_pin(
     ul_pin_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let pin = match unsafe { try_read_optional_bytes(p_pin, ul_pin_len) } {
+        let pin = match unsafe { try_read_credential_bytes(p_pin, ul_pin_len) } {
             Ok(pin) => pin,
             Err(e) => return rv_err(e),
         };
@@ -62,11 +64,11 @@ pub unsafe extern "C" fn c_set_pin(
     ul_new_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let old_pin = match unsafe { try_read_optional_bytes(p_old_pin, ul_old_len) } {
+        let old_pin = match unsafe { try_read_credential_bytes(p_old_pin, ul_old_len) } {
             Ok(pin) => pin,
             Err(e) => return rv_err(e),
         };
-        let new_pin = match unsafe { try_read_optional_bytes(p_new_pin, ul_new_len) } {
+        let new_pin = match unsafe { try_read_credential_bytes(p_new_pin, ul_new_len) } {
             Ok(pin) => pin,
             Err(e) => return rv_err(e),
         };
