@@ -243,6 +243,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Logged-out USE of virtualized key-mat/SP800-108 handles now refuses: the handles are recorded private at registration, closing the fail-open hole on failing backend probes (review-A m-1).
 - `C_CloseAllSessions` releases the last-holder backend login before the batch close, silencing the routine operator WARN on ordinary logged-in close-all (review-A m-5).
 - `C_CloseSession` of the last session releases the last-holder backend login before the backend close via the closing session as carrier, silencing the same routine operator WARN on the singular path (T5F follow-up to review-A m-5).
+- Lifecycle read exclusion for retained native roots (C3M F-01): every
+  admitted ordinary invocation now holds lifecycle read exclusion through
+  native return, validation and settlement (compile-time-enforced guard
+  proof at each native entry); `Finalize` seals admission and drains
+  in-flight work before its exclusive native call; closes/cancels ride
+  per-session fences; destructor cleanup rides the enclosing exclusion
+  and backend `Drop` probes domain quiescence. The P0
+  lifecycle-exclusion clause is implemented; the ownership-doc clause is
+  marked IMPLEMENTED.
 
 ### Security
 
@@ -313,13 +322,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GetAttributeValue` query probes likewise still collapse (NULL,0) to
   (ptr,0) (no `template_null` bit on the query path). Disclosure only; no
   wire expansion.
-- Lifecycle read exclusion for retained native roots (C3M F-01, deferred to
-  a post-v0.2.0 P-slice): the documented "native-operation guard" does not
-  exist yet, so the P0 lifecycle-exclusion clause is unimplemented. No UB
-  demonstrated (shared reads of stable roots; exploitation needs a concurrent
-  evictor mid-provider-dereference). See the C3M re-review addendum §3/R1 for
-  the exact open-item text.
-
 ## [0.1.0] - 2026-05-15
 
 Initial release of the Rust PKCS#11 remote proxy.
