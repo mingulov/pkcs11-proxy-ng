@@ -1504,8 +1504,10 @@ pub(crate) async fn encrypt_message(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `EncryptMessageRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let operation_lock = match ctx_mgr
         .message_operation_lock(
@@ -1554,9 +1556,9 @@ pub(crate) async fn encrypt_message(
         }
     };
 
-    let aad = SecretBytes::new(req.associated_data);
+    let aad = SecretBytes::new(std::mem::take(&mut req.associated_data));
     let aad_null_len = req.associated_data_null_len;
-    let plaintext = SecretBytes::new(req.plaintext);
+    let plaintext = SecretBytes::new(std::mem::take(&mut req.plaintext));
     let plaintext_null_len = req.plaintext_null_len;
     // ADR-0010 sanitize_inputs: validate NULL aad/plaintext pointers before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
@@ -1615,24 +1617,26 @@ pub(crate) async fn encrypt_message_begin(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageBeginResponse>, Status> {
-    let req = request.into_inner();
+    // T12: `EncryptMessageBeginRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
     // W1-L5-04: compatibility-range gate, never an equality literal.
     if req.parameter_out_spec.is_some()
         && !exact_output_effects_version_supported(req.exact_output_effects_version)
     {
         return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
-    let ctx_id = ClientContextId(req.client_context_id);
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
     let result = execute_message_begin(
         ctx,
         ctx_id,
         req.session_handle,
         ServerMessageOperation::Encrypt,
-        SecretBytes::new(req.parameter),
-        SecretBytes::new(req.associated_data),
+        SecretBytes::new(std::mem::take(&mut req.parameter)),
+        SecretBytes::new(std::mem::take(&mut req.associated_data)),
         req.associated_data_null_len,
-        req.parameter_out_spec,
-        req.message_parameter,
+        std::mem::take(&mut req.parameter_out_spec),
+        std::mem::take(&mut req.message_parameter),
     )
     .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::EncryptMessageBeginResponse {
@@ -1655,8 +1659,10 @@ pub(crate) async fn encrypt_message_next(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `EncryptMessageNextRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let operation_lock = match ctx_mgr
         .message_operation_lock(
@@ -1705,7 +1711,7 @@ pub(crate) async fn encrypt_message_next(
         }
     };
 
-    let plaintext_part = SecretBytes::new(req.plaintext_part);
+    let plaintext_part = SecretBytes::new(std::mem::take(&mut req.plaintext_part));
     let plaintext_part_null_len = req.plaintext_part_null_len;
     let flags = CkFlags(req.flags as u64);
     // ADR-0010 sanitize_inputs: validate NULL plaintext_part pointer before backend call.
@@ -1761,8 +1767,10 @@ pub(crate) async fn decrypt_message(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `DecryptMessageRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let operation_lock = match ctx_mgr
         .message_operation_lock(
@@ -1811,9 +1819,9 @@ pub(crate) async fn decrypt_message(
         }
     };
 
-    let aad = SecretBytes::new(req.associated_data);
+    let aad = SecretBytes::new(std::mem::take(&mut req.associated_data));
     let aad_null_len = req.associated_data_null_len;
-    let ciphertext = req.ciphertext;
+    let ciphertext = std::mem::take(&mut req.ciphertext);
     let ciphertext_null_len = req.ciphertext_null_len;
     // ADR-0010 sanitize_inputs: validate NULL aad/ciphertext pointers before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, aad_null_len) {
@@ -1870,24 +1878,26 @@ pub(crate) async fn decrypt_message_begin(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageBeginResponse>, Status> {
-    let req = request.into_inner();
+    // T12: `DecryptMessageBeginRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
     // W1-L5-04: compatibility-range gate, never an equality literal.
     if req.parameter_out_spec.is_some()
         && !exact_output_effects_version_supported(req.exact_output_effects_version)
     {
         return Err(exact_effects_version_rejected(req.exact_output_effects_version));
     }
-    let ctx_id = ClientContextId(req.client_context_id);
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
     let result = execute_message_begin(
         ctx,
         ctx_id,
         req.session_handle,
         ServerMessageOperation::Decrypt,
-        SecretBytes::new(req.parameter),
-        SecretBytes::new(req.associated_data),
+        SecretBytes::new(std::mem::take(&mut req.parameter)),
+        SecretBytes::new(std::mem::take(&mut req.associated_data)),
         req.associated_data_null_len,
-        req.parameter_out_spec,
-        req.message_parameter,
+        std::mem::take(&mut req.parameter_out_spec),
+        std::mem::take(&mut req.message_parameter),
     )
     .await?;
     Ok(Response::new(pkcs11_proxy_ng_proto::DecryptMessageBeginResponse {
@@ -1910,8 +1920,10 @@ pub(crate) async fn decrypt_message_next(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `DecryptMessageNextRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let operation_lock = match ctx_mgr
         .message_operation_lock(
@@ -1960,7 +1972,7 @@ pub(crate) async fn decrypt_message_next(
         }
     };
 
-    let ciphertext_part = req.ciphertext_part;
+    let ciphertext_part = std::mem::take(&mut req.ciphertext_part);
     let ciphertext_part_null_len = req.ciphertext_part_null_len;
     let flags = CkFlags(req.flags as u64);
     // ADR-0010 sanitize_inputs: validate NULL ciphertext_part pointer before backend call.
@@ -2014,8 +2026,10 @@ pub(crate) async fn sign_message(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `SignMessageRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let operation_lock = match ctx_mgr
         .message_operation_lock(
@@ -2064,7 +2078,7 @@ pub(crate) async fn sign_message(
         }
     };
 
-    let data = SecretBytes::new(req.data);
+    let data = SecretBytes::new(std::mem::take(&mut req.data));
     let data_null_len = req.data_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
@@ -2111,8 +2125,10 @@ pub(crate) async fn sign_message_begin(
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageBeginResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `SignMessageBeginRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let operation_lock = match ctx_mgr
         .message_operation_lock(
@@ -2239,8 +2255,10 @@ pub(crate) async fn sign_message_next(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `SignMessageNextRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let operation_lock = match ctx_mgr
         .message_operation_lock(
@@ -2304,7 +2322,7 @@ pub(crate) async fn sign_message_next(
             }));
         }
     };
-    let data_part = SecretBytes::new(req.data_part);
+    let data_part = SecretBytes::new(std::mem::take(&mut req.data_part));
     let data_part_null_len = req.data_part_null_len;
     let request_signature = req.request_signature;
     // ADR-0010 sanitize_inputs: validate NULL data_part pointer before backend call.
@@ -2416,8 +2434,10 @@ pub(crate) async fn verify_message(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `VerifyMessageRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let operation_lock = match ctx_mgr
         .message_operation_lock(
@@ -2465,9 +2485,9 @@ pub(crate) async fn verify_message(
             }));
         }
     };
-    let data = SecretBytes::new(req.data);
+    let data = SecretBytes::new(std::mem::take(&mut req.data));
     let data_null_len = req.data_null_len;
-    let signature = req.signature;
+    let signature = std::mem::take(&mut req.signature);
     let signature_null_len = req.signature_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data/signature pointers before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
@@ -2550,8 +2570,10 @@ pub(crate) async fn verify_message_begin(
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageBeginResponse>, Status> {
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `VerifyMessageBeginRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let operation_lock = match ctx_mgr
         .message_operation_lock(
@@ -2663,8 +2685,10 @@ pub(crate) async fn verify_message_next(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `VerifyMessageNextRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let operation_lock = match ctx_mgr
         .message_operation_lock(
@@ -2712,10 +2736,10 @@ pub(crate) async fn verify_message_next(
             }));
         }
     };
-    let data_part = SecretBytes::new(req.data_part);
+    let data_part = SecretBytes::new(std::mem::take(&mut req.data_part));
     let data_part_null_len = req.data_part_null_len;
     let is_final = req.is_final;
-    let signature = req.signature;
+    let signature = std::mem::take(&mut req.signature);
     let signature_null_len = req.signature_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data_part/signature pointers before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_part_null_len) {
@@ -3803,7 +3827,10 @@ mod lifecycle_transition_tests {
                         },
                         "Begin" => match direction {
                             Direction::Encrypt => {
-                                let response = encrypt_message_begin(
+                                // T12: `EncryptMessageBeginResponse` is
+                                // `ZeroizeOnDrop`; take the field instead of
+                                // moving it.
+                                let mut response = encrypt_message_begin(
                                     &ctx,
                                     Request::new(
                                         pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
@@ -3821,10 +3848,13 @@ mod lifecycle_transition_tests {
                                 .await
                                 .unwrap()
                                 .into_inner();
-                                (response.ck_rv, response.parameter_result)
+                                (response.ck_rv, std::mem::take(&mut response.parameter_result))
                             }
                             Direction::Decrypt => {
-                                let response = decrypt_message_begin(
+                                // T12: `DecryptMessageBeginResponse` is
+                                // `ZeroizeOnDrop`; take the field instead of
+                                // moving it.
+                                let mut response = decrypt_message_begin(
                                     &ctx,
                                     Request::new(
                                         pkcs11_proxy_ng_proto::DecryptMessageBeginRequest {
@@ -3842,7 +3872,7 @@ mod lifecycle_transition_tests {
                                 .await
                                 .unwrap()
                                 .into_inner();
-                                (response.ck_rv, response.parameter_result)
+                                (response.ck_rv, std::mem::take(&mut response.parameter_result))
                             }
                         },
                         "one-shot" | "Next" => {

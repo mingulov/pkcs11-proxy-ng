@@ -50,6 +50,8 @@ http = "1"
 bytes = "1"
 http-body = "1"
 http-body-util = "0.1"
+# T15: bounded wiping owner for the audit signing seed.
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # W1-L16-15: process only for integration tests (child-process harness);

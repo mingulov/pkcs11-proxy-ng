@@ -15,7 +15,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         function_name: &str,
-    ) -> CkResult<(u64, Vec<u8>, u64, CkObjectHandle, CkObjectHandle)> {
+    ) -> CkResult<(u64, SecretBytes, u64, CkObjectHandle, CkObjectHandle)> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::AsyncCompleteRequest {
             client_context_id: ctx,
@@ -35,10 +35,13 @@ impl Pkcs11Client {
             return Err(rv);
         }
 
-        let data = response.async_data.unwrap_or_default();
+        // T12: `AsyncData` is `ZeroizeOnDrop`; take the owned field out
+        // with `mem::take` instead of moving it. T13: adopt the async
+        // payload into `SecretBytes` (no copy).
+        let mut data = response.async_data.unwrap_or_default();
         Ok((
             data.version,
-            data.value,
+            SecretBytes::new(std::mem::take(&mut data.value)),
             data.value_len,
             CkObjectHandle(data.object_handle),
             CkObjectHandle(data.additional_object_handle),
@@ -70,7 +73,7 @@ impl Pkcs11Client {
         function_name: &str,
         operation_id: u64,
         buffer_size: u64,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::AsyncJoinRequest {
             client_context_id: ctx,
@@ -79,7 +82,10 @@ impl Pkcs11Client {
             operation_id,
             buffer_size,
         };
-        let resp = pkcs11_unary_call!(self.grpc.async_join(req), true);
-        Ok(resp.data)
+        // T12: `AsyncJoinResponse` is `ZeroizeOnDrop`; take the owned
+        // field out with `mem::take` instead of moving it. T13: adopt the
+        // payload into `SecretBytes` (no copy).
+        let mut resp = pkcs11_unary_call!(self.grpc.async_join(req), true);
+        Ok(SecretBytes::new(std::mem::take(&mut resp.data)))
     }
 }

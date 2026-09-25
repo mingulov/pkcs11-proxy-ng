@@ -13,7 +13,7 @@ mod state;
 pub mod __test_api {
     pub use crate::state::{
         is_initialized, mark_finalized, mark_initialized, mechanism_registry,
-        replace_mechanism_registry, runtime,
+        replace_mechanism_registry, runtime, try_mechanism_registry,
     };
 }
 

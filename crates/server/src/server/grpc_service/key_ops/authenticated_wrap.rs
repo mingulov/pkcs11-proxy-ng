@@ -37,9 +37,11 @@ pub(crate) async fn wrap_key_authenticated(
     request: Request<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::WrapKeyAuthenticatedResponse>, Status> {
     let started = Instant::now();
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
-    let associated_data = SecretBytes::new(req.associated_data);
+    // T12: `WrapKeyAuthenticatedRequest` is `ZeroizeOnDrop`; take owned
+    // fields out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
+    let associated_data = SecretBytes::new(std::mem::take(&mut req.associated_data));
     let outcome = async {
         let p = match super::wrap_preparation::prepare_wrap(
             ctx,
@@ -47,7 +49,7 @@ pub(crate) async fn wrap_key_authenticated(
             req.session_handle,
             req.wrapping_key_handle,
             req.key_handle,
-            req.mechanism,
+            std::mem::take(&mut req.mechanism),
         )
         .await?
         {
@@ -155,8 +157,10 @@ async fn unwrap_key_authenticated_impl(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `UnwrapKeyAuthenticatedRequest` is `ZeroizeOnDrop`; take owned
+    // fields out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let (session, unwrapping_key) = match super::super::service_utils::resolve_session_and_object(
         ctx,
@@ -177,7 +181,7 @@ async fn unwrap_key_authenticated_impl(
         }
     };
 
-    let mut mechanism = match parse_mechanism(req.mechanism) {
+    let mut mechanism = match parse_mechanism(std::mem::take(&mut req.mechanism)) {
         Ok(mechanism) => mechanism,
         Err(rv) => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
@@ -242,9 +246,9 @@ async fn unwrap_key_authenticated_impl(
         }));
     }
 
-    let wrapped_key = SecretBytes::new(req.wrapped_key);
+    let wrapped_key = SecretBytes::new(std::mem::take(&mut req.wrapped_key));
     let wrapped_key_null_len = req.wrapped_key_null_len;
-    let aad = SecretBytes::new(req.associated_data);
+    let aad = SecretBytes::new(std::mem::take(&mut req.associated_data));
     let aad_null_len = req.associated_data_null_len;
     // ADR-0010 sanitize_inputs: validate NULL wrapped_key/aad pointers before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, wrapped_key_null_len) {
@@ -268,17 +272,23 @@ async fn unwrap_key_authenticated_impl(
         Some(envelope) => match decode_parameters(&mechanism, envelope) {
             Ok(parameter) => Some(parameter),
             Err(rv) => {
+                // T12: `UnwrapKeyAuthenticatedResponse` is `ZeroizeOnDrop`;
+                // struct-update syntax is forbidden — all fields spelled out.
                 return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                    authenticated_output: None,
                     ck_rv: rv.0,
-                    ..Default::default()
+                    key_handle: 0,
+                    mechanism_parameter_out: Vec::new(),
                 }));
             }
         },
         None if legacy_parameter_supported(&mechanism) => None,
         None => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::UnwrapKeyAuthenticatedResponse {
+                authenticated_output: None,
                 ck_rv: CkRv::FUNCTION_NOT_SUPPORTED.0,
-                ..Default::default()
+                key_handle: 0,
+                mechanism_parameter_out: Vec::new(),
             }));
         }
     };

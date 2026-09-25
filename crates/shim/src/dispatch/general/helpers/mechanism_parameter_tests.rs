@@ -1,19 +1,32 @@
+// `as CK_ULONG` / `as u64` casts below are identity on 64-bit targets but
+// load-bearing on 32-bit targets (CK_ULONG=u32); the allow keeps them portable.
+#![allow(clippy::unnecessary_cast)]
 use super::{
-    MAX_MECHANISM_PARAM_STRUCT_LEN, read_mechanism, read_mechanism_with_shape, read_raw_bytes,
-    read_wrap_key_mechanism, validate_mechanism, write_mechanism_output_params,
+    MAX_MECHANISM_PARAM_STRUCT_LEN, MAX_NESTED_MECHANISMS, NestingBudget,
+    prepare_mechanism_output_params, read_mechanism, read_mechanism_with_shape,
+    read_mechanism_with_shape_budgeted, read_raw_bytes, read_wrap_key_mechanism,
+    validate_mechanism,
 };
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::{
     CcmParams, CcmWrapParams, ChaCha20Params, CkAttributeType, CkAttributeValue,
-    CkGeneratorFunction, CkKdf, CkMechanismParams, CkMechanismType, CkMgf, CkOaepSource,
-    CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv, ExtractParams, GcmParams, GcmWrapParams,
-    KeyWrapSetOaepParams, KmacParams, MechanismRegistry, MuGenParams, RsaAesKeyWrapParams,
-    RsaPkcsOaepParams, RsaPkcsPssParams, Salsa20ChaCha20Poly1305Params, SecretBytes,
-    SignAdditionalContext, Sp800108DerivedKey, Sp800108FeedbackKdfParams,
+    CkGeneratorFunction, CkKdf, CkMechanism, CkMechanismParams, CkMechanismType, CkMgf,
+    CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv, ExtractParams, GcmParams,
+    GcmWrapParams, IvParams, KeyWrapSetOaepParams, KipParams, KmacParams, MacGeneralParams,
+    MechanismRegistry, MuGenParams, RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams,
+    Salsa20ChaCha20Poly1305Params, SecretBytes, SignAdditionalContext, Sp800108DerivedKey,
+    Sp800108FeedbackKdfParams, Sp800108KdfParams, TlsPrfParams,
 };
 
 fn ensure_registry() {
-    let registry = MechanismRegistry::load(None).expect("default mechanism registry");
+    // Load-once: the embedded default never changes within a test binary,
+    // so parsing TOML on every call only burns time (minutes per call
+    // under Miri across ~50 read_ck_mechanism tests). Each caller still
+    // gets a fresh clone installed globally, exactly as before.
+    static DEFAULT: std::sync::OnceLock<MechanismRegistry> = std::sync::OnceLock::new();
+    let registry = DEFAULT
+        .get_or_init(|| MechanismRegistry::load(None).expect("default mechanism registry"))
+        .clone();
     crate::state::replace_mechanism_registry(registry);
 }
 
@@ -177,6 +190,61 @@ fn reads_common_mechanism_parameter_structs() {
 }
 
 #[test]
+fn gmac_bare_iv_forwards_verbatim_as_iv() {
+    // T20: 2.40-style callers (BouncyHSM) pass bare IV bytes for GMAC —
+    // shorter than CK_GCM_PARAMS, flat and pointer-free, forwarded
+    // verbatim exactly as the old "iv" mapping did. Registry-driven so
+    // the TOML mapping itself is pinned.
+    let mut iv = [0x11u8; 12];
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GMAC.0 as CK_MECHANISM_TYPE,
+        pParameter: iv.as_mut_ptr() as CK_VOID_PTR,
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    match unsafe { read_ck_mechanism(&mechanism) } {
+        CkMechanismParams::Iv(IvParams { iv }) => assert_eq!(iv, [0x11; 12]),
+        other => panic!("unexpected GMAC bare-IV params: {other:?}"),
+    }
+}
+
+#[test]
+fn gmac_struct_params_parse_as_gcm_without_forwarding_pointers() {
+    // T20: 3.x-style callers (freehsm-c) pass a CK_GCM_PARAMS struct for
+    // GMAC. The struct half must be parsed — IV/AAD bytes copied
+    // client-side — and never forwarded verbatim: the embedded pIv/pAAD
+    // are client-process pointers that segfaulted the daemon (freehsm-c
+    // AES-GMAC SIGSEGV). Uses the freehsm shape: NULL AAD with zero
+    // length alongside a real IV.
+    let mut iv = [0x11u8; 12];
+    let mut gcm = CK_GCM_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvBits: 96,
+        pAAD: std::ptr::null_mut(),
+        ulAADLen: 0,
+        ulTagBits: 128,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CkMechanismType::AES_GMAC.0 as CK_MECHANISM_TYPE,
+        pParameter: &mut gcm as *mut _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_ck_mechanism(&mechanism) } {
+        CkMechanismParams::Gcm(GcmParams {
+            iv, iv_bits, aad, tag_bits, iv_null, aad_null, ..
+        }) => {
+            assert_eq!(iv, [0x11; 12]);
+            assert_eq!(iv_bits, 96);
+            assert_eq!(aad, SecretBytes::copy_from_slice(&[]));
+            assert_eq!(tag_bits, 128);
+            assert!(!iv_null);
+            assert!(aad_null);
+        }
+        other => panic!("unexpected GMAC struct params: {other:?}"),
+    }
+}
+
+#[test]
 fn reads_handle_string_and_sign_context_parameter_structs() {
     let mut object_handle: CK_OBJECT_HANDLE = 0xCAFE;
     let mechanism = CK_MECHANISM {
@@ -272,7 +340,7 @@ fn reads_signature_parameter_structs() {
         other => panic!("unexpected EdDSA params: {other:?}"),
     }
 
-    let mut xeddsa = CK_XEDDSA_PARAMS { hash: CkMechanismType::SHA256.0 };
+    let mut xeddsa = CK_XEDDSA_PARAMS { hash: CkMechanismType::SHA256.0 as CK_ULONG };
     let mechanism = CK_MECHANISM {
         mechanism: CKM_TEST_XEDDSA,
         pParameter: &mut xeddsa as *mut _ as CK_VOID_PTR,
@@ -597,7 +665,9 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         aad: Vec::new().into(),
         tag_bits: 96,
     });
-    unsafe { write_mechanism_output_params(&mut mechanism, &output) };
+    let plan = unsafe { prepare_mechanism_output_params(&mut mechanism, &output) }
+        .expect("valid output prepares");
+    unsafe { plan.commit() };
     assert_eq!(&iv[..4], &[1, 2, 3, 4]);
     // E0793: params structs are packed on Windows; assert on by-value copies.
     let (gcm_iv_len, gcm_tag_bits) = (gcm_wrap.ulIvLen, gcm_wrap.ulTagBits);
@@ -628,7 +698,9 @@ fn write_mechanism_output_params_writes_aead_wrap_generated_fields() {
         aad: Vec::new().into(),
         mac_len: 12,
     });
-    unsafe { write_mechanism_output_params(&mut mechanism, &output) };
+    let plan = unsafe { prepare_mechanism_output_params(&mut mechanism, &output) }
+        .expect("valid output prepares");
+    unsafe { plan.commit() };
     assert_eq!(&nonce[..4], &[9, 8, 7, 6]);
     let (ccm_nonce_len, ccm_mac_len) = (ccm_wrap.ulNonceLen, ccm_wrap.ulMACLen);
     assert_eq!(ccm_nonce_len, 4);
@@ -2010,8 +2082,8 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
     }
 
     let generated = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
-    unsafe {
-        write_mechanism_output_params(
+    let plan = unsafe {
+        prepare_mechanism_output_params(
             &mut mechanism,
             &CkMechanismParams::Gcm(GcmParams {
                 iv: generated.clone(),
@@ -2023,8 +2095,10 @@ fn gcm_generated_iv_buffer_is_preserved_and_written_back() {
                 iv_null: false,
                 aad_null: false,
             }),
-        );
+        )
     }
+    .expect("valid output prepares");
+    unsafe { plan.commit() };
 
     assert_eq!(iv, generated.as_slice());
     let (gcm_iv_len, gcm_iv_bits) = (gcm.ulIvLen, gcm.ulIvBits);
@@ -2386,11 +2460,11 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
         other => panic!("unexpected SP800-108 feedback params: {other:?}"),
     }
 
-    unsafe {
-        write_mechanism_output_params(
+    let plan = unsafe {
+        prepare_mechanism_output_params(
             &mut mechanism,
             &CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-                prf_type: CkMechanismType(CKM_SHA256_HMAC),
+                prf_type: CkMechanismType(CKM_SHA256_HMAC as u64),
                 data_params: Vec::new(),
                 iv: vec![0xA5; 16],
                 additional_derived_keys: vec![Sp800108DerivedKey {
@@ -2398,8 +2472,10 @@ fn sp800_108_feedback_reads_additional_keys_and_writes_handles_back() {
                     key_handle: CkObjectHandle(0xCAFE),
                 }],
             }),
-        );
+        )
     }
+    .expect("valid output prepares");
+    unsafe { plan.commit() };
 
     assert_eq!(additional_key_handle, 0xCAFE);
 }
@@ -2713,4 +2789,367 @@ fn oaep_null_vs_empty_source_survives_the_read() {
             other => panic!("unexpected OAEP params: {other:?}"),
         }
     }
+}
+
+// ─── T03: misalignment tolerance + KIP nesting budget ───────────────────────
+
+/// Copy a `Copy` value into heap backing at a *guaranteed misaligned*
+/// address for its type. Returns the backing (the caller must keep it
+/// alive past the read) and the pointer. Every misaligned test below
+/// offsets each nested record independently through this helper; byte
+/// payloads need no misalignment (`u8` aligns anywhere) but their
+/// backing must likewise outlive the read.
+fn misaligned_copy<T: Copy>(value: T) -> (Vec<u8>, *const T) {
+    let size = std::mem::size_of::<T>();
+    let align = std::mem::align_of::<T>().max(2);
+    let mut backing = vec![0u8; size + align + 1];
+    let base = backing.as_ptr() as usize;
+    let offset =
+        (1..=align).find(|o| !(base + o).is_multiple_of(align)).expect("misaligned offset exists");
+    let ptr = unsafe { backing.as_mut_ptr().add(offset) as *mut T };
+    unsafe { ptr.write_unaligned(value) };
+    assert_ne!((ptr as usize) % align, 0, "fixture must actually be misaligned");
+    (backing, ptr as *const T)
+}
+
+fn live_bytes(data: &[u8]) -> (Vec<u8>, *mut u8) {
+    let mut backing = data.to_vec();
+    let ptr = backing.as_mut_ptr();
+    (backing, ptr)
+}
+
+#[test]
+fn misaligned_outer_mechanism_and_oaep_params_read() {
+    ensure_registry();
+    let (_src_backing, src) = live_bytes(&[0xA0, 0xA1, 0xA2]);
+    let oaep = CK_RSA_PKCS_OAEP_PARAMS {
+        hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        mgf: 1,
+        source: 1,
+        pSourceData: src as CK_VOID_PTR,
+        ulSourceDataLen: 3,
+    };
+    let (_oaep_backing, oaep_ptr) = misaligned_copy(oaep);
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_OAEP,
+        pParameter: oaep_ptr as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
+    };
+    let (_mech_backing, mech_ptr) = misaligned_copy(mechanism);
+    match unsafe { read_mechanism(mech_ptr) } {
+        Ok(CkMechanism { params: Some(CkMechanismParams::RsaPkcsOaep(parsed)), .. }) => {
+            assert_eq!(parsed.source_data, SecretBytes::copy_from_slice(&[0xA0, 0xA1, 0xA2]));
+        }
+        other => panic!("misaligned outer + OAEP must parse, got {other:?}"),
+    }
+}
+
+#[test]
+fn misaligned_scalar_mechanism_value_reads() {
+    let (backing, val_ptr) = misaligned_copy(64 as CK_MAC_GENERAL_PARAMS);
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_SHA_1_HMAC_GENERAL,
+        pParameter: val_ptr as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_MAC_GENERAL_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("mac_general")) } {
+        Ok(CkMechanism {
+            params: Some(CkMechanismParams::MacGeneral(MacGeneralParams { mac_length })),
+            ..
+        }) => {
+            assert_eq!(mac_length, 64);
+        }
+        other => panic!("misaligned scalar must parse, got {other:?}"),
+    }
+    let _ = backing;
+}
+
+#[test]
+fn misaligned_nested_oaep_reads() {
+    let (_src_backing, src) = live_bytes(&[0xB0, 0xB1]);
+    let oaep = CK_RSA_PKCS_OAEP_PARAMS {
+        hashAlg: CkMechanismType::SHA256.0 as CK_MECHANISM_TYPE,
+        mgf: 1,
+        source: 1,
+        pSourceData: src as CK_VOID_PTR,
+        ulSourceDataLen: 2,
+    };
+    let (_oaep_backing, oaep_ptr) = misaligned_copy(oaep);
+    // Real struct (not usize cells) so the OAEP pointer keeps its
+    // provenance under Miri; int-to-pointer casts carry no provenance.
+    let record = CK_RSA_AES_KEY_WRAP_PARAMS {
+        ulAESKeyBits: 256,
+        pOAEPParams: oaep_ptr as *mut CK_RSA_PKCS_OAEP_PARAMS,
+    };
+    let (_rec_backing, rec_ptr) = misaligned_copy(record);
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_AES_KEY_WRAP,
+        pParameter: rec_ptr as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_RSA_AES_KEY_WRAP_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("rsa_aes_key_wrap")) } {
+        Ok(CkMechanism {
+            params:
+                Some(CkMechanismParams::RsaAesKeyWrap(RsaAesKeyWrapParams {
+                    aes_key_bits,
+                    oaep_params,
+                })),
+            ..
+        }) => {
+            assert_eq!(aes_key_bits, 256);
+            assert_eq!(oaep_params.source_data, SecretBytes::copy_from_slice(&[0xB0, 0xB1]));
+        }
+        other => panic!("misaligned nested OAEP must parse, got {other:?}"),
+    }
+}
+
+#[test]
+fn misaligned_tls_prf_lengths_read() {
+    let (_seed_backing, seed) = live_bytes(&[0xC0, 0xC1]);
+    let (_label_backing, label) = live_bytes(&[0xD0]);
+    let (_len_backing, len_ptr) = misaligned_copy(48 as CK_ULONG);
+    let prf = CK_TLS_PRF_PARAMS {
+        pSeed: seed as *mut CK_BYTE,
+        ulSeedLen: 2,
+        pLabel: label as *mut CK_BYTE,
+        ulLabelLen: 1,
+        pOutput: std::ptr::null_mut(),
+        pulOutputLen: len_ptr as *mut CK_ULONG,
+    };
+    let (_prf_backing, prf_ptr) = misaligned_copy(prf);
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_TLS_PRF,
+        pParameter: prf_ptr as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("tls_prf")) } {
+        Ok(CkMechanism {
+            params: Some(CkMechanismParams::TlsPrf(TlsPrfParams { seed, label, output_len, .. })),
+            ..
+        }) => {
+            assert_eq!(seed, SecretBytes::copy_from_slice(&[0xC0, 0xC1]));
+            assert_eq!(label, SecretBytes::copy_from_slice(&[0xD0]));
+            assert_eq!(output_len, 48);
+        }
+        other => panic!("misaligned TLS PRF must parse, got {other:?}"),
+    }
+}
+
+#[test]
+fn misaligned_sp800_prf_array_reads() {
+    let (_v0_backing, v0) = live_bytes(&[0xE0]);
+    let (_v1_backing, v1) = live_bytes(&[0xE1, 0xE2]);
+    let elems = [
+        CK_PRF_DATA_PARAM { type_: 1 as CK_PRF_DATA_TYPE, pValue: v0 as *mut _, ulValueLen: 1 },
+        CK_PRF_DATA_PARAM { type_: 2 as CK_PRF_DATA_TYPE, pValue: v1 as *mut _, ulValueLen: 2 },
+    ];
+    let (_arr_backing, arr_ptr) = misaligned_copy(elems);
+    let kdf = CK_SP800_108_KDF_PARAMS {
+        prfType: 1 as CK_SP800_108_PRF_TYPE,
+        ulNumberOfDataParams: 2,
+        pDataParams: arr_ptr as *mut CK_PRF_DATA_PARAM,
+        ulAdditionalDerivedKeys: 0,
+        pAdditionalDerivedKeys: std::ptr::null_mut(),
+    };
+    let (_kdf_backing, kdf_ptr) = misaligned_copy(kdf);
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_SP800_108_COUNTER_KDF,
+        pParameter: kdf_ptr as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_SP800_108_KDF_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("sp800_108_kdf")) } {
+        Ok(CkMechanism {
+            params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams { data_params, .. })),
+            ..
+        }) => {
+            assert_eq!(data_params.len(), 2);
+            assert_eq!(data_params[0].value, SecretBytes::copy_from_slice(&[0xE0]));
+            assert_eq!(data_params[1].value, SecretBytes::copy_from_slice(&[0xE1, 0xE2]));
+        }
+        other => panic!("misaligned SP800 array must parse, got {other:?}"),
+    }
+}
+
+#[test]
+fn misaligned_sp800_phkey_reads() {
+    let (_h_backing, h_ptr) = misaligned_copy(0xDEAD_BEEFu64 as CK_OBJECT_HANDLE);
+    let keys = [CK_DERIVED_KEY {
+        pTemplate: std::ptr::null_mut(),
+        ulAttributeCount: 0,
+        phKey: h_ptr as *mut CK_OBJECT_HANDLE,
+    }];
+    let (_arr_backing, arr_ptr) = misaligned_copy(keys);
+    let kdf = CK_SP800_108_KDF_PARAMS {
+        prfType: 1 as CK_SP800_108_PRF_TYPE,
+        ulNumberOfDataParams: 0,
+        pDataParams: std::ptr::null_mut(),
+        ulAdditionalDerivedKeys: 1,
+        pAdditionalDerivedKeys: arr_ptr as *mut CK_DERIVED_KEY,
+    };
+    let (_kdf_backing, kdf_ptr) = misaligned_copy(kdf);
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_SP800_108_COUNTER_KDF,
+        pParameter: kdf_ptr as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_SP800_108_KDF_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("sp800_108_kdf")) } {
+        Ok(CkMechanism {
+            params:
+                Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
+                    additional_derived_keys, ..
+                })),
+            ..
+        }) => {
+            assert_eq!(additional_derived_keys.len(), 1);
+            assert_eq!(additional_derived_keys[0].key_handle.0, 0xDEAD_BEEF);
+        }
+        other => panic!("misaligned SP800 phKey must parse, got {other:?}"),
+    }
+}
+
+fn kip_nested_rsa_mechanism() -> CK_MECHANISM {
+    CK_MECHANISM { mechanism: CKM_RSA_PKCS, pParameter: std::ptr::null_mut(), ulParameterLen: 0 }
+}
+
+#[test]
+fn misaligned_kip_nested_records_read() {
+    ensure_registry();
+    let (_nested_backing, nested_ptr) = misaligned_copy(kip_nested_rsa_mechanism());
+    let (_seed_backing, seed) = live_bytes(&[0xF0, 0xF1]);
+    let kip = CK_KIP_PARAMS {
+        pMechanism: nested_ptr as *mut CK_MECHANISM,
+        hKey: 0x42,
+        pSeed: seed as *mut CK_BYTE,
+        ulSeedLen: 2,
+    };
+    let (_kip_backing, kip_ptr) = misaligned_copy(kip);
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_KIP_DERIVE,
+        pParameter: kip_ptr as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_KIP_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("kip")) } {
+        Ok(CkMechanism {
+            params: Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed })),
+            ..
+        }) => {
+            assert_eq!(mechanism.mechanism_type.0, CKM_RSA_PKCS as u64);
+            assert_eq!(key_handle.0, 0x42);
+            assert_eq!(seed, SecretBytes::copy_from_slice(&[0xF0, 0xF1]));
+        }
+        other => panic!("misaligned KIP nesting must parse, got {other:?}"),
+    }
+}
+
+#[test]
+fn kip_valid_nested_mechanism_roundtrips() {
+    ensure_registry();
+    let mut nested = kip_nested_rsa_mechanism();
+    let mut seed = [0xF2u8, 0xF3, 0xF4];
+    let kip = CK_KIP_PARAMS {
+        pMechanism: &mut nested,
+        hKey: 0x43,
+        pSeed: seed.as_mut_ptr() as *mut CK_BYTE,
+        ulSeedLen: seed.len() as CK_ULONG,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_KIP_DERIVE,
+        pParameter: &kip as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_KIP_PARAMS>() as CK_ULONG,
+    };
+    match unsafe { read_mechanism_with_shape(&mechanism, Some("kip")) } {
+        Ok(CkMechanism {
+            params: Some(CkMechanismParams::Kip(KipParams { mechanism, key_handle, seed })),
+            ..
+        }) => {
+            assert_eq!(mechanism.mechanism_type.0, CKM_RSA_PKCS as u64);
+            assert_eq!(key_handle.0, 0x43);
+            assert_eq!(seed, SecretBytes::copy_from_slice(&[0xF2, 0xF3, 0xF4]));
+        }
+        other => panic!("valid KIP nesting must roundtrip, got {other:?}"),
+    }
+}
+
+#[test]
+fn kip_self_cycle_is_rejected() {
+    ensure_registry();
+    let mut nested = kip_nested_rsa_mechanism();
+    let nested_addr = &mut nested as *mut CK_MECHANISM as usize;
+    let mut seed = [0xF5u8];
+    let kip = CK_KIP_PARAMS {
+        pMechanism: &mut nested,
+        hKey: 0,
+        pSeed: seed.as_mut_ptr() as *mut CK_BYTE,
+        ulSeedLen: seed.len() as CK_ULONG,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_KIP_DERIVE,
+        pParameter: &kip as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_KIP_PARAMS>() as CK_ULONG,
+    };
+    // Positive control: the same fixture parses with a fresh budget.
+    assert!(unsafe { read_mechanism_with_shape(&mechanism, Some("kip")) }.is_ok());
+    // A repeated active address is a reference cycle: reject before recursion.
+    let mut budget = NestingBudget::new();
+    budget.enter(nested_addr).expect("first entry fits");
+    assert!(
+        matches!(
+            unsafe { read_mechanism_with_shape_budgeted(&mechanism, Some("kip"), &mut budget) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "self-cycle must be rejected before recursion"
+    );
+}
+
+#[test]
+fn kip_depth_limit_is_enforced() {
+    ensure_registry();
+    assert_eq!(MAX_NESTED_MECHANISMS, 16, "shim/backend depth bound must match");
+    let mut nested = kip_nested_rsa_mechanism();
+    let mut seed = [0xF6u8];
+    let kip = CK_KIP_PARAMS {
+        pMechanism: &mut nested,
+        hKey: 0,
+        pSeed: seed.as_mut_ptr() as *mut CK_BYTE,
+        ulSeedLen: seed.len() as CK_ULONG,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_KIP_DERIVE,
+        pParameter: &kip as *const _ as CK_VOID_PTR,
+        ulParameterLen: std::mem::size_of::<CK_KIP_PARAMS>() as CK_ULONG,
+    };
+    // Fifteen active ancestors: the 16th nested node is still allowed.
+    let mut budget = NestingBudget::new();
+    for i in 0..15usize {
+        budget.enter(0x1000 + i).expect("budget entry fits");
+    }
+    assert!(
+        unsafe { read_mechanism_with_shape_budgeted(&mechanism, Some("kip"), &mut budget) }.is_ok(),
+        "16 nested nodes must be allowed"
+    );
+    // Sixteen active ancestors: the 17th nested node is rejected.
+    let mut budget = NestingBudget::new();
+    for i in 0..16usize {
+        budget.enter(0x1000 + i).expect("budget entry fits");
+    }
+    assert!(
+        matches!(
+            unsafe { read_mechanism_with_shape_budgeted(&mechanism, Some("kip"), &mut budget) },
+            Err(CkRv::MECHANISM_PARAM_INVALID)
+        ),
+        "17th nested node must be rejected before recursion"
+    );
+}
+
+#[test]
+fn nesting_budget_pins_sixteen_node_limit() {
+    assert_eq!(MAX_NESTED_MECHANISMS, 16);
+    let mut budget = NestingBudget::new();
+    for i in 0..16usize {
+        budget.enter(0x1000 + i).expect("first sixteen entries fit");
+    }
+    assert!(matches!(budget.enter(0x2000), Err(CkRv::MECHANISM_PARAM_INVALID)));
+    let mut budget = NestingBudget::new();
+    budget.enter(0x3000).expect("first entry fits");
+    assert!(matches!(budget.enter(0x3000), Err(CkRv::MECHANISM_PARAM_INVALID)));
 }

@@ -56,23 +56,34 @@ server_key = "/etc/pkcs11-proxy-ng/tls/server.key"
 allow_insecure_tcp = false
 
 [auth]
-# Production should pin to specific peer identities via [[auth.policy]]
-# rather than allow_all_authenticated. Example (primary SPKI form —
-# find a peer's fingerprint in the daemon logs, which print it with the
-# DN-migration warning):
-#
-# allow_all_authenticated = false
-# [[auth.policy]]
-# identity = "x509:spki=<hex-sha256-of-svc-healthcheck-public-key>"
-# tokens = ["label:primary-hsm"]
-#
-# (Legacy DN form, deprecated — same grant, but the daemon logs a
-# migration warning per key:
-# identity = "x509:issuer=CN=corp-ca;subject=CN=svc-healthcheck")
-#
-# Keeping the permissive default here as a starting point; the
-# accompanying runbook walks through the tightening step.
-allow_all_authenticated = true
+# Explicit grants only: every mTLS identity is named, with the token(s)
+# it may use. allow_all stays OFF — flipping it true would silently
+# supersede these grants (and the daemon refuses allow-all on any
+# auth="none" listener). (Legacy DN identity form,
+# "x509:issuer=...;subject=...", is deprecated: it still parses but
+# logs a migration warning per key — prefer SPKI pins.)
+allow_all_authenticated = false
+
+[[auth.policy]]
+# mTLS client identity: SPKI pin of the client certificate. Replace
+# with your own fingerprint (`openssl x509 -in client.crt -pubkey
+# -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256`).
+identity = "x509:spki=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+tokens = [
+  # Rich grant: use-only access to AES keys on the primary HSM token —
+  # extraction explicitly denied, AEAD use only. (Inline tables stay on
+  # one line — TOML has no multi-line inline tables.)
+  { token = "label:primary-hsm", classes = ["secret_key"], mechanisms = ["CKM_AES_GCM"], extract = "deny" },
+]
+
+[rate_limit]
+# Deliberate quotas (every knob opt-in: an absent section means no
+# limiting at all, and 0 is rejected at startup). Sized for one HSM
+# partition behind this daemon — re-tune per deployment.
+per_principal_max_in_flight = 64
+per_principal_max_sessions = 16
+per_slot_failed_login_budget = 10
+per_slot_failed_login_cooldown_secs = 300
 
 [mechanisms]
 # Vendor extensions (CloudHSM, Thales) declared in this file; the

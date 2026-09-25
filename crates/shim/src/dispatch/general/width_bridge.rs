@@ -28,14 +28,19 @@ fn is_ulong_typed(attr_type: CkAttributeType) -> bool {
 ///
 /// No-op when the widths match or the attribute is not ulong-typed (opaque
 /// bytes need no translation). A size query (`client_len == 0`) stays `0`.
+///
+/// Fallible (T04): a widening rescale that exceeds `u64` reports
+/// [`WidthError::LengthOverflow`] instead of wrapping. Unreachable from
+/// `capture` (caller lengths are capped at 512 MiB first), but the bridge
+/// stays honest for direct callers.
 pub fn bridge_request_buffer_len(
     attr_type: CkAttributeType,
     client_len: u64,
     client_width: usize,
     backend_width: usize,
-) -> u64 {
+) -> Result<u64, WidthError> {
     if client_width == backend_width || !is_ulong_typed(attr_type) {
-        return client_len;
+        return Ok(client_len);
     }
     translate_ulong_len(client_len, client_width, backend_width)
 }
@@ -80,6 +85,9 @@ pub fn bridge_template_output_len(
 ///   client's `CK_ULONG` range (D4) — the caller surfaces that attribute as
 ///   `CK_UNAVAILABLE_INFORMATION` rather than truncating or failing the whole
 ///   call.
+/// - [`WidthError::LengthOverflow`] is returned if the length rescale itself
+///   exceeds `u64` (T04) — a malformed length, which unlike a value overflow
+///   fails the whole call at the exact-output layer.
 pub fn bridge_output_value(
     attr_type: CkAttributeType,
     value: Option<&[u8]>,
@@ -90,7 +98,7 @@ pub fn bridge_output_value(
     if backend_width == client_width || !is_ulong_typed(attr_type) {
         return Ok((value.map(<[u8]>::to_vec), returned_len));
     }
-    let client_len = translate_ulong_len(returned_len, backend_width, client_width);
+    let client_len = translate_ulong_len(returned_len, backend_width, client_width)?;
     let client_value = match value {
         Some(bytes) => {
             // D6 guarantees both edges share this client's native order.
@@ -141,31 +149,46 @@ mod tests {
 
     #[test]
     fn request_len_same_width_is_identity() {
-        assert_eq!(bridge_request_buffer_len(SCALAR, 8, 8, 8), 8);
-        assert_eq!(bridge_request_buffer_len(SCALAR, 4, 4, 4), 4);
+        assert_eq!(bridge_request_buffer_len(SCALAR, 8, 8, 8), Ok(8));
+        assert_eq!(bridge_request_buffer_len(SCALAR, 4, 4, 4), Ok(4));
     }
 
     #[test]
     fn request_len_passes_opaque_through() {
         // A non-ulong attribute is byte-addressed; its length never rescales.
-        assert_eq!(bridge_request_buffer_len(OPAQUE, 256, 4, 8), 256);
+        assert_eq!(bridge_request_buffer_len(OPAQUE, 256, 4, 8), Ok(256));
     }
 
     #[test]
     fn request_len_inflates_scalar_and_array_to_backend_width() {
         // 32-bit client -> 64-bit backend: one ulong 4 -> 8 bytes.
-        assert_eq!(bridge_request_buffer_len(SCALAR, 4, 4, 8), 8);
+        assert_eq!(bridge_request_buffer_len(SCALAR, 4, 4, 8), Ok(8));
         // Array of three: 3*4 -> 3*8.
-        assert_eq!(bridge_request_buffer_len(ARRAY, 12, 4, 8), 24);
+        assert_eq!(bridge_request_buffer_len(ARRAY, 12, 4, 8), Ok(24));
         // Size query stays zero.
-        assert_eq!(bridge_request_buffer_len(SCALAR, 0, 4, 8), 0);
+        assert_eq!(bridge_request_buffer_len(SCALAR, 0, 4, 8), Ok(0));
     }
 
     #[test]
     fn request_len_deflates_for_narrow_backend() {
         // 64-bit client -> 32-bit backend: 8 -> 4.
-        assert_eq!(bridge_request_buffer_len(SCALAR, 8, 8, 4), 4);
-        assert_eq!(bridge_request_buffer_len(ARRAY, 24, 8, 4), 12);
+        assert_eq!(bridge_request_buffer_len(SCALAR, 8, 8, 4), Ok(4));
+        assert_eq!(bridge_request_buffer_len(ARRAY, 24, 8, 4), Ok(12));
+    }
+
+    #[test]
+    fn request_len_widening_overflow_reports_length_overflow() {
+        // T04: one element past the widening boundary is a malformed
+        // length (LengthOverflow), never a wrapped buffer size.
+        let max_elements = u64::MAX / 8;
+        assert_eq!(
+            bridge_request_buffer_len(SCALAR, (max_elements + 1) * 4, 4, 8),
+            Err(WidthError::LengthOverflow)
+        );
+        assert_eq!(
+            bridge_output_value(SCALAR, None, (max_elements + 1) * 4, 4, 8),
+            Err(WidthError::LengthOverflow)
+        );
     }
 
     #[test]
@@ -315,7 +338,7 @@ mod law_tests {
             let len = rng.next() % 100_000;
             assert_eq!(
                 bridge_request_buffer_len(CkAttributeType::MODULUS, len, 8, 4),
-                len,
+                Ok(len),
                 "opaque byte attributes are byte-addressed at every width"
             );
         }

@@ -6,6 +6,8 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
+use crate::state;
+
 use super::helpers::*;
 
 /// Write an encapsulate result (ciphertext bytes + key handle) back to
@@ -69,6 +71,13 @@ pub unsafe extern "C" fn c_encapsulate_key(
             Err(e) => return rv_err(e),
         };
         let template_opt = null_preserving_template(&template, p_template);
+        // T07: gate after pure-local argument parsing but before registry
+        // access (validate/read below) so a pre-init call returns
+        // CRYPTOKI_NOT_INITIALIZED instead of panicking on the
+        // uninstalled registry.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -115,6 +124,13 @@ pub unsafe extern "C" fn c_decapsulate_key(
             Err(e) => return rv_err(e),
         };
         let template_opt = null_preserving_template(&template, p_template);
+        // T07: gate after pure-local argument parsing but before registry
+        // access (validate/read below) so a pre-init call returns
+        // CRYPTOKI_NOT_INITIALIZED instead of panicking on the
+        // uninstalled registry.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
         let rv = unsafe { validate_mechanism(p_mechanism) };
         if rv != rv_ok() {
             return rv;
@@ -136,10 +152,10 @@ pub unsafe extern "C" fn c_decapsulate_key(
             template_opt,
             ciphertext,
         )) {
-            Ok(key_handle) => {
-                unsafe { write_object_handle_output(key_handle, ph_key) };
-                rv_ok()
-            }
+            Ok(key_handle) => match unsafe { write_object_handle_output(key_handle, ph_key) } {
+                Ok(()) => rv_ok(),
+                Err(e) => rv_err(e),
+            },
             Err(e) => rv_err(e),
         }
     })

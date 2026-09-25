@@ -236,7 +236,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         encrypted_data: &[u8],
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let (bytes, _) = self.decrypt_with_mechanism_out(session, encrypted_data).await?;
         Ok(bytes)
     }
@@ -248,7 +248,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         encrypted_data: &[u8],
-    ) -> CkResult<(Vec<u8>, Option<CkMechanismParams>)> {
+    ) -> CkResult<(SecretBytes, Option<CkMechanismParams>)> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::DecryptRequest {
             client_context_id: ctx,
@@ -256,8 +256,11 @@ impl Pkcs11Client {
             encrypted_data: encrypted_data.to_vec(),
             encrypted_data_null_len: None,
         };
-        pkcs11_unary_map!(self.grpc.decrypt(req), true, resp => {
-            (resp.data, Self::parse_mech_out(resp.mechanism_out)?)
+        pkcs11_unary_map!(self.grpc.decrypt(req), true, mut resp => {
+            (
+                SecretBytes::new(std::mem::take(&mut resp.data)),
+                Self::parse_mech_out(std::mem::take(&mut resp.mechanism_out))?,
+            )
         })
     }
 
@@ -265,7 +268,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         encrypted_part: &[u8],
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let (bytes, _) = self.decrypt_update_with_mechanism_out(session, encrypted_part).await?;
         Ok(bytes)
     }
@@ -278,7 +281,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         encrypted_part: &[u8],
-    ) -> CkResult<(Vec<u8>, Option<CkMechanismParams>)> {
+    ) -> CkResult<(SecretBytes, Option<CkMechanismParams>)> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::DecryptUpdateRequest {
             client_context_id: ctx,
@@ -286,12 +289,15 @@ impl Pkcs11Client {
             encrypted_part: encrypted_part.to_vec(),
             encrypted_part_null_len: None,
         };
-        pkcs11_unary_map!(self.grpc.decrypt_update(req), true, resp => {
-            (resp.part, Self::parse_mech_out(resp.mechanism_out)?)
+        pkcs11_unary_map!(self.grpc.decrypt_update(req), true, mut resp => {
+            (
+                SecretBytes::new(std::mem::take(&mut resp.part)),
+                Self::parse_mech_out(std::mem::take(&mut resp.mechanism_out))?,
+            )
         })
     }
 
-    pub async fn decrypt_final(&mut self, session: CkSessionHandle) -> CkResult<Vec<u8>> {
+    pub async fn decrypt_final(&mut self, session: CkSessionHandle) -> CkResult<SecretBytes> {
         let (bytes, _) = self.decrypt_final_with_mechanism_out(session).await?;
         Ok(bytes)
     }
@@ -302,14 +308,17 @@ impl Pkcs11Client {
     pub async fn decrypt_final_with_mechanism_out(
         &mut self,
         session: CkSessionHandle,
-    ) -> CkResult<(Vec<u8>, Option<CkMechanismParams>)> {
+    ) -> CkResult<(SecretBytes, Option<CkMechanismParams>)> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::DecryptFinalRequest {
             client_context_id: ctx,
             session_handle: session.0,
         };
-        pkcs11_unary_map!(self.grpc.decrypt_final(req), true, resp => {
-            (resp.last_part, Self::parse_mech_out(resp.mechanism_out)?)
+        pkcs11_unary_map!(self.grpc.decrypt_final(req), true, mut resp => {
+            (
+                SecretBytes::new(std::mem::take(&mut resp.last_part)),
+                Self::parse_mech_out(std::mem::take(&mut resp.mechanism_out))?,
+            )
         })
     }
 

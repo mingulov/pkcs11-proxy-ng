@@ -107,6 +107,40 @@ fn pointer_safe_message_parameters_from_wire(advertised: Option<bool>) -> bool {
     advertised.unwrap_or(false)
 }
 
+/// Convert wire interface versions without truncation (T05): a
+/// `version_major`/`version_minor` above 255 is malformed discovery
+/// (259 must never alias major 3) and fails permanent before any probe
+/// state is recorded. Pure: touches no client state, so a failure
+/// installs no capability/registry publication.
+pub(crate) fn backend_interfaces_from_wire(
+    infos: Vec<pkcs11_proxy_ng_proto::InterfaceInfo>,
+) -> Result<Vec<BackendInterface>, ConnectError> {
+    infos
+        .into_iter()
+        .map(|info| {
+            let version_major = pkcs11_proxy_ng_types::narrow_u32_to_u8(info.version_major)
+                .map_err(|_| {
+                    ConnectError::permanent(format!(
+                        "malformed interface version {}.{}",
+                        info.version_major, info.version_minor
+                    ))
+                })?;
+            let version_minor = pkcs11_proxy_ng_types::narrow_u32_to_u8(info.version_minor)
+                .map_err(|_| {
+                    ConnectError::permanent(format!(
+                        "malformed interface version {}.{}",
+                        info.version_major, info.version_minor
+                    ))
+                })?;
+            Ok(BackendInterface {
+                version_major,
+                version_minor,
+                null_functions: info.null_functions,
+            })
+        })
+        .collect()
+}
+
 /// Validate the daemon's init version range (W1-L5-05): overlap negotiates
 /// (returns the agreed version), disjoint ranges fail loudly with
 /// FUNCTION_NOT_SUPPORTED before any context is stored. `None` bounds mean
@@ -456,19 +490,15 @@ impl Pkcs11Client {
             .map_err(|status| ConnectError::from_probe_status(&status))?
             .into_inner();
 
+        // T05: interface versions convert fallibly before anything is
+        // recorded, so malformed discovery fails here and installs no
+        // capability/registry state.
+        let interfaces = backend_interfaces_from_wire(resp.interfaces)?;
         let probe = BackendProbe {
             exact_output_effects_version: resp.exact_output_effects_version,
             pointer_safe_authenticated_parameters: resp.pointer_safe_authenticated_parameters
                 == Some(true),
-            interfaces: resp
-                .interfaces
-                .into_iter()
-                .map(|info| BackendInterface {
-                    version_major: info.version_major as u8,
-                    version_minor: info.version_minor as u8,
-                    null_functions: info.null_functions,
-                })
-                .collect(),
+            interfaces,
             mechanism_registry: resp.mechanism_registry,
             backend_ulong_size: resp.backend_ulong_size,
             backend_byte_order: resp.backend_byte_order,
@@ -716,6 +746,52 @@ mod tests {
             prod.matches("keep_alive_timeout(").count(),
             1,
             "keepalive timeout applied once, inside the shared helper"
+        );
+    }
+
+    /// T05: a 259 major must not alias interface major 3 (`as u8`
+    /// truncation); malformed discovery is a permanent error. The
+    /// converter is pure and runs before `note_backend_probe` in
+    /// `get_backend_interfaces`, so failure installs no
+    /// capability/registry state.
+    #[test]
+    fn malformed_interface_version_not_installed() {
+        use super::{BackendInterface, backend_interfaces_from_wire};
+        let malformed = vec![pkcs11_proxy_ng_proto::InterfaceInfo {
+            version_major: 259,
+            version_minor: 0,
+            null_functions: vec![],
+        }];
+        let err = backend_interfaces_from_wire(malformed).unwrap_err();
+        assert!(err.is_permanent(), "malformed discovery must be permanent: {err}");
+        assert!(!err.is_transient());
+        // Valid conversions still install byte-exact values, with an
+        // inclusive 255 boundary on both fields.
+        let valid = vec![pkcs11_proxy_ng_proto::InterfaceInfo {
+            version_major: 3,
+            version_minor: 0,
+            null_functions: vec!["C_SeedRandom".to_string()],
+        }];
+        assert_eq!(
+            backend_interfaces_from_wire(valid).unwrap(),
+            vec![BackendInterface {
+                version_major: 3,
+                version_minor: 0,
+                null_functions: vec!["C_SeedRandom".to_string()],
+            }]
+        );
+        let boundary = vec![pkcs11_proxy_ng_proto::InterfaceInfo {
+            version_major: 255,
+            version_minor: 255,
+            null_functions: vec![],
+        }];
+        assert_eq!(
+            backend_interfaces_from_wire(boundary).unwrap(),
+            vec![BackendInterface {
+                version_major: 255,
+                version_minor: 255,
+                null_functions: vec![]
+            }]
         );
     }
 

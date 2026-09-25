@@ -56,16 +56,20 @@ pub(super) async fn slot_is_authorized(
     // burst of authorization checks (discovery, open) does not issue a blocking
     // C_GetTokenInfo each time (M9). A cache miss reads the backend and records
     // the result; TOKEN_NOT_PRESENT and other errors are not cached.
+    // Generation-guarded publication (T09): a fetch started before a reinit
+    // must not reinsert stale label/serial after its invalidation.
     let (label, serial) = match ctx_mgr.cached_token_info(backend_slot) {
         Some(cached) => cached,
         None => {
+            let generation = ctx_mgr.authz_generation();
             let backend = backend_ref.clone();
             match spawn_backend(move || backend.get_token_info(backend_slot.0)).await? {
                 Ok(info) => {
-                    ctx_mgr.cache_token_info(
+                    ctx_mgr.cache_token_info_if_generation(
                         backend_slot,
                         info.label.clone(),
                         info.serial_number.clone(),
+                        generation,
                     );
                     (info.label, info.serial_number)
                 }
@@ -133,16 +137,19 @@ pub(super) async fn extract_is_permitted(
     // Resolve the token (label, serial) from cache when available. On a miss,
     // fetch from the backend and cache the result so a TTL-expired cache cannot
     // silently disarm the extract gate. Mirrors slot_is_authorized (M9).
+    // Generation-guarded publication (T09): see slot_is_authorized.
     let (label, serial) = match ctx.context_manager.cached_token_info(backend_slot) {
         Some(info) => info,
         None => {
+            let generation = ctx.context_manager.authz_generation();
             let backend = ctx.backend.clone();
             match spawn_backend(move || backend.get_token_info(backend_slot.0)).await? {
                 Ok(info) => {
-                    ctx.context_manager.cache_token_info(
+                    ctx.context_manager.cache_token_info_if_generation(
                         backend_slot,
                         info.label.clone(),
                         info.serial_number.clone(),
+                        generation,
                     );
                     (info.label, info.serial_number)
                 }

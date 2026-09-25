@@ -176,3 +176,95 @@ stop site per arch with the contracted registers, and every retry loop
 is contained with no fallthrough. Out of scope (unchanged, still
 excluded): Windows/macOS arms (cross, not natively executed here),
 non-x86 Linux (fallback arm, compile-only).
+
+## Addendum: T10 re-verification (2026-09-22)
+
+The stop-path sources changed after `f6920ff` (aarch64 arm row 5 in
+`b19ca20`, the W1-C4-08 const-qualification refactor, and T10's
+`begin_finalize` → `begin_finalize_with_deadline` split plus a
+caller-census doc fix), so the point-in-time review above went stale
+on the source checklist (2 → 3 `asm!` blocks, 4 → 5 qualified arms)
+and on call-site line numbers. T10 re-verified the locally-runnable
+subset on the T10 tree (this commit) with the SAME toolchain as the
+original review (stable rustc 1.98.1 `48a229cea`, GNU objdump 2.46),
+so the bytes below are directly comparable.
+
+Source checklist (current `native_stop.rs`):
+
+- `core::arch::asm!` blocks: exactly 3 (x86_64 + i686 + aarch64;
+  the +1 is the `b19ca20` arm, pre-T10).
+- `options(nostack)`: x86_64 and aarch64 stubs only; the i686 arm
+  keeps default options with the push/pop balance contract.
+- `noreturn`, `pure`, `nomem`, `readonly`,
+  `unreachable_unchecked`, `libc::`, `abort(`, `raise(`: ABSENT
+  except the same two reviewed comments (macOS rationale, anti-fold
+  note).
+- Fallback arm: `cfg(not(any(...)))` complement of the five
+  qualified arms; the cfg-partition test pins arm selection.
+- Production `abnormal_stop_native_lifetime` call sites: still
+  exactly 4 (guard×2 in `loading.rs`, controller×1 in
+  `native_stop.rs`, sealer×1 now in
+  `LifecycleDomain::begin_finalize_with_deadline`). The x86_64 stub
+  body is byte-identical to `f6920ff` (md5 `e09341cb…` both).
+- T10's own stop-path delta is codegen-neutral: a doc comment in
+  `native_stop.rs`, six `#[cfg(test)]` →
+  `#[cfg(any(test, feature = "native-owner-test-hooks"))]`
+  widenings across three files (3 in `loading.rs`, 2 in
+  `native_domain.rs`, 1 in `ffi.rs`; test-only helpers), three new
+  hooks-gated helpers (2 test constructors + the `stop_qualified_target`
+  predicate read, all cfg'd out of default builds), and the
+  `begin_finalize` wrapper split in `native_domain.rs` (the arm-1
+  suicide call itself is unchanged, line moved).
+
+x86_64 GNU debug daemon (symbols): stub
+`movq $0xe7,-0x8(%rsp); mov -0x8(%rsp),%rax; mov $0x46,%edi;
+syscall; mov %rax,…; ret` — identical shape to the reviewed bytes;
+loop `call stub; mov; jmp call`, contained. VERDICT: pass.
+
+x86_64 GNU release, stripped ship binary (pattern + twin): EXACTLY
+ONE `syscall` (`b8 e7 00 00 00; bf 46 00 00 00; 0f 05`); four call
+sites, each `call; jmp call`. The unstripped twin (same flags,
+`CARGO_PROFILE_RELEASE_STRIP=none` only) has identical stub bytes
+and attributes the sites: `controller_loop`,
+`LifecycleDomain::begin_finalize_with_deadline` (T10 rename of the
+reviewed `begin_finalize` sealer), `FfiBackend::drop` ×2 — four
+machine sites for four source sites, no LTO duplication, none
+missing. VERDICT: pass.
+
+i686 GNU release, stripped ship binary (pattern): EXACTLY ONE
+`int $0x80` with the reviewed sequence
+(`mov $0xfc,%eax; mov $0x46,%ecx; push %ebx; mov %ecx,%ebx;
+int $0x80; pop %ebx`) — plus a `sub $0xc,%esp` function-entry
+prologue (compiler-version codegen choice; EBX still balanced, so
+callers target the entry one instruction above the reviewed bytes).
+Four call sites, each `call; jmp call`, contained. VERDICT: pass.
+
+aarch64 Linux (NEW — the arm postdates the original review):
+`cargo check -p pkcs11-proxy-ng-backend --tests --target
+aarch64-unknown-linux-gnu` passes (in-tree const pins:
+`NATIVE_FFI_QUALIFIED`, `NATIVE_STOP_QUALIFIED`, arm name), and the
+cross-built backend rlib disassembles (llvm-objdump) to exactly ONE
+`svc #0` in the whole archive with the contracted registers
+(`mov w8,#70` → X0 status, `mov w8,#94` → X8 nr, `svc #0`,
+modeled X0 return preserved) plus a contained `bl; stur; b` retry
+loop (the `bl` target is an unrelocated placeholder, as expected in
+an unlinked object). Native execution still impossible on x86_64
+hosts. VERDICT: pass (object-level; link + exec remain out of
+scope).
+
+Native execution (current tree):
+
+| Variant | Command | Result |
+|---|---|---|
+| x86_64 GNU | `cargo test -p pkcs11-proxy-ng-backend --lib -- native_stop` | 52 pass |
+| i686 GNU (native exec on x86_64 host) | `cargo test --target i686-unknown-linux-gnu … -- native_stop` | 52 pass |
+
+The 50 → 52 growth since September is two stop-qualification pin
+tests landed pre-T10 (W1-C4-08 era). VERDICT: pass.
+
+Still out of scope (unchanged): MSRV 1.88 codegen, musl variants,
+Windows/macOS arms, aarch64 link + native execution.
+
+Addendum verdict: PASS. The T10 tree's stop machine code upholds
+every reviewed contract row; the sealer rename is the only
+symbol-level change and the twin attributes it.

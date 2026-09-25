@@ -38,13 +38,18 @@ pub unsafe extern "C" fn c_find_objects(
         if ph_object.is_null() || pul_object_count.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        // W1-L3-07: the wire field is u32; reject an unrepresentable count
-        // with DATA_LEN_RANGE (c_generate_random convention), never `as u32`
-        // truncation.
-        let max_count = match u32::try_from(ul_max_object_count) {
-            Ok(count) => count,
-            Err(_) => return rv_err(CkRv::DATA_LEN_RANGE),
-        };
+        // T20: ulMaxObjectCount is a CAP, not an exact length — backends
+        // accept absurd values and return at most that many handles
+        // (SoftHSM answers OK to 0x100000008). Saturate to the u32 wire
+        // field instead of rejecting: a local DATA_LEN_RANGE reject is a
+        // transparency gap (17 lanes), while values above the bound are
+        // observably equivalent — no token holds > u32::MAX objects, and
+        // the backend clamps to its allocation bound anyway
+        // (cap_find_objects_count). Deliberately NOT the W1-L3-07
+        // narrowing reject (kept for exact lengths like
+        // c_generate_random, where clamping would shorten output):
+        // caps clamp, lengths reject.
+        let max_count = u32::try_from(ul_max_object_count).unwrap_or(u32::MAX);
         match with_client!(client => client.find_objects(
             CkSessionHandle(h_session as u64),
             max_count,
@@ -116,7 +121,7 @@ pub unsafe extern "C" fn c_get_attribute_value(
                 backend_width,
                 backend_stride,
             ) {
-                Ok(writes) => {
+                Ok((writes, rv)) => {
                     unsafe { exact::commit(writes) };
                     rv_err(rv)
                 }
@@ -176,7 +181,7 @@ unsafe fn write_nested_result_to_ffi(
             item.apply_type = true;
         }
     }
-    let writes = exact::prepare(
+    let (writes, _) = exact::prepare(
         &[call],
         &[result],
         CkRv::OK,
@@ -209,10 +214,10 @@ pub unsafe extern "C" fn c_create_object(
         let template_opt = null_preserving_template(&template, p_template);
         match with_client!(client => client.create_object(CkSessionHandle(h_session as u64), template_opt))
         {
-            Ok(handle) => {
-                unsafe { write_object_handle_output(handle, ph_object) };
-                rv_ok()
-            }
+            Ok(handle) => match unsafe { write_object_handle_output(handle, ph_object) } {
+                Ok(()) => rv_ok(),
+                Err(e) => rv_err(e),
+            },
             Err(e) => rv_err(e),
         }
     })
@@ -239,10 +244,10 @@ pub unsafe extern "C" fn c_copy_object(
             CkObjectHandle(h_object as u64),
             template_opt,
         )) {
-            Ok(handle) => {
-                unsafe { write_object_handle_output(handle, ph_new_object) };
-                rv_ok()
-            }
+            Ok(handle) => match unsafe { write_object_handle_output(handle, ph_new_object) } {
+                Ok(()) => rv_ok(),
+                Err(e) => rv_err(e),
+            },
             Err(e) => rv_err(e),
         }
     })

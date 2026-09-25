@@ -2,6 +2,7 @@ use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use pkcs11_proxy_ng_proto::convert::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
+use pkcs11_proxy_ng_proto::convert::output::parameter_roundtrip_result_from_owned;
 use pkcs11_proxy_ng_types::*;
 
 use crate::client::Pkcs11Client;
@@ -10,11 +11,13 @@ use crate::error::{MessageCallError, grpc_status_to_ck_rv};
 use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
 type MessageBeginContractDecoded = (CkParameterRoundtripResult, Option<MessageEffects>);
 
+/// T13: owned parts — the caller takes them out of its owned response
+/// and the conversions adopt (no copies).
 fn decode_message_init_contract_response(
     ck_rv: u64,
-    parameter_result: Option<&pkcs11_proxy_ng_proto::ParameterRoundtripResult>,
+    parameter_result: Option<pkcs11_proxy_ng_proto::ParameterRoundtripResult>,
     response_shape: Option<i32>,
-    response_parameter: Option<&pkcs11_proxy_ng_proto::MessageParameter>,
+    response_parameter: Option<pkcs11_proxy_ng_proto::MessageParameter>,
     envelope: &CkParameterRoundtripSpec,
     requested: Option<&MessageParameter>,
     expected_shape: MessageParameterShape,
@@ -25,7 +28,7 @@ fn decode_message_init_contract_response(
     }
 
     let parameter_result = parameter_result
-        .map(CkParameterRoundtripResult::from)
+        .map(parameter_roundtrip_result_from_owned)
         .ok_or_else(MessageCallError::protocol)?;
     if parameter_result.ck_rv != CkRv::OK
         || parameter_result.returned_len != envelope.buffer_len
@@ -46,10 +49,10 @@ fn decode_message_init_contract_response(
     match (requested, response_parameter) {
         (None, None) => Ok(()),
         (Some(requested), Some(response)) => {
-            validate_structured_wire_parameter(response)
+            validate_structured_wire_parameter(&response)
                 .map_err(|_| MessageCallError::protocol())?;
-            let response =
-                MessageParameter::try_from(response).map_err(|_| MessageCallError::protocol())?;
+            let response = MessageParameter::try_from_owned(response)
+                .map_err(|_| MessageCallError::protocol())?;
             if !expected_shape.matches(&response) || requested != &response {
                 return Err(MessageCallError::protocol());
             }
@@ -60,10 +63,12 @@ fn decode_message_init_contract_response(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// T13: `parameter_result` is an owned part (adopted); the
+/// presence-only and effects parts stay borrowed (no wiping conversion).
 fn decode_message_begin_contract_response(
     ck_rv: u64,
     legacy_parameter: &[u8],
-    parameter_result: Option<&pkcs11_proxy_ng_proto::ParameterRoundtripResult>,
+    parameter_result: Option<pkcs11_proxy_ng_proto::ParameterRoundtripResult>,
     message_parameter_out: Option<&pkcs11_proxy_ng_proto::MessageParameter>,
     message_effects: Option<&pkcs11_proxy_ng_proto::pkcs11_proxy_ng::v1::MessageParameterEffects>,
     envelope: &CkParameterRoundtripSpec,
@@ -83,7 +88,7 @@ fn decode_message_begin_contract_response(
         return Err(MessageCallError::protocol());
     }
     let parameter_result = parameter_result
-        .map(CkParameterRoundtripResult::from)
+        .map(parameter_roundtrip_result_from_owned)
         .ok_or_else(MessageCallError::protocol)?;
     if parameter_result.ck_rv != rv
         || parameter_result.returned_len != envelope.buffer_len
@@ -115,11 +120,12 @@ fn decode_message_begin_contract_response(
     Ok((parameter_result, response_parameter))
 }
 
+/// T13: `parameter_result` is an owned part (adopted).
 fn decode_empty_message_parameter_response(
     ck_rv: u64,
     legacy_parameter: &[u8],
     unexpected_output: &[u8],
-    parameter_result: Option<&pkcs11_proxy_ng_proto::ParameterRoundtripResult>,
+    parameter_result: Option<pkcs11_proxy_ng_proto::ParameterRoundtripResult>,
     envelope: &CkParameterRoundtripSpec,
 ) -> Result<CkParameterRoundtripResult, MessageCallError> {
     let rv = CkRv(ck_rv);
@@ -130,7 +136,7 @@ fn decode_empty_message_parameter_response(
         return Err(MessageCallError::protocol());
     }
     let result = parameter_result
-        .map(CkParameterRoundtripResult::from)
+        .map(parameter_roundtrip_result_from_owned)
         .ok_or_else(MessageCallError::protocol)?;
     if result.ck_rv != CkRv::OK
         || result.returned_len != envelope.buffer_len
@@ -214,7 +220,7 @@ impl Pkcs11Client {
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
             parameter_shape: Some(shape.to_proto_i32()),
         };
-        let response = self
+        let mut response = self
             .grpc
             .message_encrypt_init(req)
             .await
@@ -224,9 +230,9 @@ impl Pkcs11Client {
             .into_inner();
         decode_message_init_contract_response(
             response.ck_rv,
-            response.parameter_result.as_ref(),
+            response.parameter_result.take(),
             response.parameter_shape,
-            response.init_message_parameter.as_ref(),
+            response.init_message_parameter.take(),
             envelope,
             init_param,
             shape,
@@ -323,7 +329,7 @@ impl Pkcs11Client {
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
             parameter_shape: Some(shape.to_proto_i32()),
         };
-        let response = self
+        let mut response = self
             .grpc
             .message_decrypt_init(req)
             .await
@@ -333,9 +339,9 @@ impl Pkcs11Client {
             .into_inner();
         decode_message_init_contract_response(
             response.ck_rv,
-            response.parameter_result.as_ref(),
+            response.parameter_result.take(),
             response.parameter_shape,
-            response.init_message_parameter.as_ref(),
+            response.init_message_parameter.take(),
             envelope,
             init_param,
             shape,
@@ -510,7 +516,7 @@ impl Pkcs11Client {
         parameter: &[u8],
         aad: CkInBuf<'_>,
         plaintext: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, Vec<u8>)> {
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::EncryptMessageRequest {
             client_context_id: ctx,
@@ -523,8 +529,11 @@ impl Pkcs11Client {
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         Self::fill_input(plaintext, &mut req.plaintext, &mut req.plaintext_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.encrypt_message(req), true);
-        Ok((resp.parameter_out, resp.ciphertext))
+        // T12: `EncryptMessageResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.encrypt_message(req), true);
+        let parameter_out = SecretBytes::new(std::mem::take(&mut resp.parameter_out));
+        Ok((parameter_out, std::mem::take(&mut resp.ciphertext)))
     }
 
     // --- C_EncryptMessageBegin — returns parameter_out ---
@@ -534,7 +543,7 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         parameter: &[u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::EncryptMessageBeginRequest {
             exact_output_effects_version: 1,
@@ -547,8 +556,10 @@ impl Pkcs11Client {
             message_parameter: None,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.encrypt_message_begin(req), true);
-        Ok(resp.parameter_out)
+        // T12: `EncryptMessageBeginResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.encrypt_message_begin(req), true);
+        Ok(SecretBytes::new(std::mem::take(&mut resp.parameter_out)))
     }
 
     /// Capability-gated Begin contract used by the C shim. The raw legacy
@@ -574,7 +585,7 @@ impl Pkcs11Client {
             message_parameter: message_parameter.map(Into::into),
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
-        let response = self
+        let mut response = self
             .grpc
             .encrypt_message_begin(req)
             .await
@@ -585,7 +596,7 @@ impl Pkcs11Client {
         decode_message_begin_contract_response(
             response.ck_rv,
             &response.parameter_out,
-            response.parameter_result.as_ref(),
+            response.parameter_result.take(),
             response.message_parameter_out.as_ref(),
             response.message_effects.as_ref(),
             envelope,
@@ -602,7 +613,7 @@ impl Pkcs11Client {
         parameter: &[u8],
         plaintext_part: CkInBuf<'_>,
         flags: CkFlags,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, Vec<u8>)> {
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::EncryptMessageNextRequest {
             client_context_id: ctx,
@@ -613,8 +624,11 @@ impl Pkcs11Client {
             plaintext_part_null_len: None,
         };
         Self::fill_input(plaintext_part, &mut req.plaintext_part, &mut req.plaintext_part_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.encrypt_message_next(req), true);
-        Ok((resp.parameter_out, resp.ciphertext_part))
+        // T12: `EncryptMessageNextResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.encrypt_message_next(req), true);
+        let parameter_out = SecretBytes::new(std::mem::take(&mut resp.parameter_out));
+        Ok((parameter_out, std::mem::take(&mut resp.ciphertext_part)))
     }
 
     // --- C_DecryptMessage — returns (parameter_out, plaintext) ---
@@ -625,7 +639,7 @@ impl Pkcs11Client {
         parameter: &[u8],
         aad: CkInBuf<'_>,
         ciphertext: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::DecryptMessageRequest {
             client_context_id: ctx,
@@ -638,8 +652,11 @@ impl Pkcs11Client {
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
         Self::fill_input(ciphertext, &mut req.ciphertext, &mut req.ciphertext_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.decrypt_message(req), true);
-        Ok((resp.parameter_out, resp.plaintext))
+        // T12: `DecryptMessageResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.decrypt_message(req), true);
+        let parameter_out = SecretBytes::new(std::mem::take(&mut resp.parameter_out));
+        Ok((parameter_out, SecretBytes::new(std::mem::take(&mut resp.plaintext))))
     }
 
     // --- C_DecryptMessageBegin — returns parameter_out ---
@@ -649,7 +666,7 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         parameter: &[u8],
         aad: CkInBuf<'_>,
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::DecryptMessageBeginRequest {
             exact_output_effects_version: 1,
@@ -662,8 +679,10 @@ impl Pkcs11Client {
             message_parameter: None,
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.decrypt_message_begin(req), true);
-        Ok(resp.parameter_out)
+        // T12: `DecryptMessageBeginResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.decrypt_message_begin(req), true);
+        Ok(SecretBytes::new(std::mem::take(&mut resp.parameter_out)))
     }
 
     pub async fn decrypt_message_begin_contract(
@@ -686,7 +705,7 @@ impl Pkcs11Client {
             message_parameter: message_parameter.map(Into::into),
         };
         Self::fill_input(aad, &mut req.associated_data, &mut req.associated_data_null_len);
-        let response = self
+        let mut response = self
             .grpc
             .decrypt_message_begin(req)
             .await
@@ -697,7 +716,7 @@ impl Pkcs11Client {
         decode_message_begin_contract_response(
             response.ck_rv,
             &response.parameter_out,
-            response.parameter_result.as_ref(),
+            response.parameter_result.take(),
             response.message_parameter_out.as_ref(),
             response.message_effects.as_ref(),
             envelope,
@@ -714,7 +733,7 @@ impl Pkcs11Client {
         parameter: &[u8],
         ciphertext_part: CkInBuf<'_>,
         flags: CkFlags,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, SecretBytes)> {
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::DecryptMessageNextRequest {
             client_context_id: ctx,
@@ -729,8 +748,11 @@ impl Pkcs11Client {
             &mut req.ciphertext_part,
             &mut req.ciphertext_part_null_len,
         );
-        let resp = pkcs11_unary_call!(self.grpc.decrypt_message_next(req), true);
-        Ok((resp.parameter_out, resp.plaintext_part))
+        // T12: `DecryptMessageNextResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.decrypt_message_next(req), true);
+        let parameter_out = SecretBytes::new(std::mem::take(&mut resp.parameter_out));
+        Ok((parameter_out, SecretBytes::new(std::mem::take(&mut resp.plaintext_part))))
     }
 
     // --- C_SignMessage — returns (parameter_out, signature) ---
@@ -740,7 +762,7 @@ impl Pkcs11Client {
         session: CkSessionHandle,
         parameter: &[u8],
         data: CkInBuf<'_>,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, Vec<u8>)> {
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::SignMessageRequest {
             client_context_id: ctx,
@@ -750,8 +772,11 @@ impl Pkcs11Client {
             data_null_len: None,
         };
         Self::fill_input(data, &mut req.data, &mut req.data_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.sign_message(req), true);
-        Ok((resp.parameter_out, resp.signature))
+        // T12: `SignMessageResponse` is `ZeroizeOnDrop`; take owned fields
+        // out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.sign_message(req), true);
+        let parameter_out = SecretBytes::new(std::mem::take(&mut resp.parameter_out));
+        Ok((parameter_out, std::mem::take(&mut resp.signature)))
     }
 
     // --- C_SignMessageBegin — returns parameter_out ---
@@ -760,7 +785,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         parameter: &[u8],
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::SignMessageBeginRequest {
             client_context_id: ctx,
@@ -768,8 +793,10 @@ impl Pkcs11Client {
             parameter: parameter.to_vec(),
             parameter_out_spec: None,
         };
-        let resp = pkcs11_unary_call!(self.grpc.sign_message_begin(req), true);
-        Ok(resp.parameter_out)
+        // T12: `SignMessageBeginResponse` is `ZeroizeOnDrop`; take the
+        // owned field out with `mem::take` instead of moving it.
+        let mut resp = pkcs11_unary_call!(self.grpc.sign_message_begin(req), true);
+        Ok(SecretBytes::new(std::mem::take(&mut resp.parameter_out)))
     }
 
     pub async fn sign_message_begin_contract(
@@ -784,7 +811,7 @@ impl Pkcs11Client {
             parameter: Vec::new(),
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
         };
-        let response = self
+        let mut response = self
             .grpc
             .sign_message_begin(request)
             .await
@@ -796,7 +823,7 @@ impl Pkcs11Client {
             response.ck_rv,
             &response.parameter_out,
             &[],
-            response.parameter_result.as_ref(),
+            response.parameter_result.take(),
             envelope,
         )
     }
@@ -809,7 +836,7 @@ impl Pkcs11Client {
         parameter: &[u8],
         data_part: CkInBuf<'_>,
         request_signature: bool,
-    ) -> CkResult<(Vec<u8>, Vec<u8>)> {
+    ) -> CkResult<(SecretBytes, Vec<u8>)> {
         let ctx = self.context_id()?;
         let mut req = pkcs11_proxy_ng_proto::SignMessageNextRequest {
             client_context_id: ctx,
@@ -821,8 +848,11 @@ impl Pkcs11Client {
             parameter_out_spec: None,
         };
         Self::fill_input(data_part, &mut req.data_part, &mut req.data_part_null_len);
-        let resp = pkcs11_unary_call!(self.grpc.sign_message_next(req), true);
-        Ok((resp.parameter_out, resp.signature))
+        // T12: `SignMessageNextResponse` is `ZeroizeOnDrop`; take owned
+        // fields out with `mem::take` instead of moving them.
+        let mut resp = pkcs11_unary_call!(self.grpc.sign_message_next(req), true);
+        let parameter_out = SecretBytes::new(std::mem::take(&mut resp.parameter_out));
+        Ok((parameter_out, std::mem::take(&mut resp.signature)))
     }
 
     pub async fn sign_message_next_feed_contract(
@@ -842,7 +872,7 @@ impl Pkcs11Client {
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
         };
         Self::fill_input(data_part, &mut request.data_part, &mut request.data_part_null_len);
-        let response = self
+        let mut response = self
             .grpc
             .sign_message_next(request)
             .await
@@ -854,7 +884,7 @@ impl Pkcs11Client {
             response.ck_rv,
             &response.parameter_out,
             &response.signature,
-            response.parameter_result.as_ref(),
+            response.parameter_result.take(),
             envelope,
         )
     }
@@ -904,7 +934,7 @@ impl Pkcs11Client {
         };
         Self::fill_input(data, &mut request.data, &mut request.data_null_len);
         Self::fill_input(signature, &mut request.signature, &mut request.signature_null_len);
-        let response = self
+        let mut response = self
             .grpc
             .verify_message(request)
             .await
@@ -916,7 +946,7 @@ impl Pkcs11Client {
             response.ck_rv,
             &[],
             &[],
-            response.parameter_result.as_ref(),
+            response.parameter_result.take(),
             envelope,
         )
     }
@@ -950,7 +980,7 @@ impl Pkcs11Client {
             parameter: Vec::new(),
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
         };
-        let response = self
+        let mut response = self
             .grpc
             .verify_message_begin(request)
             .await
@@ -962,7 +992,7 @@ impl Pkcs11Client {
             response.ck_rv,
             &response.parameter_out,
             &[],
-            response.parameter_result.as_ref(),
+            response.parameter_result.take(),
             envelope,
         )
     }
@@ -1016,7 +1046,7 @@ impl Pkcs11Client {
         };
         Self::fill_input(data_part, &mut request.data_part, &mut request.data_part_null_len);
         Self::fill_input(signature, &mut request.signature, &mut request.signature_null_len);
-        let response = self
+        let mut response = self
             .grpc
             .verify_message_next(request)
             .await
@@ -1028,7 +1058,7 @@ impl Pkcs11Client {
             response.ck_rv,
             &[],
             &[],
-            response.parameter_result.as_ref(),
+            response.parameter_result.take(),
             envelope,
         )
     }
@@ -1097,12 +1127,12 @@ mod begin_contract_tests {
                 MessageParameter::SalaChacha(parameter) => parameter.nonce[0] ^= 0xFF,
                 MessageParameter::Raw(_) => unreachable!(),
             }
-            let wire_mutated = (&mutated).into();
+            let wire_mutated: pkcs11_proxy_ng_proto::MessageParameter = (&mutated).into();
             let error = decode_message_init_contract_response(
                 CkRv::OK.0,
-                Some(&acknowledged),
+                Some(acknowledged.clone()),
                 Some(shape.to_proto_i32()),
-                Some(&wire_mutated),
+                Some(wire_mutated.clone()),
                 &envelope,
                 Some(&requested),
                 shape,
@@ -1115,7 +1145,7 @@ mod begin_contract_tests {
     #[test]
     fn init_contract_rejects_missing_or_mutated_acknowledgements() {
         let requested = gcm_parameter();
-        let wire_requested = (&requested).into();
+        let wire_requested: pkcs11_proxy_ng_proto::MessageParameter = (&requested).into();
         let envelope =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 48, value: None };
         let acknowledged = pkcs11_proxy_ng_proto::ParameterRoundtripResult {
@@ -1130,7 +1160,7 @@ mod begin_contract_tests {
             unreachable!();
         };
         parameter.iv[0] ^= 0xFF;
-        let wire_mutated = (&mutated_parameter).into();
+        let wire_mutated: pkcs11_proxy_ng_proto::MessageParameter = (&mutated_parameter).into();
         let malformed_parameter = pkcs11_proxy_ng_proto::MessageParameter { params: None };
         let raw_parameter = pkcs11_proxy_ng_proto::MessageParameter {
             params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(Vec::new())),
@@ -1138,13 +1168,13 @@ mod begin_contract_tests {
         let raw_nonempty_parameter = pkcs11_proxy_ng_proto::MessageParameter {
             params: Some(pkcs11_proxy_ng_proto::message_parameter::Params::Raw(vec![0xA5])),
         };
-        let wrong_variant = (&ccm_parameter()).into();
+        let wrong_variant: pkcs11_proxy_ng_proto::MessageParameter = (&ccm_parameter()).into();
 
         decode_message_init_contract_response(
             CkRv::OK.0,
-            Some(&acknowledged),
+            Some(acknowledged.clone()),
             Some(MessageParameterShape::Gcm.to_proto_i32()),
-            Some(&wire_requested),
+            Some(wire_requested.clone()),
             &envelope,
             Some(&requested),
             MessageParameterShape::Gcm,
@@ -1156,62 +1186,67 @@ mod begin_contract_tests {
                 "missing outer acknowledgement",
                 None,
                 Some(MessageParameterShape::Gcm.to_proto_i32()),
-                Some(&wire_requested),
+                Some(wire_requested.clone()),
             ),
             (
                 "mutated outer acknowledgement",
-                Some(&mutated_envelope),
+                Some(mutated_envelope.clone()),
                 Some(MessageParameterShape::Gcm.to_proto_i32()),
-                Some(&wire_requested),
+                Some(wire_requested.clone()),
             ),
-            ("missing shape acknowledgement", Some(&acknowledged), None, Some(&wire_requested)),
+            (
+                "missing shape acknowledgement",
+                Some(acknowledged.clone()),
+                None,
+                Some(wire_requested.clone()),
+            ),
             (
                 "mutated shape acknowledgement",
-                Some(&acknowledged),
+                Some(acknowledged.clone()),
                 Some(MessageParameterShape::Ccm.to_proto_i32()),
-                Some(&wire_requested),
+                Some(wire_requested.clone()),
             ),
             (
                 "unknown shape acknowledgement",
-                Some(&acknowledged),
+                Some(acknowledged.clone()),
                 Some(i32::MAX),
-                Some(&wire_requested),
+                Some(wire_requested.clone()),
             ),
             (
                 "missing structured acknowledgement",
-                Some(&acknowledged),
+                Some(acknowledged.clone()),
                 Some(MessageParameterShape::Gcm.to_proto_i32()),
                 None,
             ),
             (
                 "mutated structured acknowledgement",
-                Some(&acknowledged),
+                Some(acknowledged.clone()),
                 Some(MessageParameterShape::Gcm.to_proto_i32()),
-                Some(&wire_mutated),
+                Some(wire_mutated.clone()),
             ),
             (
                 "malformed structured acknowledgement",
-                Some(&acknowledged),
+                Some(acknowledged.clone()),
                 Some(MessageParameterShape::Gcm.to_proto_i32()),
-                Some(&malformed_parameter),
+                Some(malformed_parameter.clone()),
             ),
             (
                 "raw structured acknowledgement",
-                Some(&acknowledged),
+                Some(acknowledged.clone()),
                 Some(MessageParameterShape::Gcm.to_proto_i32()),
-                Some(&raw_parameter),
+                Some(raw_parameter.clone()),
             ),
             (
                 "nonempty raw structured acknowledgement",
-                Some(&acknowledged),
+                Some(acknowledged.clone()),
                 Some(MessageParameterShape::Gcm.to_proto_i32()),
-                Some(&raw_nonempty_parameter),
+                Some(raw_nonempty_parameter.clone()),
             ),
             (
                 "wrong structured variant acknowledgement",
-                Some(&acknowledged),
+                Some(acknowledged.clone()),
                 Some(MessageParameterShape::Gcm.to_proto_i32()),
-                Some(&wrong_variant),
+                Some(wrong_variant.clone()),
             ),
         ] {
             let error = decode_message_init_contract_response(
@@ -1229,9 +1264,9 @@ mod begin_contract_tests {
 
         let error = decode_message_init_contract_response(
             CkRv::OK.0,
-            Some(&acknowledged),
+            Some(acknowledged.clone()),
             Some(MessageParameterShape::Gcm.to_proto_i32()),
-            Some(&wire_requested),
+            Some(wire_requested.clone()),
             &envelope,
             None,
             MessageParameterShape::Gcm,
@@ -1245,7 +1280,7 @@ mod begin_contract_tests {
         let requested = gcm_parameter();
         let envelope =
             CkParameterRoundtripSpec { buffer_present: true, buffer_len: 32, value: None };
-        let response = pkcs11_proxy_ng_proto::EncryptMessageBeginResponse {
+        let mut response = pkcs11_proxy_ng_proto::EncryptMessageBeginResponse {
             message_effects: None,
             ck_rv: CkRv::OK.0,
             parameter_out: Vec::new(),
@@ -1256,7 +1291,7 @@ mod begin_contract_tests {
         let error = decode_message_begin_contract_response(
             response.ck_rv,
             &response.parameter_out,
-            response.parameter_result.as_ref(),
+            response.parameter_result.take(),
             response.message_parameter_out.as_ref(),
             response.message_effects.as_ref(),
             &envelope,
@@ -1289,7 +1324,7 @@ mod begin_contract_tests {
                 let error = decode_message_begin_contract_response(
                     CkRv::OK.0,
                     &[],
-                    Some(&response),
+                    Some(response),
                     None,
                     None,
                     &envelope,
@@ -1337,7 +1372,7 @@ mod begin_contract_tests {
             let error = decode_message_begin_contract_response(
                 CkRv::OK.0,
                 &[],
-                Some(&acknowledged),
+                Some(acknowledged.clone()),
                 Some(&response),
                 None,
                 &envelope,
@@ -1364,14 +1399,9 @@ mod begin_contract_tests {
             returned_len: 1,
             value: Some(Vec::new()),
         };
-        let error = decode_empty_message_parameter_response(
-            CkRv::OK.0,
-            &[],
-            &[],
-            Some(&mutated),
-            &envelope,
-        )
-        .unwrap_err();
+        let error =
+            decode_empty_message_parameter_response(CkRv::OK.0, &[], &[], Some(mutated), &envelope)
+                .unwrap_err();
         assert_eq!(error.origin, crate::MessageCallErrorOrigin::Protocol);
     }
 }
