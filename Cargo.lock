@@ -1321,10 +1321,12 @@ dependencies = [
 name = "pkcs11-proxy-ng-client"
 version = "0.1.0"
 dependencies = [
+ "hyper-util",
  "pkcs11-proxy-ng-proto",
  "pkcs11-proxy-ng-types",
  "tokio",
  "tonic",
+ "tower",
  "tracing",
  "uuid",
 ]

@@ -18,6 +18,7 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
 use super::super::context_manager::{ClientContextId, ContextManager};
@@ -60,10 +61,21 @@ pub(crate) async fn message_encrypt_init(
             }
         };
 
+        let init_param =
+            match req.init_message_parameter.as_ref().map(MessageParameter::try_from).transpose() {
+                Ok(p) => p,
+                Err(rv) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                        ck_rv: rv.0,
+                    }));
+                }
+            };
+
         let backend = Arc::clone(backend_ref);
-        let result =
-            spawn_backend(move || backend.message_encrypt_init(session, Some(&mechanism), key))
-                .await?;
+        let result = spawn_backend(move || {
+            backend.message_encrypt_init(session, Some(&mechanism), init_param.as_ref(), key)
+        })
+        .await?;
 
         let ck_rv = match &result {
             Ok(()) => {
@@ -88,9 +100,10 @@ pub(crate) async fn message_encrypt_init(
         };
 
         let backend = Arc::clone(backend_ref);
-        let result =
-            spawn_backend(move || backend.message_encrypt_init(session, None, CkObjectHandle(0)))
-                .await?;
+        let result = spawn_backend(move || {
+            backend.message_encrypt_init(session, None, None, CkObjectHandle(0))
+        })
+        .await?;
 
         let ck_rv = match &result {
             Ok(()) => {
@@ -169,10 +182,21 @@ pub(crate) async fn message_decrypt_init(
             }
         };
 
+        let init_param =
+            match req.init_message_parameter.as_ref().map(MessageParameter::try_from).transpose() {
+                Ok(p) => p,
+                Err(rv) => {
+                    return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                        ck_rv: rv.0,
+                    }));
+                }
+            };
+
         let backend = Arc::clone(backend_ref);
-        let result =
-            spawn_backend(move || backend.message_decrypt_init(session, Some(&mechanism), key))
-                .await?;
+        let result = spawn_backend(move || {
+            backend.message_decrypt_init(session, Some(&mechanism), init_param.as_ref(), key)
+        })
+        .await?;
 
         let ck_rv = match &result {
             Ok(()) => {
@@ -197,9 +221,10 @@ pub(crate) async fn message_decrypt_init(
         };
 
         let backend = Arc::clone(backend_ref);
-        let result =
-            spawn_backend(move || backend.message_decrypt_init(session, None, CkObjectHandle(0)))
-                .await?;
+        let result = spawn_backend(move || {
+            backend.message_decrypt_init(session, None, None, CkObjectHandle(0))
+        })
+        .await?;
 
         let ck_rv = match &result {
             Ok(()) => {

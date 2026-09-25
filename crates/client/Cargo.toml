@@ -12,3 +12,7 @@ tonic.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+# Unix-domain-socket transport (local-testing endpoint): a tower connector
+# dialing a tokio UnixStream, adapted to hyper's IO traits via TokioIo.
+tower = { version = "0.5", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }

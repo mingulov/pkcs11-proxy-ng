@@ -1,5 +1,30 @@
+use std::sync::OnceLock;
+
 use pkcs11_proxy_ng_types::CkRv;
 use tonic::Code;
+
+/// Hook fired whenever a gRPC **transport** failure is mapped to a CK_RV
+/// (see [`grpc_status_to_ck_rv_kind`]). The shim registers this so it can
+/// mark its cached channel for reconnect *only* on genuine transport
+/// failures — never on a backend `ck_rv`. This matters because kryoptic
+/// (and others) use `CKR_DEVICE_ERROR` (its OpenSSL/crypto catch-all) and
+/// `CKR_GENERAL_ERROR` (its internal/plumbing catch-all) as ordinary
+/// operation results; those arrive via a *successful* gRPC response and
+/// must NOT churn the channel with a spurious reconnect on every error.
+static TRANSPORT_FAILURE_HOOK: OnceLock<fn()> = OnceLock::new();
+
+/// Register a process-wide callback invoked on every gRPC transport
+/// failure. Idempotent (first registration wins); a no-op if never set
+/// (the native Rust client / CLI does not need reconnect bookkeeping).
+pub fn set_transport_failure_hook(hook: fn()) {
+    let _ = TRANSPORT_FAILURE_HOOK.set(hook);
+}
+
+fn note_transport_failure() {
+    if let Some(hook) = TRANSPORT_FAILURE_HOOK.get() {
+        hook();
+    }
+}
 
 /// Categorises the PKCS#11 entry point that a gRPC error needs to be
 /// mapped back to. Different entry points have different
@@ -30,6 +55,12 @@ pub enum RpcKind {
 /// Without it, the mapping cannot honour PKCS#11 v3.0 §5.4's strict
 /// `C_Initialize` returns list, which omits `CKR_TOKEN_NOT_PRESENT`.
 pub fn grpc_status_to_ck_rv_kind(code: Code, kind: RpcKind) -> CkRv {
+    // Reaching this function means a gRPC **transport** failure occurred —
+    // it is never used to map a backend `ck_rv`. Fire the reconnect hook
+    // here, and ONLY here, so a backend error (e.g. kryoptic's
+    // CKR_DEVICE_ERROR / CKR_GENERAL_ERROR catch-alls) can never trigger a
+    // spurious channel reconnect.
+    note_transport_failure();
     match code {
         // Transport unavailability: pick the most honest spec-permitted
         // value for the entry point we are in.
@@ -144,6 +175,30 @@ mod tests {
         assert_eq!(
             grpc_status_to_ck_rv_kind(Code::DataLoss, RpcKind::Lifecycle),
             CkRv::GENERAL_ERROR
+        );
+    }
+
+    // The transport-failure hook must fire when a gRPC Status is mapped —
+    // this is what drives the shim's reconnect on genuine transport
+    // failures (and, by living only here, NOT on a backend ck_rv). The
+    // hook is `fn()` so the counter must be a static. `set_*` is OnceLock,
+    // and no other test in this binary registers a hook, so ours wins; the
+    // synchronous call below guarantees at least one fire regardless of any
+    // concurrent test also exercising the mapping.
+    static HOOK_FIRES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn counting_hook() {
+        HOOK_FIRES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn transport_failure_hook_fires_when_status_is_mapped() {
+        use std::sync::atomic::Ordering;
+        set_transport_failure_hook(counting_hook);
+        let before = HOOK_FIRES.load(Ordering::SeqCst);
+        let _ = grpc_status_to_ck_rv_kind(Code::Unavailable, RpcKind::Session);
+        assert!(
+            HOOK_FIRES.load(Ordering::SeqCst) > before,
+            "transport-failure hook must fire when a gRPC Status is mapped"
         );
     }
 }

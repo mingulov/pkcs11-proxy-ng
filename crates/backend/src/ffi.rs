@@ -664,6 +664,15 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_generate_key(session, mechanism, template)
     }
 
+    fn generate_key_with_output(
+        &self,
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+        template: &[CkAttribute],
+    ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
+        self.ffi_generate_key_with_output(session, mechanism, template)
+    }
+
     fn create_object(
         &self,
         session: CkSessionHandle,
@@ -872,9 +881,10 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
+        init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
-        self.ffi_message_encrypt_init(session, mechanism, key)
+        self.ffi_message_encrypt_init(session, mechanism, init_param, key)
     }
 
     fn message_encrypt_final(&self, session: CkSessionHandle) -> CkResult<()> {
@@ -885,9 +895,10 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
+        init_param: Option<&pkcs11_proxy_ng_proto::convert::message_params::MessageParameter>,
         key: CkObjectHandle,
     ) -> CkResult<()> {
-        self.ffi_message_decrypt_init(session, mechanism, key)
+        self.ffi_message_decrypt_init(session, mechanism, init_param, key)
     }
 
     fn message_decrypt_final(&self, session: CkSessionHandle) -> CkResult<()> {

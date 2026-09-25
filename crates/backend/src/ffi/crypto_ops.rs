@@ -194,9 +194,7 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_verify_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
-        Self::call_unit(unsafe { (*self.func_list).C_VerifyInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut(), 0)
-        })?;
+        self.ffi_session_cancel(session, CkFlags(cryptoki_sys::CKF_VERIFY as u64))?;
         self.drop_mech_cache(session);
         Ok(())
     }
@@ -248,9 +246,7 @@ impl FfiBackend {
     }
 
     pub(super) fn ffi_digest_init_cancel(&self, session: CkSessionHandle) -> CkResult<()> {
-        Self::call_unit(unsafe { (*self.func_list).C_DigestInit }, |function| unsafe {
-            function(Self::session_handle(session), std::ptr::null_mut())
-        })?;
+        self.ffi_session_cancel(session, CkFlags(cryptoki_sys::CKF_DIGEST as u64))?;
         self.drop_mech_cache(session);
         Ok(())
     }

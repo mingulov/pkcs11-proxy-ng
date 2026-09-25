@@ -649,10 +649,15 @@ message ExtractParams {
   uint64 bit_position = 1;
 }
 
-// CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA/SLH-DSA hedge mode + optional context.
+// CK_SIGN_ADDITIONAL_CONTEXT (pure / hash-specific ML-DSA/SLH-DSA) OR
+// CK_HASH_SIGN_ADDITIONAL_CONTEXT (generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA),
+// distinguished by `hash`.
 message SignAdditionalContext {
   uint64 hedge_variant = 1;
   bytes context = 2;
+  // hash = 0 → CK_SIGN_ADDITIONAL_CONTEXT (hash implied by the mechanism).
+  // hash != 0 → CK_HASH_SIGN_ADDITIONAL_CONTEXT (carries the hash mechanism).
+  uint64 hash = 3;
 }
 
 // CK_KMAC_PARAMS — KMAC key handle, output length, and customization string.

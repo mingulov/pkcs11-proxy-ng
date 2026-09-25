@@ -258,6 +258,9 @@ fn backend_methods_have_proto_rpcs() {
         "wrap_key_exact_with_output",
         "derive_key_with_output",
         "derive_key_with_output_result",
+        // Reuses the GenerateKey RPC, surfacing HSM-written mechanism params
+        // (CK_PBE_PARAMS.pInitVector) via GenerateKeyResponse.mechanism_out.
+        "generate_key_with_output",
         "get_operation_state_exact",
         // Helper used by the simple Encrypt/Decrypt + Update/Final RPCs to
         // surface HSM-mutated mechanism params. Not its own RPC; populates
@@ -390,46 +393,37 @@ fn config_proxy_fields_all_have_defaults() {
     assert!(config.max_concurrent_backend_calls <= config.max_blocking_threads);
 }
 
-// doc/completed/ and doc/adr/ live in the umbrella workspace one level above
-// the submodule. They're reachable when this crate is built inside the
-// workspace checkout, but not in a standalone submodule clone (e.g. CI).
-// These checks enforce workspace docs hygiene when reachable, and silently
-// skip otherwise so the test suite stays green outside the workspace.
+// Public docs ship INSIDE this repository (doc/, prd.md, README.md). These
+// checks verify the released repo is self-describing: they resolve paths from
+// the repo root and no longer reach into any outer planning workspace, so they
+// pass in a standalone clone of this repository.
+
+/// Repo root, derived from the server crate's manifest dir
+/// (`<repo>/crates/server`).
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
 
 #[test]
-fn completion_docs_directory_is_not_empty() {
-    let completed_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../doc/completed");
-    if !completed_dir.exists() {
-        eprintln!(
-            "skipping completion_docs_directory_is_not_empty: {} not reachable from submodule-only checkout",
-            completed_dir.display()
-        );
-        return;
+fn public_docs_present() {
+    let root = repo_root();
+    for rel in ["README.md", "prd.md", "doc/architecture-overview.md", "doc/adr/README.md"] {
+        let path = root.join(rel);
+        assert!(path.exists(), "public doc missing: {} (expected at {})", rel, path.display());
     }
-    let count = std::fs::read_dir(&completed_dir)
-        .expect("cannot read doc/completed/")
-        .filter(|e| e.as_ref().is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".md")))
-        .count();
-    assert!(count >= 10, "doc/completed/ should have many completion notes, found only {count}");
 }
 
 #[test]
 fn adr_files_exist() {
-    let adr_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../doc/adr");
-    if !adr_dir.exists() {
-        eprintln!(
-            "skipping adr_files_exist: {} not reachable from submodule-only checkout",
-            adr_dir.display()
-        );
-        return;
-    }
+    let adr_dir = repo_root().join("doc/adr");
     let expected = [
         "ADR-0001-function-mechanism-coverage-policy.md",
         "ADR-0002-handle-session-identity-model.md",
         "ADR-0003-error-model.md",
         "ADR-0004-backend-integration-model.md",
         "ADR-0005-phase-1-authorization-model.md",
+        "ADR-0006-32-64-bit-cross-platform-compatibility.md",
+        "ADR-0007-backend-process-isolation.md",
     ];
     for name in &expected {
         let path = adr_dir.join(name);

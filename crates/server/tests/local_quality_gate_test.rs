@@ -1997,7 +1997,7 @@ fn oasis_inventory_tracks_mechanism_parameter_shape_layers() {
     assert_eq!(pbe["proto_oneof_field"], "pbe_params");
     assert_eq!(pbe["backend_ffi_conversion"], true);
     assert_eq!(pbe["shim_read_support"], true);
-    assert_eq!(pbe["shim_writeback_support"], false);
+    assert_eq!(pbe["shim_writeback_support"], true);
 
     let extract = parameter_shape_matrix_entry(&inventory, "Extract");
     assert_eq!(extract["rust_struct"], "ExtractParams");

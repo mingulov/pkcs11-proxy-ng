@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::config::{AuthConfig, TcpAuthMode};
+use crate::config::{AuthConfig, TcpAuthMode, UnixAuthMode};
 use crate::mechanism_registry_source::MechanismRegistrySource;
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::Pkcs11Proxy;
@@ -38,6 +38,7 @@ pub struct Pkcs11ProxyService {
     context_manager: Arc<ContextManager>,
     backend: Arc<dyn Pkcs11Backend>,
     tcp_auth_mode: TcpAuthMode,
+    unix_auth_mode: UnixAuthMode,
     token_policy: Arc<TokenPolicy>,
     /// Holds the current registry payload to publish over
     /// `GetBackendInterfaces`. Wrapped in a `MechanismRegistrySource`
@@ -50,10 +51,18 @@ impl Pkcs11ProxyService {
         context_manager: Arc<ContextManager>,
         backend: Arc<dyn Pkcs11Backend>,
         tcp_auth_mode: TcpAuthMode,
+        unix_auth_mode: UnixAuthMode,
         token_policy: Arc<TokenPolicy>,
         mechanism_registry_source: MechanismRegistrySource,
     ) -> Self {
-        Self { context_manager, backend, tcp_auth_mode, token_policy, mechanism_registry_source }
+        Self {
+            context_manager,
+            backend,
+            tcp_auth_mode,
+            unix_auth_mode,
+            token_policy,
+            mechanism_registry_source,
+        }
     }
 
     pub fn insecure_for_tests(
@@ -64,7 +73,14 @@ impl Pkcs11ProxyService {
             Arc::new(TokenPolicy::from_config(&AuthConfig::default()).expect("default policy"));
         let registry = MechanismRegistrySource::load(None)
             .expect("embedded mechanism registry must always load");
-        Self::new(context_manager, backend, TcpAuthMode::None, token_policy, registry)
+        Self::new(
+            context_manager,
+            backend,
+            TcpAuthMode::None,
+            UnixAuthMode::None,
+            token_policy,
+            registry,
+        )
     }
 }
 
@@ -110,6 +126,7 @@ macro_rules! impl_proxy_service {
                     &self.backend,
                     request,
                     self.tcp_auth_mode,
+                    self.unix_auth_mode,
                 )
                 .await
             }
@@ -236,6 +253,16 @@ macro_rules! impl_proxy_service {
                     &self,
                     request: Request<pkcs11_proxy_ng_proto::$request>,
                 ) -> Result<Response<pkcs11_proxy_ng_proto::$response>, Status> {
+                    // Hold the context un-evictable for the whole operation so a
+                    // long backend call (keygen/derive on a slow HSM, larger than
+                    // the lease) is never reaped MID-CALL. Every dispatched
+                    // request carries client_context_id; if the context is already
+                    // gone the guard is None and the handler returns the right CKR.
+                    let _op = self.context_manager.begin_operation(
+                        &$crate::server::context_manager::ClientContextId(
+                            request.get_ref().client_context_id.clone(),
+                        ),
+                    );
                     $module(&self.context_manager, &self.backend, request).await
                 }
             )+

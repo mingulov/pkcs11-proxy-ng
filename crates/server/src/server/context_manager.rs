@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use pkcs11_proxy_ng_types::*;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -36,6 +37,12 @@ pub struct LogicalClientInstance {
     pub object_handles: HandleMap,  // virtual object → backend object
     pub login_state: HashMap<CkSlotId, LoginState>, // per-token login
     pub authenticated_identity: Option<String>, // bound at creation (ADR-0005 §4)
+    /// Count of backend operations currently in flight for this context.
+    /// Eviction never reaps a context with `in_flight > 0`, so a single
+    /// long backend call (DH/RSA keygen, slow-HSM op) is not evicted MID-CALL
+    /// even when it outlasts the lease. `Arc` so an `OperationGuard` can hold
+    /// and decrement it after the DashMap shard lock is released.
+    pub in_flight: Arc<AtomicI64>,
 }
 
 impl LogicalClientInstance {
@@ -50,6 +57,7 @@ impl LogicalClientInstance {
             object_handles: HandleMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
+            in_flight: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -76,7 +84,22 @@ impl LogicalClientInstance {
                 backend_handles.push(bh);
             }
         }
+        self.login_state.remove(&slot);
         backend_handles
+    }
+
+    /// Remove one session. If it was the final session this logical client
+    /// held for the slot, clear the corresponding logical login state.
+    pub fn remove_session(&mut self, session: VirtualHandle) -> Option<BackendHandle> {
+        let slot = self.session_slots.remove(&session);
+        let backend_handle = self.session_handles.remove(session);
+        if let Some(slot) = slot {
+            let has_remaining_session_for_slot = self.session_slots.values().any(|s| *s == slot);
+            if !has_remaining_session_for_slot {
+                self.login_state.remove(&slot);
+            }
+        }
+        backend_handle
     }
 
     /// Prepare teardown: collect backend session handles, then clear maps.
@@ -109,6 +132,25 @@ pub struct ContextManager {
     slot_map: Arc<RwLock<SlotMap>>,
     lease_duration: std::time::Duration,
     max_contexts: usize,
+}
+
+/// RAII guard marking a backend operation in flight for one context. While it
+/// lives, eviction skips that context (see `ContextManager::begin_operation`).
+pub struct OperationGuard {
+    manager: Arc<ContextManager>,
+    id: ClientContextId,
+    counter: Arc<AtomicI64>,
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+        // Refresh last_active (sync DashMap access) so a long op that just
+        // finished isn't evicted before the client's next call.
+        if let Some(mut ctx) = self.manager.contexts.get_mut(&self.id) {
+            ctx.touch();
+        }
+    }
 }
 
 impl ContextManager {
@@ -169,7 +211,7 @@ impl ContextManager {
             let expired: Vec<_> = self
                 .contexts
                 .iter()
-                .filter(|entry| now.duration_since(entry.value().last_active) > self.lease_duration)
+                .filter(|entry| self.is_reapable(entry.value(), now))
                 .map(|entry| entry.key().clone())
                 .collect();
             for id in &expired {
@@ -214,6 +256,29 @@ impl ContextManager {
         })
     }
 
+    pub fn first_login_state_for_slot_excluding(
+        &self,
+        slot: CkSlotId,
+        excluded_id: &ClientContextId,
+    ) -> Option<LoginState> {
+        self.contexts.iter().find_map(|ctx| {
+            if ctx.key() == excluded_id { None } else { ctx.login_state.get(&slot).copied() }
+        })
+    }
+
+    /// Begin a backend operation for `id`: bump its in-flight counter and return
+    /// a guard. While the guard lives the context is NOT evicted even past the
+    /// lease, so a single long backend call (DH/RSA keygen, slow-HSM op) is never
+    /// reaped MID-CALL. On drop the guard decrements the counter and refreshes
+    /// `last_active` so a long op that just finished isn't evicted before the
+    /// client's next call. Returns `None` when the context doesn't exist — the
+    /// caller then errors out normally and no guard is needed.
+    pub fn begin_operation(self: &Arc<Self>, id: &ClientContextId) -> Option<OperationGuard> {
+        let counter = self.contexts.get(id)?.in_flight.clone();
+        counter.fetch_add(1, Ordering::Relaxed);
+        Some(OperationGuard { manager: Arc::clone(self), id: id.clone(), counter })
+    }
+
     pub async fn context_identity(&self, id: &ClientContextId) -> Option<String> {
         self.contexts.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
     }
@@ -234,10 +299,18 @@ impl ContextManager {
         expired
     }
 
+    /// A context is reapable only when its lease has expired AND it has no
+    /// backend operation in flight (a long in-flight op must never be evicted
+    /// mid-call — that is the whole point of the in-flight counter).
+    fn is_reapable(&self, ctx: &LogicalClientInstance, now: Instant) -> bool {
+        ctx.in_flight.load(Ordering::Relaxed) == 0
+            && now.duration_since(ctx.last_active) > self.lease_duration
+    }
+
     fn collect_expired_context_ids(&self, now: Instant) -> Vec<ClientContextId> {
         self.contexts
             .iter()
-            .filter(|entry| now.duration_since(entry.value().last_active) > self.lease_duration)
+            .filter(|entry| self.is_reapable(entry.value(), now))
             .map(|entry| entry.key().clone())
             .collect()
     }
@@ -250,10 +323,8 @@ impl ContextManager {
         let now = Instant::now();
         let mut backend_sessions = Vec::new();
         for id in expired {
-            let still_expired = self
-                .contexts
-                .get(id)
-                .is_some_and(|entry| now.duration_since(entry.last_active) > self.lease_duration);
+            let still_expired =
+                self.contexts.get(id).is_some_and(|entry| self.is_reapable(&entry, now));
             if !still_expired {
                 continue;
             }
