@@ -1,3 +1,4 @@
+pub mod grant;
 pub mod identity;
 pub mod mtls;
 #[cfg(unix)]

@@ -566,3 +566,43 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_exact_output_
         );
     }
 }
+
+#[test]
+fn verify_rejects_signature_that_does_not_match_sign_echo() {
+    // C_Verify must actually verify: since sign outputs a deterministic
+    // echo of the signed data, a signature that does not match that echo
+    // (any byte lost or corrupted by a proxy in between) is rejected.
+    let backend = MockBackend::default_test();
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let key = backend.create_object(session, &[]).unwrap();
+    let mech = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+
+    backend.sign_init(session, &mech, key).unwrap();
+    let signature = backend.sign(session, CkInBuf::Bytes(b"the data")).unwrap();
+
+    // Correct signature over the same data verifies.
+    backend.verify_init(session, &mech, key).unwrap();
+    backend.verify(session, CkInBuf::Bytes(b"the data"), CkInBuf::Bytes(&signature)).unwrap();
+
+    // One flipped signature byte is rejected.
+    let mut tampered = signature.clone();
+    tampered[0] ^= 0x01;
+    backend.verify_init(session, &mech, key).unwrap();
+    assert_eq!(
+        backend
+            .verify(session, CkInBuf::Bytes(b"the data"), CkInBuf::Bytes(&tampered))
+            .unwrap_err(),
+        CkRv::SIGNATURE_INVALID,
+    );
+
+    // A signature over DIFFERENT data is rejected (the data reached the
+    // backend intact only if the echo matches).
+    backend.verify_init(session, &mech, key).unwrap();
+    assert_eq!(
+        backend
+            .verify(session, CkInBuf::Bytes(b"other data"), CkInBuf::Bytes(&signature))
+            .unwrap_err(),
+        CkRv::SIGNATURE_INVALID,
+    );
+}

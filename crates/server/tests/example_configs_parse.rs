@@ -60,6 +60,14 @@ fn rewrite_for_test(orig: &str) -> String {
             // Force allow_insecure_tcp = true to pair with the
             // auth = "none" rewrite above.
             out.push_str("allow_insecure_tcp = true\n");
+        } else if trimmed.starts_with("allow_all_authenticated ")
+            || trimmed.starts_with("allow_all_authenticated=")
+        {
+            // Strip allow_all_authenticated when mTLS has been downgraded to
+            // auth = "none" above; the combination is rejected by the H1 guard.
+            // The example files are correct (mTLS is authenticated); this rewrite
+            // is an artefact of the test harness stripping cert paths.
+            out.push_str(&format!("# {line}  # stripped for test (mTLS downgraded)\n"));
         } else {
             out.push_str(line);
             out.push('\n');

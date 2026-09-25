@@ -1,105 +1,161 @@
-use std::sync::Arc;
+use std::time::Instant;
 
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
-use pkcs11_proxy_ng_types::CkAttribute;
+use pkcs11_proxy_ng_audit::EventClass;
+use pkcs11_proxy_ng_types::{CkAttribute, CkRv};
 
-use super::super::context_manager::ContextManager;
 use super::attr_value_to_bytes;
+use crate::server::context_manager::ClientContextId;
+use crate::server::grpc_service::audit_events::emit_auth_event;
 
 mod attributes;
 mod lifecycle;
 mod search;
 
+use crate::server::grpc_service::HandlerContext;
+
 pub(super) async fn find_objects_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsInitResponse>, Status> {
-    search::find_objects_init(ctx_mgr, backend_ref, request).await
+    search::find_objects_init(ctx, request).await
 }
 
 pub(super) async fn find_objects(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsResponse>, Status> {
-    search::find_objects(ctx_mgr, backend_ref, request).await
+    search::find_objects(ctx, request).await
 }
 
 pub(super) async fn find_objects_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsFinalResponse>, Status> {
-    search::find_objects_final(ctx_mgr, backend_ref, request).await
+    search::find_objects_final(ctx, request).await
 }
 
 pub(super) async fn get_attribute_value(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueResponse>, Status> {
-    attributes::get_attribute_value(ctx_mgr, backend_ref, request).await
+    attributes::get_attribute_value(ctx, request).await
 }
 
 pub(super) async fn get_attribute_value_exact(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetAttributeValueExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetAttributeValueExactResponse>, Status> {
-    attributes::get_attribute_value_exact(ctx_mgr, backend_ref, request).await
+    attributes::get_attribute_value_exact(ctx, request).await
 }
 
 pub(super) async fn set_attribute_value(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SetAttributeValueRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetAttributeValueResponse>, Status> {
-    attributes::set_attribute_value(ctx_mgr, backend_ref, request).await
+    attributes::set_attribute_value(ctx, request).await
 }
 
 pub(super) async fn get_object_size(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::GetObjectSizeRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetObjectSizeResponse>, Status> {
-    attributes::get_object_size(ctx_mgr, backend_ref, request).await
+    attributes::get_object_size(ctx, request).await
 }
 
+/// Wrapper: captures timing + identity, delegates to lifecycle impl, emits a
+/// fail-closed `KeyMgmt` audit record.  `C_CreateObject` creates a key or
+/// data object — qualifies as key-management activity.
 pub(super) async fn create_object(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::CreateObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CreateObjectResponse>, Status> {
-    lifecycle::create_object(ctx_mgr, backend_ref, request).await
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
+    let response = lifecycle::create_object(ctx, request).await?;
+    let ck_rv = response.get_ref().ck_rv;
+    if emit_auth_event(
+        ctx,
+        &ctx_id,
+        "C_CreateObject",
+        EventClass::KeyMgmt,
+        None,
+        session_for_audit,
+        ck_rv,
+        started,
+    )
+    .is_err()
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+            object_handle: 0,
+        }));
+    }
+    Ok(response)
 }
 
+/// Wrapper: captures timing + identity, delegates to lifecycle impl, emits a
+/// fail-closed `KeyMgmt` audit record.
 pub(super) async fn copy_object(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::CopyObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::CopyObjectResponse>, Status> {
-    lifecycle::copy_object(ctx_mgr, backend_ref, request).await
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
+    let response = lifecycle::copy_object(ctx, request).await?;
+    let ck_rv = response.get_ref().ck_rv;
+    if emit_auth_event(
+        ctx,
+        &ctx_id,
+        "C_CopyObject",
+        EventClass::KeyMgmt,
+        None,
+        session_for_audit,
+        ck_rv,
+        started,
+    )
+    .is_err()
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+            new_object_handle: 0,
+        }));
+    }
+    Ok(response)
 }
 
+/// Wrapper: captures timing + identity, delegates to lifecycle impl, emits a
+/// fail-closed `KeyMgmt` audit record.  `C_DestroyObject` is key extraction
+/// risk (permanent deletion = auditworthy).
 pub(super) async fn destroy_object(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DestroyObjectRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DestroyObjectResponse>, Status> {
-    lifecycle::destroy_object(ctx_mgr, backend_ref, request).await
+    let started = Instant::now();
+    let ctx_id = ClientContextId(request.get_ref().client_context_id.clone());
+    let session_for_audit = Some(request.get_ref().session_handle);
+    let response = lifecycle::destroy_object(ctx, request).await?;
+    let ck_rv = response.get_ref().ck_rv;
+    if emit_auth_event(
+        ctx,
+        &ctx_id,
+        "C_DestroyObject",
+        EventClass::KeyMgmt,
+        None,
+        session_for_audit,
+        ck_rv,
+        started,
+    )
+    .is_err()
+    {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DestroyObjectResponse {
+            ck_rv: CkRv::FUNCTION_FAILED.0,
+        }));
+    }
+    Ok(response)
 }
 
 /// Build the proto `AttributeResult` list from an owned template.

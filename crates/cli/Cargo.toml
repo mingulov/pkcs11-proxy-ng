@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-client = { path = "../client" }
+pkcs11-proxy-ng-audit = { path = "../audit" }
 clap.workspace = true
 tokio.workspace = true
 # CLI is a gRPC client: `channel` transport + `codegen` + `tls-ring`. No server.

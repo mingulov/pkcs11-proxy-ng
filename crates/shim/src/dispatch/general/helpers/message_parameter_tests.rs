@@ -251,7 +251,7 @@ fn wtls_master_key_derive_reads_version_byte_and_writes_it_back() {
         .expect("wtls params")
     {
         CkMechanismParams::WtlsMasterKeyDerive(params) => {
-            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0 as _);
+            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.random_info.client_random, client_random);
             assert_eq!(params.random_info.server_random, server_random);
             assert_eq!(params.version, 1);
@@ -312,7 +312,7 @@ fn wtls_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
         .expect("wtls key material params")
     {
         CkMechanismParams::WtlsKeyMat(params) => {
-            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0 as _);
+            assert_eq!(params.digest_mechanism, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.mac_size_bits, 160);
             assert_eq!(params.key_size_bits, 128);
             assert_eq!(params.iv_size_bits, 32);
@@ -402,7 +402,7 @@ fn ssl3_key_mat_reads_caller_stack_params_and_writes_outputs_back() {
             assert!(!params.is_export);
             assert_eq!(params.random_info.client_random, client_random);
             assert_eq!(params.random_info.server_random, server_random);
-            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as _);
+            assert_eq!(params.prf_hash_mechanism, CkMechanismType::SHA256.0 as u64);
             assert_eq!(params.client_mac_secret_handle, 0);
             assert_eq!(params.server_mac_secret_handle, 0);
             assert_eq!(params.client_key_handle, 0);

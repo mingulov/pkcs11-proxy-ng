@@ -1,22 +1,26 @@
 use std::sync::Arc;
+use std::time::Instant;
 
+use pkcs11_proxy_ng_audit::EventClass;
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
-
+use super::super::authorization::mechanism_permitted;
 use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend,
 };
-use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::context_manager::ClientContextId;
+use crate::server::grpc_service::audit_events::emit_auth_event;
 
+use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn verify_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -44,7 +48,7 @@ pub(crate) async fn verify_init(
     }
 
     let (session, key) =
-        match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle).await {
+        match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
             Ok(handles) => handles,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyInitResponse {
@@ -60,9 +64,19 @@ pub(crate) async fn verify_init(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyInitResponse { ck_rv: rv.0 }));
+    }
+
+    // Mechanism policy gate (G3-PR3 Task 3).
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+        }));
     }
 
     let backend = Arc::clone(backend_ref);
@@ -71,11 +85,13 @@ pub(crate) async fn verify_init(
 }
 
 pub(crate) async fn verify(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyResponse>, Status> {
+    let started = Instant::now();
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -104,15 +120,30 @@ pub(crate) async fn verify(
         )
     })
     .await?;
-    Ok(Response::new(pkcs11_proxy_ng_proto::VerifyResponse { ck_rv: ck_rv_only(result) }))
+    let ck_rv = ck_rv_only(result);
+    // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
+    if ctx.audit.as_ref().is_some_and(|a| a.data_plane_enabled()) {
+        let _ = emit_auth_event(
+            ctx,
+            &ctx_id,
+            "C_Verify",
+            EventClass::DataPlane,
+            None,
+            Some(req.session_handle),
+            ck_rv,
+            started,
+        );
+    }
+    Ok(Response::new(pkcs11_proxy_ng_proto::VerifyResponse { ck_rv }))
 }
 
 pub(crate) async fn verify_update(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyUpdateResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -138,11 +169,13 @@ pub(crate) async fn verify_update(
 }
 
 pub(crate) async fn verify_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyFinalResponse>, Status> {
+    let started = Instant::now();
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -164,15 +197,30 @@ pub(crate) async fn verify_final(
         backend.verify_final(session, input_from_wire(&signature, signature_null_len))
     })
     .await?;
-    Ok(Response::new(pkcs11_proxy_ng_proto::VerifyFinalResponse { ck_rv: ck_rv_only(result) }))
+    let ck_rv = ck_rv_only(result);
+    // Opt-in data-plane audit: emit fail-open; never reject the op on a dropped record.
+    if ctx.audit.as_ref().is_some_and(|a| a.data_plane_enabled()) {
+        let _ = emit_auth_event(
+            ctx,
+            &ctx_id,
+            "C_Verify",
+            EventClass::DataPlane,
+            None,
+            Some(req.session_handle),
+            ck_rv,
+            started,
+        );
+    }
+    Ok(Response::new(pkcs11_proxy_ng_proto::VerifyFinalResponse { ck_rv }))
 }
 
 pub(crate) async fn verify_recover_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyRecoverInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyRecoverInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -200,7 +248,7 @@ pub(crate) async fn verify_recover_init(
     }
 
     let (session, key) =
-        match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle).await {
+        match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
             Ok(handles) => handles,
             Err(rv) => {
                 return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyRecoverInitResponse {
@@ -218,9 +266,19 @@ pub(crate) async fn verify_recover_init(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyRecoverInitResponse { ck_rv: rv.0 }));
+    }
+
+    // Mechanism policy gate (G3-PR3 Task 3).
+    if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::VerifyRecoverInitResponse {
+            ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
+        }));
     }
 
     let backend = Arc::clone(backend_ref);
@@ -232,11 +290,12 @@ pub(crate) async fn verify_recover_init(
 }
 
 pub(crate) async fn verify_recover(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyRecoverRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyRecoverResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 

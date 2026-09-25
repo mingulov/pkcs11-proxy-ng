@@ -551,3 +551,138 @@ fn nested_template_input_round_trips_via_every_template_call() {
         assert_wrap_template_holds_class(abi, shim.session, target, 4, "set_attribute_value");
     }
 }
+
+#[test]
+fn sign_then_verify_round_trips_through_the_proxy_cross_abi() {
+    // A2 lossless-loop: the mock now VERIFIES (signature must reproduce
+    // the sign echo of the data). A sign->verify round-trip through the
+    // full shim->gRPC->daemon stack therefore proves no byte was lost or
+    // corrupted in either direction — on foreign-ABI daemons too.
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (_daemon, shim) = session_on(abi);
+        let key = create_object(shim.session);
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_RSA_PKCS,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let data = b"cross-abi integrity";
+
+        assert_eq!(
+            unsafe { dispatch::general::c_sign_init(shim.session, &mut mechanism, key) },
+            CKR_OK as CK_RV,
+            "{abi:?} C_SignInit"
+        );
+        let mut sig_len: CK_ULONG = 0;
+        assert_eq!(
+            unsafe {
+                dispatch::general::c_sign(
+                    shim.session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    data.len() as CK_ULONG,
+                    std::ptr::null_mut(),
+                    &mut sig_len,
+                )
+            },
+            CKR_OK as CK_RV,
+            "{abi:?} C_Sign size query"
+        );
+        let mut signature = vec![0u8; sig_len as usize];
+        assert_eq!(
+            unsafe {
+                dispatch::general::c_sign(
+                    shim.session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    data.len() as CK_ULONG,
+                    signature.as_mut_ptr(),
+                    &mut sig_len,
+                )
+            },
+            CKR_OK as CK_RV,
+            "{abi:?} C_Sign"
+        );
+
+        // The genuine signature verifies.
+        assert_eq!(
+            unsafe { dispatch::general::c_verify_init(shim.session, &mut mechanism, key) },
+            CKR_OK as CK_RV,
+            "{abi:?} C_VerifyInit"
+        );
+        assert_eq!(
+            unsafe {
+                dispatch::general::c_verify(
+                    shim.session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    data.len() as CK_ULONG,
+                    signature.as_ptr() as CK_BYTE_PTR,
+                    sig_len,
+                )
+            },
+            CKR_OK as CK_RV,
+            "{abi:?} genuine signature verifies through the proxy"
+        );
+
+        // A tampered signature is rejected — the loop actually checks.
+        let mut tampered = signature.clone();
+        tampered[0] ^= 0x01;
+        assert_eq!(
+            unsafe { dispatch::general::c_verify_init(shim.session, &mut mechanism, key) },
+            CKR_OK as CK_RV,
+        );
+        assert_eq!(
+            unsafe {
+                dispatch::general::c_verify(
+                    shim.session,
+                    data.as_ptr() as CK_BYTE_PTR,
+                    data.len() as CK_ULONG,
+                    tampered.as_ptr() as CK_BYTE_PTR,
+                    sig_len,
+                )
+            },
+            CKR_SIGNATURE_INVALID as CK_RV,
+            "{abi:?} a corrupted signature is rejected"
+        );
+    }
+}
+
+#[test]
+fn generated_key_default_attributes_bridge_cross_abi() {
+    // Synthesized CKA_CLASS/CKA_KEY_TYPE are ulong attributes, so they
+    // must read back at the client width through the bridge on foreign
+    // ABIs — a client reading a generated key sees an authentic object.
+    let _guard = shim_state_test_guard();
+    for abi in foreign_profiles() {
+        let (_daemon, shim) = session_on(abi);
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_AES_KEY_GEN,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut key = CK_INVALID_HANDLE;
+        let rv = unsafe {
+            dispatch::general::c_generate_key(
+                shim.session,
+                &mut mechanism,
+                std::ptr::null_mut(),
+                0,
+                &mut key,
+            )
+        };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} C_GenerateKey");
+
+        let w = std::mem::size_of::<CK_ULONG>();
+        let mut class_buf = vec![0u8; w];
+        let mut attr = CK_ATTRIBUTE {
+            type_: CKA_CLASS,
+            pValue: class_buf.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: w as CK_ULONG,
+        };
+        let rv =
+            unsafe { dispatch::general::c_get_attribute_value(shim.session, key, &mut attr, 1) };
+        assert_eq!(rv, CKR_OK as CK_RV, "{abi:?} read CKA_CLASS");
+        let bytes: [u8; std::mem::size_of::<CK_ULONG>()] =
+            class_buf.as_slice().try_into().expect("width");
+        assert_eq!(CK_ULONG::from_le_bytes(bytes), CKO_SECRET_KEY as CK_ULONG, "{abi:?} CKA_CLASS");
+    }
+}

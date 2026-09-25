@@ -13,16 +13,20 @@ use pkcs11_proxy_ng_types::*;
 mod common_3x;
 use common_3x::{init_client, mock_daemon};
 
-const CKM_BATON_KEY_GEN: CkMechanismType = CkMechanismType(0x0000_1030);
+// Camellia-CTR: a current-spec mechanism whose working-spec markdown has
+// no Mechanisms-vs-Functions table, and which the historical spec does not
+// cover either — so it stays ungrounded (unlike the legacy BATON/DES
+// families, now grounded from pkcs11-hist).
+const CKM_CAMELLIA_CTR: CkMechanismType = CkMechanismType(0x0000_0558);
 
 #[tokio::test]
 async fn grpc_mechanism_info_preserves_zero_flags_without_source_workflow_evidence() {
-    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CKM_BATON_KEY_GEN]));
+    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CKM_CAMELLIA_CTR]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
 
     let slots = client.get_slot_list(false).await.unwrap();
-    let info = client.get_mechanism_info(slots[0], CKM_BATON_KEY_GEN).await.unwrap();
+    let info = client.get_mechanism_info(slots[0], CKM_CAMELLIA_CTR).await.unwrap();
 
     assert_eq!(info.min_key_size, 2048);
     assert_eq!(info.max_key_size, 4096);

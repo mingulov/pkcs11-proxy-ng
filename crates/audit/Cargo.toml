@@ -1,0 +1,14 @@
+[package]
+name = "pkcs11-proxy-ng-audit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+ed25519-dalek = { workspace = true }
+thiserror = { workspace = true }

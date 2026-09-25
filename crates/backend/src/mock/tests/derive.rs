@@ -239,9 +239,9 @@ fn cms_sig_workflows_validate_optional_certificate_handle() {
 
     let live_cert_mechanism = cms_sig_mechanism(certificate);
     backend.sign_init(session, &live_cert_mechanism, signing_key).unwrap();
-    backend.sign_final(session).unwrap();
+    let signature = backend.sign_final(session).unwrap();
     backend.verify_init(session, &live_cert_mechanism, signing_key).unwrap();
-    backend.verify_final(session, CkInBuf::Bytes(b"sig")).unwrap();
+    backend.verify_final(session, CkInBuf::Bytes(&signature)).unwrap();
     backend.sign_recover_init(session, &live_cert_mechanism, signing_key).unwrap();
     backend.sign_recover(session, CkInBuf::Bytes(b"data")).unwrap();
     backend.verify_recover_init(session, &live_cert_mechanism, signing_key).unwrap();
@@ -340,9 +340,9 @@ fn kip_derive_and_mac_validate_hkey_but_wrap_does_not_use_it() {
 
     let valid_mac = kip_mechanism(CkMechanismType::KIP_MAC, entropy_key);
     backend.sign_init(session, &valid_mac, base_key).unwrap();
-    backend.sign_final(session).unwrap();
+    let signature = backend.sign_final(session).unwrap();
     backend.verify_init(session, &valid_mac, base_key).unwrap();
-    backend.verify_final(session, CkInBuf::Bytes(b"sig")).unwrap();
+    backend.verify_final(session, CkInBuf::Bytes(&signature)).unwrap();
 
     let wrap_mechanism = kip_mechanism(CkMechanismType::KIP_WRAP, invalid);
     assert_eq!(

@@ -469,3 +469,125 @@ fn create_object_stores_template_attributes_for_read_back() {
     assert_eq!(results[2].value, Some(b"probe".to_vec()), "string bytes");
     assert_eq!(results[3].value, Some(vec![9, 8, 7]), "vendor bytes pass through opaquely");
 }
+
+#[test]
+fn generated_secret_key_value_has_requested_value_len() {
+    // A real token generating an n-byte secret key sets CKA_VALUE to n
+    // bytes; the mock synthesizes deterministic echo bytes of exactly
+    // CKA_VALUE_LEN so read-after-generate looks authentic.
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_KEY_GEN]);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let mech = CkMechanism { mechanism_type: CkMechanismType::AES_KEY_GEN, params: None };
+    let template = [CkAttribute {
+        attr_type: CkAttributeType::VALUE_LEN,
+        value: Some(CkAttributeValue::Ulong(32)),
+    }];
+    let key = backend.generate_key(session, &mech, &template).unwrap();
+
+    let (rv, results) = backend
+        .get_attribute_value_exact(
+            session,
+            key,
+            &[CkAttributeQuery {
+                attr_type: CkAttributeType::VALUE,
+                buffer_present: false,
+                buffer_len: 0,
+                nested: None,
+            }],
+        )
+        .unwrap();
+    assert_eq!(rv, CkRv::OK);
+    assert_eq!(results[0].returned_len, 32, "CKA_VALUE length matches CKA_VALUE_LEN");
+}
+
+#[test]
+fn explicit_value_wins_over_value_len_synthesis() {
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_KEY_GEN]);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let mech = CkMechanism { mechanism_type: CkMechanismType::AES_KEY_GEN, params: None };
+    let template = [
+        CkAttribute {
+            attr_type: CkAttributeType::VALUE_LEN,
+            value: Some(CkAttributeValue::Ulong(16)),
+        },
+        CkAttribute {
+            attr_type: CkAttributeType::VALUE,
+            value: Some(CkAttributeValue::Bytes(vec![0xAB; 4])),
+        },
+    ];
+    let key = backend.generate_key(session, &mech, &template).unwrap();
+    let (_rv, results) = backend
+        .get_attribute_value_exact(
+            session,
+            key,
+            &[CkAttributeQuery {
+                attr_type: CkAttributeType::VALUE,
+                buffer_present: false,
+                buffer_len: 0,
+                nested: None,
+            }],
+        )
+        .unwrap();
+    assert_eq!(results[0].returned_len, 4, "an explicit CKA_VALUE is not overridden");
+}
+
+#[test]
+fn generate_key_synthesizes_class_and_key_type() {
+    // A real token sets CKA_CLASS/CKA_KEY_TYPE (and CKA_LOCAL) on a
+    // generated key from the mechanism, unless the template overrides.
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_KEY_GEN]);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let mech = CkMechanism { mechanism_type: CkMechanismType::AES_KEY_GEN, params: None };
+    let key = backend.generate_key(session, &mech, &[]).unwrap();
+
+    let query = |t: CkAttributeType| CkAttributeQuery {
+        attr_type: t,
+        buffer_present: true,
+        buffer_len: 8,
+        nested: None,
+    };
+    let (rv, results) = backend
+        .get_attribute_value_exact(
+            session,
+            key,
+            &[query(CkAttributeType::CLASS), query(CkAttributeType::KEY_TYPE)],
+        )
+        .unwrap();
+    assert_eq!(rv, CkRv::OK);
+    // CKO_SECRET_KEY = 4, CKK_AES = 0x1F, at the mock's emulated width.
+    assert_eq!(results[0].value, Some(MockAbi::host().encode_ulong(4)), "CKA_CLASS");
+    assert_eq!(results[1].value, Some(MockAbi::host().encode_ulong(0x1F)), "CKA_KEY_TYPE");
+}
+
+#[test]
+fn generate_key_template_overrides_synthesized_class() {
+    let backend = MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::AES_KEY_GEN]);
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let mech = CkMechanism { mechanism_type: CkMechanismType::AES_KEY_GEN, params: None };
+    let template = [CkAttribute {
+        attr_type: CkAttributeType::CLASS,
+        value: Some(CkAttributeValue::Ulong(0x99)),
+    }];
+    let key = backend.generate_key(session, &mech, &template).unwrap();
+    let (_rv, results) = backend
+        .get_attribute_value_exact(
+            session,
+            key,
+            &[CkAttributeQuery {
+                attr_type: CkAttributeType::CLASS,
+                buffer_present: true,
+                buffer_len: 8,
+                nested: None,
+            }],
+        )
+        .unwrap();
+    assert_eq!(
+        results[0].value,
+        Some(MockAbi::host().encode_ulong(0x99)),
+        "template CKA_CLASS wins"
+    );
+}

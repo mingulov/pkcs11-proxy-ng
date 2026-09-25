@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
@@ -8,18 +6,20 @@ use pkcs11_proxy_ng_types::{
     CkFlags, CkInBuf, CkOutputBufferSpec, CkParameterRoundtripSpec, ParameterOutputFunction,
 };
 
-use super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::context_manager::ClientContextId;
 use super::service_utils::{
     check_sanitize, input_from_wire, parse_mechanism, resolve_session,
     resolve_session_and_two_objects, spawn_backend,
 };
 
+use crate::server::grpc_service::HandlerContext;
 pub(super) async fn parameter_output_exact(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::ParameterOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ParameterOutputExactResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -70,7 +70,7 @@ pub(super) async fn parameter_output_exact(
             };
 
             let (session, wrapping_key, key) = match resolve_session_and_two_objects(
-                ctx_mgr,
+                ctx,
                 &ctx_id,
                 req.session_handle,
                 req.wrapping_key_handle,

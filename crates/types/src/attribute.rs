@@ -24,10 +24,20 @@ impl CkAttributeType {
     pub const MODULUS: Self = Self(0x00000120);
     pub const MODULUS_BITS: Self = Self(0x00000121);
     pub const PUBLIC_EXPONENT: Self = Self(0x00000122);
+    pub const PRIVATE_EXPONENT: Self = Self(0x0000_0123);
+    pub const PRIME_1: Self = Self(0x0000_0124);
+    pub const PRIME_2: Self = Self(0x0000_0125);
+    pub const EXPONENT_1: Self = Self(0x0000_0126);
+    pub const EXPONENT_2: Self = Self(0x0000_0127);
+    pub const COEFFICIENT: Self = Self(0x0000_0128);
     pub const EC_PARAMS: Self = Self(0x00000180);
     pub const EC_POINT: Self = Self(0x00000181);
     pub const ID: Self = Self(0x00000102);
+    /// `CKA_UNIQUE_ID` — PKCS#11 v3.0 mandatory, immutable byte-string
+    /// globally unique identifier for storage objects (CK_BYTE_PTR, value 0x0000_002E).
+    pub const UNIQUE_ID: Self = Self(0x0000_002E);
     pub const VALUE_LEN: Self = Self(0x00000161);
+    pub const LOCAL: Self = Self(0x00000163);
 
     /// `CKF_ARRAY_ATTRIBUTE` flag (0x40000000).
     const ARRAY_ATTRIBUTE_FLAG: u64 = 0x4000_0000;
@@ -226,6 +236,24 @@ impl CkAttributeType {
     }
 }
 
+/// Attributes that carry secret key material and must be protected during
+/// extract/serialization operations. Used by the extract-deny authorization gate.
+pub const VALUE_BEARING_SECRET: &[CkAttributeType] = &[
+    CkAttributeType::VALUE,
+    CkAttributeType::PRIVATE_EXPONENT,
+    CkAttributeType::PRIME_1,
+    CkAttributeType::PRIME_2,
+    CkAttributeType::EXPONENT_1,
+    CkAttributeType::EXPONENT_2,
+    CkAttributeType::COEFFICIENT,
+];
+
+/// Returns true if the attribute type carries secret key material that must
+/// be protected during extract/serialization operations.
+pub fn is_value_bearing_secret(t: CkAttributeType) -> bool {
+    VALUE_BEARING_SECRET.contains(&t)
+}
+
 /// A typed attribute value (ADR-0001: known attributes use typed serialization).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CkAttributeValue {
@@ -253,6 +281,12 @@ pub struct CkAttribute {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_id_attribute_has_correct_value() {
+        // CKA_UNIQUE_ID = 0x0000_002E per PKCS#11 v3.0 spec.
+        assert_eq!(CkAttributeType::UNIQUE_ID.0, 0x0000_002E);
+    }
 
     #[test]
     fn attr_type_classification() {
@@ -348,5 +382,35 @@ mod tests {
         assert_eq!(vendor.0, 0x8000_0042);
         assert!(vendor.is_vendor_defined());
         assert!(!CkAttributeType::LABEL.is_vendor_defined());
+    }
+
+    #[test]
+    fn value_bearing_secret_constants() {
+        // Verify RSA private key component constants match PKCS#11 spec values
+        assert_eq!(CkAttributeType::PRIVATE_EXPONENT.0, 0x0000_0123);
+        assert_eq!(CkAttributeType::PRIME_1.0, 0x0000_0124);
+        assert_eq!(CkAttributeType::PRIME_2.0, 0x0000_0125);
+        assert_eq!(CkAttributeType::EXPONENT_1.0, 0x0000_0126);
+        assert_eq!(CkAttributeType::EXPONENT_2.0, 0x0000_0127);
+        assert_eq!(CkAttributeType::COEFFICIENT.0, 0x0000_0128);
+    }
+
+    #[test]
+    fn is_value_bearing_secret_classification() {
+        // Secret attributes should be classified as value-bearing secrets
+        assert!(is_value_bearing_secret(CkAttributeType::VALUE));
+        assert!(is_value_bearing_secret(CkAttributeType::PRIVATE_EXPONENT));
+        assert!(is_value_bearing_secret(CkAttributeType::PRIME_1));
+        assert!(is_value_bearing_secret(CkAttributeType::PRIME_2));
+        assert!(is_value_bearing_secret(CkAttributeType::EXPONENT_1));
+        assert!(is_value_bearing_secret(CkAttributeType::EXPONENT_2));
+        assert!(is_value_bearing_secret(CkAttributeType::COEFFICIENT));
+
+        // Public attributes must not be classified as value-bearing secrets
+        assert!(!is_value_bearing_secret(CkAttributeType::MODULUS));
+        assert!(!is_value_bearing_secret(CkAttributeType::PUBLIC_EXPONENT));
+        assert!(!is_value_bearing_secret(CkAttributeType::EC_POINT));
+        assert!(!is_value_bearing_secret(CkAttributeType::EC_PARAMS));
+        assert!(!is_value_bearing_secret(CkAttributeType::LABEL));
     }
 }

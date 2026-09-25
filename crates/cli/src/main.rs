@@ -6,7 +6,7 @@ mod handlers;
 mod mechanisms;
 mod pkcs11_names;
 
-use cli::{Cli, Commands};
+use cli::{AuditCmd, Cli, Commands};
 use handlers::run_command;
 use mechanisms::MECHANISM_NAMES;
 
@@ -15,6 +15,10 @@ async fn main() -> Result<(), Box<dyn core::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
+
+    if let Commands::Audit { cmd: AuditCmd::Verify { dir, public_key_hex } } = &cli.command {
+        return handlers::audit::verify(dir, public_key_hex.as_deref());
+    }
 
     if let Commands::ListMechanismNames = &cli.command {
         println!("{:<12}  Name", "Value");

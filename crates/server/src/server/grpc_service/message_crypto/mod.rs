@@ -17,11 +17,11 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameter;
 use pkcs11_proxy_ng_types::*;
 
-use super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::context_manager::ClientContextId;
+use super::authorization::mechanism_permitted;
 use super::mechanism_handles::remap_mechanism_handles;
 use super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
@@ -32,12 +32,14 @@ use super::service_utils::{
 // Message Encrypt Init (optional mechanism — None means cancel)
 // ---------------------------------------------------------------------------
 
+use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn message_encrypt_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageEncryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageEncryptInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -51,9 +53,7 @@ pub(crate) async fn message_encrypt_init(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
@@ -71,10 +71,21 @@ pub(crate) async fn message_encrypt_init(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
                 ck_rv: rv.0,
+            }));
+        }
+
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageEncryptInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -141,11 +152,11 @@ pub(crate) async fn message_encrypt_init(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_encrypt_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageEncryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageEncryptFinalResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -170,11 +181,12 @@ pub(crate) async fn message_encrypt_final(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_decrypt_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageDecryptInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageDecryptInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -188,9 +200,7 @@ pub(crate) async fn message_decrypt_init(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
@@ -208,10 +218,21 @@ pub(crate) async fn message_decrypt_init(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
                 ck_rv: rv.0,
+            }));
+        }
+
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageDecryptInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -278,11 +299,11 @@ pub(crate) async fn message_decrypt_init(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_decrypt_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageDecryptFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageDecryptFinalResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -307,11 +328,12 @@ pub(crate) async fn message_decrypt_final(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_sign_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageSignInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageSignInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -325,9 +347,7 @@ pub(crate) async fn message_sign_init(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
@@ -345,10 +365,21 @@ pub(crate) async fn message_sign_init(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
                 ck_rv: rv.0,
+            }));
+        }
+
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageSignInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -403,11 +434,11 @@ pub(crate) async fn message_sign_init(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_sign_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageSignFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageSignFinalResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -430,11 +461,12 @@ pub(crate) async fn message_sign_final(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_verify_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageVerifyInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageVerifyInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -448,9 +480,7 @@ pub(crate) async fn message_verify_init(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
@@ -468,10 +498,21 @@ pub(crate) async fn message_verify_init(
             }
         };
 
-        // B1: remap object handles embedded in the mechanism parameters.
-        if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        // B1: remap object handles embedded in the mechanism parameters;
+        // gate each through per-object authz when active (C1).
+        if let Err(rv) =
+            remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism)
+                .await
+        {
             return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
                 ck_rv: rv.0,
+            }));
+        }
+
+        // Mechanism policy gate (G3-PR3 Task 3).
+        if !mechanism_permitted(ctx, &ctx_id, req.session_handle, mechanism.mechanism_type).await {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::MessageVerifyInitResponse {
+                ck_rv: pkcs11_proxy_ng_types::CkRv::MECHANISM_INVALID.0,
             }));
         }
 
@@ -526,11 +567,11 @@ pub(crate) async fn message_verify_init(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn message_verify_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::MessageVerifyFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::MessageVerifyFinalResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -559,11 +600,12 @@ pub(crate) async fn message_verify_final(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn encrypt_message(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -630,11 +672,12 @@ pub(crate) async fn encrypt_message(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn encrypt_message_begin(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageBeginResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -683,11 +726,12 @@ pub(crate) async fn encrypt_message_begin(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn encrypt_message_next(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncryptMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncryptMessageNextResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -746,11 +790,12 @@ pub(crate) async fn encrypt_message_next(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn decrypt_message(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -817,11 +862,12 @@ pub(crate) async fn decrypt_message(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn decrypt_message_begin(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageBeginResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -870,11 +916,12 @@ pub(crate) async fn decrypt_message_begin(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn decrypt_message_next(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecryptMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecryptMessageNextResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -933,11 +980,12 @@ pub(crate) async fn decrypt_message_next(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn sign_message(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -990,11 +1038,11 @@ pub(crate) async fn sign_message(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn sign_message_begin(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageBeginResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -1029,11 +1077,12 @@ pub(crate) async fn sign_message_begin(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn sign_message_next(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignMessageNextResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -1092,11 +1141,12 @@ pub(crate) async fn sign_message_next(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_message(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -1138,11 +1188,11 @@ pub(crate) async fn verify_message(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_message_begin(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageBeginRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageBeginResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -1171,11 +1221,12 @@ pub(crate) async fn verify_message_begin(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_message_next(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifyMessageNextRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifyMessageNextResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 

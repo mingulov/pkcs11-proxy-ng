@@ -65,6 +65,21 @@ pub(super) async fn open_session(
         }
     }
 
+    // G2-PR3: per-principal session quota (opt-in; zero-cost when unset).
+    // principal_key is derived only when the quota is active to avoid an
+    // unconditional DashMap lookup + String clone on every open_session call
+    // in the common (limit-unset) path.
+    if let Some(max) = crate::server::rate_quota::per_principal_max_sessions() {
+        let principal_key = ctx_mgr.context_identity(&ctx_id).unwrap_or_else(|| ctx_id.0.clone());
+        if ctx_mgr.session_count_for_principal(&principal_key) >= max {
+            crate::server::resilience::record_session_quota_rejected();
+            return Ok(Response::new(pkcs11_proxy_ng_proto::OpenSessionResponse {
+                ck_rv: CkRv::SESSION_COUNT.0,
+                session_handle: 0,
+            }));
+        }
+    }
+
     let flags = CkSessionFlags(req.flags as u64);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.open_session(backend_slot, flags)).await?;

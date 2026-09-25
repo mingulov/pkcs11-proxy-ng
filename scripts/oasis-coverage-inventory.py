@@ -3104,8 +3104,23 @@ def completion_gap_summary(
     }
 
 
+def historical_flags_source(root: Path) -> Path:
+    return root / "crates/backend/src/mock/historical_flags.rs"
+
+
+def parse_historical_grounded_mechanisms(path: Path) -> list[int]:
+    """Mechanism values grounded from the historical spec (pkcs11-hist),
+    read from the committed generated table so this runs in CI without the
+    spec present. Each arm is `x if x == 0x... => ...`."""
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    return sorted({int(m, 16) for m in re.findall(r"x if x == (0x[0-9a-fA-F]+) =>", text)})
+
+
 def build_inventory() -> dict[str, Any]:
     root = repo_root()
+    historical_grounded = parse_historical_grounded_mechanisms(historical_flags_source(root))
     spec_dir = spec_root(root)
     if not spec_dir.exists():
         raise SystemExit(f"vendored OASIS spec directory not found: {spec_dir}")
@@ -3318,8 +3333,22 @@ def build_inventory() -> dict[str, Any]:
     provider_summary = provider_mechanism_summary(mechanism_matrix, len(official_inventory))
 
     return {
+        "historical_mechanism_grounding": {
+            "source": "OASIS pkcs11-hist (historical mechanisms spec)",
+            "generated_table": "crates/backend/src/mock/historical_flags.rs",
+            "grounded_mechanism_count": len(historical_grounded),
+            "note": (
+                "Legacy mechanisms (SKIPJACK/BATON/JUNIPER/KEA, RC2/RC4/RC5, "
+                "CAST, IDEA, DES, GOST, MD2/MD5, RIPEMD, ...) whose workflow "
+                "prose the current working spec dropped are accepted by the "
+                "mock with flags transcribed from the historical spec's own "
+                "function table. Not vendored (policy); the flags are baked "
+                "into a committed generated table."
+            ),
+        },
         "source": {
             "repo_root": str(root),
+            "historical_flags_source": str(historical_flags_source(root)),
             "spec_dir": str(spec_dir),
             "spec_markdown_file_count": len(list(spec_dir.glob("*.md"))),
             "official_function_headers": official_function_headers_source,

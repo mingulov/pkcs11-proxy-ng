@@ -554,6 +554,15 @@ fn example_configs_parse_and_validate_without_errors() {
                 .join(std::path::Path::new(path.file_name().expect("example config file name")));
             std::fs::write(&normalized_path, normalized)
                 .unwrap_or_else(|e| panic!("cannot write {}: {e}", normalized_path.display()));
+            // The perm-guard in load() rejects group/world-writable files.
+            // Temp files created by std::fs::write use the process umask and
+            // may be 0664; set them to 0600 so the check passes here.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&normalized_path, std::fs::Permissions::from_mode(0o600))
+                    .unwrap_or_else(|e| panic!("cannot chmod {}: {e}", normalized_path.display()));
+            }
             let _config = crate::config::DaemonConfig::load(&normalized_path)
                 .unwrap_or_else(|e| panic!("{} failed to validate: {e}", path.display()));
             count += 1;

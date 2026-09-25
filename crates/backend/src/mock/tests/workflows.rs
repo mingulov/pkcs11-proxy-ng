@@ -1011,10 +1011,14 @@ fn mock_mechanism_info_uses_source_grounded_workflow_flags() {
 fn mock_mechanism_info_leaves_flags_empty_without_source_workflow_evidence() {
     let backend = MockBackend::with_official_mechanisms(vec![CkSlotId(0)]);
 
+    // Camellia/ARIA are current-spec mechanisms whose working-spec markdown
+    // carries no Mechanisms-vs-Functions table, and they are not in the
+    // historical spec either — so they stay ungrounded (unlike the legacy
+    // BATON/CAST families, which pkcs11-hist now grounds).
     for mechanism in [
-        CkMechanismType(0x0000_1030), // CKM_BATON_KEY_GEN
         CkMechanismType(0x0000_0558), // CKM_CAMELLIA_CTR
-        CkMechanismType(0x0000_0322), // CKM_CAST5_CBC
+        CkMechanismType(0x0000_0375), // CKM_TLS_MASTER_KEY_DERIVE
+        CkMechanismType(0x0000_1012), // CKM_KEA_DERIVE
     ] {
         let info = backend.get_mechanism_info(CkSlotId(0), mechanism).unwrap();
         assert_eq!(
@@ -1207,7 +1211,9 @@ fn official_source_grounded_mock_enforces_mechanism_workflow_flags() {
     backend.verify(session, CkInBuf::Bytes(b"payload"), CkInBuf::Bytes(&des_signature)).unwrap();
     assert_eq!(backend.encrypt_init(session, &des_mac, key).unwrap_err(), CkRv::MECHANISM_INVALID);
 
-    let no_source = CkMechanism { mechanism_type: CkMechanismType(0x0000_1030), params: None };
+    // A mechanism grounded by neither the current nor the historical spec
+    // (CKM_CAMELLIA_CTR) has no workflow flags, so every keyed op rejects it.
+    let no_source = CkMechanism { mechanism_type: CkMechanismType(0x0000_0558), params: None };
     assert_eq!(
         backend.generate_key(session, &no_source, &[]).unwrap_err(),
         CkRv::MECHANISM_INVALID
@@ -1245,9 +1251,9 @@ fn official_source_grounded_mock_rejects_all_no_source_workflow_mechanisms() {
         .filter(|mechanism_type| session_ops::mock_mechanism_workflow_flags(*mechanism_type) == 0)
         .collect::<Vec<_>>();
 
-    assert!(no_source_mechanisms.contains(&CkMechanismType(0x0000_1030))); // CKM_BATON_KEY_GEN
     assert!(no_source_mechanisms.contains(&CkMechanismType(0x0000_0558))); // CKM_CAMELLIA_CTR
-    assert!(no_source_mechanisms.contains(&CkMechanismType(0x0000_0122))); // CKM_DES_CBC
+    assert!(no_source_mechanisms.contains(&CkMechanismType(0x0000_1012))); // CKM_KEA_DERIVE
+    assert!(no_source_mechanisms.contains(&CkMechanismType(0x0000_0375))); // CKM_TLS_MASTER_KEY_DERIVE
 
     for mechanism_type in no_source_mechanisms {
         let mechanism = CkMechanism { mechanism_type, params: None };
@@ -1404,15 +1410,16 @@ fn official_mechanism_mock_accepts_every_official_mechanism_across_core_workflow
 
         backend.sign_init(session, &mechanism, key).unwrap();
         backend.sign_update(session, CkInBuf::Bytes(b"part")).unwrap();
+        let multipart_signature = backend.sign_final(session).unwrap();
         assert!(
-            !backend.sign_final(session).unwrap().is_empty(),
+            !multipart_signature.is_empty(),
             "multipart sign output for 0x{:08X}",
             mechanism_type.0
         );
 
         backend.verify_init(session, &mechanism, key).unwrap();
         backend.verify_update(session, CkInBuf::Bytes(b"part")).unwrap();
-        backend.verify_final(session, CkInBuf::Bytes(&signature)).unwrap();
+        backend.verify_final(session, CkInBuf::Bytes(&multipart_signature)).unwrap();
 
         backend.digest_init(session, &mechanism).unwrap();
         let digest = backend.digest(session, CkInBuf::Bytes(b"data")).unwrap();
@@ -1590,15 +1597,20 @@ fn full_registry_mock_accepts_every_registered_mechanism_across_core_workflows()
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
         let key = backend.create_object(session, &[]).unwrap();
+        backend.sign_init(session, &mechanism, key).unwrap();
+        let signature = backend.sign(session, CkInBuf::Bytes(b"data")).unwrap();
         backend.verify_init(session, &mechanism, key).unwrap();
-        backend.verify(session, CkInBuf::Bytes(b"data"), CkInBuf::Bytes(b"signature")).unwrap();
+        backend.verify(session, CkInBuf::Bytes(b"data"), CkInBuf::Bytes(&signature)).unwrap();
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
         let key = backend.create_object(session, &[]).unwrap();
+        backend.sign_init(session, &mechanism, key).unwrap();
+        backend.sign_update(session, CkInBuf::Bytes(b"part")).unwrap();
+        let multipart_signature = backend.sign_final(session).unwrap();
         backend.verify_init(session, &mechanism, key).unwrap();
         backend.verify_update(session, CkInBuf::Bytes(b"part")).unwrap();
-        backend.verify_final(session, CkInBuf::Bytes(b"signature")).unwrap();
+        backend.verify_final(session, CkInBuf::Bytes(&multipart_signature)).unwrap();
         backend.close_session(session).unwrap();
 
         let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
@@ -2242,4 +2254,69 @@ fn decrypt_message_rejects_null_aad_with_nonzero_len() {
             .unwrap_err(),
         CkRv::ARGUMENTS_BAD,
     );
+}
+
+#[test]
+fn mechanism_info_reports_spec_grounded_key_sizes() {
+    // AES: 16/24/32-byte keys (bytes, per the OASIS convention the mock
+    // follows for symmetric key sizes); DES3: fixed 24. Mechanisms whose
+    // spec tables define no size keep the mock's generic default.
+    let backend = MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![
+            CkMechanismType::AES_KEY_GEN,
+            CkMechanismType::DES3_KEY_GEN,
+            CkMechanismType::RSA_PKCS_KEY_PAIR_GEN,
+        ],
+    );
+    backend.initialize().unwrap();
+
+    let aes = backend.get_mechanism_info(CkSlotId(0), CkMechanismType::AES_KEY_GEN).unwrap();
+    assert_eq!(aes.min_key_size, 16);
+    assert_eq!(aes.max_key_size, 32);
+
+    let des3 = backend.get_mechanism_info(CkSlotId(0), CkMechanismType::DES3_KEY_GEN).unwrap();
+    assert_eq!(des3.min_key_size, 24);
+    assert_eq!(des3.max_key_size, 24);
+
+    // A mechanism without a spec-grounded size table keeps the generic
+    // default (asymmetric key-pair gen).
+    let rsa =
+        backend.get_mechanism_info(CkSlotId(0), CkMechanismType::RSA_PKCS_KEY_PAIR_GEN).unwrap();
+    assert_eq!((rsa.min_key_size, rsa.max_key_size), (2048, 4096));
+}
+
+#[test]
+fn historically_grounded_mechanisms_are_accepted_with_workflow_flags() {
+    // C1: legacy mechanisms grounded from the historical spec (pkcs11-hist,
+    // via the generated historical_flags table) must be accepted by the
+    // mock — a client using SKIPJACK/CAST/RC/DES/IDEA/GOST legacy
+    // mechanisms through the proxy is exercised, not blanket-rejected.
+    let backend = MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![
+            CkMechanismType(0x0000_0122), // CKM_DES_CBC (enc/dec + wrap)
+            CkMechanismType(0x0000_0322), // CKM_CAST5_CBC
+            CkMechanismType(0x0000_1010), // CKM_SKIPJACK_ECB64
+            CkMechanismType(0x0000_1030), // CKM_BATON_KEY_GEN (generate)
+        ],
+    );
+    backend.initialize().unwrap();
+    let session = backend.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+    let key = backend.create_object(session, &[]).unwrap();
+
+    // DES-CBC grounded with ENCRYPT/DECRYPT: encrypt_init is accepted.
+    let des_cbc = CkMechanism { mechanism_type: CkMechanismType(0x0000_0122), params: None };
+    backend.encrypt_init(session, &des_cbc, key).unwrap();
+    backend.encrypt_init_cancel(session).unwrap();
+
+    // BATON_KEY_GEN grounded with GENERATE: generate_key is accepted.
+    let baton_gen = CkMechanism { mechanism_type: CkMechanismType(0x0000_1030), params: None };
+    assert_ne!(backend.generate_key(session, &baton_gen, &[]).unwrap(), CkObjectHandle(0));
+
+    // Every advertised historical mechanism reports non-empty flags.
+    for mech in [CkMechanismType(0x0000_0322), CkMechanismType(0x0000_1010)] {
+        let info = backend.get_mechanism_info(CkSlotId(0), mech).unwrap();
+        assert_ne!(info.flags, CkMechanismFlags::default(), "{mech:?} should be grounded");
+    }
 }

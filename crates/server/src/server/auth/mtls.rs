@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use x509_parser::prelude::*;
 
@@ -64,10 +65,17 @@ pub fn validate_cert_file(path: &Path) -> Result<String, String> {
     leaf_subject.ok_or_else(|| format!("no certificate found in '{}'", path.display()))
 }
 
-/// Extract issuer and subject Distinguished Names from a DER-encoded X.509
-/// certificate. The DN strings are produced by `x509-parser`'s RFC 4514
-/// serializer (comma-separated, leaf-to-root, short attribute names, values
-/// escaped per RFC 4514 §2.4 — this function does not re-implement that).
+/// Extract issuer, subject Distinguished Names and SPKI fingerprint from a
+/// DER-encoded X.509 certificate. The DN strings are produced by
+/// `x509-parser`'s RFC 4514 serializer (comma-separated, leaf-to-root, short
+/// attribute names, values escaped per RFC 4514 §2.4 — this function does not
+/// re-implement that).
+///
+/// Returns a triple `(issuer, subject, spki_sha256)` where:
+/// - `issuer` and `subject` are the RFC 4514 DN strings used in legacy identity keys.
+/// - `spki_sha256` is the hex-encoded SHA-256 digest of the certificate's
+///   SubjectPublicKeyInfo (SPKI) DER bytes — the cryptographic identity key
+///   used for SPKI-pinned policy entries (`x509:spki=<fingerprint>`).
 ///
 /// These strings become identity keys in the authorization policy (via
 /// `AuthenticatedIdentity::Mtls`); the identity's *own* string form additionally
@@ -79,7 +87,7 @@ pub fn validate_cert_file(path: &Path) -> Result<String, String> {
 /// its SubjectAltName for identity, which Phase 1 does not consult, and would
 /// otherwise collapse every empty-subject cert from a CA onto one ambiguous
 /// identity. (SAN-based identity is a deliberate Phase 1 gap.)
-pub fn extract_identity(cert_der: &[u8]) -> Result<(String, String), String> {
+pub fn extract_identity(cert_der: &[u8]) -> Result<(String, String, String), String> {
     if cert_der.is_empty() {
         return Err("empty certificate".into());
     }
@@ -95,7 +103,9 @@ pub fn extract_identity(cert_der: &[u8]) -> Result<(String, String), String> {
             .into());
     }
 
-    Ok((issuer, subject))
+    let spki_sha256 = hex::encode(Sha256::digest(cert.public_key().raw));
+
+    Ok((issuer, subject, spki_sha256))
 }
 
 #[cfg(test)]
