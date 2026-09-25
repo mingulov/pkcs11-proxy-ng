@@ -405,6 +405,19 @@ impl MockBackend {
         Ok(result)
     }
 
+    fn reject_null_output_length(
+        &self,
+        session: CkSessionHandle,
+        op: MultiPartOp,
+        spec: &CkOutputBufferSpec,
+    ) -> CkResult<Option<CkOutputBufferResult>> {
+        if !spec.length_pointer_null {
+            return Ok(None);
+        }
+        self.state.lock().unwrap().end_op(session, op)?;
+        Ok(Some(CkOutputBufferResult { ck_rv: CkRv::ARGUMENTS_BAD, returned_len: 0, value: None }))
+    }
+
     pub(super) fn sign_exact_impl(
         &self,
         session: CkSessionHandle,
@@ -479,6 +492,9 @@ impl MockBackend {
         data: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        if let Some(result) = self.reject_null_output_length(session, MultiPartOp::Encrypt, spec)? {
+            return Ok(result);
+        }
         let bytes = Self::xor_bytes(data);
         let result = self.exact_terminal_output(session, MultiPartOp::Encrypt, &bytes, spec)?;
         if result.ck_rv == CkRv::OK && result.value.is_some() {
@@ -493,6 +509,9 @@ impl MockBackend {
         part: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        if let Some(result) = self.reject_null_output_length(session, MultiPartOp::Encrypt, spec)? {
+            return Ok(result);
+        }
         let bytes = self.encrypt_update_impl(session, part)?;
         Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
     }
@@ -516,6 +535,9 @@ impl MockBackend {
         encrypted_data: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        if let Some(result) = self.reject_null_output_length(session, MultiPartOp::Decrypt, spec)? {
+            return Ok(result);
+        }
         let bytes = Self::xor_bytes(encrypted_data);
         self.exact_terminal_output(session, MultiPartOp::Decrypt, &bytes, spec)
     }
@@ -526,6 +548,9 @@ impl MockBackend {
         encrypted_part: &[u8],
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
+        if let Some(result) = self.reject_null_output_length(session, MultiPartOp::Decrypt, spec)? {
+            return Ok(result);
+        }
         let bytes = self.decrypt_update_impl(session, encrypted_part)?;
         Ok(CkOutputBufferResult::from_convenience_bytes(&bytes, spec))
     }
@@ -604,7 +629,11 @@ impl MockBackend {
     ) -> CkParameterRoundtripResult {
         CkParameterRoundtripResult {
             ck_rv: CkRv::OK,
-            returned_len: parameter.len() as u64,
+            returned_len: if parameter.is_empty() {
+                param_out_spec.buffer_len
+            } else {
+                parameter.len() as u64
+            },
             value: if param_out_spec.buffer_present { Some(parameter.to_vec()) } else { None },
         }
     }
@@ -620,9 +649,11 @@ impl MockBackend {
                 };
                 MessageParameter::GcmMessage(GcmMessageParams {
                     iv: params.iv.clone(),
+                    iv_null_len: params.iv_null_len,
                     iv_fixed_bits: params.iv_fixed_bits,
                     iv_generator: params.iv_generator,
                     tag: vec![MOCK_GCM_TAG_BYTE; tag_len],
+                    tag_null_len: params.tag_null_len,
                     tag_bits: params.tag_bits,
                 })
             }
@@ -632,9 +663,11 @@ impl MockBackend {
                 MessageParameter::CcmMessage(CcmMessageParams {
                     data_len: params.data_len,
                     nonce: params.nonce.clone(),
+                    nonce_null_len: params.nonce_null_len,
                     nonce_fixed_bits: params.nonce_fixed_bits,
                     nonce_generator: params.nonce_generator,
                     mac: vec![MOCK_CCM_MAC_BYTE; mac_len],
+                    mac_null_len: params.mac_null_len,
                     mac_len: params.mac_len,
                 })
             }
@@ -642,9 +675,62 @@ impl MockBackend {
                 let tag_len = if params.tag.is_empty() { 16 } else { params.tag.len() };
                 MessageParameter::SalaChacha(Salsa20ChaCha20Poly1305MessageParams {
                     nonce: params.nonce.clone(),
+                    nonce_bits: params.nonce_bits,
+                    nonce_null_len: params.nonce_null_len,
                     tag: vec![MOCK_SALSA_CHACHA_TAG_BYTE; tag_len],
+                    tag_null_len: params.tag_null_len,
                 })
             }
+        }
+    }
+
+    fn mock_generated_message_bytes(input: &[u8], fixed_bits: u64, generator: u64) -> Vec<u8> {
+        if matches!(
+            generator,
+            x if x == cryptoki_sys::CKG_NO_GENERATE as u64
+                || x == cryptoki_sys::CKG_GENERATE_COUNTER_XOR as u64
+        ) {
+            return input.to_vec();
+        }
+
+        let mut output = input.to_vec();
+        let whole_prefix = (fixed_bits / 8) as usize;
+        let partial_bits = (fixed_bits % 8) as u8;
+        let mut generated_start = whole_prefix;
+        if partial_bits > 0 && whole_prefix < output.len() {
+            let fixed_mask = 0xff_u8 << (8 - partial_bits);
+            output[whole_prefix] = (output[whole_prefix] & fixed_mask) | (0x7b & !fixed_mask);
+            generated_start += 1;
+        }
+        let generated_start = generated_start.min(output.len());
+        output[generated_start..].fill(0x7b);
+        output
+    }
+
+    pub(super) fn mock_message_begin_parameter_out(
+        message_parameter: &MessageParameter,
+    ) -> MessageParameter {
+        match message_parameter {
+            MessageParameter::GcmMessage(params) => {
+                let mut output = params.clone();
+                output.iv = Self::mock_generated_message_bytes(
+                    &params.iv,
+                    params.iv_fixed_bits,
+                    params.iv_generator,
+                );
+                MessageParameter::GcmMessage(output)
+            }
+            MessageParameter::CcmMessage(params) => {
+                let mut output = params.clone();
+                output.nonce = Self::mock_generated_message_bytes(
+                    &params.nonce,
+                    params.nonce_fixed_bits,
+                    params.nonce_generator,
+                );
+                MessageParameter::CcmMessage(output)
+            }
+            MessageParameter::SalaChacha(params) => MessageParameter::SalaChacha(params.clone()),
+            MessageParameter::Raw(raw) => MessageParameter::Raw(raw.clone()),
         }
     }
 
@@ -742,9 +828,11 @@ impl MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        let bytes = self.encrypt_impl(session, plaintext)?;
+        self.require_open_session(session)?;
+        let bytes = Self::xor_bytes(plaintext);
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
-        let param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        let mut param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        param_result.ck_rv = output_result.ck_rv;
         Ok((output_result, param_result))
     }
 
@@ -757,9 +845,11 @@ impl MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        let bytes = self.decrypt_impl(session, ciphertext)?;
+        self.require_open_session(session)?;
+        let bytes = Self::xor_bytes(ciphertext);
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
-        let param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        let mut param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        param_result.ck_rv = output_result.ck_rv;
         Ok((output_result, param_result))
     }
 
@@ -771,9 +861,11 @@ impl MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        let bytes = self.sign_impl(session, data)?;
+        self.require_open_session(session)?;
+        let bytes = Self::reverse_bytes(data);
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
-        let param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        let mut param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        param_result.ck_rv = output_result.ck_rv;
         Ok((output_result, param_result))
     }
 
@@ -786,9 +878,11 @@ impl MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        let bytes = self.encrypt_update_impl(session, plaintext_part)?;
+        self.require_open_session(session)?;
+        let bytes = Self::xor_bytes(plaintext_part);
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
-        let param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        let mut param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        param_result.ck_rv = output_result.ck_rv;
         Ok((output_result, param_result))
     }
 
@@ -801,9 +895,11 @@ impl MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        let bytes = self.decrypt_update_impl(session, ciphertext_part)?;
+        self.require_open_session(session)?;
+        let bytes = Self::xor_bytes(ciphertext_part);
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
-        let param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        let mut param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        param_result.ck_rv = output_result.ck_rv;
         Ok((output_result, param_result))
     }
 
@@ -815,9 +911,11 @@ impl MockBackend {
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
-        let bytes = self.sign_impl(session, data_part)?;
+        self.require_open_session(session)?;
+        let bytes = Self::reverse_bytes(data_part);
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
-        let param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        let mut param_result = Self::mock_param_roundtrip(parameter, param_out_spec);
+        param_result.ck_rv = output_result.ck_rv;
         Ok((output_result, param_result))
     }
 
@@ -830,7 +928,7 @@ impl MockBackend {
         let output_result = CkOutputBufferResult::from_convenience_bytes(&bytes, output_spec);
         // Authenticated wrap has no input parameter in the mock — return empty.
         let param_result = CkParameterRoundtripResult {
-            ck_rv: CkRv::OK,
+            ck_rv: output_result.ck_rv,
             returned_len: 0,
             value: if param_out_spec.buffer_present { Some(Vec::new()) } else { None },
         };

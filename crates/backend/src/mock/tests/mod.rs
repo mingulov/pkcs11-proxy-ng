@@ -37,11 +37,11 @@ fn live_key(backend: &MockBackend, session: CkSessionHandle) -> CkObjectHandle {
 }
 
 fn exact_size_spec() -> CkOutputBufferSpec {
-    CkOutputBufferSpec { buffer_present: false, buffer_len: 0 }
+    CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false }
 }
 
 fn exact_data_spec() -> CkOutputBufferSpec {
-    CkOutputBufferSpec { buffer_present: true, buffer_len: 1024 }
+    CkOutputBufferSpec { buffer_present: true, buffer_len: 1024, length_pointer_null: false }
 }
 
 fn exact_param_size_spec() -> CkParameterRoundtripSpec {

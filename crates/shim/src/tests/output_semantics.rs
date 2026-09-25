@@ -6,15 +6,16 @@ use pkcs11_proxy_ng::server::grpc_service::Pkcs11ProxyService;
 use pkcs11_proxy_ng::server::handle_map::VirtualHandle;
 use pkcs11_proxy_ng_backend::{
     MockBackend, Pkcs11Backend,
-    mock::{MockAbi, MockAttributeSlot},
+    mock::{MockAbi, MockAttributeSlot, MockMessageLifecycleAction},
 };
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_proto::Pkcs11ProxyServer;
+use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::{
     CkAttributeQuery, CkAttributeQueryResult, CkAttributeType, CkAttributeValue, CkInBuf,
     CkMechanismParams, CkMechanismType, CkObjectHandle, CkOutputBufferResult, CkOutputBufferSpec,
-    CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSlotId, GcmParams, InterfaceCapabilities,
-    InterfaceInfo, ParameterOutputFunction,
+    CkParameterRoundtripResult, CkParameterRoundtripSpec, CkRv, CkSessionFlags, CkSlotId,
+    GcmParams, InterfaceCapabilities, InterfaceInfo, ParameterOutputFunction,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
@@ -297,11 +298,18 @@ fn label_attr(buffer: Option<&mut [u8]>) -> CK_ATTRIBUTE {
 fn write_exact_output_rejects_value_larger_than_declared_buffer_without_copy() {
     let mut backing = [0xAA_u8; 4];
     let mut declared_len: CK_ULONG = 2;
+    let spec =
+        unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut declared_len) };
     let result =
         CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 4, value: Some(vec![1, 2, 3, 4]) };
 
     let rv = unsafe {
-        dispatch::general::write_exact_output(&result, backing.as_mut_ptr(), &mut declared_len)
+        dispatch::general::write_exact_output(
+            &spec,
+            &result,
+            backing.as_mut_ptr(),
+            &mut declared_len,
+        )
     };
 
     assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
@@ -313,6 +321,8 @@ fn write_exact_output_rejects_value_larger_than_declared_buffer_without_copy() {
 fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
     let mut backing = [0xAA_u8; 4];
     let mut declared_len: CK_ULONG = 2;
+    let spec =
+        unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut declared_len) };
     let result = CkOutputBufferResult {
         ck_rv: CkRv::BUFFER_TOO_SMALL,
         returned_len: 4,
@@ -320,12 +330,44 @@ fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
     };
 
     let rv = unsafe {
-        dispatch::general::write_exact_output(&result, backing.as_mut_ptr(), &mut declared_len)
+        dispatch::general::write_exact_output(
+            &spec,
+            &result,
+            backing.as_mut_ptr(),
+            &mut declared_len,
+        )
     };
 
     assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV);
     assert_eq!(declared_len, 4);
     assert_eq!(backing, [0xAA; 4]);
+}
+
+#[test]
+fn output_buffer_spec_classifies_all_three_pointer_shapes_without_reading_size_query_cell() {
+    let mut length_sentinel: CK_ULONG = 0xA5A5;
+    let size_query = unsafe {
+        dispatch::general::output_buffer_spec(std::ptr::null_mut(), &mut length_sentinel)
+    };
+    assert_eq!(
+        size_query,
+        CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false }
+    );
+
+    let mut output = 0_u8;
+    let missing_length =
+        unsafe { dispatch::general::output_buffer_spec(&mut output, std::ptr::null_mut()) };
+    assert_eq!(
+        missing_length,
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true }
+    );
+
+    let mut capacity: CK_ULONG = 7;
+    let data = unsafe { dispatch::general::output_buffer_spec(&mut output, &mut capacity) };
+    assert_eq!(
+        data,
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 7, length_pointer_null: false }
+    );
 }
 
 #[test]
@@ -346,6 +388,27 @@ fn shim_get_attribute_value_size_query_returns_exact_length_without_copy() {
         unsafe { dispatch::general::c_get_attribute_value(shim.session, object, &mut attr, 1) };
     assert_eq!(rv, CKR_OK as CK_RV);
     assert_eq!(attr.ulValueLen, 3);
+}
+
+#[test]
+fn shim_get_attribute_value_null_zero_reaches_empty_query_backend() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::shared();
+    let shim = ShimSession::new();
+    let object = create_object(shim.session);
+    daemon.backend.set_attribute(
+        backend_object_handle(daemon, object),
+        CkAttributeType::LABEL,
+        MockAttributeSlot::Value(CkAttributeValue::String("key".into())),
+    );
+    let calls_before = daemon.backend.attr_get_exact_call_count();
+
+    let rv = unsafe {
+        dispatch::general::c_get_attribute_value(shim.session, object, std::ptr::null_mut(), 0)
+    };
+
+    assert_eq!(rv, CKR_OK as CK_RV);
+    assert_eq!(daemon.backend.attr_get_exact_call_count(), calls_before + 1);
 }
 
 #[test]
@@ -866,6 +929,11 @@ fn finalize_clears_cached_output_state() {
         state::wrap_cache().lock().unwrap().insert(shim.session, vec![0xAA]);
         state::encapsulate_cache().lock().unwrap().insert(shim.session, (vec![0xBB], 77));
     }
+    set_test_message_shape(
+        shim.session,
+        state::MessageOperation::Encrypt,
+        MessageParameterShape::Gcm,
+    );
 
     let finalize_rv = unsafe { dispatch::general::c_finalize(std::ptr::null_mut()) };
     assert_eq!(finalize_rv, CKR_OK as CK_RV);
@@ -873,6 +941,11 @@ fn finalize_clears_cached_output_state() {
     assert!(state::dig_cache().lock().unwrap().is_empty());
     assert!(state::wrap_cache().lock().unwrap().is_empty());
     assert!(state::encapsulate_cache().lock().unwrap().is_empty());
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Encrypt),
+        None,
+        "finalize must evict message-operation shapes",
+    );
 
     std::mem::forget(shim);
 }
@@ -906,6 +979,16 @@ fn close_all_sessions_evicts_only_target_slot_output_caches() {
     state::dig_cache().lock().unwrap().insert(other_session, vec![0xDD]);
     state::wrap_cache().lock().unwrap().insert(other_session, vec![0xEE]);
     state::encapsulate_cache().lock().unwrap().insert(other_session, (vec![0xFF], 9));
+    set_test_message_shape(
+        target_session,
+        state::MessageOperation::Encrypt,
+        MessageParameterShape::Gcm,
+    );
+    set_test_message_shape(
+        other_session,
+        state::MessageOperation::Encrypt,
+        MessageParameterShape::Ccm,
+    );
 
     let close_all_rv = unsafe { dispatch::general::c_close_all_sessions(target_slot) };
     assert_eq!(close_all_rv, CKR_OK as CK_RV);
@@ -916,6 +999,16 @@ fn close_all_sessions_evicts_only_target_slot_output_caches() {
     assert!(state::dig_cache().lock().unwrap().contains_key(&other_session));
     assert!(state::wrap_cache().lock().unwrap().contains_key(&other_session));
     assert!(state::encapsulate_cache().lock().unwrap().contains_key(&other_session));
+    assert_eq!(
+        test_message_shape(target_session, state::MessageOperation::Encrypt),
+        None,
+        "close-all must evict shapes for the target slot",
+    );
+    assert_eq!(
+        test_message_shape(other_session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Ccm),
+        "close-all must preserve shapes for another slot",
+    );
 
     let mut info = std::mem::MaybeUninit::uninit();
     let stale_rv =
@@ -934,6 +1027,7 @@ fn failed_close_session_still_evicts_session_output_caches() {
 
     state::dig_cache().lock().unwrap().insert(session, vec![0xAA]);
     state::wrap_cache().lock().unwrap().insert(session, vec![0xBB]);
+    set_test_message_shape(session, state::MessageOperation::Encrypt, MessageParameterShape::Gcm);
 
     let daemon = TestDaemon::shared();
     daemon.backend.inject_close_error(CkRv::FUNCTION_FAILED);
@@ -941,15 +1035,25 @@ fn failed_close_session_still_evicts_session_output_caches() {
     daemon.backend.clear_close_error();
     assert_eq!(failed_rv, CKR_FUNCTION_FAILED as CK_RV);
 
-    // `state::evict_session_caches` contract: caches are dropped on the close
-    // attempt, regardless of the server's CK_RV.
+    // Disposable output caches are dropped on the close attempt, regardless
+    // of the server's CK_RV.
     assert!(!state::dig_cache().lock().unwrap().contains_key(&session));
     assert!(!state::wrap_cache().lock().unwrap().contains_key(&session));
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+        "a decoded transient close failure must preserve authoritative shape state",
+    );
 
     // The transient failure kept the handle valid (M3), so a retry succeeds
     // and simply finds the caches already evicted.
     let retry_rv = unsafe { dispatch::general::c_close_session(session) };
     assert_eq!(retry_rv, CKR_OK as CK_RV);
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        None,
+        "a terminal close must evict authoritative shape state",
+    );
 }
 
 #[test]
@@ -968,6 +1072,654 @@ fn failed_close_all_sessions_still_evicts_slot_session_caches() {
     // `state::evict_slot_session_caches` contract: dropped on the attempt,
     // regardless of the server's CK_RV.
     assert!(!state::dig_cache().lock().unwrap().contains_key(&phantom_session));
+}
+
+fn set_test_message_shape(
+    session: CK_SESSION_HANDLE,
+    operation: state::MessageOperation,
+    shape: MessageParameterShape,
+) {
+    state::message_operation_state(session, operation)
+        .lock()
+        .expect("message-operation state lock")
+        .shape = Some(shape);
+}
+
+fn test_message_shape(
+    session: CK_SESSION_HANDLE,
+    operation: state::MessageOperation,
+) -> Option<MessageParameterShape> {
+    state::message_operation_state(session, operation)
+        .lock()
+        .expect("message-operation state lock")
+        .shape
+}
+
+#[test]
+fn message_encrypt_decrypt_final_require_and_clear_only_their_active_shape() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+
+    for (operation, init_call, final_call) in [
+        (
+            state::MessageOperation::Encrypt,
+            dispatch::general::c_message_encrypt_init
+                as unsafe extern "C" fn(
+                    CK_SESSION_HANDLE,
+                    CK_MECHANISM_PTR,
+                    CK_OBJECT_HANDLE,
+                ) -> CK_RV,
+            dispatch::general::c_message_encrypt_final
+                as unsafe extern "C" fn(CK_SESSION_HANDLE) -> CK_RV,
+        ),
+        (
+            state::MessageOperation::Decrypt,
+            dispatch::general::c_message_decrypt_init
+                as unsafe extern "C" fn(
+                    CK_SESSION_HANDLE,
+                    CK_MECHANISM_PTR,
+                    CK_OBJECT_HANDLE,
+                ) -> CK_RV,
+            dispatch::general::c_message_decrypt_final
+                as unsafe extern "C" fn(CK_SESSION_HANDLE) -> CK_RV,
+        ),
+    ] {
+        assert_eq!(
+            unsafe { final_call(shim.session) },
+            CKR_OPERATION_NOT_INITIALIZED as CK_RV,
+            "MessageFinal must reject a missing authoritative operation shape",
+        );
+
+        let mut mechanism = aes_ecb_mechanism();
+        assert_eq!(unsafe { init_call(shim.session, &mut mechanism, key) }, CKR_OK as CK_RV);
+        assert_eq!(
+            test_message_shape(shim.session, operation),
+            Some(MessageParameterShape::Unmodeled),
+        );
+        assert_eq!(unsafe { final_call(shim.session) }, CKR_OK as CK_RV);
+        assert_eq!(
+            test_message_shape(shim.session, operation),
+            None,
+            "successful MessageFinal must clear its authoritative operation shape",
+        );
+    }
+}
+
+#[test]
+fn malformed_post_provider_ack_returns_device_error_and_clears_shim_shape() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut iv = [0x11_u8; 12];
+    let mut tag = [0_u8; 16];
+    let mut parameter = CK_GCM_MESSAGE_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvFixedBits: 96,
+        ivGenerator: CKG_NO_GENERATE,
+        pTag: tag.as_mut_ptr(),
+        ulTagBits: 128,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM,
+        pParameter: (&mut parameter as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of_val(&parameter) as CK_ULONG,
+    };
+    assert_eq!(
+        unsafe { dispatch::general::c_message_encrypt_init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+    );
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Encrypt),
+        Some(MessageParameterShape::Gcm),
+    );
+
+    let daemon = TestDaemon::shared();
+    let provider_len = std::mem::size_of::<CK_GCM_MESSAGE_PARAMS>() as u64;
+    daemon.backend.set_next_message_parameter_ack(CkParameterRoundtripResult {
+        ck_rv: CkRv::OK,
+        returned_len: provider_len + 1,
+        value: Some(Vec::new()),
+    });
+    let calls_before = daemon.backend.message_parameter_call_count();
+    let input = [0x22_u8; 8];
+    let mut output = [0xA5_u8; 8];
+    let mut output_len = output.len() as CK_ULONG;
+    let rv = unsafe {
+        dispatch::general::c_encrypt_message(
+            shim.session,
+            (&mut parameter as *mut CK_GCM_MESSAGE_PARAMS).cast(),
+            std::mem::size_of_val(&parameter) as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+            input.as_ptr() as CK_BYTE_PTR,
+            input.len() as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut output_len,
+        )
+    };
+
+    assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
+    assert_eq!(daemon.backend.message_parameter_call_count(), calls_before + 1);
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Encrypt),
+        None,
+        "post-provider acknowledgement ambiguity must clear local authoritative state",
+    );
+    assert_eq!(output, [0xA5; 8], "malformed response must not write main output");
+    assert_eq!(output_len, 8, "malformed response must not write output length");
+    assert_eq!(iv, [0x11; 12], "malformed response must not write embedded IV");
+    assert_eq!(tag, [0; 16], "malformed response must not write embedded tag");
+}
+
+#[test]
+fn device_error_close_clears_authoritative_message_shapes() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+    set_test_message_shape(session, state::MessageOperation::Encrypt, MessageParameterShape::Gcm);
+
+    let daemon = TestDaemon::shared();
+    daemon.backend.inject_close_error(CkRv::DEVICE_ERROR);
+    let rv = unsafe { dispatch::general::c_close_session(session) };
+    daemon.backend.clear_close_error();
+
+    assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        None,
+        "an outcome-ambiguous close must clear authoritative shape state",
+    );
+}
+
+#[test]
+fn panicked_close_clears_authoritative_message_shapes() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let session = shim.open_additional_session();
+    set_test_message_shape(session, state::MessageOperation::Encrypt, MessageParameterShape::Gcm);
+
+    let daemon = TestDaemon::shared();
+    let calls_before = daemon.backend.close_session_call_count();
+    daemon.backend.set_next_message_lifecycle_action(MockMessageLifecycleAction::Panic);
+    let rv = unsafe { dispatch::general::c_close_session(session) };
+
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(daemon.backend.close_session_call_count(), calls_before + 1);
+    assert_eq!(
+        test_message_shape(session, state::MessageOperation::Encrypt),
+        None,
+        "a transport-ambiguous close must clear authoritative shape state",
+    );
+}
+
+#[test]
+fn session_cancel_success_is_bit_selective_for_message_shapes() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+
+    for operation in [
+        state::MessageOperation::Encrypt,
+        state::MessageOperation::Decrypt,
+        state::MessageOperation::Sign,
+        state::MessageOperation::Verify,
+    ] {
+        set_test_message_shape(shim.session, operation, MessageParameterShape::Unmodeled);
+    }
+
+    let rv = unsafe {
+        dispatch::general::c_session_cancel(shim.session, CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_SIGN)
+    };
+    assert_eq!(rv, CKR_OK as CK_RV);
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Encrypt),
+        None,
+        "the selected encrypt shape must be cleared",
+    );
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Sign),
+        None,
+        "the selected sign shape must be cleared",
+    );
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Decrypt),
+        Some(MessageParameterShape::Unmodeled),
+        "an unselected decrypt shape must survive",
+    );
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Verify),
+        Some(MessageParameterShape::Unmodeled),
+        "an unselected verify shape must survive",
+    );
+
+    let zero_flags_rv = unsafe { dispatch::general::c_session_cancel(shim.session, 0) };
+    assert_eq!(zero_flags_rv, CKR_OK as CK_RV);
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Decrypt),
+        Some(MessageParameterShape::Unmodeled),
+        "flags=0 must clear nothing",
+    );
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Verify),
+        Some(MessageParameterShape::Unmodeled),
+        "flags=0 must clear nothing",
+    );
+}
+
+#[test]
+fn session_cancel_error_origin_controls_selected_shim_shapes() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let daemon = TestDaemon::shared();
+
+    for (action, expected_rv, selected_shape) in [
+        (
+            MockMessageLifecycleAction::Return(CkRv::FUNCTION_FAILED),
+            CKR_FUNCTION_FAILED as CK_RV,
+            Some(MessageParameterShape::Unmodeled),
+        ),
+        (MockMessageLifecycleAction::Return(CkRv::DEVICE_ERROR), CKR_DEVICE_ERROR as CK_RV, None),
+        (MockMessageLifecycleAction::Panic, CKR_GENERAL_ERROR as CK_RV, None),
+    ] {
+        for operation in [
+            state::MessageOperation::Encrypt,
+            state::MessageOperation::Decrypt,
+            state::MessageOperation::Sign,
+            state::MessageOperation::Verify,
+        ] {
+            set_test_message_shape(shim.session, operation, MessageParameterShape::Unmodeled);
+        }
+        let calls_before = daemon.backend.message_lifecycle_call_count();
+        daemon.backend.set_next_message_lifecycle_action(action);
+
+        let rv = unsafe {
+            dispatch::general::c_session_cancel(
+                shim.session,
+                CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_SIGN,
+            )
+        };
+
+        assert_eq!(rv, expected_rv, "{action:?}");
+        assert_eq!(daemon.backend.message_lifecycle_call_count(), calls_before + 1);
+        assert_eq!(
+            test_message_shape(shim.session, state::MessageOperation::Encrypt),
+            selected_shape,
+            "{action:?} encrypt",
+        );
+        assert_eq!(
+            test_message_shape(shim.session, state::MessageOperation::Sign),
+            selected_shape,
+            "{action:?} sign",
+        );
+        assert_eq!(
+            test_message_shape(shim.session, state::MessageOperation::Decrypt),
+            Some(MessageParameterShape::Unmodeled),
+            "{action:?} unselected decrypt",
+        );
+        assert_eq!(
+            test_message_shape(shim.session, state::MessageOperation::Verify),
+            Some(MessageParameterShape::Unmodeled),
+            "{action:?} unselected verify",
+        );
+    }
+}
+
+#[test]
+fn pointer_safe_message_every_entrypoint_requires_capability_before_pointer_state_or_rpc() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let daemon = TestDaemon::shared();
+    for (operation, shape) in [
+        (state::MessageOperation::Encrypt, MessageParameterShape::Gcm),
+        (state::MessageOperation::Decrypt, MessageParameterShape::Gcm),
+        (state::MessageOperation::Sign, MessageParameterShape::Unmodeled),
+        (state::MessageOperation::Verify, MessageParameterShape::Unmodeled),
+    ] {
+        set_test_message_shape(shim.session, operation, shape);
+    }
+    let backend_counts_before = (
+        daemon.backend.data_op_call_count(),
+        daemon.backend.message_begin_call_count(),
+        daemon.backend.message_init_contract_call_count(),
+        daemon.backend.message_lifecycle_call_count(),
+        daemon.backend.message_parameter_call_count(),
+    );
+    crate::interface_probe::invalidate_pointer_safe_message_parameters();
+
+    macro_rules! assert_capability_rejected {
+        ($name:literal, $call:expr) => {
+            assert_eq!(unsafe { $call }, CKR_FUNCTION_NOT_SUPPORTED as CK_RV, $name,);
+        };
+    }
+
+    let poison_mechanism: CK_MECHANISM_PTR = std::ptr::dangling_mut();
+    let poison_parameter: *mut ::std::os::raw::c_void = std::ptr::dangling_mut();
+    let poison_bytes: CK_BYTE_PTR = std::ptr::dangling_mut();
+    let poison_len: *mut CK_ULONG = std::ptr::dangling_mut();
+
+    type InitFn =
+        unsafe extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
+    for (name, init) in [
+        ("MessageEncryptInit", dispatch::general::c_message_encrypt_init as InitFn),
+        ("MessageDecryptInit", dispatch::general::c_message_decrypt_init as InitFn),
+        ("MessageSignInit", dispatch::general::c_message_sign_init as InitFn),
+        ("MessageVerifyInit", dispatch::general::c_message_verify_init as InitFn),
+    ] {
+        assert_eq!(
+            unsafe { init(shim.session, poison_mechanism, 1) },
+            CKR_FUNCTION_NOT_SUPPORTED as CK_RV,
+            "{name} must gate before reading a non-NULL mechanism",
+        );
+        assert_eq!(
+            unsafe { init(shim.session, std::ptr::null_mut(), 1) },
+            CKR_FUNCTION_NOT_SUPPORTED as CK_RV,
+            "{name} cancel must be capability-gated too",
+        );
+    }
+
+    assert_capability_rejected!(
+        "EncryptMessage",
+        dispatch::general::c_encrypt_message(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            poison_len,
+        )
+    );
+    assert_capability_rejected!(
+        "EncryptMessageBegin",
+        dispatch::general::c_encrypt_message_begin(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+        )
+    );
+    assert_capability_rejected!(
+        "EncryptMessageNext",
+        dispatch::general::c_encrypt_message_next(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            poison_len,
+            CKF_END_OF_MESSAGE,
+        )
+    );
+    assert_capability_rejected!(
+        "DecryptMessage",
+        dispatch::general::c_decrypt_message(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            poison_len,
+        )
+    );
+    assert_capability_rejected!(
+        "DecryptMessageBegin",
+        dispatch::general::c_decrypt_message_begin(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+        )
+    );
+    assert_capability_rejected!(
+        "DecryptMessageNext",
+        dispatch::general::c_decrypt_message_next(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            poison_len,
+            CKF_END_OF_MESSAGE,
+        )
+    );
+    assert_capability_rejected!(
+        "SignMessage",
+        dispatch::general::c_sign_message(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            poison_len,
+        )
+    );
+    assert_capability_rejected!(
+        "SignMessageBegin",
+        dispatch::general::c_sign_message_begin(shim.session, poison_parameter, 1)
+    );
+    assert_capability_rejected!(
+        "SignMessageNext",
+        dispatch::general::c_sign_message_next(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            poison_len,
+        )
+    );
+    assert_capability_rejected!(
+        "SignMessageNext(feed)",
+        dispatch::general::c_sign_message_next(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            std::ptr::null_mut(),
+        )
+    );
+    assert_capability_rejected!(
+        "VerifyMessage",
+        dispatch::general::c_verify_message(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            1,
+        )
+    );
+    assert_capability_rejected!(
+        "VerifyMessageBegin",
+        dispatch::general::c_verify_message_begin(shim.session, poison_parameter, 1)
+    );
+    assert_capability_rejected!(
+        "VerifyMessageNext",
+        dispatch::general::c_verify_message_next(
+            shim.session,
+            poison_parameter,
+            1,
+            poison_bytes,
+            1,
+            poison_bytes,
+            1,
+        )
+    );
+
+    type FinalFn = unsafe extern "C" fn(CK_SESSION_HANDLE) -> CK_RV;
+    for (name, final_call) in [
+        ("MessageEncryptFinal", dispatch::general::c_message_encrypt_final as FinalFn),
+        ("MessageDecryptFinal", dispatch::general::c_message_decrypt_final as FinalFn),
+        ("MessageSignFinal", dispatch::general::c_message_sign_final as FinalFn),
+        ("MessageVerifyFinal", dispatch::general::c_message_verify_final as FinalFn),
+    ] {
+        assert_eq!(
+            unsafe { final_call(shim.session) },
+            CKR_FUNCTION_NOT_SUPPORTED as CK_RV,
+            "{name}",
+        );
+    }
+    assert_capability_rejected!(
+        "SessionCancel",
+        dispatch::general::c_session_cancel(
+            shim.session,
+            CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_DECRYPT | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY,
+        )
+    );
+    assert_capability_rejected!(
+        "SessionCancel(mixed classic and message)",
+        dispatch::general::c_session_cancel(shim.session, CKF_ENCRYPT | CKF_MESSAGE_ENCRYPT,)
+    );
+
+    assert_eq!(
+        (
+            daemon.backend.data_op_call_count(),
+            daemon.backend.message_begin_call_count(),
+            daemon.backend.message_init_contract_call_count(),
+            daemon.backend.message_lifecycle_call_count(),
+            daemon.backend.message_parameter_call_count(),
+        ),
+        backend_counts_before,
+        "capability rejection must occur before every covered provider call",
+    );
+
+    assert_eq!(
+        unsafe { dispatch::general::c_session_cancel(shim.session, 0) },
+        CKR_OK as CK_RV,
+        "flags=0 remains safe against a legacy daemon",
+    );
+    assert_eq!(
+        unsafe { dispatch::general::c_session_cancel(shim.session, CKF_ENCRYPT) },
+        CKR_OK as CK_RV,
+        "classic-only cancellation remains safe against a legacy daemon",
+    );
+
+    for (operation, shape) in [
+        (state::MessageOperation::Encrypt, MessageParameterShape::Gcm),
+        (state::MessageOperation::Decrypt, MessageParameterShape::Gcm),
+        (state::MessageOperation::Sign, MessageParameterShape::Unmodeled),
+        (state::MessageOperation::Verify, MessageParameterShape::Unmodeled),
+    ] {
+        assert_eq!(
+            test_message_shape(shim.session, operation),
+            Some(shape),
+            "capability rejection must occur before taking or clearing {operation:?} state",
+        );
+    }
+}
+
+#[test]
+fn set_operation_state_success_clears_all_message_shapes() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let source_session = shim.open_additional_session();
+    let key = create_object(source_session);
+    let mut mechanism = rsa_pkcs_mechanism();
+    let init_rv = unsafe { dispatch::general::c_sign_init(source_session, &mut mechanism, key) };
+    assert_eq!(init_rv, CKR_OK as CK_RV);
+    let operation_state = export_operation_state(source_session, CKR_OK as CK_RV, 3);
+    assert_eq!(unsafe { dispatch::general::c_close_session(source_session) }, CKR_OK as CK_RV,);
+
+    for operation in [
+        state::MessageOperation::Encrypt,
+        state::MessageOperation::Decrypt,
+        state::MessageOperation::Sign,
+        state::MessageOperation::Verify,
+    ] {
+        set_test_message_shape(shim.session, operation, MessageParameterShape::Unmodeled);
+    }
+
+    let restore_rv = unsafe {
+        dispatch::general::c_set_operation_state(
+            shim.session,
+            operation_state.as_ptr() as CK_BYTE_PTR,
+            operation_state.len() as CK_ULONG,
+            0,
+            0,
+        )
+    };
+    assert_eq!(restore_rv, CKR_OK as CK_RV);
+    for operation in [
+        state::MessageOperation::Encrypt,
+        state::MessageOperation::Decrypt,
+        state::MessageOperation::Sign,
+        state::MessageOperation::Verify,
+    ] {
+        assert_eq!(
+            test_message_shape(shim.session, operation),
+            None,
+            "successful opaque state restore must clear every message shape",
+        );
+    }
+}
+
+#[test]
+fn set_operation_state_error_origin_controls_all_shim_shapes() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let daemon = TestDaemon::shared();
+    let operation_state = [0xC9, 0xEA, 2];
+
+    for (action, expected_rv, expected_shape) in [
+        (
+            MockMessageLifecycleAction::Return(CkRv::FUNCTION_FAILED),
+            CKR_FUNCTION_FAILED as CK_RV,
+            Some(MessageParameterShape::Unmodeled),
+        ),
+        (MockMessageLifecycleAction::Return(CkRv::DEVICE_ERROR), CKR_DEVICE_ERROR as CK_RV, None),
+        (MockMessageLifecycleAction::Panic, CKR_GENERAL_ERROR as CK_RV, None),
+    ] {
+        for operation in [
+            state::MessageOperation::Encrypt,
+            state::MessageOperation::Decrypt,
+            state::MessageOperation::Sign,
+            state::MessageOperation::Verify,
+        ] {
+            set_test_message_shape(shim.session, operation, MessageParameterShape::Unmodeled);
+        }
+        let calls_before = daemon.backend.message_lifecycle_call_count();
+        daemon.backend.set_next_message_lifecycle_action(action);
+
+        let rv = unsafe {
+            dispatch::general::c_set_operation_state(
+                shim.session,
+                operation_state.as_ptr() as CK_BYTE_PTR,
+                operation_state.len() as CK_ULONG,
+                0,
+                0,
+            )
+        };
+
+        assert_eq!(rv, expected_rv, "{action:?}");
+        assert_eq!(daemon.backend.message_lifecycle_call_count(), calls_before + 1);
+        for operation in [
+            state::MessageOperation::Encrypt,
+            state::MessageOperation::Decrypt,
+            state::MessageOperation::Sign,
+            state::MessageOperation::Verify,
+        ] {
+            assert_eq!(
+                test_message_shape(shim.session, operation),
+                expected_shape,
+                "{action:?} {operation:?}",
+            );
+        }
+    }
 }
 
 #[test]
@@ -1995,6 +2747,154 @@ fn exact_decrypt_update_exact_fit_copies_bytes() {
     assert_eq!(out, expected, "decrypted bytes should equal part ^ 0x42");
 }
 
+type CipherInitFn =
+    unsafe extern "C" fn(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE) -> CK_RV;
+type CipherOutputFn = unsafe extern "C" fn(
+    CK_SESSION_HANDLE,
+    CK_BYTE_PTR,
+    CK_ULONG,
+    CK_BYTE_PTR,
+    CK_ULONG_PTR,
+) -> CK_RV;
+
+fn assert_null_pul_len_terminates_cipher_operation(
+    operation_name: &str,
+    init: CipherInitFn,
+    operation: CipherOutputFn,
+) {
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = aes_ecb_mechanism();
+    assert_eq!(
+        unsafe { init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "{operation_name} init",
+    );
+
+    let daemon = TestDaemon::shared();
+    let calls_before = daemon.backend.data_op_call_count();
+    let input = *b"data";
+    let mut output_sentinel = 0xA5;
+    let rv = unsafe {
+        operation(
+            shim.session,
+            input.as_ptr() as CK_BYTE_PTR,
+            input.len() as CK_ULONG,
+            &mut output_sentinel,
+            std::ptr::null_mut(),
+        )
+    };
+
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV, "{operation_name} provider RV");
+    assert_eq!(output_sentinel, 0xA5, "{operation_name} must not write output bytes");
+    assert_eq!(
+        daemon.backend.data_op_call_count(),
+        calls_before + 1,
+        "{operation_name} must reach the provider exactly once",
+    );
+
+    let mut mechanism = aes_ecb_mechanism();
+    assert_eq!(
+        unsafe { init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "{operation_name} must terminate the active provider operation",
+    );
+    assert_eq!(
+        unsafe { init(shim.session, std::ptr::null_mut(), 0) },
+        CKR_OK as CK_RV,
+        "{operation_name} cleanup",
+    );
+}
+
+#[test]
+fn null_pul_len_encrypt_reaches_provider_once_and_terminates_operation() {
+    let _guard = shim_state_test_guard();
+    assert_null_pul_len_terminates_cipher_operation(
+        "C_Encrypt",
+        dispatch::general::c_encrypt_init,
+        dispatch::general::c_encrypt,
+    );
+}
+
+#[test]
+fn null_pul_len_encrypt_update_reaches_provider_once_and_terminates_operation() {
+    let _guard = shim_state_test_guard();
+    assert_null_pul_len_terminates_cipher_operation(
+        "C_EncryptUpdate",
+        dispatch::general::c_encrypt_init,
+        dispatch::general::c_encrypt_update,
+    );
+}
+
+#[test]
+fn null_pul_len_decrypt_reaches_provider_once_and_terminates_operation() {
+    let _guard = shim_state_test_guard();
+    assert_null_pul_len_terminates_cipher_operation(
+        "C_Decrypt",
+        dispatch::general::c_decrypt_init,
+        dispatch::general::c_decrypt,
+    );
+}
+
+#[test]
+fn null_pul_len_decrypt_update_reaches_provider_once_and_terminates_operation() {
+    let _guard = shim_state_test_guard();
+    assert_null_pul_len_terminates_cipher_operation(
+        "C_DecryptUpdate",
+        dispatch::general::c_decrypt_init,
+        dispatch::general::c_decrypt_update,
+    );
+}
+
+#[test]
+fn null_pul_len_sign_message_next_remains_a_feed_call() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let key = create_object(shim.session);
+    let mut mechanism = rsa_pkcs_mechanism();
+    assert_eq!(
+        unsafe { dispatch::general::c_message_sign_init(shim.session, &mut mechanism, key) },
+        CKR_OK as CK_RV,
+        "C_MessageSignInit",
+    );
+
+    let daemon = TestDaemon::shared();
+    let data_calls_before = daemon.backend.data_op_call_count();
+    let parameter_calls_before = daemon.backend.message_parameter_call_count();
+    let data = *b"more";
+    let mut signature_canary = 0xA5;
+
+    let rv = unsafe {
+        dispatch::general::c_sign_message_next(
+            shim.session,
+            std::ptr::null_mut(),
+            0,
+            data.as_ptr() as CK_BYTE_PTR,
+            data.len() as CK_ULONG,
+            &mut signature_canary,
+            std::ptr::null_mut(),
+        )
+    };
+
+    assert_eq!(rv, CKR_OK as CK_RV, "C_SignMessageNext(feed)");
+    assert_eq!(signature_canary, 0xA5, "feed call must not write signature bytes");
+    assert_eq!(
+        daemon.backend.data_op_call_count(),
+        data_calls_before + 1,
+        "feed call must reach the provider exactly once",
+    );
+    assert_eq!(
+        daemon.backend.message_parameter_call_count(),
+        parameter_calls_before + 1,
+        "feed call must use the parameter round-trip contract",
+    );
+    assert_eq!(
+        test_message_shape(shim.session, state::MessageOperation::Sign),
+        Some(MessageParameterShape::Unmodeled),
+        "feed call must keep the message-sign operation active",
+    );
+}
+
 #[test]
 fn exact_wrap_key_size_query_returns_length() {
     let _guard = shim_state_test_guard();
@@ -2048,8 +2948,8 @@ fn exact_get_operation_state_size_query_returns_length() {
 #[test]
 fn exact_encrypt_message_size_query_returns_length() {
     // MockBackend now implements encrypt_message_exact (delegates to encrypt_impl).
-    // encrypt_impl requires an active Encrypt operation, so first we call
-    // encrypt_init, then verify the exact RPC returns a size-query result.
+    // encrypt_impl requires an active message Encrypt operation, so first we
+    // call MessageEncryptInit, then verify the exact RPC size-query result.
     let _guard = shim_state_test_guard();
     let daemon = TestDaemon::start(MockAbi::host());
 
@@ -2063,20 +2963,21 @@ fn exact_encrypt_message_size_query_returns_length() {
             .await
             .expect("C_OpenSession");
 
-        // Set up an active encrypt operation so the mock can process the call.
+        // Set up an active message-encrypt operation so the mock can process the call.
         let mechanism = pkcs11_proxy_ng_types::CkMechanism {
             mechanism_type: CkMechanismType::AES_ECB,
             params: None,
         };
         let key = client.create_object(session, &[]).await.expect("C_CreateObject");
-        client.encrypt_init(session, &mechanism, key).await.expect("C_EncryptInit");
+        client
+            .message_encrypt_init(session, Some(&mechanism), None, key)
+            .await
+            .expect("C_MessageEncryptInit");
 
-        let output_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
-        let param_out_spec = CkParameterRoundtripSpec {
-            buffer_present: true,
-            buffer_len: 12,
-            value: Some(vec![0xAA; 12]),
-        };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
+        let param_out_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
 
         let result = client
             .parameter_output_exact(
@@ -2085,7 +2986,7 @@ fn exact_encrypt_message_size_query_returns_length() {
                 &output_spec,
                 CkInBuf::Bytes(b"plaintext"),
                 CkInBuf::Bytes(b"aad"),
-                &[0xAA; 12],
+                &[],
                 &param_out_spec,
                 0,
                 None,
@@ -2140,7 +3041,8 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
         let wrapping_key = client.create_object(session, &[]).await.expect("C_CreateObject");
         let key = client.create_object(session, &[]).await.expect("C_CreateObject");
 
-        let output_spec = CkOutputBufferSpec { buffer_present: false, buffer_len: 0 };
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: false, buffer_len: 0, length_pointer_null: false };
         let param_out_spec = CkParameterRoundtripSpec {
             buffer_present: true,
             buffer_len: 16,
@@ -2188,6 +3090,54 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
                 panic!("wrap_key_authenticated_exact unexpectedly failed with {rv:?}");
             }
         }
+
+        client.close_session(session).await.expect("C_CloseSession");
+        client.finalize().await.expect("C_Finalize");
+    });
+}
+
+#[test]
+fn null_output_length_parameter_rpc_preserves_exact_provider_rv() {
+    let _guard = shim_state_test_guard();
+    let daemon = TestDaemon::start(MockAbi::host());
+
+    daemon.block_on(async {
+        let mut client = Pkcs11Client::connect(&daemon.endpoint).await.expect("connect client");
+        client.initialize().await.expect("C_Initialize");
+        let slot = client.get_slot_list(false).await.expect("C_GetSlotList")[0];
+        let session = client
+            .open_session(slot, CkSessionFlags(CkSessionFlags::SERIAL_SESSION))
+            .await
+            .expect("C_OpenSession");
+        let wrapping_key = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let key = client.create_object(session, &[]).await.expect("C_CreateObject");
+        let output_spec =
+            CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
+        let parameter_spec =
+            CkParameterRoundtripSpec { buffer_present: false, buffer_len: 0, value: None };
+        let mechanism = pkcs11_proxy_ng_types::CkMechanism {
+            mechanism_type: CkMechanismType::AES_ECB,
+            params: None,
+        };
+
+        let result = client
+            .parameter_output_exact(
+                session,
+                ParameterOutputFunction::WrapKeyAuthenticated,
+                &output_spec,
+                CkInBuf::Bytes(&[]),
+                CkInBuf::Bytes(b"aad"),
+                &[],
+                &parameter_spec,
+                0,
+                Some(&mechanism),
+                wrapping_key.0,
+                key.0,
+                None,
+            )
+            .await;
+
+        assert_eq!(result, Err(CkRv::ARGUMENTS_BAD));
 
         client.close_session(session).await.expect("C_CloseSession");
         client.finalize().await.expect("C_Finalize");
@@ -2295,6 +3245,33 @@ fn exact_encapsulate_key_too_small_buffer() {
     assert_eq!(out_len, 8, "required ciphertext length should be reported");
     // Buffer-too-small must NOT create a key — phKey should remain unchanged.
     assert_eq!(key_handle, CK_INVALID_HANDLE, "phKey must remain unchanged on buffer-too-small");
+}
+
+#[test]
+fn null_pul_len_encapsulate_key_preserves_output_and_handle_cells() {
+    let _guard = shim_state_test_guard();
+    let shim = ShimSession::new();
+    let public_key = create_object(shim.session);
+    let mut mechanism = generic_mechanism();
+    let mut output_sentinel = 0xA5;
+    let mut key_handle = CK_INVALID_HANDLE;
+
+    let rv = unsafe {
+        dispatch::general::c_encapsulate_key(
+            shim.session,
+            &mut mechanism,
+            public_key,
+            std::ptr::null_mut(),
+            0,
+            &mut output_sentinel,
+            std::ptr::null_mut(),
+            &mut key_handle,
+        )
+    };
+
+    assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    assert_eq!(output_sentinel, 0xA5);
+    assert_eq!(key_handle, CK_INVALID_HANDLE);
 }
 
 // =========================================================================

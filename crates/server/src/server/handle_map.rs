@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Opaque backend handle (never exposed to clients).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -14,6 +14,7 @@ pub struct HandleMap {
     next_id: u64,
     virtual_to_backend: HashMap<VirtualHandle, BackendHandle>,
     backend_to_virtual: HashMap<BackendHandle, VirtualHandle>,
+    suspended_virtual_to_backend: HashMap<VirtualHandle, BackendHandle>,
 }
 
 impl Default for HandleMap {
@@ -24,7 +25,12 @@ impl Default for HandleMap {
 
 impl HandleMap {
     pub fn new() -> Self {
-        Self { next_id: 1, virtual_to_backend: HashMap::new(), backend_to_virtual: HashMap::new() }
+        Self {
+            next_id: 1,
+            virtual_to_backend: HashMap::new(),
+            backend_to_virtual: HashMap::new(),
+            suspended_virtual_to_backend: HashMap::new(),
+        }
     }
 
     pub fn insert(&mut self, backend: BackendHandle) -> VirtualHandle {
@@ -49,21 +55,78 @@ impl HandleMap {
     }
 
     pub fn remove(&mut self, virt: VirtualHandle) -> Option<BackendHandle> {
-        if let Some(backend) = self.virtual_to_backend.remove(&virt) {
-            self.backend_to_virtual.remove(&backend);
+        let backend = self
+            .virtual_to_backend
+            .remove(&virt)
+            .or_else(|| self.suspended_virtual_to_backend.remove(&virt));
+        if let Some(backend) = backend {
+            // A suspended raw handle may already have been recycled and bound
+            // to a newer virtual handle.  Never delete that newer reverse map.
+            if self.backend_to_virtual.get(&backend) == Some(&virt) {
+                self.backend_to_virtual.remove(&backend);
+            }
             Some(backend)
         } else {
             None
         }
     }
 
+    /// Make `virt` temporarily unresolvable while retaining the expected raw
+    /// handle for close completion and teardown.  Detaching the reverse entry
+    /// allows a provider-recycled raw handle to receive a fresh virtual id.
+    pub fn suspend(&mut self, virt: VirtualHandle) -> Option<BackendHandle> {
+        let backend = self.virtual_to_backend.remove(&virt)?;
+        if self.backend_to_virtual.get(&backend) == Some(&virt) {
+            self.backend_to_virtual.remove(&backend);
+        }
+        self.suspended_virtual_to_backend.insert(virt, backend);
+        Some(backend)
+    }
+
+    pub fn suspended_backend(&self, virt: VirtualHandle) -> Option<BackendHandle> {
+        self.suspended_virtual_to_backend.get(&virt).copied()
+    }
+
+    /// Reactivate exactly the suspended mapping when the raw handle has not
+    /// meanwhile been rebound.  A stale close completion cannot steal an ABA
+    /// binding from a newer virtual handle.
+    pub fn reactivate_suspended(
+        &mut self,
+        virt: VirtualHandle,
+        expected_backend: BackendHandle,
+    ) -> bool {
+        if self.suspended_backend(virt) != Some(expected_backend) {
+            return false;
+        }
+        if self.backend_to_virtual.get(&expected_backend).is_some_and(|bound| *bound != virt) {
+            return false;
+        }
+        self.suspended_virtual_to_backend.remove(&virt);
+        self.virtual_to_backend.insert(virt, expected_backend);
+        self.backend_to_virtual.insert(expected_backend, virt);
+        true
+    }
+
     pub fn clear(&mut self) {
         self.virtual_to_backend.clear();
         self.backend_to_virtual.clear();
+        self.suspended_virtual_to_backend.clear();
     }
 
     pub fn virtual_handles(&self) -> impl Iterator<Item = VirtualHandle> + '_ {
         self.virtual_to_backend.keys().copied()
+    }
+
+    /// All raw handles retained by active or suspended entries, deduplicated
+    /// for context teardown when an ABA-recycled value appears in both maps.
+    pub fn backend_handles(&self) -> impl Iterator<Item = BackendHandle> + '_ {
+        let handles: HashSet<BackendHandle> = self
+            .virtual_to_backend
+            .values()
+            .chain(self.suspended_virtual_to_backend.values())
+            .copied()
+            .collect();
+        handles.into_iter()
     }
 }
 
@@ -172,5 +235,65 @@ mod tests {
         map.remove(h1);
         let h2 = map.insert(BackendHandle(200));
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn suspended_handle_is_unresolvable_and_recycled_backend_gets_a_new_virtual() {
+        let mut map = HandleMap::new();
+        let backend = BackendHandle(77);
+        let old = map.insert(backend);
+
+        assert_eq!(map.suspend(old), Some(backend));
+        assert_eq!(map.resolve(old), None);
+        assert_eq!(map.resolve_backend(backend), None);
+        assert_eq!(map.suspended_backend(old), Some(backend));
+
+        let new = map.insert(backend);
+        assert_ne!(new, old);
+        assert_eq!(map.resolve(new), Some(backend));
+        assert_eq!(map.resolve_backend(backend), Some(new));
+
+        assert_eq!(map.remove(old), Some(backend));
+        assert_eq!(map.resolve(new), Some(backend));
+        assert_eq!(map.resolve_backend(backend), Some(new));
+    }
+
+    #[test]
+    fn transient_old_completion_cannot_steal_recycled_backend_binding() {
+        let mut map = HandleMap::new();
+        let backend = BackendHandle(77);
+        let old = map.insert(backend);
+        assert_eq!(map.suspend(old), Some(backend));
+        let new = map.insert(backend);
+
+        assert!(!map.reactivate_suspended(old, backend));
+        assert_eq!(map.resolve(old), None);
+        assert_eq!(map.suspended_backend(old), Some(backend));
+        assert_eq!(map.resolve(new), Some(backend));
+        assert_eq!(map.resolve_backend(backend), Some(new));
+    }
+
+    #[test]
+    fn transient_completion_reactivates_suspended_mapping_when_backend_is_unbound() {
+        let mut map = HandleMap::new();
+        let backend = BackendHandle(77);
+        let old = map.insert(backend);
+        assert_eq!(map.suspend(old), Some(backend));
+
+        assert!(map.reactivate_suspended(old, backend));
+        assert_eq!(map.resolve(old), Some(backend));
+        assert_eq!(map.resolve_backend(backend), Some(old));
+        assert_eq!(map.suspended_backend(old), None);
+    }
+
+    #[test]
+    fn backend_handles_include_suspended_entries_without_duplicates() {
+        let mut map = HandleMap::new();
+        let backend = BackendHandle(77);
+        let old = map.insert(backend);
+        assert_eq!(map.suspend(old), Some(backend));
+        let _new = map.insert(backend);
+
+        assert_eq!(map.backend_handles().collect::<Vec<_>>(), vec![backend]);
     }
 }

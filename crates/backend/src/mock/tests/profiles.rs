@@ -36,7 +36,8 @@ fn official_mechanism_mock_advertises_provider_gap_mechanisms() {
 
 #[test]
 fn mechanism_bearing_workflows_reject_unadvertised_mechanisms() {
-    let output_spec = CkOutputBufferSpec { buffer_present: true, buffer_len: 64 };
+    let output_spec =
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 64, length_pointer_null: false };
     let param_spec = CkParameterRoundtripSpec { buffer_present: true, buffer_len: 16, value: None };
 
     let (backend, session, key, _, mechanism) = unsupported_mechanism_fixture();
