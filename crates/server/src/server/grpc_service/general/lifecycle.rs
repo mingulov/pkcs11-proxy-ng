@@ -44,7 +44,7 @@ pub(super) async fn finalize(
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let maybe_ctx = ctx_mgr.remove_context(&ctx_id).await;
+    let maybe_ctx = ctx_mgr.remove_context(&ctx_id);
     let ck_rv = match maybe_ctx {
         Some(mut ctx) => {
             let backend_sessions = ctx.teardown();

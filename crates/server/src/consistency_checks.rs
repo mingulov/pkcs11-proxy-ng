@@ -55,10 +55,17 @@ fn proto_source_paths() -> Vec<String> {
 fn grpc_handler_rpcs() -> Vec<String> {
     let src = include_str!("server/grpc_service/mod.rs");
     let mut handlers = Vec::new();
+    // Only methods inside the `impl Pkcs11Proxy for ...` trait block are RPC
+    // handlers. Inherent helpers on the service (e.g. `check_context_owner`)
+    // are also `async fn` but must not be counted as handlers.
+    let mut in_trait_impl = false;
 
     for line in src.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("async fn ") {
+        if trimmed.starts_with("impl Pkcs11Proxy for ") {
+            in_trait_impl = true;
+        }
+        if in_trait_impl && let Some(rest) = trimmed.strip_prefix("async fn ") {
             let name = rest.split('(').next().unwrap().trim();
             if name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
                 && !handlers.contains(&name.to_string())
@@ -424,6 +431,8 @@ fn adr_files_exist() {
         "ADR-0005-phase-1-authorization-model.md",
         "ADR-0006-32-64-bit-cross-platform-compatibility.md",
         "ADR-0007-backend-process-isolation.md",
+        "ADR-0008-cross-client-login-pin-verifier.md",
+        "ADR-0009-per-request-context-ownership.md",
     ];
     for name in &expected {
         let path = adr_dir.join(name);

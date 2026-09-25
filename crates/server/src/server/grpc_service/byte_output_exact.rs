@@ -5,18 +5,19 @@ use tonic::{Request, Response, Status};
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_proto::convert::output::byte_output_function_from_i32;
 use pkcs11_proxy_ng_types::{
-    ByteOutputFunction, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
+    ByteOutputFunction, CkInBuf, CkOutputBufferResult, CkOutputBufferSpec, CkResult, CkRv,
 };
 
 use super::super::context_manager::{ClientContextId, ContextManager};
 use super::service_utils::{
-    mechanism_output_to_proto, parse_mechanism, resolve_session, resolve_session_and_two_objects,
-    spawn_backend,
+    check_sanitize, input_from_wire, mechanism_output_to_proto, parse_mechanism, resolve_session,
+    resolve_session_and_two_objects, spawn_backend,
 };
 
 pub(super) async fn byte_output_exact(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::ByteOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ByteOutputExactResponse>, Status> {
     let req = request.into_inner();
@@ -52,6 +53,7 @@ pub(super) async fn byte_output_exact(
         .unwrap_or(CkOutputBufferSpec { buffer_present: false, buffer_len: 0 });
 
     let input_data = req.input_data;
+    let input_data_null_len = req.input_data_null_len;
 
     match function {
         // Shape: (session, mechanism, wrapping_key, key, spec) -> wrap_key_exact
@@ -119,10 +121,16 @@ pub(super) async fn byte_output_exact(
                 Err(error) => return Ok(Response::new(error_response(error))),
             };
 
+            // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
+            if let Err(rv) = check_sanitize(sanitize_inputs, input_data_null_len) {
+                return Ok(Response::new(error_response(rv)));
+            }
+
             let backend = backend_ref.clone();
             let (result, mechanism_out) = if function == ByteOutputFunction::Encrypt {
                 let result = spawn_backend(move || {
-                    backend.encrypt_exact_with_output(session, &input_data, &spec)
+                    let buf = input_from_wire(&input_data, input_data_null_len);
+                    backend.encrypt_exact_with_output(session, buf, &spec)
                 })
                 .await?;
                 match result {
@@ -131,7 +139,8 @@ pub(super) async fn byte_output_exact(
                 }
             } else {
                 let result = spawn_backend(move || {
-                    dispatch_session_data(function, &*backend, session, &input_data, &spec)
+                    let buf = input_from_wire(&input_data, input_data_null_len);
+                    dispatch_session_data(function, &*backend, session, buf, &spec)
                 })
                 .await?;
                 (result, None)
@@ -170,29 +179,29 @@ fn dispatch_session_data(
     function: ByteOutputFunction,
     backend: &dyn Pkcs11Backend,
     session: pkcs11_proxy_ng_types::CkSessionHandle,
-    data: &[u8],
+    buf: CkInBuf<'_>,
     spec: &CkOutputBufferSpec,
 ) -> pkcs11_proxy_ng_types::CkResult<pkcs11_proxy_ng_types::CkOutputBufferResult> {
     match function {
-        ByteOutputFunction::Sign => backend.sign_exact(session, data, spec),
-        ByteOutputFunction::SignRecover => backend.sign_recover_exact(session, data, spec),
-        ByteOutputFunction::VerifyRecover => backend.verify_recover_exact(session, data, spec),
-        ByteOutputFunction::Digest => backend.digest_exact(session, data, spec),
-        ByteOutputFunction::Encrypt => backend.encrypt_exact(session, data, spec),
-        ByteOutputFunction::EncryptUpdate => backend.encrypt_update_exact(session, data, spec),
-        ByteOutputFunction::Decrypt => backend.decrypt_exact(session, data, spec),
-        ByteOutputFunction::DecryptUpdate => backend.decrypt_update_exact(session, data, spec),
+        ByteOutputFunction::Sign => backend.sign_exact(session, buf, spec),
+        ByteOutputFunction::SignRecover => backend.sign_recover_exact(session, buf, spec),
+        ByteOutputFunction::VerifyRecover => backend.verify_recover_exact(session, buf, spec),
+        ByteOutputFunction::Digest => backend.digest_exact(session, buf, spec),
+        ByteOutputFunction::Encrypt => backend.encrypt_exact(session, buf, spec),
+        ByteOutputFunction::EncryptUpdate => backend.encrypt_update_exact(session, buf, spec),
+        ByteOutputFunction::Decrypt => backend.decrypt_exact(session, buf, spec),
+        ByteOutputFunction::DecryptUpdate => backend.decrypt_update_exact(session, buf, spec),
         ByteOutputFunction::DigestEncryptUpdate => {
-            backend.digest_encrypt_update_exact(session, data, spec)
+            backend.digest_encrypt_update_exact(session, buf, spec)
         }
         ByteOutputFunction::DecryptDigestUpdate => {
-            backend.decrypt_digest_update_exact(session, data, spec)
+            backend.decrypt_digest_update_exact(session, buf, spec)
         }
         ByteOutputFunction::SignEncryptUpdate => {
-            backend.sign_encrypt_update_exact(session, data, spec)
+            backend.sign_encrypt_update_exact(session, buf, spec)
         }
         ByteOutputFunction::DecryptVerifyUpdate => {
-            backend.decrypt_verify_update_exact(session, data, spec)
+            backend.decrypt_verify_update_exact(session, buf, spec)
         }
         // See `dispatch_session_only` for the rationale: conservative
         // CKR_FUNCTION_NOT_SUPPORTED instead of a panic across gRPC.
@@ -215,3 +224,401 @@ fn result_to_proto(
 
 // `mechanism_output_to_proto` has moved to `service_utils` so the
 // simple Encrypt/Decrypt handlers can share the same conversion.
+
+#[cfg(test)]
+mod sanitize_inputs_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use pkcs11_proxy_ng_backend::{MockBackend, Pkcs11Backend};
+    use pkcs11_proxy_ng_types::*;
+    use tonic::Request;
+
+    use super::super::digest_cipher::{decrypt_init, encrypt_init};
+    use super::byte_output_exact;
+    use crate::server::context_manager::{ClientContextId, ContextManager};
+    use crate::server::grpc_service::{Pkcs11ProxyService, session::open_session};
+
+    // -----------------------------------------------------------------------
+    // Fixture helpers
+    // -----------------------------------------------------------------------
+
+    async fn setup_mock_session() -> (Arc<ContextManager>, Arc<MockBackend>, ClientContextId, u64) {
+        let mock = Arc::new(MockBackend::default_test());
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(CkSlotId(0)).await;
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let virtual_slot = ctx_mgr.virtual_slots().await[0];
+
+        let resp = open_session(
+            &ctx_mgr,
+            &backend,
+            Request::new(pkcs11_proxy_ng_proto::OpenSessionRequest {
+                client_context_id: ctx_id.0.clone(),
+                slot_id: virtual_slot.0,
+                flags: CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(resp.ck_rv, CkRv::OK.0, "setup: open_session failed");
+        (ctx_mgr, mock, ctx_id, resp.session_handle)
+    }
+
+    /// Do a decrypt_init so the session has an active decrypt operation.
+    async fn setup_decrypt(
+        ctx_mgr: &Arc<ContextManager>,
+        backend: &Arc<dyn Pkcs11Backend>,
+        ctx_id: &ClientContextId,
+        session: u64,
+    ) {
+        // Generate a key first so we have a valid key handle.
+        let key_resp = crate::server::grpc_service::key_ops::generate_key(
+            ctx_mgr,
+            backend,
+            false,
+            Request::new(pkcs11_proxy_ng_proto::GenerateKeyRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                    mechanism_type: CkMechanismType::RSA_PKCS_KEY_PAIR_GEN.0,
+                    params: None,
+                }),
+                template: vec![],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        // Ignore the RV — just init decrypt with key_handle=0 (mock ignores key validity for
+        // decrypt_init) and any mechanism that the mock supports.
+        let _ = decrypt_init(
+            ctx_mgr,
+            backend,
+            false,
+            Request::new(pkcs11_proxy_ng_proto::DecryptInitRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                key_handle: key_resp.key_handle,
+                mechanism: Some(pkcs11_proxy_ng_proto::Mechanism {
+                    mechanism_type: CkMechanismType::RSA_PKCS.0,
+                    params: None,
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    fn make_service_sanitize_off(
+        ctx_mgr: Arc<ContextManager>,
+        backend: Arc<dyn Pkcs11Backend>,
+    ) -> Pkcs11ProxyService {
+        Pkcs11ProxyService::insecure_for_tests(ctx_mgr, backend)
+    }
+
+    fn make_service_sanitize_on(
+        ctx_mgr: Arc<ContextManager>,
+        backend: Arc<dyn Pkcs11Backend>,
+    ) -> Pkcs11ProxyService {
+        Pkcs11ProxyService::insecure_for_tests(ctx_mgr, backend).with_sanitize_inputs()
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1: sanitize ON + NULL data pointer (len>0) → CKR_ARGUMENTS_BAD,
+    //         backend NOT called for the data operation.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn sanitize_on_null_input_rejected_before_backend() {
+        let (ctx_mgr, mock, ctx_id, session) = setup_mock_session().await;
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        setup_decrypt(&ctx_mgr, &backend, &ctx_id, session).await;
+
+        let before = mock.data_op_call_count();
+        let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
+
+        let resp = byte_output_exact(
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
+            Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,
+                // NULL pointer with len=16: spec-invalid input
+                input_data: vec![],
+                input_data_null_len: Some(16),
+                output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
+                    buffer_present: true,
+                    buffer_len: 64,
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        let result = resp.result.expect("result must be present");
+        assert_eq!(
+            result.ck_rv,
+            CkRv::ARGUMENTS_BAD.0,
+            "sanitize ON: NULL data with len>0 must return CKR_ARGUMENTS_BAD"
+        );
+        assert_eq!(
+            mock.data_op_call_count(),
+            before,
+            "sanitize ON: backend must NOT be called for the data operation"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2: sanitize OFF (default) + NULL data pointer → reaches backend
+    //         (backend itself returns ARGUMENTS_BAD as a strict token, so we
+    //         confirm by checking that the backend call count increased).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn sanitize_off_null_input_reaches_backend() {
+        let (ctx_mgr, mock, ctx_id, session) = setup_mock_session().await;
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        setup_decrypt(&ctx_mgr, &backend, &ctx_id, session).await;
+
+        let before = mock.data_op_call_count();
+        let service = make_service_sanitize_off(ctx_mgr.clone(), backend.clone());
+
+        let _resp = byte_output_exact(
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
+            Request::new(pkcs11_proxy_ng_proto::ByteOutputExactRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                function: pkcs11_proxy_ng_proto::ByteOutputFunction::Decrypt as i32,
+                input_data: vec![],
+                input_data_null_len: Some(16),
+                output_spec: Some(pkcs11_proxy_ng_proto::OutputBufferSpec {
+                    buffer_present: true,
+                    buffer_len: 64,
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            mock.data_op_call_count() > before,
+            "sanitize OFF: backend must be called even for NULL input (transparent forwarding)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3a: sanitize ON + NULL mechanism on encrypt_init → ARGUMENTS_BAD
+    //          without dispatching to backend.
+    // Test 3b: sanitize OFF + NULL mechanism on encrypt_init → forwarded
+    //          (existing Scope-1 behavior: encrypt_init_cancel is called).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn sanitize_on_null_mechanism_init_rejected() {
+        let (ctx_mgr, mock, ctx_id, session) = setup_mock_session().await;
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let before = mock.data_op_call_count();
+
+        let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
+
+        let resp = encrypt_init(
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
+            Request::new(pkcs11_proxy_ng_proto::EncryptInitRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                key_handle: 0,
+                mechanism: None, // NULL mechanism
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::ARGUMENTS_BAD.0,
+            "sanitize ON: NULL mechanism on encrypt_init must return CKR_ARGUMENTS_BAD"
+        );
+        // Primary evidence: ARGUMENTS_BAD confirms the init cancel was never dispatched.
+        // Supplementary: data_op_call_count is unchanged (no data op reached the backend).
+        assert_eq!(
+            mock.data_op_call_count(),
+            before,
+            "sanitize ON: no data op should have been called"
+        );
+    }
+
+    #[tokio::test]
+    async fn sanitize_off_null_mechanism_init_forwarded() {
+        let (ctx_mgr, _mock, ctx_id, session) = setup_mock_session().await;
+        let backend: Arc<dyn Pkcs11Backend> = _mock.clone();
+
+        let service = make_service_sanitize_off(ctx_mgr.clone(), backend.clone());
+
+        let resp = encrypt_init(
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
+            Request::new(pkcs11_proxy_ng_proto::EncryptInitRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                key_handle: 0,
+                mechanism: None, // NULL mechanism — forwarded as cancel
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        // The mock backend returns OK on encrypt_init_cancel.
+        assert_ne!(
+            resp.ck_rv,
+            CkRv::ARGUMENTS_BAD.0,
+            "sanitize OFF: NULL mechanism must be forwarded (not rejected with ARGUMENTS_BAD)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4: sanitize ON rejects NULL data on sign handler (per-op, not ByteOutputExact).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn sanitize_on_null_data_sign_rejected() {
+        let (ctx_mgr, mock, ctx_id, session) = setup_mock_session().await;
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let before = mock.data_op_call_count();
+        let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
+
+        let resp = super::super::sign_verify::sign(
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
+            Request::new(pkcs11_proxy_ng_proto::SignRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                data: vec![],
+                data_null_len: Some(16),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::ARGUMENTS_BAD.0,
+            "sanitize ON: NULL data on sign must return CKR_ARGUMENTS_BAD"
+        );
+        assert_eq!(mock.data_op_call_count(), before, "sanitize ON: backend must not be called");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5: sanitize ON rejects NULL signature (SECOND field) on verify.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn sanitize_on_null_signature_verify_rejected() {
+        let (ctx_mgr, mock, ctx_id, session) = setup_mock_session().await;
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let before = mock.data_op_call_count();
+        let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
+
+        // data is valid (non-null), signature_null_len makes the second field NULL
+        let resp = super::super::sign_verify::verify(
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
+            Request::new(pkcs11_proxy_ng_proto::VerifyRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                data: vec![0x01, 0x02, 0x03],
+                data_null_len: None, // valid data
+                signature: vec![],
+                signature_null_len: Some(16), // NULL signature
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::ARGUMENTS_BAD.0,
+            "sanitize ON: NULL signature (2nd field) on verify must return CKR_ARGUMENTS_BAD"
+        );
+        assert_eq!(mock.data_op_call_count(), before, "sanitize ON: backend must not be called");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: sanitize ON rejects NULL mechanism on sign_init.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn sanitize_on_null_mechanism_sign_init_rejected() {
+        let (ctx_mgr, mock, ctx_id, session) = setup_mock_session().await;
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let before = mock.data_op_call_count();
+        let service = make_service_sanitize_on(ctx_mgr.clone(), backend.clone());
+
+        let resp = super::super::sign_verify::sign_init(
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
+            Request::new(pkcs11_proxy_ng_proto::SignInitRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                key_handle: 0,
+                mechanism: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::ARGUMENTS_BAD.0,
+            "sanitize ON: NULL mechanism on sign_init must return CKR_ARGUMENTS_BAD"
+        );
+        assert_eq!(mock.data_op_call_count(), before, "sanitize ON: backend must not be called");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: sanitize OFF forwards NULL mechanism on sign_init to backend.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn sanitize_off_null_mechanism_sign_init_forwarded() {
+        let (ctx_mgr, _mock, ctx_id, session) = setup_mock_session().await;
+        let backend: Arc<dyn Pkcs11Backend> = _mock.clone();
+        let service = make_service_sanitize_off(ctx_mgr.clone(), backend.clone());
+
+        let resp = super::super::sign_verify::sign_init(
+            &service.context_manager,
+            &service.backend,
+            service.sanitize_inputs,
+            Request::new(pkcs11_proxy_ng_proto::SignInitRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session,
+                key_handle: 0,
+                mechanism: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_ne!(
+            resp.ck_rv,
+            CkRv::ARGUMENTS_BAD.0,
+            "sanitize OFF: NULL mechanism must be forwarded (not rejected)"
+        );
+    }
+}

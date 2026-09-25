@@ -125,8 +125,10 @@ async fn encapsulate_decapsulate_round_trip() {
     assert_ne!(enc_key, CkObjectHandle(0), "encapsulated key handle should be nonzero");
 
     // Decapsulate
-    let dec_key =
-        client.decapsulate_key(session, &test_mechanism(), key, &[], &capsule).await.unwrap();
+    let dec_key = client
+        .decapsulate_key(session, &test_mechanism(), key, &[], CkInBuf::Bytes(&capsule))
+        .await
+        .unwrap();
     assert_ne!(dec_key, CkObjectHandle(0), "decapsulated key handle should be nonzero");
 }
 
@@ -148,8 +150,10 @@ async fn message_encrypt_decrypt_round_trip() {
     client.message_encrypt_init(session, Some(&test_mechanism()), None, key).await.unwrap();
 
     // Encrypt one message
-    let (param_out, ciphertext) =
-        client.encrypt_message(session, parameter, &[], plaintext).await.unwrap();
+    let (param_out, ciphertext) = client
+        .encrypt_message(session, parameter, CkInBuf::Bytes(&[]), CkInBuf::Bytes(plaintext))
+        .await
+        .unwrap();
     assert_ne!(ciphertext, plaintext.to_vec(), "ciphertext should differ from plaintext");
 
     // Finalize encrypt
@@ -159,8 +163,10 @@ async fn message_encrypt_decrypt_round_trip() {
     client.message_decrypt_init(session, Some(&test_mechanism()), None, key).await.unwrap();
 
     // Decrypt
-    let (_param_out2, recovered) =
-        client.decrypt_message(session, &param_out, &[], &ciphertext).await.unwrap();
+    let (_param_out2, recovered) = client
+        .decrypt_message(session, &param_out, CkInBuf::Bytes(&[]), CkInBuf::Bytes(&ciphertext))
+        .await
+        .unwrap();
     assert_eq!(recovered, plaintext.to_vec(), "decrypted plaintext should match original");
 
     // Finalize decrypt
@@ -181,29 +187,36 @@ async fn message_encrypt_decrypt_begin_next_round_trip() {
     let part2 = b"message begin-next";
 
     client.message_encrypt_init(session, Some(&mechanism), None, key).await.unwrap();
-    let encrypt_parameter = client.encrypt_message_begin(session, parameter, aad).await.unwrap();
+    let encrypt_parameter =
+        client.encrypt_message_begin(session, parameter, CkInBuf::Bytes(aad)).await.unwrap();
     assert_eq!(encrypt_parameter, parameter);
 
-    let (encrypt_parameter, ciphertext1) =
-        client.encrypt_message_next(session, &encrypt_parameter, part1, CkFlags(0)).await.unwrap();
-    let (encrypt_parameter, ciphertext2) =
-        client.encrypt_message_next(session, &encrypt_parameter, part2, CkFlags(0)).await.unwrap();
+    let (encrypt_parameter, ciphertext1) = client
+        .encrypt_message_next(session, &encrypt_parameter, CkInBuf::Bytes(part1), CkFlags(0))
+        .await
+        .unwrap();
+    let (encrypt_parameter, ciphertext2) = client
+        .encrypt_message_next(session, &encrypt_parameter, CkInBuf::Bytes(part2), CkFlags(0))
+        .await
+        .unwrap();
     assert_eq!(encrypt_parameter, parameter);
     assert_ne!(ciphertext1, part1);
     assert_ne!(ciphertext2, part2);
     client.message_encrypt_final(session).await.unwrap();
 
     client.message_decrypt_init(session, Some(&mechanism), None, key).await.unwrap();
-    let decrypt_parameter =
-        client.decrypt_message_begin(session, &encrypt_parameter, aad).await.unwrap();
+    let decrypt_parameter = client
+        .decrypt_message_begin(session, &encrypt_parameter, CkInBuf::Bytes(aad))
+        .await
+        .unwrap();
     assert_eq!(decrypt_parameter, parameter);
 
     let (decrypt_parameter, recovered1) = client
-        .decrypt_message_next(session, &decrypt_parameter, &ciphertext1, CkFlags(0))
+        .decrypt_message_next(session, &decrypt_parameter, CkInBuf::Bytes(&ciphertext1), CkFlags(0))
         .await
         .unwrap();
     let (decrypt_parameter, recovered2) = client
-        .decrypt_message_next(session, &decrypt_parameter, &ciphertext2, CkFlags(0))
+        .decrypt_message_next(session, &decrypt_parameter, CkInBuf::Bytes(&ciphertext2), CkFlags(0))
         .await
         .unwrap();
     assert_eq!(decrypt_parameter, parameter);
@@ -453,7 +466,7 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
             session,
             ByteOutputFunction::Encrypt,
             &size_spec,
-            plaintext,
+            CkInBuf::Bytes(plaintext),
             None,
             0,
             0,
@@ -471,7 +484,7 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
             session,
             ByteOutputFunction::Encrypt,
             &data_spec,
-            plaintext,
+            CkInBuf::Bytes(plaintext),
             None,
             0,
             0,
@@ -527,7 +540,7 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
             session,
             ByteOutputFunction::WrapKey,
             &size_spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             Some(&mechanism),
             wrapping_key.0,
             key.0,
@@ -545,7 +558,7 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
             session,
             ByteOutputFunction::WrapKey,
             &data_spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             Some(&mechanism),
             wrapping_key.0,
             key.0,
@@ -586,7 +599,8 @@ async fn message_sign_verify_round_trip() {
     client.message_sign_init(session, Some(&test_mechanism()), key).await.unwrap();
 
     // Sign message
-    let (param_out, signature) = client.sign_message(session, parameter, data).await.unwrap();
+    let (param_out, signature) =
+        client.sign_message(session, parameter, CkInBuf::Bytes(data)).await.unwrap();
     assert!(!signature.is_empty(), "signature should not be empty");
 
     // Finalize sign
@@ -596,7 +610,9 @@ async fn message_sign_verify_round_trip() {
     client.message_verify_init(session, Some(&test_mechanism()), key).await.unwrap();
 
     // Verify message
-    let result = client.verify_message(session, &param_out, data, &signature).await;
+    let result = client
+        .verify_message(session, &param_out, CkInBuf::Bytes(data), CkInBuf::Bytes(&signature))
+        .await;
     assert!(result.is_ok(), "verify_message should succeed for matching signature");
 
     // Finalize verify
@@ -619,13 +635,17 @@ async fn message_sign_verify_begin_next_round_trip() {
     let sign_parameter = client.sign_message_begin(session, parameter).await.unwrap();
     assert_eq!(sign_parameter, parameter);
 
-    let (sign_parameter, nonfinal_signature) =
-        client.sign_message_next(session, &sign_parameter, nonfinal_data, false).await.unwrap();
+    let (sign_parameter, nonfinal_signature) = client
+        .sign_message_next(session, &sign_parameter, CkInBuf::Bytes(nonfinal_data), false)
+        .await
+        .unwrap();
     assert_eq!(sign_parameter, parameter);
     assert!(nonfinal_signature.is_empty());
 
-    let (sign_parameter, signature) =
-        client.sign_message_next(session, &sign_parameter, final_data, true).await.unwrap();
+    let (sign_parameter, signature) = client
+        .sign_message_next(session, &sign_parameter, CkInBuf::Bytes(final_data), true)
+        .await
+        .unwrap();
     let expected_signature: Vec<u8> = final_data.iter().rev().copied().collect();
     assert_eq!(sign_parameter, parameter);
     assert_eq!(signature, expected_signature);
@@ -633,9 +653,24 @@ async fn message_sign_verify_begin_next_round_trip() {
 
     client.message_verify_init(session, Some(&mechanism), key).await.unwrap();
     client.verify_message_begin(session, &sign_parameter).await.unwrap();
-    client.verify_message_next(session, &sign_parameter, nonfinal_data, false, &[]).await.unwrap();
     client
-        .verify_message_next(session, &sign_parameter, final_data, true, &signature)
+        .verify_message_next(
+            session,
+            &sign_parameter,
+            CkInBuf::Bytes(nonfinal_data),
+            false,
+            CkInBuf::Bytes(&[]),
+        )
+        .await
+        .unwrap();
+    client
+        .verify_message_next(
+            session,
+            &sign_parameter,
+            CkInBuf::Bytes(final_data),
+            true,
+            CkInBuf::Bytes(&signature),
+        )
         .await
         .unwrap();
     client.message_verify_final(session).await.unwrap();
@@ -659,10 +694,13 @@ async fn verify_signature_round_trip() {
     let signature: Vec<u8> = data.iter().rev().copied().collect(); // "fedcba"
 
     // Init with signature
-    client.verify_signature_init(session, Some(&test_mechanism()), key, &signature).await.unwrap();
+    client
+        .verify_signature_init(session, Some(&test_mechanism()), key, CkInBuf::Bytes(&signature))
+        .await
+        .unwrap();
 
     // Single-part verify: data should match signature reversed
-    let result = client.verify_signature(session, data).await;
+    let result = client.verify_signature(session, CkInBuf::Bytes(data)).await;
     assert!(result.is_ok(), "verify_signature should succeed when data matches");
 }
 
@@ -760,7 +798,13 @@ async fn wrap_unwrap_key_authenticated_round_trip() {
 
     // Wrap
     let (wrapped_key, mech_param_out) = client
-        .wrap_key_authenticated(session, &test_mechanism(), wrapping_key, target_key, &[])
+        .wrap_key_authenticated(
+            session,
+            &test_mechanism(),
+            wrapping_key,
+            target_key,
+            CkInBuf::Bytes(&[]),
+        )
         .await
         .unwrap();
     assert_eq!(wrapped_key, vec![0xBB; 16], "wrapped_key should be synthetic 0xBB bytes");
@@ -768,7 +812,14 @@ async fn wrap_unwrap_key_authenticated_round_trip() {
 
     // Unwrap
     let (new_key, mech_param_out2) = client
-        .unwrap_key_authenticated(session, &test_mechanism(), wrapping_key, &wrapped_key, &[], &[])
+        .unwrap_key_authenticated(
+            session,
+            &test_mechanism(),
+            wrapping_key,
+            CkInBuf::Bytes(&wrapped_key),
+            &[],
+            CkInBuf::Bytes(&[]),
+        )
         .await
         .unwrap();
     assert_ne!(new_key, CkObjectHandle(0), "unwrapped key handle should be nonzero");

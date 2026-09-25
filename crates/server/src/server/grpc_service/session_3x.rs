@@ -20,6 +20,7 @@ use super::service_utils::{resolve_session, spawn_backend};
 pub(super) async fn login_user(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::LoginUserRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::LoginUserResponse>, Status> {
     let req = request.into_inner();
@@ -45,7 +46,9 @@ pub(super) async fn login_user(
     // PIN bytes are zeroized when the closure drops.
     // DO NOT log pin or username at any tracing level.
     let pin = Zeroizing::new(req.pin);
-    let username = req.username;
+    // Usernames can be sensitive account identifiers tied to the PIN
+    // (build.rs flags LoginUserRequest.username secret-bearing); wipe on drop.
+    let username = Zeroizing::new(req.username);
     let backend = backend_ref.clone();
     let result =
         spawn_backend(move || backend.login_user(session, user_type, &username, &pin)).await?;
@@ -67,6 +70,7 @@ pub(super) async fn login_user(
 pub(super) async fn session_cancel(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::SessionCancelRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SessionCancelResponse>, Status> {
     let req = request.into_inner();
@@ -102,6 +106,7 @@ pub(super) async fn session_cancel(
 pub(super) async fn get_session_validation_flags(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GetSessionValidationFlagsRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GetSessionValidationFlagsResponse>, Status> {
     let req = request.into_inner();

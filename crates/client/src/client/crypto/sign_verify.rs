@@ -36,17 +36,24 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             data: data.to_vec(),
+            data_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.sign(req), true, resp => resp.signature)
     }
 
-    pub async fn sign_update(&mut self, session: CkSessionHandle, part: &[u8]) -> CkResult<()> {
+    pub async fn sign_update(
+        &mut self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::SignUpdateRequest {
+        let mut req = pkcs11_proxy_ng_proto::SignUpdateRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            part: part.to_vec(),
+            part: Vec::new(),
+            part_null_len: None,
         };
+        Self::fill_input(part, &mut req.part, &mut req.part_null_len);
         pkcs11_unary_ok!(self.grpc.sign_update(req), true)
     }
 
@@ -96,6 +103,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             data: data.to_vec(),
+            data_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.sign_recover(req), true, resp => resp.signature)
     }
@@ -137,6 +145,7 @@ impl Pkcs11Client {
             client_context_id: ctx,
             session_handle: session.0,
             signature: signature.to_vec(),
+            signature_null_len: None,
         };
         pkcs11_unary_map!(self.grpc.verify_recover(req), true, resp => resp.data)
     }
@@ -171,40 +180,52 @@ impl Pkcs11Client {
     pub async fn verify(
         &mut self,
         session: CkSessionHandle,
-        data: &[u8],
-        signature: &[u8],
+        data: CkInBuf<'_>,
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::VerifyRequest {
+        let mut req = pkcs11_proxy_ng_proto::VerifyRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            data: data.to_vec(),
-            signature: signature.to_vec(),
+            data: Vec::new(),
+            signature: Vec::new(),
+            data_null_len: None,
+            signature_null_len: None,
         };
+        Self::fill_input(data, &mut req.data, &mut req.data_null_len);
+        Self::fill_input(signature, &mut req.signature, &mut req.signature_null_len);
         pkcs11_unary_ok!(self.grpc.verify(req), true)
     }
 
-    pub async fn verify_update(&mut self, session: CkSessionHandle, part: &[u8]) -> CkResult<()> {
+    pub async fn verify_update(
+        &mut self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::VerifyUpdateRequest {
+        let mut req = pkcs11_proxy_ng_proto::VerifyUpdateRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            part: part.to_vec(),
+            part: Vec::new(),
+            part_null_len: None,
         };
+        Self::fill_input(part, &mut req.part, &mut req.part_null_len);
         pkcs11_unary_ok!(self.grpc.verify_update(req), true)
     }
 
     pub async fn verify_final(
         &mut self,
         session: CkSessionHandle,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
-        let req = pkcs11_proxy_ng_proto::VerifyFinalRequest {
+        let mut req = pkcs11_proxy_ng_proto::VerifyFinalRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            signature: signature.to_vec(),
+            signature: Vec::new(),
+            signature_null_len: None,
         };
+        Self::fill_input(signature, &mut req.signature, &mut req.signature_null_len);
         pkcs11_unary_ok!(self.grpc.verify_final(req), true)
     }
 }

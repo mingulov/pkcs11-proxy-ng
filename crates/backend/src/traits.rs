@@ -1,4 +1,4 @@
-use pkcs11_proxy_ng_types::*;
+use pkcs11_proxy_ng_types::{CkInBuf, *};
 
 /// Structured `C_DeriveKey` result for mechanisms that can mutate caller-owned
 /// mechanism parameters even when the PKCS#11 return value is not `CKR_OK`.
@@ -112,21 +112,26 @@ pub trait Pkcs11Backend: Send + Sync {
     fn sign_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn sign(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>>;
-    fn sign_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()>;
+    fn sign(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>>;
+    fn sign_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<()>;
     fn sign_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>>;
 
-    fn digest_encrypt_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<Vec<u8>>;
+    fn digest_encrypt_update(
+        &self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<Vec<u8>>;
     fn decrypt_digest_update(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>>;
-    fn sign_encrypt_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<Vec<u8>>;
+    fn sign_encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>)
+    -> CkResult<Vec<u8>>;
     fn decrypt_verify_update(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>>;
 
     fn sign_recover_init(
@@ -138,7 +143,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn sign_recover_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn sign_recover(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>>;
+    fn sign_recover(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>>;
 
     fn verify_recover_init(
         &self,
@@ -149,7 +154,8 @@ pub trait Pkcs11Backend: Send + Sync {
     fn verify_recover_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn verify_recover(&self, session: CkSessionHandle, signature: &[u8]) -> CkResult<Vec<u8>>;
+    fn verify_recover(&self, session: CkSessionHandle, signature: CkInBuf<'_>)
+    -> CkResult<Vec<u8>>;
 
     fn verify_init(
         &self,
@@ -160,9 +166,14 @@ pub trait Pkcs11Backend: Send + Sync {
     fn verify_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn verify(&self, session: CkSessionHandle, data: &[u8], signature: &[u8]) -> CkResult<()>;
-    fn verify_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()>;
-    fn verify_final(&self, session: CkSessionHandle, signature: &[u8]) -> CkResult<()>;
+    fn verify(
+        &self,
+        session: CkSessionHandle,
+        data: CkInBuf<'_>,
+        signature: CkInBuf<'_>,
+    ) -> CkResult<()>;
+    fn verify_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<()>;
+    fn verify_final(&self, session: CkSessionHandle, signature: CkInBuf<'_>) -> CkResult<()>;
 
     /// Returns `(public_handle, private_handle)` — in that order, matching
     /// the pub_template / priv_template argument ordering.
@@ -190,8 +201,8 @@ pub trait Pkcs11Backend: Send + Sync {
     fn digest_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn digest(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>>;
-    fn digest_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()>;
+    fn digest(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>>;
+    fn digest_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<()>;
     fn digest_key(&self, session: CkSessionHandle, key: CkObjectHandle) -> CkResult<()>;
     fn digest_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>>;
 
@@ -204,8 +215,8 @@ pub trait Pkcs11Backend: Send + Sync {
     fn encrypt_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn encrypt(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>>;
-    fn encrypt_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<Vec<u8>>;
+    fn encrypt(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>>;
+    fn encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<Vec<u8>>;
     fn encrypt_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>>;
 
     fn decrypt_init(
@@ -217,8 +228,12 @@ pub trait Pkcs11Backend: Send + Sync {
     fn decrypt_init_cancel(&self, _session: CkSessionHandle) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
-    fn decrypt(&self, session: CkSessionHandle, encrypted_data: &[u8]) -> CkResult<Vec<u8>>;
-    fn decrypt_update(&self, session: CkSessionHandle, encrypted_part: &[u8]) -> CkResult<Vec<u8>>;
+    fn decrypt(&self, session: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<Vec<u8>>;
+    fn decrypt_update(
+        &self,
+        session: CkSessionHandle,
+        encrypted_part: CkInBuf<'_>,
+    ) -> CkResult<Vec<u8>>;
     fn decrypt_final(&self, session: CkSessionHandle) -> CkResult<Vec<u8>>;
 
     fn derive_key(
@@ -273,7 +288,7 @@ pub trait Pkcs11Backend: Send + Sync {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
-        wrapped_key: &[u8],
+        wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle>;
     fn generate_key(
@@ -310,11 +325,11 @@ pub trait Pkcs11Backend: Send + Sync {
     fn set_operation_state(
         &self,
         session: CkSessionHandle,
-        state: &[u8],
+        state: CkInBuf<'_>,
         enc_key: CkObjectHandle,
         auth_key: CkObjectHandle,
     ) -> CkResult<()>;
-    fn seed_random(&self, session: CkSessionHandle, seed: &[u8]) -> CkResult<()>;
+    fn seed_random(&self, session: CkSessionHandle, seed: CkInBuf<'_>) -> CkResult<()>;
     fn generate_random(&self, session: CkSessionHandle, len: u32) -> CkResult<Vec<u8>>;
 
     // --- Exact byte-output methods (Track B) ---
@@ -325,7 +340,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn sign_exact(
         &self,
         _session: CkSessionHandle,
-        _data: &[u8],
+        _data: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -334,7 +349,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn sign_recover_exact(
         &self,
         _session: CkSessionHandle,
-        _data: &[u8],
+        _data: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -343,7 +358,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn verify_recover_exact(
         &self,
         _session: CkSessionHandle,
-        _signature: &[u8],
+        _signature: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -352,7 +367,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn digest_exact(
         &self,
         _session: CkSessionHandle,
-        _data: &[u8],
+        _data: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -361,7 +376,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn encrypt_exact(
         &self,
         _session: CkSessionHandle,
-        _data: &[u8],
+        _data: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -370,7 +385,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn encrypt_exact_with_output(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)> {
         self.encrypt_exact(session, data, spec).map(|result| (result, None))
@@ -379,7 +394,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn encrypt_update_exact(
         &self,
         _session: CkSessionHandle,
-        _part: &[u8],
+        _part: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -388,7 +403,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn decrypt_exact(
         &self,
         _session: CkSessionHandle,
-        _encrypted_data: &[u8],
+        _encrypted_data: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -397,7 +412,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn decrypt_update_exact(
         &self,
         _session: CkSessionHandle,
-        _encrypted_part: &[u8],
+        _encrypted_part: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -406,7 +421,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn digest_encrypt_update_exact(
         &self,
         _session: CkSessionHandle,
-        _part: &[u8],
+        _part: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -415,7 +430,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn decrypt_digest_update_exact(
         &self,
         _session: CkSessionHandle,
-        _encrypted_part: &[u8],
+        _encrypted_part: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -424,7 +439,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn sign_encrypt_update_exact(
         &self,
         _session: CkSessionHandle,
-        _part: &[u8],
+        _part: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -433,7 +448,7 @@ pub trait Pkcs11Backend: Send + Sync {
     fn decrypt_verify_update_exact(
         &self,
         _session: CkSessionHandle,
-        _encrypted_part: &[u8],
+        _encrypted_part: CkInBuf<'_>,
         _spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -519,8 +534,8 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &[u8],
-        _aad: &[u8],
-        _plaintext: &[u8],
+        _aad: CkInBuf<'_>,
+        _plaintext: CkInBuf<'_>,
         _output_spec: &CkOutputBufferSpec,
         _param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -531,8 +546,8 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &[u8],
-        _aad: &[u8],
-        _ciphertext: &[u8],
+        _aad: CkInBuf<'_>,
+        _ciphertext: CkInBuf<'_>,
         _output_spec: &CkOutputBufferSpec,
         _param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -543,7 +558,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &[u8],
-        _data: &[u8],
+        _data: CkInBuf<'_>,
         _output_spec: &CkOutputBufferSpec,
         _param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -554,7 +569,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &[u8],
-        _plaintext_part: &[u8],
+        _plaintext_part: CkInBuf<'_>,
         _flags: CkFlags,
         _output_spec: &CkOutputBufferSpec,
         _param_out_spec: &CkParameterRoundtripSpec,
@@ -566,7 +581,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &[u8],
-        _ciphertext_part: &[u8],
+        _ciphertext_part: CkInBuf<'_>,
         _flags: CkFlags,
         _output_spec: &CkOutputBufferSpec,
         _param_out_spec: &CkParameterRoundtripSpec,
@@ -578,7 +593,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &[u8],
-        _data_part: &[u8],
+        _data_part: CkInBuf<'_>,
         _output_spec: &CkOutputBufferSpec,
         _param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -593,8 +608,8 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        _aad: &[u8],
-        _plaintext: &[u8],
+        _aad: CkInBuf<'_>,
+        _plaintext: CkInBuf<'_>,
         _output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
         CkOutputBufferResult,
@@ -607,8 +622,8 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        _aad: &[u8],
-        _ciphertext: &[u8],
+        _aad: CkInBuf<'_>,
+        _ciphertext: CkInBuf<'_>,
         _output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
         CkOutputBufferResult,
@@ -621,7 +636,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        _data: &[u8],
+        _data: CkInBuf<'_>,
         _output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
         CkOutputBufferResult,
@@ -634,7 +649,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        _plaintext_part: &[u8],
+        _plaintext_part: CkInBuf<'_>,
         _flags: CkFlags,
         _output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
@@ -648,7 +663,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        _ciphertext_part: &[u8],
+        _ciphertext_part: CkInBuf<'_>,
         _flags: CkFlags,
         _output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
@@ -662,7 +677,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        _data_part: &[u8],
+        _data_part: CkInBuf<'_>,
         _output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
         CkOutputBufferResult,
@@ -677,7 +692,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _mechanism: &CkMechanism,
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
-        _aad: &[u8],
+        _aad: CkInBuf<'_>,
         _output_spec: &CkOutputBufferSpec,
         _param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -749,7 +764,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _mechanism: &CkMechanism,
         _private_key: CkObjectHandle,
         _template: &[CkAttribute],
-        _ciphertext: &[u8],
+        _ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -770,8 +785,8 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &mut [u8],
-        _aad: &[u8],
-        _plaintext: &[u8],
+        _aad: CkInBuf<'_>,
+        _plaintext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -780,7 +795,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &mut [u8],
-        _aad: &[u8],
+        _aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -789,7 +804,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &mut [u8],
-        _plaintext_part: &[u8],
+        _plaintext_part: CkInBuf<'_>,
         _flags: CkFlags,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -815,8 +830,8 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &mut [u8],
-        _aad: &[u8],
-        _ciphertext: &[u8],
+        _aad: CkInBuf<'_>,
+        _ciphertext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -825,7 +840,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &mut [u8],
-        _aad: &[u8],
+        _aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -834,7 +849,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &mut [u8],
-        _ciphertext_part: &[u8],
+        _ciphertext_part: CkInBuf<'_>,
         _flags: CkFlags,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -859,7 +874,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &mut [u8],
-        _data: &[u8],
+        _data: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -876,7 +891,7 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &mut [u8],
-        _data_part: &[u8],
+        _data_part: CkInBuf<'_>,
         _request_signature: bool,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
@@ -901,8 +916,8 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &[u8],
-        _data: &[u8],
-        _signature: &[u8],
+        _data: CkInBuf<'_>,
+        _signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -915,9 +930,9 @@ pub trait Pkcs11Backend: Send + Sync {
         &self,
         _session: CkSessionHandle,
         _parameter: &[u8],
-        _data_part: &[u8],
+        _data_part: CkInBuf<'_>,
         _is_final: bool,
-        _signature: &[u8],
+        _signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -933,19 +948,19 @@ pub trait Pkcs11Backend: Send + Sync {
         _session: CkSessionHandle,
         _mechanism: Option<&CkMechanism>,
         _key: CkObjectHandle,
-        _signature: &[u8],
+        _signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
-    fn verify_signature(&self, _session: CkSessionHandle, _data: &[u8]) -> CkResult<()> {
+    fn verify_signature(&self, _session: CkSessionHandle, _data: CkInBuf<'_>) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
 
     fn verify_signature_update(
         &self,
         _session: CkSessionHandle,
-        _data_part: &[u8],
+        _data_part: CkInBuf<'_>,
     ) -> CkResult<()> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -962,7 +977,7 @@ pub trait Pkcs11Backend: Send + Sync {
         _mechanism: &CkMechanism,
         _wrapping_key: CkObjectHandle,
         _key: CkObjectHandle,
-        _aad: &[u8],
+        _aad: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }
@@ -972,9 +987,9 @@ pub trait Pkcs11Backend: Send + Sync {
         _session: CkSessionHandle,
         _mechanism: &CkMechanism,
         _unwrapping_key: CkObjectHandle,
-        _wrapped_key: &[u8],
+        _wrapped_key: CkInBuf<'_>,
         _template: &[CkAttribute],
-        _aad: &[u8],
+        _aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
         Err(CkRv::FUNCTION_NOT_SUPPORTED)
     }

@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    d. client public API return types
     //       (e.g. `client/src/client/crypto/sign_verify.rs`)
     //    e. shim helper signatures
-    //       (`shim/src/dispatch/general/helpers.rs::write_exact_output`)
+    //       (`shim/src/dispatch/general/helpers/mod.rs::write_exact_output`)
     //    f. all `vec![..]` test literals on that field
     //       → `Bytes::from(vec![..])`
     //

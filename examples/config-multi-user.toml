@@ -22,6 +22,9 @@ max_concurrent_backend_calls = 200
 # Size of the tokio blocking thread pool. Must be >= max_concurrent_backend_calls.
 # Default 512. Increase for high-concurrency HSM deployments.
 max_blocking_threads = 512
+# Reject NULL data pointers (len>0) and NULL mechanisms before the backend module.
+# OFF by default (ADR-0010 transparent forwarding). Enable for modules that crash on them.
+# sanitize_inputs = true
 
 [listener.remote]
 bind = "0.0.0.0:50051"

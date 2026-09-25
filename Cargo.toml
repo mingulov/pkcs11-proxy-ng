@@ -30,7 +30,11 @@ license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-tonic = { version = "0.14", features = ["tls-ring"] }
+# tonic transport features are selected per-crate (M11), not workspace-wide, so
+# the client-side artifacts (shim cdylib, client, CLI) do not link the server
+# stack — axum `router`, h2/hyper `server`, socket2. Each member enables exactly
+# what it uses: server → ["server","router",…]; client/CLI/proto → ["channel",…].
+tonic = { version = "0.14", default-features = false }
 prost = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -39,9 +43,9 @@ toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive", "env"] }
-libloading = "0.9"
+libloading = "0.8"
 cryptoki-sys = "0.5"
-nix = { version = "0.31", features = ["socket", "user"] }
+nix = { version = "0.31", features = ["socket", "user", "fs"] }
 dashmap = "6"
 x509-parser = "0.18"
 tonic-build = "0.14"

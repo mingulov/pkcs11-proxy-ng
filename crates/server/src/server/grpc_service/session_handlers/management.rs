@@ -9,6 +9,7 @@ use pkcs11_proxy_ng_types::*;
 
 use super::super::super::auth::policy::TokenPolicy;
 use super::super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::super::handle_map::VirtualHandle;
 use super::super::authorization;
 use super::super::service_utils::{context_exists, resolve_session, resolve_slot, spawn_backend};
 
@@ -131,6 +132,21 @@ pub(super) async fn set_pin(
     // Zeroize both old and new PINs on closure drop.
     let old_pin = req.old_pin.map(Zeroizing::new);
     let new_pin = req.new_pin.map(Zeroizing::new);
+    // Pre-hash the new PIN and capture (slot, login state) so the per-slot PIN
+    // verifier can be refreshed on success: after a PIN change a co-located
+    // logical login with the NEW PIN must be accepted, not fail closed against
+    // the old verifier (A1 / ADR-0008).
+    let new_pin_hash = ctx_mgr.hash_pin(new_pin.as_deref().map(Vec::as_slice));
+    let virtual_session = VirtualHandle(req.session_handle);
+    let slot_state = ctx_mgr
+        .get_context(&ctx_id, |ctx| {
+            ctx.session_slots
+                .get(&virtual_session)
+                .copied()
+                .map(|slot| (slot, ctx.login_state.get(&slot).copied()))
+        })
+        .await
+        .flatten();
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
         backend.set_pin(
@@ -143,6 +159,9 @@ pub(super) async fn set_pin(
 
     let ck_rv = match &result {
         Ok(()) => {
+            if let Some((slot, Some(state))) = slot_state {
+                ctx_mgr.store_pin_verifier_hash(slot, state, new_pin_hash);
+            }
             info!(context_id = %ctx_id.0, "SetPIN succeeded");
             CkRv::OK.0
         }

@@ -8,7 +8,7 @@
 
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::{
-    AesCbcEncryptDataParams, AesCtrParams, CkAttribute, CkAttributeType, CkAttributeValue,
+    AesCbcEncryptDataParams, AesCtrParams, CkAttribute, CkAttributeType, CkAttributeValue, CkInBuf,
     CkKeyType, CkMechanism, CkMechanismParams, CkMechanismType, CkObjectClass, CkObjectHandle,
     CkResult, CkSessionHandle, Ecdh1DeriveParams, HkdfParams, IvParams, RsaPkcsOaepParams,
     RsaPkcsPssParams,
@@ -509,7 +509,7 @@ pub async fn test_rsa_pss_sign_verify(
         .await
         .map_err(|rv| format!("C_VerifyInit(PSS) failed: {rv}"))?;
     client
-        .verify(session, data, &signature)
+        .verify(session, CkInBuf::Bytes(data), CkInBuf::Bytes(&signature))
         .await
         .map_err(|rv| format!("C_Verify(PSS) failed: {rv}"))?;
 

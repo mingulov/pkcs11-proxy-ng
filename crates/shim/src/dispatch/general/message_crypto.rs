@@ -236,8 +236,18 @@ pub unsafe extern "C" fn c_encrypt_message(
         if pul_ciphertext_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let aad = unsafe { read_input_slice(p_associated_data, ul_associated_data_len) };
-        let plaintext = unsafe { read_input_slice(p_plaintext, ul_plaintext_len) };
+        let aad = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_associated_data, ul_associated_data_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
+        let plaintext = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_plaintext, ul_plaintext_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let output_spec = unsafe { output_buffer_spec(p_ciphertext, pul_ciphertext_len) };
         let param_out_spec =
             match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
@@ -293,7 +303,12 @@ pub unsafe extern "C" fn c_encrypt_message_begin(
 ) -> CK_RV {
     catch_panics(|| {
         let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
-        let aad = unsafe { read_input_slice(p_associated_data, ul_associated_data_len) };
+        let aad = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_associated_data, ul_associated_data_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
 
         let result = with_client!(client => client.encrypt_message_begin(
             CkSessionHandle(h_session),
@@ -329,7 +344,12 @@ pub unsafe extern "C" fn c_encrypt_message_next(
         if pul_ciphertext_part_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let plaintext_part = unsafe { read_input_slice(p_plaintext_part, ul_plaintext_part_len) };
+        let plaintext_part = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_plaintext_part, ul_plaintext_part_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let output_spec = unsafe { output_buffer_spec(p_ciphertext_part, pul_ciphertext_part_len) };
         let param_out_spec =
             match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
@@ -348,7 +368,7 @@ pub unsafe extern "C" fn c_encrypt_message_next(
             ParameterOutputFunction::EncryptMessageNext,
             &output_spec,
             plaintext_part,
-            &[],
+            CkInBuf::Bytes(&[]),
             &[],
             &param_out_spec,
             flags,
@@ -393,8 +413,18 @@ pub unsafe extern "C" fn c_decrypt_message(
         if pul_plaintext_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let aad = unsafe { read_input_slice(p_associated_data, ul_associated_data_len) };
-        let ciphertext = unsafe { read_input_slice(p_ciphertext, ul_ciphertext_len) };
+        let aad = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_associated_data, ul_associated_data_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
+        let ciphertext = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_ciphertext, ul_ciphertext_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let output_spec = unsafe { output_buffer_spec(p_plaintext, pul_plaintext_len) };
         let param_out_spec =
             match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
@@ -450,7 +480,12 @@ pub unsafe extern "C" fn c_decrypt_message_begin(
 ) -> CK_RV {
     catch_panics(|| {
         let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
-        let aad = unsafe { read_input_slice(p_associated_data, ul_associated_data_len) };
+        let aad = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_associated_data, ul_associated_data_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
 
         let result = with_client!(client => client.decrypt_message_begin(
             CkSessionHandle(h_session),
@@ -486,8 +521,12 @@ pub unsafe extern "C" fn c_decrypt_message_next(
         if pul_plaintext_part_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let ciphertext_part =
-            unsafe { read_input_slice(p_ciphertext_part, ul_ciphertext_part_len) };
+        let ciphertext_part = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_ciphertext_part, ul_ciphertext_part_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let output_spec = unsafe { output_buffer_spec(p_plaintext_part, pul_plaintext_part_len) };
         let param_out_spec =
             match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
@@ -506,7 +545,7 @@ pub unsafe extern "C" fn c_decrypt_message_next(
             ParameterOutputFunction::DecryptMessageNext,
             &output_spec,
             ciphertext_part,
-            &[],
+            CkInBuf::Bytes(&[]),
             &[],
             &param_out_spec,
             flags,
@@ -549,7 +588,10 @@ pub unsafe extern "C" fn c_sign_message(
         if pul_signature_len.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
-        let data = unsafe { read_input_slice(p_data, ul_data_len) };
+        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         let output_spec = unsafe { output_buffer_spec(p_signature, pul_signature_len) };
         let param_out_spec =
             match unsafe { message_parameter_roundtrip_spec(p_parameter, ul_parameter_len) } {
@@ -568,7 +610,7 @@ pub unsafe extern "C" fn c_sign_message(
             ParameterOutputFunction::SignMessage,
             &output_spec,
             data,
-            &[],
+            CkInBuf::Bytes(&[]),
             &[],
             &param_out_spec,
             0,
@@ -634,7 +676,12 @@ pub unsafe extern "C" fn c_sign_message_next(
 ) -> CK_RV {
     catch_panics(|| {
         let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
-        let data_part = unsafe { read_input_slice(p_data_part, ul_data_part_len) };
+        let data_part = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_data_part, ul_data_part_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
 
         // If pul_signature_len is NULL => "more data" mode, request_signature = false
         let request_signature = !pul_signature_len.is_null();
@@ -678,7 +725,7 @@ pub unsafe extern "C" fn c_sign_message_next(
             ParameterOutputFunction::SignMessageNext,
             &output_spec,
             data_part,
-            &[],
+            CkInBuf::Bytes(&[]),
             &[],
             &param_out_spec,
             0,
@@ -717,8 +764,16 @@ pub unsafe extern "C" fn c_verify_message(
 ) -> CK_RV {
     catch_panics(|| {
         let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
-        let data = unsafe { read_input_slice(p_data, ul_data_len) };
-        let signature = unsafe { read_input_slice(p_signature, ul_signature_len) };
+        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
+        let signature = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_signature, ul_signature_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
 
         unit_result_to_rv(with_client!(client => client.verify_message(
             CkSessionHandle(h_session),
@@ -763,12 +818,23 @@ pub unsafe extern "C" fn c_verify_message_next(
 ) -> CK_RV {
     catch_panics(|| {
         let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
-        let data_part = unsafe { read_input_slice(p_data_part, ul_data_part_len) };
+        let data_part = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_data_part, ul_data_part_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
 
         // If pSignature is NULL, this is a "feed more data" call (is_final = false)
         let is_final = !p_signature.is_null();
-        let signature =
-            if is_final { unsafe { read_input_slice(p_signature, ul_signature_len) } } else { &[] };
+        let signature = if is_final {
+            match input_buf_to_ck_in_buf(unsafe { classify_input(p_signature, ul_signature_len) }) {
+                Ok(buf) => buf,
+                Err(e) => return rv_err(e),
+            }
+        } else {
+            CkInBuf::Bytes(&[])
+        };
 
         unit_result_to_rv(with_client!(client => client.verify_message_next(
             CkSessionHandle(h_session),

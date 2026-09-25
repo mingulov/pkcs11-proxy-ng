@@ -76,7 +76,7 @@ pub(crate) async fn unwrap_key(
             session,
             &mechanism,
             CkObjectHandle(unwrapping_key_handle),
-            &wrapped_key,
+            CkInBuf::Bytes(&wrapped_key),
             &template,
         )
         .await

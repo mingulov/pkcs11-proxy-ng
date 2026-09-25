@@ -151,6 +151,9 @@ impl MockBackend {
     }
 
     pub(super) fn close_session_impl(&self, session: CkSessionHandle) -> CkResult<()> {
+        if let Some(rv) = *self.injected_close_error.lock().unwrap() {
+            return Err(rv);
+        }
         let mut state = self.state.lock().unwrap();
         if let Some(pos) = state.open_sessions.iter().position(|(handle, _, _)| *handle == session)
         {

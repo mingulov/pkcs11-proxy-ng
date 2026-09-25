@@ -9,7 +9,8 @@ use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::super::handle_map::VirtualHandle;
 use super::super::convert_template;
 use super::super::service_utils::{
-    ck_rv_only, register_object_handle, resolve_session, resolve_session_and_object, spawn_backend,
+    ck_rv_only, register_session_object_handle, resolve_session, resolve_session_and_object,
+    spawn_backend, template_declares_token_object,
 };
 
 pub(super) async fn create_object(
@@ -40,13 +41,25 @@ pub(super) async fn create_object(
         }
     };
 
+    // Classify before the template is moved into the backend call: a session
+    // object's handle is evicted when its session closes; a token object's
+    // handle persists across sessions (B2).
+    let is_token_object = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.create_object(session, &template)).await?;
 
     match result {
         Ok(object) => Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
             ck_rv: CkRv::OK.0,
-            object_handle: register_object_handle(ctx_mgr, &ctx_id, object).await,
+            object_handle: register_session_object_handle(
+                ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                object,
+                is_token_object,
+            )
+            .await,
         })),
         Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::CreateObjectResponse {
             ck_rv: error.0,
@@ -86,13 +99,23 @@ pub(super) async fn copy_object(
         }
     };
 
+    // A copied object is a session object unless its template marks CKA_TOKEN (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.copy_object(session, object, &template)).await?;
 
     match result {
         Ok(object) => Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
             ck_rv: CkRv::OK.0,
-            new_object_handle: register_object_handle(ctx_mgr, &ctx_id, object).await,
+            new_object_handle: register_session_object_handle(
+                ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                object,
+                is_token,
+            )
+            .await,
         })),
         Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::CopyObjectResponse {
             ck_rv: error.0,

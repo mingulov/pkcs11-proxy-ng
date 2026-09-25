@@ -17,6 +17,7 @@ mod combined;
 mod digest_cipher;
 mod general;
 mod key_ops;
+mod mechanism_handles;
 mod message_crypto;
 mod object;
 mod parameter_output_exact;
@@ -44,6 +45,11 @@ pub struct Pkcs11ProxyService {
     /// `GetBackendInterfaces`. Wrapped in a `MechanismRegistrySource`
     /// so SIGHUP can swap the payload while live requests are in flight.
     mechanism_registry_source: MechanismRegistrySource,
+    /// ADR-0010 sanitize_inputs: when true, NULL data pointer with len>0
+    /// and NULL mechanisms on operation init are rejected with
+    /// CKR_ARGUMENTS_BAD before reaching the backend module. Default false
+    /// (transparent forwarding).
+    pub(super) sanitize_inputs: bool,
 }
 
 impl Pkcs11ProxyService {
@@ -62,7 +68,14 @@ impl Pkcs11ProxyService {
             unix_auth_mode,
             token_policy,
             mechanism_registry_source,
+            sanitize_inputs: false,
         }
+    }
+
+    /// Enable sanitize_inputs mode for tests that need daemon-side input rejection.
+    pub fn with_sanitize_inputs(mut self) -> Self {
+        self.sanitize_inputs = true;
+        self
     }
 
     pub fn insecure_for_tests(
@@ -81,6 +94,28 @@ impl Pkcs11ProxyService {
             token_policy,
             registry,
         )
+        // sanitize_inputs defaults to false — transparent forwarding (ADR-0010)
+    }
+
+    /// A2: reject any request whose live transport identity does not own the
+    /// `client_context_id` it presents. The id is an unauthenticated bearer
+    /// token, so it is re-bound to the caller's identity on every RPC (the
+    /// identity is captured once at C_Initialize). `raw_ctx_id` is the request's
+    /// `client_context_id` field; an unknown context passes here and the handler
+    /// returns the proper CK_RV.
+    async fn check_context_owner<T>(
+        &self,
+        request: &Request<T>,
+        raw_ctx_id: &str,
+    ) -> Result<(), Status> {
+        authorization::enforce_context_owner(
+            &self.context_manager,
+            request,
+            &super::context_manager::ClientContextId(raw_ctx_id.to_owned()),
+            self.tcp_auth_mode,
+            self.unix_auth_mode,
+        )
+        .await
     }
 }
 
@@ -135,6 +170,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::GetSlotListRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetSlotListResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 slot::get_slot_list_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -148,6 +185,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::GetSlotInfoRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetSlotInfoResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 slot::get_slot_info_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -161,6 +200,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::GetTokenInfoRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetTokenInfoResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 slot::get_token_info_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -174,6 +215,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::GetMechanismListRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetMechanismListResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 slot::get_mechanism_list_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -187,6 +230,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::GetMechanismInfoRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::GetMechanismInfoResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 slot::get_mechanism_info_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -209,10 +254,36 @@ macro_rules! impl_proxy_service {
                 .await
             }
 
+            async fn wait_for_slot_event(
+                &self,
+                request: Request<pkcs11_proxy_ng_proto::WaitForSlotEventRequest>,
+            ) -> Result<Response<pkcs11_proxy_ng_proto::WaitForSlotEventResponse>, Status> {
+                // Hand-written (not via the dispatch macro) because it needs the
+                // token policy to suppress events for unauthorized slots (M13).
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
+                // A blocking wait (CKF_DONT_BLOCK omitted) must not be reaped
+                // mid-call, exactly as the dispatch macro guards its RPCs.
+                let _op = self.context_manager.begin_operation(
+                    &super::context_manager::ClientContextId(
+                        request.get_ref().client_context_id.clone(),
+                    ),
+                );
+                state_ops::wait_for_slot_event_with_policy(
+                    &self.context_manager,
+                    &self.backend,
+                    self.token_policy.as_ref(),
+                    request,
+                )
+                .await
+            }
+
             async fn open_session(
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::OpenSessionRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::OpenSessionResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 session::open_session_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -226,6 +297,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::CloseAllSessionsRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::CloseAllSessionsResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 session::close_all_sessions_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -239,6 +312,8 @@ macro_rules! impl_proxy_service {
                 &self,
                 request: Request<pkcs11_proxy_ng_proto::InitTokenRequest>,
             ) -> Result<Response<pkcs11_proxy_ng_proto::InitTokenResponse>, Status> {
+                self.check_context_owner(&request, &request.get_ref().client_context_id)
+                    .await?;
                 session::init_token_with_policy(
                     &self.context_manager,
                     &self.backend,
@@ -253,17 +328,34 @@ macro_rules! impl_proxy_service {
                     &self,
                     request: Request<pkcs11_proxy_ng_proto::$request>,
                 ) -> Result<Response<pkcs11_proxy_ng_proto::$response>, Status> {
+                    // A2: bind the caller's transport identity to the context it
+                    // claims before touching any state.
+                    self.check_context_owner(
+                        &request,
+                        &request.get_ref().client_context_id,
+                    )
+                    .await?;
                     // Hold the context un-evictable for the whole operation so a
                     // long backend call (keygen/derive on a slow HSM, larger than
-                    // the lease) is never reaped MID-CALL. Every dispatched
-                    // request carries client_context_id; if the context is already
-                    // gone the guard is None and the handler returns the right CKR.
-                    let _op = self.context_manager.begin_operation(
+                    // the lease) is never reaped MID-CALL, AND enforce the
+                    // per-context in-flight cap so one noisy client cannot drain
+                    // the shared backend-call budget and DEVICE_ERROR every tenant
+                    // (M2). A context that is already gone yields Ok(None) and the
+                    // handler returns the right CKR.
+                    let _op = match self.context_manager.begin_operation_capped(
                         &$crate::server::context_manager::ClientContextId(
                             request.get_ref().client_context_id.clone(),
                         ),
-                    );
-                    $module(&self.context_manager, &self.backend, request).await
+                        service_utils::per_context_max_in_flight() as i64,
+                    ) {
+                        Ok(guard) => guard,
+                        Err(()) => {
+                            return Err(Status::resource_exhausted(
+                                "per-context concurrency limit exceeded",
+                            ));
+                        }
+                    };
+                    $module(&self.context_manager, &self.backend, self.sanitize_inputs, request).await
                 }
             )+
         }
@@ -363,12 +455,6 @@ impl_proxy_service!(
     (wrap_key, WrapKeyRequest, WrapKeyResponse, key_ops::wrap_key),
     (unwrap_key, UnwrapKeyRequest, UnwrapKeyResponse, key_ops::unwrap_key),
     (generate_random, GenerateRandomRequest, GenerateRandomResponse, state_ops::generate_random),
-    (
-        wait_for_slot_event,
-        WaitForSlotEventRequest,
-        WaitForSlotEventResponse,
-        state_ops::wait_for_slot_event
-    ),
     (
         get_operation_state,
         GetOperationStateRequest,

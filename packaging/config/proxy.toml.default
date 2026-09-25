@@ -35,6 +35,10 @@ shutdown_grace_secs = 30
 # NOT_SERVING (drives k8s readiness probes).
 backend_health_consecutive_failures = 3
 
+# Reject NULL data pointers (len>0) and NULL mechanisms before the backend module.
+# OFF by default (ADR-0010 transparent forwarding). Enable for modules that crash on them.
+# sanitize_inputs = true
+
 # Other timeouts and pool sizes use the documented ProxyConfig
 # defaults; see crates/server/src/config.rs.
 

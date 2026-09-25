@@ -1,10 +1,10 @@
 // crates/pkcs11-backend/src/ffi.rs
 use crate::traits::{CkDeriveKeyOutputResult, Pkcs11Backend};
+use dashmap::DashMap;
 use libloading::Library;
 use pkcs11_proxy_ng_types::*;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::CString;
-use std::sync::Mutex;
 
 #[path = "ffi/authenticated_wrap_ops.rs"]
 mod authenticated_wrap_ops;
@@ -44,30 +44,32 @@ use mapping::{
 };
 
 macro_rules! session_bytes_input {
-    ($session:expr, $input:expr, $function:ident, $output:ident, $output_len:ident) => {
+    ($session:expr, $input:expr, $function:ident, $output:ident, $output_len:ident) => {{
+        let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
         unsafe {
             $function(
                 Self::session_handle($session),
-                $input.as_ptr() as *mut _,
-                Self::ulong_len($input.len()),
+                _ck_in_ptr as *mut _,
+                Self::ulong_len_u64(_ck_in_len),
                 $output,
                 $output_len,
             )
         }
-    };
+    }};
 }
 pub(crate) use session_bytes_input;
 
 macro_rules! session_unit_input {
-    ($session:expr, $input:expr, $function:ident) => {
+    ($session:expr, $input:expr, $function:ident) => {{
+        let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
         unsafe {
             $function(
                 Self::session_handle($session),
-                $input.as_ptr() as *mut _,
-                Self::ulong_len($input.len()),
+                _ck_in_ptr as *mut _,
+                Self::ulong_len_u64(_ck_in_len),
             )
         }
-    };
+    }};
 }
 pub(crate) use session_unit_input;
 
@@ -136,11 +138,18 @@ pub struct FfiBackend {
     /// The spec says backends should copy, but for compatibility we keep the
     /// FfiMechanism (and its backing `Vec<u8>` buffers) alive until the next
     /// Init call or session close replaces it.
-    mech_cache: Mutex<HashMap<u64, ffi_conversion::FfiMechanism>>,
-    /// Reverse map of session handle -> slot id, used to evict per-slot
-    /// `mech_cache` entries on `C_CloseAllSessions`. Populated on successful
-    /// `ffi_open_session`, drained on close paths.
-    session_slot_map: Mutex<HashMap<u64, u64>>,
+    ///
+    /// Sharded (`DashMap`) so concurrent sessions doing crypto `*Init` calls on
+    /// the shared backend do not serialise on one global lock (L4).
+    mech_cache: DashMap<u64, ffi_conversion::FfiMechanism>,
+    /// Map of session handle -> slot id. Lets a per-session close path find the
+    /// owning slot in O(1) to keep [`slot_sessions`](Self::slot_sessions)
+    /// consistent. Populated on successful `ffi_open_session`, drained on close.
+    session_slot_map: DashMap<u64, u64>,
+    /// Reverse index slot id -> set of session handles open on that slot. Lets
+    /// `C_CloseAllSessions` evict exactly the sessions on one slot in
+    /// O(sessions-on-slot) instead of scanning every session (L4).
+    slot_sessions: DashMap<u64, HashSet<u64>>,
 }
 
 // Safety: PKCS#11 spec requires modules loaded with CKF_OS_LOCKING_OK to be
@@ -317,11 +326,11 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_sign_init_cancel(session)
     }
 
-    fn sign(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    fn sign(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_sign(session, data)
     }
 
-    fn sign_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()> {
+    fn sign_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<()> {
         self.ffi_sign_update(session, part)
     }
 
@@ -342,14 +351,14 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_sign_recover_init_cancel(session)
     }
 
-    fn sign_recover(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    fn sign_recover(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_sign_recover(session, data)
     }
 
     fn sign_exact(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_sign_exact(session, data, spec)
@@ -366,7 +375,7 @@ impl Pkcs11Backend for FfiBackend {
     fn sign_recover_exact(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_sign_recover_exact(session, data, spec)
@@ -375,7 +384,7 @@ impl Pkcs11Backend for FfiBackend {
     fn verify_recover_exact(
         &self,
         session: CkSessionHandle,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_verify_recover_exact(session, signature, spec)
@@ -394,7 +403,11 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_verify_recover_init_cancel(session)
     }
 
-    fn verify_recover(&self, session: CkSessionHandle, signature: &[u8]) -> CkResult<Vec<u8>> {
+    fn verify_recover(
+        &self,
+        session: CkSessionHandle,
+        signature: CkInBuf<'_>,
+    ) -> CkResult<Vec<u8>> {
         self.ffi_verify_recover(session, signature)
     }
 
@@ -411,15 +424,20 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_verify_init_cancel(session)
     }
 
-    fn verify(&self, session: CkSessionHandle, data: &[u8], signature: &[u8]) -> CkResult<()> {
+    fn verify(
+        &self,
+        session: CkSessionHandle,
+        data: CkInBuf<'_>,
+        signature: CkInBuf<'_>,
+    ) -> CkResult<()> {
         self.ffi_verify(session, data, signature)
     }
 
-    fn verify_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()> {
+    fn verify_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<()> {
         self.ffi_verify_update(session, part)
     }
 
-    fn verify_final(&self, session: CkSessionHandle, signature: &[u8]) -> CkResult<()> {
+    fn verify_final(&self, session: CkSessionHandle, signature: CkInBuf<'_>) -> CkResult<()> {
         self.ffi_verify_final(session, signature)
     }
 
@@ -431,11 +449,11 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_digest_init_cancel(session)
     }
 
-    fn digest(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    fn digest(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_digest(session, data)
     }
 
-    fn digest_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<()> {
+    fn digest_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<()> {
         self.ffi_digest_update(session, part)
     }
 
@@ -450,7 +468,7 @@ impl Pkcs11Backend for FfiBackend {
     fn digest_exact(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_digest_exact(session, data, spec)
@@ -477,11 +495,11 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_encrypt_init_cancel(session)
     }
 
-    fn encrypt(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<Vec<u8>> {
+    fn encrypt(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_encrypt(session, data)
     }
 
-    fn encrypt_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<Vec<u8>> {
+    fn encrypt_update(&self, session: CkSessionHandle, part: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_encrypt_update(session, part)
     }
 
@@ -509,11 +527,15 @@ impl Pkcs11Backend for FfiBackend {
         self.cached_mechanism_output_params(session)
     }
 
-    fn decrypt(&self, session: CkSessionHandle, encrypted_data: &[u8]) -> CkResult<Vec<u8>> {
+    fn decrypt(&self, session: CkSessionHandle, encrypted_data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
         self.ffi_decrypt(session, encrypted_data)
     }
 
-    fn decrypt_update(&self, session: CkSessionHandle, encrypted_part: &[u8]) -> CkResult<Vec<u8>> {
+    fn decrypt_update(
+        &self,
+        session: CkSessionHandle,
+        encrypted_part: CkInBuf<'_>,
+    ) -> CkResult<Vec<u8>> {
         self.ffi_decrypt_update(session, encrypted_part)
     }
 
@@ -524,7 +546,7 @@ impl Pkcs11Backend for FfiBackend {
     fn encrypt_exact(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_encrypt_exact(session, data, spec)
@@ -533,7 +555,7 @@ impl Pkcs11Backend for FfiBackend {
     fn encrypt_exact_with_output(
         &self,
         session: CkSessionHandle,
-        data: &[u8],
+        data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<(CkOutputBufferResult, Option<CkMechanismParams>)> {
         self.ffi_encrypt_exact_with_output(session, data, spec)
@@ -542,7 +564,7 @@ impl Pkcs11Backend for FfiBackend {
     fn encrypt_update_exact(
         &self,
         session: CkSessionHandle,
-        part: &[u8],
+        part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_encrypt_update_exact(session, part, spec)
@@ -559,7 +581,7 @@ impl Pkcs11Backend for FfiBackend {
     fn decrypt_exact(
         &self,
         session: CkSessionHandle,
-        encrypted_data: &[u8],
+        encrypted_data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_decrypt_exact(session, encrypted_data, spec)
@@ -568,7 +590,7 @@ impl Pkcs11Backend for FfiBackend {
     fn decrypt_update_exact(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_decrypt_update_exact(session, encrypted_part, spec)
@@ -649,7 +671,7 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
-        wrapped_key: &[u8],
+        wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
         self.ffi_unwrap_key(session, mechanism, unwrapping_key, wrapped_key, template)
@@ -736,14 +758,14 @@ impl Pkcs11Backend for FfiBackend {
     fn set_operation_state(
         &self,
         session: CkSessionHandle,
-        state: &[u8],
+        state: CkInBuf<'_>,
         enc_key: CkObjectHandle,
         auth_key: CkObjectHandle,
     ) -> CkResult<()> {
         self.ffi_set_operation_state(session, state, enc_key, auth_key)
     }
 
-    fn seed_random(&self, session: CkSessionHandle, seed: &[u8]) -> CkResult<()> {
+    fn seed_random(&self, session: CkSessionHandle, seed: CkInBuf<'_>) -> CkResult<()> {
         self.ffi_seed_random(session, seed)
     }
 
@@ -759,14 +781,18 @@ impl Pkcs11Backend for FfiBackend {
         self.ffi_cancel_function(session)
     }
 
-    fn digest_encrypt_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<Vec<u8>> {
+    fn digest_encrypt_update(
+        &self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<Vec<u8>> {
         self.ffi_digest_encrypt_update(session, part)
     }
 
     fn digest_encrypt_update_exact(
         &self,
         session: CkSessionHandle,
-        part: &[u8],
+        part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_digest_encrypt_update_exact(session, part, spec)
@@ -775,7 +801,7 @@ impl Pkcs11Backend for FfiBackend {
     fn decrypt_digest_update(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         self.ffi_decrypt_digest_update(session, encrypted_part)
     }
@@ -783,20 +809,24 @@ impl Pkcs11Backend for FfiBackend {
     fn decrypt_digest_update_exact(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_decrypt_digest_update_exact(session, encrypted_part, spec)
     }
 
-    fn sign_encrypt_update(&self, session: CkSessionHandle, part: &[u8]) -> CkResult<Vec<u8>> {
+    fn sign_encrypt_update(
+        &self,
+        session: CkSessionHandle,
+        part: CkInBuf<'_>,
+    ) -> CkResult<Vec<u8>> {
         self.ffi_sign_encrypt_update(session, part)
     }
 
     fn sign_encrypt_update_exact(
         &self,
         session: CkSessionHandle,
-        part: &[u8],
+        part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_sign_encrypt_update_exact(session, part, spec)
@@ -805,7 +835,7 @@ impl Pkcs11Backend for FfiBackend {
     fn decrypt_verify_update(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         self.ffi_decrypt_verify_update(session, encrypted_part)
     }
@@ -813,7 +843,7 @@ impl Pkcs11Backend for FfiBackend {
     fn decrypt_verify_update_exact(
         &self,
         session: CkSessionHandle,
-        encrypted_part: &[u8],
+        encrypted_part: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
         self.ffi_decrypt_verify_update_exact(session, encrypted_part, spec)
@@ -870,7 +900,7 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         private_key: CkObjectHandle,
         template: &[CkAttribute],
-        ciphertext: &[u8],
+        ciphertext: CkInBuf<'_>,
     ) -> CkResult<CkObjectHandle> {
         self.ffi_decapsulate_key(session, mechanism, private_key, template, ciphertext)
     }
@@ -937,8 +967,8 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        aad: &[u8],
-        plaintext: &[u8],
+        aad: CkInBuf<'_>,
+        plaintext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_encrypt_message(session, parameter, aad, plaintext)
     }
@@ -947,7 +977,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        aad: &[u8],
+        aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         self.ffi_encrypt_message_begin(session, parameter, aad)
     }
@@ -956,7 +986,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        plaintext_part: &[u8],
+        plaintext_part: CkInBuf<'_>,
         flags: CkFlags,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_encrypt_message_next(session, parameter, plaintext_part, flags)
@@ -966,8 +996,8 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        aad: &[u8],
-        ciphertext: &[u8],
+        aad: CkInBuf<'_>,
+        ciphertext: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_decrypt_message(session, parameter, aad, ciphertext)
     }
@@ -976,7 +1006,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        aad: &[u8],
+        aad: CkInBuf<'_>,
     ) -> CkResult<Vec<u8>> {
         self.ffi_decrypt_message_begin(session, parameter, aad)
     }
@@ -985,7 +1015,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        ciphertext_part: &[u8],
+        ciphertext_part: CkInBuf<'_>,
         flags: CkFlags,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_decrypt_message_next(session, parameter, ciphertext_part, flags)
@@ -995,7 +1025,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        data: &[u8],
+        data: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_sign_message(session, parameter, data)
     }
@@ -1012,7 +1042,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &mut [u8],
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
         request_signature: bool,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_sign_message_next(session, parameter, data_part, request_signature)
@@ -1022,8 +1052,8 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data: &[u8],
-        signature: &[u8],
+        data: CkInBuf<'_>,
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         self.ffi_verify_message(session, parameter, data, signature)
     }
@@ -1036,9 +1066,9 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
         is_final: bool,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         self.ffi_verify_message_next(session, parameter, data_part, is_final, signature)
     }
@@ -1050,16 +1080,20 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: Option<&CkMechanism>,
         key: CkObjectHandle,
-        signature: &[u8],
+        signature: CkInBuf<'_>,
     ) -> CkResult<()> {
         self.ffi_verify_signature_init(session, mechanism, key, signature)
     }
 
-    fn verify_signature(&self, session: CkSessionHandle, data: &[u8]) -> CkResult<()> {
+    fn verify_signature(&self, session: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<()> {
         self.ffi_verify_signature(session, data)
     }
 
-    fn verify_signature_update(&self, session: CkSessionHandle, data_part: &[u8]) -> CkResult<()> {
+    fn verify_signature_update(
+        &self,
+        session: CkSessionHandle,
+        data_part: CkInBuf<'_>,
+    ) -> CkResult<()> {
         self.ffi_verify_signature_update(session, data_part)
     }
 
@@ -1075,7 +1109,7 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
-        aad: &[u8],
+        aad: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         self.ffi_wrap_key_authenticated(session, mechanism, wrapping_key, key, aad)
     }
@@ -1085,9 +1119,9 @@ impl Pkcs11Backend for FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
-        wrapped_key: &[u8],
+        wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
-        aad: &[u8],
+        aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
         self.ffi_unwrap_key_authenticated(
             session,
@@ -1105,8 +1139,8 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        aad: &[u8],
-        plaintext: &[u8],
+        aad: CkInBuf<'_>,
+        plaintext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -1124,8 +1158,8 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        aad: &[u8],
-        ciphertext: &[u8],
+        aad: CkInBuf<'_>,
+        ciphertext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -1143,7 +1177,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data: &[u8],
+        data: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -1154,7 +1188,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        plaintext_part: &[u8],
+        plaintext_part: CkInBuf<'_>,
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
@@ -1173,7 +1207,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        ciphertext_part: &[u8],
+        ciphertext_part: CkInBuf<'_>,
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
@@ -1192,7 +1226,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         parameter: &[u8],
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -1205,7 +1239,7 @@ impl Pkcs11Backend for FfiBackend {
         mechanism: &CkMechanism,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
-        aad: &[u8],
+        aad: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -1226,8 +1260,8 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        aad: &[u8],
-        plaintext: &[u8],
+        aad: CkInBuf<'_>,
+        plaintext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
         CkOutputBufferResult,
@@ -1240,8 +1274,8 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        aad: &[u8],
-        ciphertext: &[u8],
+        aad: CkInBuf<'_>,
+        ciphertext: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
         CkOutputBufferResult,
@@ -1254,7 +1288,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        data: &[u8],
+        data: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
         CkOutputBufferResult,
@@ -1267,7 +1301,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        plaintext_part: &[u8],
+        plaintext_part: CkInBuf<'_>,
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
@@ -1287,7 +1321,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        ciphertext_part: &[u8],
+        ciphertext_part: CkInBuf<'_>,
         flags: CkFlags,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
@@ -1307,7 +1341,7 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         msg_param: &pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
-        data_part: &[u8],
+        data_part: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
     ) -> CkResult<(
         CkOutputBufferResult,
@@ -1348,8 +1382,9 @@ mod tests {
             func_list_3_0: None,
             func_list_3_2: None,
             initialize_args: None,
-            mech_cache: Mutex::new(HashMap::new()),
-            session_slot_map: Mutex::new(HashMap::new()),
+            mech_cache: DashMap::new(),
+            session_slot_map: DashMap::new(),
+            slot_sessions: DashMap::new(),
         };
 
         (backend, functions)
@@ -1358,8 +1393,9 @@ mod tests {
     fn seed_cache(backend: &FfiBackend) {
         let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
         let ffi_mechanism = ffi_conversion::mechanism_to_ffi(&mechanism).unwrap();
-        backend.mech_cache.lock().unwrap().insert(7, ffi_mechanism);
-        backend.session_slot_map.lock().unwrap().insert(7, 11);
+        backend.mech_cache.insert(7, ffi_mechanism);
+        // Use the public path so the forward map and reverse index stay in sync.
+        backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
     }
 
     #[test]
@@ -1369,8 +1405,8 @@ mod tests {
 
         assert_eq!(backend.finalize().unwrap_err(), CkRv::GENERAL_ERROR);
 
-        assert!(backend.mech_cache.lock().unwrap().contains_key(&7));
-        assert_eq!(backend.session_slot_map.lock().unwrap().get(&7), Some(&11));
+        assert!(backend.mech_cache.contains_key(&7));
+        assert_eq!(backend.session_slot_map.get(&7).as_deref(), Some(&11));
     }
 
     #[test]
@@ -1380,7 +1416,51 @@ mod tests {
 
         backend.finalize().unwrap();
 
-        assert!(backend.mech_cache.lock().unwrap().is_empty());
-        assert!(backend.session_slot_map.lock().unwrap().is_empty());
+        assert!(backend.mech_cache.is_empty());
+        assert!(backend.session_slot_map.is_empty());
+        assert!(backend.slot_sessions.is_empty());
+    }
+
+    #[test]
+    fn drop_mech_cache_for_slot_evicts_only_that_slots_sessions() {
+        // L4: per-slot eviction drops exactly the sessions open on the target
+        // slot (resolved via the reverse index) and leaves other slots intact.
+        let (backend, _functions) = backend_with_finalize(Some(finalize_ok));
+        for (session, slot) in [(7u64, 11u64), (8, 11), (9, 22)] {
+            let mechanism = CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None };
+            backend
+                .mech_cache
+                .insert(session, ffi_conversion::mechanism_to_ffi(&mechanism).unwrap());
+            backend.remember_session_slot(CkSessionHandle(session), CkSlotId(slot));
+        }
+
+        backend.drop_mech_cache_for_slot(CkSlotId(11));
+
+        for evicted in [7u64, 8] {
+            assert!(!backend.mech_cache.contains_key(&evicted));
+            assert!(backend.session_slot_map.get(&evicted).is_none());
+        }
+        assert!(backend.mech_cache.contains_key(&9));
+        assert_eq!(backend.session_slot_map.get(&9).as_deref(), Some(&22));
+        // The emptied slot-11 reverse entry is pruned; slot 22 still maps to {9}.
+        assert!(backend.slot_sessions.get(&11).is_none());
+        assert!(backend.slot_sessions.get(&22).is_some());
+    }
+
+    #[test]
+    fn forget_session_slot_prunes_the_reverse_index() {
+        // L4: forgetting a session removes it from the reverse index, and the
+        // slot entry itself is dropped once its last session is gone.
+        let (backend, _functions) = backend_with_finalize(Some(finalize_ok));
+        backend.remember_session_slot(CkSessionHandle(7), CkSlotId(11));
+        backend.remember_session_slot(CkSessionHandle(8), CkSlotId(11));
+
+        backend.forget_session_slot(CkSessionHandle(7));
+        assert_eq!(backend.slot_sessions.get(&11).map(|s| s.len()), Some(1));
+        assert!(backend.slot_sessions.get(&11).unwrap().contains(&8));
+
+        backend.forget_session_slot(CkSessionHandle(8));
+        assert!(backend.slot_sessions.get(&11).is_none());
+        assert!(backend.session_slot_map.is_empty());
     }
 }

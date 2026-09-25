@@ -1,5 +1,18 @@
 use super::*;
 
+/// Test-local discovery filter. The production server filters tokens per-slot
+/// via `slot_is_authorized`, so this mirrors that intent over the public
+/// `allows` to exercise the real authorization path against multi-token
+/// matrices (L9: the former `TokenPolicy::visible_tokens` was production dead
+/// code referenced only by these tests).
+fn visible_tokens<'a>(
+    policy: &TokenPolicy,
+    identity: &AuthenticatedIdentity,
+    tokens: &'a [(String, String)],
+) -> Vec<&'a (String, String)> {
+    tokens.iter().filter(|(label, serial)| policy.allows(identity, label, serial)).collect()
+}
+
 #[test]
 fn unauthenticated_always_allowed() {
     let policy = TokenPolicy { rules: HashMap::new(), allow_all_authenticated: false };
@@ -198,9 +211,12 @@ fn parse_bare_string_defaults_to_label() {
 }
 
 #[test]
-fn parse_pkcs11_uri_selector() {
-    let s = TokenSelector::parse("pkcs11:token=foo;serial=bar").unwrap();
-    assert_eq!(s, TokenSelector::Uri("pkcs11:token=foo;serial=bar".into()));
+fn parse_rejects_pkcs11_uri_selector() {
+    // pkcs11: URI selectors are not implemented; they would match nothing and
+    // silently deny, locking the operator out. parse() must reject them loudly
+    // at config load instead.
+    let err = TokenSelector::parse("pkcs11:token=foo;serial=bar").unwrap_err();
+    assert!(err.contains("pkcs11:"), "error should name the unsupported form: {err}");
 }
 
 #[test]
@@ -295,7 +311,7 @@ fn discovery_uid1000_sees_token_a_and_b() {
     let policy = matrix_policy();
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
     let tokens = token_list();
-    let visible = policy.visible_tokens(&id, &tokens);
+    let visible = visible_tokens(&policy, &id, &tokens);
     let labels: Vec<&str> = visible.iter().map(|(l, _)| l.as_str()).collect();
     assert_eq!(labels, vec!["token-a", "token-b"]);
 }
@@ -305,7 +321,7 @@ fn discovery_uid2000_sees_only_token_c() {
     let policy = matrix_policy();
     let id = AuthenticatedIdentity::PeerCred { uid: 2000 };
     let tokens = token_list();
-    let visible = policy.visible_tokens(&id, &tokens);
+    let visible = visible_tokens(&policy, &id, &tokens);
     let labels: Vec<&str> = visible.iter().map(|(l, _)| l.as_str()).collect();
     assert_eq!(labels, vec!["token-c"]);
 }
@@ -315,7 +331,7 @@ fn discovery_admin_mtls_sees_all() {
     let policy = matrix_policy();
     let id = AuthenticatedIdentity::Mtls { issuer: "CN=Root".into(), subject: "CN=admin".into() };
     let tokens = token_list();
-    let visible = policy.visible_tokens(&id, &tokens);
+    let visible = visible_tokens(&policy, &id, &tokens);
     assert_eq!(visible.len(), 4, "admin should see all 4 tokens");
 }
 
@@ -324,7 +340,7 @@ fn discovery_reader_mtls_sees_one() {
     let policy = matrix_policy();
     let id = AuthenticatedIdentity::Mtls { issuer: "CN=Root".into(), subject: "CN=reader".into() };
     let tokens = token_list();
-    let visible = policy.visible_tokens(&id, &tokens);
+    let visible = visible_tokens(&policy, &id, &tokens);
     let labels: Vec<&str> = visible.iter().map(|(l, _)| l.as_str()).collect();
     assert_eq!(labels, vec!["token-a"]);
 }
@@ -334,7 +350,7 @@ fn discovery_unknown_uid_sees_nothing() {
     let policy = matrix_policy();
     let id = AuthenticatedIdentity::PeerCred { uid: 5000 };
     let tokens = token_list();
-    let visible = policy.visible_tokens(&id, &tokens);
+    let visible = visible_tokens(&policy, &id, &tokens);
     assert!(visible.is_empty(), "unknown identity should see no tokens");
 }
 
@@ -343,7 +359,7 @@ fn discovery_explicit_deny_sees_nothing() {
     let policy = matrix_policy();
     let id = AuthenticatedIdentity::PeerCred { uid: 9999 };
     let tokens = token_list();
-    let visible = policy.visible_tokens(&id, &tokens);
+    let visible = visible_tokens(&policy, &id, &tokens);
     assert!(visible.is_empty(), "identity with empty selectors should see no tokens");
 }
 
@@ -352,7 +368,7 @@ fn discovery_unauthenticated_sees_all() {
     let policy = matrix_policy();
     let id = AuthenticatedIdentity::Unauthenticated;
     let tokens = token_list();
-    let visible = policy.visible_tokens(&id, &tokens);
+    let visible = visible_tokens(&policy, &id, &tokens);
     assert_eq!(visible.len(), 4, "unauthenticated mode bypasses policy, sees all tokens");
 }
 
@@ -360,7 +376,7 @@ fn discovery_unauthenticated_sees_all() {
 fn discovery_empty_token_list() {
     let policy = matrix_policy();
     let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
-    let visible = policy.visible_tokens(&id, &[]);
+    let visible = visible_tokens(&policy, &id, &[]);
     assert!(visible.is_empty());
 }
 
@@ -457,7 +473,7 @@ fn cross_identity_no_leakage() {
     ];
 
     for (i, case) in cases.iter().enumerate() {
-        let visible = policy.visible_tokens(&case.id, &tokens);
+        let visible = visible_tokens(&policy, &case.id, &tokens);
         let labels: Vec<&str> = visible.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
             labels, case.expected_labels,

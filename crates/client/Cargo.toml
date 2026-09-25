@@ -8,7 +8,9 @@ publish = false
 [dependencies]
 pkcs11-proxy-ng-types = { path = "../types" }
 pkcs11-proxy-ng-proto = { path = "../proto" }
-tonic.workspace = true
+# Client side only: `channel` transport + `codegen` + `tls-ring` (mTLS client
+# config). No server stack.
+tonic = { workspace = true, features = ["channel", "codegen", "tls-ring"] }
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true

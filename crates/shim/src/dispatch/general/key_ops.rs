@@ -27,7 +27,7 @@ pub unsafe extern "C" fn c_wrap_key(
             CkSessionHandle(h_session),
             ByteOutputFunction::WrapKey,
             &spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             Some(&mech),
             h_wrapping_key,
             h_key,
@@ -74,7 +74,12 @@ pub unsafe extern "C" fn c_unwrap_key(
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let wrapped_key = unsafe { read_input_slice(p_wrapped_key, ul_wrapped_key_len) };
+        let wrapped_key = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_wrapped_key, ul_wrapped_key_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         match with_client!(client => client.unwrap_key(
             CkSessionHandle(h_session),
             &mech,
@@ -254,7 +259,10 @@ pub unsafe extern "C" fn c_seed_random(
     ul_seed_len: CK_ULONG,
 ) -> CK_RV {
     catch_panics(|| {
-        let seed = unsafe { read_input_slice(p_seed, ul_seed_len) };
+        let seed = match input_buf_to_ck_in_buf(unsafe { classify_input(p_seed, ul_seed_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
         unit_result_to_rv(
             with_client!(client => client.seed_random(CkSessionHandle(h_session), seed)),
         )

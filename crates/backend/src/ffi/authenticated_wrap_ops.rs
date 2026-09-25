@@ -11,7 +11,7 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
-        aad: &[u8],
+        aad: CkInBuf<'_>,
     ) -> CkResult<(Vec<u8>, Vec<u8>)> {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_WrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
@@ -22,6 +22,8 @@ impl FfiBackend {
         let param_ptr = ffi_mech.ck_mechanism.pParameter as *mut u8;
         let param_len = ffi_mech.ck_mechanism.ulParameterLen as usize;
 
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+
         // Two-call pattern: first call with pWrappedKey = null to get size.
         let mut wrapped_key_len: cryptoki_sys::CK_ULONG = 0;
         Self::ck_result(unsafe {
@@ -30,8 +32,8 @@ impl FfiBackend {
                 &mut ffi_mech.ck_mechanism,
                 Self::object_handle(wrapping_key),
                 Self::object_handle(key),
-                aad.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-                Self::ulong_len(aad.len()),
+                aad_ptr as *mut cryptoki_sys::CK_BYTE,
+                Self::ulong_len_u64(aad_len),
                 std::ptr::null_mut(),
                 &mut wrapped_key_len,
             )
@@ -47,8 +49,8 @@ impl FfiBackend {
                 &mut ffi_mech.ck_mechanism,
                 Self::object_handle(wrapping_key),
                 Self::object_handle(key),
-                aad.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-                Self::ulong_len(aad.len()),
+                aad_ptr as *mut cryptoki_sys::CK_BYTE,
+                Self::ulong_len_u64(aad_len),
                 wrapped_key.as_mut_ptr(),
                 &mut wrapped_key_len,
             )
@@ -71,9 +73,9 @@ impl FfiBackend {
         session: CkSessionHandle,
         mechanism: &CkMechanism,
         unwrapping_key: CkObjectHandle,
-        wrapped_key: &[u8],
+        wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
-        aad: &[u8],
+        aad: CkInBuf<'_>,
     ) -> CkResult<(CkObjectHandle, Vec<u8>)> {
         let fl = self.func_list_3_2.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
         let f = unsafe { (*fl).C_UnwrapKeyAuthenticated }.ok_or(CkRv::FUNCTION_NOT_SUPPORTED)?;
@@ -85,6 +87,9 @@ impl FfiBackend {
         let param_ptr = ffi_mech.ck_mechanism.pParameter as *mut u8;
         let param_len = ffi_mech.ck_mechanism.ulParameterLen as usize;
 
+        let (wk_ptr, wk_len) = wrapped_key.as_ptr_len();
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
+
         let mut key_handle: cryptoki_sys::CK_OBJECT_HANDLE = 0;
 
         Self::ck_result(unsafe {
@@ -92,12 +97,12 @@ impl FfiBackend {
                 Self::session_handle(session),
                 &mut ffi_mech.ck_mechanism,
                 Self::object_handle(unwrapping_key),
-                wrapped_key.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-                Self::ulong_len(wrapped_key.len()),
+                wk_ptr as *mut cryptoki_sys::CK_BYTE,
+                Self::ulong_len_u64(wk_len),
                 Self::ffi_attr_ptr(&ffi_attrs),
                 Self::ffi_attr_len(&ffi_attrs),
-                aad.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-                Self::ulong_len(aad.len()),
+                aad_ptr as *mut cryptoki_sys::CK_BYTE,
+                Self::ulong_len_u64(aad_len),
                 &mut key_handle,
             )
         })?;
@@ -120,7 +125,7 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         wrapping_key: CkObjectHandle,
         key: CkObjectHandle,
-        aad: &[u8],
+        aad: CkInBuf<'_>,
         output_spec: &CkOutputBufferSpec,
         param_out_spec: &CkParameterRoundtripSpec,
     ) -> CkResult<(CkOutputBufferResult, CkParameterRoundtripResult)> {
@@ -135,6 +140,7 @@ impl FfiBackend {
         let mech_param_len = ffi_mech.ck_mechanism.ulParameterLen as usize;
         // C_WrapKeyAuthenticated passes pParameter via the mechanism struct,
         // not as separate args. We use a direct single-call approach.
+        let (aad_ptr, aad_len) = aad.as_ptr_len();
         let mut out_len: cryptoki_sys::CK_ULONG = 0;
 
         if !output_spec.buffer_present {
@@ -145,8 +151,8 @@ impl FfiBackend {
                     &mut ffi_mech.ck_mechanism,
                     Self::object_handle(wrapping_key),
                     Self::object_handle(key),
-                    aad.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-                    Self::ulong_len(aad.len()),
+                    aad_ptr as *mut cryptoki_sys::CK_BYTE,
+                    Self::ulong_len_u64(aad_len),
                     std::ptr::null_mut(),
                     &mut out_len,
                 )
@@ -180,7 +186,7 @@ impl FfiBackend {
             }
         } else {
             // Data query: allocate caller-specified buffer.
-            let capped = super::call_helpers::capped_output_len(output_spec.buffer_len as u64);
+            let capped = super::call_helpers::capped_output_len(output_spec.buffer_len);
             out_len = capped as cryptoki_sys::CK_ULONG;
             let mut buf = vec![0u8; capped];
             let rv = unsafe {
@@ -189,8 +195,8 @@ impl FfiBackend {
                     &mut ffi_mech.ck_mechanism,
                     Self::object_handle(wrapping_key),
                     Self::object_handle(key),
-                    aad.as_ptr() as *mut cryptoki_sys::CK_BYTE,
-                    Self::ulong_len(aad.len()),
+                    aad_ptr as *mut cryptoki_sys::CK_BYTE,
+                    Self::ulong_len_u64(aad_len),
                     buf.as_mut_ptr(),
                     &mut out_len,
                 )

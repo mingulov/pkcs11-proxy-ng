@@ -52,7 +52,10 @@ pub(crate) async fn seed_random(
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
     login_user(client, session, &pin).await?;
-    client.seed_random(session, &seed).await.map_err(crate::handlers::cli_err("C_SeedRandom"))?;
+    client
+        .seed_random(session, CkInBuf::Bytes(&seed))
+        .await
+        .map_err(crate::handlers::cli_err("C_SeedRandom"))?;
     println!("RNG seeded.");
     close_session(client, session, true).await;
     Ok(())

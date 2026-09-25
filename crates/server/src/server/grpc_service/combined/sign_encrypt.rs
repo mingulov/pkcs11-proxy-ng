@@ -24,6 +24,7 @@ async fn resolve_backend_session(
     }
 }
 
+// NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(super) async fn digest_encrypt_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
@@ -43,7 +44,9 @@ pub(super) async fn digest_encrypt_update(
 
     let part = req.part;
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.digest_encrypt_update(session, &part)).await?;
+    let result =
+        spawn_backend(move || backend.digest_encrypt_update(session, CkInBuf::Bytes(&part)))
+            .await?;
     let (ck_rv, encrypted_part) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::DigestEncryptUpdateResponse {
         ck_rv,
@@ -51,6 +54,7 @@ pub(super) async fn digest_encrypt_update(
     }))
 }
 
+// NOTE: legacy per-op RPC — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(super) async fn sign_encrypt_update(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
@@ -70,7 +74,8 @@ pub(super) async fn sign_encrypt_update(
 
     let part = req.part;
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.sign_encrypt_update(session, &part)).await?;
+    let result =
+        spawn_backend(move || backend.sign_encrypt_update(session, CkInBuf::Bytes(&part))).await?;
     let (ck_rv, encrypted_part) = ck_result_to_rv(result);
     Ok(Response::new(pkcs11_proxy_ng_proto::SignEncryptUpdateResponse {
         ck_rv,

@@ -1,6 +1,7 @@
 pub mod attribute;
 pub mod error;
 pub mod info;
+pub mod input;
 pub mod interface;
 pub mod mechanism;
 pub mod mechanism_official;
@@ -13,6 +14,7 @@ pub mod slot;
 pub use attribute::{CkAttribute, CkAttributeType, CkAttributeValue};
 pub use error::{CkResult, CkRv};
 pub use info::CkInfo;
+pub use input::CkInBuf;
 pub use interface::{InterfaceCapabilities, InterfaceInfo};
 pub use mechanism::{
     AesCbcEncryptDataParams, AesCmacKeyDerivationParams, AesCtrParams, AriaCbcEncryptDataParams,

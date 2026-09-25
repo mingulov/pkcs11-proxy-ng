@@ -6,9 +6,11 @@ use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::{CkMechanismParams, CkObjectHandle, CkRv, Sp800108DerivedKey};
 
 use super::super::convert_template;
+use super::super::mechanism_handles::remap_mechanism_handles;
 use super::super::service_utils::{
-    parse_mechanism, register_object_handle, register_object_pair, resolve_session,
-    resolve_session_and_object, spawn_backend,
+    parse_mechanism, register_object_handle, register_session_object_handle,
+    register_session_object_pair, resolve_session, resolve_session_and_object, spawn_backend,
+    template_declares_token_object,
 };
 use crate::server::context_manager::{ClientContextId, ContextManager};
 use crate::server::handle_map::VirtualHandle;
@@ -18,6 +20,7 @@ const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
 pub(crate) async fn generate_key_pair(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyPairRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyPairResponse>, Status> {
     let req = request.into_inner();
@@ -67,6 +70,11 @@ pub(crate) async fn generate_key_pair(
         }
     };
 
+    // Each generated key is a session object unless its template marks
+    // CKA_TOKEN; classify before the templates move into the backend call (B2).
+    let public_is_token = template_declares_token_object(&public_key_template);
+    let private_is_token = template_declares_token_object(&private_key_template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.generate_key_pair(session, &mechanism, &public_key_template, &private_key_template)
@@ -75,11 +83,14 @@ pub(crate) async fn generate_key_pair(
 
     match result {
         Ok((public_key, private_key)) => {
-            let virtual_handles = register_object_pair(
+            let virtual_handles = register_session_object_pair(
                 ctx_mgr,
                 &ctx_id,
+                virtual_session,
                 CkObjectHandle(public_key.0),
+                public_is_token,
                 CkObjectHandle(private_key.0),
+                private_is_token,
             )
             .await;
             match virtual_handles {
@@ -108,6 +119,7 @@ pub(crate) async fn generate_key_pair(
 pub(crate) async fn generate_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::GenerateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::GenerateKeyResponse>, Status> {
     let req = request.into_inner();
@@ -147,6 +159,10 @@ pub(crate) async fn generate_key(
     };
 
     let mechanism_type = mechanism.mechanism_type;
+    // A generated key is a session object unless its template marks CKA_TOKEN;
+    // classify before the template moves into the backend call (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result =
         spawn_backend(move || backend.generate_key_with_output(session, &mechanism, &template))
@@ -154,8 +170,14 @@ pub(crate) async fn generate_key(
 
     match result {
         Ok((object, mechanism_out_params)) => {
-            let key_handle =
-                register_object_handle(ctx_mgr, &ctx_id, CkObjectHandle(object.0)).await;
+            let key_handle = register_session_object_handle(
+                ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                CkObjectHandle(object.0),
+                is_token,
+            )
+            .await;
             let mechanism_out = mechanism_out_params.map(|params| {
                 pkcs11_proxy_ng_proto::Mechanism::from(&pkcs11_proxy_ng_types::CkMechanism {
                     mechanism_type,
@@ -179,6 +201,7 @@ pub(crate) async fn generate_key(
 pub(crate) async fn derive_key(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
+    _sanitize_inputs: bool,
     request: Request<pkcs11_proxy_ng_proto::DeriveKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DeriveKeyResponse>, Status> {
     let req = request.into_inner();
@@ -209,27 +232,17 @@ pub(crate) async fn derive_key(
         }
     };
 
-    // CKM_CONCATENATE_BASE_AND_KEY passes an object handle inside the
-    // mechanism parameter.  Translate the client's virtual handle to the
-    // backend's real handle so the backend can resolve it.
-    if let Some(pkcs11_proxy_ng_types::CkMechanismParams::ObjectHandle(ref mut p)) =
-        mechanism.params
-    {
-        let resolved = ctx_mgr
-            .get_context(&ctx_id, |ctx| ctx.object_handles.resolve(VirtualHandle(p.handle)))
-            .await;
-        match resolved {
-            Some(Some(backend_handle)) => {
-                p.handle = backend_handle.0;
-            }
-            _ => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
-                    ck_rv: CkRv::OBJECT_HANDLE_INVALID.0,
-                    key_handle: 0,
-                    mechanism_out: None,
-                }));
-            }
-        }
+    // Translate every embedded object handle carried inside the mechanism
+    // parameters (HKDF salt key, ECDH/MQV private-data keys, TLS key-material
+    // secrets, CKM_CONCATENATE_BASE_AND_KEY handle, …) from the caller's
+    // virtual handle space to the backend's (B1). SP800-108's byte-encoded
+    // input key handles are handled separately just below.
+    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+        return Ok(Response::new(pkcs11_proxy_ng_proto::DeriveKeyResponse {
+            ck_rv: rv.0,
+            key_handle: 0,
+            mechanism_out: None,
+        }));
     }
 
     if let Some(ref mut params) = mechanism.params
@@ -254,6 +267,9 @@ pub(crate) async fn derive_key(
     };
 
     let mechanism_type = mechanism.mechanism_type;
+    // A derived key is a session object unless CKA_TOKEN is set (B2).
+    let is_token = template_declares_token_object(&template);
+    let virtual_session = VirtualHandle(req.session_handle);
     let backend = Arc::clone(backend_ref);
     let result = spawn_backend(move || {
         backend.derive_key_with_output_result(session, &mechanism, base_key, &template)
@@ -264,7 +280,16 @@ pub(crate) async fn derive_key(
         Ok(mut derive_result) => {
             let key_handle = if derive_result.rv.is_ok() {
                 match derive_result.key_handle {
-                    Some(object) => register_object_handle(ctx_mgr, &ctx_id, object).await,
+                    Some(object) => {
+                        register_session_object_handle(
+                            ctx_mgr,
+                            &ctx_id,
+                            virtual_session,
+                            object,
+                            is_token,
+                        )
+                        .await
+                    }
                     None => 0,
                 }
             } else {

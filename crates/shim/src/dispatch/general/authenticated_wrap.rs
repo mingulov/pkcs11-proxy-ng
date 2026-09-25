@@ -37,7 +37,10 @@ pub unsafe extern "C" fn c_wrap_key_authenticated(
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let aad = unsafe { read_input_slice(p_aad, ul_aad_len) };
+        let aad = match input_buf_to_ck_in_buf(unsafe { classify_input(p_aad, ul_aad_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
 
         // The mechanism's pParameter is the dual-purpose buffer for write-back
         let c_mech = unsafe { &*p_mechanism };
@@ -49,7 +52,7 @@ pub unsafe extern "C" fn c_wrap_key_authenticated(
             CkSessionHandle(h_session),
             ParameterOutputFunction::WrapKeyAuthenticated,
             &output_spec,
-            &[],
+            CkInBuf::Bytes(&[]),
             aad,
             param_out_spec.value.as_deref().unwrap_or(&[]),
             &param_out_spec,
@@ -105,8 +108,16 @@ pub unsafe extern "C" fn c_unwrap_key_authenticated(
             return rv;
         }
         let mech = unsafe { read_mechanism(p_mechanism) };
-        let wrapped_key = unsafe { read_input_slice(p_wrapped_key, ul_wrapped_key_len) };
-        let aad = unsafe { read_input_slice(p_aad, ul_aad_len) };
+        let wrapped_key = match input_buf_to_ck_in_buf(unsafe {
+            classify_input(p_wrapped_key, ul_wrapped_key_len)
+        }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
+        let aad = match input_buf_to_ck_in_buf(unsafe { classify_input(p_aad, ul_aad_len) }) {
+            Ok(buf) => buf,
+            Err(e) => return rv_err(e),
+        };
 
         match with_client!(client => client.unwrap_key_authenticated(
             CkSessionHandle(h_session),

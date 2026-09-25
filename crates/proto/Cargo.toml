@@ -7,7 +7,10 @@ publish = false
 
 [dependencies]
 pkcs11-proxy-ng-types = { path = "../types" }
-tonic.workspace = true
+# Generated stubs need `codegen`; the generated client exposes a
+# `connect()`/`Channel` impl, so `channel` (client transport) is required. No
+# server-side transport is referenced by the generated code.
+tonic = { workspace = true, features = ["codegen", "channel"] }
 tonic-prost.workspace = true
 prost.workspace = true
 

@@ -169,7 +169,7 @@ mod tests {
         // Re-create directly to remove (NamedTempFile drop already may unlink, but be sure).
         let _ = std::fs::remove_file(&path);
 
-        let err = src.reload().err().expect("reload must fail without file");
+        let err = src.reload().expect_err("reload must fail without file");
         assert!(err.contains("failed to read mechanism registry"), "actual: {err}");
 
         let after = src.current();

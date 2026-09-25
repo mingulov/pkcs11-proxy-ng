@@ -25,8 +25,8 @@ mod support;
 
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::{
-    CkAttribute, CkAttributeType, CkAttributeValue, CkKeyType, CkMechanism, CkMechanismType,
-    CkObjectClass, CkObjectHandle, CkSessionHandle,
+    CkAttribute, CkAttributeType, CkAttributeValue, CkInBuf, CkKeyType, CkMechanism,
+    CkMechanismType, CkObjectClass, CkObjectHandle, CkSessionHandle,
 };
 use support::{
     CKM_AES_CBC_ENCRYPT_DATA, CKM_AES_CTR, CKM_ECDSA_SHA3_256, CKM_HKDF_DERIVE,
@@ -500,7 +500,7 @@ async fn kryoptic_ecdsa_sha3_sign_verify() -> Result<(), String> {
         .await
         .map_err(|rv| format!("C_VerifyInit(ECDSA-SHA3-256) failed: {rv}"))?;
     client
-        .verify(session, data, &signature)
+        .verify(session, CkInBuf::Bytes(data), CkInBuf::Bytes(&signature))
         .await
         .map_err(|rv| format!("C_Verify(ECDSA-SHA3-256) failed: {rv}"))?;
 

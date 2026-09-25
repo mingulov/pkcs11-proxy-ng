@@ -11,7 +11,9 @@ impl TokenSelector {
     /// Accepted forms:
     /// - `label:<value>` — match by token label (case-sensitive)
     /// - `serial:<value>` — match by token serial (case-sensitive)
-    /// - `pkcs11:<rest>` — PKCS#11 URI selector (matching deferred to Phase 2)
+    /// - `pkcs11:<rest>` — rejected at parse: URI matching is not yet
+    ///   implemented (it would match nothing and silently deny); use
+    ///   `label:` / `serial:`
     /// - bare string without a recognized prefix — defaults to label match
     ///
     /// Returns `Err` for empty, whitespace-only, or ambiguous selectors.
@@ -33,7 +35,7 @@ impl TokenSelector {
             }
             Ok(Self::Serial(serial.to_string()))
         } else if trimmed.starts_with("pkcs11:") {
-            Ok(Self::Uri(trimmed.to_string()))
+            Err("pkcs11: URI selectors are not yet supported; use 'label:' or 'serial:'".into())
         } else if trimmed.contains(':') {
             let prefix = trimmed.split(':').next().unwrap_or("");
             Err(format!(

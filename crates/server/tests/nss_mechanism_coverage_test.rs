@@ -10,8 +10,8 @@
 mod support;
 
 use pkcs11_proxy_ng_types::{
-    CkAttribute, CkAttributeType, CkAttributeValue, CkKeyType, CkMechanism, CkMechanismParams,
-    CkMechanismType, CkObjectClass, GcmParams, IvParams, RsaPkcsPssParams,
+    CkAttribute, CkAttributeType, CkAttributeValue, CkInBuf, CkKeyType, CkMechanism,
+    CkMechanismParams, CkMechanismType, CkObjectClass, GcmParams, IvParams, RsaPkcsPssParams,
 };
 use support::{
     DaemonHarness, ProviderFixture, ensure_user_token, generate_named_rsa_key_pair,
@@ -237,7 +237,7 @@ async fn nss_rsa_pss_sign_verify_parameterized() -> Result<(), String> {
         .await
         .map_err(|rv| format!("C_VerifyInit(PSS) failed: {rv}"))?;
     client
-        .verify(session, data, &signature)
+        .verify(session, CkInBuf::Bytes(data), CkInBuf::Bytes(&signature))
         .await
         .map_err(|rv| format!("C_Verify(PSS) failed: {rv}"))?;
 

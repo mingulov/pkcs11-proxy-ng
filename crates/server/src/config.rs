@@ -193,6 +193,14 @@ pub struct ProxyConfig {
     /// Window length for the per-peer rate limiter, in seconds.
     #[serde(default = "default_rate_limit_window_secs")]
     pub rate_limit_window_secs: u64,
+    /// Reject spec-invalid inputs (NULL data pointer with len>0, NULL mechanism
+    /// on operation init) with CKR_ARGUMENTS_BAD at the daemon, before they
+    /// reach the module — protects a shared daemon from modules that crash on
+    /// them. OFF by default per ADR-0010 (trades transparency for availability).
+    /// NOTE: a sanitize-mode reject does NOT terminate the active backend
+    /// operation the way a module-returned error would (documented divergence).
+    #[serde(default)]
+    pub sanitize_inputs: bool,
 }
 
 impl Default for ProxyConfig {
@@ -213,6 +221,7 @@ impl Default for ProxyConfig {
             backend_health_consecutive_failures: default_backend_health_consecutive_failures(),
             rate_limit_get_backend_interfaces: default_rate_limit_get_backend_interfaces(),
             rate_limit_window_secs: default_rate_limit_window_secs(),
+            sanitize_inputs: false,
         }
     }
 }

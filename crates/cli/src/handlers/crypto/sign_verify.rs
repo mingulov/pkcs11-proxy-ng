@@ -58,7 +58,7 @@ pub(crate) async fn verify(
         .verify_init(session, &mechanism, key)
         .await
         .map_err(crate::handlers::cli_err("C_VerifyInit"))?;
-    match client.verify(session, &data, &signature).await {
+    match client.verify(session, CkInBuf::Bytes(&data), CkInBuf::Bytes(&signature)).await {
         Ok(()) => println!("Signature VALID"),
         Err(error) if error == CkRv::SIGNATURE_INVALID => {
             eprintln!("Signature INVALID (CKR_SIGNATURE_INVALID)");
