@@ -134,20 +134,27 @@ development escape hatch.
 
 ## Current Scope
 
+v0.2.0 is a **single-logical-client testing baseline**: use one trusted
+security domain per daemon and provider instance. Do not connect mutually
+untrusted clients or share a daemon/provider between independent domains.
+Restart the daemon and its provider instance before changing to an independent
+client or security domain. `[proxy] max_contexts = 1` is an admission guardrail,
+not a repair for isolation or residual native authentication state.
+Multi-client isolation is deferred to the [v0.3 scope](release/v0.3.0-scope.md).
+
 **In scope:** Linux daemon and shim, Rust client library, CLI, gRPC over mTLS
 TCP and authenticated Unix sockets, represented PKCS#11 2.40/3.x function-list
 coverage, explicitly modeled mechanisms, exact-output semantics, SoftHSM2/NSS
 integration, and optional gateway/audit controls.
 
-**Out of scope:** macOS native-provider daemon targets (Windows x64/MSVC is
-covered via the implemented tail stretch,
-[ADR-0014](adr/ADR-0014-v020-tail-platform-stretch.md) — see below),
+**Out of scope:** targets beyond the boundaries in
+[the native ownership contract](release/native-mechanism-ownership.md),
 automatic support for future PKCS#11 versions or unmodeled parameter
 layouts, backend worker-process isolation, callbacks, and multi-module
 aggregation within a single daemon.
 The proxy is a forwarding layer; provider conformance is validated externally.
 
-### Selected v0.2 native contract (implementation/qualification pending)
+### Selected v0.2 native contract (implemented; candidate qualification incomplete)
 
 The [native ownership contract](release/native-mechanism-ownership.md)
 requires constructor reservation before loading/discovery, epoch-qualified
@@ -159,25 +166,20 @@ input/output/RV widths and the specified local-refusal order are mandatory.
 Logical clients compete for shared native pending flags; logical Initialize
 creates no independent bitmap or full native per-application event equivalence.
 
-Live FFI qualification covers Linux GNU/musl x86_64/64-bit and x86/32-bit, and
-— via the implemented tail stretch
-([ADR-0014](adr/ADR-0014-v020-tail-platform-stretch.md)) — Windows x64 MSVC.
-Portable Windows client/shim/proto/types, mock-only backend/server builds and
-Windows-client/Linux-daemon interoperation remain. Nonqualified hosts must
-refuse construction before loading; all four Linux width pairs need native
-loaded-shim receipts.
-
-[Tail-stretch closure, 2026-09-17: the Linux-only qualification line, the
-supersession of ADR-0011/0006's Windows native-provider daemon scope, and the
-Native-Windows-deferred line here were the 2026-09-13 P0 amendment posture —
-ADR-0014 is Implemented, with real-Windows daemon-host receipts in
-workspace-root `artifacts/v020-tail-windows-2026-09-16/` legs A and C, and
-shim-direction receipts in leg B.]
+The implementation admits Linux GNU/musl x86_64, i686 and aarch64, Windows
+MSVC x64/x86, and macOS aarch64/x86_64 under the native-ownership contract.
+Historical coverage is narrower than admission: win32 uses a stub provider,
+macOS x86_64 has load coverage only, and Linux aarch64 lacks a native stop-fire
+receipt. Windows GNU and live big-endian FFI remain excluded. The
+[platform decision](adr/ADR-0014-v020-tail-platform-stretch.md) records the
+historical Linux width-pair and Windows interoperation work. These records do
+not establish qualification of the final unreleased testing candidate.
 
 Unresolved shutdown or final-domain Drop without private quiescence proof
 selects return-aware raw Linux `exit_group(70)` for the whole embedding thread
 group. Its target/seccomp/environment contract is explicit; it promises no
 wiping, complete audit tail, cleanup, token deletion, strict disappearance
 deadline or global no-core policy. The controller must progress without stalled
-native/session/registry locks. These are required future enforcement and test
-gates, not claims that this documentation amendment implements them.
+native/session/registry locks. The enforcement is implemented; acceptance of
+its behavior on the final candidate still requires evidence for the claimed
+target and environment.

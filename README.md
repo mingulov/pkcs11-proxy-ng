@@ -13,11 +13,17 @@ app ──dlopen──▶ libpkcs11_proxy_ng_shim.so ──gRPC/TLS──▶ pkc
 
 > **Public latest: `v0.1.0`.**
 >
-> The local target is `v0.2.0`; its gateway, authorization, resilience, and audit
-> work is implemented locally, partially covered, and unreleased. Local unit and
-> integration coverage is not a
-> provenance-complete transparency matrix, so there is no public `v0.2.0` parity
-> or support claim. See [Beta scope](#beta-scope).
+> `v0.2.0` is an **unreleased testing candidate**. Its implemented features and
+> historical test evidence do not establish qualification of the current source.
+> Final-source validation and provider comparison work remain; there is
+> no public `v0.2.0` parity or support claim. See [Beta scope](#beta-scope).
+
+The v0.2 scope is **one logical client in one trusted security domain per
+daemon/provider instance**. Do not share it with mutually untrusted clients.
+Restart the daemon and provider before switching independent clients or domains.
+`[proxy] max_contexts = 1` is an admission guardrail, not an isolation fix.
+Multi-client isolation is deferred to the
+[v0.3 scope](./doc/release/v0.3.0-scope.md).
 
 ## Quick start (local dev, no Kubernetes)
 
@@ -48,30 +54,26 @@ PKCS11_PROXY_ENDPOINT=http://127.0.0.1:7512 \
 # (then exercise crypto, e.g. --login --pin 1234 --sign --mechanism RSA-PKCS ...)
 ```
 
-For anything beyond local dev, start from a template in
-[`examples/configs/`](./examples/configs/) (dev / staging / prod) rather than
-hand-rolling a config.
+Configuration examples are available in
+[`examples/configs/`](./examples/configs/) (`dev`, `staging`, `prod`). These
+names describe example settings, not v0.2 production qualification. Every v0.2
+deployment retains the single-client testing boundary above; preserve the
+required authentication and transport settings when adapting an example.
 
 ## Beta scope
 
-The selected v0.2 [native ownership contract](./doc/release/native-mechanism-ownership.md)
-is partially implemented locally and unreleased: mechanism roots and nested
-output cells live in persistent native allocations (Miri-checked under both
-borrow models), one provider chain per process is enforced by the
-constructor domain with lifecycle-honest retirement, and wire widths are
-checked with rejection proven on i686 hardware. Still pending: DONT_BLOCK-only
-slot waits with shared native event flags, the qualified Linux
-whole-process lifetime stop, session operation slots, subprocess/topology
-qualification, and the provider parity round. The v0.2.0 tail stretch (see
-[ADR-0014](./doc/adr/ADR-0014-v020-tail-platform-stretch.md), Implemented
-2026-09-17) evidences Windows x64/MSVC daemon + shim in both interoperation
-directions on real Windows Server 2022
-(`artifacts/v020-tail-windows-2026-09-16/` legs A/B/C at the workspace root),
-the 32-bit/mixed width claim (four Linux legs plus the NSS-i386 second
-provider, `scripts/run-cross-width-*-live-test.sh` in nightly), the per-PR
-Tier 0f `windows-client-llp64` `--all-targets` gate, and the deterministic
-Windows ZIP bundle (`scripts/release-windows.sh`, `SHA256SUMS-windows`).
-This is not a v0.2 parity/support receipt.
+The v0.2 [native ownership contract](./doc/release/native-mechanism-ownership.md)
+is implemented: persistent native allocations, one managed provider chain per
+process, lifecycle retirement, checked widths, nonblocking slot waits, operation
+slots, and platform-specific abnormal stops. Historical ownership and topology
+evidence is described in that contract and
+[ADR-0014](./doc/adr/ADR-0014-v020-tail-platform-stretch.md).
+
+These records do not qualify every later source revision. The current candidate
+still needs fresh validation of its claimed scope; the last 30-provider comparison run
+ended with incomplete comparisons for all 30 providers. Platform build, stub,
+load, runtime, and provider-parity coverage are distinct; see the candidate
+[release notes](./doc/release/v0.2.0-release-notes.md) for their limits.
 
 **Public `v0.1.0` support**
 
@@ -82,7 +84,7 @@ This is not a v0.2 parity/support receipt.
   softokn**, **Kryoptic**
 - The released daemon, client, CLI, and shim architecture and TOML config model
 
-**Explicitly not claimed for this beta**
+**Explicitly not claimed for the public `v0.1.0` beta**
 
 - General production-readiness / operational guarantees
 - Windows GNU, 32-bit Windows (PE32), and macOS/ARM/big-endian runtime claims
