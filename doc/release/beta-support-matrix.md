@@ -76,7 +76,7 @@ statement below is unchanged.
 | --- | --- |
 | OS | Linux |
 | Architecture | `x86_64` |
-| 32-bit / mixed 32-64-bit | **Deferred** — not supported for the beta (see [ADR-0006](../adr/ADR-0006-32-64-bit-cross-platform-compatibility.md)) |
+| 32-bit / mixed 32-64-bit | **Deferred** — not supported for the public v0.1.0 beta |
 
 ## Transport
 
@@ -129,8 +129,8 @@ These remain valuable but do **not** block or qualify the beta:
 
 - **Backend-crash blast radius:** multiple logical clients share a backend; a
   hard backend crash can affect co-located clients. Mitigated operationally (run
-  multiple daemon instances + client reconnect); see
-  [ADR-0007](../adr/ADR-0007-backend-process-isolation.md).
+  multiple daemon instances + client reconnect); see the
+  [crash-isolation runbook](../runbooks/operating-pkcs11-proxy-ng.md#4a-crash-isolation--blast-radius--run-multiple-instances).
 - Error semantics follow the backend; the proxy preserves exact `CK_RV` values
   and does not normalize provider-specific error precedence. See
   [doc/error-reference.md](../error-reference.md).

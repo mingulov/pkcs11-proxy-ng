@@ -131,6 +131,3 @@ they likewise do not wipe endpoints' memory. Operators should disable core
 dumps, protect or disable swap as appropriate to their threat model, restrict
 process inspection, keep diagnostic collection private, and avoid injecting
 secrets through command-line arguments or environment variables.
-
-See [ADR-0013](../adr/ADR-0013-secret-ownership-and-diagnostics.md) for the
-decision and accepted trade-offs.
