@@ -16,8 +16,10 @@ struct LoginGate {
 
 mod crypto_ops;
 pub mod echo;
+mod historical_flags;
 mod mock_types;
 mod object_ops;
+pub mod output_lengths;
 mod session_ops;
 mod state;
 
@@ -113,6 +115,11 @@ pub struct MockBackend {
     /// paths are exercised through this separate hook. Set via
     /// `inject_close_error()`.
     injected_close_error: Mutex<Option<CkRv>>,
+    /// Error that `login` specifically returns (before `login_impl`). Used to
+    /// simulate PIN failures (e.g. CKR_PIN_INCORRECT) so tests can exercise
+    /// the per-slot failed-login budget without a real PKCS#11 module.
+    /// `login_calls` is still incremented so the caller can assert backend reach.
+    injected_login_rv: Mutex<Option<CkRv>>,
     /// Optional mechanism parameters to return from `C_EncryptInit`.
     ///
     /// Real providers may mutate selected init parameters, for example by
@@ -148,6 +155,9 @@ pub struct MockBackend {
     /// for gRPC tests that exercise the simple Encrypt/Decrypt response
     /// `mechanism_out` fields.
     session_mechanism_output: Mutex<HashMap<u64, CkMechanismParams>>,
+    /// Active digest mechanism per session, captured at C_DigestInit so
+    /// digest output length can match the mechanism (mock::output_lengths).
+    session_digest_mechanism: Mutex<HashMap<u64, CkMechanismType>>,
     /// Per-session signature captured by `C_VerifySignatureInit`.
     verify_signature_state: Mutex<HashMap<u64, Vec<u8>>>,
     /// Per-session accumulated data for `C_VerifySignatureUpdate`/`Final`.
@@ -162,6 +172,13 @@ pub struct MockBackend {
     /// every migrated data op that calls it contributes. Used by
     /// sanitize_inputs tests to confirm whether the backend was reached.
     data_op_calls: AtomicUsize,
+    /// Count of `C_GetAttributeValue` calls reaching the backend (regular path).
+    /// Used by R2 coalescer tests to assert whether the backend was bypassed on
+    /// a cache hit.
+    attr_get_calls: AtomicUsize,
+    /// Count of `C_GetAttributeValue` calls reaching the backend (exact path).
+    /// Parallels `attr_get_calls` for the exact-output RPC path.
+    attr_get_exact_calls: AtomicUsize,
     /// Test-only gate (M5 harness): when `Some`, each real backend `login`
     /// signals + blocks on it. `None` (default) makes `login` a no-op gate.
     login_gate: Mutex<Option<LoginGate>>,
@@ -175,6 +192,20 @@ pub struct MockBackend {
     /// construction (`with_mechanism_registry`); `None` (plain `new`)
     /// keeps the mock permissive for existing suites.
     param_presence: Option<ParamPresence>,
+    /// PKCS#11 version reported by `get_info`. Default `(3, 0)`.
+    /// Set via `with_cryptoki_version` to test the v3.0+ startup guard.
+    cryptoki_version: (u8, u8),
+    /// When `Some`, `find_objects` returns successive slices of this list,
+    /// advancing the cursor on each call. After all objects have been returned,
+    /// subsequent calls return an empty vec — simulating genuine backend exhaustion.
+    /// `find_objects_init` resets the cursor to 0. Default `None` preserves the
+    /// historical "always empty" find behavior for tests that do not need search.
+    find_objects_override: Mutex<Option<Vec<CkObjectHandle>>>,
+    /// Cursor into `find_objects_override`: the index of the next object to return.
+    /// Each `find_objects` call advances it by the number of objects returned.
+    /// `find_objects_init` resets it to 0. Enables multi-batch test scenarios where
+    /// successive calls return successive slices (batch1 → batch2 → [] exhausted).
+    find_objects_cursor: Mutex<usize>,
 }
 
 /// Which mechanisms require parameters and which forbid them, snapshot
@@ -214,22 +245,29 @@ impl MockBackend {
             attribute_store: Mutex::new(HashMap::new()),
             injected_error: Mutex::new(None),
             injected_close_error: Mutex::new(None),
+            injected_login_rv: Mutex::new(None),
             encrypt_init_output: Mutex::new(None),
             encrypt_operation_output: Mutex::new(None),
             encrypt_exact_output: Mutex::new(None),
             wrap_key_exact_output: Mutex::new(None),
             derive_key_output: Mutex::new(None),
             session_mechanism_output: Mutex::new(HashMap::new()),
+            session_digest_mechanism: Mutex::new(HashMap::new()),
             verify_signature_state: Mutex::new(HashMap::new()),
             verify_signature_accumulator: Mutex::new(HashMap::new()),
             interface_capabilities: Mutex::new(None),
             login_calls: AtomicUsize::new(0),
             token_info_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
+            attr_get_calls: AtomicUsize::new(0),
+            attr_get_exact_calls: AtomicUsize::new(0),
             login_gate: Mutex::new(None),
             abi: MockAbi::host(),
             advertise_big_endian: false,
             param_presence: None,
+            cryptoki_version: (3, 0),
+            find_objects_override: Mutex::new(None),
+            find_objects_cursor: Mutex::new(0),
         }
     }
 
@@ -306,6 +344,19 @@ impl MockBackend {
         store.entry(object.0).or_default().insert(attr_type.0, slot);
     }
 
+    /// Configure the objects to be served by successive `find_objects` calls.
+    ///
+    /// `find_objects` returns a cursor-based slice of up to `max_count` handles on each
+    /// call, advancing the cursor. Once all handles have been returned, subsequent calls
+    /// yield an empty vec — simulating genuine backend exhaustion. `find_objects_init`
+    /// resets the cursor to 0, so a new search starts from the beginning.
+    ///
+    /// This enables multi-batch test scenarios (e.g. batch1=[denied], batch2=[allowed])
+    /// by configuring a list larger than `max_count` and using a small `max_object_count`.
+    pub fn set_find_objects_result(&self, objects: Vec<CkObjectHandle>) {
+        *self.find_objects_override.lock().unwrap() = Some(objects);
+    }
+
     /// Enqueue a slot event to be returned by the next `wait_for_slot_event` call.
     ///
     /// Events are returned FIFO. If multiple events are queued, each call to
@@ -338,6 +389,19 @@ impl MockBackend {
     /// (M9) deduplicates repeated authorization checks.
     pub fn token_info_call_count(&self) -> usize {
         self.token_info_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of `C_GetAttributeValue` calls reaching the backend (regular path).
+    ///
+    /// Used by R2 coalescer tests to assert that a cache hit does NOT increment
+    /// the backend call count, confirming the backend was bypassed.
+    pub fn attr_get_call_count(&self) -> usize {
+        self.attr_get_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of `C_GetAttributeValue` calls reaching the backend (exact path).
+    pub fn attr_get_exact_call_count(&self) -> usize {
+        self.attr_get_exact_calls.load(Ordering::SeqCst)
     }
 
     /// Configure a slot-specific mechanism list.
@@ -383,6 +447,19 @@ impl MockBackend {
     /// Clear a previously injected `close_session` error.
     pub fn clear_close_error(&self) {
         *self.injected_close_error.lock().unwrap() = None;
+    }
+
+    /// Make subsequent `login` calls return `rv` instead of the normal
+    /// login logic. `login_calls` is still incremented so tests can assert
+    /// whether the backend was reached. Use to simulate PIN failures without
+    /// a real PKCS#11 module (e.g. `CKR_PIN_INCORRECT`).
+    pub fn inject_login_rv(&self, rv: CkRv) {
+        *self.injected_login_rv.lock().unwrap() = Some(rv);
+    }
+
+    /// Clear a previously injected login error, restoring normal login behavior.
+    pub fn clear_login_rv(&self) {
+        *self.injected_login_rv.lock().unwrap() = None;
     }
 
     /// Configure optional mechanism parameters returned by `encrypt_init`.
@@ -483,6 +560,13 @@ impl MockBackend {
         self
     }
 
+    /// Override the PKCS#11 cryptoki version reported by `get_info`.
+    /// Used by startup-guard tests to simulate a pre-3.0 backend.
+    pub fn with_cryptoki_version(mut self, major: u8, minor: u8) -> Self {
+        self.cryptoki_version = (major, minor);
+        self
+    }
+
     /// The ABI profile this mock emulates.
     pub fn abi(&self) -> MockAbi {
         self.abi
@@ -555,9 +639,60 @@ impl MockBackend {
         if template.is_empty() {
             return;
         }
-        let attrs =
+        let mut attrs =
             template.iter().filter_map(Self::template_entry_to_slot).collect::<HashMap<_, _>>();
+        Self::synthesize_value_from_value_len(handle, &mut attrs);
         self.attribute_store.lock().unwrap().insert(handle.0, attrs);
+    }
+
+    /// A key created with CKA_VALUE_LEN but no explicit CKA_VALUE gets a
+    /// deterministic CKA_VALUE of exactly that many bytes — matching a
+    /// real token, where generate/derive produce key material of the
+    /// requested length and it reads back at that size.
+    fn synthesize_value_from_value_len(
+        handle: CkObjectHandle,
+        attrs: &mut HashMap<u64, MockAttributeSlot>,
+    ) {
+        if attrs.contains_key(&CkAttributeType::VALUE.0) {
+            return;
+        }
+        let Some(MockAttributeSlot::Value(CkAttributeValue::Ulong(len))) =
+            attrs.get(&CkAttributeType::VALUE_LEN.0)
+        else {
+            return;
+        };
+        let len = *len as usize;
+        let value = echo::echo_bytes("key-value", &[&handle.0.to_le_bytes()], len);
+        attrs.insert(
+            CkAttributeType::VALUE.0,
+            MockAttributeSlot::Value(CkAttributeValue::Bytes(value)),
+        );
+    }
+
+    /// Set CKA_CLASS/CKA_KEY_TYPE (+CKA_LOCAL = true) on a freshly
+    /// generated key from the mechanism, unless the template already
+    /// provided them — matching a real token, so read-after-generate
+    /// shows an authentic object. Creates the store entry if the object
+    /// was generated with an empty template.
+    fn synthesize_default_key_attributes(
+        &self,
+        handle: CkObjectHandle,
+        class: u64,
+        key_type: Option<u64>,
+    ) {
+        let mut store = self.attribute_store.lock().unwrap();
+        let attrs = store.entry(handle.0).or_default();
+        attrs
+            .entry(CkAttributeType::CLASS.0)
+            .or_insert_with(|| MockAttributeSlot::Value(CkAttributeValue::Ulong(class)));
+        if let Some(kt) = key_type {
+            attrs
+                .entry(CkAttributeType::KEY_TYPE.0)
+                .or_insert_with(|| MockAttributeSlot::Value(CkAttributeValue::Ulong(kt)));
+        }
+        attrs
+            .entry(CkAttributeType::LOCAL.0)
+            .or_insert_with(|| MockAttributeSlot::Value(CkAttributeValue::Bool(true)));
     }
 
     /// C_SetAttributeValue semantics: merge the template into the object's
@@ -792,12 +927,6 @@ impl MockBackend {
 
     fn xor_bytes(data: &[u8]) -> Vec<u8> {
         data.iter().map(|byte| byte ^ 0x42).collect()
-    }
-
-    fn digest_bytes(data: &[u8]) -> Vec<u8> {
-        // Deterministic, input-derived, domain-separated (see mock::echo);
-        // 4 bytes to keep two-call buffer tests simple.
-        echo::echo_bytes("digest", &[data], 4)
     }
 
     fn reverse_bytes(data: &[u8]) -> Vec<u8> {
@@ -1206,6 +1335,11 @@ impl Pkcs11Backend for MockBackend {
                 released = cv.wait(released).unwrap();
             }
         }
+        // G2-PR3: injected login error for PIN-failure tests. Checked after the
+        // gate and counter so tests can assert backend reach via login_call_count.
+        if let Some(rv) = *self.injected_login_rv.lock().unwrap() {
+            return Err(rv);
+        }
         self.login_impl(session, user_type)
     }
 
@@ -1215,8 +1349,12 @@ impl Pkcs11Backend for MockBackend {
     fn find_objects_init(&self, session: CkSessionHandle, _t: &[CkAttribute]) -> CkResult<()> {
         self.find_objects_init_impl(session)
     }
-    fn find_objects(&self, session: CkSessionHandle, _m: u32) -> CkResult<Vec<CkObjectHandle>> {
-        self.find_objects_impl(session)
+    fn find_objects(
+        &self,
+        session: CkSessionHandle,
+        max_count: u32,
+    ) -> CkResult<Vec<CkObjectHandle>> {
+        self.find_objects_impl(session, max_count)
     }
     fn find_objects_final(&self, session: CkSessionHandle) -> CkResult<()> {
         self.find_objects_final_impl(session)
@@ -1298,27 +1436,60 @@ impl Pkcs11Backend for MockBackend {
         self.init_cancel_impl(s, MultiPartOp::Verify)
     }
     fn verify(&self, s: CkSessionHandle, d: CkInBuf<'_>, sig: CkInBuf<'_>) -> CkResult<()> {
-        let _ = self.resolve_input(d)?;
-        let _ = self.resolve_input(sig)?;
-        self.verify_impl(s)
+        let data = self.resolve_input(d)?;
+        let signature = self.resolve_input(sig)?;
+        // A real integrity check: the one-shot sign echo is a function of
+        // the signed data (see sign_impl), so a signature that does not
+        // reproduce echo("sign", data) means data or signature bytes were
+        // lost/corrupted between sign and verify.
+        let expected = echo::echo_bytes("sign", &[data], crypto_ops::MOCK_SIGN_LEN);
+        // Terminate the operation first (like a real token: C_Verify ends
+        // the op whether it returns OK or CKR_SIGNATURE_INVALID), then
+        // report the signature outcome.
+        self.verify_impl(s)?;
+        if signature != expected {
+            return Err(CkRv::SIGNATURE_INVALID);
+        }
+        Ok(())
     }
     fn verify_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
         let _ = self.resolve_input(p)?;
         self.verify_update_impl(s)
     }
     fn verify_final(&self, s: CkSessionHandle, sig: CkInBuf<'_>) -> CkResult<()> {
-        let _ = self.resolve_input(sig)?;
-        self.verify_final_impl(s)
+        let signature = self.resolve_input(sig)?;
+        // Multi-part verify accumulates no data (sign_final's echo is
+        // input-independent), so this stays a shape check against the
+        // sign-final echo rather than a data-integrity check.
+        let expected = echo::echo_bytes("sign-final", &[], crypto_ops::MOCK_SIGN_LEN);
+        self.verify_final_impl(s)?;
+        if signature != expected {
+            return Err(CkRv::SIGNATURE_INVALID);
+        }
+        Ok(())
     }
     fn digest_init(&self, s: CkSessionHandle, m: &CkMechanism) -> CkResult<()> {
         self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::DIGEST)?;
-        self.digest_init_impl(s)
+        self.digest_init_impl(s)?;
+        self.session_digest_mechanism.lock().unwrap().insert(s.0, m.mechanism_type);
+        Ok(())
     }
     fn digest_init_cancel(&self, s: CkSessionHandle) -> CkResult<()> {
+        self.session_digest_mechanism.lock().unwrap().remove(&s.0);
         self.init_cancel_impl(s, MultiPartOp::Digest)
     }
     fn digest(&self, s: CkSessionHandle, data: CkInBuf<'_>) -> CkResult<Vec<u8>> {
-        self.digest_impl(s, self.resolve_input(data)?)
+        let data = self.resolve_input(data)?;
+        // Length follows the active mechanism (mock::output_lengths);
+        // unknown mechanisms keep the legacy compact length.
+        let len = self
+            .session_digest_mechanism
+            .lock()
+            .unwrap()
+            .get(&s.0)
+            .and_then(|m| output_lengths::digest_len(*m))
+            .unwrap_or(crypto_ops::MOCK_DEFAULT_DIGEST_LEN);
+        self.digest_impl(s, data, len)
     }
     fn digest_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
         let _ = self.resolve_input(p)?;
@@ -1328,7 +1499,14 @@ impl Pkcs11Backend for MockBackend {
         self.digest_key_impl(s, k)
     }
     fn digest_final(&self, s: CkSessionHandle) -> CkResult<Vec<u8>> {
-        self.digest_final_impl(s)
+        let len = self
+            .session_digest_mechanism
+            .lock()
+            .unwrap()
+            .get(&s.0)
+            .and_then(|m| output_lengths::digest_len(*m))
+            .unwrap_or(crypto_ops::MOCK_DEFAULT_DIGEST_LEN);
+        self.digest_final_impl(s, len)
     }
     fn encrypt_init(
         &self,
@@ -1483,7 +1661,14 @@ impl Pkcs11Backend for MockBackend {
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
         self.require_mechanism_workflow_for_session(session, m, CkMechanismFlags::GENERATE)?;
-        self.generate_key_impl(session, template)
+        let handle = self.generate_key_impl(session, template)?;
+        // CKO_SECRET_KEY, with the key type derived from the mechanism.
+        self.synthesize_default_key_attributes(
+            handle,
+            0x0000_0004,
+            session_ops::mock_secret_key_type(m.mechanism_type),
+        );
+        Ok(handle)
     }
     fn create_object(
         &self,
@@ -1530,7 +1715,12 @@ impl Pkcs11Backend for MockBackend {
             m,
             CkMechanismFlags::GENERATE_KEY_PAIR,
         )?;
-        self.generate_key_pair_impl(session, public_template, private_template)
+        let (public, private) =
+            self.generate_key_pair_impl(session, public_template, private_template)?;
+        let key_type = session_ops::mock_pair_key_type(m.mechanism_type);
+        self.synthesize_default_key_attributes(public, 0x0000_0002, key_type); // CKO_PUBLIC_KEY
+        self.synthesize_default_key_attributes(private, 0x0000_0003, key_type); // CKO_PRIVATE_KEY
+        Ok((public, private))
     }
     fn wait_for_slot_event(&self, flags: u64) -> CkResult<CkSlotId> {
         self.wait_for_slot_event_impl(flags)

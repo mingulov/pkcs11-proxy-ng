@@ -41,6 +41,7 @@ async fn spawn_uds_server(
         UnixAuthMode::PeerCred,
         Arc::new(policy),
         MechanismRegistrySource::load(None).unwrap(),
+        None, // audit: not needed for transport tests
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -72,6 +73,7 @@ fn current_uid() -> u32 {
 fn all_tokens(identity: String) -> TokenPolicy {
     TokenPolicy::from_config(&AuthConfig {
         allow_all_authenticated: false,
+        anonymous_principal: None,
         policy: vec![PolicyEntry { identity, tokens: TokenAccessSpec::All("all".into()) }],
     })
     .unwrap()

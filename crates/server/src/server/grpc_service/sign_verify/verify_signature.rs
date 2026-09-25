@@ -10,10 +10,9 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
 
-use super::super::super::context_manager::{ClientContextId, ContextManager};
+use super::super::super::context_manager::ClientContextId;
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, input_from_wire, parse_mechanism, resolve_session,
     resolve_session_and_key, spawn_backend,
@@ -23,12 +22,14 @@ use super::super::service_utils::{
 // C_VerifySignatureInit — optional mechanism (None = cancel)
 // ---------------------------------------------------------------------------
 
+use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn verify_signature_init(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureInitRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureInitResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -42,9 +43,7 @@ pub(crate) async fn verify_signature_init(
     if req.mechanism.is_some() {
         // Normal init path: resolve session + key, parse mechanism.
         let (session, key) =
-            match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.key_handle)
-                .await
-            {
+            match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.key_handle).await {
                 Ok(handles) => handles,
                 Err(rv) => {
                     return Ok(Response::new(pkcs11_proxy_ng_proto::VerifySignatureInitResponse {
@@ -128,11 +127,12 @@ pub(crate) async fn verify_signature_init(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_signature(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -164,11 +164,12 @@ pub(crate) async fn verify_signature(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_signature_update(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureUpdateResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
@@ -204,11 +205,11 @@ pub(crate) async fn verify_signature_update(
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn verify_signature_final(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::VerifySignatureFinalRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::VerifySignatureFinalResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 

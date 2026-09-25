@@ -40,7 +40,7 @@ impl MockBackend {
 
     pub(super) fn backend_info(&self) -> CkResult<CkInfo> {
         Ok(CkInfo {
-            cryptoki_version: (3, 0),
+            cryptoki_version: self.cryptoki_version,
             manufacturer_id: "MockBackend".into(),
             flags: 0,
             library_description: "Mock PKCS#11 for testing".into(),
@@ -125,9 +125,10 @@ impl MockBackend {
         if !self.mechanisms_for_slot(slot_id).contains(&mech) {
             return Err(CkRv::MECHANISM_INVALID);
         }
+        let (min_key_size, max_key_size) = mock_mechanism_key_sizes(mech).unwrap_or((2048, 4096));
         Ok(CkMechanismInfo {
-            min_key_size: 2048,
-            max_key_size: 4096,
+            min_key_size,
+            max_key_size,
             flags: CkMechanismFlags(mock_mechanism_workflow_flags(mech)),
         })
     }
@@ -254,7 +255,78 @@ impl MockBackend {
     }
 }
 
+/// Spec-grounded `(min_key_size, max_key_size)` for mechanisms whose
+/// OASIS tables define concrete sizes. Symmetric mechanisms report key
+/// sizes in BYTES (the convention SoftHSM and most providers follow);
+/// mechanisms with no defined size return `None` so `mechanism_info`
+/// keeps its generic default. Source-grounded metadata (cited by the
+/// OASIS coverage inventory) — extend only with spec-backed values.
+/// The CKK_* key type of the secret key produced by a symmetric
+/// `*_KEY_GEN` mechanism (from cryptoki_sys::CKK_*). `None` leaves the
+/// key type unset (mechanism has no single obvious secret key type).
+pub(super) fn mock_secret_key_type(mech: CkMechanismType) -> Option<u64> {
+    use cryptoki_sys::*;
+    let v = mech.0;
+    Some(match v {
+        x if x == CKM_AES_KEY_GEN as u64 => CKK_AES as u64,
+        x if x == CKM_DES3_KEY_GEN as u64 => CKK_DES3 as u64,
+        x if x == CKM_GENERIC_SECRET_KEY_GEN as u64 => CKK_GENERIC_SECRET as u64,
+        x if x == CKM_CHACHA20_KEY_GEN as u64 => CKK_CHACHA20 as u64,
+        _ => return None,
+    })
+}
+
+/// The CKK_* key type of the key pair produced by an asymmetric
+/// `*_KEY_PAIR_GEN` mechanism.
+pub(super) fn mock_pair_key_type(mech: CkMechanismType) -> Option<u64> {
+    use cryptoki_sys::*;
+    let v = mech.0;
+    Some(match v {
+        x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as u64 => CKK_RSA as u64,
+        x if x == CKM_EC_KEY_PAIR_GEN as u64 => CKK_EC as u64,
+        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as u64 => CKK_EC_EDWARDS as u64,
+        x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as u64 => CKK_EC_MONTGOMERY as u64,
+        x if x == CKM_DSA_KEY_PAIR_GEN as u64 => CKK_DSA as u64,
+        x if x == CKM_DH_PKCS_KEY_PAIR_GEN as u64 => CKK_DH as u64,
+        _ => return None,
+    })
+}
+
+pub(super) fn mock_mechanism_key_sizes(mech: CkMechanismType) -> Option<(u64, u64)> {
+    use cryptoki_sys::*;
+    let v = mech.0;
+    Some(match v {
+        // AES: 128/192/256-bit keys.
+        x if x == CKM_AES_KEY_GEN as u64 => (16, 32),
+        x if x == CKM_AES_CBC as u64 => (16, 32),
+        x if x == CKM_AES_ECB as u64 => (16, 32),
+        x if x == CKM_AES_GCM as u64 => (16, 32),
+        x if x == CKM_AES_CTR as u64 => (16, 32),
+        x if x == CKM_AES_CMAC as u64 => (16, 32),
+        x if x == CKM_AES_KEY_WRAP as u64 => (16, 32),
+        // DES3: fixed triple-DES key.
+        x if x == CKM_DES3_KEY_GEN as u64 => (24, 24),
+        x if x == CKM_DES3_CBC as u64 => (24, 24),
+        x if x == CKM_DES3_ECB as u64 => (24, 24),
+        // ChaCha20 / Salsa20: fixed 256-bit.
+        x if x == CKM_CHACHA20_KEY_GEN as u64 => (32, 32),
+        x if x == CKM_SALSA20_KEY_GEN as u64 => (32, 32),
+        _ => return None,
+    })
+}
+
 pub(super) fn mock_mechanism_workflow_flags(mech: CkMechanismType) -> u64 {
+    let primary = mock_mechanism_workflow_flags_current(mech);
+    if primary != 0 {
+        return primary;
+    }
+    // Legacy mechanisms dropped from the current working spec are grounded
+    // from the historical-mechanisms spec (pkcs11-hist) instead — see
+    // super::historical_flags (generated, source-cited).
+    super::historical_flags::historical_workflow_flags(mech).unwrap_or(0)
+}
+
+fn mock_mechanism_workflow_flags_current(mech: CkMechanismType) -> u64 {
     let encrypt_decrypt = CkMechanismFlags::ENCRYPT | CkMechanismFlags::DECRYPT;
     let sign_verify = CkMechanismFlags::SIGN | CkMechanismFlags::VERIFY;
     let sign_recover_verify_recover =

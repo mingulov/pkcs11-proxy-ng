@@ -131,6 +131,7 @@ mod tests {
     #[test]
     fn peer_cred_to_policy_integration() {
         // End-to-end: extract identity from socket → match against policy.
+        use super::super::grant::TokenGrant;
         use super::super::policy::{TokenAccess, TokenPolicy, TokenSelector};
         use std::collections::HashMap;
 
@@ -140,9 +141,19 @@ mod tests {
 
         // Build a policy that allows this UID to access "my-hsm"
         let mut rules = HashMap::new();
-        rules
-            .insert(policy_key, TokenAccess::Specific(vec![TokenSelector::Label("my-hsm".into())]));
-        let policy = TokenPolicy { rules, allow_all_authenticated: false };
+        rules.insert(
+            policy_key,
+            TokenAccess::Specific(vec![TokenGrant::simple(TokenSelector::Label("my-hsm".into()))]),
+        );
+        let policy = TokenPolicy {
+            rules,
+            allow_all_authenticated: false,
+            has_policy: false,
+            anonymous_principal: None,
+            per_object_active_cache: false,
+            per_class_active_cache: false,
+            per_mechanism_active_cache: false,
+        };
 
         assert!(
             policy.allows(&id, "my-hsm", "any-serial"),
@@ -180,6 +191,7 @@ mod tests {
     fn multi_user_policy_isolation() {
         // Simulate two users connecting: uid=1000 and uid=2000.
         // Each should only see their own tokens.
+        use super::super::grant::TokenGrant;
         use super::super::identity::AuthenticatedIdentity;
         use super::super::policy::{TokenAccess, TokenPolicy, TokenSelector};
         use std::collections::HashMap;
@@ -187,13 +199,25 @@ mod tests {
         let mut rules = HashMap::new();
         rules.insert(
             "uid=1000".into(),
-            TokenAccess::Specific(vec![TokenSelector::Label("user1-token".into())]),
+            TokenAccess::Specific(vec![TokenGrant::simple(TokenSelector::Label(
+                "user1-token".into(),
+            ))]),
         );
         rules.insert(
             "uid=2000".into(),
-            TokenAccess::Specific(vec![TokenSelector::Label("user2-token".into())]),
+            TokenAccess::Specific(vec![TokenGrant::simple(TokenSelector::Label(
+                "user2-token".into(),
+            ))]),
         );
-        let policy = TokenPolicy { rules, allow_all_authenticated: false };
+        let policy = TokenPolicy {
+            rules,
+            allow_all_authenticated: false,
+            has_policy: false,
+            anonymous_principal: None,
+            per_object_active_cache: false,
+            per_class_active_cache: false,
+            per_mechanism_active_cache: false,
+        };
 
         let user1 = AuthenticatedIdentity::PeerCred { uid: 1000 };
         let user2 = AuthenticatedIdentity::PeerCred { uid: 2000 };

@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::{CkObjectHandle, CkOutputBufferSpec, CkRv};
 
 use super::super::convert_template;
@@ -16,31 +15,36 @@ use super::super::service_utils::{
     check_sanitize, input_from_wire, parse_mechanism, register_session_object_handle,
     resolve_session_and_key, spawn_backend, template_declares_token_object,
 };
-use crate::server::context_manager::{ClientContextId, ContextManager};
+use crate::server::context_manager::ClientContextId;
 use crate::server::handle_map::VirtualHandle;
 
+use crate::server::grpc_service::HandlerContext;
 pub(crate) async fn encapsulate_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncapsulateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncapsulateKeyResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, public_key) =
-        match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.public_key_handle)
-            .await
-        {
-            Ok(handles) => handles,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
-                    ck_rv: rv.0,
-                    ciphertext: Vec::new(),
-                    key_handle: 0,
-                }));
-            }
-        };
+    let (session, public_key) = match resolve_session_and_key(
+        ctx,
+        &ctx_id,
+        req.session_handle,
+        req.public_key_handle,
+    )
+    .await
+    {
+        Ok(handles) => handles,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
+                ck_rv: rv.0,
+                ciphertext: Vec::new(),
+                key_handle: 0,
+            }));
+        }
+    };
 
     let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
@@ -53,8 +57,11 @@ pub(crate) async fn encapsulate_key(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyResponse {
             ck_rv: rv.0,
             ciphertext: Vec::new(),
@@ -106,16 +113,17 @@ pub(crate) async fn encapsulate_key(
 }
 
 pub(crate) async fn decapsulate_key(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DecapsulateKeyRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DecapsulateKeyResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
+    let sanitize_inputs = ctx.sanitize_inputs;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
     let (session, private_key) =
-        match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.private_key_handle)
+        match resolve_session_and_key(ctx, &ctx_id, req.session_handle, req.private_key_handle)
             .await
         {
             Ok(handles) => handles,
@@ -137,8 +145,11 @@ pub(crate) async fn decapsulate_key(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::DecapsulateKeyResponse {
             ck_rv: rv.0,
             key_handle: 0,
@@ -202,30 +213,34 @@ pub(crate) async fn decapsulate_key(
 }
 
 pub(crate) async fn encapsulate_key_exact(
-    ctx_mgr: &Arc<ContextManager>,
-    backend_ref: &Arc<dyn Pkcs11Backend>,
-    _sanitize_inputs: bool,
+    ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncapsulateKeyExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse>, Status> {
+    let ctx_mgr = &ctx.context_manager;
+    let backend_ref = &ctx.backend;
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
 
-    let (session, public_key) =
-        match resolve_session_and_key(ctx_mgr, &ctx_id, req.session_handle, req.public_key_handle)
-            .await
-        {
-            Ok(handles) => handles,
-            Err(rv) => {
-                return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
-                    result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
-                        ck_rv: rv.0,
-                        returned_len: 0,
-                        value: None,
-                        object_handle: 0,
-                    }),
-                }));
-            }
-        };
+    let (session, public_key) = match resolve_session_and_key(
+        ctx,
+        &ctx_id,
+        req.session_handle,
+        req.public_key_handle,
+    )
+    .await
+    {
+        Ok(handles) => handles,
+        Err(rv) => {
+            return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
+                result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
+                    ck_rv: rv.0,
+                    returned_len: 0,
+                    value: None,
+                    object_handle: 0,
+                }),
+            }));
+        }
+    };
 
     let mut mechanism = match parse_mechanism(req.mechanism) {
         Ok(mechanism) => mechanism,
@@ -241,8 +256,11 @@ pub(crate) async fn encapsulate_key_exact(
         }
     };
 
-    // B1: remap object handles embedded in the mechanism parameters.
-    if let Err(rv) = remap_mechanism_handles(ctx_mgr, &ctx_id, &mut mechanism).await {
+    // B1: remap object handles embedded in the mechanism parameters;
+    // gate each through per-object authz when active (C1).
+    if let Err(rv) =
+        remap_mechanism_handles(ctx, &ctx_id, req.session_handle, session.0, &mut mechanism).await
+    {
         return Ok(Response::new(pkcs11_proxy_ng_proto::EncapsulateKeyExactResponse {
             result: Some(pkcs11_proxy_ng_proto::OutputAndHandleResult {
                 ck_rv: rv.0,

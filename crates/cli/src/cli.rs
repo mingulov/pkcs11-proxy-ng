@@ -285,6 +285,24 @@ pub(crate) enum Commands {
         #[arg(long)]
         file: std::path::PathBuf,
     },
+    /// Audit log operations (hash chain verification, etc.).
+    Audit {
+        #[command(subcommand)]
+        cmd: AuditCmd,
+    },
+}
+
+/// Subcommands for the `audit` command group.
+#[derive(Subcommand)]
+pub(crate) enum AuditCmd {
+    /// Verify a directory of audit logs (hash chain + optional signatures).
+    Verify {
+        /// Path to the directory containing audit log files.
+        dir: std::path::PathBuf,
+        /// Hex-encoded Ed25519 public key for checkpoint signature verification.
+        #[arg(long)]
+        public_key_hex: Option<String>,
+    },
 }
 
 #[cfg(test)]

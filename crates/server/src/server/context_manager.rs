@@ -2,7 +2,7 @@ use super::handle_map::{BackendHandle, HandleMap, VirtualHandle};
 use super::slot_map::SlotMap;
 use dashmap::DashMap;
 use pkcs11_proxy_ng_types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
@@ -27,6 +27,36 @@ pub enum LoginState {
     So,
 }
 
+/// Cached object metadata for the per-object / per-class authorization gate (G3).
+///
+/// Fetched in a single `C_GetAttributeValue` round-trip covering
+/// `CKA_UNIQUE_ID`, `CKA_CLASS`, and `CKA_TOKEN`. Only session objects
+/// (`is_token = false`) are stored in the cache; token objects are always
+/// re-fetched to prevent stale authorization against recycled backend handles
+/// (I2 fix, ADR-0012 §G3).
+#[derive(Debug, Clone)]
+pub struct ObjectMetadata {
+    pub unique_id: Vec<u8>,
+    /// `None` when `CKA_CLASS` is absent or unparseable (M2: uid-only deployments must not
+    /// fail on a missing class attribute). Class-confined gates treat `None` as fail-closed
+    /// (deny); uid-only deployments ignore this field entirely.
+    pub class: Option<CkObjectClass>,
+    pub is_token: bool,
+}
+
+/// Raw per-attribute backend result stored by the session-scoped coalescer (R2).
+///
+/// Captures both the value bytes and the `CK_RV` so the coalescer can faithfully
+/// replay the exact backend response — including attribute-level errors — without
+/// a second backend round-trip.
+#[derive(Debug, Clone)]
+pub struct CachedAttr {
+    /// Raw attribute value bytes as returned by the backend (may be empty on error).
+    pub value: Vec<u8>,
+    /// The raw `CK_RV` returned by the backend for this attribute.
+    pub ck_rv: u64,
+}
+
 /// A logical client instance — the server-side PKCS#11 "application" (ADR-0002).
 pub struct LogicalClientInstance {
     pub id: ClientContextId,
@@ -35,6 +65,16 @@ pub struct LogicalClientInstance {
     pub session_handles: HandleMap, // virtual session → backend session
     pub session_slots: HashMap<VirtualHandle, CkSlotId>, // session → slot ownership (ADR-0002 §7)
     pub object_handles: HandleMap,  // virtual object → backend object
+    /// Per-virtual-object cached `ObjectMetadata` (G3). **Only session objects
+    /// (`CKA_TOKEN=false`) are cached.** Token objects are never stored here —
+    /// they are re-fetched on every gate call so a cross-client backend handle
+    /// recycling event cannot cause a stale authorization decision (I2 fix).
+    ///
+    /// Entries are evicted wherever `object_handles` entries are removed —
+    /// on explicit `C_DestroyObject`, on session close (for session objects),
+    /// and on context teardown — so a recycled virtual handle can never return
+    /// stale metadata within one context.
+    pub object_metadata: HashMap<VirtualHandle, ObjectMetadata>,
     /// Virtual object handles created as SESSION objects (CKA_TOKEN=false) in
     /// each virtual session. Evicted when that session closes so a recycled
     /// backend object number can never alias a stale handle (B2). Token objects
@@ -43,6 +83,30 @@ pub struct LogicalClientInstance {
     pub session_objects: HashMap<VirtualHandle, Vec<VirtualHandle>>,
     pub login_state: HashMap<CkSlotId, LoginState>, // per-token login
     pub authenticated_identity: Option<String>,     // bound at creation (ADR-0005 §4)
+    /// Virtual object handles minted by this context (via generate/wrap/create,
+    /// NOT via find). Used by `gate_object_handle` to allow a principal to use
+    /// keys it generated, even when its `objects` grant does not list the new
+    /// object's `CKA_UNIQUE_ID` (which is backend-assigned and therefore
+    /// unknown at configuration time).
+    ///
+    /// Entries are evicted in the SAME removal hooks that evict `object_metadata`
+    /// (per-handle removal on session close and on `C_DestroyObject`, plus full
+    /// teardown) so a recycled virtual handle cannot inherit created-status from
+    /// a prior object.
+    ///
+    /// FIND results (`register_object_handles`) are intentionally NOT inserted
+    /// here — only minting operations insert.
+    pub created_objects: HashSet<VirtualHandle>,
+    /// Session-scoped attribute result cache (R2 coalescer).
+    ///
+    /// Keys are `(virtual object handle, attribute type)`. Entries are evicted
+    /// in the SAME hooks that evict `object_metadata` and `created_objects`
+    /// (per-handle removal on session close and `C_DestroyObject`, plus full
+    /// teardown) so a recycled virtual handle can never return stale cached
+    /// attributes within one context. The map is always allocated; it is only
+    /// populated when `resilience::coalesce_enabled()` is `true` (Task 2 wires
+    /// the serving path).
+    pub attr_cache: HashMap<(VirtualHandle, CkAttributeType), CachedAttr>,
     /// Count of backend operations currently in flight for this context.
     /// Eviction never reaps a context with `in_flight > 0`, so a single
     /// long backend call (DH/RSA keygen, slow-HSM op) is not evicted MID-CALL
@@ -61,7 +125,10 @@ impl LogicalClientInstance {
             session_handles: HandleMap::new(),
             session_slots: HashMap::new(),
             object_handles: HandleMap::new(),
+            object_metadata: HashMap::new(),
             session_objects: HashMap::new(),
+            created_objects: HashSet::new(),
+            attr_cache: HashMap::new(),
             login_state: HashMap::new(),
             authenticated_identity: identity,
             in_flight: Arc::new(AtomicI64::new(0)),
@@ -87,10 +154,19 @@ impl LogicalClientInstance {
         let mut backend_handles = Vec::with_capacity(to_remove.len());
         for vh in to_remove {
             self.session_slots.remove(&vh);
-            // Evict each closed session's session objects (B2).
+            // Evict each closed session's session objects (B2) together with
+            // their cached unique IDs so recycled virtual handles cannot return
+            // stale ids. Also evict the created-set entries so a recycled
+            // virtual handle cannot inherit created-status.
             if let Some(objects) = self.session_objects.remove(&vh) {
                 for object in objects {
                     self.object_handles.remove(object);
+                    self.object_metadata.remove(&object);
+                    self.created_objects.remove(&object);
+                    // Evict all cached attribute entries for this object (R2). Mirrors
+                    // the object_metadata + created_objects eviction so a recycled
+                    // virtual handle cannot return stale cached attributes.
+                    self.attr_cache.retain(|(attr_vh, _), _| *attr_vh != object);
                 }
             }
             if let Some(bh) = self.session_handles.remove(vh) {
@@ -114,10 +190,18 @@ impl LogicalClientInstance {
         let backend_handle = self.session_handles.remove(session);
         // Evict the session's session objects: the backend destroys them on
         // close, so the virtual handles must not linger and alias a recycled
-        // backend object number (B2).
+        // backend object number (B2).  Cached unique IDs and created-set
+        // entries are evicted alongside object handles so a recycled virtual
+        // handle cannot return stale metadata or inherit created-status.
         if let Some(objects) = self.session_objects.remove(&session) {
             for object in objects {
                 self.object_handles.remove(object);
+                self.object_metadata.remove(&object);
+                self.created_objects.remove(&object);
+                // Evict all cached attribute entries for this object (R2). Mirrors
+                // the object_metadata + created_objects eviction so a recycled
+                // virtual handle cannot return stale cached attributes.
+                self.attr_cache.retain(|(attr_vh, _), _| *attr_vh != object);
             }
         }
         if let Some(slot) = slot {
@@ -142,7 +226,10 @@ impl LogicalClientInstance {
         self.session_handles.clear();
         self.session_slots.clear();
         self.object_handles.clear();
+        self.object_metadata.clear();
         self.session_objects.clear();
+        self.created_objects.clear();
+        self.attr_cache.clear();
         self.login_state.clear();
         backend_sessions
     }
@@ -237,6 +324,154 @@ impl ContextManager {
     /// `TOKEN_INFO_CACHE_TTL`; otherwise `None` (the caller must re-read it).
     pub fn cached_token_info(&self, backend_slot: CkSlotId) -> Option<(String, String)> {
         self.cached_token_info_within(backend_slot, TOKEN_INFO_CACHE_TTL)
+    }
+
+    /// Look up the backend slot that owns `virtual_session` within context
+    /// `ctx_id`. Returns `None` when the context does not exist or the session
+    /// is not registered in `session_slots`.
+    pub async fn slot_for_session(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_session: VirtualHandle,
+    ) -> Option<CkSlotId> {
+        self.get_context(ctx_id, |ctx| ctx.session_slots.get(&virtual_session).copied())
+            .await
+            .flatten()
+    }
+
+    /// Return the cached [`ObjectMetadata`] for `virtual_object` within context
+    /// `ctx_id`, or `None` on a cache miss.
+    ///
+    /// A `None` result means either the object has never been fetched, OR it is
+    /// a token object (token objects are never cached — see `cache_object_metadata`).
+    /// The caller must fetch from the backend via `fetch_object_metadata` when
+    /// this returns `None`.
+    pub async fn object_metadata(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_object: u64,
+    ) -> Option<ObjectMetadata> {
+        self.get_context(ctx_id, |ctx| {
+            ctx.object_metadata.get(&VirtualHandle(virtual_object)).cloned()
+        })
+        .await
+        .flatten()
+    }
+
+    /// Cache [`ObjectMetadata`] for `virtual_object` within context `ctx_id`.
+    ///
+    /// **I2 fix:** token objects (`meta.is_token == true`) are NEVER cached.
+    /// They are re-fetched on every gate call so a cross-client backend handle
+    /// recycling event cannot cause a stale authorization decision.
+    ///
+    /// Session objects (`!meta.is_token`) are cached and evicted together with
+    /// the virtual object handle (on `C_DestroyObject`, session close, or
+    /// context teardown) so a recycled virtual handle can never return stale
+    /// metadata within one context.
+    ///
+    /// No-ops silently when the context no longer exists.
+    pub async fn cache_object_metadata(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_object: u64,
+        meta: ObjectMetadata,
+    ) {
+        if meta.is_token {
+            return; // Never cache token objects (I2 fix).
+        }
+        let _ = self
+            .get_context(ctx_id, |ctx| {
+                ctx.object_metadata.insert(VirtualHandle(virtual_object), meta);
+            })
+            .await;
+    }
+
+    // --- R2 attribute coalescer accessors ---
+
+    /// Return the cached [`CachedAttr`] for `(object, attr)` within context `ctx_id`,
+    /// or `None` on a cache miss.
+    ///
+    /// A `None` result means either the attribute has never been cached for this object,
+    /// or the object's cache entries were evicted (session close / context teardown).
+    /// The caller should forward the request to the backend and then call
+    /// [`attr_cache_put`](Self::attr_cache_put) when the coalescer is enabled.
+    pub async fn attr_cache_get(
+        &self,
+        ctx_id: &ClientContextId,
+        object: u64,
+        attr: CkAttributeType,
+    ) -> Option<CachedAttr> {
+        self.get_context(ctx_id, |ctx| ctx.attr_cache.get(&(VirtualHandle(object), attr)).cloned())
+            .await
+            .flatten()
+    }
+
+    /// Store a [`CachedAttr`] for `(object, attr)` within context `ctx_id`.
+    ///
+    /// No-ops silently when the context no longer exists (the backend result is
+    /// still forwarded to the caller; only the caching step is skipped).
+    pub async fn attr_cache_put(
+        &self,
+        ctx_id: &ClientContextId,
+        object: u64,
+        attr: CkAttributeType,
+        entry: CachedAttr,
+    ) {
+        let _ = self
+            .get_context(ctx_id, |ctx| {
+                ctx.attr_cache.insert((VirtualHandle(object), attr), entry);
+            })
+            .await;
+    }
+
+    /// Drop ALL cached attribute entries for `object` within context `ctx_id`.
+    ///
+    /// Called when a virtual object handle is invalidated (e.g. `C_DestroyObject`)
+    /// so a reused virtual handle cannot serve stale cached attributes from a prior
+    /// object. No-ops silently when the context is gone.
+    pub async fn attr_cache_invalidate_object(&self, ctx_id: &ClientContextId, object: u64) {
+        let _ = self
+            .get_context(ctx_id, |ctx| {
+                ctx.attr_cache.retain(|(vh, _), _| *vh != VirtualHandle(object));
+            })
+            .await;
+    }
+
+    /// Clear ALL cached attribute entries for context `ctx_id` (e.g. after `C_Logout`).
+    ///
+    /// Per PKCS#11, `C_Logout` invalidates an application's handles to private objects
+    /// on the token; the coalescer must not serve cached attributes of those handles
+    /// after logout. Evicting the entire cache is conservative and correct: it also
+    /// clears public-object entries, which is only a performance miss, not a correctness
+    /// issue. Distinguishing private vs. public would require `CKA_PRIVATE` to be
+    /// tracked per handle — which the cache does not do. No-ops silently when the
+    /// context is gone.
+    pub async fn attr_cache_clear(&self, ctx_id: &ClientContextId) {
+        let _ = self
+            .get_context(ctx_id, |ctx| {
+                ctx.attr_cache.clear();
+            })
+            .await;
+    }
+
+    /// Return `true` when `virtual_object` was minted (generated, created,
+    /// unwrapped) by context `ctx_id` in this session — i.e. it is present in
+    /// the context's `created_objects` set.
+    ///
+    /// Used by `gate_object_handle` to allow a confined principal to use keys
+    /// it just generated even when the backend-assigned `CKA_UNIQUE_ID` is not
+    /// in its pre-configured `objects` grant.
+    ///
+    /// Returns `false` when the context is gone (fail-safe: treat absence as
+    /// not-created so the gate does not skip its normal policy check).
+    pub async fn object_was_created_here(
+        &self,
+        ctx_id: &ClientContextId,
+        virtual_object: u64,
+    ) -> bool {
+        self.get_context(ctx_id, |ctx| ctx.created_objects.contains(&VirtualHandle(virtual_object)))
+            .await
+            .unwrap_or(false)
     }
 
     fn cached_token_info_within(
@@ -487,6 +722,28 @@ impl ContextManager {
     // Not `async`: a DashMap read needs no `.await` (L5).
     pub fn context_identity(&self, id: &ClientContextId) -> Option<String> {
         self.contexts.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
+    }
+
+    /// Sum of open sessions across ALL contexts whose principal key equals
+    /// `principal_key`. A context's principal key is its `authenticated_identity`
+    /// when set; otherwise the context-id string itself (mirrors the derivation
+    /// used at the dispatch seam so authenticated principals aggregate across
+    /// their contexts and unauthenticated contexts are counted individually).
+    ///
+    /// Not `async`: iterates the DashMap with shared shard guards, no await
+    /// needed (L5). Called from `open_session` BEFORE opening the backend
+    /// session — leak-proof because it reads live bookkeeping rather than
+    /// maintaining a separate reserve/release counter.
+    pub fn session_count_for_principal(&self, principal_key: &str) -> usize {
+        self.contexts
+            .iter()
+            .map(|entry| {
+                let ctx = entry.value();
+                let key =
+                    ctx.authenticated_identity.as_deref().unwrap_or_else(|| entry.key().0.as_str());
+                if key == principal_key { ctx.session_slots.len() } else { 0 }
+            })
+            .sum()
     }
 
     // Not `async`: a DashMap remove needs no `.await` (L5).
