@@ -5,6 +5,22 @@ Proposed
 
 ## Context
 
+Wrapping adapters share admission in this order: context/session and direct
+objects, mechanism parsing, embedded-handle remapping and authorization,
+mechanism permission, then extraction permission for the wrapped object.
+This covers ordinary/exact `C_WrapKey` and `C_WrapKeyAuthenticated` identically;
+authenticated unwrap also remaps embedded handles before native entry. Object
+and class-only policy both apply. AAD sanitation remains adapter-local, after
+shared wrapping admission. Denied/unknown direct handles retain ADR-0012's
+zero-handle forwarding and provider RV precedence; denied/foreign nonzero
+embedded handles fail with `CKR_OBJECT_HANDLE_INVALID` before native wrap.
+Zero forwarding preserves provider precedence when no independent mechanism
+or extraction denial applies. In particular, an unknown wrapped object cannot
+resolve its UID; an active per-object extraction override then fails closed
+with `CKR_KEY_FUNCTION_NOT_PERMITTED`, matching ordinary wrapping. Visibility
+denial alone does not imply extraction denial for a mapped object whose UID
+can still be resolved.
+
 The PKCS#11 proxy daemon exposes remote access to PKCS#11 tokens and HSMs over Unix sockets and TCP. Before any production deployment, the daemon needs authentication and authorization to prevent unauthorized access to cryptographic material.
 
 The design tension is between security completeness and Phase 1 pragmatism. The project has one design partner and needs a working, auditable auth layer -- not a full multi-tenant RBAC system. The authorization model must be layered and configurable so that development, single-machine, and networked deployments each use the appropriate level of security without requiring code changes.
@@ -103,6 +119,28 @@ The `client_context_id` issued by the daemon (see ADR-0002) is bound to the auth
   client must reopen to pick up the change. Per-request policy re-evaluation is
   deliberately deferred for Phase 1 because it would add a backend
   `C_GetTokenInfo` to every crypto/object call (the M14 decision).
+
+  This coarse session grant is separate from the opt-in per-mechanism and
+  per-object/class restrictions in ADR-0012. Mechanism-bearing initializers
+  enforce the calling identity's mechanism grant against the session's recorded
+  backend slot. `C_DigestInit`, `C_VerifySignatureInit`, `C_EncapsulateKey`,
+  `C_DecapsulateKey`, and exact encapsulation reject a denied mechanism with
+  `CKR_MECHANISM_INVALID` before native initialization. A failed token-metadata
+  lookup also denies; cold lookups use the backend slot, never its virtual ID.
+  Session and primary-object resolution retain their existing precedence.
+  NULL-mechanism cancellation bypasses mechanism admission; updates, finals,
+  and combined operations consume initialized state. Restoring opaque state
+  with `C_SetOperationState` is not a mechanism-policy enforcement boundary.
+
+  The corrected initializers translate typed embedded object handles through the calling
+  context and enforce either active object or class restrictions. A missing or
+  denied nonzero embedded handle returns `CKR_OBJECT_HANDLE_INVALID` before
+  native dispatch; it must not be rewritten to the optional-zero parameter.
+  Explicit optional zeros retain their existing meaning. SP800-108 derivation
+  applies the same denial rule to byte-encoded input handles, preserves 4/8-byte
+  encoding, rejects narrowing overflow, and uses the real native session for
+  metadata reads. See the [operation coverage](../release/mechanism-authorization.md)
+  for adapter boundaries and remaining gaps.
 
 ### 5. Auth failure error mapping (relationship to ADR-0003)
 

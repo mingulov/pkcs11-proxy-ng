@@ -193,14 +193,18 @@ mod tests {
 
         // Set up ContextManager with virtual slot, session, and object.
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
         let (session_vh, obj_vh) = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                let svh = ctx.register_session(BackendHandle(backend_session.0), virtual_slot);
+                let svh = ctx.register_session(BackendHandle(backend_session.0), backend_slot);
                 let ovh = ctx.object_handles.insert(BackendHandle(backend_object.0));
                 (svh, ovh)
             })
@@ -250,16 +254,20 @@ mod tests {
         let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
         // Register session but use a backend object handle that does NOT exist
         // in the mock — mock will return OBJECT_HANDLE_INVALID.
         let (session_vh, obj_vh) = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                let svh = ctx.register_session(BackendHandle(backend_session.0), virtual_slot);
+                let svh = ctx.register_session(BackendHandle(backend_session.0), backend_slot);
                 // Object 999 does not exist in the mock.
                 let ovh = ctx.object_handles.insert(BackendHandle(999));
                 (svh, ovh)

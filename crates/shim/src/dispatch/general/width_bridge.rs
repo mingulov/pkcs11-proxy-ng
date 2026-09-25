@@ -44,6 +44,7 @@ pub fn bridge_request_buffer_len(
 /// Template byte lengths count whole `CK_ATTRIBUTE` structs, whose size is
 /// an ABI property of each edge (24 LP64 / 12 ILP32 / 16 LLP64-packed).
 /// Rescale by entry count; a zero stride (defensive) passes through.
+#[cfg(test)]
 pub fn bridge_template_request_len(
     client_len: u64,
     client_stride: usize,
@@ -56,6 +57,7 @@ pub fn bridge_template_request_len(
 }
 
 /// Pure size query: backend-layout template byte length -> client layout.
+#[cfg(test)]
 pub fn bridge_template_output_len(
     backend_len: u64,
     backend_stride: usize,

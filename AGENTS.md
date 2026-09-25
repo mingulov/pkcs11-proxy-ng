@@ -16,7 +16,14 @@ AI agents, automation, and human contributors.
 - **The shim must behave identically to a native PKCS#11 module from the
   application's perspective.** An application loading the shim .so should not
   be able to distinguish it from loading the real backend .so directly, except
-  for network latency. This is the primary correctness requirement.
+  for network latency and explicitly documented support/transport limits. This
+  is the primary correctness requirement within the supported scope.
+- The selected v0.2 P0 amendment deliberately limits `C_WaitForSlotEvent` to
+  `CKF_DONT_BLOCK`, with shared native event flags, checked widths and documented
+  local refusals. It also requires one managed provider chain and a qualified
+  Linux whole-process lifetime stop. These are pending implementation contracts,
+  not behavior-preserving refactors or completed support claims; follow
+  `doc/release/native-mechanism-ownership.md` and the amended ADRs.
 - The shim uses exact/raw output semantics: it sends the caller's buffer
   specification to the backend, the backend performs one PKCS#11 call with
   those exact parameters, and the shim writes back the exact result. The shim
@@ -50,6 +57,10 @@ AI agents, automation, and human contributors.
   handling structs in `crates/types/src/mechanism.rs` rely on
   `ZeroizeOnDrop` running during stack unwinding to wipe password buffers
   on panic. With `panic = "abort"` those drops do not run.
+- The selected abnormal native-lifetime stop is the explicit exception to
+  normal wiping/destruction: unresolved retained storage must not be wiped or
+  freed. It preserves unwinding for ordinary panics and requires the exact
+  target/environment/retirement contract in the native-ownership document.
 - Never add `Debug` logging of PKCS#11 request types that can contain secret
   fields.
 - Preserve existing mTLS, peer-credential, and policy boundaries.

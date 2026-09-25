@@ -15,6 +15,16 @@ unsafe fn write_exact_kem_output(
     pul_ciphertext_len: CK_ULONG_PTR,
     ph_key: CK_OBJECT_HANDLE_PTR,
 ) -> CK_RV {
+    let handle = match result.object_handle {
+        Some(handle) if result.ck_rv == CkRv::OK && !ph_key.is_null() => {
+            match CK_OBJECT_HANDLE::try_from(handle.0) {
+                Ok(handle) => Some(handle),
+                Err(_) => return rv_err(CkRv::GENERAL_ERROR),
+            }
+        }
+        None => None,
+        _ => return rv_err(CkRv::GENERAL_ERROR),
+    };
     let buf_result = CkOutputBufferResult {
         ck_rv: result.ck_rv,
         returned_len: result.returned_len,
@@ -23,8 +33,10 @@ unsafe fn write_exact_kem_output(
     let output_rv =
         unsafe { write_exact_output(spec, &buf_result, p_ciphertext, pul_ciphertext_len) };
     // Commit the handle only after the main output envelope validates.
-    if output_rv == rv_ok() {
-        unsafe { *ph_key = result.object_handle.0 as CK_OBJECT_HANDLE };
+    if output_rv == rv_ok()
+        && let Some(handle) = handle
+    {
+        unsafe { ph_key.write(handle) };
     }
     output_rv
 }
@@ -126,9 +138,9 @@ mod tests {
             CkOutputBufferSpec { buffer_present: true, buffer_len: 0, length_pointer_null: true };
         let result = CkOutputAndHandleResult {
             ck_rv: CkRv::OK,
-            returned_len: 1,
+            returned_len: Some(1),
             value: None,
-            object_handle: CkObjectHandle(0x44),
+            object_handle: Some(CkObjectHandle(0x44)),
         };
         let mut ciphertext_canary = 0xa5;
         let handle_canary = 0xa5a5 as CK_OBJECT_HANDLE;

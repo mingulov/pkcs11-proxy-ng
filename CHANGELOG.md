@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-15
+
 ### Added
 
 - Local-only, unreleased opt-in gateway authorization: leaf-SPKI identity
@@ -68,6 +70,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   legacy consumer Dockerfiles.
 - `.gitlab-ci.yml` Phase-1 matrix: `alpine_3_22`, `alpine_3_23`,
   `amazon_2023`.
+- Operator mechanism exclusion: the mechanism registry override file
+  accepts an `exclude = [...]` list of `CK_MECHANISM_TYPE` values.
+  Excluded mechanisms are rejected at operation time with
+  `CKR_MECHANISM_INVALID` (even parameterless) and hidden from
+  discovery in every discovery mode — unlike a filtered allowlist,
+  which only hides. Exclusions travel to shims in the new
+  `MechanismRegistryPayload.excluded` field (absent from older
+  daemons, treated as empty). The FIPS example hard-excludes 73
+  historical mechanisms (MD2/MD5, RC2/RC4, single-DES, CAST, IDEA,
+  SEED, Camellia, ARIA, including parameterized variants) so a FIPS
+  deployment no longer forwards them on direct invocation.
+- `LOG_FORMAT` is honored by the daemon: `LOG_FORMAT=plain` selects
+  human-readable log lines (the README dev flow now works as
+  documented); unset or any other value keeps the historical JSON
+  default that the prod/staging examples set explicitly.
 
 ### Changed
 
@@ -140,6 +157,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The CI MSRV job now matches the declared `rust-version` (it previously built
   with 1.94, leaving the declared MSRV unverified). The declared MSRV was
   corrected for let-chains; see `AGENTS.md` rule 5.
+- Slot, session, object, and mechanism-type handles crossing into
+  native calls are now range-checked: an unrepresentable `u64` on a
+  narrow-`CK_ULONG` host fails with `CKR_FUNCTION_FAILED` instead of
+  silently truncating (same fail-loud doctrine as the existing
+  `narrow_wire_ulong` conversions). No behavior change on 64-bit
+  hosts, where the checks are pass-throughs.
 
 ### Security
 
@@ -154,6 +177,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closing a first-login race; bind-time umask for UDS socket
   permissions; `C_WaitForSlotEvent` authorization with unauthorized
   slot events suppressed; strict `cargo-deny` policy.
+- Daemon login-family secret holders (login PIN, SO PIN, user PIN,
+  old/new PINs, protected-auth username) moved from `Zeroizing` to
+  the redacting `SecretBytes` owner: buffers are still wiped on drop
+  and now also redact in `Debug`, so no current or future log line
+  capturing a holder can leak secret bytes. The unused `zeroize`
+  dependency was removed from the server crate.
 
 ## [0.1.0] - 2026-05-15
 

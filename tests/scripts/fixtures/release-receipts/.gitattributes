@@ -1,0 +1,2 @@
+# Hash fixtures must retain identical bytes even with core.autocrlf enabled.
+bundle/** -text

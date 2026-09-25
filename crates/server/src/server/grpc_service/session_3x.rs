@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
-use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_types::*;
 
@@ -62,15 +61,18 @@ pub(super) async fn login_user(
     };
 
     let user_type_raw = req.user_type;
-    // PIN bytes are zeroized when the closure drops.
-    // DO NOT log pin or username at any tracing level.
-    let pin = Zeroizing::new(req.pin);
-    // Usernames can be sensitive account identifiers tied to the PIN
-    // (build.rs flags LoginUserRequest.username secret-bearing); wipe on drop.
-    let username = Zeroizing::new(req.username);
+    // Hold the PIN and username in `SecretBytes`: wiped on drop and redacted
+    // in Debug. DO NOT log pin or username at any tracing level.
+    // (build.rs flags LoginUserRequest.username secret-bearing.)
+    let pin = SecretBytes::new(req.pin);
+    let username = SecretBytes::new(req.username);
     let backend = backend_ref.clone();
-    let result =
-        spawn_backend(move || backend.login_user(session, user_type, &username, &pin)).await?;
+    let result = spawn_backend(move || {
+        let pin = pin.into_zeroizing();
+        let username = username.into_zeroizing();
+        backend.login_user(session, user_type, &username, &pin)
+    })
+    .await?;
 
     let ck_rv = match &result {
         Ok(()) => {
@@ -214,7 +216,10 @@ mod tests {
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
         let virtual_session = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                ctx.register_session(BackendHandle(backend_session.0), CkSlotId(1))
+                ctx.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(1)),
+                )
             })
             .await
             .unwrap();
@@ -397,6 +402,62 @@ mod tests {
                 "{action:?}",
             );
             assert_eq!(mock.message_lifecycle_call_count(), calls_before + 1);
+        }
+    }
+
+    /// `login_user` must not leak the PIN or username into audit logs
+    /// (both holders are `SecretBytes`, and the handler logs only IDs and
+    /// RVs). Uses a wrong PIN so the mock takes the failure path; both
+    /// paths share the same holder and logging code.
+    #[tokio::test]
+    async fn login_user_produces_audit_log_without_secrets() {
+        let (ctx_mgr, _mock, backend, ctx_id, virtual_session) = setup_message_shapes().await;
+        let pin = b"WrongPin!999".to_vec();
+        let username = b"operator-7".to_vec();
+
+        let output = super::super::session::tests::capture_logs(|| async {
+            let _ = login_user(
+                &HandlerContext::for_test(&ctx_mgr, &backend),
+                Request::new(pkcs11_proxy_ng_proto::LoginUserRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: virtual_session.0,
+                    user_type: 1,
+                    pin: pin.clone(),
+                    username: username.clone(),
+                }),
+            )
+            .await;
+        })
+        .await;
+
+        assert!(
+            output.contains("LoginUser succeeded") || output.contains("LoginUser failed"),
+            "login_user audit output missing expected event: {output:?}"
+        );
+        assert!(!output.contains("WrongPin"), "PIN must never appear in log output: {output}");
+        assert!(
+            !output.contains("operator-7"),
+            "username must never appear in log output: {output}"
+        );
+    }
+
+    /// The `login_user` handler's PIN/username holders must redact secrets
+    /// in Debug (build.rs flags the username secret-bearing; the handler
+    /// must never log either). Mirrors the holder construction in
+    /// `login_user`. Byte-wise assertion: `Vec<u8>` Debug renders decimal
+    /// byte values, never the original text.
+    #[test]
+    fn login_user_holders_debug_redact_secrets() {
+        let pin_bytes = b"SuperSecretPIN!42";
+        let user_bytes = b"secret-operator-7";
+        let pin = SecretBytes::new(pin_bytes.to_vec());
+        let username = SecretBytes::new(user_bytes.to_vec());
+        let rendered = format!("{pin:?} {username:?}");
+        for byte in pin_bytes.iter().chain(user_bytes.iter()) {
+            assert!(
+                !rendered.contains(&byte.to_string()),
+                "login_user holder leaks secret byte {byte} via Debug: {rendered}"
+            );
         }
     }
 }

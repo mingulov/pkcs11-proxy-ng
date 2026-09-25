@@ -36,6 +36,7 @@ fn synth_registry(n_vendor: usize) -> MechanismRegistry {
     // We rebuild via from_parts since param_shapes_view is read-only.
     let mut param_shapes: HashMap<u64, String> = reg.param_shapes_view().clone();
     let parameterless: HashSet<u64> = reg.parameterless_view().clone();
+    let disabled: HashSet<u64> = reg.excluded_view().clone();
     let discovery_mode = reg.discovery_mode();
 
     let vendor_base: u64 = 0x80001000;
@@ -48,6 +49,7 @@ fn synth_registry(n_vendor: usize) -> MechanismRegistry {
     reg = MechanismRegistry::from_parts(
         param_shapes,
         parameterless,
+        disabled,
         discovery_mode,
         EMBEDDED_DEFAULT_REVISION.to_owned(),
     );

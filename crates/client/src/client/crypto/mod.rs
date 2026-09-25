@@ -1,3 +1,4 @@
+mod authenticated_typed;
 mod authenticated_wrap;
 mod combined;
 mod digest_cipher;

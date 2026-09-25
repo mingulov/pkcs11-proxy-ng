@@ -14,16 +14,31 @@ explicit exception to it).
 
 ## Decision (summary)
 
+**v0.2 P0 amendment (2026-09-13; selected contract, implementation pending):**
+Production live FFI is restricted to qualified Linux GNU/musl x86_64 with
+64-bit pointers and x86 with 32-bit pointers. This explicitly supersedes D3's
+Windows native-provider daemon support for v0.2. Windows native loading is
+deferred, lower priority/stretch work. Existing portable Windows
+client/shim/proto/types, mock-only backend/server builds and Windows-client to
+qualified-Linux-daemon interoperation remain. Nonqualified-host construction
+must fail before loading/discovery; keep portable compile CI and add a no-loader
+constructor-refusal test. No unsafe legacy FFI or abort fallback is permitted.
+The [native ownership contract](../release/native-mechanism-ownership.md)
+defines exact cfg/environment gates, checked Wait widths and all four required
+Linux topology receipts. Earlier bridge/Wine results do not qualify this new
+native lifetime/stop implementation, which remains unimplemented.
+
 Support **narrow-`CK_ULONG` clients** — clients whose native `CK_ULONG` is
 32-bit (`i686-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`, and
 `x86_64-pc-windows-msvc`/LLP64) — talking to a 64-bit Linux server+backend, via a
 **client-side, transparent width bridge confined to the shim's C-ABI edge**.
 The design generalizes to **bidirectional** cross-width (the principle is "ABI
-width normalization at each C-ABI boundary"; see Bidirectionality), and all four
-combinations are **supported and live-verified** (D3 amendment, 2026-07-02):
+width normalization at each C-ABI boundary"; see Bidirectionality). Historical
+bridge validation covered all four combinations (D3 amendment, 2026-07-02):
 narrow clients (`32c/64b`), the reverse direction (`64c/32b`, a
 narrow-`CK_ULONG` daemon host with D4 checked input narrowing), and both
-same-width controls. The Windows daemon host is supported as mTLS-TCP-only.
+same-width controls. The historical Windows mTLS-TCP daemon scope is superseded
+for v0.2 by the amendment above.
 
 - **The wire and the server do not change.** They remain `u64`-everywhere and
   width-agnostic. The client does **not** advertise its width *to* the server
@@ -32,8 +47,11 @@ same-width controls. The Windows daemon host is supported as mTLS-TCP-only.
 - The bridge translates **only** `CK_ULONG`-semantic *attribute values* returned
   by `C_GetAttributeValue`, because those are the **sole** outputs that travel as
   raw backend-width bytes. Every other output (`CK_*_INFO` structs, slot/mechanism
-  lists, all lengths/counts, typed mechanism-param write-backs) is already written
-  with field-typed `as CK_ULONG` casts and is width-correct by construction.
+  lists, all lengths/counts, typed mechanism-param write-backs) is typed rather
+  than raw attribute bytes. A typed `as CK_ULONG` cast alone does not prove
+  representability. In particular, v0.2 Wait input flags, response RV and
+  successful virtual-slot output require new checked conversions under the
+  exact lifecycle -> width -> mode -> contention order in the linked contract.
 - This is an explicit, bounded exception to ADR-0010's verbatim rule, justified
   because transparency (Contributor Rule §2 — "indistinguishable from a native
   module") *requires* a 32-bit client to receive 32-bit `CK_ULONG` attribute
@@ -528,18 +546,16 @@ assumption.
   `mechanism_registry`). The client asserts at probe; against an older daemon
   that omits them it falls back to "8 / little-endian + warning" (D9). No
   client→server width signalling.
-- **D3 — Targets (amended 2026-07-02).** Client targets:
+- **D3 — Targets (2026-09-13 supersedes 2026-07-02 native-host scope).** Client targets:
   `i686-unknown-linux-gnu` + `armv7-unknown-linux-gnueabihf` +
   `x86_64-pc-windows-msvc`. Daemon hosts: 64-bit Linux (primary),
-  **narrow-`CK_ULONG` Linux** (i686-class; D4 checked input narrowing, live
-  cross-width harness legs 3-4), and **Windows x64** (mTLS-TCP-only — the
-  UDS/peer-cred transport is Unix-only and `[listener.local]` is rejected;
-  SIGHUP registry reload unavailable, restart to apply; wine-validated at
-  runtime, a real-Windows conformance pass remains the final sign-off).
-  Original scoping (2026-06-28) had gated the non-64-bit-Linux daemon
-  tracks on deployment demand; that demand was confirmed and the tracks
-  were implemented + live-verified. Still excluded: `pc-windows-gnu`,
-  32-bit Windows, big-/mixed-endian.
+  **narrow-`CK_ULONG` Linux** (i686-class), only on the qualified GNU/musl
+  x86_64/64-bit and x86/32-bit targets. Historical cross-width legs are bridge
+  evidence; fresh native owner/stop qualification is required for v0.2.
+  **Windows x64 native-provider daemon support is withdrawn/deferred for v0.2**;
+  portable and mock-only builds remain. Existing client exclusions remain:
+  `pc-windows-gnu`, 32-bit Windows, big-/mixed-endian. Native-host exclusions
+  additionally include x32, other architectures/environments and non-Linux.
 - **D4 — Overflow: checked, value-preserving narrowing.** Convert the integer
   value with a checked `CK_ULONG::try_from`; reject (`CKR_FUNCTION_FAILED`) on a
   genuine `> u32::MAX` value rather than silently truncate. Guarantees `1 → 1`
@@ -649,14 +665,20 @@ assumption.
   plus test-guard hygiene; the suite now completes in well under a minute on
   x86_64 and i686 alike.
 
-**Completed 2026-07-02 (cross-ABI closure, umbrella plan Phases A-E):**
-- **D4 server-input checked narrowing** (`ffi_conversion.rs`): every wire u64
-  materialized into a native `CK_ULONG` — attribute values AND the CK_ULONG
+**Historical implementation record, 2026-07-02 (not v0.2 P0 qualification):**
+- **D4 server-input checked narrowing** (`ffi_conversion.rs`): covered wire u64
+  materialization into native `CK_ULONG` — attribute values and CK_ULONG
   type-alias casts (mechanism types, attribute types, param-embedded object/
-  session handles, kdf/prf/generator/hash enums, ~150 sites) — goes through
+  session handles, kdf/prf/generator/hash enums, ~150 sites) — through
   `narrow_wire_ulong` (checked; `CKR_FUNCTION_FAILED` on overflow, never
   truncation). On the 64-bit backend it is an infallible pass-through.
   Pinned by narrow-host reject tests; the widened i686 CI gate runs them.
+  The former claim that this covered every wire u64 was too broad: Wait's
+  flag cast and shim slot/RV casts remain unchecked in the inspected source.
+  The new checked Wait contract is required implementation, not a preserved
+  property of those casts. A wide error must never truncate into CKR_OK;
+  caller-width failure is local FUNCTION_FAILED with unchanged output canary
+  and the original provider RV retained in the completion observation.
 - Windows **server** OS port (Bucket 3): UDS listener + `SO_PEERCRED` are
   `#[cfg(unix)]`; `[listener.local]` is rejected on non-Unix (mTLS TCP only);
   the daemon cross-compiles for `x86_64-pc-windows-msvc` in CI.
@@ -669,8 +691,10 @@ assumption.
     daemon, loaded through the public C ABI (`LoadLibrary` +
     `C_GetFunctionList`), plus a native dlopen control leg.
 
-**D3 amendment executed (2026-07-02):** narrow-`CK_ULONG` Linux daemon
-hosts and the Windows daemon host are **supported targets**, live-verified:
+**Historical D3 execution record (2026-07-02):** narrow-`CK_ULONG` Linux daemon
+and Windows daemon bridge runs were recorded below. The Windows native-provider
+support claim is superseded for v0.2; these results do not qualify the new P0
+native owner/termination contract:
 - `scripts/run-cross-width-live-test.sh` now covers all four Linux width
   topologies (32c/64b, 64/64, **64c/32b** via an i686 daemon + i386
   SoftHSM2 — the reverse bridge and server-side D4 narrowing live — and
@@ -683,5 +707,9 @@ hosts and the Windows daemon host are **supported targets**, live-verified:
 - The per-PR i686 CI gate additionally runs the server lib suite and
   builds the i686 daemon.
 
-**Remaining (sign-off only, not code gaps):**
-- A real-Windows (non-wine) conformance pass for final Windows sign-off.
+**Remaining:**
+- v0.2 checked Wait input/output/RV, common domain and platform/stop enforcement,
+  all four Linux loaded-shim topologies and native GNU/musl stop receipts.
+- Windows native-provider daemon support is deferred; restoring it requires a
+  separately reviewed whole-process stop and native tests, not just the former
+  real-Windows (non-Wine) conformance sign-off.

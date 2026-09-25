@@ -117,11 +117,6 @@ pub(super) fn exact_attribute_results_from_ffi(
         .iter()
         .zip(attrs.iter())
         .map(|(query, attr)| {
-            // For nested (CKF_ARRAY_ATTRIBUTE) queries with data, read sub-attributes
-            if query.nested.is_some() && query.buffer_present && !attr.pValue.is_null() {
-                return nested_attribute_result_from_ffi(query, attr, overall_rv);
-            }
-
             let unavailable = attr.ulValueLen == cryptoki_sys::CK_UNAVAILABLE_INFORMATION;
             // Canonicalise the platform-sized CK_UNAVAILABLE_INFORMATION sentinel
             // to a width-independent wire value (ADR-0011) so any-width client
@@ -153,121 +148,21 @@ pub(super) fn exact_attribute_results_from_ffi(
                 None
             };
 
-            let value = if unavailable || attr.pValue.is_null() || too_small {
-                None
-            } else {
-                Some(
-                    unsafe {
-                        std::slice::from_raw_parts(
-                            attr.pValue as *const u8,
-                            attr.ulValueLen as usize,
-                        )
-                    }
-                    .to_vec(),
-                )
-            };
+            // Values are read separately from FfiAttributeQueries' owned allocations.
 
             CkAttributeQueryResult {
+                apply_returned_len: query.buffer_present
+                    || pkcs11_proxy_ng_types::attribute_outputs_defined(overall_rv)
+                    || returned_len != 0,
+                apply_type: false,
                 attr_type: query.attr_type,
                 returned_len,
-                value,
+                value: None,
                 ck_rv,
                 nested: None,
             }
         })
         .collect()
-}
-
-/// Read back a nested `CK_ATTRIBUTE[]` result from a parent attribute after
-/// the FFI call completes.
-///
-/// The parent's `pValue` points to the nested `CK_ATTRIBUTE` array that was
-/// allocated in `FfiAttributeQueries::build_nested_attr`. The backend has
-/// written back `ulValueLen` (and possibly `pValue` data) for each sub-attribute.
-fn nested_attribute_result_from_ffi(
-    query: &CkAttributeQuery,
-    attr: &cryptoki_sys::CK_ATTRIBUTE,
-    _overall_rv: CkRv,
-) -> CkAttributeQueryResult {
-    let unavailable = attr.ulValueLen == cryptoki_sys::CK_UNAVAILABLE_INFORMATION;
-    let returned_len = if unavailable {
-        pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE
-    } else {
-        attr.ulValueLen as u64
-    };
-
-    if unavailable {
-        return CkAttributeQueryResult {
-            attr_type: query.attr_type,
-            returned_len,
-            value: None,
-            ck_rv: None,
-            nested: None,
-        };
-    }
-
-    let ck_attr_size = std::mem::size_of::<cryptoki_sys::CK_ATTRIBUTE>();
-    let nested_count = attr.ulValueLen as usize / ck_attr_size;
-    let nested_queries = query.nested.as_deref().unwrap_or(&[]);
-
-    let sub_attrs = unsafe {
-        std::slice::from_raw_parts(attr.pValue as *const cryptoki_sys::CK_ATTRIBUTE, nested_count)
-    };
-
-    let nested_results: Vec<CkAttributeQueryResult> = sub_attrs
-        .iter()
-        .enumerate()
-        .map(|(i, sub_attr)| {
-            let sub_query = nested_queries.get(i);
-            let sub_unavailable = sub_attr.ulValueLen == cryptoki_sys::CK_UNAVAILABLE_INFORMATION;
-            let sub_returned_len = if sub_unavailable {
-                pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE
-            } else {
-                sub_attr.ulValueLen as u64
-            };
-            let sub_buffer_present = sub_query.is_some_and(|q| q.buffer_present);
-            let sub_too_small =
-                sub_buffer_present && sub_returned_len > sub_query.map_or(0, |q| q.buffer_len);
-
-            let sub_ck_rv = if sub_unavailable {
-                None
-            } else if sub_too_small {
-                Some(CkRv::BUFFER_TOO_SMALL)
-            } else {
-                None
-            };
-
-            let sub_value = if sub_unavailable || sub_attr.pValue.is_null() || sub_too_small {
-                None
-            } else {
-                Some(
-                    unsafe {
-                        std::slice::from_raw_parts(
-                            sub_attr.pValue as *const u8,
-                            sub_attr.ulValueLen as usize,
-                        )
-                    }
-                    .to_vec(),
-                )
-            };
-
-            CkAttributeQueryResult {
-                attr_type: CkAttributeType(sub_attr.type_ as u64),
-                returned_len: sub_returned_len,
-                value: sub_value,
-                ck_rv: sub_ck_rv,
-                nested: None,
-            }
-        })
-        .collect();
-
-    CkAttributeQueryResult {
-        attr_type: query.attr_type,
-        returned_len,
-        value: None,
-        ck_rv: None,
-        nested: Some(nested_results),
-    }
 }
 
 #[cfg(test)]
@@ -295,6 +190,8 @@ mod tests {
         assert_eq!(
             results,
             vec![CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 3,
                 value: None,
@@ -377,6 +274,8 @@ mod tests {
         assert_eq!(
             results,
             vec![CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::VALUE,
                 returned_len: u64::MAX,
                 value: None,
@@ -406,6 +305,8 @@ mod tests {
         assert_eq!(
             results,
             vec![CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::VALUE,
                 returned_len: u64::MAX,
                 value: None,
@@ -451,6 +352,8 @@ mod tests {
             results,
             vec![
                 CkAttributeQueryResult {
+                    apply_returned_len: true,
+                    apply_type: false,
                     attr_type: CkAttributeType::VALUE,
                     returned_len: u64::MAX,
                     value: None,
@@ -458,6 +361,8 @@ mod tests {
                     nested: None,
                 },
                 CkAttributeQueryResult {
+                    apply_returned_len: true,
+                    apply_type: false,
                     attr_type: CkAttributeType::LABEL,
                     returned_len: u64::MAX,
                     value: None,
@@ -488,6 +393,8 @@ mod tests {
         assert_eq!(
             results,
             vec![CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::VALUE,
                 returned_len: u64::MAX,
                 value: None,

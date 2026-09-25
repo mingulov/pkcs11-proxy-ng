@@ -24,17 +24,51 @@ impl FfiBackend {
     ///
     /// Some modules, notably NSS softoken, require a non-null `pReserved`
     /// library-parameters string in `CK_C_INITIALIZE_ARGS`.
+    ///
+    /// C3M.4 construction order: purely local platform/config validation,
+    /// then the process construction reservation, and only then
+    /// `dlopen`/discovery. An occupied or refused slot fails here with zero
+    /// loader or provider attempts. A failed `dlopen` rolls the untouched
+    /// reservation back; any later failure (native code may have run)
+    /// poisons the slot instead of recycling it.
     pub fn load_with_init_args(path: &Path, initialize_args: Option<&str>) -> Result<Self, String> {
-        let lib = unsafe { Library::new(path).map_err(|e| format!("dlopen failed: {e}"))? };
+        super::native_domain::check_native_platform().map_err(|e| e.to_string())?;
+        let initialize_args = initialize_args
+            .map(|s| {
+                CString::new(s)
+                    .map_err(|_| "initialize_args contains an interior NUL byte".to_string())
+            })
+            .transpose()?;
+        let permit = super::native_domain::reserve_for_construction().map_err(|e| e.to_string())?;
+
+        let lib = match unsafe { Library::new(path) } {
+            Ok(lib) => lib,
+            Err(e) => {
+                permit.rollback_before_native();
+                return Err(format!("dlopen failed: {e}"));
+            }
+        };
 
         let get_iface_sym = Self::resolve_get_interface(&lib);
         let mut legacy = || pkcs11_module::function_list(&lib);
         let (func_list, primary_from_interface) = match get_iface_sym {
             Some(sym) => {
                 let mut q = ffi_query(sym);
-                select_primary(Some(&mut q), &mut legacy)?
+                match select_primary(Some(&mut q), &mut legacy) {
+                    Ok(selected) => selected,
+                    Err(e) => {
+                        permit.poison();
+                        return Err(e);
+                    }
+                }
             }
-            None => select_primary(None, &mut legacy)?,
+            None => match select_primary(None, &mut legacy) {
+                Ok(selected) => selected,
+                Err(e) => {
+                    permit.poison();
+                    return Err(e);
+                }
+            },
         };
 
         // Attempt to discover 3.0 and 3.2 function lists. These are optional;
@@ -61,12 +95,10 @@ impl FfiBackend {
             .or_else(|| Self::primary_interface_fallback(func_list, primary_from_interface, 3, 2))
             .map(|ptr| ptr as *const cryptoki_sys::CK_FUNCTION_LIST_3_2);
 
-        let initialize_args = initialize_args
-            .map(|s| {
-                CString::new(s)
-                    .map_err(|_| "initialize_args contains an interior NUL byte".to_string())
-            })
-            .transpose()?;
+        if let Err(e) = permit.activate() {
+            permit.poison();
+            return Err(e.to_string());
+        }
 
         Ok(Self {
             _lib: lib,
@@ -75,8 +107,12 @@ impl FfiBackend {
             func_list_3_2,
             initialize_args,
             mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
             session_slot_map: dashmap::DashMap::new(),
             slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            construction: permit,
+            lifecycle: super::native_domain::LifecycleTracker::default(),
         })
     }
 
@@ -123,11 +159,33 @@ impl FfiBackend {
     }
 }
 
+impl Drop for FfiBackend {
+    /// Retire the construction reservation honestly: release the exact epoch
+    /// only when the instance lifecycle proves quiescence (never initialized,
+    /// or finalized with no open sessions); otherwise retain ownership and
+    /// poison the slot until process restart. Stale handles and already
+    /// poisoned slots are untouched.
+    fn drop(&mut self) {
+        use super::native_domain::RetirementDecision::{Poison, Release};
+        match self.lifecycle.retirement_decision() {
+            Release => {
+                super::native_domain::ConstructionPermit::release_if_owner(self.construction.epoch);
+            }
+            Poison => {
+                self.construction.poison();
+            }
+        }
+    }
+}
+
 /// One `C_GetInterface` answer as the module reported it.
 pub(crate) struct InterfaceAnswer {
     pub name: Option<Vec<u8>>,
     pub func_list: *mut std::ffi::c_void,
 }
+
+type InterfaceQuery<'a> =
+    dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer> + 'a;
 
 const STANDARD_NAME: &[u8] = b"PKCS 11";
 
@@ -144,9 +202,7 @@ fn accepts_standard(ans: &InterfaceAnswer) -> bool {
 /// validated unnamed → legacy. Provenance in the returned bool comes from
 /// the branch that produced the pointer, never from symbol existence.
 fn select_primary(
-    query: Option<
-        &mut dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer>,
-    >,
+    query: Option<&mut InterfaceQuery<'_>>,
     legacy: &mut dyn FnMut() -> Result<*mut cryptoki_sys::CK_FUNCTION_LIST, String>,
 ) -> Result<(*mut cryptoki_sys::CK_FUNCTION_LIST, bool), String> {
     if let Some(q) = query {
@@ -166,7 +222,7 @@ fn select_primary(
 /// the same §6a name rule on the unnamed result. Rejecting a hypothetical
 /// vendor-named answer here is soundness over coverage.
 fn select_versioned(
-    q: &mut dyn FnMut(Option<&[u8]>, Option<cryptoki_sys::CK_VERSION>) -> Option<InterfaceAnswer>,
+    q: &mut InterfaceQuery<'_>,
     major: u8,
     minor: u8,
 ) -> Option<*mut std::ffi::c_void> {
@@ -293,6 +349,10 @@ mod tests {
     #[test]
     fn bouncyhsm_3_0_interface_falls_back_to_primary() {
         use std::path::Path;
+
+        // Serialized with the constructor-domain tests: this is the only
+        // other test touching the process-global reservation.
+        let _serial = crate::ffi::native_domain::serial_domain_test_guard();
 
         const DEFAULT_MODULE: &str = concat!(
             "/home/user/.nuget/packages/bouncyhsm.client/2.0.1/",

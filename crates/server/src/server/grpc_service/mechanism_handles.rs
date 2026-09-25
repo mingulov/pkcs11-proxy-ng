@@ -24,13 +24,13 @@ use super::super::handle_map::{BackendHandle, VirtualHandle};
 
 /// Remap every embedded object handle in `mechanism`'s parameters from the
 /// caller's per-context virtual handle space into the backend handle space,
-/// gating each through the per-object authorization layer when active.
+/// gating each through object and class authorization when active.
 ///
-/// When `ctx.token_policy.per_object_active()` is `false` (the common case),
+/// When neither object nor class policy is active (the common case),
 /// handles are remapped with a single context-lock acquisition — zero-overhead
 /// transparent forwarding.
 ///
-/// When per-object authz IS active, the function uses a three-phase approach:
+/// When object or class authorization is active, the function uses four phases:
 /// 1. Collect all non-zero embedded virtual handles (read-only scan).
 /// 2. Resolve each virtual→backend inside the context lock.
 /// 3. Gate each resolved handle through `gate_object_handle` (async, one call
@@ -52,7 +52,7 @@ use super::super::handle_map::{BackendHandle, VirtualHandle};
 ///
 /// Returns `CKR_CRYPTOKI_NOT_INITIALIZED` if the context no longer exists,
 /// `CKR_OBJECT_HANDLE_INVALID` if any embedded handle is not owned by the
-/// caller or is denied by per-object policy. A mechanism with no parameters
+/// caller or is denied by object/class policy. A mechanism with no parameters
 /// is a no-op.
 pub(super) async fn remap_mechanism_handles(
     ctx: &super::HandlerContext,
@@ -65,9 +65,9 @@ pub(super) async fn remap_mechanism_handles(
         return Ok(());
     };
 
-    if !ctx.token_policy.per_object_active() {
+    if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() {
         // Fast path: resolve virtual→backend without gating.
-        // This is the common case (no per-object authz configured).
+        // This is the common case (no object or class policy configured).
         return match ctx
             .context_manager
             .get_context(ctx_id, |lci| {
@@ -82,7 +82,7 @@ pub(super) async fn remap_mechanism_handles(
         };
     }
 
-    // Gating path — per_object_active() == true.
+    // Gating path — object or class policy is active.
 
     // Phase 1: collect all non-zero embedded virtual handles.
     let virtual_handles = collect_param_handles(params);
@@ -626,13 +626,20 @@ mod tests {
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock;
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        ctx_mgr.cache_token_info(CkSlotId(0), "MockToken".into(), "0001".into());
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
         let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
 
         let (vs, vo) = ctx_mgr
             .get_context(&ctx_id, |c| {
-                let vs = c.register_session(BackendHandle(backend_session.0), CkSlotId(0));
+                let vs = c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
                 let vo = c.object_handles.insert(BackendHandle(backend_object.0));
                 (vs, vo)
             })

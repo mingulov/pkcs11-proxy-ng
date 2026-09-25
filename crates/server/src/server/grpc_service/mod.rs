@@ -61,6 +61,7 @@ impl Pkcs11ProxyService {
     ) -> Self {
         Self {
             ctx: HandlerContext {
+                object_cleanup: Arc::default(),
                 context_manager,
                 backend,
                 tcp_auth_mode,
@@ -281,7 +282,7 @@ mod dispatch_rate_quota_tests {
     #[tokio::test]
     async fn open_session_through_service_inert_with_no_limit() {
         let ctx_mgr = make_ctx_mgr();
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let backend = make_backend();
         let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend);
 
@@ -312,7 +313,7 @@ mod dispatch_rate_quota_tests {
     #[tokio::test]
     async fn macro_handler_get_info_inert_with_no_limit() {
         let ctx_mgr = make_ctx_mgr();
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let backend = make_backend();
         let svc = Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend);
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
@@ -336,7 +337,7 @@ mod dispatch_rate_quota_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn open_session_many_concurrent_no_limit() {
         let ctx_mgr = make_ctx_mgr();
-        ctx_mgr.register_slot(CkSlotId(0)).await;
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let backend = make_backend();
         let svc = Arc::new(Pkcs11ProxyService::insecure_for_tests(ctx_mgr.clone(), backend));
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();

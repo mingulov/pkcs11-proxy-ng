@@ -1,6 +1,8 @@
 # OASIS coverage completion audit
 
-Date: 2026-05-17
+Date: 2026-09-15 (counts regenerated; no provider artifacts were present, so
+the provider-gap and strict counts below are artifact-less upper bounds —
+re-check them in an artifact-backed matrix run before release)
 
 Status: internal coverage complete; provider-backed gaps remain separate
 
@@ -16,7 +18,7 @@ unsupported rows, and remaining provider artifact gaps visible.
 - Standard interface catalog entries: 3
 - Official mechanism values from published headers: 463
 - Official mechanism names/aliases in matrix: 479
-- Provider-gap mechanism names/aliases: 164
+- Provider-gap mechanism names/aliases: 479
 - Spec-only `C_DigestXof*` functions without local function-list ABI slots: 6
 - Spec parameter structs in OASIS inventory: 64
 - Mechanism parameter shapes: 79
@@ -25,10 +27,10 @@ unsupported rows, and remaining provider artifact gaps visible.
 - Actionable MockBackend semantic gaps: 0
 - Intentional no-source workflow rejections: 121
 - Intentional unsupported function-list gaps: 6
-- Intentional unsupported numeric-value gaps: 6
+- Intentional unsupported numeric-value gaps: 11
 - Intentional unsupported workflow gaps: 121
 - Internal completion open items: 0
-- Strict completion open items including provider gaps: 164
+- Strict completion open items including provider gaps: 479
 
 ## Prompt-to-artifact checklist
 

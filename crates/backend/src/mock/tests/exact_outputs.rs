@@ -1,4 +1,5 @@
 use super::*;
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 
 #[test]
 fn null_output_length_classic_cipher_operations_follow_provider_owned_lifecycle() {
@@ -20,7 +21,7 @@ fn null_output_length_classic_cipher_operations_follow_provider_owned_lifecycle(
         }
         .unwrap();
         assert_eq!(result.ck_rv, CkRv::ARGUMENTS_BAD);
-        assert_eq!(result.returned_len, 0);
+        assert_eq!(result.returned_len, None);
         assert_eq!(result.value, None);
         assert_eq!(backend.data_op_call_count(), before + 1);
         backend.encrypt_init(session, &mechanism, key).unwrap();
@@ -37,7 +38,7 @@ fn null_output_length_classic_cipher_operations_follow_provider_owned_lifecycle(
         }
         .unwrap();
         assert_eq!(result.ck_rv, CkRv::ARGUMENTS_BAD);
-        assert_eq!(result.returned_len, 0);
+        assert_eq!(result.returned_len, None);
         assert_eq!(result.value, None);
         assert_eq!(backend.data_op_call_count(), before + 1);
         backend.decrypt_init(session, &mechanism, key).unwrap();
@@ -172,14 +173,25 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
                 "{shape} {direction} one-shot trait call",
             );
             assert_eq!(one_shot.ck_rv, CkRv::OK, "{shape} {direction} one-shot rv");
-            assert_eq!(one_shot.returned_len, 5, "{shape} {direction} one-shot length");
+            assert_eq!(one_shot.returned_len, Some(5), "{shape} {direction} one-shot length");
             assert!(one_shot.value.is_some(), "{shape} {direction} one-shot output");
             assert_eq!(
                 one_shot_ack.returned_len, provider_spec.buffer_len,
                 "{shape} {direction} one-shot native length",
             );
             assert!(
-                parameter.same_layout_and_scalars(&one_shot_parameter),
+                one_shot_parameter
+                    .validate_for(
+                        parameter,
+                        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                            mode: ParameterEffectCallMode::Data,
+                            encrypt,
+                            generated_stage: true,
+                            auth_stage: true,
+                            rv: one_shot.ck_rv
+                        }
+                    )
+                    .is_ok(),
                 "{shape} {direction} one-shot layout/scalars",
             );
             exercised_cells += 1;
@@ -211,7 +223,18 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
                 "{shape} {direction} Begin native length",
             );
             assert!(
-                parameter.same_layout_and_scalars(&begin_parameter),
+                begin_parameter
+                    .validate_for(
+                        parameter,
+                        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                            mode: ParameterEffectCallMode::Data,
+                            encrypt,
+                            generated_stage: true,
+                            auth_stage: false,
+                            rv: begin_ack.ck_rv
+                        }
+                    )
+                    .is_ok(),
                 "{shape} {direction} Begin layout/scalars",
             );
             exercised_cells += 1;
@@ -243,14 +266,25 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
                 "{shape} {direction} Next trait call",
             );
             assert_eq!(next.ck_rv, CkRv::OK, "{shape} {direction} Next rv");
-            assert_eq!(next.returned_len, 5, "{shape} {direction} Next length");
+            assert_eq!(next.returned_len, Some(5), "{shape} {direction} Next length");
             assert!(next.value.is_some(), "{shape} {direction} Next output");
             assert_eq!(
                 next_ack.returned_len, provider_spec.buffer_len,
                 "{shape} {direction} Next native length",
             );
             assert!(
-                parameter.same_layout_and_scalars(&next_parameter),
+                next_parameter
+                    .validate_for(
+                        parameter,
+                        pkcs11_proxy_ng_proto::convert::message_effects::MessageEffectContext {
+                            mode: ParameterEffectCallMode::Data,
+                            encrypt,
+                            generated_stage: false,
+                            auth_stage: false,
+                            rv: next.ck_rv
+                        }
+                    )
+                    .is_ok(),
                 "{shape} {direction} Next layout/scalars",
             );
             exercised_cells += 1;
@@ -271,7 +305,7 @@ fn typed_message_exact_paths_return_structured_mock_outputs() {
         )
         .unwrap();
     assert_eq!(small.ck_rv, CkRv::BUFFER_TOO_SMALL);
-    assert_eq!(small.returned_len, 5);
+    assert_eq!(small.returned_len, Some(5));
     assert_eq!(small.value, None);
 
     assert_eq!(
@@ -348,12 +382,12 @@ fn encapsulate_key_exact_data_query_returns_live_key_with_template_attributes() 
         .unwrap();
 
     assert_eq!(result.ck_rv, CkRv::OK);
-    assert_eq!(result.returned_len, 8);
-    assert_ne!(result.object_handle, CkObjectHandle(0));
+    assert_eq!(result.returned_len, Some(8));
+    assert!(result.object_handle.is_some_and(|h| h.0 != 0));
     let (rv, results) = backend
         .get_attribute_value_exact(
             session,
-            result.object_handle,
+            result.object_handle.expect("successful handle effect"),
             &[CkAttributeQuery {
                 attr_type: CkAttributeType::LABEL,
                 buffer_present: true,
@@ -388,7 +422,7 @@ fn encapsulate_key_exact_non_data_queries_do_not_allocate_key() {
         )
         .unwrap();
     assert_eq!(size_query.ck_rv, CkRv::OK);
-    assert_eq!(size_query.object_handle, CkObjectHandle(0));
+    assert_eq!(size_query.object_handle, None);
 
     let too_small = backend
         .encapsulate_key_exact(
@@ -400,7 +434,7 @@ fn encapsulate_key_exact_non_data_queries_do_not_allocate_key() {
         )
         .unwrap();
     assert_eq!(too_small.ck_rv, CkRv::BUFFER_TOO_SMALL);
-    assert_eq!(too_small.object_handle, CkObjectHandle(0));
+    assert_eq!(too_small.object_handle, None);
 
     assert_eq!(
         backend.destroy_object(session, CkObjectHandle(public_key.0 + 1)).unwrap_err(),
@@ -430,7 +464,7 @@ fn full_registry_mock_accepts_every_registered_mechanism_for_exact_wrap_workflow
         let size_result =
             backend.wrap_key_exact(session, &mechanism, wrapping_key, key, &size_spec).unwrap();
         assert_eq!(size_result.ck_rv, CkRv::OK);
-        assert_eq!(size_result.returned_len, 4);
+        assert_eq!(size_result.returned_len, Some(4));
         assert!(size_result.value.is_none());
 
         let data_spec =

@@ -26,7 +26,9 @@ The fastest end-to-end path on a laptop, using SoftHSM2 as the backend and
 
 ```bash
 # 1. System prereqs (Debian/Ubuntu — adjust for your distro).
-sudo apt install -y softhsm2 opensc gnutls-bin
+# Install Rust stable through rustup first; see doc/development.md.
+sudo apt install -y build-essential pkg-config protobuf-compiler \
+    softhsm2 opensc gnutls-bin
 
 # 2. Initialise a SoftHSM2 token. The PIN here is for local dev only.
 softhsm2-util --init-token --slot 0 --label dev \
@@ -51,6 +53,19 @@ For anything beyond local dev, start from a template in
 hand-rolling a config.
 
 ## Beta scope
+
+The selected v0.2 [native ownership contract](./doc/release/native-mechanism-ownership.md)
+is partially implemented locally and unreleased: mechanism roots and nested
+output cells live in persistent native allocations (Miri-checked under both
+borrow models), one provider chain per process is enforced by the
+constructor domain with lifecycle-honest retirement, and wire widths are
+checked with rejection proven on i686 hardware. Still pending: DONT_BLOCK-only
+slot waits with shared native event flags, the qualified Linux
+whole-process lifetime stop, session operation slots, subprocess/topology
+qualification, and the provider parity round. Windows native
+daemon support is committed v0.2.0 tail stretch (low priority, see ADR-0014);
+portable Windows clients and mock-only builds
+remain. This is not a v0.2 parity/support receipt.
 
 **Public `v0.1.0` support**
 
@@ -81,6 +96,8 @@ candidate [release notes](./doc/release/v0.2.0-release-notes.md) are satisfied.
 
 ## Documentation
 
+- [`doc/development.md`](./doc/development.md) — native tools, optional mise
+  setup, MSRV, and local validation commands
 - [`prd.md`](./prd.md) — product requirements
 - [`doc/architecture-overview.md`](./doc/architecture-overview.md) — how the
   shim, daemon, and backend fit together

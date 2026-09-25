@@ -64,7 +64,7 @@ fn assert_exact_byte_result(
             panic!("{workflow} data query value for 0x{:08X}", mechanism_type.0)
         });
         assert_eq!(
-            result.returned_len as usize,
+            result.returned_len.expect("successful byte output length") as usize,
             value.len(),
             "{workflow} data query length for 0x{:08X}",
             mechanism_type.0
@@ -141,8 +141,7 @@ where
     assert_eq!(size_result.ck_rv, CkRv::OK, "{workflow} size rv for 0x{:08X}", mechanism_type.0);
     assert!(size_result.value.is_none(), "{workflow} size value for 0x{:08X}", mechanism_type.0);
     assert_eq!(
-        size_result.object_handle,
-        CkObjectHandle(0),
+        size_result.object_handle, None,
         "{workflow} size query handle for 0x{:08X}",
         mechanism_type.0
     );
@@ -153,14 +152,13 @@ where
         .value
         .unwrap_or_else(|| panic!("{workflow} data value for 0x{:08X}", mechanism_type.0));
     assert_eq!(
-        data_result.returned_len as usize,
+        data_result.returned_len.expect("successful ciphertext length") as usize,
         value.len(),
         "{workflow} data length for 0x{:08X}",
         mechanism_type.0
     );
     assert_ne!(
-        data_result.object_handle,
-        CkObjectHandle(0),
+        data_result.object_handle, None,
         "{workflow} data query handle for 0x{:08X}",
         mechanism_type.0
     );

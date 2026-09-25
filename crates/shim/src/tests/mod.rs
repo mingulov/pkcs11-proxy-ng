@@ -28,6 +28,7 @@ mod null_pointers;
 mod output_semantics;
 mod regression;
 mod resource_limits;
+mod retained_oracle_live;
 
 fn empty_interface() -> CK_INTERFACE {
     CK_INTERFACE {

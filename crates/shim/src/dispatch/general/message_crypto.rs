@@ -598,7 +598,9 @@ pub unsafe extern "C" fn c_encrypt_message_begin(
                         response_parameter.as_ref(),
                     )
                 };
-                if rv != rv_ok() {
+                if parameter_result.ck_rv == CkRv::DEVICE_ERROR
+                    || rv != rv_err(parameter_result.ck_rv)
+                {
                     operation.shape = None;
                 }
                 rv
@@ -891,7 +893,9 @@ pub unsafe extern "C" fn c_decrypt_message_begin(
                         response_parameter.as_ref(),
                     )
                 };
-                if rv != rv_ok() {
+                if parameter_result.ck_rv == CkRv::DEVICE_ERROR
+                    || rv != rv_err(parameter_result.ck_rv)
+                {
                     operation.shape = None;
                 }
                 rv

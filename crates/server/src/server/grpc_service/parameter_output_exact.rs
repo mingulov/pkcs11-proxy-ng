@@ -1,6 +1,8 @@
+use pkcs11_proxy_ng_proto::convert::message_effects::ParameterEffectCallMode;
 use tonic::{Request, Response, Status};
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
+use pkcs11_proxy_ng_proto::convert::message_effects::{MessageEffectContext, MessageEffects};
 use pkcs11_proxy_ng_proto::convert::message_params::{
     MessageParameter, MessageParameterShape, validate_structured_wire_parameter,
 };
@@ -15,8 +17,7 @@ use super::super::context_manager::{
 };
 use super::super::handle_map::VirtualHandle;
 use super::service_utils::{
-    check_sanitize, input_from_wire, parse_mechanism, resolve_session,
-    resolve_session_and_two_objects, spawn_backend,
+    ExactCompletion, check_sanitize, input_from_wire, resolve_session, spawn_backend_exact,
 };
 
 use crate::server::grpc_service::HandlerContext;
@@ -81,10 +82,14 @@ pub(super) async fn parameter_output_exact(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::ParameterOutputExactRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::ParameterOutputExactResponse>, Status> {
+    let started = std::time::Instant::now();
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
     let mut req = request.into_inner();
+    if req.exact_output_effects_version != 1 {
+        return Err(Status::failed_precondition("exact output effects version 1 required"));
+    }
     let ctx_id = ClientContextId(req.client_context_id);
 
     // Parse the function discriminator
@@ -92,6 +97,8 @@ pub(super) async fn parameter_output_exact(
         Some(f) => f,
         None => {
             return Ok(Response::new(pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                message_effects: None,
+                authenticated_output: None,
                 output_result: None,
                 parameter_result: None,
                 message_parameter_out: None,
@@ -130,47 +137,127 @@ pub(super) async fn parameter_output_exact(
 
     match function {
         ParameterOutputFunction::WrapKeyAuthenticated => {
-            let mechanism = match parse_mechanism(req.mechanism) {
-                Ok(m) => m,
-                Err(error) => {
-                    return Ok(Response::new(error_response(error)));
+            let outcome = async {
+                let p = match super::key_ops::wrap_preparation::prepare_wrap(
+                    ctx,
+                    &ctx_id,
+                    req.session_handle,
+                    req.wrapping_key_handle,
+                    req.key_handle,
+                    req.mechanism,
+                )
+                .await?
+                {
+                    Ok(p) => p,
+                    Err(rv) => return Ok(Err(rv)),
+                };
+                if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
+                    return Ok(Err(rv));
                 }
-            };
-
-            let (session, wrapping_key, key) = match resolve_session_and_two_objects(
+                use pkcs11_proxy_ng_proto::convert::authenticated::{
+                    decode_parameters, legacy_parameter_supported,
+                };
+                let typed = match req.authenticated_parameters.as_ref() {
+                    Some(envelope) => {
+                        if !parameter.is_empty()
+                            || param_out_spec.value.is_some()
+                            || req.message_parameter.is_some()
+                        {
+                            return Ok(Err(CkRv::MECHANISM_PARAM_INVALID));
+                        }
+                        match decode_parameters(&p.mechanism, envelope) {
+                            Ok(parameter) => Some(parameter),
+                            Err(rv) => return Ok(Err(rv)),
+                        }
+                    }
+                    None if legacy_parameter_supported(&p.mechanism) => None,
+                    None => return Ok(Err(CkRv::FUNCTION_NOT_SUPPORTED)),
+                };
+                let backend = backend_ref.clone();
+                spawn_backend_exact(move || {
+                    if let Some(parameter) = typed {
+                        let completion =
+                            ExactCompletion::capture(backend.wrap_key_authenticated_exact_typed(
+                                p.session,
+                                &p.mechanism,
+                                parameter.as_ref(),
+                                p.wrapping_key,
+                                p.key,
+                                input_from_wire(&associated_data, associated_data_null_len),
+                                &output_spec,
+                            ));
+                        completion.map_result(|result| {
+                            let (output, typed_output) = result?;
+                            if typed_output
+                                .validate_exact_for(
+                                    &p.mechanism,
+                                    parameter.as_ref(),
+                                    output.ck_rv,
+                                    ParameterEffectCallMode::from_output_spec(&output_spec),
+                                )
+                                .is_err()
+                            {
+                                tracing::warn!(
+                                    provider_rv = output.ck_rv.0,
+                                    "native exact authenticated parameter contract violation"
+                                );
+                                return Err(CkRv::DEVICE_ERROR);
+                            }
+                            let ack = CkParameterRoundtripResult {
+                                ck_rv: output.ck_rv,
+                                returned_len: 0,
+                                value: None,
+                            };
+                            Ok((
+                                output,
+                                ack,
+                                Some(
+                                    pkcs11_proxy_ng_proto::AuthenticatedMechanismOutput::try_from(
+                                        &typed_output,
+                                    )?,
+                                ),
+                            ))
+                        })
+                    } else {
+                        ExactCompletion::capture(
+                            backend
+                                .wrap_key_authenticated_exact(
+                                    p.session,
+                                    &p.mechanism,
+                                    p.wrapping_key,
+                                    p.key,
+                                    input_from_wire(&associated_data, associated_data_null_len),
+                                    &output_spec,
+                                    &param_out_spec,
+                                )
+                                .map(|(output, parameter)| (output, parameter, None)),
+                        )
+                    }
+                })
+                .await
+            }
+            .await;
+            let result = super::audit_events::audit_key_outcome(
                 ctx,
                 &ctx_id,
+                "C_WrapKeyAuthenticated",
                 req.session_handle,
-                req.wrapping_key_handle,
-                req.key_handle,
-            )
-            .await
-            {
-                Ok(handles) => handles,
-                Err(error) => {
-                    return Ok(Response::new(error_response(error)));
+                started,
+                outcome,
+                |(output, _, _)| output.ck_rv,
+            )?;
+            Ok(Response::new(match result {
+                Ok((output, parameter, authenticated_output)) => {
+                    pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                        message_effects: None,
+                        output_result: Some((&output).into()),
+                        parameter_result: Some((&parameter).into()),
+                        message_parameter_out: None,
+                        authenticated_output,
+                    }
                 }
-            };
-
-            // ADR-0010 sanitize_inputs: validate NULL aad pointer before backend call.
-            if let Err(rv) = check_sanitize(sanitize_inputs, associated_data_null_len) {
-                return Ok(Response::new(error_response(rv)));
-            }
-            let backend = backend_ref.clone();
-            let result = spawn_backend(move || {
-                backend.wrap_key_authenticated_exact(
-                    session,
-                    &mechanism,
-                    wrapping_key,
-                    key,
-                    input_from_wire(&associated_data, associated_data_null_len),
-                    &output_spec,
-                    &param_out_spec,
-                )
-            })
-            .await?;
-
-            Ok(Response::new(result_to_proto(result)))
+                Err(rv) => error_response(rv),
+            }))
         }
 
         // Canonical Encrypt/Decrypt one-shot and Next paths. Their active Init
@@ -277,7 +364,7 @@ pub(super) async fn parameter_output_exact(
             let mut transition = MessageOperationTransition::begin(operation);
             let result = if let Some(mp) = msg_param {
                 let request_parameter = mp.clone();
-                let result = spawn_backend(move || {
+                let result = spawn_backend_exact(move || {
                     transition.mark_started();
                     let provider_result = match function {
                         ParameterOutputFunction::EncryptMessage
@@ -304,47 +391,72 @@ pub(super) async fn parameter_output_exact(
                         ),
                         _ => unreachable!(),
                     };
-                    match provider_result {
-                        Ok((output, parameter_result, returned_parameter))
-                            if parameter_ack_matches(
-                                &parameter_result,
-                                &provider_spec,
-                                output.ck_rv,
-                            ) && returned_parameter
-                                .validate_structured_shape(installed_shape)
-                                .is_ok()
-                                && request_parameter
-                                    .same_layout_and_scalars(&returned_parameter) =>
-                        {
-                            let response_parameter = if matches!(
-                                function,
-                                ParameterOutputFunction::DecryptMessage
-                                    | ParameterOutputFunction::DecryptMessageNext
-                            ) {
-                                request_parameter
-                            } else {
-                                returned_parameter
-                            };
-                            let caller_ack = translate_parameter_ack(&output, &param_out_spec);
-                            let outcome = Ok(());
-                            transition.settle(&outcome, Some(installed_shape));
-                            Ok((output, caller_ack, response_parameter))
+                    ExactCompletion::capture(provider_result).map_result(|provider_result| {
+                        match provider_result {
+                            Ok((output, parameter_result, returned_parameter))
+                                if parameter_ack_matches(
+                                    &parameter_result,
+                                    &provider_spec,
+                                    output.ck_rv,
+                                ) && returned_parameter
+                                    .validate_for(
+                                        &request_parameter,
+                                        MessageEffectContext {
+                                            mode: ParameterEffectCallMode::from_output_spec(
+                                                &output_spec,
+                                            ),
+                                            encrypt: matches!(
+                                                function,
+                                                ParameterOutputFunction::EncryptMessage
+                                                    | ParameterOutputFunction::EncryptMessageNext
+                                            ),
+                                            generated_stage: matches!(
+                                                function,
+                                                ParameterOutputFunction::EncryptMessage
+                                                    | ParameterOutputFunction::DecryptMessage
+                                            ),
+                                            auth_stage: matches!(
+                                                function,
+                                                ParameterOutputFunction::EncryptMessage
+                                                    | ParameterOutputFunction::DecryptMessage
+                                            ) || flags.0
+                                                & cryptoki_sys::CKF_END_OF_MESSAGE as u64
+                                                != 0,
+                                            rv: output.ck_rv,
+                                        },
+                                    )
+                                    .is_ok() =>
+                            {
+                                let response_parameter = returned_parameter;
+                                let caller_ack = translate_parameter_ack(&output, &param_out_spec);
+                                let outcome = if output.ck_rv == CkRv::OK {
+                                    Ok(())
+                                } else {
+                                    Err(output.ck_rv)
+                                };
+                                transition.settle(&outcome, Some(installed_shape));
+                                Ok((output, caller_ack, response_parameter))
+                            }
+                            Ok((output, _, _)) => {
+                                tracing::warn!(
+                                    provider_rv = output.ck_rv.0,
+                                    "native exact parameter contract violation"
+                                );
+                                transition.settle_ambiguous();
+                                Err(CkRv::DEVICE_ERROR)
+                            }
+                            Err(error) => {
+                                let outcome: CkResult<()> = Err(error);
+                                transition.settle(&outcome, Some(installed_shape));
+                                Err(error)
+                            }
                         }
-                        Ok(_) => {
-                            transition.settle_ambiguous();
-                            Err(CkRv::DEVICE_ERROR)
-                        }
-                        Err(error) => {
-                            let outcome: CkResult<()> = Err(error);
-                            transition.settle(&outcome, Some(installed_shape));
-                            Err(error)
-                        }
-                    }
+                    })
                 })
                 .await?;
                 return Ok(Response::new(result_to_proto_msg(result)));
             } else {
-                spawn_backend(move || {
+                spawn_backend_exact(move || {
                     transition.mark_started();
                     let provider_result = match function {
                         ParameterOutputFunction::EncryptMessage
@@ -371,28 +483,34 @@ pub(super) async fn parameter_output_exact(
                         ),
                         _ => unreachable!(),
                     };
-                    match provider_result {
-                        Ok((output, parameter_result))
-                            if parameter_ack_matches(
-                                &parameter_result,
-                                &provider_spec,
-                                output.ck_rv,
-                            ) =>
-                        {
-                            let outcome = Ok(());
-                            transition.settle(&outcome, Some(installed_shape));
+                    ExactCompletion::capture(provider_result).map_result(|provider_result| {
+                        match provider_result {
                             Ok((output, parameter_result))
+                                if parameter_ack_matches(
+                                    &parameter_result,
+                                    &provider_spec,
+                                    output.ck_rv,
+                                ) =>
+                            {
+                                let outcome = if output.ck_rv == CkRv::OK {
+                                    Ok(())
+                                } else {
+                                    Err(output.ck_rv)
+                                };
+                                transition.settle(&outcome, Some(installed_shape));
+                                Ok((output, parameter_result))
+                            }
+                            Ok(_) => {
+                                transition.settle_ambiguous();
+                                Err(CkRv::DEVICE_ERROR)
+                            }
+                            Err(error) => {
+                                let outcome: CkResult<()> = Err(error);
+                                transition.settle(&outcome, Some(installed_shape));
+                                Err(error)
+                            }
                         }
-                        Ok(_) => {
-                            transition.settle_ambiguous();
-                            Err(CkRv::DEVICE_ERROR)
-                        }
-                        Err(error) => {
-                            let outcome: CkResult<()> = Err(error);
-                            transition.settle(&outcome, Some(installed_shape));
-                            Err(error)
-                        }
-                    }
+                    })
                 })
                 .await?
             };
@@ -438,7 +556,7 @@ pub(super) async fn parameter_output_exact(
             }
             let backend = backend_ref.clone();
             let mut transition = MessageOperationTransition::begin(operation);
-            let result = spawn_backend(move || {
+            let result = spawn_backend_exact(move || {
                 transition.mark_started();
                 let provider_result = match function {
                     ParameterOutputFunction::SignMessage => dispatch_message_oneshot(
@@ -463,28 +581,31 @@ pub(super) async fn parameter_output_exact(
                     ),
                     _ => unreachable!(),
                 };
-                match provider_result {
-                    Ok((output, parameter_result))
-                        if parameter_ack_matches(
-                            &parameter_result,
-                            &param_out_spec,
-                            output.ck_rv,
-                        ) =>
-                    {
-                        let outcome = Ok(());
-                        transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                ExactCompletion::capture(provider_result).map_result(|provider_result| {
+                    match provider_result {
                         Ok((output, parameter_result))
+                            if parameter_ack_matches(
+                                &parameter_result,
+                                &param_out_spec,
+                                output.ck_rv,
+                            ) =>
+                        {
+                            let outcome =
+                                if output.ck_rv == CkRv::OK { Ok(()) } else { Err(output.ck_rv) };
+                            transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                            Ok((output, parameter_result))
+                        }
+                        Ok(_) => {
+                            transition.settle_ambiguous();
+                            Err(CkRv::DEVICE_ERROR)
+                        }
+                        Err(error) => {
+                            let outcome: CkResult<()> = Err(error);
+                            transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
+                            Err(error)
+                        }
                     }
-                    Ok(_) => {
-                        transition.settle_ambiguous();
-                        Err(CkRv::DEVICE_ERROR)
-                    }
-                    Err(error) => {
-                        let outcome: CkResult<()> = Err(error);
-                        transition.settle(&outcome, Some(MessageParameterShape::Unmodeled));
-                        Err(error)
-                    }
-                }
+                })
             })
             .await?;
             Ok(Response::new(result_to_proto(result)))
@@ -586,7 +707,7 @@ fn dispatch_message_oneshot_msg(
 ) -> pkcs11_proxy_ng_types::CkResult<(
     pkcs11_proxy_ng_types::CkOutputBufferResult,
     pkcs11_proxy_ng_types::CkParameterRoundtripResult,
-    pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+    MessageEffects,
 )> {
     match function {
         ParameterOutputFunction::EncryptMessage => backend.encrypt_message_exact_msg(
@@ -625,7 +746,7 @@ fn dispatch_message_next_msg(
 ) -> pkcs11_proxy_ng_types::CkResult<(
     pkcs11_proxy_ng_types::CkOutputBufferResult,
     pkcs11_proxy_ng_types::CkParameterRoundtripResult,
-    pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+    MessageEffects,
 )> {
     match function {
         ParameterOutputFunction::EncryptMessageNext => backend.encrypt_message_next_exact_msg(
@@ -654,19 +775,31 @@ fn result_to_proto_msg(
     result: pkcs11_proxy_ng_types::CkResult<(
         pkcs11_proxy_ng_types::CkOutputBufferResult,
         pkcs11_proxy_ng_types::CkParameterRoundtripResult,
-        pkcs11_proxy_ng_proto::convert::message_params::MessageParameter,
+        MessageEffects,
     )>,
 ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
     match result {
-        Ok((output, parameter, msg_param)) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
-            output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult::from(&output)),
-            parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult::from(
-                &parameter,
-            )),
-            message_parameter_out: Some(pkcs11_proxy_ng_proto::MessageParameter::from(&msg_param)),
-        },
+        Ok((output, parameter, msg_param)) => {
+            let effects = match pkcs11_proxy_ng_proto::MessageParameterEffects::try_from(&msg_param)
+            {
+                Ok(effects) => effects,
+                Err(rv) => return error_response(rv),
+            };
+            pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+                message_effects: Some(effects),
+                authenticated_output: None,
+                output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult::from(&output)),
+                parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult::from(
+                    &parameter,
+                )),
+                message_parameter_out: None,
+            }
+        }
         Err(error) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(false),
                 ck_rv: error.0,
                 returned_len: 0,
                 value: None,
@@ -689,12 +822,17 @@ fn result_to_proto(
 ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
     match result {
         Ok((output, param)) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult::from(&output)),
             parameter_result: Some(pkcs11_proxy_ng_proto::ParameterRoundtripResult::from(&param)),
             message_parameter_out: None,
         },
         Err(error) => pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+            message_effects: None,
+            authenticated_output: None,
             output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+                apply_returned_len: Some(false),
                 ck_rv: error.0,
                 returned_len: 0,
                 value: None,
@@ -713,7 +851,10 @@ fn error_response(
     error: pkcs11_proxy_ng_types::CkRv,
 ) -> pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
     pkcs11_proxy_ng_proto::ParameterOutputExactResponse {
+        message_effects: None,
+        authenticated_output: None,
         output_result: Some(pkcs11_proxy_ng_proto::OutputBufferResult {
+            apply_returned_len: Some(false),
             ck_rv: error.0,
             returned_len: 0,
             value: None,
@@ -750,12 +891,16 @@ mod ambiguity_tests {
         let key = mock.create_object(backend_session, &[]).unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        manager.register_slot(CkSlotId(0)).await;
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
-        let virtual_session =
-            register_session_handle(&manager, &context_id, backend_session, CkSlotId(0))
-                .await
-                .unwrap();
+        let virtual_session = register_session_handle(
+            &manager,
+            &context_id,
+            backend_session,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
         let virtual_session = VirtualHandle(virtual_session);
         let virtual_wrapping_key = register_session_object_handle(
             &manager,
@@ -773,6 +918,8 @@ mod ambiguity_tests {
         let response = parameter_output_exact(
             &HandlerContext::for_test(&manager, &backend),
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                exact_output_effects_version: 1,
+                authenticated_parameters: None,
                 client_context_id: context_id.0.clone(),
                 session_handle: virtual_session.0,
                 function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(
@@ -818,14 +965,18 @@ mod ambiguity_tests {
         mock.initialize().unwrap();
         let backend: Arc<dyn Pkcs11Backend> = mock.clone();
         let manager = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        manager.register_slot(CkSlotId(0)).await;
+        manager.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
         let context_id = manager.create_context(None).await.unwrap();
         let backend_session =
             mock.open_session(CkSlotId(0), CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).unwrap();
-        let virtual_session =
-            register_session_handle(&manager, &context_id, backend_session, CkSlotId(0))
-                .await
-                .unwrap();
+        let virtual_session = register_session_handle(
+            &manager,
+            &context_id,
+            backend_session,
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+        )
+        .await
+        .unwrap();
         let operation = manager
             .message_operation_lock(
                 &context_id,
@@ -855,6 +1006,8 @@ mod ambiguity_tests {
         let response = parameter_output_exact(
             &HandlerContext::for_test(&manager, &backend),
             Request::new(pkcs11_proxy_ng_proto::ParameterOutputExactRequest {
+                exact_output_effects_version: 1,
+                authenticated_parameters: None,
                 client_context_id: context_id.0.clone(),
                 session_handle: virtual_session,
                 function: pkcs11_proxy_ng_proto::convert::output::parameter_output_function_to_i32(

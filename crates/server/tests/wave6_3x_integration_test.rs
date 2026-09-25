@@ -523,7 +523,7 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
         .await
         .unwrap();
     assert_eq!(size_result.ck_rv, CkRv::OK);
-    assert_eq!(size_result.returned_len, plaintext.len() as u64);
+    assert_eq!(size_result.returned_len, Some(plaintext.len() as u64));
     assert!(size_result.value.is_none(), "size query must not return ciphertext bytes");
     assert!(size_mechanism_out.is_none(), "size query must not surface delayed mechanism_out");
 
@@ -546,7 +546,7 @@ async fn byte_output_exact_encrypt_returns_gcm_output_params_through_grpc() {
         .unwrap();
 
     assert_eq!(data_result.ck_rv, CkRv::OK);
-    assert_eq!(data_result.returned_len, plaintext.len() as u64);
+    assert_eq!(data_result.returned_len, Some(plaintext.len() as u64));
     let expected_ciphertext = plaintext.iter().map(|byte| byte ^ 0x42).collect::<Vec<_>>();
     assert_eq!(data_result.value.as_deref(), Some(expected_ciphertext.as_slice()));
     assert_eq!(
@@ -602,7 +602,7 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
         .await
         .unwrap();
     assert_eq!(size_result.ck_rv, CkRv::OK);
-    assert_eq!(size_result.returned_len, 4);
+    assert_eq!(size_result.returned_len, Some(4));
     assert!(size_result.value.is_none(), "size query must not return wrapped bytes");
     assert!(size_mechanism_out.is_none(), "size query must not surface delayed mechanism_out");
 
@@ -622,7 +622,7 @@ async fn byte_output_exact_wrap_key_returns_gcm_output_params_through_grpc() {
         .unwrap();
 
     assert_eq!(wrap_result.ck_rv, CkRv::OK);
-    assert_eq!(wrap_result.returned_len, 4);
+    assert_eq!(wrap_result.returned_len, Some(4));
     assert_eq!(wrap_result.value, Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
     assert_eq!(
         mechanism_out,

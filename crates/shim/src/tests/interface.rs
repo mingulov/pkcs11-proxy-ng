@@ -204,6 +204,29 @@ fn get_interface_unknown_version_returns_null_ok() {
 }
 
 #[test]
+fn get_interface_unadvertised_flags_returns_null_ok() {
+    let _guard = shim_state_test_guard();
+    let name = b"PKCS 11\0";
+    let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
+    let rv = unsafe {
+        C_GetInterface(name.as_ptr() as *mut CK_UTF8CHAR, std::ptr::null_mut(), &mut pp, 1)
+    };
+    assert_eq!(rv, CKR_OK as CK_RV);
+    assert!(pp.is_null());
+}
+
+#[test]
+fn get_interface_flags_combine_with_version_and_name() {
+    let _guard = shim_state_test_guard();
+    let name = b"PKCS 11\0";
+    let mut version = CK_VERSION { major: 3, minor: 0 };
+    let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
+    let rv = unsafe { C_GetInterface(name.as_ptr() as *mut CK_UTF8CHAR, &mut version, &mut pp, 1) };
+    assert_eq!(rv, CKR_OK as CK_RV);
+    assert!(pp.is_null());
+}
+
+#[test]
 fn get_interface_3_0_list_has_nonnull_get_interface_list_slot() {
     let _guard = shim_state_test_guard();
     let name = b"PKCS 11\0";

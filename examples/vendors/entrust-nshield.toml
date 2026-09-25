@@ -11,11 +11,15 @@ shape = "mac_general"
 mechanisms = [0xDE436990]  # CKM_NC_AES_CMAC (approximate, check your SDK)
 
 # CKM_NC_AES_CMAC_KEY_DERIVATION
+# NOT-YET-IMPLEMENTED(aes_cmac_key_derivation): backend FFI reconstruction
+# needs the nCipher C struct layout. Fail-closed PARAM_INVALID until then.
 [[params]]
 shape = "aes_cmac_key_derivation"
 mechanisms = [0xDE436991]  # CKM_NC_AES_CMAC_KEY_DERIVATION
 
 # --- ECIES ---
+# NOT-YET-IMPLEMENTED(ecies): backend FFI reconstruction needs the vendor
+# C struct layout (cryptoki-sys has no CK_ECIES_PARAMS). Fail-closed until then.
 [[params]]
 shape = "ecies"
 mechanisms = [0xDE436993]  # CKM_NC_ECIES (approximate, check your SDK)

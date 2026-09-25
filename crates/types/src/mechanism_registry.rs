@@ -6,7 +6,14 @@
 //!
 //! The embedded default is loaded from `mechanism_params_default.toml`
 //! (compiled in via `include_str!`). An optional override file can add
-//! vendor-specific mechanisms (e.g. CloudHSM extensions).
+//! vendor-specific mechanisms (e.g. CloudHSM extensions) or hard-disable
+//! mechanisms via `exclude` (e.g. historical ciphers in FIPS deployments).
+//!
+//! Exclusion is an operation-time gate, not just a discovery hint: a
+//! filtered discovery allowlist hides mechanisms from `C_GetMechanismList`
+//! but still permits direct invocations, while `exclude` rejects them in
+//! [`MechanismRegistry::check_operation`] and hides them in every
+//! discovery mode.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -33,13 +40,18 @@ pub enum DiscoveryMode {
 /// no content-derived revision otherwise.
 pub const EMBEDDED_DEFAULT_REVISION: &str = "embedded-default";
 
-/// Registry of mechanism parameter shapes, parameterless mechanisms, and
-/// discovery mode. Built from an embedded TOML default plus an optional
-/// operator override, or reconstructed from a server-published payload.
+/// Registry of mechanism parameter shapes, parameterless mechanisms,
+/// operator-excluded mechanisms, and discovery mode. Built from an embedded
+/// TOML default plus an optional operator override, or reconstructed from a
+/// server-published payload.
 #[derive(Debug)]
 pub struct MechanismRegistry {
     param_shapes: HashMap<u64, String>,
     parameterless: HashSet<u64>,
+    /// Operator-disabled mechanisms (`exclude` list). Checked first by
+    /// [`MechanismRegistry::check_operation`] and hidden by
+    /// [`MechanismRegistry::filter_mechanisms`] in every discovery mode.
+    disabled: HashSet<u64>,
     discovery_mode: DiscoveryMode,
     /// Short content-derived identifier used for change detection
     /// between probes (`EMBEDDED_DEFAULT_REVISION` for the embedded
@@ -59,6 +71,12 @@ struct TomlConfig {
     parameterless: Vec<u64>,
     #[serde(default)]
     params: Vec<TomlParamsEntry>,
+    /// CK_MECHANISM_TYPE values the operator hard-disables. Exclusion wins
+    /// over every other entry: an excluded mechanism is rejected by
+    /// `check_operation` (even parameterless) and hidden from discovery in
+    /// every discovery mode. Excluding an unknown mechanism is not an error.
+    #[serde(default)]
+    exclude: Vec<u64>,
 }
 
 /// A `[[params]]` table: one shape name → list of mechanism type values.
@@ -77,21 +95,24 @@ const DEFAULT_TOML: &str = include_str!("mechanism_params_default.toml");
 impl MechanismRegistry {
     /// Parse the embedded default and return the initial registry state.
     #[allow(clippy::type_complexity)]
-    fn load_base() -> Result<(HashMap<u64, String>, HashSet<u64>, DiscoveryMode), String> {
+    fn load_base()
+    -> Result<(HashMap<u64, String>, HashSet<u64>, HashSet<u64>, DiscoveryMode), String> {
         let base: TomlConfig = toml::from_str(DEFAULT_TOML)
             .map_err(|e| format!("failed to parse embedded mechanism config: {e}"))?;
 
         let mut param_shapes = HashMap::new();
-        let parameterless: HashSet<u64> = base.parameterless.into_iter().collect();
-        let discovery_mode = base.discovery_mode.unwrap_or_default();
+        let mut parameterless = HashSet::new();
+        let mut disabled = HashSet::new();
+        let mut discovery_mode = DiscoveryMode::default();
+        Self::merge_config(
+            &base,
+            &mut param_shapes,
+            &mut parameterless,
+            &mut disabled,
+            &mut discovery_mode,
+        );
 
-        for entry in &base.params {
-            for &mech in &entry.mechanisms {
-                param_shapes.insert(mech, entry.shape.clone());
-            }
-        }
-
-        Ok((param_shapes, parameterless, discovery_mode))
+        Ok((param_shapes, parameterless, disabled, discovery_mode))
     }
 
     /// Load the registry from the embedded default, optionally merging an
@@ -100,7 +121,8 @@ impl MechanismRegistry {
     /// `override_path` is typically sourced from the
     /// `PKCS11_PROXY_MECHANISMS` environment variable.
     pub fn load(override_path: Option<&Path>) -> Result<Self, String> {
-        let (mut param_shapes, mut parameterless, mut discovery_mode) = Self::load_base()?;
+        let (mut param_shapes, mut parameterless, mut disabled, mut discovery_mode) =
+            Self::load_base()?;
 
         if let Some(path) = override_path {
             let content = std::fs::read_to_string(path).map_err(|e| {
@@ -129,17 +151,25 @@ impl MechanismRegistry {
                     &inc_config,
                     &mut param_shapes,
                     &mut parameterless,
+                    &mut disabled,
                     &mut discovery_mode,
                 );
             }
 
             // Merge the override file's own entries last (highest priority).
-            Self::merge_config(&over, &mut param_shapes, &mut parameterless, &mut discovery_mode);
+            Self::merge_config(
+                &over,
+                &mut param_shapes,
+                &mut parameterless,
+                &mut disabled,
+                &mut discovery_mode,
+            );
         }
 
         Ok(Self {
             param_shapes,
             parameterless,
+            disabled,
             discovery_mode,
             revision: EMBEDDED_DEFAULT_REVISION.to_string(),
         })
@@ -150,12 +180,14 @@ impl MechanismRegistry {
         config: &TomlConfig,
         param_shapes: &mut HashMap<u64, String>,
         parameterless: &mut HashSet<u64>,
+        disabled: &mut HashSet<u64>,
         discovery_mode: &mut DiscoveryMode,
     ) {
         if let Some(mode) = config.discovery_mode {
             *discovery_mode = mode;
         }
         parameterless.extend(&config.parameterless);
+        disabled.extend(&config.exclude);
         for entry in &config.params {
             for &mech in &entry.mechanisms {
                 param_shapes.insert(mech, entry.shape.clone());
@@ -166,19 +198,27 @@ impl MechanismRegistry {
     /// Load from embedded default, optionally merging an override TOML
     /// string. Useful for testing without touching the filesystem.
     pub fn load_with_override_str(override_toml: Option<&str>) -> Result<Self, String> {
-        let (mut param_shapes, mut parameterless, mut discovery_mode) = Self::load_base()?;
+        let (mut param_shapes, mut parameterless, mut disabled, mut discovery_mode) =
+            Self::load_base()?;
 
         // Merge override if provided.
         // Note: includes are not processed here (no file path context).
         if let Some(toml_str) = override_toml {
             let over: TomlConfig = toml::from_str(toml_str)
                 .map_err(|e| format!("failed to parse mechanism override config: {e}"))?;
-            Self::merge_config(&over, &mut param_shapes, &mut parameterless, &mut discovery_mode);
+            Self::merge_config(
+                &over,
+                &mut param_shapes,
+                &mut parameterless,
+                &mut disabled,
+                &mut discovery_mode,
+            );
         }
 
         Ok(Self {
             param_shapes,
             parameterless,
+            disabled,
             discovery_mode,
             revision: EMBEDDED_DEFAULT_REVISION.to_string(),
         })
@@ -190,10 +230,11 @@ impl MechanismRegistry {
     pub fn from_parts(
         param_shapes: HashMap<u64, String>,
         parameterless: HashSet<u64>,
+        disabled: HashSet<u64>,
         discovery_mode: DiscoveryMode,
         revision: String,
     ) -> Self {
-        Self { param_shapes, parameterless, discovery_mode, revision }
+        Self { param_shapes, parameterless, disabled, discovery_mode, revision }
     }
 
     /// Replace the revision string. Used by the daemon after loading a
@@ -221,6 +262,12 @@ impl MechanismRegistry {
         &self.parameterless
     }
 
+    /// Borrow the operator-excluded set, for serialisation into the proto
+    /// payload.
+    pub fn excluded_view(&self) -> &HashSet<u64> {
+        &self.disabled
+    }
+
     /// Return the parameter shape name for a mechanism, or `None` if the
     /// mechanism has no known parameterized shape.
     pub fn param_shape(&self, mech_type: u64) -> Option<&str> {
@@ -234,11 +281,21 @@ impl MechanismRegistry {
 
     /// Operation-time check: can the proxy forward this mechanism invocation?
     ///
-    /// - Parameterless invocations (no params) are always allowed.
+    /// - Operator-excluded mechanisms are always rejected with
+    ///   `CKR_MECHANISM_INVALID`, even without params. Exclusion wins over
+    ///   every other registry entry.
+    /// - Other parameterless invocations (no params) are always allowed.
     /// - Invocations with params must have a known parameter shape.
     /// - Unknown mechanisms with params are rejected with
     ///   `CKR_MECHANISM_PARAM_INVALID`.
     pub fn check_operation(&self, mech_type: u64, has_params: bool) -> Result<(), CkRv> {
+        if self.disabled.contains(&mech_type) {
+            tracing::warn!(
+                mechanism = format_args!("0x{mech_type:08X}"),
+                "rejecting operator-excluded mechanism"
+            );
+            return Err(CkRv::MECHANISM_INVALID);
+        }
         if !has_params {
             return Ok(());
         }
@@ -255,16 +312,24 @@ impl MechanismRegistry {
 
     /// Filter a mechanism list for `C_GetMechanismList`.
     ///
-    /// - `Transparent`: return all backend mechanisms unchanged.
+    /// Operator-excluded mechanisms are hidden in every discovery mode;
+    /// exclusion is a security boundary, not a display hint.
+    ///
+    /// - `Transparent`: return all backend mechanisms except excluded ones.
     /// - `Filtered`: return only mechanisms the proxy fully handles
-    ///   (parameterless or with a known parameter shape).
+    ///   (parameterless or with a known parameter shape), minus excluded ones.
     pub fn filter_mechanisms(&self, backend_mechs: &[u64]) -> Vec<u64> {
         match self.discovery_mode {
-            DiscoveryMode::Transparent => backend_mechs.to_vec(),
+            DiscoveryMode::Transparent => {
+                backend_mechs.iter().copied().filter(|m| !self.disabled.contains(m)).collect()
+            }
             DiscoveryMode::Filtered => backend_mechs
                 .iter()
                 .copied()
-                .filter(|m| self.parameterless.contains(m) || self.param_shapes.contains_key(m))
+                .filter(|m| {
+                    !self.disabled.contains(m)
+                        && (self.parameterless.contains(m) || self.param_shapes.contains_key(m))
+                })
                 .collect(),
         }
     }
@@ -275,7 +340,8 @@ impl MechanismRegistry {
     }
 
     /// Return every mechanism registered by the embedded/default registry plus
-    /// any operator override, sorted and deduplicated.
+    /// any operator override, minus operator-excluded mechanisms, sorted and
+    /// deduplicated.
     ///
     /// This is intended for deterministic test backends and audit tooling that
     /// need the complete proxy-understood mechanism surface, not for filtering
@@ -283,6 +349,7 @@ impl MechanismRegistry {
     pub fn registered_mechanisms(&self) -> Vec<u64> {
         let mut registered = self.parameterless.clone();
         registered.extend(self.param_shapes.keys().copied());
+        registered.retain(|m| !self.disabled.contains(m));
         let mut mechanisms: Vec<u64> = registered.into_iter().collect();
         mechanisms.sort_unstable();
         mechanisms
@@ -502,6 +569,94 @@ mod tests {
 
         // Original parameterless mechanisms should still be present.
         assert!(reg.is_parameterless(CKM_RSA_PKCS));
+    }
+
+    #[test]
+    fn exclude_rejects_with_and_without_params() {
+        let override_toml = r#"
+            exclude = [0x0001, 0x1087]
+        "#;
+        let reg = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap();
+
+        // Excluded parameterless mechanism is rejected even without params.
+        assert_eq!(reg.check_operation(CKM_RSA_PKCS, false), Err(CkRv::MECHANISM_INVALID));
+        // Excluded shaped mechanism is rejected with and without params.
+        assert_eq!(reg.check_operation(CKM_AES_GCM, true), Err(CkRv::MECHANISM_INVALID));
+        assert_eq!(reg.check_operation(CKM_AES_GCM, false), Err(CkRv::MECHANISM_INVALID));
+
+        // Non-excluded mechanisms are unaffected.
+        assert!(reg.check_operation(CKM_AES_ECB, false).is_ok());
+        assert!(reg.check_operation(CKM_RSA_PKCS_PSS, true).is_ok());
+    }
+
+    #[test]
+    fn exclude_filters_discovery_in_transparent_and_filtered_modes() {
+        for mode_toml in ["", "discovery_mode = \"filtered\""] {
+            let override_toml = format!("{mode_toml}\nexclude = [0x0001, 0x1087]\n");
+            let reg = MechanismRegistry::load_with_override_str(Some(&override_toml)).unwrap();
+
+            let output = reg.filter_mechanisms(&[CKM_RSA_PKCS, CKM_AES_GCM, CKM_AES_ECB]);
+            assert!(
+                !output.contains(&CKM_RSA_PKCS),
+                "excluded mech advertised (mode: {mode_toml:?})"
+            );
+            assert!(
+                !output.contains(&CKM_AES_GCM),
+                "excluded mech advertised (mode: {mode_toml:?})"
+            );
+            assert!(
+                output.contains(&CKM_AES_ECB),
+                "non-excluded mech dropped (mode: {mode_toml:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn exclude_unknown_mechanism_loads_and_rejects() {
+        // Excluding a mechanism the embedded default never modeled is not
+        // an error (forward-compatibility for vendor IDs).
+        let override_toml = "exclude = [0xDEADBEEF]";
+        let reg = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap();
+
+        assert_eq!(reg.check_operation(0xDEAD_BEEF, false), Err(CkRv::MECHANISM_INVALID));
+        assert_eq!(reg.check_operation(0xDEAD_BEEF, true), Err(CkRv::MECHANISM_INVALID));
+        // Everything else is unaffected.
+        assert!(reg.check_operation(CKM_RSA_PKCS, false).is_ok());
+    }
+
+    #[test]
+    fn registered_mechanisms_omits_excluded() {
+        let override_toml = "exclude = [0x0001]";
+        let reg = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap();
+
+        let registered = reg.registered_mechanisms();
+        assert!(!registered.contains(&CKM_RSA_PKCS));
+        assert!(registered.contains(&CKM_AES_ECB));
+    }
+
+    #[test]
+    fn filtered_discovery_without_exclude_does_not_gate_operations() {
+        // Documents why `exclude` exists: filtered discovery only hides
+        // unlisted mechanisms from C_GetMechanismList; the operation-time
+        // gate still permits anything the embedded default models
+        // (e.g. historical RC4, which stays parameterless-allowed).
+        let override_toml = r#"discovery_mode = "filtered""#;
+        let reg = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap();
+
+        const CKM_RC4: u64 = 0x0111;
+        const UNKNOWN: u64 = 0xDEAD_BEEF;
+        // Unknown mechanisms are hidden from filtered discovery ...
+        assert!(!reg.filter_mechanisms(&[UNKNOWN]).contains(&UNKNOWN));
+        // ... but a parameterless invocation would still be forwarded.
+        assert!(reg.check_operation(UNKNOWN, false).is_ok());
+        // Likewise a default-modeled historical mechanism stays allowed.
+        assert!(reg.check_operation(CKM_RC4, false).is_ok());
+
+        // ...unless the operator excludes them.
+        let override_toml = "discovery_mode = \"filtered\"\nexclude = [0x0111, 0xDEADBEEF]\n";
+        let reg = MechanismRegistry::load_with_override_str(Some(override_toml)).unwrap();
+        assert_eq!(reg.check_operation(CKM_RC4, false), Err(CkRv::MECHANISM_INVALID));
+        assert_eq!(reg.check_operation(UNKNOWN, false), Err(CkRv::MECHANISM_INVALID));
     }
 
     #[test]

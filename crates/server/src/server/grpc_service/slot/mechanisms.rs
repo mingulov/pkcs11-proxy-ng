@@ -61,7 +61,7 @@ pub(super) async fn get_mechanism_list(
     }
 
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.get_mechanism_list(backend_slot)).await?;
+    let result = spawn_backend(move || backend.get_mechanism_list(backend_slot.0)).await?;
     match result {
         Ok(mechanisms) => {
             let mechanism_types = mechanisms.iter().map(|mech| mech.0).collect();
@@ -130,7 +130,7 @@ pub(super) async fn get_mechanism_info(
     let mechanism_type = CkMechanismType(req.mechanism_type as u64);
     let backend = backend_ref.clone();
     let result =
-        spawn_backend(move || backend.get_mechanism_info(backend_slot, mechanism_type)).await?;
+        spawn_backend(move || backend.get_mechanism_info(backend_slot.0, mechanism_type)).await?;
     let (ck_rv, info) = match result {
         Ok(info) => (
             CkRv::OK.0,

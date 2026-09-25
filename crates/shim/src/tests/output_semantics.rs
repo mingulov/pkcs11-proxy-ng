@@ -300,32 +300,9 @@ fn write_exact_output_rejects_value_larger_than_declared_buffer_without_copy() {
     let mut declared_len: CK_ULONG = 2;
     let spec =
         unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut declared_len) };
-    let result =
-        CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: 4, value: Some(vec![1, 2, 3, 4]) };
-
-    let rv = unsafe {
-        dispatch::general::write_exact_output(
-            &spec,
-            &result,
-            backing.as_mut_ptr(),
-            &mut declared_len,
-        )
-    };
-
-    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
-    assert_eq!(declared_len, 4);
-    assert_eq!(backing, [0xAA; 4]);
-}
-
-#[test]
-fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
-    let mut backing = [0xAA_u8; 4];
-    let mut declared_len: CK_ULONG = 2;
-    let spec =
-        unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut declared_len) };
     let result = CkOutputBufferResult {
-        ck_rv: CkRv::BUFFER_TOO_SMALL,
-        returned_len: 4,
+        ck_rv: CkRv::OK,
+        returned_len: Some(4),
         value: Some(vec![1, 2, 3, 4]),
     };
 
@@ -338,8 +315,67 @@ fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
         )
     };
 
-    assert_eq!(rv, CKR_BUFFER_TOO_SMALL as CK_RV);
-    assert_eq!(declared_len, 4);
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(declared_len, 2);
+    assert_eq!(backing, [0xAA; 4]);
+}
+
+#[test]
+fn write_exact_output_validates_all_effects_before_any_store() {
+    let mut backing = [0xa5; 8];
+    let mut length = 8;
+    let spec = unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut length) };
+    let result =
+        CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(7), value: Some(vec![1; 4]) };
+    let rv = unsafe {
+        dispatch::general::write_exact_output(&spec, &result, backing.as_mut_ptr(), &mut length)
+    };
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(length, 8, "validation must precede all caller stores");
+    assert_eq!(backing, [0xa5; 8]);
+}
+
+#[test]
+fn write_exact_output_size_query_never_reads_incoming_length() {
+    let mut length = std::mem::MaybeUninit::<CK_ULONG>::uninit();
+    let spec =
+        unsafe { dispatch::general::output_buffer_spec(std::ptr::null_mut(), length.as_mut_ptr()) };
+    let result = CkOutputBufferResult { ck_rv: CkRv::OK, returned_len: Some(7), value: None };
+    let rv = unsafe {
+        dispatch::general::write_exact_output(
+            &spec,
+            &result,
+            std::ptr::null_mut(),
+            length.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rv, CKR_OK as CK_RV);
+    assert_eq!(unsafe { length.assume_init() }, 7);
+}
+
+#[test]
+fn write_exact_output_does_not_copy_value_on_buffer_too_small() {
+    let mut backing = [0xAA_u8; 4];
+    let mut declared_len: CK_ULONG = 2;
+    let spec =
+        unsafe { dispatch::general::output_buffer_spec(backing.as_mut_ptr(), &mut declared_len) };
+    let result = CkOutputBufferResult {
+        ck_rv: CkRv::BUFFER_TOO_SMALL,
+        returned_len: Some(4),
+        value: Some(vec![1, 2, 3, 4]),
+    };
+
+    let rv = unsafe {
+        dispatch::general::write_exact_output(
+            &spec,
+            &result,
+            backing.as_mut_ptr(),
+            &mut declared_len,
+        )
+    };
+
+    assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+    assert_eq!(declared_len, 2);
     assert_eq!(backing, [0xAA; 4]);
 }
 
@@ -556,6 +592,8 @@ fn raw_client_size_query_returns_length_without_bytes() {
         assert_eq!(
             results,
             vec![CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 3,
                 value: None,
@@ -609,6 +647,8 @@ fn raw_client_too_small_query_preserves_backend_returned_length() {
         assert_eq!(
             results,
             vec![CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: u64::MAX,
                 value: None,
@@ -662,6 +702,8 @@ fn raw_client_exact_fit_query_returns_backend_bytes() {
         assert_eq!(
             results,
             vec![CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: CkAttributeType::LABEL,
                 returned_len: 3,
                 value: Some(b"key".to_vec()),
@@ -736,6 +778,8 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
             results,
             vec![
                 CkAttributeQueryResult {
+                    apply_returned_len: true,
+                    apply_type: false,
                     attr_type: CkAttributeType::LABEL,
                     returned_len: 3,
                     value: None,
@@ -743,6 +787,8 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
                     nested: None,
                 },
                 CkAttributeQueryResult {
+                    apply_returned_len: true,
+                    apply_type: false,
                     attr_type: CkAttributeType::VALUE,
                     returned_len: u64::MAX,
                     value: None,
@@ -750,6 +796,8 @@ fn raw_client_mixed_sensitive_and_invalid_preserves_per_attribute_status() {
                     nested: None,
                 },
                 CkAttributeQueryResult {
+                    apply_returned_len: true,
+                    apply_type: false,
                     attr_type: CkAttributeType::MODULUS,
                     returned_len: u64::MAX,
                     value: None,
@@ -3007,7 +3055,7 @@ fn exact_encrypt_message_size_query_returns_length() {
                 // Size query: value is None, returned_len > 0.
                 assert!(output_result.value.is_none(), "size query should not return data");
                 assert!(
-                    output_result.returned_len > 0,
+                    output_result.returned_len > Some(0),
                     "size query should return a positive length"
                 );
             }
@@ -3082,7 +3130,7 @@ fn exact_wrap_key_authenticated_size_query_returns_length() {
                 // Size query: value is None, returned_len > 0.
                 assert!(output_result.value.is_none(), "size query should not return data");
                 assert!(
-                    output_result.returned_len > 0,
+                    output_result.returned_len > Some(0),
                     "size query should return a positive length"
                 );
             }
@@ -3137,7 +3185,9 @@ fn null_output_length_parameter_rpc_preserves_exact_provider_rv() {
             )
             .await;
 
-        assert_eq!(result, Err(CkRv::ARGUMENTS_BAD));
+        let (output, _, _) = result.expect("completed native result remains an envelope");
+        assert_eq!(output.ck_rv, CkRv::ARGUMENTS_BAD);
+        assert_eq!(output.returned_len, None);
 
         client.close_session(session).await.expect("C_CloseSession");
         client.finalize().await.expect("C_Finalize");

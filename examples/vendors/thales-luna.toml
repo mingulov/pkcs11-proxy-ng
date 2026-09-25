@@ -3,6 +3,11 @@
 #
 # Reference: Luna Client SDK cryptoki_v2.h
 # Vendor base: CKM_VENDOR_DEFINED (0x80000000)
+#
+# NOTE: IDs below follow the Luna SDK header naming; cross-check exact
+# hex values against your client version (C_GetMechanismList on the HSM
+# is authoritative). Entries whose shape is marked NOT-YET-IMPLEMENTED
+# are registered but fail closed until backend support lands.
 
 # --- Korean algorithms ---
 # These are parameterless
@@ -60,15 +65,21 @@ shape = "eddsa"
 mechanisms = [0x80000C03]  # CKM_EDDSA (with optional context)
 
 # --- Object cloning (CPv4) ---
+# NOT-YET-IMPLEMENTED(vendor_object_extract): backend FFI reconstruction
+# needs the Luna CPv4 C struct layout from cryptoki_v2.h. Fail-closed until then.
 [[params]]
 shape = "vendor_object_extract"
 mechanisms = [0x80000208]  # CKM_CPV4_EXTRACT
 
+# NOT-YET-IMPLEMENTED(vendor_object_insert): backend FFI reconstruction
+# needs the Luna CPv4 C struct layout from cryptoki_v2.h. Fail-closed until then.
 [[params]]
 shape = "vendor_object_insert"
 mechanisms = [0x80000209]  # CKM_CPV4_INSERT
 
 # --- ECIES ---
+# NOT-YET-IMPLEMENTED(ecies): backend FFI reconstruction needs the vendor
+# C struct layout (cryptoki-sys has no CK_ECIES_PARAMS). Fail-closed until then.
 [[params]]
 shape = "ecies"
 mechanisms = [0x80000A00]  # CKM_ECIES

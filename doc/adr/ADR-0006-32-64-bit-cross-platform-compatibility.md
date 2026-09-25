@@ -1,14 +1,15 @@
 # 32/64-bit Cross-Platform Compatibility Strategy
 
 **Document:** ADR-0006  
-**Status:** Accepted — 32-bit / mixed-arch **deferred** (out of scope for the `0.x` beta)  
+**Status:** Accepted — 32-bit / mixed-arch **deferred** for public `v0.1.0`; v0.2 scope amended below
+
 **Date:** 2026-03-29 (decision recorded 2026-06-04)
 
 ---
 
 ## Decision (scope for the beta)
 
-The `0.x` public beta supports **Linux `x86_64` only**. 32-bit and mixed
+The public `v0.1.0` beta supports **Linux `x86_64` only**. 32-bit and mixed
 32/64-bit deployments are **deferred**: they are not supported and not a beta
 claim (see [beta support matrix](../release/beta-support-matrix.md)).
 
@@ -26,6 +27,19 @@ daemon↔backend boundary, not on the wire to the client.
 ---
 
 ## Amendment (2026-06-29): narrow-`CK_ULONG` bridging & the three ABIs → see ADR-0011
+
+**v0.2 superseding amendment (2026-09-13; implementation/qualification pending):**
+Production live FFI is limited to qualified Linux GNU/musl x86_64/64-bit and
+x86/32-bit (i686). This supersedes the Windows native-provider daemon support
+intent below and in ADR-0011 for v0.2. Windows native loading is deferred,
+lower priority/stretch work. Portable Windows client/shim/proto/types,
+mock-only backend/server builds and Windows-client/Linux-daemon interoperation
+remain under their existing contracts. Nonqualified hosts must refuse FFI
+construction before loading/discovery; retain Windows compile CI and add that
+refusal coverage. No unsafe fallback is selected. See the exact platform,
+native-width/slot-event and evidence rules in the
+[native ownership contract](../release/native-mechanism-ownership.md).
+The ABI analysis below does not itself qualify any v0.2 native runtime.
 
 This ADR's original analysis modelled two ABIs on a single axis (LP64 vs ILP32,
 where pointer width and `CK_ULONG` width move *together*). That is incomplete:
@@ -54,7 +68,8 @@ structs are `pack(1)` — so **`CK_ULONG` width is independent of pointer width*
 |---|---|
 | 64-bit client ↔ 64-bit Linux server/backend | Supported (beta) |
 | **32-bit-`CK_ULONG` client** (i686, armv7, Windows x64) ↔ 64-bit server | **Designed (ADR-0011); the narrow-client shipping track** |
-| 64-bit client ↔ **32-bit-`CK_ULONG` server/backend** (i686 or **Windows x64/LLP64**) | **Designed; deployment-gated** on a 32-bit/Windows server port |
+| 64-bit client ↔ **32-bit-`CK_ULONG` Linux server/backend** (i686) | v0.2 qualification target; complete native owner/stop receipts required |
+| Client ↔ **Windows x64/LLP64 native-provider server** | Deferred for v0.2 by the 2026-09-13 amendment; historical bridge/port analysis retained |
 | mixed / big-endian | Out of scope — detected & refused at probe (D6) |
 
 The `CK_UNAVAILABLE_INFORMATION` sentinel analysis below remains the reference for

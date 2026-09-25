@@ -92,8 +92,11 @@ pub(super) async fn close_session(
         .context_manager
         .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
         .await
-        .flatten()
-        .map(|s| s.0);
+        .flatten();
+    let slot_for_audit = match slot_for_audit {
+        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
+        None => None,
+    };
 
     let response = lifecycle::close_session(&ctx.context_manager, &ctx.backend, request).await?;
     let ck_rv = response.get_ref().ck_rv;
@@ -162,8 +165,11 @@ pub(super) async fn login(
         .context_manager
         .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
         .await
-        .flatten()
-        .map(|s| s.0);
+        .flatten();
+    let slot_for_audit = match slot_for_audit {
+        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
+        None => None,
+    };
 
     let response = auth::login(&ctx.context_manager, &ctx.backend, request).await?;
     let ck_rv = response.get_ref().ck_rv;
@@ -200,8 +206,11 @@ pub(super) async fn logout(
         .context_manager
         .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
         .await
-        .flatten()
-        .map(|s| s.0);
+        .flatten();
+    let slot_for_audit = match slot_for_audit {
+        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
+        None => None,
+    };
 
     let response = auth::logout(&ctx.context_manager, &ctx.backend, request).await?;
     let ck_rv = response.get_ref().ck_rv;
@@ -287,8 +296,11 @@ pub(super) async fn init_pin(
         .context_manager
         .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
         .await
-        .flatten()
-        .map(|s| s.0);
+        .flatten();
+    let slot_for_audit = match slot_for_audit {
+        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
+        None => None,
+    };
 
     let response = management::init_pin(&ctx.context_manager, &ctx.backend, request).await?;
     let ck_rv = response.get_ref().ck_rv;
@@ -325,8 +337,11 @@ pub(super) async fn set_pin(
         .context_manager
         .get_context(&ctx_id, |c| c.session_slots.get(&vh).copied())
         .await
-        .flatten()
-        .map(|s| s.0);
+        .flatten();
+    let slot_for_audit = match slot_for_audit {
+        Some(slot) => ctx.context_manager.to_virtual_slot(slot).await.map(|slot| slot.0),
+        None => None,
+    };
 
     let response = management::set_pin(&ctx.context_manager, &ctx.backend, request).await?;
     let ck_rv = response.get_ref().ck_rv;
@@ -370,4 +385,4 @@ pub(super) async fn cancel_function(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

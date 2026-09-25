@@ -1,3 +1,4 @@
+use crate::server::slot_map::BackendSlotId;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -33,6 +34,7 @@ pub(super) async fn get_slot_list(
         Ok(backend_slots) => {
             let mut slot_ids = Vec::with_capacity(backend_slots.len());
             for backend_slot in backend_slots {
+                let backend_slot = BackendSlotId(backend_slot);
                 match authorization::slot_is_authorized(
                     ctx_mgr,
                     backend_ref,
@@ -124,7 +126,7 @@ pub(super) async fn get_slot_info(
     }
 
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.get_slot_info(backend_slot)).await?;
+    let result = spawn_backend(move || backend.get_slot_info(backend_slot.0)).await?;
     let (ck_rv, info) = match result {
         Ok(info) => (CkRv::OK.0, Some(pkcs11_proxy_ng_proto::SlotInfo::from(&info))),
         Err(error) => (error.0, None),
@@ -183,7 +185,7 @@ pub(super) async fn get_token_info(
     }
 
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.get_token_info(backend_slot)).await?;
+    let result = spawn_backend(move || backend.get_token_info(backend_slot.0)).await?;
     let (ck_rv, info) = match result {
         Ok(info) => (CkRv::OK.0, Some(pkcs11_proxy_ng_proto::TokenInfo::from(&info))),
         Err(error) => (error.0, None),

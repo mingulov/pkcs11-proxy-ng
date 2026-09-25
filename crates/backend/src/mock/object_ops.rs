@@ -157,6 +157,8 @@ impl MockBackend {
                     let returned_len = bytes.len() as u64;
                     if !query.buffer_present {
                         CkAttributeQueryResult {
+                            apply_returned_len: true,
+                            apply_type: false,
                             attr_type: query.attr_type,
                             returned_len,
                             value: None,
@@ -166,6 +168,8 @@ impl MockBackend {
                     } else if query.buffer_len < returned_len {
                         overall_rv = CkRv::BUFFER_TOO_SMALL;
                         CkAttributeQueryResult {
+                            apply_returned_len: true,
+                            apply_type: false,
                             attr_type: query.attr_type,
                             returned_len: u64::MAX,
                             value: None,
@@ -174,6 +178,8 @@ impl MockBackend {
                         }
                     } else {
                         CkAttributeQueryResult {
+                            apply_returned_len: true,
+                            apply_type: false,
                             attr_type: query.attr_type,
                             returned_len,
                             value: Some(bytes),
@@ -190,6 +196,8 @@ impl MockBackend {
                         overall_rv = CkRv::ATTRIBUTE_SENSITIVE;
                     }
                     CkAttributeQueryResult {
+                        apply_returned_len: true,
+                        apply_type: false,
                         attr_type: query.attr_type,
                         returned_len: u64::MAX,
                         value: None,
@@ -202,6 +210,8 @@ impl MockBackend {
                         overall_rv = CkRv::ATTRIBUTE_TYPE_INVALID;
                     }
                     CkAttributeQueryResult {
+                        apply_returned_len: true,
+                        apply_type: false,
                         attr_type: query.attr_type,
                         returned_len: u64::MAX,
                         value: None,
@@ -234,6 +244,8 @@ impl MockBackend {
         // Size query: caller passes pValue=NULL
         if !query.buffer_present {
             return CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: query.attr_type,
                 returned_len: template_byte_len,
                 value: None,
@@ -246,6 +258,8 @@ impl MockBackend {
         if query.buffer_len < template_byte_len {
             *overall_rv = CkRv::BUFFER_TOO_SMALL;
             return CkAttributeQueryResult {
+                apply_returned_len: true,
+                apply_type: false,
                 attr_type: query.attr_type,
                 returned_len: u64::MAX,
                 value: None,
@@ -271,6 +285,8 @@ impl MockBackend {
                     if !sub_buffer_present {
                         // Sub size query: pValue=NULL inside the nested template
                         nested_results.push(CkAttributeQueryResult {
+                            apply_returned_len: true,
+                            apply_type: true,
                             attr_type: *sub_type,
                             returned_len: sub_len,
                             value: None,
@@ -280,6 +296,8 @@ impl MockBackend {
                     } else if sub_buffer_len < sub_len {
                         has_sub_too_small = true;
                         nested_results.push(CkAttributeQueryResult {
+                            apply_returned_len: true,
+                            apply_type: true,
                             attr_type: *sub_type,
                             returned_len: u64::MAX,
                             value: None,
@@ -288,6 +306,8 @@ impl MockBackend {
                         });
                     } else {
                         nested_results.push(CkAttributeQueryResult {
+                            apply_returned_len: true,
+                            apply_type: true,
                             attr_type: *sub_type,
                             returned_len: sub_len,
                             value: Some(bytes),
@@ -300,6 +320,8 @@ impl MockBackend {
                     // Nested sub-attributes that are Sensitive/InvalidType/NestedTemplate
                     // are not expected in normal usage; treat as invalid type.
                     nested_results.push(CkAttributeQueryResult {
+                        apply_returned_len: true,
+                        apply_type: true,
                         attr_type: *sub_type,
                         returned_len: u64::MAX,
                         value: None,
@@ -315,6 +337,8 @@ impl MockBackend {
         }
 
         CkAttributeQueryResult {
+            apply_returned_len: true,
+            apply_type: false,
             attr_type: query.attr_type,
             returned_len: template_byte_len,
             value: None,

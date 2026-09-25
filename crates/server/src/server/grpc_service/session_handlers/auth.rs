@@ -1,8 +1,8 @@
+use crate::server::slot_map::BackendSlotId;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
-use zeroize::Zeroizing;
 
 use pkcs11_proxy_ng_backend::Pkcs11Backend;
 use pkcs11_proxy_ng_types::*;
@@ -36,7 +36,7 @@ async fn resolve_session_slot_login(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
     session_handle: u64,
-) -> Result<(CkSessionHandle, CkSlotId, Option<LoginState>), CkRv> {
+) -> Result<(CkSessionHandle, BackendSlotId, Option<LoginState>), CkRv> {
     let resolved = ctx_mgr
         .get_context(ctx_id, |ctx| {
             let virtual_session = VirtualHandle(session_handle);
@@ -117,12 +117,16 @@ pub(super) async fn login(
         }));
     }
 
-    // Wrap PIN bytes in `Zeroizing` so the backing buffer is overwritten when
-    // dropped. Read it up-front and pre-hash it so the logical-login path can
+    // Hold PIN bytes in `SecretBytes`: the backing buffer is overwritten
+    // when dropped, and Debug redacts the secret (audit/log safety net).
+    // Read it up-front and pre-hash it so the logical-login path can
     // validate the PIN and the verifier can be stored after the PIN is moved
     // into the backend call.
-    let pin = req.pin.map(Zeroizing::new);
-    let pin_hash = ctx_mgr.hash_pin(pin.as_deref().map(Vec::as_slice));
+    let pin = req.pin.map(SecretBytes::new);
+    let pin_hash = match &pin {
+        Some(secret) => secret.expose(|bytes| ctx_mgr.hash_pin(Some(bytes))),
+        None => ctx_mgr.hash_pin(None),
+    };
 
     if current_login_state.is_none()
         && let Some(requested) = requested_login_state
@@ -174,9 +178,13 @@ pub(super) async fn login(
 
     let user_type_raw = req.user_type;
     let backend = backend_ref.clone();
-    let result =
-        spawn_backend(move || backend.login(session, user_type, pin.as_deref().map(Vec::as_slice)))
-            .await?;
+    let result = spawn_backend(move || {
+        // Transfer into a wiping owner for the FFI boundary; the moved
+        // `SecretBytes` (and this transfer) are wiped on drop.
+        let pin = pin.map(SecretBytes::into_zeroizing);
+        backend.login(session, user_type, pin.as_deref().map(Vec::as_slice))
+    })
+    .await?;
 
     let ck_rv = match &result {
         Ok(()) => {
@@ -336,15 +344,15 @@ mod tests {
         mock.login(backend_session, CkUserType::User, None).unwrap();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
         // Register the real backend session in the context and record logged-in state.
         let session_vh = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                let vh = ctx.register_session(BackendHandle(backend_session.0), virtual_slot);
-                ctx.login_state.insert(virtual_slot, LoginState::User);
+                let vh = ctx.register_session(BackendHandle(backend_session.0), backend_slot);
+                ctx.login_state.insert(backend_slot, LoginState::User);
                 vh
             })
             .await
@@ -397,8 +405,8 @@ mod tests {
         mock.login(backend_session, CkUserType::User, None).unwrap();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
 
         // Two contexts on the same slot — ctx_a will attempt logout; ctx_b stays logged in,
         // forcing the logical-logout path (backend NOT called).
@@ -407,8 +415,8 @@ mod tests {
 
         let session_a_vh = ctx_mgr
             .get_context(&ctx_a, |ctx| {
-                let vh = ctx.register_session(BackendHandle(backend_session.0), virtual_slot);
-                ctx.login_state.insert(virtual_slot, LoginState::User);
+                let vh = ctx.register_session(BackendHandle(backend_session.0), backend_slot);
+                ctx.login_state.insert(backend_slot, LoginState::User);
                 vh
             })
             .await
@@ -418,7 +426,7 @@ mod tests {
         // return Some, so ctx_a's logout takes the logical path).
         ctx_mgr
             .get_context(&ctx_b, |ctx| {
-                ctx.login_state.insert(virtual_slot, LoginState::User);
+                ctx.login_state.insert(backend_slot, LoginState::User);
             })
             .await;
 
@@ -481,14 +489,14 @@ mod tests {
         let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
 
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
-        ctx_mgr.register_slot(CkSlotId(0)).await;
-        let virtual_slot = ctx_mgr.to_virtual_slot(CkSlotId(0)).await.unwrap();
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
         let ctx_id = ctx_mgr.create_context(None).await.unwrap();
 
         // Session not logged in from the ContextManager's perspective either.
         let session_vh = ctx_mgr
             .get_context(&ctx_id, |ctx| {
-                ctx.register_session(BackendHandle(backend_session.0), virtual_slot)
+                ctx.register_session(BackendHandle(backend_session.0), backend_slot)
             })
             .await
             .unwrap();
@@ -537,5 +545,25 @@ mod tests {
         let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
         let gone = ClientContextId("nonexistent".into());
         ctx_mgr.attr_cache_clear(&gone).await; // must not panic
+    }
+
+    /// The login handler's PIN holder must redact secrets in Debug: any
+    /// future log line capturing the holder (or its container) must not
+    /// leak PIN bytes. Mirrors the holder construction in `login`.
+    ///
+    /// NOTE: `Vec<u8>` renders in Debug as decimal byte values (`[83,
+    /// 117, ...]`), never as a string — so the assertion scans for every
+    /// PIN byte's decimal rendering, not the PIN text.
+    #[test]
+    fn pin_holder_debug_redacts_secret() {
+        let pin_bytes = b"SuperSecretPIN!42";
+        let pin = Some(SecretBytes::new(pin_bytes.to_vec()));
+        let rendered = format!("{pin:?}");
+        for byte in pin_bytes {
+            assert!(
+                !rendered.contains(&byte.to_string()),
+                "PIN holder leaks secret byte {byte} via Debug: {rendered}"
+            );
+        }
     }
 }

@@ -1,5 +1,5 @@
 use super::handle_map::{BackendHandle, HandleMap, VirtualHandle};
-use super::slot_map::SlotMap;
+use super::slot_map::{BackendSlotId, SlotMap, VirtualSlotId};
 use dashmap::DashMap;
 use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::*;
@@ -201,8 +201,8 @@ pub struct LogicalClientInstance {
     pub created_at: Instant,
     pub last_active: Instant,
     pub session_handles: HandleMap, // virtual session → backend session
-    pub session_slots: HashMap<VirtualHandle, CkSlotId>, // session → slot ownership (ADR-0002 §7)
-    pub object_handles: HandleMap,  // virtual object → backend object
+    pub session_slots: HashMap<VirtualHandle, BackendSlotId>, // session → slot ownership (ADR-0002 §7)
+    pub object_handles: HandleMap,                            // virtual object → backend object
     /// Per-virtual-object cached `ObjectMetadata` (G3). **Only session objects
     /// (`CKA_TOKEN=false`) are cached.** Token objects are never stored here —
     /// they are re-fetched on every gate call so a cross-client backend handle
@@ -219,8 +219,8 @@ pub struct LogicalClientInstance {
     /// are intentionally absent — their handles persist across the application's
     /// sessions.
     pub session_objects: HashMap<VirtualHandle, Vec<VirtualHandle>>,
-    pub login_state: HashMap<CkSlotId, LoginState>, // per-token login
-    pub authenticated_identity: Option<String>,     // bound at creation (ADR-0005 §4)
+    pub login_state: HashMap<BackendSlotId, LoginState>, // per-token login
+    pub authenticated_identity: Option<String>,          // bound at creation (ADR-0005 §4)
     /// Virtual object handles minted by this context (via generate/wrap/create,
     /// NOT via find). Used by `gate_object_handle` to allow a principal to use
     /// keys it generated, even when its `objects` grant does not list the new
@@ -284,14 +284,18 @@ impl LogicalClientInstance {
     }
 
     /// Register a session with its owning slot (ADR-0002 §7).
-    pub fn register_session(&mut self, backend: BackendHandle, slot: CkSlotId) -> VirtualHandle {
+    pub fn register_session(
+        &mut self,
+        backend: BackendHandle,
+        slot: BackendSlotId,
+    ) -> VirtualHandle {
         let virt = self.session_handles.insert(backend);
         self.session_slots.insert(virt, slot);
         virt
     }
 
     /// Remove sessions for a specific slot. Returns backend handles to close.
-    pub fn remove_sessions_for_slot(&mut self, slot: CkSlotId) -> Vec<BackendHandle> {
+    pub fn remove_sessions_for_slot(&mut self, slot: BackendSlotId) -> Vec<BackendHandle> {
         let to_remove: Vec<VirtualHandle> =
             self.session_slots.iter().filter(|(_, s)| **s == slot).map(|(vh, _)| *vh).collect();
 
@@ -396,7 +400,7 @@ pub struct ContextManager {
     /// PIN-validated without a second backend `C_Login` (which the shared,
     /// already-logged-in token answers `USER_ALREADY_LOGGED_IN` without
     /// checking the PIN). Stores a salted hash, never the raw PIN. See ADR-0008.
-    pin_verifiers: Arc<DashMap<(CkSlotId, LoginState), [u8; 32]>>,
+    pin_verifiers: Arc<DashMap<(BackendSlotId, LoginState), [u8; 32]>>,
     /// Random per-process salt for the PIN-verifier hashes.
     pin_salt: [u8; 16],
     /// Cache of `(label, serial)` per backend slot, captured when the daemon
@@ -406,7 +410,7 @@ pub struct ContextManager {
     /// `TOKEN_INFO_CACHE_TTL`, so a token swapped without a re-registration is
     /// re-read within at most the TTL — the cache never authorizes against a
     /// token-identity older than that.
-    token_info_cache: Arc<DashMap<CkSlotId, (Instant, String, String)>>,
+    token_info_cache: Arc<DashMap<BackendSlotId, (Instant, String, String)>>,
     /// Per-slot serialization lock for login/logout (M5). The cross-context
     /// login-state scan, the backend `C_Login`, and the `login_state` insert
     /// must be atomic per slot. Without it, two clients racing the FIRST login
@@ -414,7 +418,7 @@ pub struct ContextManager {
     /// `C_Login` path, and the second is answered `USER_ALREADY_LOGGED_IN` by
     /// the already-logged-in token instead of the synthesized logical OK. One
     /// lock per slot id; different slots log in concurrently.
-    login_locks: Arc<DashMap<CkSlotId, Arc<Mutex<()>>>>,
+    login_locks: Arc<DashMap<BackendSlotId, Arc<Mutex<()>>>>,
 }
 
 /// Maximum age of a cached `(label, serial)` before an authorization check
@@ -478,7 +482,7 @@ impl ContextManager {
     /// scan, the backend `C_Login`/`C_Logout`, and the `login_state` mutation, so
     /// concurrent logins on the same shared token cannot both take the real-login
     /// path. The lock is keyed by slot, so different slots are unaffected.
-    pub fn slot_login_lock(&self, slot: CkSlotId) -> Arc<Mutex<()>> {
+    pub fn slot_login_lock(&self, slot: BackendSlotId) -> Arc<Mutex<()>> {
         self.login_locks.entry(slot).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 
@@ -601,7 +605,7 @@ impl ContextManager {
 
     /// Cached `(label, serial)` for `backend_slot` if it was read within
     /// `TOKEN_INFO_CACHE_TTL`; otherwise `None` (the caller must re-read it).
-    pub fn cached_token_info(&self, backend_slot: CkSlotId) -> Option<(String, String)> {
+    pub fn cached_token_info(&self, backend_slot: BackendSlotId) -> Option<(String, String)> {
         self.cached_token_info_within(backend_slot, TOKEN_INFO_CACHE_TTL)
     }
 
@@ -612,7 +616,7 @@ impl ContextManager {
         &self,
         ctx_id: &ClientContextId,
         virtual_session: VirtualHandle,
-    ) -> Option<CkSlotId> {
+    ) -> Option<BackendSlotId> {
         self.get_context(ctx_id, |ctx| ctx.session_slots.get(&virtual_session).copied())
             .await
             .flatten()
@@ -755,7 +759,7 @@ impl ContextManager {
 
     fn cached_token_info_within(
         &self,
-        backend_slot: CkSlotId,
+        backend_slot: BackendSlotId,
         ttl: std::time::Duration,
     ) -> Option<(String, String)> {
         self.token_info_cache.get(&backend_slot).and_then(|entry| {
@@ -765,12 +769,12 @@ impl ContextManager {
     }
 
     /// Record the `(label, serial)` read for `backend_slot`.
-    pub fn cache_token_info(&self, backend_slot: CkSlotId, label: String, serial: String) {
+    pub fn cache_token_info(&self, backend_slot: BackendSlotId, label: String, serial: String) {
         self.token_info_cache.insert(backend_slot, (Instant::now(), label, serial));
     }
 
     /// Drop any cached token info for `backend_slot` (the token may have changed).
-    pub fn invalidate_token_info(&self, backend_slot: CkSlotId) {
+    pub fn invalidate_token_info(&self, backend_slot: BackendSlotId) {
         self.token_info_cache.remove(&backend_slot);
     }
 
@@ -792,7 +796,7 @@ impl ContextManager {
 
     /// Capture the PIN verifier for `(slot, state)` after a successful backend
     /// login so later co-located logical logins can be PIN-validated.
-    pub fn store_pin_verifier_hash(&self, slot: CkSlotId, state: LoginState, hash: [u8; 32]) {
+    pub fn store_pin_verifier_hash(&self, slot: BackendSlotId, state: LoginState, hash: [u8; 32]) {
         self.pin_verifiers.insert((slot, state), hash);
     }
 
@@ -801,7 +805,7 @@ impl ContextManager {
     /// not synthesize a login (it cannot validate the PIN).
     pub fn verify_pin_hash(
         &self,
-        slot: CkSlotId,
+        slot: BackendSlotId,
         state: LoginState,
         hash: &[u8; 32],
     ) -> Option<bool> {
@@ -809,7 +813,7 @@ impl ContextManager {
     }
 
     /// Drop the PIN verifier for `(slot, state)` (on the last real logout).
-    pub fn clear_pin_verifier(&self, slot: CkSlotId, state: LoginState) {
+    pub fn clear_pin_verifier(&self, slot: BackendSlotId, state: LoginState) {
         self.pin_verifiers.remove(&(slot, state));
     }
 
@@ -824,13 +828,13 @@ impl ContextManager {
             .map_err(|_| CkRv::GENERAL_ERROR)??;
         let mut map = self.slot_map.write().await;
         for backend_slot in slots {
-            map.register(backend_slot);
+            map.register(BackendSlotId(backend_slot));
         }
         Ok(())
     }
 
     /// Register a single backend slot discovered at runtime.
-    pub async fn register_slot(&self, backend_slot: CkSlotId) {
+    pub async fn register_slot(&self, backend_slot: BackendSlotId) {
         // A (re-)registration may reflect a changed token in the slot, so drop
         // any cached token info for it (M9).
         self.invalidate_token_info(backend_slot);
@@ -838,17 +842,17 @@ impl ContextManager {
     }
 
     /// Resolve virtual → backend slot ID.
-    pub async fn resolve_slot(&self, virtual_slot: CkSlotId) -> Option<CkSlotId> {
+    pub async fn resolve_slot(&self, virtual_slot: VirtualSlotId) -> Option<BackendSlotId> {
         self.slot_map.read().await.resolve(virtual_slot)
     }
 
     /// Get all virtual slot IDs.
-    pub async fn virtual_slots(&self) -> Vec<CkSlotId> {
+    pub async fn virtual_slots(&self) -> Vec<VirtualSlotId> {
         self.slot_map.read().await.virtual_slots()
     }
 
     /// Map backend → virtual slot ID.
-    pub async fn to_virtual_slot(&self, backend_slot: CkSlotId) -> Option<CkSlotId> {
+    pub async fn to_virtual_slot(&self, backend_slot: BackendSlotId) -> Option<VirtualSlotId> {
         self.slot_map.read().await.to_virtual(backend_slot)
     }
 
@@ -928,7 +932,7 @@ impl ContextManager {
 
     pub fn first_login_state_for_slot_excluding(
         &self,
-        slot: CkSlotId,
+        slot: BackendSlotId,
         excluded_id: &ClientContextId,
     ) -> Option<LoginState> {
         self.contexts.iter().find_map(|ctx| {

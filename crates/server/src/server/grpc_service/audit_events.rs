@@ -27,6 +27,43 @@ use crate::server::context_manager::ClientContextId;
 /// across records within a single daemon instance.
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 
+/// Audit an already completed key-management outcome before exposing outputs.
+/// Exact adapters supply their embedded provider RV; a transport failure has
+/// no provider RV and is classified as proxy `FUNCTION_FAILED`. Preserve the
+/// original Status after accepted audit, or drop all outputs on sink rejection.
+/// Cancellation while native work continues is outside this waiter-owned scope.
+pub(super) fn audit_key_outcome<T>(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    method: &'static str,
+    session: u64,
+    started_at: Instant,
+    outcome: Result<pkcs11_proxy_ng_types::CkResult<T>, tonic::Status>,
+    success_rv: impl FnOnce(&T) -> pkcs11_proxy_ng_types::CkRv,
+) -> Result<pkcs11_proxy_ng_types::CkResult<T>, tonic::Status> {
+    use pkcs11_proxy_ng_types::CkRv;
+    let rv = match &outcome {
+        Ok(Ok(value)) => success_rv(value),
+        Ok(Err(rv)) => *rv,
+        Err(_) => CkRv::FUNCTION_FAILED,
+    };
+    if emit_auth_event(
+        ctx,
+        ctx_id,
+        method,
+        EventClass::KeyMgmt,
+        None,
+        Some(session),
+        rv.0,
+        started_at,
+    )
+    .is_err()
+    {
+        return Ok(Err(CkRv::FUNCTION_FAILED));
+    }
+    outcome
+}
+
 #[inline]
 fn process_start() -> Instant {
     *PROCESS_START.get_or_init(Instant::now)

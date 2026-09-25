@@ -73,6 +73,32 @@ Phase 1 is intentionally narrower than "full PKCS#11 support".
 - built-in token implementation
 - Windows and macOS parity in phase 1
 
+#### 6.3 Selected v0.2 Native Boundary (2026-09-13)
+
+The [native ownership contract](doc/release/native-mechanism-ownership.md)
+is required for v0.2; implementation and native qualification remain pending.
+Live production FFI is limited to qualified Linux GNU/musl x86_64/64-bit and
+x86/32-bit (i686). This supersedes Windows native-provider daemon support in
+ADR-0011/0006 for this release. Portable Windows client/shim/proto/types and
+mock-only backend/server builds remain, including Windows clients using a
+qualified Linux daemon. Native Windows support is lower priority/stretch work.
+
+One managed provider chain per embedding process, reserved before loading or
+discovery, owns lifecycle and retirement. Callers share one backend via Arc;
+multiple linked runtime copies, unmanaged native calls and shared downstream
+aggregator aliases are outside the supported environment. Independent chains
+use separate processes. Unresolved native lifetime requires the qualified
+return-aware raw Linux `exit_group(70)` whole-process stop with no cleanup,
+wiping or audit-tail guarantee under its explicit environment limits.
+
+Slot-event support is `CKF_DONT_BLOCK` only: blocking mode returns local
+FUNCTION_NOT_SUPPORTED without polling. The sole supported waiter retains
+ordinary lifecycle exclusion, and input/output/RV widths are checked. Clients
+compete for one native pending-event source; logical Initialize does not create
+an independent event bitmap. No full native per-application event equivalence
+is promised. The linked contract specifies precedence, canaries, retirement
+and all four Linux loaded-shim topology/native stop release gates.
+
 ### 7. Functional Requirements
 #### 7.1 Workspace Components
 The implementation is expected to live in a Cargo workspace with four primary crates:

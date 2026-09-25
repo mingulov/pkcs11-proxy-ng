@@ -107,7 +107,11 @@ MOCK_NO_SOURCE_WORKFLOW_REJECTION_TEST = (
 MOCK_MECHANISM_INFO_NO_SOURCE_LOCAL_TESTS = [
     "mock_mechanism_info_leaves_flags_empty_without_source_workflow_evidence",
     "grpc_mechanism_info_preserves_zero_flags_without_source_workflow_evidence",
-    "loaded_shim_preserves_no_source_mechanism_info_zero_flags",
+    # Renamed in C3 phase A (was
+    # `loaded_shim_preserves_no_source_mechanism_info_zero_flags`): the
+    # successor still asserts the no-source zero-flag case end to end
+    # (CKM_CAMELLIA_CTR flags == 0 through the loaded shim).
+    "loaded_shim_preserves_provider_mechanism_info_flags",
     MOCK_NO_SOURCE_WORKFLOW_REJECTION_TEST,
 ]
 
