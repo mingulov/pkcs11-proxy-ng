@@ -172,7 +172,10 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::MessageEncryptInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: mechanism.map(Self::proto_mechanism),
+            mechanism: mechanism
+                .map(Self::proto_mechanism)
+                .transpose()
+                .map_err(MessageCallError::backend)?,
             key_handle: key.0,
             init_message_parameter: init_param.map(Into::into),
             parameter_out_spec: None,
@@ -205,7 +208,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::MessageEncryptInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism).map_err(MessageCallError::backend)?),
             key_handle: key.0,
             init_message_parameter: init_param.map(Into::into),
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
@@ -281,7 +284,10 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::MessageDecryptInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: mechanism.map(Self::proto_mechanism),
+            mechanism: mechanism
+                .map(Self::proto_mechanism)
+                .transpose()
+                .map_err(MessageCallError::backend)?,
             key_handle: key.0,
             init_message_parameter: init_param.map(Into::into),
             parameter_out_spec: None,
@@ -311,7 +317,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::MessageDecryptInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism).map_err(MessageCallError::backend)?),
             key_handle: key.0,
             init_message_parameter: init_param.map(Into::into),
             parameter_out_spec: Some(Self::proto_parameter_roundtrip_spec(envelope)),
@@ -383,7 +389,10 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::MessageSignInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: mechanism.map(Self::proto_mechanism),
+            mechanism: mechanism
+                .map(Self::proto_mechanism)
+                .transpose()
+                .map_err(MessageCallError::backend)?,
             key_handle: key.0,
         };
         let response = self
@@ -446,7 +455,10 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::MessageVerifyInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: mechanism.map(Self::proto_mechanism),
+            mechanism: mechanism
+                .map(Self::proto_mechanism)
+                .transpose()
+                .map_err(MessageCallError::backend)?,
             key_handle: key.0,
         };
         let response = self

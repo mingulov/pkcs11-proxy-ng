@@ -1,3 +1,6 @@
+// W1-L12-03: report lines go to stdout/stderr by design; the workspace
+// lint table denies these sinks elsewhere.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Cross-width runtime smoke client (ADR-0011 Phase D).
 //!
 //! Loads the built shim module through the **public C ABI** — dlopen /

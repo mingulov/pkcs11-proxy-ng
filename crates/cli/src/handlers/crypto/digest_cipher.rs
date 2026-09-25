@@ -1,21 +1,18 @@
 use pkcs11_proxy_ng_client::Pkcs11Client;
 use pkcs11_proxy_ng_types::*;
 
-use super::super::{CliResult, close_session, find_key_by_label, login_user, open_session};
-use crate::mechanisms::parse_mechanism;
-
-fn parameterless_mechanism(name: &str) -> Result<CkMechanism, Box<dyn core::error::Error>> {
-    let mechanism_type = parse_mechanism(name)?;
-    Ok(CkMechanism { mechanism_type: CkMechanismType(mechanism_type), params: None })
-}
+use super::super::{
+    CliResult, cli_mechanism, close_session, find_key_by_label, login_user, open_session,
+};
 
 pub(crate) async fn digest(
     client: &mut Pkcs11Client,
     slot_id: u64,
     mechanism: String,
+    params_file: Option<std::path::PathBuf>,
     input: String,
 ) -> CliResult {
-    let mechanism = parameterless_mechanism(&mechanism)?;
+    let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
     let data = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
@@ -34,15 +31,16 @@ pub(crate) async fn digest(
 pub(crate) async fn encrypt(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: String,
+    pin: SecretBytes,
     key_label: String,
     mechanism: String,
+    params_file: Option<std::path::PathBuf>,
     input: String,
 ) -> CliResult {
-    let mechanism = parameterless_mechanism(&mechanism)?;
+    let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
-    login_user(client, session, &pin).await?;
+    login_user(client, session, pin).await?;
     let key = find_key_by_label(client, session, &key_label, CkObjectClass::PUBLIC_KEY).await?;
     let data = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
 
@@ -60,15 +58,16 @@ pub(crate) async fn encrypt(
 pub(crate) async fn decrypt(
     client: &mut Pkcs11Client,
     slot_id: u64,
-    pin: String,
+    pin: SecretBytes,
     key_label: String,
     mechanism: String,
+    params_file: Option<std::path::PathBuf>,
     input: String,
 ) -> CliResult {
-    let mechanism = parameterless_mechanism(&mechanism)?;
+    let mechanism = cli_mechanism(&mechanism, params_file.as_deref())?;
     let session =
         open_session(client, slot_id, CkSessionFlags(CkSessionFlags::SERIAL_SESSION)).await?;
-    login_user(client, session, &pin).await?;
+    login_user(client, session, pin).await?;
     let key = find_key_by_label(client, session, &key_label, CkObjectClass::PRIVATE_KEY).await?;
     let ciphertext = hex::decode(&input).map_err(|e| format!("Invalid hex input: {e}"))?;
 

@@ -1,3 +1,6 @@
+// W1-L12-03: test/bench report lines go to stdout by design; the
+// workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stdout)]
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

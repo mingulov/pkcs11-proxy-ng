@@ -1340,3 +1340,747 @@ fn daemon_validate_accepts_audit_defaults() {
     assert_eq!(cfg.audit.fail_closed_reserve, 256);
     assert!(cfg.validate().is_ok(), "audit defaults must validate OK");
 }
+
+// W1-L8-01: the documented env mapping promises PKCS11_PROXY_ALLOW_INSECURE
+// overrides `listener.remote.allow_insecure_tcp` (env > TOML), including
+// when the TOML already carries a [listener.remote] block (the `Some`
+// branch of `apply_env_overrides`).
+//
+// Hermetic by construction: the fake env below never touches the process
+// environment, so this test cannot race parallel tests in the same binary
+// that call `load()` (e.g. the example-config consistency test).
+fn fake_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let map: std::collections::HashMap<String, String> =
+        pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect();
+    move |key: &str| map.get(key).cloned()
+}
+
+#[test]
+fn allow_insecure_env_overrides_existing_remote_block() {
+    let toml = r#"
+[backend]
+module = "."
+
+[proxy]
+
+[listener.remote]
+bind = "127.0.0.1:7512"
+auth = "none"
+allow_insecure_tcp = false
+"#;
+    // Env set: the override must be honored in the `Some` branch.
+    let mut config: DaemonConfig = toml::from_str(toml).unwrap();
+    config
+        .apply_env_overrides_with(fake_env(&[
+            ("PKCS11_PROXY_BIND", "0.0.0.0:9999"),
+            ("PKCS11_PROXY_ALLOW_INSECURE", "1"),
+        ]))
+        .expect("overrides must apply");
+    let tcp = config.listener.remote.as_ref().unwrap();
+    assert_eq!(tcp.bind, "0.0.0.0:9999");
+    assert!(
+        tcp.allow_insecure_tcp,
+        "PKCS11_PROXY_ALLOW_INSECURE=1 must override TOML allow_insecure_tcp=false (W1-L8-01)"
+    );
+    // Env set to a falsy value: env still wins (secure direction).
+    let toml_true = toml.replace("allow_insecure_tcp = false", "allow_insecure_tcp = true");
+    let mut config: DaemonConfig = toml::from_str(&toml_true).unwrap();
+    config
+        .apply_env_overrides_with(fake_env(&[
+            ("PKCS11_PROXY_BIND", "0.0.0.0:9999"),
+            ("PKCS11_PROXY_ALLOW_INSECURE", "0"),
+        ]))
+        .expect("overrides must apply");
+    assert!(
+        !config.listener.remote.as_ref().unwrap().allow_insecure_tcp,
+        "PKCS11_PROXY_ALLOW_INSECURE=0 must override TOML allow_insecure_tcp=true"
+    );
+    // Env unset: the TOML value must be preserved — no insecure default.
+    let mut config: DaemonConfig = toml::from_str(toml).unwrap();
+    config
+        .apply_env_overrides_with(fake_env(&[("PKCS11_PROXY_BIND", "0.0.0.0:9999")]))
+        .expect("overrides must apply");
+    let tcp = config.listener.remote.as_ref().unwrap();
+    assert_eq!(tcp.bind, "0.0.0.0:9999");
+    assert!(
+        !tcp.allow_insecure_tcp,
+        "unset PKCS11_PROXY_ALLOW_INSECURE must leave TOML allow_insecure_tcp=false untouched"
+    );
+}
+
+// W1-L8-05: rich-grant tables must reject unknown keys loudly. A typo like
+// `extrat = "deny"` was silently ignored while `extract` fell back to its
+// `Allow` default — permitting key extraction the operator believed denied.
+#[test]
+fn rich_grant_typo_rejected_loudly_naming_key() {
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.local]
+path = "/tmp/test.sock"
+auth = "peer_cred"
+
+[auth]
+allow_all_authenticated = false
+
+[[auth.policy]]
+identity = "uid=1000"
+tokens = [{ token = "label:MyToken", extrat = "deny" }]
+"#;
+    let err = toml::from_str::<DaemonConfig>(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("extrat"),
+        "typo'd grant key must be named loudly in the parse error (no silent Allow fallback): {err}"
+    );
+}
+
+// W1-L8-05 (same finding, objects allow-list): a typo in a rich
+// `{ id, extract }` entry must also fail loudly, not inherit silently.
+#[test]
+fn object_acl_rich_typo_rejected_loudly_naming_key() {
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.local]
+path = "/tmp/test.sock"
+auth = "peer_cred"
+
+[auth]
+allow_all_authenticated = false
+
+[[auth.policy]]
+identity = "uid=1000"
+tokens = [{ token = "label:MyToken", objects = [{ id = "a1b2", extrac = "deny" }] }]
+"#;
+    let err = toml::from_str::<DaemonConfig>(toml).unwrap_err().to_string();
+    assert!(
+        err.contains("extrac"),
+        "typo'd objects key must be named loudly in the parse error: {err}"
+    );
+}
+
+// W1-L8-05: every example daemon config in the repo must still parse after
+// deny_unknown_fields lands on the grant tables. Parse-only (not
+// validate/load): placeholders like /CHANGE_ME and @BACKEND_MODULE@ are
+// intentionally not real paths.
+#[test]
+fn all_example_daemon_configs_still_parse() {
+    use std::collections::BTreeSet;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Pinned inventory of every daemon-config TOML in the repo. Mechanism
+    // registries (examples/cloudhsm-mechanisms.toml, fips/mechanism_params.toml,
+    // examples/vendors/*.toml, packaging mechanism examples) are NOT daemon
+    // configs and are excluded.
+    let pinned: &[&str] = &[
+        "examples/config-loopback-dev.toml",
+        "examples/config-mtls.toml",
+        "examples/config-multi-user.toml",
+        "examples/config-unix-local.toml",
+        "examples/configs/dev/proxy.toml",
+        "examples/configs/staging/proxy.toml",
+        "examples/configs/prod/proxy.toml",
+        "examples/configs/fips/proxy.toml",
+        "packaging/config/proxy.toml.default",
+        "tests/consumers/proxy.toml",
+    ];
+    for rel in pinned {
+        let path = root.join(rel);
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read pinned example config {rel}: {e}"));
+        toml::from_str::<DaemonConfig>(&content)
+            .unwrap_or_else(|e| panic!("example config {rel} must still parse: {e}"));
+    }
+    // Completeness: any daemon-config-shaped file under examples/ that is
+    // not in the pinned list fails here, forcing triage instead of silent
+    // omission from coverage.
+    let pinned_set: BTreeSet<String> = pinned.iter().map(|s| s.to_string()).collect();
+    let mut discovered: BTreeSet<String> = BTreeSet::new();
+    for entry in std::fs::read_dir(root.join("examples")).expect("read examples/") {
+        let path = entry.expect("dir entry").path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if path.extension().and_then(|e| e.to_str()) == Some("toml") && name.starts_with("config") {
+            discovered.insert(format!("examples/{name}"));
+        }
+    }
+    for tier in ["dev", "staging", "prod", "fips"] {
+        let rel = format!("examples/configs/{tier}/proxy.toml");
+        assert!(root.join(&rel).exists(), "expected tier config missing: {rel}");
+        discovered.insert(rel);
+    }
+    for rel in &discovered {
+        assert!(
+            pinned_set.contains(rel),
+            "daemon config {rel} exists but is not in the pinned parse list — add it"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-04: the M3 objects+auth=none guard must be reachable (not shadowed by
+// the earlier generic policy+auth=none reject), preserving all current rejects.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn m3_objects_grant_with_none_listener_hits_m3_error() {
+    let toml = "\
+[backend]\nmodule = \".\"\n[listener.local]\npath = \"/run/p.sock\"\nauth = \"none\"\nallow_insecure_unix = true\n[auth]\nallow_all_authenticated = false\n[[auth.policy]]\nidentity = \"uid=1000\"\ntokens = [{ token = \"label:MyToken\", objects = [\"aabbcc\"] }]\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("silently inert") && err.contains("objects"),
+        "M3 combo must hit the M3-specific error, got: {err}"
+    );
+}
+
+#[test]
+fn generic_policy_with_none_listener_still_rejected() {
+    // Preservation control: a non-objects policy + auth=none must still be
+    // rejected (by the generic guard) after the M3 reorder.
+    let toml = "\
+[backend]\nmodule = \".\"\n[listener.local]\npath = \"/run/p.sock\"\nauth = \"none\"\nallow_insecure_unix = true\n[auth]\nallow_all_authenticated = false\n[[auth.policy]]\nidentity = \"uid=1000\"\ntokens = [\"label:MyToken\"]\n";
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("cannot apply to unauthenticated peers"),
+        "generic policy+none must keep the generic error, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-06: policy identity uid forms must be normalized so accepted
+// identities can match runtime keys (uid=01000 vs uid=1000).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn non_canonical_uid_identity_matches_runtime_key() {
+    // uid=01000 parses as uid 1000; the runtime key is "uid=1000", so the
+    // configured identity must match it after normalization.
+    let auth = AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![PolicyEntry {
+            identity: "uid=01000".into(),
+            tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:my-token".into())]),
+        }],
+    };
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(&auth).expect("must load");
+    let id = crate::server::auth::identity::AuthenticatedIdentity::PeerCred { uid: 1000 };
+    assert!(
+        policy.allows(&id, "my-token", "any"),
+        "normalized uid=01000 must match runtime uid=1000"
+    );
+}
+
+#[test]
+fn plus_prefixed_uid_identity_matches_runtime_key() {
+    // "+1000" parses as u32 1000 but never equals the "uid=1000" runtime key.
+    let auth = AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![PolicyEntry {
+            identity: "uid=+1000".into(),
+            tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:my-token".into())]),
+        }],
+    };
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(&auth).expect("must load");
+    let id = crate::server::auth::identity::AuthenticatedIdentity::PeerCred { uid: 1000 };
+    assert!(
+        policy.allows(&id, "my-token", "any"),
+        "normalized uid=+1000 must match runtime uid=1000"
+    );
+}
+
+#[test]
+fn canonical_uid_identity_still_matches() {
+    // Preservation control: canonical forms behave exactly as before.
+    let auth = AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![PolicyEntry {
+            identity: "uid=1000".into(),
+            tokens: TokenAccessSpec::Specific(vec![GrantSpec::Bare("label:my-token".into())]),
+        }],
+    };
+    let policy = crate::server::auth::policy::TokenPolicy::from_config(&auth).expect("must load");
+    let id = crate::server::auth::identity::AuthenticatedIdentity::PeerCred { uid: 1000 };
+    assert!(policy.allows(&id, "my-token", "any"));
+    let other = crate::server::auth::identity::AuthenticatedIdentity::PeerCred { uid: 2000 };
+    assert!(!policy.allows(&other, "my-token", "any"));
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-08: unparseable RESILIENCE_FIND_THRESHOLD must error loudly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unparseable_find_threshold_env_errors_loudly() {
+    let toml = r#"
+[backend]
+module = "."
+"#;
+    let mut config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config
+        .apply_env_overrides_with(fake_env(&[(
+            "PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD",
+            "not-a-number",
+        )]))
+        .unwrap_err();
+    assert!(
+        err.contains("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD"),
+        "error must name the var, got: {err}"
+    );
+    assert!(err.contains("not-a-number"), "error must name the value, got: {err}");
+}
+
+#[test]
+fn valid_find_threshold_env_still_applies() {
+    // Preservation control: valid values behave as before.
+    let toml = r#"
+[backend]
+module = "."
+"#;
+    let mut config: DaemonConfig = toml::from_str(toml).unwrap();
+    config
+        .apply_env_overrides_with(fake_env(&[("PKCS11_PROXY_RESILIENCE_FIND_THRESHOLD", "500")]))
+        .expect("valid threshold must apply");
+    assert_eq!(config.resilience.find_result_warn_threshold, Some(500));
+    // Unset: TOML value (here absent) is preserved.
+    let mut config: DaemonConfig = toml::from_str(toml).unwrap();
+    config.apply_env_overrides_with(fake_env(&[])).expect("unset var must be a no-op");
+    assert_eq!(config.resilience.find_result_warn_threshold, None);
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-13: bind must validate as a real SocketAddr, not contains(':').
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hostname_bind_rejected_at_validate_time() {
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.remote]
+bind = "localhost:50051"
+auth = "none"
+allow_insecure_tcp = true
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err();
+    assert!(
+        err.contains("localhost:50051"),
+        "error must name the offending bind value, got: {err}"
+    );
+}
+
+#[test]
+fn ip_binds_still_validate() {
+    // Preservation control: IP:port binds (v4 + v6) pass as before.
+    for bind in ["127.0.0.1:7512", "0.0.0.0:50051", "[::1]:7512"] {
+        let toml = format!(
+            "[backend]\nmodule = \".\"\n\n[listener.remote]\nbind = \"{bind}\"\nauth = \"none\"\nallow_insecure_tcp = true\n"
+        );
+        let config: DaemonConfig = toml::from_str(&toml).unwrap();
+        assert!(config.validate().is_ok(), "bind {bind} must validate");
+    }
+}
+
+/// W1-L6-20: transport concurrency knobs ship with safe bounded defaults.
+#[test]
+fn parse_transport_limits_defaults() {
+    let toml = r#"
+[backend]
+module = "."
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(config.proxy.grpc_concurrency_limit_per_connection, 256);
+    assert_eq!(config.proxy.grpc_max_concurrent_streams, 256);
+    assert!(config.proxy.grpc_load_shed);
+}
+
+/// W1-L6-20: operators can tune the transport concurrency knobs.
+#[test]
+fn parse_transport_limits_when_set() {
+    let toml = r#"
+[backend]
+module = "."
+
+[proxy]
+grpc_concurrency_limit_per_connection = 64
+grpc_max_concurrent_streams = 128
+grpc_load_shed = false
+"#;
+    let config: DaemonConfig = toml::from_str(toml).unwrap();
+    assert_eq!(config.proxy.grpc_concurrency_limit_per_connection, 64);
+    assert_eq!(config.proxy.grpc_max_concurrent_streams, 128);
+    assert!(!config.proxy.grpc_load_shed);
+}
+
+/// W1-L6-20: zero transport limits are rejected (a zero limit would
+/// either refuse everything or silently restore the unbounded default).
+#[test]
+fn validate_zero_transport_limits_rejected() {
+    for field in ["grpc_concurrency_limit_per_connection", "grpc_max_concurrent_streams"] {
+        let toml = format!("[backend]\nmodule = \".\"\n\n[proxy]\n{field} = 0\n");
+        let config: DaemonConfig = toml::from_str(&toml).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains(field), "error should mention field: {err}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 9 (W1-L8-06..17) helpers: read submodule-root files for doc-honesty
+// tests (same pattern as `all_example_daemon_configs_still_parse`).
+// ---------------------------------------------------------------------------
+
+/// Read a file relative to the submodule root (`pkcs11-proxy-ng/`).
+fn submodule_file(rel: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../").join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+}
+
+/// Slice `text` between the first lines starting with `start` and `end`
+/// (exclusive of the marker lines); panics when either marker is absent.
+fn section_between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
+    let from = text.find(start).unwrap_or_else(|| panic!("missing section marker {start:?}"));
+    let from = text[from..].find('\n').map(|i| from + i + 1).unwrap_or(text.len());
+    let rest = &text[from..];
+    let to = rest.find(end).unwrap_or_else(|| panic!("missing section marker {end:?}"));
+    &rest[..to]
+}
+
+/// The (var, TOML field) pairs `env_var_help()` documents, parsed from
+/// its own output so the doc-sync tests below derive the expected set
+/// instead of hardcoding it.
+fn documented_env_vars() -> Vec<(String, String)> {
+    let help = env_var_help();
+    let mut vars = Vec::new();
+    for line in help.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("PKCS11_PROXY_") {
+            let var = format!("PKCS11_PROXY_{}", rest.split_whitespace().next().unwrap_or(""));
+            let field = line
+                .split('→')
+                .nth(1)
+                .unwrap_or("")
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            assert!(!field.is_empty(), "help line must map {var} to a TOML field: {line}");
+            vars.push((var, field));
+        }
+    }
+    vars
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-07: runbook §8a must list all 8 daemon env vars var-for-var with
+// --print-env-vars.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn runbook_daemon_env_table_matches_print_env_vars() {
+    let vars = documented_env_vars();
+    assert_eq!(vars.len(), 8, "expected 8 documented daemon env vars, got: {vars:?}");
+    let runbook = submodule_file("doc/runbooks/operating-pkcs11-proxy-ng.md");
+    let table = section_between(&runbook, "## 8a.", "## 8b.");
+    for (var, field) in &vars {
+        assert!(table.contains(var), "runbook §8a must list {var} (--print-env-vars documents it)");
+        assert!(table.contains(field), "runbook §8a must map {var} to TOML field {field}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-08: runbook §8b mTLS section must match tls.rs reality (TLS_DOMAIN
+// optional; 3 vars required together) and document CONNECT_ATTEMPTS.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn runbook_mtls_section_matches_client_tls_behavior() {
+    let runbook = submodule_file("doc/runbooks/operating-pkcs11-proxy-ng.md");
+    let mtls = section_between(&runbook, "### mTLS (client side)", "### Mechanism registry");
+    assert!(
+        !mtls.contains("All four are required together"),
+        "runbook must not claim all four mTLS vars are required (TLS_DOMAIN is optional)"
+    );
+    assert!(
+        mtls.contains("PKCS11_PROXY_TLS_DOMAIN"),
+        "runbook mTLS section must document PKCS11_PROXY_TLS_DOMAIN"
+    );
+    assert!(
+        mtls.to_lowercase().contains("optional"),
+        "runbook mTLS section must say TLS_DOMAIN is optional"
+    );
+    let conn = section_between(&runbook, "### Connection", "### mTLS (client side)");
+    assert!(
+        conn.contains("PKCS11_PROXY_CONNECT_ATTEMPTS"),
+        "runbook connection table must document PKCS11_PROXY_CONNECT_ATTEMPTS"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-09: proxy.toml.default must not claim every value is env-overridable
+// (only the 8 documented vars are) and must leave config_path unset so the
+// default is the embedded registry.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn default_config_header_is_honest_about_env_overrides() {
+    let content = submodule_file("packaging/config/proxy.toml.default");
+    assert!(
+        !content.contains("Every value below can also be overridden"),
+        "default config must not claim every value is env-overridable"
+    );
+    for (var, _) in documented_env_vars() {
+        assert!(
+            content.contains(&var),
+            "default config header must list the 8 overridable vars (missing {var})"
+        );
+    }
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("config_path") {
+            panic!(
+                "default config must leave config_path unset (embedded default), \
+                 found active line: {line}"
+            );
+        }
+    }
+    assert!(
+        content.contains("embedded default"),
+        "default config must document that unset config_path serves the embedded default"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-10: example mTLS headers must describe the wired transport, not the
+// stale "not wired yet" shape.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn example_mtls_headers_describe_wired_transport() {
+    for rel in ["examples/config-mtls.toml", "examples/config-multi-user.toml"] {
+        let content = submodule_file(rel);
+        assert!(
+            !content.contains("not wired"),
+            "{rel} header must not claim mTLS is unwired (transport.rs enforces it)"
+        );
+        let head: String = content.lines().take(12).collect::<Vec<_>>().join("\n");
+        assert!(
+            head.contains("wired") || head.contains("enforced"),
+            "{rel} header must describe the wired mTLS transport"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-11: examples must point at the default daemon port (:7512) and
+// config paths (/etc/pkcs11-proxy-ng/*) so copy-paste connects.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn examples_use_default_daemon_paths() {
+    for rel in [
+        "examples/config-loopback-dev.toml",
+        "examples/config-mtls.toml",
+        "examples/config-multi-user.toml",
+    ] {
+        let content = submodule_file(rel);
+        assert!(content.contains("7512"), "{rel} must use the default daemon port :7512");
+        assert!(!content.contains("50051"), "{rel} must not use the stale :50051 port");
+        for line in content.lines() {
+            if line.contains("/etc/pkcs11-proxy/") && !line.contains("/etc/pkcs11-proxy-ng/") {
+                panic!("{rel} uses the stale /etc/pkcs11-proxy path: {line}");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-12: ADR-0005 §6 must teach label:/serial: selectors (the forms
+// TokenSelector::parse accepts), not pkcs11: URIs (which parse rejects).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn adr_policy_example_uses_supported_selectors() {
+    let adr = submodule_file("doc/adr/ADR-0005-phase-1-authorization-model.md");
+    assert!(
+        !adr.contains("pkcs11:token="),
+        "ADR-0005 must not teach pkcs11: URI selectors (TokenSelector::parse rejects them)"
+    );
+    assert!(
+        adr.contains("label:Audit"),
+        "ADR-0005 policy example must use the label: selector form"
+    );
+    assert!(
+        adr.contains("serial:1234"),
+        "ADR-0005 policy example must use the serial: selector form"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-13: ADR-0005 must reconcile the mTLS-by-default promise with the
+// shipped auth=none default (amendment recorded in the ADR; the insecure
+// default is explicit + loudly warned, never silent).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn adr_records_insecure_default_reconciliation() {
+    let adr = submodule_file("doc/adr/ADR-0005-phase-1-authorization-model.md");
+    assert!(
+        adr.contains("proxy.toml.default"),
+        "ADR-0005 must name the shipped default file in the W1-L8-13 reconciliation"
+    );
+    assert!(adr.contains("W1-L8-13"), "ADR-0005 must record the W1-L8-13 amendment marker");
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-14: AGENTS.md must not claim a default registry file path — with
+// config_path unset the daemon serves the embedded default.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agents_registry_path_claims_match_embedded_default() {
+    let agents = submodule_file("AGENTS.md");
+    assert!(
+        !agents.contains("mechanism_params.toml` by default"),
+        "AGENTS.md must not claim /etc/pkcs11-proxy-ng/mechanism_params.toml is the default path"
+    );
+    assert!(
+        agents.contains("config_path` is unset"),
+        "AGENTS.md must document that unset config_path serves the embedded default"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-16: validate() must reject degenerate zeros (rate window, login
+// cooldown, login-lock timeout) and duplicate policy identities (via the
+// C3-05 mechanism in TokenPolicy::from_config, which validate() calls).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validate_rejects_zero_rate_limit_window() {
+    let toml = rate_limit_toml("[proxy]\nrate_limit_window_secs = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("rate_limit_window_secs"), "error must name the field, got: {err}");
+}
+
+#[test]
+fn validate_rejects_zero_login_cooldown() {
+    let toml = rate_limit_toml(
+        "[rate_limit]\nper_slot_failed_login_budget = 3\nper_slot_failed_login_cooldown_secs = 0\n",
+    );
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("per_slot_failed_login_cooldown_secs"),
+        "error must name the field, got: {err}"
+    );
+}
+
+#[test]
+fn validate_rejects_zero_login_lock_timeout() {
+    let toml = rate_limit_toml("[proxy]\nlogin_lock_timeout_secs = 0\n");
+    let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("login_lock_timeout_secs"), "error must name the field, got: {err}");
+}
+
+#[test]
+fn validate_rejects_zero_audit_rotation_knobs() {
+    // Authenticated listener: the H2 guard (audit + auth=none) must not
+    // fire before the rotation-knob check under test.
+    for field in ["rotate_max_bytes", "rotate_keep_files"] {
+        let toml = format!(
+            "[backend]\nmodule = \".\"\n[listener.local]\npath = \"/tmp/test.sock\"\n\
+             auth = \"peer_cred\"\n[auth]\nallow_all_authenticated = true\n\
+             [audit]\ndir = \".\"\n{field} = 0\n"
+        );
+        let cfg: DaemonConfig = toml::from_str(&toml).unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains(field), "error must name the field, got: {err}");
+    }
+}
+
+#[test]
+fn validate_rejects_duplicate_policy_identity() {
+    // W1-L8-16 reuses the W1-C3-05 mechanism: validate() routes through
+    // TokenPolicy::from_config, which rejects duplicate identities naming
+    // the identity. This pins the validate()-level rejection.
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.local]
+path = "/tmp/test.sock"
+auth = "peer_cred"
+
+[auth]
+allow_all_authenticated = false
+
+[[auth.policy]]
+identity = "uid=1000"
+tokens = ["label:TokenA"]
+
+[[auth.policy]]
+identity = "uid=1000"
+tokens = ["label:TokenB"]
+"#;
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("duplicate") && err.contains("uid=1000"),
+        "validate() must reject duplicate policy identities naming the identity, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-L8-17: the x509:spki= identity form must be taught as primary (docs +
+// one working example) alongside the legacy DN form (marked deprecated),
+// and the taught form must validate.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn spki_identity_taught_in_docs_and_example() {
+    let default_cfg = submodule_file("packaging/config/proxy.toml.default");
+    assert!(
+        default_cfg.contains("x509:spki="),
+        "shipped default config must teach the x509:spki= identity form"
+    );
+    let prod = submodule_file("examples/configs/prod/proxy.toml");
+    assert!(prod.contains("x509:spki="), "prod example must teach the x509:spki= identity form");
+    assert!(
+        prod.to_lowercase().contains("deprecat"),
+        "prod example must mark the legacy DN identity form deprecated"
+    );
+}
+
+#[test]
+fn validate_accepts_spki_policy_identity() {
+    // The SPKI form taught by the W1-L8-17 docs must validate end to end
+    // ("." stands in for the mTLS cert paths, which only need to exist).
+    let toml = r#"
+[backend]
+module = "."
+
+[listener.remote]
+bind = "127.0.0.1:7512"
+auth = "mtls"
+ca_cert = "."
+server_cert = "."
+server_key = "."
+
+[auth]
+allow_all_authenticated = false
+
+[[auth.policy]]
+identity = "x509:spki=9f2c4a8e1b5d6f0391a4c7e2b5d8f0a1c4e7b0d3f6a9c2e5b8d1f4a7c0e3b6d9f"
+tokens = ["label:Prod"]
+"#;
+    let cfg: DaemonConfig = toml::from_str(toml).unwrap();
+    cfg.validate().expect("taught SPKI policy identity must validate");
+}

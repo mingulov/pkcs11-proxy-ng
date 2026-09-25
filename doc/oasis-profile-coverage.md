@@ -168,6 +168,8 @@ exercised: the backend FFI reconstruction path rejects them with
 `CKR_MECHANISM_PARAM_INVALID`, and the generated matrix cites that test beside
 their explicit unsupported reasons. This keeps those rows intentional without
 claiming a safe OASIS ABI mapping where the local sources do not provide one.
+Unsupported raw and vendor transport-only variants are likewise intentional
+`mechanism_params_default.toml` omissions under the AGENTS.md §12 exception.
 
 The working `chacha20_salsa20_poly1305.md` prose mentions
 `CK_CHACHA20POLY1305_PARAMS`, but its C definition and the published OASIS
@@ -195,7 +197,9 @@ entrypoints validate first and reject these parameterized mechanisms instead of
 guessing pointer lengths. This is covered both by shim helper unit tests and by
 an ignored loaded-shim C ABI test that calls through real function-list
 pointers with caller-owned `CK_CMS_SIG_PARAMS`, `CK_X3DH_*`, and
-`CK_X2RATCHET_*` stack structs.
+`CK_X2RATCHET_*` stack structs. These rows are intentional
+`mechanism_params_default.toml` omissions under the AGENTS.md §12 exception —
+no TOML shape is required for them.
 MockBackend still performs source-grounded semantic checks on the typed
 transport representation where OASIS names real object-handle fields: X3DH and
 X2Ratchet derive parameters reject invalid referenced key handles, but
@@ -231,7 +235,9 @@ only advertise mechanisms that have a concrete `CK_MECHANISM_TYPE` value. Their
 matrix rows also carry `local_numeric_decision.policy =
 do_not_assign_project_local_ckm_values_for_working_spec_names`, so future
 readers can see that the project is deliberately waiting for published OASIS
-values instead of assigning local numbers that could collide later.
+values instead of assigning local numbers that could collide later. These
+rows are intentional `mechanism_params_default.toml` omissions under the
+AGENTS.md §12 exception.
 
 The inverse discrepancy is also explicit: 119 mechanism names or aliases have
 published OASIS header values but are not named by the vendored working

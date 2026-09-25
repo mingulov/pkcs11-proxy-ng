@@ -1,6 +1,8 @@
 //! Captured caller destinations and transactional exact attribute writeback.
 use super::*;
 
+use super::super::helpers::{MAX_SERIALIZABLE_BYTES, MAX_TEMPLATE_COUNT};
+
 pub(super) struct AttributeCall {
     pub query: CkAttributeQuery,
     value: CK_VOID_PTR,
@@ -200,11 +202,23 @@ fn prepare_one(
                     backend_width,
                     client_width,
                 )
-                .map_err(|_| CkRv::GENERAL_ERROR)
             };
-            (value, length) = match &result.value {
-                Some(secret) => secret.expose(|raw| bridged(Some(raw)))?,
-                None => bridged(None)?,
+            let outcome = match &result.value {
+                Some(secret) => secret.expose(|raw| bridged(Some(raw))),
+                None => bridged(None),
+            };
+            // W1-L5-02: a genuine backend value that exceeds the client's
+            // CK_ULONG range (ADR-0011 D4 overflow) surfaces as
+            // CK_UNAVAILABLE_INFORMATION for this attribute only — value
+            // dropped, canonical sentinel length — while the other attributes
+            // are still returned. Only malformed bridge inputs (misaligned
+            // bytes, unsupported widths) fail the whole call.
+            (value, length) = match outcome {
+                Ok(pair) => pair,
+                Err(pkcs11_proxy_ng_types::width::WidthError::Overflow) => {
+                    (None, pkcs11_proxy_ng_types::width::CANONICAL_UNAVAILABLE)
+                }
+                Err(_) => return Err(CkRv::GENERAL_ERROR),
             };
         }
         if value.as_ref().is_some_and(|bytes| bytes.len() as u64 > call.capacity) {
@@ -383,5 +397,72 @@ mod tests {
         assert_eq!(first, [0xa5; 4]);
         assert_eq!(second, [0x5a; 4]);
         assert_eq!([attrs[0].ulValueLen, attrs[1].ulValueLen], [4, 4]);
+    }
+
+    #[test]
+    fn exact_bridge_overflow_is_per_attribute_unavailable_not_whole_call_error() {
+        // W1-L5-02. Documented contract: `width_bridge::bridge_output_value`'s
+        // doc comment — "WidthError::Overflow is returned if a genuine backend
+        // value exceeds the client's CK_ULONG range (D4) — the caller surfaces
+        // that attribute as CK_UNAVAILABLE_INFORMATION rather than truncating
+        // or failing the whole call" (ADR-0011 D4; D10 sentinel encoding via
+        // CANONICAL_UNAVAILABLE). Mixed call: one ulong attribute whose 64-bit
+        // backend value does not fit a 32-bit client CK_ULONG, plus one valid
+        // opaque attribute. The valid attribute must still be returned; the
+        // overflowing one gets ulValueLen = CK_UNAVAILABLE_INFORMATION with
+        // its buffer untouched; the whole call must not fail.
+        let host = std::mem::size_of::<CK_ULONG>();
+        let stride = std::mem::size_of::<CK_ATTRIBUTE>();
+        // Simulated topology: 32-bit client, 64-bit backend. Capture runs at
+        // host width (its width params only gate nested templates); the
+        // client/backend widths drive the output bridge in `prepare`.
+        let client_width = 4usize;
+        let backend_width = 8usize;
+        let mut overflow_buf = [0xa5u8; 8];
+        let mut label_buf = [0u8; 4];
+        let mut attrs = [
+            CK_ATTRIBUTE {
+                type_: CkAttributeType::CLASS.0 as CK_ATTRIBUTE_TYPE,
+                pValue: overflow_buf.as_mut_ptr().cast(),
+                ulValueLen: 8,
+            },
+            CK_ATTRIBUTE { type_: CKA_LABEL, pValue: label_buf.as_mut_ptr().cast(), ulValueLen: 4 },
+        ];
+        let calls: Vec<_> = (0..2)
+            .map(|i| {
+                unsafe { capture(attrs.as_mut_ptr().add(i), false, host, host, stride) }.unwrap()
+            })
+            .collect();
+        let big = pkcs11_proxy_ng_types::width::encode_native_ulong(0x1_0000_0001, 8);
+        let results = [
+            CkAttributeQueryResult {
+                attr_type: CkAttributeType::CLASS,
+                returned_len: 8,
+                apply_returned_len: true,
+                apply_type: false,
+                value: Some(big.into()),
+                ck_rv: None,
+                nested: None,
+            },
+            CkAttributeQueryResult {
+                attr_type: CkAttributeType::LABEL,
+                returned_len: 4,
+                apply_returned_len: true,
+                apply_type: false,
+                value: Some(b"test".to_vec().into()),
+                ck_rv: None,
+                nested: None,
+            },
+        ];
+        let writes = prepare(&calls, &results, CkRv::OK, client_width, backend_width, stride)
+            .expect("bridge overflow must be per-attribute, not a whole-call failure");
+        unsafe { commit(writes) };
+        // E0793: CK_ATTRIBUTE is packed on Windows; assert on by-value copies.
+        let overflow_len = attrs[0].ulValueLen;
+        assert_eq!(overflow_len, CK_UNAVAILABLE_INFORMATION);
+        assert_eq!(overflow_buf, [0xa5; 8], "unavailable value must not touch the buffer");
+        let label_len = attrs[1].ulValueLen;
+        assert_eq!(label_len, 4);
+        assert_eq!(label_buf, *b"test", "valid attribute must still be returned");
     }
 }

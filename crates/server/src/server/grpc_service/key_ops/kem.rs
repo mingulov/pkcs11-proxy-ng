@@ -25,6 +25,7 @@ use crate::server::context_manager::ClientContextId;
 use crate::server::handle_map::VirtualHandle;
 
 use crate::server::grpc_service::HandlerContext;
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(crate) async fn encapsulate_key(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::EncapsulateKeyRequest>,

@@ -11,11 +11,11 @@ fn input(values: [u64; 6]) -> CkMechanism {
         mechanism_type: CkMechanismType::X3DH_RESPOND,
         params: Some(CkMechanismParams::X3dhRespond(X3dhRespondParams {
             kdf: values[0],
-            identity_handle: values[1],
-            prekey_handle: values[2],
-            onetime_key_handle: values[3],
-            initiator_identity_handle: values[4],
-            initiator_ephemeral_handle: values[5],
+            identity_handle: CkObjectHandle(values[1]),
+            prekey_handle: CkObjectHandle(values[2]),
+            onetime_key_handle: CkObjectHandle(values[3]),
+            initiator_identity_handle: CkObjectHandle(values[4]),
+            initiator_ephemeral_handle: CkObjectHandle(values[5]),
         })),
     }
 }

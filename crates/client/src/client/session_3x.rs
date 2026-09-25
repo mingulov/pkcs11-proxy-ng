@@ -3,27 +3,31 @@
 //! - `C_LoginUser`
 //! - `C_SessionCancel`
 //! - `C_GetSessionValidationFlags`
+//!
+//! PIN handling: see the E3 note in `session.rs` — `LoginUserRequest`
+//! (PIN + username) likewise derives `ZeroizeOnDrop`, so the single
+//! client-owned copy wipes when the request drops after encoding.
 
 use pkcs11_proxy_ng_types::*;
 
 use super::Pkcs11Client;
-use crate::error::{MessageCallError, grpc_status_to_ck_rv};
+use crate::error::MessageCallError;
 
 impl Pkcs11Client {
     pub async fn login_user(
         &mut self,
         session: CkSessionHandle,
         user_type: CkUserType,
-        username: &[u8],
-        pin: &[u8],
+        username: Option<&[u8]>,
+        pin: Option<&[u8]>,
     ) -> CkResult<()> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::LoginUserRequest {
             client_context_id: ctx,
             session_handle: session.0,
             user_type: user_type as u64,
-            pin: pin.to_vec(),
-            username: username.to_vec(),
+            pin: pin.map(|p| p.to_vec()),
+            username: username.map(|u| u.to_vec()),
         };
         pkcs11_unary_ok!(self.grpc.login_user(req), true)
     }
@@ -47,16 +51,7 @@ impl Pkcs11Client {
             session_handle: session.0,
             flags: flags.0,
         };
-        let response = self
-            .grpc
-            .session_cancel(req)
-            .await
-            .map_err(|status| {
-                MessageCallError::transport(grpc_status_to_ck_rv(status.code(), true))
-            })?
-            .into_inner();
-        let rv = CkRv(response.ck_rv);
-        if rv.is_ok() { Ok(()) } else { Err(MessageCallError::backend(rv)) }
+        super::stateful_unit_call(self.grpc.session_cancel(req), |response| response.ck_rv).await
     }
 
     pub async fn get_session_validation_flags(

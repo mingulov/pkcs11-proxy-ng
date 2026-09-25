@@ -6,6 +6,7 @@ pub use super::token_selector::TokenSelector;
 use pkcs11_proxy_ng_types::{CkMechanismType, CkObjectClass};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug)]
@@ -65,12 +66,67 @@ pub enum TokenAccess {
     Specific(Vec<TokenGrant>),
 }
 
+/// Cap on log-dedup set size (W1-C3-10). Each set holds at most this many
+/// peer-identity keys (tens of KB worst case); past the cap the oldest key
+/// is evicted (FIFO) so sustained unique peers cannot grow memory without
+/// bound. An evicted key may log once more — the bounded-memory tradeoff —
+/// and eviction itself logs at debug, never warn-spam.
+const LOG_DEDUP_CAP: usize = 1024;
+
+/// FIFO-bounded set of already-logged peer identities (W1-C3-10).
+///
+/// Behaves like a `HashSet` for the log-once pattern (`insert` returns true
+/// only for a new key) but evicts the oldest key past [`LOG_DEDUP_CAP`] so
+/// the process cannot accumulate one entry per unique peer forever.
+struct LogDedupSet {
+    seen: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl LogDedupSet {
+    fn new() -> Self {
+        Self { seen: HashSet::new(), order: VecDeque::new() }
+    }
+
+    /// Record `key`. Returns true when newly inserted (the caller should
+    /// log) or false when already present (the caller stays silent).
+    fn insert(&mut self, key: String) -> bool {
+        if !self.seen.insert(key.clone()) {
+            return false;
+        }
+        self.order.push_back(key);
+        while self.order.len() > LOG_DEDUP_CAP {
+            if let Some(oldest) = self.order.pop_front() {
+                self.seen.remove(&oldest);
+                tracing::debug!(evicted = %oldest, "log-dedup set full; evicted oldest entry");
+            }
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        debug_assert_eq!(self.seen.len(), self.order.len());
+        self.seen.len()
+    }
+}
+
 /// Tracks SPKI hashes for which we've already emitted the "mTLS auth" info log.
 /// Prevents flooding the log when the same certificate connects repeatedly.
-static LOGGED_SPKI: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static LOGGED_SPKI: OnceLock<Mutex<LogDedupSet>> = OnceLock::new();
 
 /// Tracks legacy DN keys for which we've already emitted the deprecation warning.
-static WARNED_LEGACY: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static WARNED_LEGACY: OnceLock<Mutex<LogDedupSet>> = OnceLock::new();
+
+#[cfg(test)]
+fn logged_spki_len() -> usize {
+    LOGGED_SPKI.get().and_then(|m| m.lock().ok()).map(|set| set.len()).unwrap_or(0)
+}
+
+#[cfg(test)]
+fn warned_legacy_len() -> usize {
+    WARNED_LEGACY.get().and_then(|m| m.lock().ok()).map(|set| set.len()).unwrap_or(0)
+}
 
 impl TokenPolicy {
     /// Build from parsed config, validating all selectors.
@@ -78,7 +134,20 @@ impl TokenPolicy {
         let mut rules = HashMap::new();
         for entry in &auth.policy {
             let access = Self::parse_access(&entry.identity, &entry.tokens)?;
-            rules.insert(entry.identity.clone(), access);
+            // W1-C3-06: store under the canonical key so accepted identities
+            // match runtime keys (uid=01000 → uid=1000).
+            let key = crate::config::normalize_policy_identity(&entry.identity);
+            // W1-C3-05: reject duplicates loudly — a silent overwrite drops
+            // the first entry's grants (false security). Comparison is on
+            // the normalized key so uid=01000 + uid=1000 also collide.
+            if rules.contains_key(&key) {
+                return Err(format!(
+                    "duplicate [[auth.policy]] identity '{}': each identity may appear only \
+                     once; merge the grants into a single entry",
+                    entry.identity
+                ));
+            }
+            rules.insert(key, access);
         }
         let has_policy = !rules.is_empty();
         let per_object_active_cache = rules.values().any(|access| {
@@ -171,9 +240,9 @@ impl TokenPolicy {
                 if !spki_sha256.is_empty() {
                     let spki_key = format!("x509:spki={spki_sha256}");
                     // Log once per unique SPKI so operators can populate SPKI-form policy entries.
-                    let logged = LOGGED_SPKI.get_or_init(|| Mutex::new(HashSet::new()));
-                    if let Ok(mut set) = logged.lock()
-                        && set.insert(spki_sha256.clone())
+                    let logged = LOGGED_SPKI.get_or_init(|| Mutex::new(LogDedupSet::new()));
+                    if let Ok(mut dedup) = logged.lock()
+                        && dedup.insert(spki_sha256.clone())
                     {
                         tracing::info!(
                             spki_key = %spki_key,
@@ -192,9 +261,9 @@ impl TokenPolicy {
                     && let Some(access) = self.rules.get(&legacy_key)
                 {
                     // Warn once per legacy key so operators know to migrate.
-                    let warned = WARNED_LEGACY.get_or_init(|| Mutex::new(HashSet::new()));
-                    if let Ok(mut set) = warned.lock()
-                        && set.insert(legacy_key.clone())
+                    let warned = WARNED_LEGACY.get_or_init(|| Mutex::new(LogDedupSet::new()));
+                    if let Ok(mut dedup) = warned.lock()
+                        && dedup.insert(legacy_key.clone())
                     {
                         let spki_display = if !spki_sha256.is_empty() {
                             format!("x509:spki={spki_sha256}")

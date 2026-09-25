@@ -24,6 +24,8 @@ mod attribute_classification;
 mod control_channel_live;
 mod cross_abi;
 mod cross_width_live;
+mod dispatch_shape;
+mod endpoint;
 mod init_args;
 mod interface;
 mod null_pointers;
@@ -31,6 +33,7 @@ mod output_semantics;
 mod regression;
 mod resource_limits;
 mod retained_oracle_live;
+mod softhsm_gcm;
 mod wait_matrix;
 
 fn empty_interface() -> CK_INTERFACE {

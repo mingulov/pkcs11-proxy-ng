@@ -5,8 +5,8 @@ use pkcs11_proxy_ng_proto::convert::message_params::MessageParameterShape;
 use pkcs11_proxy_ng_types::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use uuid::Uuid;
 
@@ -168,10 +168,11 @@ impl Drop for CloseSessionTransition {
 /// Cached object metadata for the per-object / per-class authorization gate (G3).
 ///
 /// Fetched in a single `C_GetAttributeValue` round-trip covering
-/// `CKA_UNIQUE_ID`, `CKA_CLASS`, and `CKA_TOKEN`. Only session objects
-/// (`is_token = false`) are stored in the cache; token objects are always
-/// re-fetched to prevent stale authorization against recycled backend handles
-/// (I2 fix, ADR-0012 §G3).
+/// `CKA_UNIQUE_ID`, `CKA_CLASS`, and `CKA_TOKEN`. Session objects
+/// (`is_token = false`) are cached for the virtual handle's lifetime; token
+/// objects are cached gated by the authz generation (W1-L13-18) so gated
+/// reuse avoids a backend round-trip without stale-authz risk (the I2
+/// never-cache rule it replaces; ADR-0012 §G3).
 #[derive(Debug, Clone)]
 pub struct ObjectMetadata {
     /// `CKA_UNIQUE_ID` bytes (ADR-0013: attribute values are secret-classified
@@ -203,6 +204,17 @@ pub struct CachedAttr {
     pub ck_rv: u64,
 }
 
+/// Token-object metadata tagged with the authz generation that fetched it
+/// (W1-L13-18). Reusable only while `generation` equals the manager's
+/// current generation; older entries are stale and must be re-fetched.
+#[derive(Debug, Clone)]
+pub struct GatedObjectMetadata {
+    /// Daemon-wide authz generation at fetch time.
+    pub generation: u64,
+    /// The fetched metadata.
+    pub meta: ObjectMetadata,
+}
+
 /// A logical client instance — the server-side PKCS#11 "application" (ADR-0002).
 pub struct LogicalClientInstance {
     pub id: ClientContextId,
@@ -212,15 +224,26 @@ pub struct LogicalClientInstance {
     pub session_slots: HashMap<VirtualHandle, BackendSlotId>, // session → slot ownership (ADR-0002 §7)
     pub object_handles: HandleMap,                            // virtual object → backend object
     /// Per-virtual-object cached `ObjectMetadata` (G3). **Only session objects
-    /// (`CKA_TOKEN=false`) are cached.** Token objects are never stored here —
-    /// they are re-fetched on every gate call so a cross-client backend handle
-    /// recycling event cannot cause a stale authorization decision (I2 fix).
+    /// (`CKA_TOKEN=false`) are cached here** — their lifetime is tied to the
+    /// owning session, so per-handle eviction suffices. Token objects live in
+    /// [`LogicalClientInstance::token_object_metadata`], gated by the
+    /// daemon-wide authz generation (W1-L13-18).
     ///
     /// Entries are evicted wherever `object_handles` entries are removed —
     /// on explicit `C_DestroyObject`, on session close (for session objects),
     /// and on context teardown — so a recycled virtual handle can never return
     /// stale metadata within one context.
     pub object_metadata: HashMap<VirtualHandle, ObjectMetadata>,
+    /// Per-virtual-object cached token-object `ObjectMetadata` (W1-L13-18),
+    /// each tagged with the authz generation that fetched it. An entry is
+    /// reusable only while its generation is current; any daemon-wide object
+    /// mutation (`C_DestroyObject`, `C_InitToken`) revokes the generation, so
+    /// a cross-client backend handle recycling event cannot cause a stale
+    /// authorization decision (the I2 never-cache rule, made generational).
+    ///
+    /// Evicted in the SAME removal hooks as `object_metadata` (per-handle
+    /// removal on session close and on `C_DestroyObject`, plus full teardown).
+    pub token_object_metadata: HashMap<VirtualHandle, GatedObjectMetadata>,
     /// Virtual object handles created as SESSION objects (CKA_TOKEN=false) in
     /// each virtual session. Evicted when that session closes so a recycled
     /// backend object number can never alias a stale handle (B2). Token objects
@@ -292,6 +315,7 @@ impl LogicalClientInstance {
             session_slots: HashMap::new(),
             object_handles: HandleMap::new(),
             object_metadata: HashMap::new(),
+            token_object_metadata: HashMap::new(),
             session_objects: HashMap::new(),
             created_objects: HashSet::new(),
             object_private: HashMap::new(),
@@ -335,6 +359,7 @@ impl LogicalClientInstance {
                 for object in objects {
                     self.object_handles.remove(object);
                     self.object_metadata.remove(&object);
+                    self.token_object_metadata.remove(&object);
                     self.created_objects.remove(&object);
                     self.object_private.remove(&object);
                     // Evict all cached attribute entries for this object (R2). Mirrors
@@ -372,6 +397,7 @@ impl LogicalClientInstance {
             for object in objects {
                 self.object_handles.remove(object);
                 self.object_metadata.remove(&object);
+                self.token_object_metadata.remove(&object);
                 self.created_objects.remove(&object);
                 self.object_private.remove(&object);
                 // Evict all cached attribute entries for this object (R2). Mirrors
@@ -400,6 +426,7 @@ impl LogicalClientInstance {
         self.session_slots.clear();
         self.object_handles.clear();
         self.object_metadata.clear();
+        self.token_object_metadata.clear();
         self.session_objects.clear();
         self.created_objects.clear();
         self.object_private.clear();
@@ -464,6 +491,23 @@ pub struct ContextManager {
     /// the already-logged-in token instead of the synthesized logical OK. One
     /// lock per slot id; different slots log in concurrently.
     login_locks: Arc<DashMap<BackendSlotId, Arc<Mutex<()>>>>,
+    /// Daemon-wide authz generation (W1-L13-18). Cached token-object metadata
+    /// is tagged with the generation at fetch time and reusable only while
+    /// current. Revoked (bumped) by every daemon-wide object mutation —
+    /// `C_DestroyObject` and `C_InitToken` — so a cross-client backend handle
+    /// recycling event can never validate a stale cached entry.
+    authz_generation: AtomicU64,
+    /// Outstanding per-principal session-quota reservations (W1-L6-04):
+    /// opens that passed the quota check but have not registered yet.
+    /// The quota check-and-reserve is atomic under this mutex, so
+    /// concurrent opens cannot exceed the cap. Entries are removed when
+    /// their count reaches zero, keeping the map bounded by the number of
+    /// principals with in-flight opens.
+    ///
+    /// Lock order: quota mutex OUTER, contexts-DashMap shard guards INNER
+    /// (transient, inside `session_count_for_principal`). Never acquire
+    /// this mutex while holding a contexts guard.
+    session_quota_reservations: Arc<std::sync::Mutex<HashMap<String, usize>>>,
 }
 
 /// Maximum age of a cached `(label, serial)` before an authorization check
@@ -508,6 +552,38 @@ impl Drop for OperationGuardInner {
     }
 }
 
+/// One outstanding per-principal session-quota slot (W1-L6-04), minted by
+/// [`ContextManager::try_reserve_session_for_principal`]. Dropping it
+/// releases the slot (the entry is removed at zero, bounding the map).
+pub(crate) struct SessionQuotaReservation {
+    reservations: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    principal: String,
+}
+
+impl Drop for SessionQuotaReservation {
+    fn drop(&mut self) {
+        let mut reservations = self.reservations.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = reservations.get_mut(&self.principal) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                reservations.remove(&self.principal);
+            }
+        }
+    }
+}
+
+/// Outcome of [`ContextManager::remove_context_if_idle`].
+pub enum RemoveIfIdleOutcome {
+    /// The context was removed; the caller owns teardown. Boxed: the
+    /// instance is large and the other variants are fieldless.
+    Removed(Box<LogicalClientInstance>),
+    /// The context exists but has foreign operations in flight; it was
+    /// left in place and the caller should refuse busy (retryable).
+    Busy,
+    /// No such context.
+    Missing,
+}
+
 impl ContextManager {
     pub fn new(lease_duration: std::time::Duration, max_contexts: usize) -> Self {
         Self {
@@ -517,7 +593,23 @@ impl ContextManager {
             max_contexts,
             token_info_cache: Arc::new(DashMap::new()),
             login_locks: Arc::new(DashMap::new()),
+            authz_generation: AtomicU64::new(0),
+            session_quota_reservations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Current daemon-wide authz generation (W1-L13-18). Token-object
+    /// metadata cached under an older generation is stale.
+    pub fn authz_generation(&self) -> u64 {
+        self.authz_generation.load(Ordering::SeqCst)
+    }
+
+    /// Revoke the daemon-wide authz generation (W1-L13-18), invalidating all
+    /// cached token-object metadata. Called after every daemon-wide object
+    /// mutation (`C_DestroyObject`, `C_InitToken`); session-object entries are
+    /// unaffected (their lifetime is per-handle, not generational).
+    pub fn revoke_authz_generation(&self) {
+        self.authz_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Per-slot login/logout serialization lock (M5). Acquire it (`.lock().await`)
@@ -668,17 +760,31 @@ impl ContextManager {
     /// Return the cached [`ObjectMetadata`] for `virtual_object` within context
     /// `ctx_id`, or `None` on a cache miss.
     ///
-    /// A `None` result means either the object has never been fetched, OR it is
-    /// a token object (token objects are never cached — see `cache_object_metadata`).
-    /// The caller must fetch from the backend via `fetch_object_metadata` when
-    /// this returns `None`.
+    /// Session objects hit the per-handle cache. Token objects hit only while
+    /// their entry's authz generation is current (W1-L13-18); a revoked entry
+    /// is dropped eagerly and reads as a miss. The caller must fetch from the
+    /// backend via `fetch_object_metadata` when this returns `None`.
     pub async fn object_metadata(
         &self,
         ctx_id: &ClientContextId,
         virtual_object: u64,
     ) -> Option<ObjectMetadata> {
+        let generation = self.authz_generation.load(Ordering::SeqCst);
         self.get_context(ctx_id, |ctx| {
-            ctx.object_metadata.get(&VirtualHandle(virtual_object)).cloned()
+            let vh = VirtualHandle(virtual_object);
+            if let Some(meta) = ctx.object_metadata.get(&vh) {
+                return Some(meta.clone());
+            }
+            match ctx.token_object_metadata.get(&vh) {
+                Some(gated) if gated.generation == generation => Some(gated.meta.clone()),
+                // Stale generation: drop eagerly so the entry can never
+                // validate a later gate call.
+                Some(_) => {
+                    ctx.token_object_metadata.remove(&vh);
+                    None
+                }
+                None => None,
+            }
         })
         .await
         .flatten()
@@ -686,14 +792,17 @@ impl ContextManager {
 
     /// Cache [`ObjectMetadata`] for `virtual_object` within context `ctx_id`.
     ///
-    /// **I2 fix:** token objects (`meta.is_token == true`) are NEVER cached.
-    /// They are re-fetched on every gate call so a cross-client backend handle
-    /// recycling event cannot cause a stale authorization decision.
-    ///
     /// Session objects (`!meta.is_token`) are cached and evicted together with
     /// the virtual object handle (on `C_DestroyObject`, session close, or
     /// context teardown) so a recycled virtual handle can never return stale
     /// metadata within one context.
+    ///
+    /// Token objects (`meta.is_token == true`) are cached tagged with the
+    /// current authz generation (W1-L13-18): gated reuse within the generation
+    /// avoids a backend round-trip, and any daemon-wide object mutation
+    /// revokes the generation so a cross-client backend handle recycling event
+    /// cannot cause a stale authorization decision (the I2 never-cache rule,
+    /// made generational).
     ///
     /// No-ops silently when the context no longer exists.
     pub async fn cache_object_metadata(
@@ -703,7 +812,16 @@ impl ContextManager {
         meta: ObjectMetadata,
     ) {
         if meta.is_token {
-            return; // Never cache token objects (I2 fix).
+            let generation = self.authz_generation.load(Ordering::SeqCst);
+            let _ = self
+                .get_context(ctx_id, |ctx| {
+                    ctx.token_object_metadata.insert(
+                        VirtualHandle(virtual_object),
+                        GatedObjectMetadata { generation, meta },
+                    );
+                })
+                .await;
+            return;
         }
         let _ = self
             .get_context(ctx_id, |ctx| {
@@ -728,6 +846,22 @@ impl ContextManager {
         attr: CkAttributeType,
     ) -> Option<CachedAttr> {
         self.get_context(ctx_id, |ctx| ctx.attr_cache.get(&(VirtualHandle(object), attr)).cloned())
+            .await
+            .flatten()
+    }
+
+    /// Borrow a cached attribute to build a response without cloning the
+    /// entry out of the map (W1-L13-15: single copy on the coalescer hit
+    /// path — only the wire encoding allocates). Returns `None` on a cache
+    /// miss or when the context is gone.
+    pub async fn attr_cache_get_with<R>(
+        &self,
+        ctx_id: &ClientContextId,
+        object: u64,
+        attr: CkAttributeType,
+        f: impl FnOnce(&CachedAttr) -> R,
+    ) -> Option<R> {
+        self.get_context(ctx_id, |ctx| ctx.attr_cache.get(&(VirtualHandle(object), attr)).map(f))
             .await
             .flatten()
     }
@@ -1011,16 +1145,49 @@ impl ContextManager {
         self.contexts.get(id).and_then(|ctx| ctx.authenticated_identity.clone())
     }
 
+    /// Atomically check the per-principal session quota and reserve one
+    /// slot when under `max` (W1-L6-04). Returns `None` (at cap) or
+    /// `Some(reservation)`; the reservation counts toward the cap until
+    /// dropped. `open_session` drops it once the session registers (the
+    /// live count then covers it) or when the open fails — every return
+    /// path releases, so the cap cannot leak.
+    ///
+    /// Lock order: quota mutex OUTER, contexts-DashMap shard guards INNER
+    /// (transient). Never call while holding a contexts guard.
+    ///
+    /// Not `async`: mutex + DashMap reads need no `.await` (L5).
+    pub(crate) fn try_reserve_session_for_principal(
+        &self,
+        principal_key: &str,
+        max: usize,
+    ) -> Option<SessionQuotaReservation> {
+        let mut reservations =
+            self.session_quota_reservations.lock().unwrap_or_else(|e| e.into_inner());
+        let live = self.session_count_for_principal(principal_key);
+        let outstanding = reservations.get(principal_key).copied().unwrap_or(0);
+        if live + outstanding >= max {
+            return None;
+        }
+        *reservations.entry(principal_key.to_owned()).or_insert(0) += 1;
+        Some(SessionQuotaReservation {
+            reservations: Arc::clone(&self.session_quota_reservations),
+            principal: principal_key.to_owned(),
+        })
+    }
+
     /// Sum of open sessions across ALL contexts whose principal key equals
     /// `principal_key`. A context's principal key is its `authenticated_identity`
     /// when set; otherwise the context-id string itself (mirrors the derivation
     /// used at the dispatch seam so authenticated principals aggregate across
     /// their contexts and unauthenticated contexts are counted individually).
     ///
+    /// Counts LIVE sessions only; in-flight opens hold
+    /// [`SessionQuotaReservation`]s which count toward the same cap (W1-L6-04).
+    /// Quota callers must use [`Self::try_reserve_session_for_principal`],
+    /// not a bare read of this count (check-then-act races the cap).
+    ///
     /// Not `async`: iterates the DashMap with shared shard guards, no await
-    /// needed (L5). Called from `open_session` BEFORE opening the backend
-    /// session — leak-proof because it reads live bookkeeping rather than
-    /// maintaining a separate reserve/release counter.
+    /// needed (L5).
     pub fn session_count_for_principal(&self, principal_key: &str) -> usize {
         self.contexts
             .iter()
@@ -1036,6 +1203,43 @@ impl ContextManager {
     // Not `async`: a DashMap remove needs no `.await` (L5).
     pub fn remove_context(&self, id: &ClientContextId) -> Option<LogicalClientInstance> {
         self.contexts.remove(id).map(|(_k, v)| v)
+    }
+
+    /// Remove `id` only when no FOREIGN backend operation is in flight
+    /// (W1-L6-02): the check + remove are atomic under the DashMap shard
+    /// write lock (same TOCTOU discipline as eviction's `remove_if`), so a
+    /// concurrent op that began before the removal is never cut off
+    /// mid-backend-call — `begin_operation` increments under the shard read
+    /// lock, which is mutually exclusive with this write lock.
+    ///
+    /// `own_guards` is the number of in-flight guards held by the caller
+    /// itself (finalize holds exactly one via dispatch scoping): removal
+    /// proceeds when `in_flight <= own_guards`.
+    ///
+    /// Lock order: contexts-DashMap shard lock only, held transiently;
+    /// never acquire any other lock (quota mutex, slot login locks) while
+    /// holding it, and never call this while holding one.
+    ///
+    /// Not `async`: a DashMap predicate-remove needs no `.await` (L5).
+    pub fn remove_context_if_idle(
+        &self,
+        id: &ClientContextId,
+        own_guards: i64,
+    ) -> RemoveIfIdleOutcome {
+        if let Some((_, ctx)) = self
+            .contexts
+            .remove_if(id, |_, ctx| ctx.in_flight.load(Ordering::Relaxed) <= own_guards)
+        {
+            return RemoveIfIdleOutcome::Removed(Box::new(ctx));
+        }
+        if self.contexts.contains_key(id) {
+            // Still present: the predicate refused it, so a foreign op is
+            // in flight. (A concurrent remover winning the race reports
+            // Missing instead — equally correct for the caller.)
+            RemoveIfIdleOutcome::Busy
+        } else {
+            RemoveIfIdleOutcome::Missing
+        }
     }
 
     /// True when any live context holds logical login for `slot`.
@@ -1126,7 +1330,14 @@ impl ContextManager {
         slot: BackendSlotId,
         preferred_session: Option<u64>,
     ) -> bool {
-        self.backend_logout_if_last_holder_out_inner(backend, slot, preferred_session, None).await
+        self.backend_logout_if_last_holder_out_inner(
+            backend,
+            slot,
+            preferred_session,
+            None,
+            TEARDOWN_BACKEND_TIMEOUT,
+        )
+        .await
     }
 
     /// Same as [`Self::backend_logout_if_last_holder_out`], but the
@@ -1146,6 +1357,7 @@ impl ContextManager {
             slot,
             preferred_session,
             Some(exclude),
+            TEARDOWN_BACKEND_TIMEOUT,
         )
         .await
     }
@@ -1156,6 +1368,7 @@ impl ContextManager {
         slot: BackendSlotId,
         preferred_session: Option<u64>,
         exclude: Option<&ClientContextId>,
+        timeout: Duration,
     ) -> bool {
         // Fast path without the lock: observing any live holder means no logout.
         if self.slot_login_held(slot, exclude) {
@@ -1194,8 +1407,14 @@ impl ContextManager {
         }
         for via in carriers {
             let backend = backend.clone();
-            let result =
-                tokio::task::spawn_blocking(move || backend.logout(CkSessionHandle(via))).await;
+            // W1-C2-03: route through spawn_backend so a wedged backend
+            // times out (breaker slot + stuck accounting included) instead
+            // of stalling the caller — eviction or session close — forever.
+            let result = crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
+                timeout,
+                move || backend.logout(CkSessionHandle(via)),
+            )
+            .await;
             match result {
                 Ok(Ok(())) => {
                     tracing::debug!("last-holder backend logout succeeded");
@@ -1212,11 +1431,11 @@ impl ContextManager {
                     );
                     return false;
                 }
-                Err(join_error) => {
+                Err(status) => {
                     tracing::warn!(
                         slot = slot.0.0,
-                        error = %join_error,
-                        "last-holder backend logout join failed; backend may stay logged in with no holder"
+                        error = %status,
+                        "last-holder backend logout spawn failed; backend may stay logged in with no holder"
                     );
                     return false;
                 }
@@ -1248,6 +1467,18 @@ impl ContextManager {
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
         plans: Vec<ContextTeardownPlan>,
     ) {
+        self.execute_teardown_plans_with_timeout(backend, plans, TEARDOWN_BACKEND_TIMEOUT).await;
+    }
+
+    /// [`Self::execute_teardown_plans`] with an explicit per-call backend
+    /// timeout. Tests drive wedged-backend boundedness through this; all
+    /// production callers use the default via [`Self::execute_teardown_plans`].
+    pub(crate) async fn execute_teardown_plans_with_timeout(
+        &self,
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        plans: Vec<ContextTeardownPlan>,
+        timeout: Duration,
+    ) {
         let mut logouts: HashMap<BackendSlotId, u64> = HashMap::new();
         let mut closes: Vec<u64> = Vec::new();
         for plan in plans {
@@ -1257,9 +1488,16 @@ impl ContextManager {
             closes.extend(plan.sessions_to_close);
         }
         for (slot, via_session) in logouts {
-            self.backend_logout_if_last_holder_out(backend, slot, Some(via_session)).await;
+            self.backend_logout_if_last_holder_out_inner(
+                backend,
+                slot,
+                Some(via_session),
+                None,
+                timeout,
+            )
+            .await;
         }
-        Self::close_backend_sessions(backend, closes).await;
+        Self::close_backend_sessions(backend, closes, timeout).await;
     }
 
     /// Evict expired contexts (called periodically). Returns the contexts
@@ -1270,6 +1508,17 @@ impl ContextManager {
     pub async fn evict_expired(
         &self,
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+    ) -> Vec<ClientContextId> {
+        self.evict_expired_with_timeout(backend, TEARDOWN_BACKEND_TIMEOUT).await
+    }
+
+    /// [`Self::evict_expired`] with an explicit per-call backend timeout for
+    /// the teardown phase. Tests drive wedged-backend boundedness through
+    /// this; the background reaper uses the default via [`Self::evict_expired`].
+    pub(crate) async fn evict_expired_with_timeout(
+        &self,
+        backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
+        timeout: Duration,
     ) -> Vec<ClientContextId> {
         let now = Instant::now();
         let expired = self.collect_expired_context_ids(now);
@@ -1292,7 +1541,7 @@ impl ContextManager {
                 plans.push(self.plan_removed_context_teardown(&mut ctx));
             }
         }
-        self.execute_teardown_plans(backend, plans).await;
+        self.execute_teardown_plans_with_timeout(backend, plans, timeout).await;
         evicted
     }
 
@@ -1315,19 +1564,32 @@ impl ContextManager {
     async fn close_backend_sessions(
         backend: &Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend>,
         backend_sessions: Vec<u64>,
+        timeout: Duration,
     ) {
-        if backend_sessions.is_empty() {
-            return;
+        // W1-C2-03: one bounded spawn_backend call per session (not one
+        // unbounded batch) so a wedged backend stalls reaping by at most
+        // `timeout` per session while a slow-but-live backend still drains.
+        // Best-effort: every outcome is ignored — teardown must not fail.
+        for handle in backend_sessions {
+            let backend = backend.clone();
+            let _ = crate::server::grpc_service::service_utils::spawn_backend_with_timeout(
+                timeout,
+                move || {
+                    let _ = backend.close_session(CkSessionHandle(handle));
+                    Ok(())
+                },
+            )
+            .await;
         }
-        let backend = backend.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            for handle in backend_sessions {
-                let _ = backend.close_session(CkSessionHandle(handle as u64));
-            }
-        })
-        .await;
     }
 }
+
+/// Per-call backend timeout for context-teardown work (W1-C2-03): session
+/// closes and last-holder logouts during eviction/finalize. Teardown is
+/// best-effort background reaping, so it gets a shorter bound than the
+/// data-plane `proxy.request_timeout_secs` default — a wedged backend must
+/// not stall lease reaping (or session close) beyond this per call.
+const TEARDOWN_BACKEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
 mod tests;

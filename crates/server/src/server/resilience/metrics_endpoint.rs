@@ -17,9 +17,11 @@ use super::{render_prometheus, snapshot};
 pub async fn spawn_metrics_endpoint(path: PathBuf) -> Result<(), String> {
     let listener = crate::server::transport::bind_unix_listener(&path)?;
     tokio::spawn(async move {
+        let mut consecutive_failures: u32 = 0;
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
+                    consecutive_failures = 0;
                     tokio::spawn(async move {
                         if let Err(e) = serve_conn(stream).await {
                             tracing::debug!(error = %e, "metrics connection error");
@@ -27,13 +29,31 @@ pub async fn spawn_metrics_endpoint(path: PathBuf) -> Result<(), String> {
                     });
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "metrics listener accept failed; retrying");
-                    continue;
+                    // W1-C2-02: back off so a persistent accept failure
+                    // (e.g. EMFILE) cannot busy-spin this task at 100% CPU.
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    tracing::warn!(
+                        error = %e,
+                        consecutive_failures,
+                        "metrics listener accept failed; backing off"
+                    );
+                    tokio::time::sleep(accept_failure_backoff(consecutive_failures)).await;
                 }
             }
         }
     });
     Ok(())
+}
+
+/// Delay before retrying `accept()` after `consecutive_failures` failures
+/// in a row (W1-C2-02). Exponential from a 10ms base, capped at 1s so a
+/// recovered listener resumes promptly. Pure for testability.
+fn accept_failure_backoff(consecutive_failures: u32) -> Duration {
+    const BASE_MS: u64 = 10;
+    const CAP: Duration = Duration::from_secs(1);
+    let shift = consecutive_failures.saturating_sub(1).min(7);
+    let delay = Duration::from_millis(BASE_MS.saturating_mul(1 << shift));
+    delay.min(CAP)
 }
 
 async fn serve_conn(mut stream: UnixStream) -> io::Result<()> {
@@ -80,6 +100,28 @@ mod tests {
 
     fn temp_sock(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("pkcs11-metrics-{}-{}.sock", tag, std::process::id()))
+    }
+
+    #[test]
+    fn accept_failure_backoff_grows_and_caps() {
+        // W1-C2-02: persistent accept failure must back off (bounded CPU),
+        // not busy-spin. First failure pauses briefly; sustained failure
+        // grows the delay up to a cap.
+        let first = accept_failure_backoff(1);
+        assert!(first > Duration::ZERO, "first failure must pause");
+        assert!(first <= Duration::from_millis(50), "transient failure barely pauses: {first:?}");
+        let mut prev = first;
+        for failures in 2..=10 {
+            let next = accept_failure_backoff(failures);
+            assert!(next >= prev, "backoff must not shrink: {prev:?} -> {next:?}");
+            prev = next;
+        }
+        assert!(prev > first, "sustained failure must grow the delay");
+        assert_eq!(
+            accept_failure_backoff(1_000),
+            Duration::from_secs(1),
+            "backoff must cap so a recovered listener resumes promptly"
+        );
     }
 
     #[test]

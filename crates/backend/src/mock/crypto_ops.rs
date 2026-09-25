@@ -301,6 +301,9 @@ impl MockBackend {
 
     pub(super) fn generate_random_impl(&self, len: u32) -> CkResult<SecretBytes> {
         self.check_injected()?;
+        if let Some(bytes) = self.next_random_bytes.lock().unwrap().take() {
+            return Ok(bytes.into());
+        }
         if len > Self::MAX_RANDOM_BYTES {
             return Err(CkRv::DATA_LEN_RANGE);
         }

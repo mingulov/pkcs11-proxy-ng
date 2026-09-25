@@ -1,1 +1,5 @@
+# W1-L12-03 + W1-L2-08: lint LEVELS live in the workspace `[lints]` table
+# in the root Cargo.toml (print_stdout/print_stderr/dbg_macro = "deny"),
+# not here — clippy.toml holds only per-lint configuration values.
+# `crates/server/tests/print_sink_gate.rs` audits the allow set.
 too-many-arguments-threshold = 10

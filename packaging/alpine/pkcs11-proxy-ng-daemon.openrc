@@ -1,4 +1,5 @@
 #!/sbin/openrc-run
+# shellcheck shell=sh
 
 # OpenRC service unit for pkcs11-proxy-ng on Alpine.
 #
@@ -15,6 +16,19 @@ command_background="yes"
 pidfile="/run/${name}.pid"
 output_log="/var/log/${name}.log"
 error_log="/var/log/${name}.log"
+
+# Supervise the daemon so abnormal stops — including the native-lifetime
+# exit_group(70) stop (see doc/runbooks/operating-pkcs11-proxy-ng.md and
+# doc/release/native-mechanism-ownership.md) — respawn it instead of
+# leaving it down. This is the OpenRC equivalent of the systemd unit's
+# Restart=on-failure. The daemon runs in the foreground (it never forks),
+# which supervise-daemon requires; command_background above is inert while
+# the supervisor is set. The respawn cap stops a persistently-fatal daemon
+# from hot-looping forever.
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=10
+respawn_period=300
 
 depend() {
     need net

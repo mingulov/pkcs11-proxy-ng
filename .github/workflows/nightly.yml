@@ -49,12 +49,12 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: recursive
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build test image
         run: |
@@ -90,7 +90,7 @@ jobs:
 
       - name: Upload matrix log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: matrix-log-${{ github.run_id }}
           path: matrix-run.log
@@ -103,20 +103,24 @@ jobs:
     name: Tier 0 sanity (nightly)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y protobuf-compiler
-
-      - name: Install stable toolchain with components
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
+          # W1-L16-13: single protoc version everywhere; must match
+          # mise.toml.
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned toolchain with components
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
           components: rustfmt,clippy
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -127,12 +131,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-nightly-
 
+      - name: Install cargo-deny
+        run: |
+          if ! command -v cargo-deny >/dev/null 2>&1; then
+            cargo install cargo-deny --version 0.20.2 --locked
+          fi
+
       - name: Tier 0 checks
         run: |
           cargo fmt --all -- --check
-          cargo build --workspace
-          cargo test --workspace
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo deny check
+          cargo build --workspace --locked
+          cargo test --workspace --locked
+          cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
 
   # ── Live cross-width topology matrix ─────────────────────────────────────
   # Runs the real-binary width harness (ADR-0011): daemons + SoftHSM2 over
@@ -146,12 +157,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y protobuf-compiler softhsm2 \
+          sudo apt-get install -y softhsm2 \
             gcc-multilib libc6-dev-i386 libnss3-tools
           # The i386 SoftHSM2 library conflicts with the amd64 package on
           # the compat symlink; extract it beside the system instead.
@@ -170,13 +181,22 @@ jobs:
           sudo dpkg -x libnspr4_*i386.deb /opt/nss32-i386/
           sudo dpkg -x libsqlite3-0_*i386.deb /opt/nss32-i386/
 
-      - name: Install stable toolchain with i686 target
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
+          # W1-L16-13: single protoc version everywhere; must match
+          # mise.toml.
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned toolchain with i686 target
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
           targets: i686-unknown-linux-gnu
 
       - name: Build release daemon
-        run: cargo build --release -p pkcs11-proxy-ng
+        run: cargo build --locked --release -p pkcs11-proxy-ng
 
       - name: Run live tier
         run: scripts/run-test-tiers.sh live
@@ -190,20 +210,24 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y protobuf-compiler
-
-      - name: Install stable toolchain with llvm-tools
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
+          # W1-L16-13: single protoc version everywhere; must match
+          # mise.toml.
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install pinned toolchain with llvm-tools
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@166cdddc0349c6f3c1da17f66a8fc88ec3bc4dd5 # cargo-llvm-cov
 
       - name: cargo llvm-cov (workspace)
         run: |
@@ -211,7 +235,7 @@ jobs:
           cargo llvm-cov report --summary-only | tee coverage-summary.txt
 
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage
           path: |
@@ -227,16 +251,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y protobuf-compiler
+      - name: Install protoc (pinned, matches mise.toml)
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+        with:
+          # W1-L16-13: single protoc version everywhere; must match
+          # mise.toml.
+          version: "36.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install nightly toolchain with miri
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: nightly
           components: miri
 
       # Scope notes (measured 2026-07-04): the FULL types suite takes ~2.5 h

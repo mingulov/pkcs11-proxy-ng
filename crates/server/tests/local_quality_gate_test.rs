@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 use std::{
     collections::BTreeSet,
     fs,
@@ -10,9 +13,14 @@ use serde_json::Value;
 const CI_TIER0_COMMANDS: &[&str] = &[
     "cargo fmt --all -- --check",
     "cargo audit",
-    "cargo build --workspace",
-    "cargo test --workspace",
-    "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+    // W1-L16-07: the deny policy gate is part of Tier 0 (CI needs + matrix).
+    "cargo deny check",
+    // W1-L16-06: Tier 0 builds/tests run --locked.
+    "cargo build --workspace --locked",
+    "cargo test --workspace --locked",
+    "cargo clippy --workspace --locked --all-targets --all-features -- -D warnings",
+    // W1-L17-05: the packaging smoke is part of Tier 0 (CI job + matrix).
+    "scripts/packaging-smoke.sh",
 ];
 
 struct IgnoredTestLane {
@@ -139,14 +147,6 @@ const IGNORED_TEST_TAXONOMY: &[IgnoredTestLane] = &[
         requirements: &["NSS softokn libsoftokn3.so and certutil"],
     },
     IgnoredTestLane {
-        file: "crates/server/tests/parameterized_mechanism_test.rs",
-        reason: "SoftHSM2-backed parameterized mechanism coverage",
-        commands: &[
-            "cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --ignored --test-threads=1",
-        ],
-        requirements: &["SoftHSM2 module and softhsm2-util"],
-    },
-    IgnoredTestLane {
         file: "crates/server/tests/provider_matrix_test.rs",
         reason: "Optional NSS and Kryoptic provider matrix smoke coverage",
         commands: &[
@@ -233,6 +233,103 @@ fn rust_sources_under(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
+fn supply_chain_pins_are_consistent() {
+    // W1-L16-09/10/13: one pinned toolchain, one protoc version, zero
+    // floating action tags. mise.toml is canonical for protoc;
+    // rust-toolchain.toml is canonical for the Rust channel.
+    let root = workspace_root();
+    let workflows_dir = root.join(".github/workflows");
+    let mut workflow_texts = Vec::new();
+    for entry in fs::read_dir(&workflows_dir).expect("workflows directory should be readable") {
+        let path = entry.expect("workflow entry should be readable").path();
+        if path.extension().is_some_and(|extension| extension == "yml") {
+            workflow_texts.push(fs::read_to_string(&path).expect("workflow should be readable"));
+        }
+    }
+    assert!(!workflow_texts.is_empty(), "expected workflow files");
+
+    // Protoc: single version across mise, setup-protoc steps, Dockerfile.
+    let mise = fs::read_to_string(root.join("mise.toml")).expect("mise.toml should be readable");
+    let mise_version = mise
+        .lines()
+        .find_map(|line| line.strip_prefix("protoc = \"")?.strip_suffix('"'))
+        .expect("mise.toml should pin protoc");
+    for text in &workflow_texts {
+        assert!(
+            !text.contains("protobuf-compiler"),
+            "workflows should use pinned setup-protoc, not distro protobuf-compiler"
+        );
+    }
+    let dockerfile = fs::read_to_string(root.join("Dockerfile.test"))
+        .expect("Dockerfile.test should be readable");
+    assert!(
+        !dockerfile.contains("protobuf-compiler"),
+        "Dockerfile.test should use pinned protoc, not distro protobuf-compiler"
+    );
+    assert!(
+        dockerfile.contains(&format!("ARG PROTOC_VERSION={mise_version}")),
+        "Dockerfile.test protoc should match mise.toml ({mise_version})"
+    );
+    let mut setup_protoc_steps = 0;
+    for text in &workflow_texts {
+        setup_protoc_steps += text.matches("uses: arduino/setup-protoc@").count();
+    }
+    assert!(setup_protoc_steps > 0, "expected setup-protoc steps");
+    let mut pinned_protoc_steps = 0;
+    for text in &workflow_texts {
+        pinned_protoc_steps += text.matches(&format!("version: \"{mise_version}\"")).count();
+    }
+    assert_eq!(
+        pinned_protoc_steps, setup_protoc_steps,
+        "every setup-protoc step should pin protoc {mise_version}"
+    );
+
+    // Toolchain: rust-toolchain.toml channel mirrored in CI + Dockerfile.
+    let toolchain_file = fs::read_to_string(root.join("rust-toolchain.toml"))
+        .expect("rust-toolchain.toml should exist");
+    let channel = toolchain_file
+        .lines()
+        .find_map(|line| line.strip_prefix("channel = \"")?.strip_suffix('"'))
+        .expect("rust-toolchain.toml should pin a channel");
+    assert_ne!(channel, "stable", "toolchain pin should not float on stable");
+    for text in &workflow_texts {
+        assert!(
+            !text.contains("dtolnay/rust-toolchain@stable"),
+            "workflows should not float the toolchain action on @stable"
+        );
+        assert!(
+            !text.contains("dtolnay/rust-toolchain@nightly"),
+            "workflows should not float the toolchain action on @nightly"
+        );
+    }
+    assert!(
+        dockerfile.contains(&format!("ARG RUST_TOOLCHAIN={channel}")),
+        "Dockerfile.test toolchain should match rust-toolchain.toml ({channel})"
+    );
+    assert!(
+        workflow_texts.iter().any(|text| text.contains("toolchain: 1.88")),
+        "MSRV job should keep Rust 1.88"
+    );
+
+    // Actions: pinned to SHAs, never floating major tags.
+    for text in &workflow_texts {
+        for line in text.lines().map(str::trim) {
+            let Some(pinned) =
+                line.strip_prefix("- uses: ").or_else(|| line.strip_prefix("uses: "))
+            else {
+                continue;
+            };
+            let reference =
+                pinned.split('#').next().unwrap_or("").trim().split('@').nth(1).unwrap_or("");
+            assert!(
+                reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit()),
+                "action `{pinned}` should be pinned to a 40-char commit SHA"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_matrix_fast_only_matches_ci_tier0_commands() {
     let root = workspace_root();
     let test_matrix = fs::read_to_string(root.join("scripts/test-matrix.sh"))
@@ -277,9 +374,12 @@ fn ci_workflow_runs_cargo_audit_before_build_and_test() {
         "CI should have a dedicated cargo audit job"
     );
     assert!(ci_workflow.contains("cargo audit"), "CI should run cargo audit");
+    // W1-L16-07: the deny policy gate blocks the main leg like audit does.
+    assert!(ci_workflow.contains("name: Cargo Deny"), "CI should have a dedicated cargo deny job");
+    assert!(ci_workflow.contains("cargo deny check"), "CI should run cargo deny check");
     assert!(
-        ci_workflow.contains("needs: [fmt, audit]"),
-        "build-and-test should depend on fmt and audit"
+        ci_workflow.contains("needs: [fmt, audit, deny]"),
+        "build-and-test should depend on fmt, audit, and deny"
     );
 }
 
@@ -361,11 +461,448 @@ fn dockerfile_test_references_current_workspace_crates() {
 
     for package_name in package_names {
         assert!(
-            dockerfile.contains("cargo build --workspace")
+            // W1-L16-06: workspace builds in Dockerfile.test run --locked.
+            dockerfile.contains("cargo build --locked --workspace")
                 || dockerfile.contains(&format!("-p {package_name}")),
             "Dockerfile.test should build package `{package_name}` by name or build the workspace"
         );
     }
+}
+
+// ── W1-L17 (Task 23): release determinism + consumer-tier honesty ──────────
+
+/// Body of a named workflow step: the de-indented `run` lines between
+/// `      - name: <name>` and the next step header.
+fn workflow_step_body(workflow: &str, name: &str) -> String {
+    let header = format!("      - name: {name}");
+    let mut body = String::new();
+    let mut in_step = false;
+    for line in workflow.lines() {
+        if line == header {
+            in_step = true;
+            continue;
+        }
+        if in_step {
+            if line.starts_with("      - name: ") {
+                break;
+            }
+            if let Some(code) = line.strip_prefix("          ") {
+                body.push_str(code);
+                body.push('\n');
+            }
+        }
+    }
+    assert!(!body.is_empty(), "workflow step `{name}` should exist with a run body");
+    body
+}
+
+/// Body of a top-level shell function: from `<name>() {` through the closing
+/// `}` at column 0.
+fn shell_function_body(script: &str, name: &str) -> String {
+    let header = format!("{name}() {{");
+    let mut body = String::new();
+    let mut in_function = false;
+    for line in script.lines() {
+        if line == header {
+            in_function = true;
+        }
+        if in_function {
+            body.push_str(line);
+            body.push('\n');
+            if line == "}" {
+                break;
+            }
+        }
+    }
+    assert!(!body.is_empty(), "shell function `{name}` should exist");
+    body
+}
+
+#[test]
+fn ci_locked_builds_match_documented_gate_set() {
+    // W1-L17-01: Task 22 (L16-06) put --locked on every CI build/test/check/
+    // clippy line; this gate confirms that coverage holds and that
+    // doc/development.md's G-7 gate text (notably the MSRV lines) matches
+    // the enforced CI commands.
+    const GATED_VERBS: &[&str] = &[
+        "cargo build",
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+        "cargo xwin",
+        "cargo install",
+    ];
+    let root = workspace_root();
+    let ci_workflow = fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml should be readable");
+    for line in ci_workflow.lines() {
+        let trimmed = line.trim();
+        // Comments describe gates; step names label them; neither executes.
+        if trimmed.starts_with('#')
+            || trimmed.starts_with("- name:")
+            || trimmed.starts_with("name:")
+        {
+            continue;
+        }
+        if GATED_VERBS.iter().any(|verb| trimmed.contains(verb)) {
+            assert!(trimmed.contains("--locked"), "CI cargo line should run --locked: `{trimmed}`");
+        }
+    }
+
+    let development = fs::read_to_string(root.join("doc/development.md"))
+        .expect("doc/development.md should be readable");
+    let mut in_fence = false;
+    for line in development.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            continue;
+        }
+        if GATED_VERBS.iter().any(|verb| line.contains(verb)) {
+            assert!(
+                line.contains("--locked"),
+                "development.md cargo line should run --locked: `{line}`"
+            );
+        }
+    }
+    // The MSRV lines must mirror the enforced CI MSRV job (locked
+    // all-targets build plus the locked test suite), not a bare build.
+    for msrv_command in [
+        "cargo +1.88.0 build --workspace --locked --all-targets",
+        "cargo +1.88.0 test --workspace --locked",
+    ] {
+        assert!(
+            development.contains(msrv_command),
+            "development.md should document the enforced MSRV command `{msrv_command}`"
+        );
+    }
+    assert!(
+        ci_workflow.contains("cargo build --workspace --locked --all-targets"),
+        "CI MSRV job should keep the locked all-targets build"
+    );
+    assert!(
+        ci_workflow.contains("cargo test --workspace --locked"),
+        "CI MSRV job should keep the locked test suite"
+    );
+}
+
+#[test]
+fn release_receipt_path_is_version_parameterized() {
+    // W1-L17-02: the G-3 receipt step derives the receipt path (and the
+    // tag-delta allowlist) from the tag version, so a new version needs no
+    // workflow edit. Behavioral proof lives in
+    // scripts/test-verify-quality-receipt.sh (v0.3.0 fixtures); this pins
+    // the parameterization statically per-PR.
+    let root = workspace_root();
+    let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect(".github/workflows/release.yml should be readable");
+    let step = workflow_step_body(&release, "Verify quality receipt");
+    assert!(
+        step.contains("GITHUB_REF_NAME"),
+        "receipt step should derive the receipt path from the tag version"
+    );
+    assert!(!step.contains("v0.2.0"), "receipt step should not hardcode a release version");
+}
+
+#[test]
+fn release_tarball_sets_gzip_n() {
+    // W1-L17-04: the Linux bundle tarball suppresses the gzip header
+    // timestamp/name (GZIP=-n), byte-reproducible like the Windows ZIP.
+    let root = workspace_root();
+    let release = fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect(".github/workflows/release.yml should be readable");
+    let step = workflow_step_body(&release, "Package release tarball + checksums");
+    assert!(step.contains("tar "), "tarball step should invoke tar");
+    assert!(
+        step.contains("GZIP=-n"),
+        "tarball step should set GZIP=-n for byte-reproducible gzip output"
+    );
+}
+
+#[test]
+fn packaging_split_is_explicit_with_per_pr_smoke() {
+    // W1-L17-05: full APK/RPM carrier builds stay in external GitLab by
+    // design; the split is documented there and GitHub runs a per-PR
+    // packaging smoke (mirror + syntax) instead.
+    let root = workspace_root();
+    let gitlab =
+        fs::read_to_string(root.join(".gitlab-ci.yml")).expect(".gitlab-ci.yml should be readable");
+    assert!(
+        gitlab.contains("packaging-smoke"),
+        ".gitlab-ci.yml should document the by-design split and name the GitHub per-PR smoke"
+    );
+    let ci_workflow = fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml should be readable");
+    assert!(
+        ci_workflow.contains("scripts/packaging-smoke.sh"),
+        "CI should run the per-PR packaging smoke"
+    );
+    let smoke = root.join("scripts/packaging-smoke.sh");
+    assert!(smoke.is_file(), "scripts/packaging-smoke.sh should exist");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&smoke)
+            .expect("packaging smoke script should be readable")
+            .permissions()
+            .mode();
+        assert!(mode & 0o111 != 0, "scripts/packaging-smoke.sh should be executable");
+    }
+}
+
+#[test]
+fn ci_jobs_all_set_timeouts() {
+    // W1-L17-07: every ci.yml job sets timeout-minutes; none inherits the
+    // 6h default.
+    let root = workspace_root();
+    let ci_workflow = fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect(".github/workflows/ci.yml should be readable");
+    let mut jobs: Vec<(String, bool)> = Vec::new();
+    let mut in_jobs = false;
+    for line in ci_workflow.lines() {
+        if line == "jobs:" {
+            in_jobs = true;
+            continue;
+        }
+        if !in_jobs {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if line.starts_with("  ")
+            && !line.starts_with("   ")
+            && line.ends_with(':')
+            && !trimmed.starts_with('#')
+        {
+            jobs.push((trimmed.trim_end_matches(':').to_string(), false));
+            continue;
+        }
+        if let Some(current) = jobs.last_mut()
+            && !current.1
+            && let Some(value) = line.strip_prefix("    timeout-minutes: ")
+        {
+            let minutes: u32 = value.trim().parse().expect("timeout-minutes should be numeric");
+            assert!(
+                (5..=120).contains(&minutes),
+                "timeout-minutes should be a bounded non-default value, got {minutes}"
+            );
+            current.1 = true;
+        }
+    }
+    assert!(!jobs.is_empty(), "expected ci.yml jobs");
+    for (name, has_timeout) in &jobs {
+        assert!(has_timeout, "ci.yml job `{name}` should set timeout-minutes");
+    }
+}
+
+/// Inner texts of every `(not ...)` atom in a pkcs11-check `--match`
+/// expression, via paren matching.
+fn not_atoms(match_expr: &str) -> Vec<String> {
+    let bytes = match_expr.as_bytes();
+    let mut atoms = Vec::new();
+    let mut i = 0;
+    while i + 5 <= bytes.len() {
+        if bytes[i..i + 5] == *b"(not " {
+            let mut depth = 1;
+            let mut j = i + 5;
+            while j < bytes.len() && depth > 0 {
+                match bytes[j] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            assert_eq!(depth, 0, "unbalanced parens in exclusion expression");
+            atoms.push(match_expr[i + 5..j - 1].to_string());
+            i = j;
+        } else {
+            i += match_expr[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        }
+    }
+    atoms
+}
+
+// W1-L17-09: the cross-platform exclusion record. Every exclusion is
+// provider/framework-side only (proven red WITHOUT the proxy); proxy bugs
+// are never excluded. Changing the workflow list requires updating this
+// record + its justification together, so exclusion edits trip review.
+const XPLAT_PINNED_EXCLUSIONS: &[&str] = &[
+    "test_ckr_digest",
+    "test_ckr_keygen",
+    "test_ckr_sign",
+    "test_ckr_verify",
+    "test_arithmetic_overflow",
+    "test_cve_regression",
+    "test_ffi_length_boundary",
+    "test_padding_oracle",
+    "test_parameter_validation",
+    "test_scalar_attr_length_extended",
+    "test_tookan",
+    "test_mech_negative",
+    "test_operation_termination",
+    "test_set_attribute or test_set_attribute_after_destroy or test_set_attribute_token_object_in_ro_fails",
+    "test_verify_operability",
+    "(test_ckr_decrypt and test_key_type_inconsistent)",
+    "(test_ckr_encrypt and test_key_size_range)",
+    "test_bad_mechanism_with_bad_key_size",
+    "(test_null_template_nonzero_count and C_GenerateKey)",
+    "test_dh_rejects_tiny_prime",
+];
+
+#[test]
+fn xplat_exclusion_list_matches_pinned_record() {
+    // W1-L17-09: the exclusion list is gated — any add/remove fails here
+    // until the pinned record + justification move together. The KAT-only
+    // residual itself stays narrowed explicitly (gate-script docstring),
+    // never widened silently.
+    let root = workspace_root();
+    let xplat = fs::read_to_string(root.join(".github/workflows/cross-platform.yml"))
+        .expect(".github/workflows/cross-platform.yml should be readable");
+    assert!(
+        xplat.contains("Owner rule:"),
+        "cross-platform.yml should keep the exclusion owner rule"
+    );
+    assert!(
+        xplat.contains("xplat_exclusion_list_matches_pinned_record"),
+        "cross-platform.yml should point exclusion edits at the pinned-record gate test"
+    );
+    let match_line = xplat
+        .lines()
+        .find(|line| line.contains("EXTRA_P11CHECK_ARGS"))
+        .expect("cross-platform.yml should set EXTRA_P11CHECK_ARGS");
+    let mut atoms = not_atoms(match_line);
+    atoms.sort();
+    let mut pinned: Vec<String> = XPLAT_PINNED_EXCLUSIONS.iter().map(ToString::to_string).collect();
+    pinned.sort();
+    assert_eq!(
+        atoms, pinned,
+        "EXTRA_P11CHECK_ARGS exclusions should match the pinned record (update both + justification together)"
+    );
+    let gate = fs::read_to_string(root.join("scripts/ci-direct-vs-proxy.py"))
+        .expect("scripts/ci-direct-vs-proxy.py should be readable");
+    assert!(
+        gate.contains("Known residual"),
+        "gate script should keep documenting the KAT-only residual scope"
+    );
+}
+
+#[test]
+fn version_mirror_check_is_shared() {
+    // W1-L17-10: one 4-mirror version definition, sourced by all three
+    // release scripts (plus the L17-05 packaging smoke).
+    let root = workspace_root();
+    let lib = fs::read_to_string(root.join("scripts/lib/version-mirrors.sh"))
+        .expect("scripts/lib/version-mirrors.sh should exist");
+    assert!(
+        lib.contains("check_version_mirrors"),
+        "shared lib should define check_version_mirrors"
+    );
+    for mirror in [
+        ".gitlab-ci.yml",
+        "packaging/alpine/APKBUILD",
+        "packaging/amazon/pkcs11-proxy-ng.spec",
+        "packaging/amazon/Dockerfile.amazon",
+    ] {
+        assert!(lib.contains(mirror), "shared lib should define the {mirror} mirror");
+    }
+    // The Dockerfile-ARG extraction program is the canary: it must exist in
+    // exactly one place (the lib), never inlined per script.
+    let mut definitions = lib.matches("ARG APP_VERSION=([^[:space:]]+)").count();
+    for script in [
+        "scripts/release-dry-run.sh",
+        "scripts/release-windows.sh",
+        "scripts/verify-release-subject.sh",
+        "scripts/packaging-smoke.sh",
+    ] {
+        let text =
+            fs::read_to_string(root.join(script)).expect("release script should be readable");
+        assert!(
+            text.contains("version-mirrors.sh"),
+            "{script} should source the shared mirror check"
+        );
+        definitions += text.matches("ARG APP_VERSION=([^[:space:]]+)").count();
+    }
+    assert_eq!(definitions, 1, "the 4-mirror definition should live in exactly one place");
+}
+
+#[test]
+fn nss_fixture_lane_runs_by_default() {
+    // W1-L17-11: the NSS fixture lane runs in a default test-matrix run;
+    // the opt-out is a real --skip-nss-fixtures flag, not an unset var.
+    let root = workspace_root();
+    let matrix = fs::read_to_string(root.join("scripts/test-matrix.sh"))
+        .expect("scripts/test-matrix.sh should be readable");
+    assert!(
+        matrix.contains("test-nss-fixtures.sh"),
+        "test-matrix.sh should wire the NSS fixture lane"
+    );
+    assert!(
+        matrix.contains("--skip-nss-fixtures"),
+        "test-matrix.sh should offer a real --skip-nss-fixtures flag"
+    );
+    assert!(
+        matrix.matches("--skip-nss-fixtures").count() >= 2,
+        "--skip-nss-fixtures should appear in both usage and the parser"
+    );
+    assert!(matrix.contains("run_nss_fixtures=1"), "NSS fixture lane should default on");
+    assert!(!matrix.contains("RUN_NSS_FIXTURES"), "NSS lane should not gate on an env var");
+    assert!(
+        !matrix.contains("--run-nss-fixtures"),
+        "test-matrix.sh should not cite a nonexistent flag"
+    );
+    // The lane's old Docker hang was certutil -S reading an infinite -z
+    // noise file (NSS reads to EOF; /dev/urandom never EOFs): pin the
+    // finite-noise fix.
+    let fixtures = fs::read_to_string(root.join("scripts/test-nss-fixtures.sh"))
+        .expect("scripts/test-nss-fixtures.sh should be readable");
+    assert!(
+        !fixtures.contains("-z /dev/urandom"),
+        "fixture cert seeding must use a finite noise file, never /dev/urandom"
+    );
+}
+
+#[test]
+fn consumer_tier_fails_on_pkcs11test_failure() {
+    // W1-L17-23: a failing pkcs11test fails the consumer tier; its output
+    // is captured to a per-tag log, not discarded with || true.
+    let root = workspace_root();
+    let consumers = fs::read_to_string(root.join("scripts/test-consumers.sh"))
+        .expect("scripts/test-consumers.sh should be readable");
+    let suite = shell_function_body(&consumers, "run_pkcs11test_suite");
+    let code: String = suite
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!code.contains("|| true"), "pkcs11test must not force success with || true");
+    assert!(
+        suite.contains("pkcs11test-$tag.log"),
+        "pkcs11test output should be captured to a per-tag log"
+    );
+    assert!(
+        suite.contains("return \"$rc\""),
+        "pkcs11test failure should propagate its exit status"
+    );
+}
+
+#[test]
+fn consumer_tier_daemon_boot_uses_readiness_probe() {
+    // W1-L17-24: daemon boot waits on a readiness probe (port + liveness),
+    // not a fixed sleep.
+    let root = workspace_root();
+    let consumers = fs::read_to_string(root.join("scripts/test-consumers.sh"))
+        .expect("scripts/test-consumers.sh should be readable");
+    assert!(!consumers.contains("sleep 1"), "daemon boot should not use a fixed sleep");
+    assert!(
+        consumers.contains("wait_for_daemon() {"),
+        "test-consumers.sh should define a daemon readiness probe"
+    );
+    assert!(
+        consumers.contains("wait_for_daemon \"$daemon_pid\" \"$PORT\""),
+        "daemon boot should wait on the readiness probe"
+    );
 }
 
 #[test]
@@ -2077,6 +2614,121 @@ fn oasis_inventory_cites_local_tests_for_safe_represented_parameter_shapes() {
         missing.is_empty(),
         "safe represented parameter shapes should cite local tests: {missing:?}"
     );
+}
+
+/// `rust_variant`s of the safe represented mechanism shapes: FFI conversion +
+/// proto message + shim read support, with no unsupported reasons (the same
+/// filter as `oasis_inventory_cites_local_tests_for_safe_represented_parameter_shapes`).
+fn safe_represented_shape_variants(inventory: &Value) -> Vec<String> {
+    inventory["mechanism_parameter_shape_matrix"]
+        .as_array()
+        .expect("mechanism_parameter_shape_matrix should be an array")
+        .iter()
+        .filter(|entry| {
+            entry["backend_ffi_conversion"] == true
+                && entry["proto_message"].is_string()
+                && entry["shim_read_support"] == true
+                && entry["unsupported_reason"].is_null()
+                && entry["shim_read_unsupported_reason"].is_null()
+        })
+        .map(|entry| {
+            entry["rust_variant"].as_str().expect("rust_variant should be a string").to_owned()
+        })
+        .collect()
+}
+
+/// `variant: "..."` entries of the real-backend shape driver table
+/// (`support/shape_matrix.rs`): every entry is pushed through the live
+/// SoftHSM2 stack by `softhsm_all_param_shapes_execute` (executed when the
+/// provider advertises the mechanism, honestly skipped otherwise, zero
+/// transport failures tolerated).
+fn driver_shape_variants(root: &Path) -> Vec<String> {
+    let path = root.join("crates/server/tests/support/shape_matrix.rs");
+    let src =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("should read {}: {e}", path.display()));
+    let mut variants = Vec::new();
+    for line in src.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("variant: \"")
+            && let Some(end) = rest.find('"')
+        {
+            variants.push(rest[..end].to_owned());
+        }
+    }
+    assert!(!variants.is_empty(), "shape driver table should list variants");
+    variants
+}
+
+/// Split inventory variants vs driver variants into `(unproven, stale)`:
+/// inventory shapes with no real-backend driver entry, and driver entries
+/// with no inventory shape. Both must be empty.
+fn unproven_shape_variants(inventory: &[String], driver: &[String]) -> (Vec<String>, Vec<String>) {
+    let driver_set: BTreeSet<&str> = driver.iter().map(String::as_str).collect();
+    let inventory_set: BTreeSet<&str> = inventory.iter().map(String::as_str).collect();
+    let mut unproven: Vec<String> =
+        inventory.iter().filter(|v| !driver_set.contains(v.as_str())).cloned().collect();
+    let mut stale: Vec<String> =
+        driver.iter().filter(|v| !inventory_set.contains(v.as_str())).cloned().collect();
+    unproven.sort();
+    stale.sort();
+    (unproven, stale)
+}
+
+#[test]
+fn oasis_inventory_safe_shapes_have_real_backend_driver_coverage() {
+    // W1-L9-13: per-shape real-backend gate giving AGENTS §7/§12-step-8
+    // teeth beyond MockBackend-local test strings. Every safe represented
+    // shape must be covered by the live SoftHSM2 shape driver
+    // (`softhsm_all_param_shapes_execute` over `support/shape_matrix.rs`),
+    // which executes each advertised shape through the full FFI stack and
+    // honestly skips the rest with zero transport failures. A new shape
+    // with proto+mock tests but no driver entry fails here.
+    let root = workspace_root();
+    let Some(inventory) = oasis_inventory_json(&root) else {
+        return;
+    };
+
+    // The proof itself must exist — not just the table it runs over.
+    let driver_test =
+        fs::read_to_string(root.join("crates/server/tests/parameterized_mechanism_test.rs"))
+            .expect("parameterized mechanism driver should be readable");
+    assert!(
+        driver_test.contains("fn softhsm_all_param_shapes_execute"),
+        "real-backend shape driver test must exist"
+    );
+
+    let safe = safe_represented_shape_variants(&inventory);
+    assert!(!safe.is_empty(), "inventory should list safe represented shapes");
+    let driver = driver_shape_variants(&root);
+    let all_inventory: Vec<String> = inventory["mechanism_parameter_shape_matrix"]
+        .as_array()
+        .expect("mechanism_parameter_shape_matrix should be an array")
+        .iter()
+        .map(|entry| {
+            entry["rust_variant"].as_str().expect("rust_variant should be a string").to_owned()
+        })
+        .collect();
+    // Unproven is measured against the SAFE set (driver legitimately also
+    // covers unsafe shapes the inventory marks unsupported); stale is
+    // measured against ALL inventory shapes in both directions fail-closed.
+    let (unproven, _) = unproven_shape_variants(&safe, &driver);
+    let (_, stale) = unproven_shape_variants(&all_inventory, &driver);
+    assert!(unproven.is_empty(), "safe shapes without real-backend driver proof: {unproven:?}");
+    assert!(stale.is_empty(), "driver entries without an inventory shape: {stale:?}");
+}
+
+#[test]
+fn real_backend_shape_gate_trips_on_unplugged_shape() {
+    // W1-L9-13 negative control: unplug one shape from the real-backend
+    // driver set and the gate flags exactly that shape as unproven; a stale
+    // driver entry trips the reverse direction.
+    let inventory = vec!["Gcm".to_string(), "Iv".to_string(), "Raw".to_string()];
+    let driver = vec!["Gcm".to_string(), "Stale".to_string()];
+    let (unproven, stale) = unproven_shape_variants(&inventory, &driver);
+    assert_eq!(unproven, vec!["Iv".to_string(), "Raw".to_string()]);
+    assert_eq!(stale, vec!["Stale".to_string()]);
+    let (unproven, stale) = unproven_shape_variants(&inventory, &inventory);
+    assert!(unproven.is_empty() && stale.is_empty());
 }
 
 #[test]
@@ -4921,5 +5573,184 @@ fn class1_dispatch_sites_use_classified_input_reader() {
                 );
             }
         }
+    }
+}
+
+/// W1-L4-11: every `CkMechanismParams` variant and every official
+/// parameter-requiring mechanism must resolve to a default TOML shape.
+/// Known residuals are pinned as explicit exclusions in the inventory; any new
+/// gap (e.g. removing a `[[params]]` entry) fails this gate.
+#[test]
+fn oasis_inventory_default_toml_shape_coverage_has_no_gaps() {
+    let root = workspace_root();
+    let Some(inventory) = oasis_inventory_json(&root) else {
+        return;
+    };
+    let coverage = &inventory["default_shape_coverage"];
+
+    let variant_gaps = coverage["param_variants_missing_default_shape"]
+        .as_array()
+        .expect("param_variants_missing_default_shape should be an array");
+    assert!(
+        variant_gaps.is_empty(),
+        "every CkMechanismParams variant should have a default TOML shape: {variant_gaps:?}"
+    );
+
+    let mechanism_gaps = coverage["official_param_mechanisms_missing_default_shape"]
+        .as_array()
+        .expect("official_param_mechanisms_missing_default_shape should be an array");
+    assert!(
+        mechanism_gaps.is_empty(),
+        "every official param-requiring mechanism should have a default TOML shape: {mechanism_gaps:?}"
+    );
+
+    // The check must actually measure coverage, not vacuously pass.
+    assert!(
+        coverage["toml_shape_count"].as_u64().unwrap_or(0) > 0,
+        "default TOML should define shapes"
+    );
+    assert!(
+        coverage["rust_variant_count"].as_u64().unwrap_or(0) > 0,
+        "CkMechanismParams variants should be enumerated"
+    );
+    // Pinned residuals stay documented, not silently dropped.
+    assert!(
+        coverage["variant_exclusions"]["Raw"].is_string(),
+        "Raw fallback exclusion should stay documented"
+    );
+}
+
+/// W1-L11-21: the shim-dead per-function byte-output RPCs are retained
+/// for CLI/compat under ONE documented decision — not silently.
+///
+/// * `service.proto` carries the retention notice: it names every legacy
+///   RPC plus the removal version (delimited BEGIN/END block).
+/// * Every corresponding server handler carries the uniform legacy
+///   marker (same text everywhere = handled consistently).
+///
+/// Covering a new per-function RPC with the Exact family without
+/// retiring it or listing it here fails this gate.
+#[test]
+fn legacy_per_function_rpcs_have_documented_retention() {
+    // (rpc name, handler source file, handler fn anchor)
+    const LEGACY: &[(&str, &str, &str)] = &[
+        ("Sign", "crates/server/src/server/grpc_service/sign_verify/sign.rs", "async fn sign("),
+        (
+            "SignFinal",
+            "crates/server/src/server/grpc_service/sign_verify/sign.rs",
+            "async fn sign_final(",
+        ),
+        (
+            "SignRecover",
+            "crates/server/src/server/grpc_service/sign_verify/sign.rs",
+            "async fn sign_recover(",
+        ),
+        (
+            "VerifyRecover",
+            "crates/server/src/server/grpc_service/sign_verify/verify.rs",
+            "async fn verify_recover(",
+        ),
+        (
+            "Digest",
+            "crates/server/src/server/grpc_service/digest_cipher/digest.rs",
+            "async fn digest(",
+        ),
+        (
+            "DigestFinal",
+            "crates/server/src/server/grpc_service/digest_cipher/digest.rs",
+            "async fn digest_final(",
+        ),
+        (
+            "Encrypt",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn encrypt(",
+        ),
+        (
+            "EncryptUpdate",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn encrypt_update(",
+        ),
+        (
+            "EncryptFinal",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn encrypt_final(",
+        ),
+        (
+            "Decrypt",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn decrypt(",
+        ),
+        (
+            "DecryptUpdate",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn decrypt_update(",
+        ),
+        (
+            "DecryptFinal",
+            "crates/server/src/server/grpc_service/digest_cipher/cipher.rs",
+            "async fn decrypt_final(",
+        ),
+        (
+            "DigestEncryptUpdate",
+            "crates/server/src/server/grpc_service/combined/sign_encrypt.rs",
+            "async fn digest_encrypt_update(",
+        ),
+        (
+            "SignEncryptUpdate",
+            "crates/server/src/server/grpc_service/combined/sign_encrypt.rs",
+            "async fn sign_encrypt_update(",
+        ),
+        (
+            "DecryptDigestUpdate",
+            "crates/server/src/server/grpc_service/combined/decrypt_digest.rs",
+            "async fn decrypt_digest_update(",
+        ),
+        (
+            "DecryptVerifyUpdate",
+            "crates/server/src/server/grpc_service/combined/decrypt_digest.rs",
+            "async fn decrypt_verify_update(",
+        ),
+        (
+            "GetOperationState",
+            "crates/server/src/server/grpc_service/state_ops/operation_state.rs",
+            "async fn get_operation_state(",
+        ),
+        (
+            "WrapKey",
+            "crates/server/src/server/grpc_service/key_ops/wrapping.rs",
+            "async fn wrap_key(",
+        ),
+        (
+            "EncapsulateKey",
+            "crates/server/src/server/grpc_service/key_ops/kem.rs",
+            "async fn encapsulate_key(",
+        ),
+    ];
+    const MARKER: &str = "NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto)";
+
+    let root = workspace_root();
+    let proto = fs::read_to_string(root.join("proto/pkcs11-proxy-ng/v1/service.proto"))
+        .expect("service.proto should be readable");
+    let begin = proto
+        .find("Legacy per-function retention (W1-L11-21) - BEGIN")
+        .expect("service.proto must carry the legacy retention notice block");
+    let end = proto
+        .find("Legacy per-function retention (W1-L11-21) - END")
+        .expect("service.proto retention notice must be delimited");
+    assert!(begin < end, "retention notice delimiters out of order");
+    let notice = &proto[begin..end];
+    assert!(notice.contains("v0.4.0"), "retention notice must state the removal version");
+    for (rpc, _, _) in LEGACY {
+        assert!(notice.contains(rpc), "retention notice must name the legacy rpc {rpc}");
+    }
+
+    for (rpc, file, anchor) in LEGACY {
+        let src = fs::read_to_string(root.join(file)).expect("handler source readable");
+        let at = src.find(anchor).unwrap_or_else(|| panic!("{file} must define {anchor}"));
+        let window_start = at.saturating_sub(600);
+        assert!(
+            src[window_start..at].contains(MARKER),
+            "{file} handler for legacy rpc {rpc} must carry the uniform legacy marker"
+        );
     }
 }

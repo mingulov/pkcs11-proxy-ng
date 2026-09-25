@@ -49,6 +49,8 @@ impl MockBackend {
         session: CkSessionHandle,
         max_count: u32,
     ) -> CkResult<Vec<CkObjectHandle>> {
+        use std::sync::atomic::Ordering;
+        self.find_objects_calls.fetch_add(1, Ordering::SeqCst);
         let state = self.state.lock().unwrap();
         if !state.has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
@@ -65,6 +67,12 @@ impl MockBackend {
         // length can observe multi-batch behaviour: batch1 → batch2 → [] exhausted.
         let overridden = self.find_objects_override.lock().unwrap().clone();
         if let Some(objects) = overridden {
+            // W1-C11-04 harness: an installed gate can reject the most
+            // recent init template (e.g. wrong CKA_CLASS), in which case
+            // the search misses exactly like a real backend's would.
+            if !self.find_template_gate_passes() {
+                return Ok(vec![]);
+            }
             let mut cursor = self.find_objects_cursor.lock().unwrap();
             let start = *cursor;
             let remaining = objects.len().saturating_sub(start);

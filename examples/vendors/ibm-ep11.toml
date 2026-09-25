@@ -3,8 +3,15 @@
 #
 # Reference: ep11.h (https://github.com/IBM-Cloud/hpcs-grep11/blob/master/ep11.h)
 # Vendor base: CKM_VENDOR_DEFINED + 0x10000 range
+#
+# NOTE (W1-L8-06): `parameterless` must stay a single top-level list
+# (before the first [[params]]): TOML attaches a bare key written after
+# a [[params]] header to that table, where the strict registry loader
+# rejects it — and duplicate top-level keys are invalid TOML.
 
 # --- SHA-3 family (parameterless) ---
+# --- EdDSA (parameterless) ---
+# --- Schnorr signatures (parameterless) ---
 parameterless = [
   0x80010001, # CKM_IBM_SHA3_224
   0x80010002, # CKM_IBM_SHA3_256
@@ -14,12 +21,9 @@ parameterless = [
   0x80010006, # CKM_IBM_SHA3_256_HMAC
   0x80010007, # CKM_IBM_SHA3_384_HMAC
   0x80010008, # CKM_IBM_SHA3_512_HMAC
-]
-
-# --- EdDSA (parameterless) ---
-parameterless = [
   0x80010020, # CKM_IBM_ED25519_SHA512
   0x80010021, # CKM_IBM_ED448_SHA3
+  0x80010025, # CKM_IBM_ECDSA_OTHER (Schnorr)
 ]
 
 # --- AES-CMAC ---
@@ -30,26 +34,25 @@ mechanisms = [0x80010009]  # CKM_IBM_CMAC
 # --- Post-quantum cryptography ---
 # NOT-YET-IMPLEMENTED(dilithium): pre-standard IBM PQC name; backend FFI
 # reconstruction needs the ep11.h C struct layout (not in cryptoki-sys).
-# Fail-closed PARAM_INVALID until then; official CKM_ML_DSA flows instead.
-[[params]]
-shape = "dilithium"
-mechanisms = [0x80010023]  # CKM_IBM_DILITHIUM
+# Commented out: unknown shapes fail registry load loudly (W1-L8-06) —
+# uncomment once the shape ships; official CKM_ML_DSA flows instead.
+# [[params]]
+# shape = "dilithium"
+# mechanisms = [0x80010023]  # CKM_IBM_DILITHIUM
 
 # NOT-YET-IMPLEMENTED(kyber): pre-standard IBM PQC name; backend FFI
 # reconstruction needs the ep11.h C struct layout (not in cryptoki-sys).
-# Fail-closed PARAM_INVALID until then; official CKM_ML_KEM flows instead.
-[[params]]
-shape = "kyber"
-mechanisms = [0x80010024]  # CKM_IBM_KYBER
+# Commented out: unknown shapes fail registry load loudly (W1-L8-06) —
+# uncomment once the shape ships; official CKM_ML_KEM flows instead.
+# [[params]]
+# shape = "kyber"
+# mechanisms = [0x80010024]  # CKM_IBM_KYBER
 
 # --- Blockchain key derivation ---
 # NOT-YET-IMPLEMENTED(hd_key_derive): backend FFI reconstruction needs
-# the EP11 BTC/ETH derive C struct layout. Fail-closed until then.
-[[params]]
-shape = "hd_key_derive"
-mechanisms = [0x80070001, 0x80070002]  # CKM_IBM_BTC_DERIVE, CKM_IBM_ETH_DERIVE
-
-# --- Schnorr signatures (parameterless) ---
-parameterless = [
-  0x80010025, # CKM_IBM_ECDSA_OTHER (Schnorr)
-]
+# the EP11 BTC/ETH derive C struct layout.
+# Commented out: unknown shapes fail registry load loudly (W1-L8-06) —
+# uncomment once the shape ships.
+# [[params]]
+# shape = "hd_key_derive"
+# mechanisms = [0x80070001, 0x80070002]  # CKM_IBM_BTC_DERIVE, CKM_IBM_ETH_DERIVE

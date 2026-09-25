@@ -88,8 +88,11 @@ run_pkcs11test_suite() {
     module_name="$(basename "$module")"
     slot_dec=$((16#$slot_hex))
 
+    # W1-L17-23: a failing pkcs11test fails the tier. Capture the output
+    # to a per-tag log and propagate the failure instead of forcing success.
+    local log="$tmpdir/pkcs11test-$tag.log"
     echo "[pkcs11test/$tag] curated compatibility subset"
-    pkcs11test \
+    if pkcs11test \
         -m "$module_name" \
         -l "$module_dir" \
         -s "$slot_dec" \
@@ -98,7 +101,16 @@ run_pkcs11test_suite() {
         -X \
         --gtest_color=no \
         --gtest_brief=1 \
-        --gtest_filter="$filter" >/dev/null 2>&1 || true
+        --gtest_filter="$filter" >"$log" 2>&1; then
+        echo "[pkcs11test/$tag] passed (log: $log)"
+        return 0
+    else
+        # $? here is pkcs11test's status (an if without else returns 0).
+        local rc=$?
+        echo "[pkcs11test/$tag] FAILED (exit $rc); output follows:" >&2
+        cat "$log" >&2
+        return "$rc"
+    fi
 }
 
 run_pkcs11_tool_baseline_suite() {
@@ -164,6 +176,29 @@ run_pkcs11_tool_key_suite() {
         --login \
         --set-pin="$pin" \
         --list-all "pkcs11:token=$token_label" >/dev/null
+}
+
+# W1-L17-24: wait until the daemon accepts TCP on 127.0.0.1:$port (or fail
+# loud when the process dies or the timeout lapses), instead of a fixed
+# sleep. Same probe shape as harness_start_daemon in lib/live-harness.sh.
+wait_for_daemon() {
+    local pid="$1" port="$2" logfile="$3" timeout_s="${4:-30}"
+    local deadline=$((SECONDS + timeout_s))
+    while ((SECONDS < deadline)); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "Daemon (pid $pid) exited during startup; log follows:" >&2
+            cat "$logfile" >&2
+            return 1
+        fi
+        if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+            exec 3>&- 3<&-
+            return 0
+        fi
+        sleep 0.2
+    done
+    echo "Daemon did not listen on 127.0.0.1:$port within ${timeout_s}s; log tail follows:" >&2
+    tail -n 50 "$logfile" >&2
+    return 1
 }
 
 cd "$ROOT_DIR"
@@ -247,7 +282,7 @@ EOF
 
 "$DAEMON_BIN" "$tmpdir/daemon.toml" >"$tmpdir/daemon.log" 2>&1 &
 daemon_pid="$!"
-sleep 1
+wait_for_daemon "$daemon_pid" "$PORT" "$tmpdir/daemon.log" 30
 
 export PKCS11_PROXY_ENDPOINT="http://127.0.0.1:$PORT"
 shim_slot_hex="$(find_token_slot_hex "$SHIM_LIB")"

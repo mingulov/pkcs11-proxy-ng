@@ -20,7 +20,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::EncapsulateKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             public_key_handle: public_key.0,
             template: proto_template,
             template_null: template.is_none(),
@@ -42,7 +42,7 @@ impl Pkcs11Client {
         let mut req = pkcs11_proxy_ng_proto::DecapsulateKeyRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             private_key_handle: private_key.0,
             template: proto_template,
             template_null: template.is_none(),

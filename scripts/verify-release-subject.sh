@@ -14,6 +14,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/version-mirrors.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/version-mirrors.sh"
 cd "$ROOT_DIR"
 
 TAG="${1:-${GITHUB_REF_NAME:-}}"
@@ -56,18 +58,11 @@ if ! grep -Eq "^## \\[${BASE_ESCAPED}\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELO
     exit 1
 fi
 
-for mirror in \
-    ".gitlab-ci.yml:$(sed -nE 's/^  APP_VERSION: \"([^\"]+)\"$/\1/p' .gitlab-ci.yml)" \
-    "packaging/alpine/APKBUILD:$(sed -nE 's/^pkgver=([^[:space:]]+)$/\1/p' packaging/alpine/APKBUILD)" \
-    "packaging/amazon/pkcs11-proxy-ng.spec:$(sed -nE 's/^Version:[[:space:]]+([^[:space:]]+)[[:space:]]*$/\1/p' packaging/amazon/pkcs11-proxy-ng.spec)" \
-    "packaging/amazon/Dockerfile.amazon:$(sed -nE 's/^ARG APP_VERSION=([^[:space:]]+)$/\1/p' packaging/amazon/Dockerfile.amazon)"; do
-    mirror_path="${mirror%%:*}"
-    mirror_version="${mirror#*:}"
-    if [[ "$mirror_version" != "$CARGO_VERSION" ]]; then
-        echo "::error::$mirror_path version $mirror_version does not match Cargo $CARGO_VERSION; refusing to release." >&2
-        echo "expected $mirror_path version $CARGO_VERSION" >&2
-        exit 1
-    fi
-done
+mirror_diagnostics="$(check_version_mirrors "$CARGO_VERSION" 2>&1)" || {
+    echo "::error::packaging version mirrors disagree with Cargo $CARGO_VERSION; refusing to release." >&2
+    echo "$mirror_diagnostics" >&2
+    echo "expected every packaging mirror at version $CARGO_VERSION" >&2
+    exit 1
+}
 
 echo "release subject verified: tag $TAG matches Cargo $CARGO_VERSION"

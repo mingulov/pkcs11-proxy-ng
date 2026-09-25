@@ -84,7 +84,7 @@ impl MockBackend {
             key: key.0,
             mechanism_type: mechanism.mechanism_type.0,
             embedded_key: match mechanism.params.as_ref() {
-                Some(CkMechanismParams::Gostr3410KeyWrap(p)) => Some(p.key_handle),
+                Some(CkMechanismParams::Gostr3410KeyWrap(p)) => Some(p.key_handle.0),
                 _ => None,
             },
             parameter_present: mechanism.params.is_some(),

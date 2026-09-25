@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Provider-specific object-template compatibility tests (Item 83).
 //!
 //! These tests exercise keygen and import templates with SoftHSM2 to

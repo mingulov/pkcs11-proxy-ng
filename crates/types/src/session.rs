@@ -5,6 +5,13 @@ use crate::slot::CkSlotId;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CkFlags(pub u64);
 
+impl CkFlags {
+    /// CKF_DONT_BLOCK: non-blocking `C_WaitForSlotEvent` (flags value 1).
+    pub const DONT_BLOCK: u64 = 0x0000_0001;
+    /// CKF_END_OF_MESSAGE: final part of a multipart message operation.
+    pub const END_OF_MESSAGE: u64 = 0x0000_0001;
+}
+
 /// Virtual session handle — scoped to logical client instance (ADR-0002 §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CkSessionHandle(pub u64);
@@ -117,6 +124,15 @@ mod tests {
         for v in [3u64, 4, 9, 99, u64::MAX] {
             assert_eq!(CkUserType::from_raw(v), None, "from_raw({v}) should be None");
         }
+    }
+
+    // W1-C9-09: CkFlags carries named CKF_ constants (OASIS PKCS#11 v3.2,
+    // verified against cryptoki-sys 0.5.0); no consumer re-declares them.
+    #[test]
+    fn ck_flags_named_constants() {
+        assert_eq!(CkFlags::DONT_BLOCK, 0x0000_0001);
+        assert_eq!(CkFlags::END_OF_MESSAGE, 0x0000_0001);
+        assert_eq!(CkFlags(CkFlags::DONT_BLOCK).0, 1);
     }
 
     #[test]

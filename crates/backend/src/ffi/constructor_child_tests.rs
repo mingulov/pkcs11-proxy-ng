@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 #![cfg(all(test, unix))]
 //! Subprocess-only constructor battery (TO26a group 1): permanent-denial
 //! paths that cannot run in-process because they poison the process-global

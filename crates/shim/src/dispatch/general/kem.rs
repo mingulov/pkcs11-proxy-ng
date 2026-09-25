@@ -64,7 +64,10 @@ pub unsafe extern "C" fn c_encapsulate_key(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_ciphertext, pul_ciphertext_len) };
 
         let result = with_client!(client => client.encapsulate_key_exact(
@@ -107,7 +110,10 @@ pub unsafe extern "C" fn c_decapsulate_key(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         let ciphertext = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_ciphertext, ul_ciphertext_len)
         }) {
@@ -158,7 +164,8 @@ mod tests {
             )
         };
 
-        assert_eq!(rv, CKR_GENERAL_ERROR as CK_RV);
+        // W1-L3-05: unified exact-output violation RV (was GENERAL_ERROR).
+        assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
         assert_eq!(ciphertext_canary, 0xa5);
         assert_eq!(key_handle, handle_canary);
     }

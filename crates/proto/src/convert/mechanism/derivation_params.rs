@@ -7,7 +7,8 @@ use crate::pkcs11_proxy_ng::v1 as v1_proto;
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use crate::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::{
-    CkMechanismType, CkRv, Ecdh2DeriveParams, EcdhAesKeyWrapParams, EcmqvDeriveParams, EddsaParams,
+    CkKdf, CkMechanismType, CkMgf, CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource,
+    CkRv, Ecdh2DeriveParams, EcdhAesKeyWrapParams, EcmqvDeriveParams, EddsaParams,
     Gostr3410DeriveParams, Gostr3410KeyWrapParams, HkdfParams, KeaDeriveParams,
     KeyWrapSetOaepParams, PbeParams, Pkcs5Pbkd2Params, RsaAesKeyWrapParams, RsaPkcsOaepParams,
     SecretBytes, X942Dh1DeriveParams, X942Dh2DeriveParams, X942MqvDeriveParams,
@@ -20,11 +21,11 @@ use pkcs11_proxy_ng_types::{
 impl From<&Ecdh2DeriveParams> for v1_proto::Ecdh2DeriveParams {
     fn from(p: &Ecdh2DeriveParams) -> Self {
         Self {
-            kdf: p.kdf,
+            kdf: p.kdf.0,
             shared_data: secret_to_plain(&p.shared_data),
             public_data: p.public_data.clone(),
             private_data_len: p.private_data_len,
-            private_data_handle: p.private_data_handle,
+            private_data_handle: p.private_data_handle.0,
             public_data2: p.public_data2.clone(),
         }
     }
@@ -33,11 +34,11 @@ impl From<&Ecdh2DeriveParams> for v1_proto::Ecdh2DeriveParams {
 impl From<&v1_proto::Ecdh2DeriveParams> for Ecdh2DeriveParams {
     fn from(p: &v1_proto::Ecdh2DeriveParams) -> Self {
         Self {
-            kdf: p.kdf,
+            kdf: CkKdf(p.kdf),
             shared_data: SecretBytes::copy_from_slice(&p.shared_data),
             public_data: p.public_data.clone(),
             private_data_len: p.private_data_len,
-            private_data_handle: p.private_data_handle,
+            private_data_handle: CkObjectHandle(p.private_data_handle),
             public_data2: p.public_data2.clone(),
         }
     }
@@ -50,13 +51,13 @@ impl From<&v1_proto::Ecdh2DeriveParams> for Ecdh2DeriveParams {
 impl From<&EcmqvDeriveParams> for v1_proto::EcmqvDeriveParams {
     fn from(p: &EcmqvDeriveParams) -> Self {
         Self {
-            kdf: p.kdf,
+            kdf: p.kdf.0,
             shared_data: secret_to_plain(&p.shared_data),
             public_data: p.public_data.clone(),
             private_data_len: p.private_data_len,
-            private_data_handle: p.private_data_handle,
+            private_data_handle: p.private_data_handle.0,
             public_data2: p.public_data2.clone(),
-            public_key_handle: p.public_key_handle,
+            public_key_handle: p.public_key_handle.0,
         }
     }
 }
@@ -64,13 +65,13 @@ impl From<&EcmqvDeriveParams> for v1_proto::EcmqvDeriveParams {
 impl From<&v1_proto::EcmqvDeriveParams> for EcmqvDeriveParams {
     fn from(p: &v1_proto::EcmqvDeriveParams) -> Self {
         Self {
-            kdf: p.kdf,
+            kdf: CkKdf(p.kdf),
             shared_data: SecretBytes::copy_from_slice(&p.shared_data),
             public_data: p.public_data.clone(),
             private_data_len: p.private_data_len,
-            private_data_handle: p.private_data_handle,
+            private_data_handle: CkObjectHandle(p.private_data_handle),
             public_data2: p.public_data2.clone(),
-            public_key_handle: p.public_key_handle,
+            public_key_handle: CkObjectHandle(p.public_key_handle),
         }
     }
 }
@@ -82,7 +83,7 @@ impl From<&v1_proto::EcmqvDeriveParams> for EcmqvDeriveParams {
 impl From<&X942Dh1DeriveParams> for v1_proto::X942Dh1DeriveParams {
     fn from(p: &X942Dh1DeriveParams) -> Self {
         Self {
-            kdf: p.kdf,
+            kdf: p.kdf.0,
             other_info: secret_to_plain(&p.other_info),
             public_data: p.public_data.clone(),
         }
@@ -92,7 +93,7 @@ impl From<&X942Dh1DeriveParams> for v1_proto::X942Dh1DeriveParams {
 impl From<&v1_proto::X942Dh1DeriveParams> for X942Dh1DeriveParams {
     fn from(p: &v1_proto::X942Dh1DeriveParams) -> Self {
         Self {
-            kdf: p.kdf,
+            kdf: CkKdf(p.kdf),
             other_info: SecretBytes::copy_from_slice(&p.other_info),
             public_data: p.public_data.clone(),
         }
@@ -106,11 +107,11 @@ impl From<&v1_proto::X942Dh1DeriveParams> for X942Dh1DeriveParams {
 impl From<&X942Dh2DeriveParams> for v1_proto::X942Dh2DeriveParams {
     fn from(p: &X942Dh2DeriveParams) -> Self {
         Self {
-            kdf: p.kdf,
+            kdf: p.kdf.0,
             other_info: secret_to_plain(&p.other_info),
             public_data: p.public_data.clone(),
             private_data_len: p.private_data_len,
-            private_data_handle: p.private_data_handle,
+            private_data_handle: p.private_data_handle.0,
             public_data2: p.public_data2.clone(),
         }
     }
@@ -119,11 +120,11 @@ impl From<&X942Dh2DeriveParams> for v1_proto::X942Dh2DeriveParams {
 impl From<&v1_proto::X942Dh2DeriveParams> for X942Dh2DeriveParams {
     fn from(p: &v1_proto::X942Dh2DeriveParams) -> Self {
         Self {
-            kdf: p.kdf,
+            kdf: CkKdf(p.kdf),
             other_info: SecretBytes::copy_from_slice(&p.other_info),
             public_data: p.public_data.clone(),
             private_data_len: p.private_data_len,
-            private_data_handle: p.private_data_handle,
+            private_data_handle: CkObjectHandle(p.private_data_handle),
             public_data2: p.public_data2.clone(),
         }
     }
@@ -136,13 +137,13 @@ impl From<&v1_proto::X942Dh2DeriveParams> for X942Dh2DeriveParams {
 impl From<&X942MqvDeriveParams> for v1_proto::X942MqvDeriveParams {
     fn from(p: &X942MqvDeriveParams) -> Self {
         Self {
-            kdf: p.kdf,
+            kdf: p.kdf.0,
             other_info: secret_to_plain(&p.other_info),
             public_data: p.public_data.clone(),
             private_data_len: p.private_data_len,
-            private_data_handle: p.private_data_handle,
+            private_data_handle: p.private_data_handle.0,
             public_data2: p.public_data2.clone(),
-            public_key_handle: p.public_key_handle,
+            public_key_handle: p.public_key_handle.0,
         }
     }
 }
@@ -150,13 +151,13 @@ impl From<&X942MqvDeriveParams> for v1_proto::X942MqvDeriveParams {
 impl From<&v1_proto::X942MqvDeriveParams> for X942MqvDeriveParams {
     fn from(p: &v1_proto::X942MqvDeriveParams) -> Self {
         Self {
-            kdf: p.kdf,
+            kdf: CkKdf(p.kdf),
             other_info: SecretBytes::copy_from_slice(&p.other_info),
             public_data: p.public_data.clone(),
             private_data_len: p.private_data_len,
-            private_data_handle: p.private_data_handle,
+            private_data_handle: CkObjectHandle(p.private_data_handle),
             public_data2: p.public_data2.clone(),
-            public_key_handle: p.public_key_handle,
+            public_key_handle: CkObjectHandle(p.public_key_handle),
         }
     }
 }
@@ -170,10 +171,10 @@ impl From<&HkdfParams> for v1_proto::HkdfParams {
         Self {
             extract: p.extract,
             expand: p.expand,
-            prf_hash_mechanism: p.prf_hash_mechanism,
+            prf_hash_mechanism: p.prf_hash_mechanism.0,
             salt_type: p.salt_type,
             salt: secret_to_plain(&p.salt),
-            salt_key_handle: p.salt_key_handle,
+            salt_key_handle: p.salt_key_handle.0,
             info: secret_to_plain(&p.info),
         }
     }
@@ -184,10 +185,10 @@ impl From<&v1_proto::HkdfParams> for HkdfParams {
         Self {
             extract: p.extract,
             expand: p.expand,
-            prf_hash_mechanism: p.prf_hash_mechanism,
+            prf_hash_mechanism: CkMechanismType(p.prf_hash_mechanism),
             salt_type: p.salt_type,
             salt: SecretBytes::copy_from_slice(&p.salt),
-            salt_key_handle: p.salt_key_handle,
+            salt_key_handle: CkObjectHandle(p.salt_key_handle),
             info: SecretBytes::copy_from_slice(&p.info),
         }
     }
@@ -215,13 +216,13 @@ impl From<&v1_proto::EddsaParams> for EddsaParams {
 
 impl From<&Gostr3410DeriveParams> for v1_proto::Gostr3410DeriveParams {
     fn from(p: &Gostr3410DeriveParams) -> Self {
-        Self { kdf: p.kdf, public_data: p.public_data.clone(), ukm: p.ukm.clone() }
+        Self { kdf: p.kdf.0, public_data: p.public_data.clone(), ukm: p.ukm.clone() }
     }
 }
 
 impl From<&v1_proto::Gostr3410DeriveParams> for Gostr3410DeriveParams {
     fn from(p: &v1_proto::Gostr3410DeriveParams) -> Self {
-        Self { kdf: p.kdf, public_data: p.public_data.clone(), ukm: p.ukm.clone() }
+        Self { kdf: CkKdf(p.kdf), public_data: p.public_data.clone(), ukm: p.ukm.clone() }
     }
 }
 
@@ -259,7 +260,7 @@ impl From<&EcdhAesKeyWrapParams> for v1_proto::EcdhAesKeyWrapParams {
     fn from(p: &EcdhAesKeyWrapParams) -> Self {
         Self {
             aes_key_bits: p.aes_key_bits,
-            kdf: p.kdf,
+            kdf: p.kdf.0,
             shared_data: secret_to_plain(&p.shared_data),
         }
     }
@@ -269,7 +270,7 @@ impl From<&v1_proto::EcdhAesKeyWrapParams> for EcdhAesKeyWrapParams {
     fn from(p: &v1_proto::EcdhAesKeyWrapParams) -> Self {
         Self {
             aes_key_bits: p.aes_key_bits,
-            kdf: p.kdf,
+            kdf: CkKdf(p.kdf),
             shared_data: SecretBytes::copy_from_slice(&p.shared_data),
         }
     }
@@ -285,8 +286,8 @@ impl From<&RsaAesKeyWrapParams> for v1_proto::RsaAesKeyWrapParams {
             aes_key_bits: p.aes_key_bits,
             oaep_params: Some(v1_proto::RsaPkcsOaepParams {
                 hash_alg: p.oaep_params.hash_alg.0,
-                mgf: p.oaep_params.mgf,
-                source: p.oaep_params.source,
+                mgf: p.oaep_params.mgf.0,
+                source: p.oaep_params.source.0,
                 source_data: secret_to_plain(&p.oaep_params.source_data),
                 source_null: p.oaep_params.source_null,
             }),
@@ -303,8 +304,8 @@ impl TryFrom<&v1_proto::RsaAesKeyWrapParams> for RsaAesKeyWrapParams {
             aes_key_bits: p.aes_key_bits,
             oaep_params: RsaPkcsOaepParams {
                 hash_alg: CkMechanismType(o.hash_alg),
-                mgf: o.mgf,
-                source: o.source,
+                mgf: CkMgf(o.mgf),
+                source: CkOaepSource(o.source),
                 source_data: SecretBytes::copy_from_slice(&o.source_data),
                 source_null: o.source_null,
             },
@@ -318,13 +319,17 @@ impl TryFrom<&v1_proto::RsaAesKeyWrapParams> for RsaAesKeyWrapParams {
 
 impl From<&Gostr3410KeyWrapParams> for v1_proto::Gostr3410KeyWrapParams {
     fn from(p: &Gostr3410KeyWrapParams) -> Self {
-        Self { wrap_oid: p.wrap_oid.clone(), ukm: p.ukm.clone(), key_handle: p.key_handle }
+        Self { wrap_oid: p.wrap_oid.clone(), ukm: p.ukm.clone(), key_handle: p.key_handle.0 }
     }
 }
 
 impl From<&v1_proto::Gostr3410KeyWrapParams> for Gostr3410KeyWrapParams {
     fn from(p: &v1_proto::Gostr3410KeyWrapParams) -> Self {
-        Self { wrap_oid: p.wrap_oid.clone(), ukm: p.ukm.clone(), key_handle: p.key_handle }
+        Self {
+            wrap_oid: p.wrap_oid.clone(),
+            ukm: p.ukm.clone(),
+            key_handle: CkObjectHandle(p.key_handle),
+        }
     }
 }
 
@@ -370,6 +375,22 @@ impl From<&v1_proto::PbeParams> for PbeParams {
     }
 }
 
+// Owned-adopting conversion (W1-L2-04): takes ownership of the password
+// buffers out of the prost message instead of copying them, so after
+// adoption the password bytes exist in exactly one wiped-on-drop owner.
+// The source message is left with empty buffers; its drop wipes any
+// residual via the derived `ZeroizeOnDrop` impl (see build.rs).
+impl From<&mut v1_proto::PbeParams> for PbeParams {
+    fn from(p: &mut v1_proto::PbeParams) -> Self {
+        Self {
+            init_vector: SecretBytes::new(std::mem::take(&mut p.init_vector)),
+            password: SecretBytes::new(std::mem::take(&mut p.password)),
+            salt: SecretBytes::new(std::mem::take(&mut p.salt)),
+            iteration: p.iteration,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PBE: Pkcs5Pbkd2Params
 // ---------------------------------------------------------------------------
@@ -377,10 +398,10 @@ impl From<&v1_proto::PbeParams> for PbeParams {
 impl From<&Pkcs5Pbkd2Params> for v1_proto::Pkcs5Pbkd2Params {
     fn from(p: &Pkcs5Pbkd2Params) -> Self {
         Self {
-            salt_source: p.salt_source,
+            salt_source: p.salt_source.0,
             salt_source_data: secret_to_plain(&p.salt_source_data),
             iterations: p.iterations,
-            prf: p.prf,
+            prf: p.prf.0,
             prf_data: secret_to_plain(&p.prf_data),
             password: secret_to_plain(&p.password),
         }
@@ -390,12 +411,30 @@ impl From<&Pkcs5Pbkd2Params> for v1_proto::Pkcs5Pbkd2Params {
 impl From<&v1_proto::Pkcs5Pbkd2Params> for Pkcs5Pbkd2Params {
     fn from(p: &v1_proto::Pkcs5Pbkd2Params) -> Self {
         Self {
-            salt_source: p.salt_source,
+            salt_source: CkPbkdf2SaltSource(p.salt_source),
             salt_source_data: SecretBytes::copy_from_slice(&p.salt_source_data),
             iterations: p.iterations,
-            prf: p.prf,
+            prf: CkPbkdf2Prf(p.prf),
             prf_data: SecretBytes::copy_from_slice(&p.prf_data),
             password: SecretBytes::copy_from_slice(&p.password),
+        }
+    }
+}
+
+// Owned-adopting conversion (W1-L2-04): takes ownership of the password
+// buffers out of the prost message instead of copying them, so after
+// adoption the password bytes exist in exactly one wiped-on-drop owner.
+// The source message is left with empty buffers; its drop wipes any
+// residual via the derived `ZeroizeOnDrop` impl (see build.rs).
+impl From<&mut v1_proto::Pkcs5Pbkd2Params> for Pkcs5Pbkd2Params {
+    fn from(p: &mut v1_proto::Pkcs5Pbkd2Params) -> Self {
+        Self {
+            salt_source: CkPbkdf2SaltSource(p.salt_source),
+            salt_source_data: SecretBytes::new(std::mem::take(&mut p.salt_source_data)),
+            iterations: p.iterations,
+            prf: CkPbkdf2Prf(p.prf),
+            prf_data: SecretBytes::new(std::mem::take(&mut p.prf_data)),
+            password: SecretBytes::new(std::mem::take(&mut p.password)),
         }
     }
 }

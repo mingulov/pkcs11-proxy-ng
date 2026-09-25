@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -36,6 +36,63 @@ static CLIENT_INIT: Mutex<()> = Mutex::new(());
 /// `C_Initialize` must re-read connection configuration instead of reusing a
 /// channel that may point at an old daemon.
 static CLIENT_RECONNECT_REQUIRED: AtomicBool = AtomicBool::new(false);
+
+/// Cached pre-init failed-dial outcome (W1-C7-01). A pre-init probe against
+/// an unreachable daemon burns one full dial series (~21 s at the default
+/// 10 attempts + backoff); without a cache, every `C_GetFunctionList` /
+/// `C_GetInterfaceList` / `C_GetInterface` call re-pays it. The key folds
+/// the pid and endpoint together so a forked child and an endpoint change
+/// both miss the cache and dial fresh — lock-free on purpose, so no
+/// fork-inherited mutex is ever touched on this path.
+static PRE_INIT_CONNECT_FAILED: AtomicBool = AtomicBool::new(false);
+static PRE_INIT_CONNECT_FAILED_KEY: AtomicU64 = AtomicU64::new(0);
+
+/// Dial-series counter, test-only: each `connect_with_retry` invocation is
+/// one series of up to `MAX_ATTEMPTS` attempts.
+#[cfg(test)]
+static CONNECT_SERIES: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(test)]
+pub(crate) fn connect_series_count() -> u32 {
+    CONNECT_SERIES.load(Ordering::Relaxed)
+}
+
+fn pre_init_failure_key(endpoint: &str) -> u64 {
+    // FNV-1a over the pid + endpoint; compared only within this process.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in std::process::id().to_le_bytes().iter().chain(endpoint.as_bytes()) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Whether the pre-init dial to the current endpoint already failed.
+/// Consulted only while `!is_initialized()`; `C_Initialize` sets the
+/// initialized flag before connecting, so it always dials fresh.
+pub(crate) fn pre_init_connect_failed() -> bool {
+    if !PRE_INIT_CONNECT_FAILED.load(Ordering::Acquire) {
+        return false;
+    }
+    // W1-L8-02: an unresolvable endpoint (e.g. tls:// socket) has no
+    // cache key; report "no cached failure" so the probe reaches the
+    // connect path, which surfaces the loud parse error.
+    let Ok(endpoint) = resolve_endpoint_from_env() else {
+        return false;
+    };
+    PRE_INIT_CONNECT_FAILED_KEY.load(Ordering::Relaxed) == pre_init_failure_key(&endpoint)
+}
+
+fn record_pre_init_connect_failure(endpoint: &str) {
+    PRE_INIT_CONNECT_FAILED_KEY.store(pre_init_failure_key(endpoint), Ordering::Relaxed);
+    PRE_INIT_CONNECT_FAILED.store(true, Ordering::Release);
+}
+
+/// Drop any cached pre-init dial failure. Called on successful connect,
+/// reconnect-required, re-probe/cache-clear, and by tests for isolation.
+pub(crate) fn clear_pre_init_connect_failure() {
+    PRE_INIT_CONNECT_FAILED.store(false, Ordering::Release);
+}
 
 /// The mechanism registry uses a two-level wrapper:
 ///
@@ -151,15 +208,14 @@ pub fn mark_finalized() {
 /// Require the next client access to connect from the current environment.
 pub fn mark_client_reconnect_required() {
     CLIENT_RECONNECT_REQUIRED.store(true, Ordering::Release);
+    // A forced reconnect must dial fresh — never reuse a cached failure.
+    clear_pre_init_connect_failure();
 }
 
 pub type SessionByteCacheMap = Mutex<HashMap<CK_SESSION_HANDLE, Vec<u8>>>;
 pub type SessionSlotMap = Mutex<HashMap<CK_SESSION_HANDLE, CK_SLOT_ID>>;
-type SessionMechanismParamMap = Mutex<HashMap<CK_SESSION_HANDLE, usize>>;
 
 static SESSION_SLOTS: LazyLock<SessionSlotMap> = LazyLock::new(|| Mutex::new(HashMap::new()));
-static DELAYED_GCM_WRITEBACK: LazyLock<SessionMechanismParamMap> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum MessageOperation {
@@ -208,25 +264,6 @@ pub(crate) fn remember_session_slot(h_session: CK_SESSION_HANDLE, slot_id: CK_SL
 
 fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
     if let Ok(mut map) = SESSION_SLOTS.lock() {
-        map.remove(&h_session);
-    }
-}
-
-pub(crate) fn remember_delayed_gcm_writeback(
-    h_session: CK_SESSION_HANDLE,
-    mechanism_param_addr: usize,
-) {
-    if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
-        map.insert(h_session, mechanism_param_addr);
-    }
-}
-
-pub(crate) fn take_delayed_gcm_writeback(h_session: CK_SESSION_HANDLE) -> Option<usize> {
-    DELAYED_GCM_WRITEBACK.lock().ok().and_then(|mut map| map.remove(&h_session))
-}
-
-pub(crate) fn clear_delayed_gcm_writeback(h_session: CK_SESSION_HANDLE) {
-    if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
         map.remove(&h_session);
     }
 }
@@ -456,9 +493,6 @@ pub(crate) fn clear_all_caches() {
     if let Ok(mut map) = SESSION_SLOTS.lock() {
         map.clear();
     }
-    if let Ok(mut map) = DELAYED_GCM_WRITEBACK.lock() {
-        map.clear();
-    }
     if let Ok(mut map) = MESSAGE_OPERATION_STATES.lock() {
         map.clear();
     }
@@ -473,7 +507,6 @@ fn evict_disposable_output_caches_for_session(h_session: CK_SESSION_HANDLE) {
     if let Ok(mut map) = encapsulate_cache().lock() {
         map.remove(&h_session);
     }
-    clear_delayed_gcm_writeback(h_session);
 }
 
 /// Drop only retryable/two-call output material, without changing session
@@ -550,17 +583,45 @@ pub fn runtime() -> &'static Runtime {
     fresh
 }
 
+/// Loud warning when `PKCS11_PROXY_CONNECT_TIMEOUT` is set but not a
+/// valid second count (W1-L8-15). Returns `None` when the var is unset
+/// or parses — the call site logs `Some` via `tracing::warn!` and the
+/// value still falls back to the 5 s default, but never silently.
+pub(crate) fn connect_timeout_warning(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None => None,
+        Some(value) => match value.parse::<u64>() {
+            Ok(_) => None,
+            Err(_) => Some(format!(
+                "PKCS11_PROXY_CONNECT_TIMEOUT={value:?} is not a valid number of seconds; \
+                 using default 5"
+            )),
+        },
+    }
+}
+
 fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {
-    let endpoint = resolve_endpoint_from_env();
-    let timeout_secs: u64 = std::env::var("PKCS11_PROXY_CONNECT_TIMEOUT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5);
+    // W1-L8-02: a malformed endpoint (e.g. tls:// socket) fails the
+    // connect outright — never dial a fallback on the caller's behalf.
+    // The parse error is already logged loudly by the resolver.
+    let endpoint = resolve_endpoint_from_env().map_err(|_| CkRv::DEVICE_ERROR)?;
+    let timeout_raw = std::env::var("PKCS11_PROXY_CONNECT_TIMEOUT").ok();
+    if let Some(warning) = connect_timeout_warning(timeout_raw.as_deref()) {
+        tracing::warn!("{warning}");
+    }
+    let timeout_secs: u64 = timeout_raw.as_deref().and_then(|s| s.parse().ok()).unwrap_or(5);
     let tls_files =
         pkcs11_proxy_ng_client::tls::ClientTlsFiles::from_env().map_err(|_| CkRv::DEVICE_ERROR)?;
     let rt = runtime();
-    rt.block_on(async { connect_with_retry(&endpoint, tls_files, timeout_secs).await })
-        .map_err(|_| CkRv::DEVICE_ERROR)
+    let result = rt
+        .block_on(async { connect_with_retry(&endpoint, tls_files, timeout_secs).await })
+        .map_err(|_| CkRv::DEVICE_ERROR);
+    // W1-C7-01: cache only the failure; any success invalidates.
+    match &result {
+        Ok(_) => clear_pre_init_connect_failure(),
+        Err(_) => record_pre_init_connect_failure(&endpoint),
+    }
+    result
 }
 
 /// Resolve the daemon endpoint from environment variables.
@@ -572,11 +633,14 @@ fn connect_client_from_env() -> Result<Pkcs11Client, CkRv> {
 ///      `tcp://host:port` → `http://host:port`). The legacy `tls://`
 ///      prefix is intentionally NOT supported here: the new shim uses
 ///      mTLS configured via `PKCS11_PROXY_TLS_*` env vars rather than
-///      TLS-PSK. A `tls://` URL logs an explicit error and falls
-///      through to the default endpoint so the daemon refuses the
-///      connection visibly rather than silently misrouting.
+///      TLS-PSK. A `tls://` URL is a loud error (W1-L8-02): it must
+///      never fall through to the default endpoint, which would
+///      silently connect to the wrong daemon with no TLS.
 ///   3. Default `http://127.0.0.1:7512`.
-fn resolve_endpoint_from_env() -> String {
+///
+/// Returns `Err` (naming the variable and the offending value class) for
+/// a `tls://` socket instead of producing any connection string.
+pub(crate) fn resolve_endpoint_from_env() -> Result<String, String> {
     if let Ok(endpoint) = std::env::var("PKCS11_PROXY_ENDPOINT") {
         if std::env::var_os("PKCS11_PROXY_SOCKET").is_some() {
             tracing::debug!(
@@ -584,7 +648,7 @@ fn resolve_endpoint_from_env() -> String {
                  PKCS11_PROXY_ENDPOINT wins"
             );
         }
-        return endpoint;
+        return Ok(endpoint);
     }
     if let Ok(socket) = std::env::var("PKCS11_PROXY_SOCKET") {
         if let Some(rest) = socket.strip_prefix("tcp://") {
@@ -594,24 +658,22 @@ fn resolve_endpoint_from_env() -> String {
                 endpoint = %translated,
                 "translating legacy PKCS11_PROXY_SOCKET to PKCS11_PROXY_ENDPOINT"
             );
-            return translated;
+            return Ok(translated);
         }
         if socket.starts_with("tls://") {
-            tracing::error!(
-                socket = %socket,
-                "PKCS11_PROXY_SOCKET tls:// is not supported by this shim; \
+            let msg = format!(
+                "PKCS11_PROXY_SOCKET has unsupported tls:// endpoint {socket:?}; \
                  use PKCS11_PROXY_ENDPOINT=https://... and PKCS11_PROXY_TLS_* env vars for mTLS"
             );
-            // Fall through to the default endpoint so the connection
-            // attempt fails visibly rather than silently misrouting.
-        } else {
-            tracing::warn!(
-                socket = %socket,
-                "PKCS11_PROXY_SOCKET must use tcp:// prefix; ignoring"
-            );
+            tracing::error!(socket = %socket, "{msg}");
+            return Err(msg);
         }
+        tracing::warn!(
+            socket = %socket,
+            "PKCS11_PROXY_SOCKET must use tcp:// prefix; ignoring"
+        );
     }
-    "http://127.0.0.1:7512".to_string()
+    Ok("http://127.0.0.1:7512".to_string())
 }
 
 /// Establish the gRPC client connection with retry.
@@ -632,6 +694,8 @@ pub fn ensure_client_connected() -> Result<(), CkRv> {
     reclaim_after_fork();
     // Fast path: already connected.
     if CLIENT.get().is_some() && !CLIENT_RECONNECT_REQUIRED.load(Ordering::Acquire) {
+        // Connected means reachable: no failure stays cached (W1-C7-01).
+        clear_pre_init_connect_failure();
         return Ok(());
     }
     // Slow path: serialize init attempts.
@@ -641,9 +705,17 @@ pub fn ensure_client_connected() -> Result<(), CkRv> {
         if !CLIENT_RECONNECT_REQUIRED.load(Ordering::Acquire) {
             return Ok(());
         }
-        let client = connect_client_from_env()?;
+        let mut client = connect_client_from_env()?;
         runtime().block_on(async {
-            *existing.lock().await = client;
+            let mut guard = existing.lock().await;
+            // W1-L6-29: preserve the logical session across the swap. The
+            // reconnect may run mid-session (steady-state data plane), and
+            // a fresh client carries no context id — dropping it would
+            // orphan the server context (later calls, including finalize,
+            // short-circuit locally and never reach the daemon).
+            let context_id = guard.context_id_opt();
+            client.restore_context_id(context_id);
+            *guard = client;
         });
         CLIENT_RECONNECT_REQUIRED.store(false, Ordering::Release);
         return Ok(());
@@ -742,14 +814,37 @@ pub(crate) fn connect_attempts_from_value(raw: Option<&str>) -> u32 {
         .unwrap_or(MAX_ATTEMPTS)
 }
 
+/// Loud warning when `PKCS11_PROXY_CONNECT_ATTEMPTS` is set but not a
+/// valid attempt count (W1-L8-15). The parse predicate matches
+/// [`connect_attempts_from_value`] exactly (trimmed `u32`), so the
+/// warning fires exactly when the default engages. Clamping is
+/// documented behavior and stays silent.
+pub(crate) fn connect_attempts_warning(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None => None,
+        Some(value) => match value.trim().parse::<u32>() {
+            Ok(_) => None,
+            Err(_) => Some(format!(
+                "PKCS11_PROXY_CONNECT_ATTEMPTS={value:?} is not a valid attempt count; \
+                 using default {MAX_ATTEMPTS}"
+            )),
+        },
+    }
+}
+
 async fn connect_with_retry(
     endpoint: &str,
     tls_files: Option<pkcs11_proxy_ng_client::tls::ClientTlsFiles>,
     timeout_secs: u64,
 ) -> Result<Pkcs11Client, String> {
+    #[cfg(test)]
+    CONNECT_SERIES.fetch_add(1, Ordering::Relaxed);
     let connect_timeout = Duration::from_secs(timeout_secs);
-    let max_attempts =
-        connect_attempts_from_value(std::env::var("PKCS11_PROXY_CONNECT_ATTEMPTS").ok().as_deref());
+    let attempts_raw = std::env::var("PKCS11_PROXY_CONNECT_ATTEMPTS").ok();
+    if let Some(warning) = connect_attempts_warning(attempts_raw.as_deref()) {
+        tracing::warn!("{warning}");
+    }
+    let max_attempts = connect_attempts_from_value(attempts_raw.as_deref());
 
     for attempt in 0..max_attempts {
         let delay = backoff_for_attempt(attempt);
@@ -893,5 +988,50 @@ mod backoff_tests {
                 base + band,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod env_warning_tests {
+    use super::*;
+
+    // W1-L8-15: an invalid PKCS11_PROXY_CONNECT_TIMEOUT must produce a
+    // loud naming warning (the value still falls back to the default,
+    // but never silently).
+    #[test]
+    fn connect_timeout_warning_names_invalid_value() {
+        let warning =
+            connect_timeout_warning(Some("junk")).expect("invalid timeout must warn loudly");
+        assert!(
+            warning.contains("PKCS11_PROXY_CONNECT_TIMEOUT") && warning.contains("junk"),
+            "warning must name the var and the value, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn connect_timeout_warning_silent_when_valid_or_unset() {
+        assert_eq!(connect_timeout_warning(None), None);
+        assert_eq!(connect_timeout_warning(Some("10")), None);
+    }
+
+    // W1-L8-15: same loud-warning contract for
+    // PKCS11_PROXY_CONNECT_ATTEMPTS. Clamping (0 → 1, >max → max) is
+    // documented behavior and stays silent; only unparseable values warn.
+    #[test]
+    fn connect_attempts_warning_names_invalid_value() {
+        let warning =
+            connect_attempts_warning(Some("junk")).expect("invalid attempts must warn loudly");
+        assert!(
+            warning.contains("PKCS11_PROXY_CONNECT_ATTEMPTS") && warning.contains("junk"),
+            "warning must name the var and the value, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn connect_attempts_warning_silent_when_valid_unset_or_clamped() {
+        assert_eq!(connect_attempts_warning(None), None);
+        assert_eq!(connect_attempts_warning(Some("3")), None);
+        assert_eq!(connect_attempts_warning(Some("0")), None);
+        assert_eq!(connect_attempts_warning(Some("50")), None);
     }
 }

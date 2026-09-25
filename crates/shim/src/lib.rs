@@ -102,7 +102,11 @@ pub unsafe extern "C" fn C_GetInterfaceList(
             return CKR_BUFFER_TOO_SMALL as CK_RV;
         }
 
-        let written = interface_probe::copy_catalog(p_interfaces_list, unsafe { *pul_count });
+        // SAFETY (W1-L1-02): `p_interfaces_list` is non-null here (the
+        // null case returned via the count-only path above) and the
+        // caller-declared `*pul_count >= n` entries were checked above;
+        // `copy_catalog` re-checks the length and fails safe on short.
+        let written = unsafe { interface_probe::copy_catalog(p_interfaces_list, *pul_count) };
         unsafe {
             *pul_count = written;
         }

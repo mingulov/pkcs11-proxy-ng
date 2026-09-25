@@ -33,6 +33,12 @@ pub(super) async fn get_slot_list(
     match result {
         Ok(backend_slots) => {
             let mut slot_ids = Vec::with_capacity(backend_slots.len());
+            // W1-C1-06: a per-slot authorization error must not abort the
+            // whole listing. Only `TOKEN_NOT_PRESENT` (surfaced as
+            // unauthorized by `slot_is_authorized`) and denied slots skip
+            // silently; other per-slot errors are collected (first one
+            // reported) while the remaining slots are still listed.
+            let mut first_error: Option<CkRv> = None;
             for backend_slot in backend_slots {
                 let backend_slot = BackendSlotId(backend_slot);
                 match authorization::slot_is_authorized(
@@ -47,10 +53,13 @@ pub(super) async fn get_slot_list(
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(error) => {
-                        return Ok(Response::new(pkcs11_proxy_ng_proto::GetSlotListResponse {
-                            ck_rv: error.0,
-                            slot_ids: vec![],
-                        }));
+                        tracing::warn!(
+                            slot_id = backend_slot.0.0,
+                            rv = error.0,
+                            "GetSlotList: skipping slot after authorization error"
+                        );
+                        first_error.get_or_insert(error);
+                        continue;
                     }
                 }
 
@@ -63,10 +72,8 @@ pub(super) async fn get_slot_list(
                     slot_ids.push(virtual_slot.0);
                 }
             }
-            Ok(Response::new(pkcs11_proxy_ng_proto::GetSlotListResponse {
-                ck_rv: CkRv::OK.0,
-                slot_ids,
-            }))
+            let ck_rv = first_error.map_or(CkRv::OK.0, |error| error.0);
+            Ok(Response::new(pkcs11_proxy_ng_proto::GetSlotListResponse { ck_rv, slot_ids }))
         }
         Err(error) => Ok(Response::new(pkcs11_proxy_ng_proto::GetSlotListResponse {
             ck_rv: error.0,
@@ -191,4 +198,82 @@ pub(super) async fn get_token_info(
         Err(error) => (error.0, None),
     };
     Ok(Response::new(pkcs11_proxy_ng_proto::GetTokenInfoResponse { ck_rv, info }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AuthConfig;
+    use crate::server::context_manager::ContextManager;
+    use pkcs11_proxy_ng_backend::MockBackend;
+
+    fn allow_all_policy() -> TokenPolicy {
+        TokenPolicy::from_config(&AuthConfig {
+            allow_all_authenticated: true,
+            anonymous_principal: None,
+            policy: vec![],
+        })
+        .expect("policy must parse")
+    }
+
+    async fn setup_two_slots()
+    -> (Arc<ContextManager>, Arc<MockBackend>, Arc<dyn Pkcs11Backend>, ClientContextId) {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0), CkSlotId(1)], vec![]));
+        mock.initialize().unwrap();
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(std::time::Duration::from_secs(300), 0));
+        let ctx_id = ctx_mgr.create_context(Some("uid=1000".into())).await.unwrap();
+        (ctx_mgr, mock, backend, ctx_id)
+    }
+
+    /// W1-C1-06: one failing slot must yield a partial list + its error, not
+    /// abort the whole `GetSlotList` with an empty list.
+    #[tokio::test]
+    async fn get_slot_list_partial_list_on_single_slot_error() {
+        let (ctx_mgr, mock, backend, ctx_id) = setup_two_slots().await;
+        let policy = allow_all_policy();
+        // Serve slot 0's token identity from the authz cache so only slot 1
+        // reaches the (failing) backend token-info fetch.
+        ctx_mgr.cache_token_info(BackendSlotId(CkSlotId(0)), "MockToken".into(), "0001".into());
+        mock.inject_error(CkRv::DEVICE_ERROR);
+
+        let resp = get_slot_list(
+            &ctx_mgr,
+            &backend,
+            &policy,
+            Request::new(pkcs11_proxy_ng_proto::GetSlotListRequest {
+                client_context_id: ctx_id.0.clone(),
+                token_present: false,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::DEVICE_ERROR.0, "failing slot's error must be reported");
+        assert_eq!(resp.slot_ids, vec![1], "healthy slot must still be listed (partial list)");
+    }
+
+    /// W1-C1-06 characterization: all-healthy output is unchanged (OK + full list).
+    #[tokio::test]
+    async fn get_slot_list_all_healthy_unchanged() {
+        let (ctx_mgr, _mock, backend, ctx_id) = setup_two_slots().await;
+        let policy = allow_all_policy();
+
+        let resp = get_slot_list(
+            &ctx_mgr,
+            &backend,
+            &policy,
+            Request::new(pkcs11_proxy_ng_proto::GetSlotListRequest {
+                client_context_id: ctx_id.0.clone(),
+                token_present: false,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert_eq!(resp.slot_ids, vec![1, 2]);
+    }
 }

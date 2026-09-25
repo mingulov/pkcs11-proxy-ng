@@ -1,5 +1,8 @@
 use super::*;
 
+// (W1-L16-09) Alias keeps clippy::type_complexity quiet on the 1.98 toolchain.
+type FieldSetter<'a, P> = [(&'a str, fn(&mut P, u32)); 4];
+
 #[test]
 fn slot_info_round_trip() {
     let original = CkSlotInfo {
@@ -10,7 +13,7 @@ fn slot_info_round_trip() {
         firmware_version: (3, 4),
     };
     let proto: v1_proto::SlotInfo = (&original).into();
-    let back = CkSlotInfo::from(&proto);
+    let back = CkSlotInfo::try_from(&proto).unwrap();
     assert_eq!(back, original);
 }
 
@@ -37,7 +40,7 @@ fn token_info_round_trip() {
         utc_time: "20260312000000".into(),
     };
     let proto: v1_proto::TokenInfo = (&original).into();
-    let back = CkTokenInfo::from(&proto);
+    let back = CkTokenInfo::try_from(&proto).unwrap();
     assert_eq!(back, original);
 }
 
@@ -51,7 +54,7 @@ fn cryptoki_info_round_trip() {
         library_version: (1, 0),
     };
     let proto: v1_proto::CryptokiInfo = (&original).into();
-    let back = CkInfo::from(&proto);
+    let back = CkInfo::try_from(&proto).unwrap();
     assert_eq!(back, original);
 }
 
@@ -65,7 +68,7 @@ fn slot_info_max_version_bytes_round_trip() {
         firmware_version: (255, 255),
     };
     let proto: v1_proto::SlotInfo = (&original).into();
-    let back = CkSlotInfo::from(&proto);
+    let back = CkSlotInfo::try_from(&proto).unwrap();
     assert_eq!(back.hardware_version, (255, 255));
     assert_eq!(back.firmware_version, (255, 255));
 }
@@ -80,7 +83,7 @@ fn slot_info_empty_strings_round_trip() {
         firmware_version: (0, 0),
     };
     let proto: v1_proto::SlotInfo = (&original).into();
-    let back = CkSlotInfo::from(&proto);
+    let back = CkSlotInfo::try_from(&proto).unwrap();
     assert_eq!(back, original);
 }
 
@@ -107,7 +110,7 @@ fn token_info_ck_unavailable_information_session_counts() {
         utc_time: String::new(),
     };
     let proto: v1_proto::TokenInfo = (&original).into();
-    let back = CkTokenInfo::from(&proto);
+    let back = CkTokenInfo::try_from(&proto).unwrap();
     assert_eq!(back.max_session_count, u64::MAX);
     assert_eq!(back.session_count, u64::MAX);
     assert_eq!(back.max_rw_session_count, u64::MAX);
@@ -137,7 +140,7 @@ fn token_info_all_flags_round_trip() {
         utc_time: String::new(),
     };
     let proto: v1_proto::TokenInfo = (&original).into();
-    let back = CkTokenInfo::from(&proto);
+    let back = CkTokenInfo::try_from(&proto).unwrap();
     assert_eq!(back.flags.0, u64::MAX);
 }
 
@@ -164,7 +167,7 @@ fn token_info_unicode_label_round_trip() {
         utc_time: String::new(),
     };
     let proto: v1_proto::TokenInfo = (&original).into();
-    let back = CkTokenInfo::from(&proto);
+    let back = CkTokenInfo::try_from(&proto).unwrap();
     assert_eq!(back.label, original.label);
 }
 
@@ -191,7 +194,7 @@ fn token_info_single_char_fields_round_trip() {
         utc_time: "16".into(),
     };
     let proto: v1_proto::TokenInfo = (&original).into();
-    let back = CkTokenInfo::from(&proto);
+    let back = CkTokenInfo::try_from(&proto).unwrap();
     assert_eq!(back, original);
 }
 
@@ -218,7 +221,7 @@ fn token_info_trimmed_strings_round_trip() {
         utc_time: String::new(),
     };
     let proto: v1_proto::TokenInfo = (&original).into();
-    let back = CkTokenInfo::from(&proto);
+    let back = CkTokenInfo::try_from(&proto).unwrap();
     assert_eq!(back, original);
 }
 
@@ -232,8 +235,111 @@ fn cryptoki_info_all_flag_bits_round_trip() {
         library_version: (255, 255),
     };
     let proto: v1_proto::CryptokiInfo = (&original).into();
-    let back = CkInfo::from(&proto);
+    let back = CkInfo::try_from(&proto).unwrap();
     assert_eq!(back, original);
+}
+
+#[test]
+fn slot_info_version_narrowing_rejects_above_255() {
+    // W1-C8-06: every u8 version component rejects wire values above 255
+    // loudly; 0-255 convert exactly as before.
+    let base = CkSlotInfo {
+        slot_description: "Slot".into(),
+        manufacturer_id: "Test".into(),
+        flags: CkSlotFlags(0),
+        hardware_version: (1, 2),
+        firmware_version: (3, 4),
+    };
+    let wire: v1_proto::SlotInfo = (&base).into();
+    let setters: FieldSetter<v1_proto::SlotInfo> = [
+        ("hardware_version_major", |p, v| p.hardware_version_major = v),
+        ("hardware_version_minor", |p, v| p.hardware_version_minor = v),
+        ("firmware_version_major", |p, v| p.firmware_version_major = v),
+        ("firmware_version_minor", |p, v| p.firmware_version_minor = v),
+    ];
+    for (label, set) in setters {
+        for bad in [256, u32::MAX] {
+            let mut mutated = wire.clone();
+            set(&mut mutated, bad);
+            assert_eq!(CkSlotInfo::try_from(&mutated), Err(CkRv::DEVICE_ERROR), "{label}={bad}");
+        }
+        let mut boundary = wire.clone();
+        set(&mut boundary, 255);
+        assert!(CkSlotInfo::try_from(&boundary).is_ok(), "{label}=255 must convert");
+    }
+}
+
+#[test]
+fn token_info_version_narrowing_rejects_above_255() {
+    // W1-C8-06: every u8 version component rejects wire values above 255
+    // loudly; 0-255 convert exactly as before.
+    let base = CkTokenInfo {
+        label: "Token".into(),
+        manufacturer_id: "Test".into(),
+        model: "M".into(),
+        serial_number: "0".into(),
+        flags: CkTokenFlags(0),
+        max_session_count: 0,
+        session_count: 0,
+        max_rw_session_count: 0,
+        rw_session_count: 0,
+        max_pin_len: 0,
+        min_pin_len: 0,
+        total_public_memory: 0,
+        free_public_memory: 0,
+        total_private_memory: 0,
+        free_private_memory: 0,
+        hardware_version: (1, 2),
+        firmware_version: (3, 4),
+        utc_time: String::new(),
+    };
+    let wire: v1_proto::TokenInfo = (&base).into();
+    let setters: FieldSetter<v1_proto::TokenInfo> = [
+        ("hardware_version_major", |p, v| p.hardware_version_major = v),
+        ("hardware_version_minor", |p, v| p.hardware_version_minor = v),
+        ("firmware_version_major", |p, v| p.firmware_version_major = v),
+        ("firmware_version_minor", |p, v| p.firmware_version_minor = v),
+    ];
+    for (label, set) in setters {
+        for bad in [256, u32::MAX] {
+            let mut mutated = wire.clone();
+            set(&mut mutated, bad);
+            assert_eq!(CkTokenInfo::try_from(&mutated), Err(CkRv::DEVICE_ERROR), "{label}={bad}");
+        }
+        let mut boundary = wire.clone();
+        set(&mut boundary, 255);
+        assert!(CkTokenInfo::try_from(&boundary).is_ok(), "{label}=255 must convert");
+    }
+}
+
+#[test]
+fn cryptoki_info_version_narrowing_rejects_above_255() {
+    // W1-C8-06: every u8 version component rejects wire values above 255
+    // loudly; 0-255 convert exactly as before.
+    let base = CkInfo {
+        cryptoki_version: (3, 0),
+        manufacturer_id: "Test".into(),
+        flags: 0,
+        library_description: "Test Library".into(),
+        library_version: (1, 0),
+    };
+    let wire: v1_proto::CryptokiInfo = (&base).into();
+    let setters: FieldSetter<v1_proto::CryptokiInfo> = [
+        ("cryptoki_version_major", |p, v| p.cryptoki_version_major = v),
+        ("cryptoki_version_minor", |p, v| p.cryptoki_version_minor = v),
+        ("library_version_major", |p, v| p.library_version_major = v),
+        ("library_version_minor", |p, v| p.library_version_minor = v),
+    ];
+    for (label, set) in setters {
+        for bad in [256, u32::MAX] {
+            let mut mutated = wire.clone();
+            set(&mut mutated, bad);
+            assert_eq!(CkInfo::try_from(&mutated), Err(CkRv::DEVICE_ERROR), "{label}={bad}");
+        }
+        let mut boundary = wire.clone();
+        set(&mut boundary, 255);
+        assert!(CkInfo::try_from(&boundary).is_ok(), "{label}=255 must convert");
+    }
 }
 
 #[test]
@@ -246,6 +352,6 @@ fn cryptoki_info_empty_description_round_trip() {
         library_version: (0, 0),
     };
     let proto: v1_proto::CryptokiInfo = (&original).into();
-    let back = CkInfo::from(&proto);
+    let back = CkInfo::try_from(&proto).unwrap();
     assert_eq!(back, original);
 }

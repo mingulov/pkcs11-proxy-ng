@@ -427,10 +427,24 @@ impl FfiBackend {
     }
 
     /// Drop every cached mechanism of the given session, plus its last-Init
-    /// marker (called on session close).
+    /// marker (called on session close). Direct per-family removal —
+    /// O(families), no full-cache scan (W1-L13-16).
     pub(super) fn drop_mech_cache_session(&self, session: CkSessionHandle) {
-        self.mech_cache.retain(|key, _| key.0 != session.0);
-        self.last_init_family.remove(&session.0);
+        Self::evict_session_mech_entries(&self.mech_cache, &self.last_init_family, session.0);
+    }
+
+    /// Evict one session's mechanism-cache entries: every family slot
+    /// plus the last-Init marker. Shared by single-session close and
+    /// the per-slot loop below so both stay O(families)-per-session.
+    fn evict_session_mech_entries(
+        mech_cache: &dashmap::DashMap<(u64, OperationFamily), super::ffi_conversion::FfiMechanism>,
+        last_init_family: &dashmap::DashMap<u64, OperationFamily>,
+        session: u64,
+    ) {
+        for family in OperationFamily::ALL {
+            mech_cache.remove(&(session, family));
+        }
+        last_init_family.remove(&session);
     }
 
     /// Record `session -> slot` for later per-slot eviction in
@@ -464,13 +478,13 @@ impl FfiBackend {
         // O(sessions-on-slot): take the slot's session set from the reverse
         // index, then evict exactly those sessions' entries — every family
         // slot plus the last-Init marker — from the mechanism cache and
-        // the forward map — no full scan of every open session (L4).
+        // the forward map — no full scan of every open session (L4), and no
+        // per-session full scan either (W1-L13-16).
         let Some((_, sessions)) = self.slot_sessions.remove(&slot_id.0) else {
             return;
         };
         for session in sessions {
-            self.mech_cache.retain(|key, _| key.0 != session);
-            self.last_init_family.remove(&session);
+            Self::evict_session_mech_entries(&self.mech_cache, &self.last_init_family, session);
             self.session_slot_map.remove(&session);
         }
     }

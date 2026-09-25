@@ -1,10 +1,12 @@
 use crate::server::slot_map::{BackendSlotId, VirtualSlotId};
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
+use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tonic::Status;
 
@@ -20,14 +22,34 @@ use super::HandlerContext;
 mod exact_completion;
 pub(super) use exact_completion::{ExactCompletion, spawn_backend_exact};
 
+/// Global backend-call budget shared by all tenants (W1-L15-30): one noisy
+/// tenant can fill the budget and trip `CKR_HOST_MEMORY` for co-tenants.
+/// Accepted blast radius (ADR-0012): per-context (M2) and per-connection
+/// (W1-L7-28) quarter-budget caps bound a single tenant, and stuck slots free
+/// when the backend returns; per-tenant backend partitioning is out of scope.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static BACKEND_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static MAX_BACKEND_CALLS: OnceLock<usize> = OnceLock::new();
 static LOGIN_LOCK_TIMEOUT: OnceLock<Duration> = OnceLock::new();
 static HEALTH_EVENT_TX: OnceLock<mpsc::Sender<BackendHealthEvent>> = OnceLock::new();
+/// In-flight backend calls per TCP peer address (W1-L7-28): the
+/// per-connection admission budget under the global `IN_FLIGHT`
+/// breaker. Entries are removed when their count drains to zero, so
+/// the table stays bounded by the number of connections with
+/// in-flight backend calls.
+static PEER_IN_FLIGHT: LazyLock<DashMap<SocketAddr, Arc<AtomicUsize>>> =
+    LazyLock::new(DashMap::new);
 
 tokio::task_local! {
     static CONTEXT_OPERATION_GUARD: Option<OperationGuard>;
+}
+
+tokio::task_local! {
+    /// This request's TCP peer address (W1-L7-28), published by
+    /// `run_context_scoped` from `request.remote_addr()`. `None` on UDS
+    /// (no peer address) and wherever dispatch did not publish one —
+    /// those calls run unadmitted under the global breaker only.
+    static CURRENT_PEER: Option<SocketAddr>;
 }
 
 /// Scope one already-admitted context operation around a service handler.
@@ -42,6 +64,18 @@ where
 
 pub(super) fn current_context_operation_guard() -> Option<OperationGuard> {
     CONTEXT_OPERATION_GUARD.try_with(|guard| guard.clone()).ok().flatten()
+}
+
+/// Publish this request's peer address around a service handler (W1-L7-28).
+pub(super) async fn scope_peer_admission<T, F>(peer: Option<SocketAddr>, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    CURRENT_PEER.scope(peer, future).await
+}
+
+pub(super) fn current_peer() -> Option<SocketAddr> {
+    CURRENT_PEER.try_with(|peer| *peer).ok().flatten()
 }
 /// Tracks whether the LAST sent health event was `Success`. Initialized
 /// to `true` because the health-gate task assumes the daemon starts in
@@ -79,6 +113,31 @@ pub fn configure_login_lock_timeout(secs: u64) {
 /// Falls back to 10 seconds if `configure_login_lock_timeout` was never called.
 pub fn login_lock_timeout() -> Duration {
     *LOGIN_LOCK_TIMEOUT.get().unwrap_or(&Duration::from_secs(10))
+}
+
+/// Bounded per-slot login-lock acquisition (W1-L11-07, G2/V11): serialize
+/// login/logout on a slot, refusing with `CKR_GENERAL_ERROR` (W1-L3-01:
+/// proxy serialization refusal, backend untouched) rather than queueing
+/// unboundedly when a slow/wedged backend pins the lock. One acquisition
+/// site shared by login and logout; the caller must hold the returned
+/// guard across its critical section. `OwnedMutexGuard` (not the borrowed
+/// guard) so the lock can be acquired inside this helper.
+pub(super) async fn acquire_slot_login_lock(
+    ctx_mgr: &Arc<ContextManager>,
+    slot: BackendSlotId,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, CkRv> {
+    let login_guard = ctx_mgr.slot_login_lock(slot);
+    match tokio::time::timeout(login_lock_timeout(), login_guard.lock_owned()).await {
+        Ok(guard) => Ok(guard),
+        Err(_elapsed) => {
+            // Another tenant holds the per-slot login lock past the configured
+            // bound (slow/wedged backend login on the shared token). Refuse
+            // rather than queue unboundedly; CKR_GENERAL_ERROR is a transient
+            // proxy-serialization failure the client can retry (W1-L3-01:
+            // distinct from the backend DEVICE_ERROR catch-all).
+            Err(CkRv::GENERAL_ERROR)
+        }
+    }
 }
 
 /// Wire up the channel that `spawn_backend` uses to report outcomes
@@ -120,9 +179,24 @@ fn max_concurrent_backend_calls() -> usize {
 /// Per-context in-flight cap: a quarter of the global backend-call budget (at
 /// least 1). Under the global circuit breaker, this stops a single noisy logical
 /// client from draining the whole budget and tipping every other tenant into
-/// DEVICE_ERROR (M2). Scales with the configured global limit.
+/// HOST_MEMORY (M2). Scales with the configured global limit.
 pub(super) fn per_context_max_in_flight() -> usize {
     (max_concurrent_backend_calls() / 4).max(1)
+}
+
+/// Per-connection in-flight cap (W1-L7-28): a quarter of the global
+/// backend-call budget (at least 1), mirroring the per-context M2
+/// fraction. Under the global circuit breaker, this stops a single
+/// connection from draining the whole budget and tipping every other
+/// tenant into HOST_MEMORY. Scales with the configured global limit.
+pub(super) fn per_connection_max_in_flight() -> usize {
+    (max_concurrent_backend_calls() / 4).max(1)
+}
+
+/// Number of live per-peer admission entries (W1-L7-28 tests only).
+#[cfg(test)]
+pub(super) fn peer_admission_table_size_for_test() -> usize {
+    PEER_IN_FLIGHT.len()
 }
 
 /// Current number of in-flight backend calls (for health checks / metrics).
@@ -190,6 +264,54 @@ fn try_acquire_backend_call(
     }
 }
 
+/// RAII slot for one peer's admission budget (W1-L7-28). Moved into the
+/// blocking task alongside the global [`InFlightGuard`] so the peer slot
+/// is held for the TRUE backend-call lifetime; on drop the count
+/// decrements and a drained entry is removed (bounded table).
+struct PeerAdmissionGuard {
+    peer: SocketAddr,
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for PeerAdmissionGuard {
+    fn drop(&mut self) {
+        let previous = self.counter.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(previous >= 1, "peer admission count must not underflow");
+        if previous == 1 {
+            // Last slot released: remove the entry so the table cannot
+            // grow with stale peers. The predicate re-checks under the
+            // shard lock — a racing admission (count back above zero, or
+            // a recycled Arc) keeps the entry.
+            let mine = Arc::clone(&self.counter);
+            PEER_IN_FLIGHT.remove_if(&self.peer, |_, count| {
+                Arc::ptr_eq(count, &mine) && count.load(Ordering::Relaxed) == 0
+            });
+        }
+    }
+}
+
+/// Admit one backend call for `peer` under `max_in_flight` (W1-L7-28).
+/// CAS-exact like the global acquire; `None` when the peer is at cap.
+fn try_admit_peer(peer: SocketAddr, max_in_flight: usize) -> Option<PeerAdmissionGuard> {
+    let counter =
+        PEER_IN_FLIGHT.entry(peer).or_insert_with(|| Arc::new(AtomicUsize::new(0))).clone();
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current >= max_in_flight {
+            return None;
+        }
+        match counter.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Some(PeerAdmissionGuard { peer, counter }),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 pub(super) async fn spawn_backend<T, F>(operation: F) -> Result<CkResult<T>, Status>
 where
     T: Send + 'static,
@@ -207,8 +329,10 @@ where
 
 /// Testable variant of [`spawn_backend`] with an explicit timeout.  It uses
 /// the same breaker/completion machinery; production callers use the
-/// configured timeout through `spawn_backend`.
-pub(super) async fn spawn_backend_with_timeout<T, F>(
+/// configured timeout through `spawn_backend`. Also used by
+/// `context_manager` eviction teardown (W1-C2-03) so a wedged backend
+/// cannot stall lease reaping.
+pub(crate) async fn spawn_backend_with_timeout<T, F>(
     timeout: Duration,
     operation: F,
 ) -> Result<CkResult<T>, Status>
@@ -303,9 +427,33 @@ where
         // A flood of breaker trips means the daemon is overloaded (or the
         // backend is wedged and every slot is held by a stuck call) and
         // downstream traffic should be diverted — count as a failure
-        // for the health gate.
+        // for the health gate. Caller-visible CKR_HOST_MEMORY (W1-L3-01):
+        // the daemon cannot accept more work; the backend was untouched.
         report_backend_outcome(false);
-        return Ok(Err(CkRv::DEVICE_ERROR));
+        return Ok(Err(CkRv::HOST_MEMORY));
+    };
+    // W1-L7-28: per-connection admission UNDER the global breaker, after
+    // the global slot is held (a peer rejection below drops it again).
+    // One connection cannot exhaust the shared budget. Distinct layer
+    // from the L6-20 transport knobs (which bound buffering) and the
+    // per-context M2 cap (which binds earlier for single-context
+    // connections). No health event on rejection: a per-peer trip
+    // reflects one noisy client and must not flip daemon readiness (M1).
+    let peer_guard = match current_peer() {
+        Some(peer) => match try_admit_peer(peer, per_connection_max_in_flight()) {
+            Some(guard) => Some(guard),
+            None => {
+                tracing::warn!(
+                    peer = %peer,
+                    max = per_connection_max_in_flight(),
+                    "per-connection backend-call budget exhausted — rejecting"
+                );
+                // Same breaker class as the global trip above (W1-L3-01).
+                return Ok(Err(CkRv::HOST_MEMORY));
+            }
+        },
+        // UDS / unpublished transport: global breaker only.
+        None => None,
     };
     let context_operation_guard = current_context_operation_guard();
 
@@ -319,6 +467,7 @@ where
         // exactly when the FFI returns (even if the caller timed out or
         // the gRPC future was cancelled long before).
         let _guard = guard;
+        let _peer_guard = peer_guard;
         let _context_operation_guard = context_operation_guard;
         let result = operation();
         if timed_out_task.load(Ordering::Acquire) {
@@ -349,11 +498,14 @@ where
             );
             // A timeout is a transport-level failure of the daemon's own making.
             // Report it to the readiness gauge HERE, then return early, so the
-            // ck_rv classifier never sees this proxy-generated DEVICE_ERROR and
-            // can treat a backend-RETURNED DEVICE_ERROR as a per-request
-            // response rather than a daemon-health signal (M1).
+            // ck_rv classifier never sees this proxy-generated FUNCTION_FAILED
+            // and can treat a backend-RETURNED DEVICE_ERROR as a per-request
+            // response rather than a daemon-health signal (M1). The timeout RV
+            // is FUNCTION_FAILED (W1-L3-01): outcome-ambiguous, the backend
+            // call may still complete — matching the client-side mapping of a
+            // gRPC DeadlineExceeded (ADR-0003 §3).
             report_backend_outcome(false);
-            return Ok(Err(CkRv::DEVICE_ERROR));
+            return Ok(Err(CkRv::FUNCTION_FAILED));
         }
     };
 
@@ -369,9 +521,9 @@ where
 /// (false) from the daemon-level readiness gauge's perspective.
 ///
 /// Transport failures are classified separately from provider responses:
-///   * timeouts (reported before returning proxy-generated DEVICE_ERROR),
+///   * timeouts (reported before returning proxy-generated FUNCTION_FAILED),
 ///   * `spawn_blocking` panics (`Err(Status)`),
-///   * circuit-breaker trips (also `Ok(Err(CkRv::DEVICE_ERROR))` —
+///   * circuit-breaker trips (also `Ok(Err(..))` — `CKR_HOST_MEMORY`,
 ///     reported separately by `spawn_backend` before this function is
 ///     called).
 ///
@@ -515,10 +667,18 @@ pub(super) fn mechanism_output_to_proto(
         | CkMechanismParams::VendorObjectExtract(_)
         | CkMechanismParams::VendorObjectInsert(_) => return None,
     };
-    Some(pkcs11_proxy_ng_proto::Mechanism::from(&CkMechanism {
+    // Only Gcm and Tls12MasterKeyDerive reach this conversion, and
+    // neither shape carries templates or nested mechanisms, so the
+    // fallible conversion cannot fail here (the nested-template
+    // refusal, W1-C8-01, is its only Err source). `.ok()` preserves
+    // the existing "variant does not surface output" contract; a
+    // future surfaced variant carrying templates must propagate the
+    // error loudly at its call sites instead.
+    pkcs11_proxy_ng_proto::Mechanism::try_from(&CkMechanism {
         mechanism_type,
         params: Some(params),
-    }))
+    })
+    .ok()
 }
 
 pub(super) async fn context_exists(
@@ -556,6 +716,39 @@ pub(super) async fn resolve_session(
 
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
     Ok(CkSessionHandle(backend_session.0 as u64))
+}
+
+/// Resolve a virtual session to its backend session, owning slot, and current
+/// login state in a single context-locked read (shared by login/logout — M7).
+/// Returns the CK_RV the caller should surface when the context is gone
+/// (`CRYPTOKI_NOT_INITIALIZED`) or the session handle is unknown
+/// (`SESSION_HANDLE_INVALID`).
+///
+/// W1-L11-16: the shared home for this triple read (moved out of auth.rs so
+/// auth routes through the service_utils resolve_* helpers); the
+/// single-locked-read semantics are unchanged.
+pub(super) async fn resolve_session_slot_login(
+    ctx_mgr: &Arc<ContextManager>,
+    ctx_id: &ClientContextId,
+    session_handle: u64,
+) -> Result<(CkSessionHandle, BackendSlotId, Option<LoginState>), CkRv> {
+    let resolved = ctx_mgr
+        .get_context(ctx_id, |ctx| {
+            let virtual_session = VirtualHandle(session_handle);
+            let backend_session = ctx.session_handles.resolve(virtual_session);
+            let slot = ctx.session_slots.get(&virtual_session).copied();
+            let current_login_state = slot.and_then(|slot| ctx.login_state.get(&slot).copied());
+            (backend_session, slot, current_login_state)
+        })
+        .await;
+
+    match resolved {
+        None => Err(CkRv::CRYPTOKI_NOT_INITIALIZED),
+        Some((Some(backend_session), Some(slot), current_login_state)) => {
+            Ok((CkSessionHandle(backend_session.0 as u64), slot, current_login_state))
+        }
+        Some(_) => Err(CkRv::SESSION_HANDLE_INVALID),
+    }
 }
 
 /// Resolve the caller's identity and the token `(label, serial)` for the
@@ -700,9 +893,9 @@ pub(super) async fn gate_object_handle(
     }
 
     // --- 3. Resolve ObjectMetadata from cache or backend (non-created objects) ---
-    // Token objects (is_token=true) are never cached (I2 fix: cross-client backend
-    // handle recycling immunity). Session objects are cached for the lifetime of
-    // the virtual handle.
+    // Session objects are cached for the lifetime of the virtual handle;
+    // token objects are cached gated by the authz generation (W1-L13-18:
+    // cross-client backend handle recycling immunity via revocation).
     let meta: Option<ObjectMetadata> =
         ctx.context_manager.object_metadata(ctx_id, virtual_object).await;
     let meta = match meta {
@@ -712,7 +905,8 @@ pub(super) async fn gate_object_handle(
             let fetched =
                 super::authorization::fetch_object_metadata(ctx, backend_session, backend_object)
                     .await;
-            // cache_object_metadata internally skips token objects (I2 fix).
+            // cache_object_metadata tags token objects with the current
+            // authz generation (W1-L13-18).
             if let Some(ref m) = fetched {
                 ctx.context_manager.cache_object_metadata(ctx_id, virtual_object, m.clone()).await;
             }
@@ -812,56 +1006,11 @@ pub(super) async fn resolve_session_and_object(
     session_handle: u64,
     object_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
-    let Some((session, object)) = ctx
-        .context_manager
-        .get_context(ctx_id, |c| {
-            (
-                c.session_handles.resolve(VirtualHandle(session_handle)),
-                c.object_handles.resolve(VirtualHandle(object_handle)),
-            )
-        })
-        .await
-    else {
-        return Err(CkRv::CRYPTOKI_NOT_INITIALIZED);
-    };
-
-    let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
-    // Forward CK_INVALID_HANDLE to backend when object is unknown — see
-    // resolve_session_and_key for rationale.
-    let backend_object = object.map_or(CkObjectHandle(0), |h| CkObjectHandle(h.0 as u64));
-    // D6(1): refuse private-object USE while logically logged out (authn
-    // before authz; unknown handles skip — the backend decides their error).
-    if backend_object.0 != 0 {
-        ensure_private_use_allowed(
-            ctx,
-            ctx_id,
-            session_handle,
-            object_handle,
-            CkSessionHandle(backend_session.0),
-            backend_object,
-        )
-        .await?;
-    }
-    // Per-object / per-class gate: see gate_object_handle for the invisible-denial
-    // contract. Zero-overhead when both per_object_active() and per_class_active()
-    // are false.
-    let backend_object = if (ctx.token_policy.per_object_active()
-        || ctx.token_policy.per_class_active())
-        && backend_object.0 != 0
-    {
-        gate_object_handle(
-            ctx,
-            ctx_id,
-            session_handle,
-            object_handle,
-            backend_session,
-            backend_object,
-        )
-        .await
-    } else {
-        backend_object
-    };
-    Ok((CkSessionHandle(backend_session.0 as u64), backend_object))
+    // W1-L11-05: the key and object resolvers were line-identical modulo
+    // parameter names (same forward-0, D6(1) authn, and per-object/class
+    // gate); the object entry point delegates to the key implementation so
+    // there is exactly one. Both names are kept for call-site clarity.
+    resolve_session_and_key(ctx, ctx_id, session_handle, object_handle).await
 }
 
 pub(super) async fn resolve_session_and_two_objects(
@@ -953,6 +1102,22 @@ pub(super) async fn resolve_session_and_two_objects(
 /// object, whose handle persists across the application's sessions and must NOT
 /// be evicted on session close. The bool may arrive as a typed `Bool`, a raw
 /// `CK_BBOOL` byte, or a ulong, so all encodings are accepted (B2).
+/// The `CKA_CLASS` declared by `template`, if any (W1-L7-05).
+/// Server-side templates arrive through proto conversion, which decodes
+/// `CKA_CLASS` to `Ulong`; any other encoding is treated as undeclared
+/// (the mint gate falls through to the backend verdict for it).
+pub(super) fn template_declared_class(template: &[CkAttribute]) -> Option<CkObjectClass> {
+    template.iter().find_map(|attr| {
+        if attr.attr_type != CkAttributeType::CLASS {
+            return None;
+        }
+        match &attr.value {
+            Some(CkAttributeValue::Ulong(class)) => Some(CkObjectClass(*class)),
+            _ => None,
+        }
+    })
+}
+
 pub(super) fn template_declares_token_object(template: &[CkAttribute]) -> bool {
     template.iter().any(|attr| {
         attr.attr_type == CkAttributeType::TOKEN
@@ -1458,7 +1623,7 @@ mod tests {
             },
             version_major: 3,
             version_minor: 3, // TLS 1.2
-            prf_hash_mechanism: CkMechanismType::SHA256.0,
+            prf_hash_mechanism: CkMechanismType::SHA256,
         });
         let proto_mech = mechanism_output_to_proto(params).expect("tls12 should convert");
         assert_eq!(proto_mech.mechanism_type, CkMechanismType::TLS12_MASTER_KEY_DERIVE.0);
@@ -1516,8 +1681,8 @@ mod tests {
         .await;
         assert_eq!(
             result.expect("no transport error").unwrap_err(),
-            CkRv::DEVICE_ERROR,
-            "caller sees the timeout as DEVICE_ERROR"
+            CkRv::FUNCTION_FAILED,
+            "W1-L3-01: caller sees the timeout as FUNCTION_FAILED (was DEVICE_ERROR)"
         );
         assert_eq!(
             STUCK_TEST_COUNTER.load(Ordering::Relaxed),
@@ -1675,8 +1840,9 @@ mod tests {
         // M1: a backend-RETURNED CKR_DEVICE_ERROR (kryoptic's request-specific
         // catch-all) or CKR_TOKEN_NOT_PRESENT is a per-request response, not a
         // daemon-health signal — they must NOT flip readiness, or one noisy
-        // client could evict the pod. The daemon's own timeout/breaker DEVICE_ERROR
-        // is reported separately in spawn_backend before classification.
+        // client could evict the pod. The daemon's own timeout/breaker RVs
+        // (FUNCTION_FAILED / HOST_MEMORY) are reported separately in
+        // spawn_backend before classification.
         for rv in [CkRv::DEVICE_ERROR, CkRv::TOKEN_NOT_PRESENT] {
             let result: Result<CkResult<()>, Status> = Ok(Err(rv));
             assert!(
@@ -1720,7 +1886,11 @@ mod tests {
 
         let result = spawn_backend(|| Ok(())).await;
         let inner = result.expect("spawn_backend should not return Status error");
-        assert_eq!(inner.unwrap_err(), CkRv::DEVICE_ERROR);
+        assert_eq!(
+            inner.unwrap_err(),
+            CkRv::HOST_MEMORY,
+            "W1-L3-01: breaker trip surfaces HOST_MEMORY (was DEVICE_ERROR)"
+        );
 
         // Restore previous value so other tests are not affected.
         IN_FLIGHT.store(previous, Ordering::Relaxed);
@@ -1962,6 +2132,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn t7_session_key_and_object_resolvers_agree() {
+        // W1-L11-05 characterization: resolve_session_and_key and
+        // resolve_session_and_object must return identical results for
+        // identical inputs (ok, forward-0, unknown session, unknown
+        // context). Must pass before AND after the delegation DRY.
+        use pkcs11_proxy_ng_backend::MockBackend;
+        let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> =
+            Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend); // default policy: no grants
+        let ctx_id = ctx_mgr.create_context(Some(IDENTITY.into())).await.unwrap();
+        let (vs, vo) = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                let vs = c.register_session(
+                    BackendHandle(77),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                );
+                let vo = c.object_handles.insert(BackendHandle(42));
+                (vs, vo)
+            })
+            .await
+            .unwrap();
+
+        // Known session + known handle: identical (session, object).
+        let via_key = resolve_session_and_key(&ctx, &ctx_id, vs.0, vo.0).await;
+        let via_object = resolve_session_and_object(&ctx, &ctx_id, vs.0, vo.0).await;
+        assert_eq!(via_key, via_object, "ok-case results must match");
+        assert_eq!(via_object.unwrap(), (CkSessionHandle(77), CkObjectHandle(42)));
+
+        // Unknown handle: both forward CK_INVALID_HANDLE (0) to the backend.
+        let via_key = resolve_session_and_key(&ctx, &ctx_id, vs.0, 9_999_999).await;
+        let via_object = resolve_session_and_object(&ctx, &ctx_id, vs.0, 9_999_999).await;
+        assert_eq!(via_key, via_object, "forward-0 results must match");
+        assert_eq!(via_object.unwrap().1, CkObjectHandle(0));
+
+        // Unknown session: both SESSION_HANDLE_INVALID.
+        let via_key = resolve_session_and_key(&ctx, &ctx_id, 9_999_999, vo.0).await;
+        let via_object = resolve_session_and_object(&ctx, &ctx_id, 9_999_999, vo.0).await;
+        assert_eq!(via_key, via_object, "unknown-session errors must match");
+        assert_eq!(via_object.unwrap_err(), CkRv::SESSION_HANDLE_INVALID);
+
+        // Unknown context: both CRYPTOKI_NOT_INITIALIZED.
+        let gone = ClientContextId("t7-gone".into());
+        let via_key = resolve_session_and_key(&ctx, &gone, vs.0, vo.0).await;
+        let via_object = resolve_session_and_object(&ctx, &gone, vs.0, vo.0).await;
+        assert_eq!(via_key, via_object, "unknown-context errors must match");
+        assert_eq!(via_object.unwrap_err(), CkRv::CRYPTOKI_NOT_INITIALIZED);
+    }
+
+    #[tokio::test]
+    async fn t7_resolve_session_slot_login_pins_triple_read() {
+        // W1-L11-16 characterization: pin the (session, slot, login-state)
+        // triple read and its RV mapping. Moved here with the helper from
+        // auth.rs; assertions unchanged — the single-locked-read semantics
+        // must survive the shared-helper routing.
+        use pkcs11_proxy_ng_backend::MockBackend;
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let session_vh = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.register_session(BackendHandle(backend_session.0), backend_slot)
+            })
+            .await
+            .unwrap();
+
+        // Unknown context → CRYPTOKI_NOT_INITIALIZED.
+        let gone = ClientContextId("t7-gone".into());
+        assert_eq!(
+            resolve_session_slot_login(&ctx_mgr, &gone, session_vh.0).await.unwrap_err(),
+            CkRv::CRYPTOKI_NOT_INITIALIZED
+        );
+        // Unknown session → SESSION_HANDLE_INVALID.
+        assert_eq!(
+            resolve_session_slot_login(&ctx_mgr, &ctx_id, 9_999_999).await.unwrap_err(),
+            CkRv::SESSION_HANDLE_INVALID
+        );
+        // Known session, nobody logged in → (backend session, slot, None).
+        assert_eq!(
+            resolve_session_slot_login(&ctx_mgr, &ctx_id, session_vh.0).await.unwrap(),
+            (CkSessionHandle(backend_session.0), backend_slot, None)
+        );
+        // Logged-in slot → current login state is reported.
+        ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                ctx.login_state.insert(backend_slot, LoginState::User);
+            })
+            .await;
+        assert_eq!(
+            resolve_session_slot_login(&ctx_mgr, &ctx_id, session_vh.0).await.unwrap(),
+            (CkSessionHandle(backend_session.0), backend_slot, Some(LoginState::User))
+        );
+    }
+
+    #[tokio::test]
     async fn per_object_gate_allows_permitted_object() {
         // Principal P is allowed only objects with unique_id ALLOWED_UID.
         // Using an object with that uid must return the real backend handle.
@@ -2112,11 +2381,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_object_gate_token_object_not_cached() {
-        // I2 proof: a token object (is_token=true) must NOT be cached.
-        // Two consecutive gate calls on the same token-object virtual handle must
-        // each trigger a fresh backend C_GetAttributeValue (no cache hit).
-        // We verify by counting backend attribute calls via a mock counter.
+    async fn per_object_gate_token_object_cached_until_revoked() {
+        // W1-L13-18: a token object (is_token=true) IS cached, gated by the
+        // authz generation. Two consecutive gated uses issue one backend
+        // fetch; revoking the generation forces a re-fetch.
         use pkcs11_proxy_ng_backend::{MockBackend, mock::MockAttributeSlot};
         let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
         mock.initialize().unwrap();
@@ -2141,6 +2409,14 @@ mod tests {
             CkAttributeType::UNIQUE_ID,
             MockAttributeSlot::Value(CkAttributeValue::Bytes(uid.clone().into())),
         );
+        // Public object (native default): the D6(1) logged-out USE check then
+        // needs no per-operation backend probe, so the mock counter below
+        // observes metadata fetches only.
+        mock.set_attribute(
+            backend_object,
+            CkAttributeType::PRIVATE,
+            MockAttributeSlot::Value(CkAttributeValue::Bool(false)),
+        );
 
         let backend: Arc<dyn pkcs11_proxy_ng_backend::Pkcs11Backend> = mock.clone();
         let policy = per_object_policy(IDENTITY, "MockToken", ALLOWED_UID_HEX);
@@ -2159,6 +2435,9 @@ mod tests {
                     crate::server::slot_map::BackendSlotId(CkSlotId(0)),
                 );
                 let vo = c.object_handles.insert(BackendHandle(backend_object.0));
+                // Record the known-public bit (as mint registration would) so
+                // logged-out USE skips the backend privacy probe.
+                c.object_private.insert(vo, false);
                 (vs, vo)
             })
             .await
@@ -2166,21 +2445,48 @@ mod tests {
         let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
         ctx.token_policy = policy;
 
-        // First gate call — should fetch from backend.
-        let _ = resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object.0)
+        let calls_before = mock.attr_get_call_count();
+        // First gated use — must fetch from the backend.
+        let first = resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object.0)
             .await
             .unwrap();
-        // Second gate call — token objects must NOT be cached; must re-fetch.
-        let _ = resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object.0)
-            .await
-            .unwrap();
+        let calls_after_first = mock.attr_get_call_count();
+        assert!(
+            calls_after_first > calls_before,
+            "first gated use must fetch token metadata from the backend"
+        );
 
-        // cache_object_metadata skips token objects (is_token=true), so the context's
-        // object_metadata map must have NO entry for this virtual handle.
+        // Second gated use — generation still current, no re-fetch.
+        let second = resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object.0)
+            .await
+            .unwrap();
+        assert_eq!(
+            mock.attr_get_call_count(),
+            calls_after_first,
+            "repeated gated use of a token object must not re-fetch"
+        );
+        assert_eq!(first, second, "gated reuse must resolve identically");
+
+        // The entry is cached under the virtual handle.
         let cached = ctx_mgr.object_metadata(&ctx_id, virtual_object.0).await;
         assert!(
-            cached.is_none(),
-            "token object metadata must NOT be cached in the context (I2 fix)"
+            cached.is_some_and(|meta| meta.is_token),
+            "token object metadata must be cached within the generation"
+        );
+
+        // Revocation invalidates: the entry reads as a miss and the next
+        // gated use re-fetches from the backend.
+        ctx_mgr.revoke_authz_generation();
+        assert!(
+            ctx_mgr.object_metadata(&ctx_id, virtual_object.0).await.is_none(),
+            "revoking the authz generation must invalidate cached token metadata"
+        );
+        let _ = resolve_session_and_object(&ctx, &ctx_id, virtual_session.0, virtual_object.0)
+            .await
+            .unwrap();
+        assert!(
+            mock.attr_get_call_count() > calls_after_first,
+            "gated use after revocation must re-fetch from the backend"
         );
     }
 
@@ -2697,5 +3003,136 @@ mod tests {
             login_lock_timeout().as_millis() > 0,
             "login_lock_timeout() must return a positive duration"
         );
+    }
+
+    // --- W1-L7-28: per-connection admission under the global breaker ---
+
+    fn test_peer(octet: u8, port: u16) -> std::net::SocketAddr {
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, octet)),
+            port,
+        )
+    }
+
+    /// Park `n` backend calls holding `peer`'s admission slots. Returns the
+    /// join handles plus one releaser per call; each parked call signals
+    /// `entered_tx` once its slot is held. All releasers must be fired (or
+    /// dropped) or the test binary hangs on teardown.
+    async fn park_peer_calls(
+        peer: std::net::SocketAddr,
+        n: usize,
+        entered_tx: tokio::sync::mpsc::Sender<()>,
+    ) -> (
+        Vec<tokio::task::JoinHandle<Result<CkResult<u8>, Status>>>,
+        Vec<std::sync::mpsc::Sender<()>>,
+    ) {
+        let mut parked = Vec::with_capacity(n);
+        let mut releasers = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            releasers.push(release_tx);
+            let entered_tx = entered_tx.clone();
+            parked.push(tokio::spawn(async move {
+                scope_peer_admission(Some(peer), async move {
+                    spawn_backend(move || {
+                        entered_tx.blocking_send(()).expect("entered signal");
+                        release_rx.recv().expect("released");
+                        Ok::<u8, CkRv>(7)
+                    })
+                    .await
+                })
+                .await
+            }));
+        }
+        (parked, releasers)
+    }
+
+    /// W1-L7-28: a peer at its cap is rejected (breaker class) without
+    /// running the backend call; released slots admit again and the empty
+    /// entry is removed (bounded table).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_connection_admission_rejects_over_cap() {
+        let peer = test_peer(51, 40051);
+        let cap = per_connection_max_in_flight();
+        assert!(cap >= 1, "per-connection cap must be at least 1");
+
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::channel::<()>(cap + 1);
+        let (parked, releasers) = park_peer_calls(peer, cap, entered_tx).await;
+        for _ in 0..cap {
+            entered_rx.recv().await.expect("each parked call holds a slot");
+        }
+
+        // Over cap: rejected as HOST_MEMORY (breaker class), backend never runs.
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_clone = Arc::clone(&ran);
+        let rejected = scope_peer_admission(Some(peer), async move {
+            spawn_backend(move || {
+                ran_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok::<u8, CkRv>(9)
+            })
+            .await
+        })
+        .await;
+        assert_eq!(
+            rejected.expect("admission rejection is a ck_rv, not a transport error"),
+            Err(CkRv::HOST_MEMORY),
+            "W1-L3-01: per-peer breaker trip surfaces HOST_MEMORY (was DEVICE_ERROR)"
+        );
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst), "rejected call must not run");
+
+        // Release everything: slots free and the table entry is removed.
+        for tx in releasers {
+            tx.send(()).expect("release parked call");
+        }
+        for handle in parked {
+            let result = handle.await.expect("parked task joins").expect("no transport error");
+            assert_eq!(result, Ok(7u8));
+        }
+        assert_eq!(
+            peer_admission_table_size_for_test(),
+            0,
+            "drained peer entries must be removed (bounded table)"
+        );
+
+        // The freed cap admits again.
+        let again =
+            scope_peer_admission(Some(peer), async { spawn_backend(|| Ok::<u8, CkRv>(1)).await })
+                .await;
+        assert_eq!(again.expect("no transport error"), Ok(1u8));
+    }
+
+    /// W1-L7-28: the cap is per peer — an unrelated connection is unaffected
+    /// by another peer's exhausted budget.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn per_connection_admission_is_per_peer() {
+        let busy = test_peer(52, 40052);
+        let idle = test_peer(53, 40053);
+        let cap = per_connection_max_in_flight();
+
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::channel::<()>(cap + 1);
+        let (parked, releasers) = park_peer_calls(busy, cap, entered_tx).await;
+        for _ in 0..cap {
+            entered_rx.recv().await.expect("each parked call holds a slot");
+        }
+
+        let other =
+            scope_peer_admission(Some(idle), async { spawn_backend(|| Ok::<u8, CkRv>(3)).await })
+                .await;
+        assert_eq!(other.expect("no transport error"), Ok(3u8), "idle peer must be admitted");
+
+        for tx in releasers {
+            tx.send(()).expect("release parked call");
+        }
+        for handle in parked {
+            handle.await.expect("parked task joins").expect("no transport error").unwrap();
+        }
+    }
+
+    /// W1-L7-28 characterization: without a scoped peer (UDS / unknown
+    /// transport) backend calls run unadmitted, as before.
+    #[tokio::test]
+    async fn per_connection_admission_skipped_without_peer() {
+        let result = spawn_backend(|| Ok::<u8, CkRv>(5)).await;
+        assert_eq!(result.expect("no transport error"), Ok(5u8));
     }
 }

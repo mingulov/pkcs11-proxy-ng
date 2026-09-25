@@ -6,9 +6,10 @@ use crate::pkcs11_proxy_ng::v1 as v1_proto;
 // `secret_boundary` docs. No plain copy is retained past the enclosing encode.
 use crate::secret_boundary::secret_to_plain;
 use pkcs11_proxy_ng_types::{
-    CkRv, SecretBytes, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData,
-    Tls12ExtendedMasterKeyDeriveParams, Tls12MasterKeyDeriveParams, TlsKdfParams, TlsPrfParams,
-    WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
+    CkMechanismType, CkObjectHandle, CkRv, SecretBytes, Ssl3KeyMatParams,
+    Ssl3MasterKeyDeriveParams, SslRandomData, Tls12ExtendedMasterKeyDeriveParams,
+    Tls12MasterKeyDeriveParams, TlsKdfParams, TlsPrfParams, WtlsKeyMatParams,
+    WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
 };
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,7 @@ impl From<&TlsPrfParams> for v1_proto::TlsPrfParams {
             seed: secret_to_plain(&p.seed),
             label: secret_to_plain(&p.label),
             output_len: p.output_len,
+            output: secret_to_plain(&p.output),
         }
     }
 }
@@ -76,6 +78,7 @@ impl From<&v1_proto::TlsPrfParams> for TlsPrfParams {
             seed: SecretBytes::copy_from_slice(&p.seed),
             label: SecretBytes::copy_from_slice(&p.label),
             output_len: p.output_len,
+            output: SecretBytes::copy_from_slice(&p.output),
         }
     }
 }
@@ -87,7 +90,7 @@ impl From<&v1_proto::TlsPrfParams> for TlsPrfParams {
 impl From<&TlsKdfParams> for v1_proto::TlsKdfParams {
     fn from(p: &TlsKdfParams) -> Self {
         Self {
-            prf_mechanism: p.prf_mechanism,
+            prf_mechanism: p.prf_mechanism.0,
             label: secret_to_plain(&p.label),
             random_info: Some(ssl_random_to_proto(&p.random_info)),
             context_data: secret_to_plain(&p.context_data),
@@ -100,7 +103,7 @@ impl TryFrom<&v1_proto::TlsKdfParams> for TlsKdfParams {
 
     fn try_from(p: &v1_proto::TlsKdfParams) -> Result<Self, Self::Error> {
         Ok(Self {
-            prf_mechanism: p.prf_mechanism,
+            prf_mechanism: CkMechanismType(p.prf_mechanism),
             label: SecretBytes::copy_from_slice(&p.label),
             random_info: required_ssl_random_from_option(&p.random_info)?,
             context_data: SecretBytes::copy_from_slice(&p.context_data),
@@ -144,7 +147,7 @@ impl From<&Tls12MasterKeyDeriveParams> for v1_proto::Tls12MasterKeyDeriveParams 
             random_info: Some(ssl_random_to_proto(&p.random_info)),
             version_major: p.version_major,
             version_minor: p.version_minor,
-            prf_hash_mechanism: p.prf_hash_mechanism,
+            prf_hash_mechanism: p.prf_hash_mechanism.0,
         }
     }
 }
@@ -157,7 +160,7 @@ impl TryFrom<&v1_proto::Tls12MasterKeyDeriveParams> for Tls12MasterKeyDerivePara
             random_info: required_ssl_random_from_option(&p.random_info)?,
             version_major: p.version_major,
             version_minor: p.version_minor,
-            prf_hash_mechanism: p.prf_hash_mechanism,
+            prf_hash_mechanism: CkMechanismType(p.prf_hash_mechanism),
         })
     }
 }
@@ -169,7 +172,7 @@ impl TryFrom<&v1_proto::Tls12MasterKeyDeriveParams> for Tls12MasterKeyDerivePara
 impl From<&Tls12ExtendedMasterKeyDeriveParams> for v1_proto::Tls12ExtendedMasterKeyDeriveParams {
     fn from(p: &Tls12ExtendedMasterKeyDeriveParams) -> Self {
         Self {
-            prf_hash_mechanism: p.prf_hash_mechanism,
+            prf_hash_mechanism: p.prf_hash_mechanism.0,
             session_hash: p.session_hash.clone(),
             version_major: p.version_major,
             version_minor: p.version_minor,
@@ -180,7 +183,7 @@ impl From<&Tls12ExtendedMasterKeyDeriveParams> for v1_proto::Tls12ExtendedMaster
 impl From<&v1_proto::Tls12ExtendedMasterKeyDeriveParams> for Tls12ExtendedMasterKeyDeriveParams {
     fn from(p: &v1_proto::Tls12ExtendedMasterKeyDeriveParams) -> Self {
         Self {
-            prf_hash_mechanism: p.prf_hash_mechanism,
+            prf_hash_mechanism: CkMechanismType(p.prf_hash_mechanism),
             session_hash: p.session_hash.clone(),
             version_major: p.version_major,
             version_minor: p.version_minor,
@@ -200,11 +203,11 @@ impl From<&Ssl3KeyMatParams> for v1_proto::Ssl3KeyMatParams {
             iv_size_bits: p.iv_size_bits,
             is_export: p.is_export,
             random_info: Some(ssl_random_to_proto(&p.random_info)),
-            prf_hash_mechanism: p.prf_hash_mechanism,
-            client_mac_secret_handle: p.client_mac_secret_handle,
-            server_mac_secret_handle: p.server_mac_secret_handle,
-            client_key_handle: p.client_key_handle,
-            server_key_handle: p.server_key_handle,
+            prf_hash_mechanism: p.prf_hash_mechanism.0,
+            client_mac_secret_handle: p.client_mac_secret_handle.0,
+            server_mac_secret_handle: p.server_mac_secret_handle.0,
+            client_key_handle: p.client_key_handle.0,
+            server_key_handle: p.server_key_handle.0,
             client_iv: secret_to_plain(&p.client_iv),
             server_iv: secret_to_plain(&p.server_iv),
         }
@@ -221,11 +224,11 @@ impl TryFrom<&v1_proto::Ssl3KeyMatParams> for Ssl3KeyMatParams {
             iv_size_bits: p.iv_size_bits,
             is_export: p.is_export,
             random_info: required_ssl_random_from_option(&p.random_info)?,
-            prf_hash_mechanism: p.prf_hash_mechanism,
-            client_mac_secret_handle: p.client_mac_secret_handle,
-            server_mac_secret_handle: p.server_mac_secret_handle,
-            client_key_handle: p.client_key_handle,
-            server_key_handle: p.server_key_handle,
+            prf_hash_mechanism: CkMechanismType(p.prf_hash_mechanism),
+            client_mac_secret_handle: CkObjectHandle(p.client_mac_secret_handle),
+            server_mac_secret_handle: CkObjectHandle(p.server_mac_secret_handle),
+            client_key_handle: CkObjectHandle(p.client_key_handle),
+            server_key_handle: CkObjectHandle(p.server_key_handle),
             client_iv: SecretBytes::copy_from_slice(&p.client_iv),
             server_iv: SecretBytes::copy_from_slice(&p.server_iv),
         })
@@ -239,7 +242,7 @@ impl TryFrom<&v1_proto::Ssl3KeyMatParams> for Ssl3KeyMatParams {
 impl From<&WtlsMasterKeyDeriveParams> for v1_proto::WtlsMasterKeyDeriveParams {
     fn from(p: &WtlsMasterKeyDeriveParams) -> Self {
         Self {
-            digest_mechanism: p.digest_mechanism,
+            digest_mechanism: p.digest_mechanism.0,
             random_info: Some(wtls_random_to_proto(&p.random_info)),
             version: p.version,
         }
@@ -251,7 +254,7 @@ impl TryFrom<&v1_proto::WtlsMasterKeyDeriveParams> for WtlsMasterKeyDeriveParams
 
     fn try_from(p: &v1_proto::WtlsMasterKeyDeriveParams) -> Result<Self, Self::Error> {
         Ok(Self {
-            digest_mechanism: p.digest_mechanism,
+            digest_mechanism: CkMechanismType(p.digest_mechanism),
             random_info: required_wtls_random_from_option(&p.random_info)?,
             version: p.version,
         })
@@ -265,10 +268,11 @@ impl TryFrom<&v1_proto::WtlsMasterKeyDeriveParams> for WtlsMasterKeyDeriveParams
 impl From<&WtlsPrfParams> for v1_proto::WtlsPrfParams {
     fn from(p: &WtlsPrfParams) -> Self {
         Self {
-            digest_mechanism: p.digest_mechanism,
+            digest_mechanism: p.digest_mechanism.0,
             seed: secret_to_plain(&p.seed),
             label: secret_to_plain(&p.label),
             output_len: p.output_len,
+            output: secret_to_plain(&p.output),
         }
     }
 }
@@ -276,10 +280,11 @@ impl From<&WtlsPrfParams> for v1_proto::WtlsPrfParams {
 impl From<&v1_proto::WtlsPrfParams> for WtlsPrfParams {
     fn from(p: &v1_proto::WtlsPrfParams) -> Self {
         Self {
-            digest_mechanism: p.digest_mechanism,
+            digest_mechanism: CkMechanismType(p.digest_mechanism),
             seed: SecretBytes::copy_from_slice(&p.seed),
             label: SecretBytes::copy_from_slice(&p.label),
             output_len: p.output_len,
+            output: SecretBytes::copy_from_slice(&p.output),
         }
     }
 }
@@ -291,15 +296,15 @@ impl From<&v1_proto::WtlsPrfParams> for WtlsPrfParams {
 impl From<&WtlsKeyMatParams> for v1_proto::WtlsKeyMatParams {
     fn from(p: &WtlsKeyMatParams) -> Self {
         Self {
-            digest_mechanism: p.digest_mechanism,
+            digest_mechanism: p.digest_mechanism.0,
             mac_size_bits: p.mac_size_bits,
             key_size_bits: p.key_size_bits,
             iv_size_bits: p.iv_size_bits,
             sequence_number: p.sequence_number,
             is_export: p.is_export,
             random_info: Some(wtls_random_to_proto(&p.random_info)),
-            mac_secret_handle: p.mac_secret_handle,
-            key_handle: p.key_handle,
+            mac_secret_handle: p.mac_secret_handle.0,
+            key_handle: p.key_handle.0,
             iv: p.iv.clone(),
         }
     }
@@ -310,15 +315,15 @@ impl TryFrom<&v1_proto::WtlsKeyMatParams> for WtlsKeyMatParams {
 
     fn try_from(p: &v1_proto::WtlsKeyMatParams) -> Result<Self, Self::Error> {
         Ok(Self {
-            digest_mechanism: p.digest_mechanism,
+            digest_mechanism: CkMechanismType(p.digest_mechanism),
             mac_size_bits: p.mac_size_bits,
             key_size_bits: p.key_size_bits,
             iv_size_bits: p.iv_size_bits,
             sequence_number: p.sequence_number,
             is_export: p.is_export,
             random_info: required_wtls_random_from_option(&p.random_info)?,
-            mac_secret_handle: p.mac_secret_handle,
-            key_handle: p.key_handle,
+            mac_secret_handle: CkObjectHandle(p.mac_secret_handle),
+            key_handle: CkObjectHandle(p.key_handle),
             iv: p.iv.clone(),
         })
     }

@@ -232,7 +232,16 @@ impl CkAttributeType {
     /// can cause capacity-overflow panics inside `extern "C"` backend
     /// functions, aborting the daemon process.
     pub fn is_allocation_size(self) -> bool {
-        matches!(self, Self::VALUE_LEN | Self::MODULUS_BITS)
+        // W1-C9-11: ADR-0011 guards CKA_VALUE_LEN, CKA_MODULUS_BITS, and the
+        // CKA_*_BITS length attributes against absurd backend allocations.
+        matches!(
+            self,
+            Self::VALUE_LEN
+                | Self::MODULUS_BITS
+                | Self::PRIME_BITS
+                | Self::SUBPRIME_BITS
+                | Self::VALUE_BITS
+        )
     }
 }
 
@@ -368,8 +377,17 @@ mod tests {
 
     #[test]
     fn allocation_size_classification() {
-        assert!(CkAttributeType::VALUE_LEN.is_allocation_size());
-        assert!(CkAttributeType::MODULUS_BITS.is_allocation_size());
+        // W1-C9-11: ADR-0011 claims CKA_VALUE_LEN, CKA_MODULUS_BITS, and
+        // CKA_*_BITS are all guarded as allocation sizes — enumerate all five.
+        for t in [
+            CkAttributeType::VALUE_LEN,
+            CkAttributeType::MODULUS_BITS,
+            CkAttributeType::PRIME_BITS,
+            CkAttributeType::SUBPRIME_BITS,
+            CkAttributeType::VALUE_BITS,
+        ] {
+            assert!(t.is_allocation_size(), "expected allocation size: {t:?}");
+        }
         // Constants, not sizes — should not be flagged
         assert!(!CkAttributeType::CLASS.is_allocation_size());
         assert!(!CkAttributeType::KEY_TYPE.is_allocation_size());

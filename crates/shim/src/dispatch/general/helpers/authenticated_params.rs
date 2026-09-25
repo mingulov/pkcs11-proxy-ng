@@ -70,7 +70,7 @@ impl AuthenticatedCall {
         if rv != CKR_OK {
             return Err(CkRv(rv as u64));
         }
-        let mechanism = unsafe { read_mechanism(mechanism) };
+        let mechanism = unsafe { read_mechanism(mechanism) }?;
         validate_input(&mechanism, None)?;
         let iv_target = if matches!(mechanism.params, Some(CkMechanismParams::Iv(_))) {
             outer.pParameter.cast()

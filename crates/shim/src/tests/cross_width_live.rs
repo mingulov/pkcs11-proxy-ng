@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Live cross-width topology test (ADR-0011 Phase A).
 //!
 //! Runs the shim against an **out-of-process** daemon so the client and

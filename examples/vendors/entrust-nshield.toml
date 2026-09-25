@@ -3,26 +3,11 @@
 #
 # Reference: Security World SDK pkcs11extra.h
 # WARNING: nShield uses non-standard vendor base 0xDE436972, NOT 0x80000000.
-
-# --- AES-CMAC ---
-# CKM_NC_AES_CMAC uses MAC general params (single CK_ULONG tag length)
-[[params]]
-shape = "mac_general"
-mechanisms = [0xDE436990]  # CKM_NC_AES_CMAC (approximate, check your SDK)
-
-# CKM_NC_AES_CMAC_KEY_DERIVATION
-# NOT-YET-IMPLEMENTED(aes_cmac_key_derivation): backend FFI reconstruction
-# needs the nCipher C struct layout. Fail-closed PARAM_INVALID until then.
-[[params]]
-shape = "aes_cmac_key_derivation"
-mechanisms = [0xDE436991]  # CKM_NC_AES_CMAC_KEY_DERIVATION
-
-# --- ECIES ---
-# NOT-YET-IMPLEMENTED(ecies): backend FFI reconstruction needs the vendor
-# C struct layout (cryptoki-sys has no CK_ECIES_PARAMS). Fail-closed until then.
-[[params]]
-shape = "ecies"
-mechanisms = [0xDE436993]  # CKM_NC_ECIES (approximate, check your SDK)
+#
+# NOTE (W1-L8-06): `parameterless` must stay a single top-level list
+# (before the first [[params]]): TOML attaches a bare key written after
+# a [[params]] header to that table, where the strict registry loader
+# rejects it — and duplicate top-level keys are invalid TOML.
 
 # --- Parameterless vendor mechanisms ---
 parameterless = [
@@ -32,6 +17,30 @@ parameterless = [
   0xDE436983, # CKM_NC_SHA384_HMAC_KEY_GEN
   0xDE436984, # CKM_NC_SHA512_HMAC_KEY_GEN
 ]
+
+# --- AES-CMAC ---
+# CKM_NC_AES_CMAC uses MAC general params (single CK_ULONG tag length)
+[[params]]
+shape = "mac_general"
+mechanisms = [0xDE436990]  # CKM_NC_AES_CMAC (approximate, check your SDK)
+
+# CKM_NC_AES_CMAC_KEY_DERIVATION
+# NOT-YET-IMPLEMENTED(aes_cmac_key_derivation): backend FFI reconstruction
+# needs the nCipher C struct layout.
+# Commented out: unknown shapes fail registry load loudly (W1-L8-06) —
+# uncomment once the shape ships.
+# [[params]]
+# shape = "aes_cmac_key_derivation"
+# mechanisms = [0xDE436991]  # CKM_NC_AES_CMAC_KEY_DERIVATION
+
+# --- ECIES ---
+# NOT-YET-IMPLEMENTED(ecies): backend FFI reconstruction needs the vendor
+# C struct layout (cryptoki-sys has no CK_ECIES_PARAMS).
+# Commented out: unknown shapes fail registry load loudly (W1-L8-06) —
+# uncomment once the shape ships.
+# [[params]]
+# shape = "ecies"
+# mechanisms = [0xDE436993]  # CKM_NC_ECIES (approximate, check your SDK)
 
 # NOTE: Exact hex values depend on your nShield firmware version.
 # Run C_GetMechanismList to discover the actual values on your HSM.

@@ -2,7 +2,7 @@
 // for cross-platform PKCS#11 portability.
 #![allow(clippy::unnecessary_cast)]
 
-use cryptoki_sys::{CK_STATE, CK_UTF8CHAR};
+use cryptoki_sys::CK_STATE;
 use pkcs11_proxy_ng_types::*;
 use zeroize::Zeroizing;
 
@@ -22,15 +22,6 @@ pub(super) fn narrow_wire_ulong(value: u64) -> CkResult<cryptoki_sys::CK_ULONG> 
 /// rather than silently replaced with an empty string.
 pub(super) fn utf8_trim(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim_end_matches([' ', '\0']).to_string()
-}
-
-/// Copy a Rust string into a fixed-width PKCS#11 field, padding with spaces.
-pub(super) fn space_pad<const N: usize>(value: &str) -> [CK_UTF8CHAR; N] {
-    let mut padded = [b' '; N];
-    let value = value.as_bytes();
-    let copy_len = value.len().min(N);
-    padded[..copy_len].copy_from_slice(&value[..copy_len]);
-    padded
 }
 
 /// Convert a raw PKCS#11 session state value into the modeled enum.

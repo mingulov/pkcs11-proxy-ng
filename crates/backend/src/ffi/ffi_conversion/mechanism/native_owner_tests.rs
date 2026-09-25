@@ -14,7 +14,7 @@ fn pss_input() -> CkMechanism {
         mechanism_type: CkMechanismType::RSA_PKCS_PSS,
         params: Some(CkMechanismParams::RsaPkcsPss(RsaPkcsPssParams {
             hash_alg: CkMechanismType::SHA256,
-            mgf: 1,
+            mgf: CkMgf(1),
             salt_len: 32,
         })),
     }

@@ -637,6 +637,54 @@ mod lifecycle_mech_tests {
         cryptoki_sys::CKR_OK
     }
 
+    /// W1-C5-01: stub provider `C_DeriveKey` performing provider-style
+    /// mechanism-output writes: PRF bytes + written length for the PRF
+    /// shapes, the negotiated version for SSL3 master-key derive.
+    unsafe extern "C" fn derive_mech_output_ok(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        mechanism: *mut cryptoki_sys::CK_MECHANISM,
+        _base_key: cryptoki_sys::CK_OBJECT_HANDLE,
+        _template: cryptoki_sys::CK_ATTRIBUTE_PTR,
+        _count: cryptoki_sys::CK_ULONG,
+        handle: *mut cryptoki_sys::CK_OBJECT_HANDLE,
+    ) -> cryptoki_sys::CK_RV {
+        if !mechanism.is_null() {
+            let mech = unsafe { &*mechanism };
+            let mech_type = mech.mechanism as u64;
+            if mech_type == CkMechanismType::TLS_PRF.0 {
+                let prf =
+                    unsafe { &mut *(mech.pParameter as *mut cryptoki_sys::CK_TLS_PRF_PARAMS) };
+                if !prf.pOutput.is_null() && !prf.pulOutputLen.is_null() {
+                    let n = (unsafe { *prf.pulOutputLen } as usize).min(32);
+                    unsafe { std::ptr::write_bytes(prf.pOutput, 0x5A, n) };
+                    unsafe { *prf.pulOutputLen = n as cryptoki_sys::CK_ULONG };
+                }
+            } else if mech_type == CkMechanismType::WTLS_PRF.0 {
+                let prf =
+                    unsafe { &mut *(mech.pParameter as *mut cryptoki_sys::CK_WTLS_PRF_PARAMS) };
+                if !prf.pOutput.is_null() && !prf.pulOutputLen.is_null() {
+                    let n = (unsafe { *prf.pulOutputLen } as usize).min(20);
+                    unsafe { std::ptr::write_bytes(prf.pOutput, 0xA5, n) };
+                    unsafe { *prf.pulOutputLen = n as cryptoki_sys::CK_ULONG };
+                }
+            } else if mech_type == CkMechanismType::SSL3_MASTER_KEY_DERIVE.0 {
+                let ssl3 = unsafe {
+                    &mut *(mech.pParameter as *mut cryptoki_sys::CK_SSL3_MASTER_KEY_DERIVE_PARAMS)
+                };
+                if !ssl3.pVersion.is_null() {
+                    unsafe {
+                        (*ssl3.pVersion).major = 3;
+                        (*ssl3.pVersion).minor = 0;
+                    }
+                }
+            }
+        }
+        if !handle.is_null() {
+            unsafe { *handle = 52 };
+        }
+        cryptoki_sys::CKR_OK
+    }
+
     unsafe extern "C" fn wrap_ok(
         _session: cryptoki_sys::CK_SESSION_HANDLE,
         _mechanism: *mut cryptoki_sys::CK_MECHANISM,
@@ -682,26 +730,14 @@ mod lifecycle_mech_tests {
         functions.C_DeriveKey = Some(derive_ok);
         functions.C_WrapKey = Some(wrap_ok);
         functions.C_GenerateKeyPair = Some(keypair_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
+        (backend, functions)
+    }
+
+    fn backend_with_derive_output_stub() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        functions.C_DeriveKey = Some(derive_mech_output_ok);
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         (backend, functions)
     }
 
@@ -771,6 +807,97 @@ mod lifecycle_mech_tests {
             )
             .unwrap();
         assert_eq!(handle, CkObjectHandle(51));
+    }
+
+    // W1-C5-01: full derive-path delivery — the stub provider writes
+    // outputs during `C_DeriveKey`; `ffi_derive_key_with_output` must
+    // surface them in `mechanism_out`.
+    #[test]
+    fn derive_key_with_output_delivers_tls_prf_bytes() {
+        use pkcs11_proxy_ng_types::TlsPrfParams;
+
+        let (backend, _functions) = backend_with_derive_output_stub();
+        backend.lifecycle_domain.open_for_tests();
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType::TLS_PRF,
+            params: Some(CkMechanismParams::TlsPrf(TlsPrfParams {
+                seed: vec![0xA1; 32].into(),
+                label: b"master secret".to_vec().into(),
+                output_len: 48,
+                output: Vec::new().into(),
+            })),
+        };
+        let (handle, mech_out) = backend
+            .ffi_derive_key_with_output(CkSessionHandle(7), &mechanism, CkObjectHandle(9), None)
+            .unwrap();
+        assert_eq!(handle, CkObjectHandle(52));
+        match mech_out {
+            Some(CkMechanismParams::TlsPrf(params)) => {
+                assert_eq!(params.output_len, 32);
+                assert_eq!(params.output, vec![0x5A; 32].into());
+            }
+            other => panic!("unexpected mechanism_out: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn derive_key_with_output_delivers_wtls_prf_bytes() {
+        use pkcs11_proxy_ng_types::WtlsPrfParams;
+
+        let (backend, _functions) = backend_with_derive_output_stub();
+        backend.lifecycle_domain.open_for_tests();
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType::WTLS_PRF,
+            params: Some(CkMechanismParams::WtlsPrf(WtlsPrfParams {
+                digest_mechanism: CkMechanismType::SHA256,
+                seed: vec![0xC1; 20].into(),
+                label: vec![0xD1; 8].into(),
+                output_len: 20,
+                output: Vec::new().into(),
+            })),
+        };
+        let (handle, mech_out) = backend
+            .ffi_derive_key_with_output(CkSessionHandle(7), &mechanism, CkObjectHandle(9), None)
+            .unwrap();
+        assert_eq!(handle, CkObjectHandle(52));
+        match mech_out {
+            Some(CkMechanismParams::WtlsPrf(params)) => {
+                assert_eq!(params.digest_mechanism.0, CkMechanismType::SHA256.0);
+                assert_eq!(params.output_len, 20);
+                assert_eq!(params.output, vec![0xA5; 20].into());
+            }
+            other => panic!("unexpected mechanism_out: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn derive_key_with_output_delivers_ssl3_master_key_version() {
+        use pkcs11_proxy_ng_types::{Ssl3MasterKeyDeriveParams, SslRandomData};
+
+        let (backend, _functions) = backend_with_derive_output_stub();
+        backend.lifecycle_domain.open_for_tests();
+        let mechanism = CkMechanism {
+            mechanism_type: CkMechanismType::SSL3_MASTER_KEY_DERIVE,
+            params: Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
+                random_info: SslRandomData {
+                    client_random: vec![0x11; 32],
+                    server_random: vec![0x22; 32],
+                },
+                version_major: 3,
+                version_minor: 0,
+            })),
+        };
+        let (handle, mech_out) = backend
+            .ffi_derive_key_with_output(CkSessionHandle(7), &mechanism, CkObjectHandle(9), None)
+            .unwrap();
+        assert_eq!(handle, CkObjectHandle(52));
+        match mech_out {
+            Some(CkMechanismParams::Ssl3MasterKeyDerive(params)) => {
+                assert_eq!(params.version_major, 3);
+                assert_eq!(params.version_minor, 0);
+            }
+            other => panic!("unexpected mechanism_out: {other:?}"),
+        }
     }
 
     #[test]
@@ -1024,26 +1151,7 @@ mod lifecycle_op_state_tests {
     fn backend_with_op_state() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_GetOperationState = Some(op_state_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         (backend, functions)
     }
 
@@ -1095,26 +1203,7 @@ mod lifecycle_random_tests {
     fn backend_with_random() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_GenerateRandom = Some(random_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         (backend, functions)
     }
 
@@ -1238,26 +1327,7 @@ mod slot_wait_tests {
         functions.C_Initialize = Some(wait_fixture_initialize_ok);
         functions.C_Finalize = Some(wait_fixture_finalize_ok);
         functions.C_WaitForSlotEvent = wait;
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         (backend, functions)
     }
 

@@ -1,9 +1,10 @@
-# Reference: planned multi-user mTLS configuration with per-identity policy
+# Reference: multi-user mTLS configuration with per-identity policy.
 #
-# Runtime mTLS enforcement is not wired in this binary yet. The daemon fails
-# closed when auth = "mtls" is configured so this file cannot accidentally
-# start a plaintext listener that looks secured. Keep this as the target
-# configuration shape for the full mTLS and token-policy implementation.
+# mTLS is wired and enforced (see server_tls_config in
+# crates/server/src/server/transport.rs): with auth = "mtls" the daemon
+# requires ca_cert, server_cert, and server_key; refuses insecure keys
+# and out-of-validity certificates at startup; and binds each client to
+# its certificate identity for the [[auth.policy]] rules below.
 #
 # Usage:
 #   pkcs11-proxy-ng examples/config-multi-user.toml
@@ -27,16 +28,18 @@ max_blocking_threads = 512
 # sanitize_inputs = true
 
 [listener.remote]
-bind = "0.0.0.0:50051"
+bind = "0.0.0.0:7512"
 auth = "mtls"
-ca_cert = "/etc/pkcs11-proxy/ca.crt"
-server_cert = "/etc/pkcs11-proxy/server.crt"
-server_key = "/etc/pkcs11-proxy/server.key"
+ca_cert = "/etc/pkcs11-proxy-ng/ca.crt"
+server_cert = "/etc/pkcs11-proxy-ng/server.crt"
+server_key = "/etc/pkcs11-proxy-ng/server.key"
 
 [auth]
 allow_all_authenticated = false
 
-# mTLS identities use the daemon's canonical issuer+subject policy key format.
+# mTLS identities key policy entries. Prefer x509:spki=<hex-fingerprint>
+# (primary form); the x509:issuer=...;subject=... DN form used below
+# still works but is deprecated (the daemon logs a migration warning).
 #
 # App service account: can access the "app-signing" token
 [[auth.policy]]

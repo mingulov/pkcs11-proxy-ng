@@ -12,7 +12,7 @@ use super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::handle_map::VirtualHandle;
 use super::audit_events::emit_auth_event;
 #[path = "session_handlers/auth.rs"]
-mod auth;
+pub(super) mod auth;
 #[path = "session_handlers/lifecycle.rs"]
 mod lifecycle;
 #[path = "session_handlers/management.rs"]

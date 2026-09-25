@@ -48,6 +48,25 @@ pub(super) async fn find_objects(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::FindObjectsRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsResponse>, Status> {
+    let scan_bound = crate::server::resilience::find_scan_bound();
+    find_objects_with_bound(ctx, request, scan_bound).await
+}
+
+/// `find_objects` with an explicit filter-scan bound (W1-C1-07; the
+/// `session_cancel_with_timeout` precedent: production passes the configured
+/// find threshold, tests pass an explicit bound).
+///
+/// Each of the three filter loops below stops once its cumulative scanned
+/// population passes `scan_bound` (`None` = unbounded, as today). A stopped
+/// scan with kept objects returns them as a legal partial result (the client
+/// loops); a stopped scan with nothing kept fails loudly with
+/// `CKR_DEVICE_ERROR` rather than returning an empty batch the client would
+/// mistake for genuine end-of-search.
+async fn find_objects_with_bound(
+    ctx: &HandlerContext,
+    request: Request<pkcs11_proxy_ng_proto::FindObjectsRequest>,
+    scan_bound: Option<usize>,
+) -> Result<Response<pkcs11_proxy_ng_proto::FindObjectsResponse>, Status> {
     let req = request.into_inner();
     let ctx_id = ClientContextId(req.client_context_id);
     // Save the virtual session handle; resolve_session copies the u64 (Copy type),
@@ -80,10 +99,12 @@ pub(super) async fn find_objects(
     // must not observe another context's session objects — the backend
     // application is shared, so unfiltered enumeration leaks across
     // tenants). Same loop contract as below: pull past fully-filtered
-    // batches, return empty ONLY on genuine backend exhaustion.
+    // batches, return empty ONLY on genuine backend exhaustion — or stop
+    // past the scan bound (W1-C1-07).
     // (Logged-out callers take the F-04 loop below instead.)
     if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() && logged_in {
         let mut kept_backends = Vec::new();
+        let mut scanned: usize = 0;
         loop {
             let batch_backend = ctx.backend.clone();
             // CkSessionHandle and u32 are Copy; the move closure copies them.
@@ -110,6 +131,7 @@ pub(super) async fn find_objects(
             if batch.is_empty() {
                 break;
             }
+            scanned += batch.len();
 
             for &backend_object in &batch {
                 if find_result_visible_to_context(ctx, &ctx_id, session, backend_object).await {
@@ -119,6 +141,19 @@ pub(super) async fn find_objects(
 
             if !kept_backends.is_empty() {
                 break;
+            }
+            // W1-C1-07: stop past the configured scan bound. Kept is empty
+            // here (non-empty broke out above), and returning it with OK
+            // would lie about exhaustion — fail loudly instead.
+            if scan_bound_tripped(scanned, scan_bound) {
+                tracing::warn!(
+                    scanned,
+                    "find_objects transparency scan exceeded the find threshold; failing loudly instead of truncating"
+                );
+                return Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                    ck_rv: CkRv::DEVICE_ERROR.0,
+                    object_handles: vec![],
+                }));
             }
         }
 
@@ -140,9 +175,11 @@ pub(super) async fn find_objects(
     // authz filter below — pull past fully-filtered batches and return empty
     // ONLY on genuine backend exhaustion, so a filtered batch is never
     // mistaken for end-of-search. Resilience observes each backend batch
-    // (population size), never the kept subset.
+    // (population size), never the kept subset. The scan bound (W1-C1-07)
+    // stops the loop past the configured threshold instead of truncating.
     if !ctx.token_policy.per_object_active() && !ctx.token_policy.per_class_active() {
         let mut kept_backends = Vec::new();
+        let mut scanned: usize = 0;
         loop {
             let batch_backend = ctx.backend.clone();
             // CkSessionHandle and u32 are Copy; the move closure copies them.
@@ -170,6 +207,7 @@ pub(super) async fn find_objects(
                 break;
             }
 
+            scanned += batch.len();
             for &backend_object in &batch {
                 // CROSS-PROC-001 first (ownership is the cheaper check for
                 // mapped handles and hides foreign session objects before
@@ -183,6 +221,18 @@ pub(super) async fn find_objects(
 
             if !kept_backends.is_empty() {
                 break;
+            }
+            // W1-C1-07: stop past the configured scan bound (kept is empty
+            // here — fail loudly rather than lie about exhaustion).
+            if scan_bound_tripped(scanned, scan_bound) {
+                tracing::warn!(
+                    scanned,
+                    "find_objects logged-out scan exceeded the find threshold; failing loudly instead of truncating"
+                );
+                return Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                    ck_rv: CkRv::DEVICE_ERROR.0,
+                    object_handles: vec![],
+                }));
             }
         }
 
@@ -219,8 +269,11 @@ pub(super) async fn find_objects(
     // client can rely on. This prevents a fully-denied batch from being returned as
     // 0 to the client, which would be indistinguishable from end-of-search and would
     // silently hide authorized objects appearing later in the backend's enumeration.
+    // Past the scan bound (W1-C1-07) the loop stops with a loud failure
+    // instead of draining an adversarial population unboundedly.
     let mut kept_backends = Vec::new();
     let mut kept_metas: Vec<ObjectMetadata> = Vec::new();
+    let mut scanned: usize = 0;
     loop {
         let batch_backend = ctx.backend.clone();
         // CkSessionHandle and u32 are Copy; the move closure copies them.
@@ -250,6 +303,7 @@ pub(super) async fn find_objects(
             // An empty kept set here means the search is truly over (correct 0).
             break;
         }
+        scanned += batch.len();
 
         for &backend_object in &batch {
             let meta =
@@ -308,13 +362,25 @@ pub(super) async fn find_objects(
         }
         // The entire batch was denied — pull the next backend batch rather than
         // returning 0, which the client would mistake for end-of-search.
+        // W1-C1-07: ...unless the scan passed the configured bound, in which
+        // case fail loudly rather than lie about exhaustion.
+        if scan_bound_tripped(scanned, scan_bound) {
+            tracing::warn!(
+                scanned,
+                "find_objects authz scan exceeded the find threshold; failing loudly instead of truncating"
+            );
+            return Ok(Response::new(pkcs11_proxy_ng_proto::FindObjectsResponse {
+                ck_rv: CkRv::DEVICE_ERROR.0,
+                object_handles: vec![],
+            }));
+        }
     }
 
     match register_object_handles(&ctx.context_manager, &ctx_id, &kept_backends).await {
         Some(virtual_handles) => {
             // Cache each kept object's metadata under its new virtual handle so
-            // use-time gates (gate_object_handle) skip the re-fetch.
-            // cache_object_metadata internally skips token objects (I2 fix).
+            // use-time gates (gate_object_handle) skip the re-fetch. Token
+            // objects are cached gated by the authz generation (W1-L13-18).
             for (&virtual_id, meta) in virtual_handles.iter().zip(kept_metas) {
                 ctx.context_manager.cache_object_metadata(&ctx_id, virtual_id, meta).await;
             }
@@ -328,6 +394,12 @@ pub(super) async fn find_objects(
             object_handles: vec![],
         })),
     }
+}
+
+/// W1-C1-07: has a find filter loop scanned past the configured bound?
+/// `None` (detection off) never trips — unbounded, as today.
+fn scan_bound_tripped(scanned: usize, scan_bound: Option<usize>) -> bool {
+    matches!(scan_bound, Some(limit) if scanned > limit)
 }
 
 pub(super) async fn find_objects_final(
@@ -1580,6 +1652,120 @@ mod tests {
             Some(obj_tok.0),
             "the kept handle must map to the token object"
         );
+    }
+
+    /// W1-C1-07 fixture: a confined principal whose search population is
+    /// `denied_count` copies of one denied (uid_B) session object. Returns the
+    /// handler context, context id, virtual session, and mock (for round-trip
+    /// counting).
+    async fn setup_denied_population_find(
+        denied_count: usize,
+    ) -> (HandlerContext, crate::server::context_manager::ClientContextId, u64, Arc<MockBackend>)
+    {
+        let policy = confined_policy(CONFINED_IDENTITY, "MockToken", UID_A_HEX);
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![]));
+        mock.initialize().unwrap();
+        let flags = CkSessionFlags(CkSessionFlags::RW_SESSION | CkSessionFlags::SERIAL_SESSION);
+        let backend_session = mock.open_session(CkSlotId(0), flags).unwrap();
+        let obj_b = mock.create_object(backend_session, Some(&[])).unwrap();
+        for (attr_type, value) in [
+            (
+                CkAttributeType::CLASS,
+                CkAttributeValue::Ulong(pkcs11_proxy_ng_types::CkObjectClass::SECRET_KEY.0),
+            ),
+            (CkAttributeType::TOKEN, CkAttributeValue::Bool(false)),
+            (CkAttributeType::PRIVATE, CkAttributeValue::Bool(false)),
+            (CkAttributeType::UNIQUE_ID, CkAttributeValue::Bytes(UID_B_BYTES.to_vec().into())),
+        ] {
+            mock.set_attribute(obj_b, attr_type, MockAttributeSlot::Value(value));
+        }
+        mock.find_objects_init(backend_session, Some(&[])).unwrap();
+        mock.set_find_objects_result(vec![obj_b; denied_count]);
+
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(60), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
+        let ctx_id = ctx_mgr.create_context(Some(CONFINED_IDENTITY.into())).await.unwrap();
+        let virtual_session = ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.register_session(
+                    BackendHandle(backend_session.0),
+                    crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+                )
+            })
+            .await
+            .unwrap();
+        // Same-context fixture: pre-register the mapping (ownership keeps it;
+        // the authz uid check is what denies it).
+        ctx_mgr
+            .get_context(&ctx_id, |c| {
+                c.object_handles.insert(BackendHandle(obj_b.0));
+            })
+            .await;
+        let mut ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+        ctx.token_policy = policy;
+        (ctx, ctx_id, virtual_session.0, mock)
+    }
+
+    /// W1-C1-07: an adversarial (fully-denied) filter population must cost
+    /// bounded backend round-trips. Past the bound the scan stops with a loud
+    /// truncation failure — never a false end-of-search.
+    #[tokio::test]
+    async fn find_objects_denied_population_bounded_by_scan_threshold() {
+        let (ctx, ctx_id, vs, mock) = setup_denied_population_find(50).await;
+        let calls_before = mock.find_objects_call_count();
+        let resp = super::find_objects_with_bound(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::FindObjectsRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: vs,
+                max_object_count: 10,
+            }),
+            Some(15),
+        )
+        .await
+        .expect("find_objects must not return a transport error")
+        .into_inner();
+        let calls = mock.find_objects_call_count() - calls_before;
+        assert!(
+            calls <= 2,
+            "scan past the bound must stop: {calls} backend round-trips for 50 denied objects"
+        );
+        assert_eq!(
+            resp.ck_rv,
+            CkRv::DEVICE_ERROR.0,
+            "truncated scan must fail loudly, not report false exhaustion"
+        );
+        assert!(resp.object_handles.is_empty(), "truncated scan keeps nothing");
+    }
+
+    /// W1-C1-07 characterization: with no bound configured the scan still
+    /// drains to genuine exhaustion (unbounded, as today).
+    #[tokio::test]
+    async fn find_objects_denied_population_unbounded_without_threshold() {
+        let (ctx, ctx_id, vs, mock) = setup_denied_population_find(50).await;
+        let calls_before = mock.find_objects_call_count();
+        let resp = super::find_objects_with_bound(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::FindObjectsRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: vs,
+                max_object_count: 10,
+            }),
+            None,
+        )
+        .await
+        .expect("find_objects must not return a transport error")
+        .into_inner();
+        let calls = mock.find_objects_call_count() - calls_before;
+        assert_eq!(calls, 6, "unbounded scan drains all 5 batches + exhaustion");
+        assert_eq!(resp.ck_rv, CkRv::OK.0);
+        assert!(resp.object_handles.is_empty());
     }
 
     #[tokio::test]

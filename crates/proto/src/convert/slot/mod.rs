@@ -1,5 +1,15 @@
 use crate::pkcs11_proxy_ng::v1 as v1_proto;
-use pkcs11_proxy_ng_types::{CkInfo, CkSlotFlags, CkSlotInfo, CkTokenFlags, CkTokenInfo};
+use pkcs11_proxy_ng_types::{
+    CkInfo, CkResult, CkRv, CkSlotFlags, CkSlotInfo, CkTokenFlags, CkTokenInfo,
+};
+
+/// W1-C8-06: PKCS#11 version components are single bytes. A wire value above
+/// 255 is corrupt peer data and must error loudly instead of truncating to
+/// the low byte. `DEVICE_ERROR` matches the discovery layer's existing signal
+/// for unusable peer info payloads.
+fn version_byte(value: u32) -> CkResult<u8> {
+    u8::try_from(value).map_err(|_| CkRv::DEVICE_ERROR)
+}
 
 impl From<&CkSlotInfo> for v1_proto::SlotInfo {
     fn from(s: &CkSlotInfo) -> Self {
@@ -15,15 +25,22 @@ impl From<&CkSlotInfo> for v1_proto::SlotInfo {
     }
 }
 
-impl From<&v1_proto::SlotInfo> for CkSlotInfo {
-    fn from(s: &v1_proto::SlotInfo) -> Self {
-        CkSlotInfo {
+impl TryFrom<&v1_proto::SlotInfo> for CkSlotInfo {
+    type Error = CkRv;
+    fn try_from(s: &v1_proto::SlotInfo) -> CkResult<Self> {
+        Ok(CkSlotInfo {
             slot_description: s.slot_description.clone(),
             manufacturer_id: s.manufacturer_id.clone(),
             flags: CkSlotFlags(s.flags),
-            hardware_version: (s.hardware_version_major as u8, s.hardware_version_minor as u8),
-            firmware_version: (s.firmware_version_major as u8, s.firmware_version_minor as u8),
-        }
+            hardware_version: (
+                version_byte(s.hardware_version_major)?,
+                version_byte(s.hardware_version_minor)?,
+            ),
+            firmware_version: (
+                version_byte(s.firmware_version_major)?,
+                version_byte(s.firmware_version_minor)?,
+            ),
+        })
     }
 }
 
@@ -54,9 +71,10 @@ impl From<&CkTokenInfo> for v1_proto::TokenInfo {
     }
 }
 
-impl From<&v1_proto::TokenInfo> for CkTokenInfo {
-    fn from(t: &v1_proto::TokenInfo) -> Self {
-        CkTokenInfo {
+impl TryFrom<&v1_proto::TokenInfo> for CkTokenInfo {
+    type Error = CkRv;
+    fn try_from(t: &v1_proto::TokenInfo) -> CkResult<Self> {
+        Ok(CkTokenInfo {
             label: t.label.clone(),
             manufacturer_id: t.manufacturer_id.clone(),
             model: t.model.clone(),
@@ -72,10 +90,16 @@ impl From<&v1_proto::TokenInfo> for CkTokenInfo {
             free_public_memory: t.free_public_memory,
             total_private_memory: t.total_private_memory,
             free_private_memory: t.free_private_memory,
-            hardware_version: (t.hardware_version_major as u8, t.hardware_version_minor as u8),
-            firmware_version: (t.firmware_version_major as u8, t.firmware_version_minor as u8),
+            hardware_version: (
+                version_byte(t.hardware_version_major)?,
+                version_byte(t.hardware_version_minor)?,
+            ),
+            firmware_version: (
+                version_byte(t.firmware_version_major)?,
+                version_byte(t.firmware_version_minor)?,
+            ),
             utc_time: t.utc_time.clone(),
-        }
+        })
     }
 }
 
@@ -93,15 +117,22 @@ impl From<&CkInfo> for v1_proto::CryptokiInfo {
     }
 }
 
-impl From<&v1_proto::CryptokiInfo> for CkInfo {
-    fn from(i: &v1_proto::CryptokiInfo) -> Self {
-        CkInfo {
-            cryptoki_version: (i.cryptoki_version_major as u8, i.cryptoki_version_minor as u8),
+impl TryFrom<&v1_proto::CryptokiInfo> for CkInfo {
+    type Error = CkRv;
+    fn try_from(i: &v1_proto::CryptokiInfo) -> CkResult<Self> {
+        Ok(CkInfo {
+            cryptoki_version: (
+                version_byte(i.cryptoki_version_major)?,
+                version_byte(i.cryptoki_version_minor)?,
+            ),
             manufacturer_id: i.manufacturer_id.clone(),
             flags: i.flags,
             library_description: i.library_description.clone(),
-            library_version: (i.library_version_major as u8, i.library_version_minor as u8),
-        }
+            library_version: (
+                version_byte(i.library_version_major)?,
+                version_byte(i.library_version_minor)?,
+            ),
+        })
     }
 }
 

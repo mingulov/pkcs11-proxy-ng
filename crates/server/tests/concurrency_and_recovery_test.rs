@@ -1,4 +1,13 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Concurrency, isolation, lease-expiry, and restart coverage.
+//!
+//! The cross-context handle-isolation test runs by default (W1-L10-23): when
+//! SoftHSM2 is present it executes the multi-client invariant for real; when
+//! SoftHSM2 is absent it records an honest `ProviderMissing` skip — never a
+//! silent pass. The remaining tests stay `#[ignore]` (heavy workload,
+//! timing-sensitive lease/restart legs).
 
 mod support;
 
@@ -9,6 +18,22 @@ use support::{
     DaemonHarness, ProviderFixture, create_data_object, find_objects_by_label, find_token_slot,
     initialized_client, open_public_session, open_user_session, unique_label,
 };
+
+/// Build a SoftHSM2 fixture, or record an honest provider-missing skip.
+///
+/// The skip path triggers ONLY when SoftHSM2 is genuinely absent
+/// (re-probed after the failure); a present-but-broken provider still fails.
+async fn soft_hsm_or_skip() -> Result<Option<ProviderFixture>, String> {
+    match ProviderFixture::soft_hsm().await {
+        Ok(fixture) => Ok(Some(fixture)),
+        Err(err) if !support::softhsm2_present() => {
+            record_skip!(support::SkipReason::ProviderMissing("softhsm2"));
+            eprintln!("fixture unavailable ({err}); recorded as skip, not a pass");
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
 
 #[tokio::test]
 #[ignore] // requires SoftHSM2 tools and library
@@ -44,9 +69,12 @@ async fn multi_client_random_workload() -> Result<(), String> {
 }
 
 #[tokio::test]
-#[ignore] // requires SoftHSM2 tools and library
 async fn virtual_object_handles_are_isolated_per_context() -> Result<(), String> {
-    let fixture = ProviderFixture::soft_hsm().await?;
+    // W1-L10-23: default CI exercises the cross-context invariant whenever
+    // SoftHSM2 is present; absence records an explicit skip (never silent).
+    let Some(fixture) = soft_hsm_or_skip().await? else {
+        return Ok(());
+    };
     let daemon = DaemonHarness::start(&fixture).await?;
     let endpoint = daemon.endpoint().to_string();
 

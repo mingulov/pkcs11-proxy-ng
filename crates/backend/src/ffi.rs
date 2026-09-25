@@ -69,20 +69,29 @@ mod exact_output_contract_tests;
 #[path = "ffi/retained_owner_contract_tests.rs"]
 mod retained_owner_contract_tests;
 
-use ffi_conversion::{FfiAttributeQueries, FfiAttrs, space_pad};
+use ffi_conversion::{FfiAttributeQueries, FfiAttrs};
 use mapping::{
     info_from_ck, mechanism_info_from_ck, session_info_from_ck, slot_info_from_ck,
     token_info_from_ck, update_template_from_ffi,
 };
 
-macro_rules! session_bytes_input {
-    ($session:expr, $input:expr, $function:ident, $output:ident, $output_len:ident) => {{
-        // The macro always expands as the tail of a CK_RV-returning closure:
-        // an unrepresentable handle fails the call loudly, never truncates.
-        let _ck_session = match Self::session_handle($session) {
+/// Narrow a wire session handle for native dispatch (W1-L11-03): the
+/// single session-handle prologue shared by the five call macros below.
+/// The macro always expands as the tail of a CK_RV-returning closure:
+/// an unrepresentable handle fails the call loudly, never truncates.
+macro_rules! narrow_session_handle {
+    ($session:expr) => {{
+        match Self::session_handle($session) {
             Ok(h) => h,
             Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
-        };
+        }
+    }};
+}
+pub(crate) use narrow_session_handle;
+
+macro_rules! session_bytes_input {
+    ($session:expr, $input:expr, $function:ident, $output:ident, $output_len:ident) => {{
+        let _ck_session = crate::ffi::narrow_session_handle!($session);
         let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
         unsafe {
             $function(
@@ -99,11 +108,7 @@ pub(crate) use session_bytes_input;
 
 macro_rules! session_unit_input {
     ($session:expr, $input:expr, $function:ident) => {{
-        // See session_bytes_input: fail loudly, never truncate.
-        let _ck_session = match Self::session_handle($session) {
-            Ok(h) => h,
-            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
-        };
+        let _ck_session = crate::ffi::narrow_session_handle!($session);
         let (_ck_in_ptr, _ck_in_len) = $input.as_ptr_len();
         unsafe { $function(_ck_session, _ck_in_ptr as *mut _, Self::ulong_len_u64(_ck_in_len)) }
     }};
@@ -112,11 +117,7 @@ pub(crate) use session_unit_input;
 
 macro_rules! mechanism_key_init {
     ($session:expr, $mechanism:expr, $key:expr, $function:ident, $mech:ident) => {{
-        // See session_bytes_input: fail loudly, never truncate.
-        let _ck_session = match Self::session_handle($session) {
-            Ok(h) => h,
-            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
-        };
+        let _ck_session = crate::ffi::narrow_session_handle!($session);
         let _ck_key = match Self::object_handle($key) {
             Ok(h) => h,
             Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
@@ -128,11 +129,7 @@ pub(crate) use mechanism_key_init;
 
 macro_rules! session_bytes_final {
     ($session:expr, $function:ident, $output:ident, $output_len:ident) => {{
-        // See session_bytes_input: fail loudly, never truncate.
-        let _ck_session = match Self::session_handle($session) {
-            Ok(h) => h,
-            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
-        };
+        let _ck_session = crate::ffi::narrow_session_handle!($session);
         unsafe { $function(_ck_session, $output, $output_len) }
     }};
 }
@@ -140,11 +137,7 @@ pub(crate) use session_bytes_final;
 
 macro_rules! session_object_unit {
     ($session:expr, $object:expr, $function:ident) => {{
-        // See session_bytes_input: fail loudly, never truncate.
-        let _ck_session = match Self::session_handle($session) {
-            Ok(h) => h,
-            Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
-        };
+        let _ck_session = crate::ffi::narrow_session_handle!($session);
         let _ck_object = match Self::object_handle($object) {
             Ok(h) => h,
             Err(_) => return CkRv::FUNCTION_FAILED.0 as cryptoki_sys::CK_RV,
@@ -206,6 +199,22 @@ pub(super) enum OperationFamily {
     Verify,
     SignRecover,
     VerifyRecover,
+}
+
+impl OperationFamily {
+    /// Every family slot a session can hold (W1-L13-16). Session-close
+    /// eviction removes these keys directly instead of retain-scanning
+    /// the whole cache; keep in sync with the variants (pinned by
+    /// `operation_family_all_covers_every_variant`).
+    pub(super) const ALL: [OperationFamily; 7] = [
+        OperationFamily::Encrypt,
+        OperationFamily::Decrypt,
+        OperationFamily::Digest,
+        OperationFamily::Sign,
+        OperationFamily::Verify,
+        OperationFamily::SignRecover,
+        OperationFamily::VerifyRecover,
+    ];
 }
 
 /// FFI backend that loads a PKCS#11 shared library via dlopen (ADR-0004 §2).
@@ -275,6 +284,40 @@ pub struct FfiBackend {
 // the loaded module's static data; the module is kept alive by `_lib`.
 unsafe impl Send for FfiBackend {}
 unsafe impl Sync for FfiBackend {}
+
+impl FfiBackend {
+    /// Test-only base constructor (W1-L11-13): the single `FfiBackend`
+    /// struct literal for stub-backed unit tests. Per-test
+    /// `backend_with_*` installers build their function-list stubs,
+    /// then delegate here for the backend half; the table `Box`es stay
+    /// caller-owned so the raw pointers cannot dangle. Unmanaged test
+    /// permit: bypasses the process reservation without consuming it;
+    /// never backs production dispatch (C3M.4).
+    #[cfg(test)]
+    pub(crate) fn test_backend_with_tables(
+        func_list: *mut cryptoki_sys::CK_FUNCTION_LIST,
+        func_list_3_0: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_0>,
+        func_list_3_2: Option<*const cryptoki_sys::CK_FUNCTION_LIST_3_2>,
+    ) -> Self {
+        Self {
+            _lib: loading::test_library_handle(),
+            func_list,
+            func_list_3_0,
+            func_list_3_2,
+            initialize_args: None,
+            mech_cache: dashmap::DashMap::new(),
+            last_init_family: dashmap::DashMap::new(),
+            session_slot_map: dashmap::DashMap::new(),
+            slot_sessions: dashmap::DashMap::new(),
+            object_cleanup: Default::default(),
+            construction: native_domain::ConstructionPermit::unmanaged_test_only(),
+            lifecycle: Default::default(),
+            lifecycle_domain: Default::default(),
+            session_fences: Default::default(),
+            retirement_sentinel: native_domain::RetirementSentinel::unmanaged_test_only(),
+        }
+    }
+}
 
 impl FfiBackend {
     const FUNCTION_NOT_SUPPORTED: CkRv = CkRv::FUNCTION_NOT_SUPPORTED;
@@ -1101,8 +1144,8 @@ impl Pkcs11Backend for FfiBackend {
         &self,
         session: CkSessionHandle,
         user_type: CkUserType,
-        username: &[u8],
-        pin: &[u8],
+        username: Option<&[u8]>,
+        pin: Option<&[u8]>,
     ) -> CkResult<()> {
         self.ffi_login_user(session, user_type, username, pin)
     }
@@ -1852,26 +1895,7 @@ mod tests {
         functions.C_Initialize = initialize;
         functions.C_Finalize = finalize;
 
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: DashMap::new(),
-            last_init_family: DashMap::new(),
-            session_slot_map: DashMap::new(),
-            slot_sessions: DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
 
         (backend, functions)
     }
@@ -2285,6 +2309,70 @@ mod tests {
         // The emptied slot-11 reverse entry is pruned; slot 22 still maps to {9}.
         assert!(backend.slot_sessions.get(&11).is_none());
         assert!(backend.slot_sessions.get(&22).is_some());
+    }
+
+    #[test]
+    fn drop_mech_cache_session_evicts_all_families_only_for_that_session() {
+        // W1-L13-16 pin: single-session eviction drops every family slot
+        // plus the last-Init marker of exactly that session; sibling
+        // sessions are untouched. Must pass before AND after the
+        // retain-scan removal (mappings identical).
+        let (backend, _functions) = backend_with_finalize(Some(finalize_ok));
+        for family in OperationFamily::ALL {
+            backend.mech_cache.insert(
+                (7, family),
+                ffi_conversion::mechanism_to_ffi(&CkMechanism {
+                    mechanism_type: CkMechanismType::RSA_PKCS,
+                    params: None,
+                })
+                .unwrap(),
+            );
+        }
+        backend.mech_cache.insert(
+            (8, OperationFamily::Sign),
+            ffi_conversion::mechanism_to_ffi(&CkMechanism {
+                mechanism_type: CkMechanismType::RSA_PKCS,
+                params: None,
+            })
+            .unwrap(),
+        );
+        backend.last_init_family.insert(7, OperationFamily::Sign);
+        backend.last_init_family.insert(8, OperationFamily::Sign);
+
+        backend.drop_mech_cache_session(CkSessionHandle(7));
+
+        for family in OperationFamily::ALL {
+            assert!(
+                !backend.mech_cache.contains_key(&(7, family)),
+                "family {family:?} of session 7 evicted"
+            );
+        }
+        assert!(backend.last_init_family.get(&7).is_none());
+        assert!(backend.mech_cache.contains_key(&(8, OperationFamily::Sign)));
+        assert_eq!(backend.last_init_family.get(&8).as_deref(), Some(&OperationFamily::Sign));
+    }
+
+    #[test]
+    fn operation_family_all_covers_every_variant() {
+        // W1-L13-16: `ALL` drives eviction; a new family must land in
+        // it or session close would leak that family's slot. The
+        // exhaustive match (no wildcard) breaks compilation on a new
+        // variant; the length pins the set size.
+        fn name(f: OperationFamily) -> &'static str {
+            match f {
+                OperationFamily::Encrypt => "encrypt",
+                OperationFamily::Decrypt => "decrypt",
+                OperationFamily::Digest => "digest",
+                OperationFamily::Sign => "sign",
+                OperationFamily::Verify => "verify",
+                OperationFamily::SignRecover => "sign_recover",
+                OperationFamily::VerifyRecover => "verify_recover",
+            }
+        }
+        assert_eq!(OperationFamily::ALL.len(), 7);
+        for family in OperationFamily::ALL {
+            let _ = name(family);
+        }
     }
 
     #[test]

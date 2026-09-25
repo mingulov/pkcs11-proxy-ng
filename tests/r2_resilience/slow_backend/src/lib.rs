@@ -369,8 +369,11 @@ unsupported!(c_get_object_size, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, CK_ULONG_PT
 // Minimal GetAttributeValue: report the fake handle as an RSA-2048
 // private key. Sufficient for pkcs11-tool's `--sign` path which
 // queries CKA_CLASS + CKA_KEY_TYPE to confirm the object is signable.
-// Anything not in our handful of known attrs is reported as
-// CKA_TYPE_INVALID per spec.
+// CKA_TOKEN=true is required as well: the daemon's CROSS-PROC-001
+// find filter only shows a context-unknown handle when it probes as
+// a token object, so without it every FindObjects comes back empty
+// and no consumer can resolve the key. Anything not in our handful
+// of known attrs is reported as CKA_TYPE_INVALID per spec.
 unsafe extern "C" fn c_get_attribute_value(
     _h: CK_SESSION_HANDLE,
     _obj: CK_OBJECT_HANDLE,
@@ -384,6 +387,7 @@ unsafe extern "C" fn c_get_attribute_value(
         return CKR_GENERAL_ERROR_LITERAL;
     }
     const CKA_CLASS_LITERAL: CK_ATTRIBUTE_TYPE = 0;
+    const CKA_TOKEN_LITERAL: CK_ATTRIBUTE_TYPE = 0x1;
     const CKA_KEY_TYPE_LITERAL: CK_ATTRIBUTE_TYPE = 0x100;
     const CKA_LABEL_LITERAL: CK_ATTRIBUTE_TYPE = 0x3;
     const CKA_ID_LITERAL: CK_ATTRIBUTE_TYPE = 0x102;
@@ -420,6 +424,18 @@ unsafe extern "C" fn c_get_attribute_value(
                 }
             }
             CKA_SIGN_LITERAL => {
+                if attr.pValue.is_null() {
+                    attr.ulValueLen = 1;
+                } else if attr.ulValueLen >= 1 {
+                    unsafe {
+                        *(attr.pValue as *mut CK_BBOOL) = 1; // CK_TRUE
+                    }
+                    attr.ulValueLen = 1;
+                } else {
+                    attr.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                }
+            }
+            CKA_TOKEN_LITERAL => {
                 if attr.pValue.is_null() {
                     attr.ulValueLen = 1;
                 } else if attr.ulValueLen >= 1 {

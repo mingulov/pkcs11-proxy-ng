@@ -13,12 +13,15 @@
 #   docker run --rm pkcs11-proxy-ng-test
 
 # ── Stage 1: Deps + Kryoptic (cached across source changes) ─────────
-FROM fedora:43 AS deps
+# W1-L16-11: base pinned by digest (tag kept for readability; the digest
+# is what Docker pulls). Re-pin with the registry's current digest when
+# moving Fedora versions.
+FROM fedora:43@sha256:a651ddf48ea28a06ed4e1e6519f51c9f47e7a5a138722ade87369b8fbb7e5b42 AS deps
 
 RUN dnf install -y \
-        bash curl git python3 \
+        bash curl git python3 unzip \
         gcc gcc-c++ make pkgconf-pkg-config clang-devel \
-        openssl openssl-devel protobuf-compiler \
+        openssl openssl-devel \
         sqlite sqlite-devel \
         softhsm \
         nss-tools nss-softokn nss-softokn-freebl \
@@ -28,18 +31,63 @@ RUN dnf install -y \
 RUN dnf install -y libp11 || true
 RUN dnf install -y openssl-pkcs11 || true
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain stable
+# W1-L16-09/W1-L16-12: versioned rustup bootstrap (not the floating
+# sh.rustup.rs pipe) installing the rust-toolchain.toml channel, with the
+# init binary's SHA256 verified before execute. Hashes below are the
+# published static.rust-lang.org rustup-init.sha256 values for 1.29.1.
+ARG RUSTUP_VERSION=1.29.1
+ARG RUST_TOOLCHAIN=1.98.1
+ARG RUSTUP_SHA256_AMD64=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+ARG RUSTUP_SHA256_ARM64=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
+RUN set -eu; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+        x86_64)  RUST_TRIPLE=x86_64-unknown-linux-gnu;  RUSTUP_SHA256="${RUSTUP_SHA256_AMD64}" ;; \
+        aarch64) RUST_TRIPLE=aarch64-unknown-linux-gnu; RUSTUP_SHA256="${RUSTUP_SHA256_ARM64}" ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUST_TRIPLE}/rustup-init" -o /tmp/rustup-init; \
+    echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal; \
+    rm /tmp/rustup-init
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Build Kryoptic (cached unless version changes)
+# W1-L16-13: pinned protoc matching mise.toml (single version
+# everywhere), hash-verified before extract. TOFU-pinned 2026-09-21
+# from the protobuf v36.1 release assets.
+ARG PROTOC_VERSION=36.1
+ARG PROTOC_SHA256_AMD64=c4bc672d9d49214dc8cafdceadf4df92182d6ca8e3ec65a56b2d7de5602669b4
+ARG PROTOC_SHA256_ARM64=237a68856edf1bd28b6204bddd0596c1cf46d298bc29c620012540b2e44c73e7
+RUN set -eu; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+        x86_64)  PROTOC_ARCH=x86_64;   PROTOC_SHA256="${PROTOC_SHA256_AMD64}" ;; \
+        aarch64) PROTOC_ARCH=aarch_64;  PROTOC_SHA256="${PROTOC_SHA256_ARM64}" ;; \
+        *) echo "unsupported arch $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip" -o /tmp/protoc.zip; \
+    echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c -; \
+    unzip -o -q /tmp/protoc.zip -d /usr/local; \
+    rm /tmp/protoc.zip; \
+    protoc --version
+
+# Build Kryoptic (cached unless version changes). W1-L16-12: tarball
+# SHA256 verified before extract (TOFU-pinned 2026-09-21; the codeload
+# bytes are stable for the v1.5.0 tag, so a mismatch fails closed).
+# Note: kryoptic ships no Cargo.lock, so its own build stays unlocked;
+# only workspace builds carry --locked.
 ARG KRYOPTIC_VERSION=1.5.0
-RUN curl -fsSL "https://github.com/latchset/kryoptic/archive/v${KRYOPTIC_VERSION}.tar.gz" \
-    | tar xz -C /opt \
-    && mv "/opt/kryoptic-${KRYOPTIC_VERSION}" /opt/kryoptic \
-    && cd /opt/kryoptic \
-    && CONFDIR=/etc cargo build --release --features "standard,nssdb,dynamic" \
-    && rm -rf /opt/kryoptic/target/release/deps \
+ARG KRYOPTIC_SHA256=0988f6eb9d8a82bd6a8e4c4d02c5a0bab57ede8cd5250280489e85dc631ff7c9
+RUN set -eu; \
+    curl -fsSL "https://github.com/latchset/kryoptic/archive/v${KRYOPTIC_VERSION}.tar.gz" -o /tmp/kryoptic.tar.gz; \
+    echo "${KRYOPTIC_SHA256}  /tmp/kryoptic.tar.gz" | sha256sum -c -; \
+    tar xz -C /opt -f /tmp/kryoptic.tar.gz; \
+    rm /tmp/kryoptic.tar.gz; \
+    mv "/opt/kryoptic-${KRYOPTIC_VERSION}" /opt/kryoptic; \
+    cd /opt/kryoptic; \
+    CONFDIR=/etc cargo build --release --features "standard,nssdb,dynamic"; \
+    rm -rf /opt/kryoptic/target/release/deps \
               /opt/kryoptic/target/release/build \
               /opt/kryoptic/target/release/incremental \
               /root/.cargo/registry/cache \
@@ -71,13 +119,13 @@ RUN for crate in types proto backend audit client shim; do \
     mkdir -p crates/cli/src && echo "fn main(){}" > crates/cli/src/main.rs
 
 # Pre-compile dependencies (cached layer — only re-runs when Cargo.toml changes)
-RUN cargo build --workspace 2>/dev/null || true
+RUN cargo build --locked --workspace 2>/dev/null || true
 
 # Copy actual source (invalidates from here on source changes)
 COPY . .
 RUN find crates -name "*.rs" -exec touch {} +
 
 # Build workspace (incremental — deps already compiled above)
-RUN cargo build --workspace --tests
+RUN cargo build --locked --workspace --tests
 
 CMD ["bash", "scripts/test-matrix.sh", "--skip-fast"]

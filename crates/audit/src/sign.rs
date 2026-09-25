@@ -16,7 +16,12 @@ use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, Verifying
 use crate::AuditError;
 
 /// A checkpoint that summarizes the audit-chain state at a point in time.
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// This is the single shared shape: the sidecar line embeds it via
+/// `#[serde(flatten)]` (see `verify::CheckpointLine`), so a field added here
+/// is automatically covered by the signature and the content binding — a
+/// one-sided add cannot silently escape the signed scope (W1-C12-11).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Checkpoint {
     pub seq: u64,
     pub chain_head_hash: String,

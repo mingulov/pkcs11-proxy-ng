@@ -57,12 +57,18 @@ allow_insecure_tcp = false
 
 [auth]
 # Production should pin to specific peer identities via [[auth.policy]]
-# rather than allow_all_authenticated. Example:
+# rather than allow_all_authenticated. Example (primary SPKI form —
+# find a peer's fingerprint in the daemon logs, which print it with the
+# DN-migration warning):
 #
 # allow_all_authenticated = false
 # [[auth.policy]]
-# identity = "x509:issuer=CN=corp-ca;subject=CN=svc-healthcheck"
-# tokens = ["primary-hsm-slot-0"]
+# identity = "x509:spki=<hex-sha256-of-svc-healthcheck-public-key>"
+# tokens = ["label:primary-hsm"]
+#
+# (Legacy DN form, deprecated — same grant, but the daemon logs a
+# migration warning per key:
+# identity = "x509:issuer=CN=corp-ca;subject=CN=svc-healthcheck")
 #
 # Keeping the permissive default here as a starting point; the
 # accompanying runbook walks through the tightening step.

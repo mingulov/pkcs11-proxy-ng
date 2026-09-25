@@ -13,7 +13,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::SignInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             key_handle: key.0,
         };
         pkcs11_unary_ok!(self.grpc.sign_init(req), true)
@@ -76,7 +76,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::SignRecoverInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             key_handle: key.0,
         };
         pkcs11_unary_ok!(self.grpc.sign_recover_init(req), true)
@@ -118,7 +118,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::VerifyRecoverInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             key_handle: key.0,
         };
         pkcs11_unary_ok!(self.grpc.verify_recover_init(req), true)
@@ -160,7 +160,7 @@ impl Pkcs11Client {
         let req = pkcs11_proxy_ng_proto::VerifyInitRequest {
             client_context_id: ctx,
             session_handle: session.0,
-            mechanism: Some(Self::proto_mechanism(mechanism)),
+            mechanism: Some(Self::proto_mechanism(mechanism)?),
             key_handle: key.0,
         };
         pkcs11_unary_ok!(self.grpc.verify_init(req), true)

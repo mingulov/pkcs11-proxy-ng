@@ -31,6 +31,20 @@ cargo test -p pkcs11-proxy-ng --test concurrency_and_recovery_test -- --ignored 
 cargo test -p pkcs11-proxy-ng --test provider_matrix_test -- --ignored --test-threads=1
 ```
 
+## Default-run SoftHSM2 lanes
+
+`crates/server/tests/parameterized_mechanism_test.rs` runs in default
+`cargo test` (W1-L9-09). When SoftHSM2 (`libsofthsm2.so` + `softhsm2-util`)
+is present, all 10 mechanism tests plus the 79-shape matrix driver execute
+for real; when it is absent, each test records an honest
+`record_skip!(ProviderMissing)` line and passes without executing. A
+present-but-broken provider still fails loudly. The shape-matrix driver
+asserts `executed + skipped == 79` with zero transport failures.
+
+```bash
+cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --test-threads=1
+```
+
 ## Ignored test taxonomy
 
 All ignored Rust integration lanes are ignored because they need real PKCS#11
@@ -54,7 +68,6 @@ build, set `PKCS11_PROXY_SHIM_LIB=/path/to/libpkcs11_proxy_ng_shim.so`.
 | `crates/server/tests/shim_c_abi_mechanism_out_test.rs` | Loaded-shim C ABI mechanism-output, C_GetMechanismInfo zero-flag, and C_WaitForSlotEvent lifecycle coverage | Built shim shared library from cargo build -p pkcs11-proxy-ng-shim or PKCS11_PROXY_SHIM_LIB | `cargo build -p pkcs11-proxy-ng-shim && cargo test -p pkcs11-proxy-ng --test shim_c_abi_mechanism_out_test -- --ignored --test-threads=1` |
 | `crates/server/tests/noncontract_begin_health_test.rs` | Native-oracle legacy Begin completion-health coverage | Normal and missing-message-begin oracle builds via PKCS11_PROXY_EXACT_ORACLE_LIB and PKCS11_PROXY_MISSING_BEGIN_ORACLE_LIB | `cargo test -p pkcs11-proxy-ng --test noncontract_begin_health_test -- --ignored --test-threads=1` |
 | `crates/server/tests/nss_mechanism_coverage_test.rs` | NSS softokn mechanism coverage | NSS softokn libsoftokn3.so and certutil | `cargo test -p pkcs11-proxy-ng --test nss_mechanism_coverage_test -- --ignored --test-threads=1` |
-| `crates/server/tests/parameterized_mechanism_test.rs` | SoftHSM2-backed parameterized mechanism coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test parameterized_mechanism_test -- --ignored --test-threads=1` |
 | `crates/server/tests/provider_matrix_test.rs` | Optional NSS and Kryoptic provider matrix smoke coverage | NSS softokn libsoftokn3.so and certutil; Kryoptic module via PKCS11_PROXY_KRYOPTIC_MODULE | `cargo test -p pkcs11-proxy-ng --test provider_matrix_test nss_softokn_smoke_suite -- --ignored --test-threads=1`<br>`cargo test -p pkcs11-proxy-ng --test provider_matrix_test kryoptic_smoke_suite -- --ignored --test-threads=1` |
 | `crates/server/tests/softhsm_fixture_test.rs` | SoftHSM2 fixture variant coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test softhsm_fixture_test -- --ignored --test-threads=1` |
 | `crates/server/tests/template_compat_test.rs` | SoftHSM2-backed template compatibility coverage | SoftHSM2 module and softhsm2-util | `cargo test -p pkcs11-proxy-ng --test template_compat_test -- --ignored --test-threads=1` |

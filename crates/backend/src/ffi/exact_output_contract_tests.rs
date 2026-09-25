@@ -10,12 +10,25 @@ fn invoke(
     rv: CkRv,
     length: Option<u64>,
 ) -> (CkResult<CkOutputBufferResult>, ExactOracleObservation) {
+    invoke_actions(spec, rv, u32::from(length.is_some()), length.unwrap_or(0), 0)
+}
+
+/// `invoke` with full byte-leaf action control (W1-L10-18 hostile matrices).
+fn invoke_actions(
+    spec: &CkOutputBufferSpec,
+    rv: CkRv,
+    length_action: u32,
+    returned_length: u64,
+    output_action: u32,
+) -> (CkResult<CkOutputBufferResult>, ExactOracleObservation) {
     unsafe {
         ExactOracle_SetScenario(&ExactOracleScenario {
             rv: rv.0,
-            length_action: u32::from(length.is_some()),
-            returned_length: length.unwrap_or(0),
-            ..Default::default()
+            length_action,
+            returned_length,
+            parameter_action: 0,
+            output_action,
+            handle_action: 0,
         });
     }
     ExactOracle_ResetObservation();
@@ -82,6 +95,107 @@ fn exact_over_capacity_length_preserves_rv_without_exposing_storage() {
         assert_eq!(result.returned_len, Some(9));
         assert_eq!(result.value, None, "no bounded value exists for an over-capacity result");
     }
+}
+
+/// Drive the byte-output oracle directly against a caller-owned buffer and
+/// length cell, returning the provider RV, the final cell value, and the
+/// sideband observation.
+fn drive_oracle_direct(
+    buffer: &mut [u8],
+    length_action: u32,
+    returned_length: u64,
+    output_action: u32,
+) -> (cryptoki_sys::CK_RV, cryptoki_sys::CK_ULONG, ExactOracleObservation) {
+    unsafe {
+        ExactOracle_SetScenario(&ExactOracleScenario {
+            rv: cryptoki_sys::CKR_OK as u64,
+            length_action,
+            returned_length,
+            parameter_action: 0,
+            output_action,
+            handle_action: 0,
+        });
+    }
+    ExactOracle_ResetObservation();
+    let mut cell = buffer.len() as cryptoki_sys::CK_ULONG;
+    let rv = unsafe { ExactOracle_ByteOutput(buffer.as_mut_ptr(), &mut cell) };
+    let mut observation = ExactOracleObservation::default();
+    unsafe {
+        ExactOracle_GetObservation(&mut observation);
+    }
+    (rv, cell, observation)
+}
+
+#[test]
+fn exact_oracle_hostile_length_clobbers_cell_with_unavailable() {
+    // W1-L10-18 negative control: length_action=2 models a hostile provider
+    // that clobbers the length cell with CK_UNAVAILABLE_INFORMATION instead
+    // of the scenario length. The old oracle honored only action==1.
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut buffer = [0xAAu8; 8];
+    let (_, cell, observation) = drive_oracle_direct(&mut buffer, 2, 7, 0);
+    assert_eq!(cell, cryptoki_sys::CK_UNAVAILABLE_INFORMATION, "hostile length clobber");
+    assert_eq!(observation.length_stores, 1);
+    assert_eq!(buffer, [0xAAu8; 8], "length clobber must not touch the buffer");
+}
+
+#[test]
+fn exact_oracle_zero_length_write_records_without_storing() {
+    // W1-L10-18 negative control: output_action=2 models a provider
+    // zero-byte write — no bytes stored, buffer provably untouched, and the
+    // zero write recorded (distinguished from "no write attempted").
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut buffer = [0xBBu8; 8];
+    let (_, cell, observation) = drive_oracle_direct(&mut buffer, 0, 0, 2);
+    assert_eq!(cell, 8, "zero-length write leaves the capacity cell alone");
+    assert_eq!(observation.zero_writes, 1);
+    assert_eq!(observation.output_stores, 0);
+    assert_eq!(buffer, [0xBBu8; 8], "zero-length write stores nothing");
+}
+
+#[test]
+fn exact_oracle_oversized_write_attempt_is_bounded_and_recorded() {
+    // W1-L10-18 negative control: output_action=3 models a provider that
+    // attempts capacity+8 bytes. The oracle writes only within capacity
+    // (an actual overrun would be UB) and records the attempt, so consumers
+    // can prove the backend never exposes the excess.
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut backing = [0xCCu8; 16];
+    let (_, cell, observation) = drive_oracle_direct(&mut backing[..8], 0, 0, 3);
+    assert_eq!(cell, 8);
+    assert_eq!(observation.overrun_attempts, 1);
+    assert_eq!(observation.output_stores, 1);
+    assert_eq!(&backing[..8], &[0x5Au8; 8], "bounded write fills capacity");
+    assert_eq!(&backing[8..], &[0xCCu8; 8], "bytes past capacity must be untouched");
+}
+
+#[test]
+fn exact_oracle_hostile_fill_covers_capacity() {
+    // W1-L10-18 negative control: output_action=4 models a hostile provider
+    // filling the whole capacity with garbage (not the 4-byte canary).
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut buffer = [0x00u8; 8];
+    let (_, cell, observation) = drive_oracle_direct(&mut buffer, 0, 0, 4);
+    assert_eq!(cell, 8);
+    assert_eq!(observation.output_stores, 1);
+    assert_eq!(buffer, [0xA5u8; 8], "hostile fill covers the full capacity");
+}
+
+#[test]
+fn exact_oversized_hostile_bytes_forwarded_exactly() {
+    // W1-L10-18 consumer: the bounded hostile bytes cross the exact-output
+    // boundary byte-identically (no reconstruction, no truncation).
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let spec =
+        CkOutputBufferSpec { buffer_present: true, buffer_len: 8, length_pointer_null: false };
+    let (result, observation) = invoke_actions(&spec, CkRv::OK, 1, 8, 3);
+    assert_eq!(observation.overrun_attempts, 1);
+    let result = result.expect("completed native envelope");
+    assert_eq!(result.ck_rv, CkRv::OK);
+    assert_eq!(result.returned_len, Some(8));
+    let value = result.value.expect("bounded hostile bytes have a value");
+    assert_eq!(value.len(), 8);
+    value.expose(|bytes| assert_eq!(bytes, [0x5Au8; 8]));
 }
 
 #[test]
@@ -232,25 +346,7 @@ fn exact_kem_error_keeps_length_and_never_publishes_output_only_handle() {
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_2::default());
     table.C_EncapsulateKey = Some(kem_error);
-    let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
-        func_list: base.as_mut(),
-        func_list_3_0: None,
-        func_list_3_2: Some(table.as_ref()),
-        initialize_args: None,
-        mech_cache: DashMap::new(),
-        last_init_family: DashMap::new(),
-        session_slot_map: DashMap::new(),
-        slot_sessions: DashMap::new(),
-        object_cleanup: Default::default(),
-        // Test-local backend: bypasses the process reservation without
-        // consuming it; never backs production dispatch (C3M.4).
-        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-        lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
-    };
+    let backend = FfiBackend::test_backend_with_tables(base.as_mut(), None, Some(table.as_ref()));
     // Exact paths are ordinary: establish post-Initialize state.
     backend.lifecycle_domain.open_for_tests();
     for (present, missing) in [(true, false), (false, false), (true, true), (false, true)] {
@@ -311,25 +407,7 @@ fn exact_parameter_error_preserves_only_defined_initialized_effects() {
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
     table.C_EncryptMessage = Some(message_error);
-    let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
-        func_list: base.as_mut(),
-        func_list_3_0: Some(table.as_ref()),
-        func_list_3_2: None,
-        initialize_args: None,
-        mech_cache: DashMap::new(),
-        last_init_family: DashMap::new(),
-        session_slot_map: DashMap::new(),
-        slot_sessions: DashMap::new(),
-        object_cleanup: Default::default(),
-        // Test-local backend: bypasses the process reservation without
-        // consuming it; never backs production dispatch (C3M.4).
-        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-        lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
-    };
+    let backend = FfiBackend::test_backend_with_tables(base.as_mut(), Some(table.as_ref()), None);
     // Exact paths are ordinary: establish post-Initialize state.
     backend.lifecycle_domain.open_for_tests();
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {
@@ -403,25 +481,7 @@ fn exact_begin_error_preserves_native_completion_and_initialized_iv() {
     let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
     let mut table = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
     table.C_EncryptMessageBegin = Some(begin_error);
-    let backend = FfiBackend {
-        _lib: crate::ffi::loading::test_library_handle(),
-        func_list: base.as_mut(),
-        func_list_3_0: Some(table.as_ref()),
-        func_list_3_2: None,
-        initialize_args: None,
-        mech_cache: DashMap::new(),
-        last_init_family: DashMap::new(),
-        session_slot_map: DashMap::new(),
-        slot_sessions: DashMap::new(),
-        object_cleanup: Default::default(),
-        // Test-local backend: bypasses the process reservation without
-        // consuming it; never backs production dispatch (C3M.4).
-        construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-        lifecycle: Default::default(),
-        lifecycle_domain: Default::default(),
-        session_fences: Default::default(),
-        retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(),
-    };
+    let backend = FfiBackend::test_backend_with_tables(base.as_mut(), Some(table.as_ref()), None);
     // Exact paths are ordinary: establish post-Initialize state.
     backend.lifecycle_domain.open_for_tests();
     let parameter = MessageParameter::GcmMessage(GcmMessageParams {

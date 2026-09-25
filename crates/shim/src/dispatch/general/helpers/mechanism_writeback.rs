@@ -54,7 +54,7 @@ pub(crate) unsafe fn write_mechanism_output_params(
                 gcm.ulIvLen = copy_len as CK_ULONG;
             }
             gcm.ulIvFixedBits = gcm_out.iv_fixed_bits as CK_ULONG;
-            gcm.ivGenerator = gcm_out.iv_generator as CK_GENERATOR_FUNCTION;
+            gcm.ivGenerator = gcm_out.iv_generator.0 as CK_GENERATOR_FUNCTION;
             gcm.ulTagBits = gcm_out.tag_bits as CK_ULONG;
         }
         CkMechanismParams::CcmWrap(ccm_out) => {
@@ -77,7 +77,7 @@ pub(crate) unsafe fn write_mechanism_output_params(
             }
             ccm.ulDataLen = ccm_out.data_len as CK_ULONG;
             ccm.ulNonceFixedBits = ccm_out.nonce_fixed_bits as CK_ULONG;
-            ccm.nonceGenerator = ccm_out.nonce_generator as CK_GENERATOR_FUNCTION;
+            ccm.nonceGenerator = ccm_out.nonce_generator.0 as CK_GENERATOR_FUNCTION;
             ccm.ulMACLen = ccm_out.mac_len as CK_ULONG;
         }
         CkMechanismParams::Tls12MasterKeyDerive(tls12_out) => {
@@ -100,6 +100,51 @@ pub(crate) unsafe fn write_mechanism_output_params(
                 version.minor = tls12_out.version_minor as cryptoki_sys::CK_BYTE;
             }
         }
+        CkMechanismParams::TlsPrf(prf_out) => {
+            // `CK_TLS_PRF_PARAMS.pOutput`/`*pulOutputLen` are OUT
+            // (W1-C5-01): copy the daemon-returned PRF bytes into the
+            // caller's buffer and report the written length. The copy
+            // is clamped to the caller's entry capacity (`*pulOutputLen`
+            // still holds it — the shim never overwrote it), so a
+            // faulty daemon cannot overflow the caller.
+            if mechanism.ulParameterLen < std::mem::size_of::<CK_TLS_PRF_PARAMS>() as CK_ULONG
+                || mechanism.pParameter.is_null()
+            {
+                return;
+            }
+            let prf = unsafe { &mut *(mechanism.pParameter as *mut CK_TLS_PRF_PARAMS) };
+            if prf.pOutput.is_null() || prf.pulOutputLen.is_null() {
+                return;
+            }
+            let capacity = (unsafe { *prf.pulOutputLen } as usize).min(MAX_SERIALIZABLE_BYTES);
+            let copy_len = prf_out.output.len().min(capacity);
+            if copy_len > 0 {
+                prf_out.output.expose(|raw| unsafe {
+                    std::ptr::copy_nonoverlapping(raw.as_ptr(), prf.pOutput, copy_len);
+                });
+            }
+            unsafe {
+                *prf.pulOutputLen = copy_len as CK_ULONG;
+            }
+        }
+        CkMechanismParams::Ssl3MasterKeyDerive(ssl3_out) => {
+            // `CK_SSL3_MASTER_KEY_DERIVE_PARAMS.pVersion` is OUT —
+            // the provider writes the negotiated CK_VERSION here
+            // (W1-C5-01; mirrors the TLS 1.2 arm above).
+            if mechanism.ulParameterLen
+                < std::mem::size_of::<CK_SSL3_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG
+                || mechanism.pParameter.is_null()
+            {
+                return;
+            }
+            let ssl3 =
+                unsafe { &mut *(mechanism.pParameter as *mut CK_SSL3_MASTER_KEY_DERIVE_PARAMS) };
+            if !ssl3.pVersion.is_null() {
+                let version = unsafe { &mut *ssl3.pVersion };
+                version.major = ssl3_out.version_major as cryptoki_sys::CK_BYTE;
+                version.minor = ssl3_out.version_minor as cryptoki_sys::CK_BYTE;
+            }
+        }
         CkMechanismParams::WtlsMasterKeyDerive(wtls_out) => {
             if mechanism.ulParameterLen
                 < std::mem::size_of::<cryptoki_sys::CK_WTLS_MASTER_KEY_DERIVE_PARAMS>() as CK_ULONG
@@ -116,6 +161,28 @@ pub(crate) unsafe fn write_mechanism_output_params(
                 }
             }
         }
+        CkMechanismParams::WtlsPrf(prf_out) => {
+            // Same OUT contract as the TLS PRF arm above (W1-C5-01).
+            if mechanism.ulParameterLen < std::mem::size_of::<CK_WTLS_PRF_PARAMS>() as CK_ULONG
+                || mechanism.pParameter.is_null()
+            {
+                return;
+            }
+            let prf = unsafe { &mut *(mechanism.pParameter as *mut CK_WTLS_PRF_PARAMS) };
+            if prf.pOutput.is_null() || prf.pulOutputLen.is_null() {
+                return;
+            }
+            let capacity = (unsafe { *prf.pulOutputLen } as usize).min(MAX_SERIALIZABLE_BYTES);
+            let copy_len = prf_out.output.len().min(capacity);
+            if copy_len > 0 {
+                prf_out.output.expose(|raw| unsafe {
+                    std::ptr::copy_nonoverlapping(raw.as_ptr(), prf.pOutput, copy_len);
+                });
+            }
+            unsafe {
+                *prf.pulOutputLen = copy_len as CK_ULONG;
+            }
+        }
         CkMechanismParams::WtlsKeyMat(wtls_out) => {
             if mechanism.ulParameterLen
                 < std::mem::size_of::<cryptoki_sys::CK_WTLS_KEY_MAT_PARAMS>() as CK_ULONG
@@ -130,8 +197,8 @@ pub(crate) unsafe fn write_mechanism_output_params(
                 return;
             }
             let output = unsafe { &mut *wtls.pReturnedKeyMaterial };
-            output.hMacSecret = wtls_out.mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE;
-            output.hKey = wtls_out.key_handle as cryptoki_sys::CK_OBJECT_HANDLE;
+            output.hMacSecret = wtls_out.mac_secret_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
+            output.hKey = wtls_out.key_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
             if !output.pIV.is_null() {
                 let capacity = (((wtls.ulIVSizeInBits as usize).saturating_add(7)) / 8)
                     .min(MAX_SERIALIZABLE_BYTES);
@@ -158,11 +225,11 @@ pub(crate) unsafe fn write_mechanism_output_params(
             }
             let output = unsafe { &mut *ssl3.pReturnedKeyMaterial };
             output.hClientMacSecret =
-                ssl3_out.client_mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE;
+                ssl3_out.client_mac_secret_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
             output.hServerMacSecret =
-                ssl3_out.server_mac_secret_handle as cryptoki_sys::CK_OBJECT_HANDLE;
-            output.hClientKey = ssl3_out.client_key_handle as cryptoki_sys::CK_OBJECT_HANDLE;
-            output.hServerKey = ssl3_out.server_key_handle as cryptoki_sys::CK_OBJECT_HANDLE;
+                ssl3_out.server_mac_secret_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
+            output.hClientKey = ssl3_out.client_key_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
+            output.hServerKey = ssl3_out.server_key_handle.0 as cryptoki_sys::CK_OBJECT_HANDLE;
             let capacity = (((ssl3.ulIVSizeInBits as usize).saturating_add(7)) / 8)
                 .min(MAX_SERIALIZABLE_BYTES);
             if !output.pIVClient.is_null() {
@@ -251,7 +318,7 @@ unsafe fn write_sp800_108_derived_key_handles(
     {
         if !derived.phKey.is_null() {
             unsafe {
-                *derived.phKey = output.key_handle as CK_OBJECT_HANDLE;
+                *derived.phKey = output.key_handle.0 as CK_OBJECT_HANDLE;
             }
         }
     }

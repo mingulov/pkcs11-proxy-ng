@@ -11,14 +11,14 @@
 # three runner OSes).
 #
 # Cadence: daily schedule (staggered off the nightly provider matrix),
-# pushes to main, and manual dispatch (the way PRs opt in). NOT per-PR:
-# hosted macOS/Windows minutes plus a full pkcs11-check double-run per leg
-# is too slow and expensive for every pull request.
+# pushes to main, manual dispatch, and every pull request (2026-09-20:
+# ARM/x64 legs re-admitted to PRs on the Ubuntu 26.04 images; hosted
+# macOS/Windows minutes plus a full pkcs11-check double-run per leg make
+# this the slowest PR gate — keep the tuned subset current).
 #
-# Legs: linux-x64, linux-arm64 (EXPERIMENTAL: aarch64 build + direct-baseline
-# signal only -- the daemon fail-closes on Linux-aarch64 by design
-# (NATIVE_FFI_QUALIFIED excludes it), so no proxied comparison can run
-# there until a future aarch64 native-FFI qualification promotes it),
+# Legs: linux-x64, linux-arm64 (full direct-vs-proxied comparison since
+# the 2026-09-20 native-FFI qualification extended the stop/load set to
+# Linux aarch64; stop stub is contract row 5),
 # macos-arm64 (PROMOTED by T2run M-5: M-1..M-3 compat prep proven by the
 # first green macOS leg -- compare green plus backend/shim lib behavior
 # suites green, including the STOP child receipts), windows-x64, plus
@@ -38,6 +38,7 @@ on:
   workflow_dispatch:
   push:
     branches: ["main"]
+  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
@@ -55,12 +56,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          # 2026-09-20: 24.04 -> 26.04 (GA 2026-09-17; 22.04 deprecating).
+          - os: ubuntu-26.04
             experimental: false
-          # T2run: experimental -- native FFI fail-closes on this host by
-          # design (see header); promote on aarch64 qualification.
-          - os: ubuntu-24.04-arm
-            experimental: true
+          # Qualified 2026-09-20: full comparison, blocking (see header).
+          - os: ubuntu-26.04-arm
+            experimental: false
           # T2run M-5: promoted — first green macOS leg (compare +
           # backend/shim lib behavior) proves the compat prep; failures
           # now fail the workflow.
@@ -70,21 +71,26 @@ jobs:
             experimental: false
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install Rust stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.1
 
       - name: Install protoc (all OSes)
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
+          # W1-L16-13: single protoc version everywhere; must match
+          # mise.toml.
+          version: "36.1"
           # T2run: unauthenticated version-resolution hits the shared
           # GitHub API rate limit (run-8 macOS red); the default token
           # raises the quota.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -131,19 +137,21 @@ jobs:
         shell: bash
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-xplat-${{ hashFiles('**/Cargo.lock') }}
+          # matrix.os scopes the key by image (ubuntu-26.04 vs 24.04) so a
+          # new image never restores another image's compiled artifacts.
+          key: ${{ matrix.os }}-${{ runner.arch }}-cargo-xplat-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cargo-xplat-
+            ${{ matrix.os }}-${{ runner.arch }}-cargo-xplat-
 
       - name: Build release daemon + shim
-        run: cargo build --release -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
+        run: cargo build --locked --release -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
         shell: bash
 
       # macOS behavior proof (T2-2/TC1 carry): the leg otherwise only
@@ -155,8 +163,8 @@ jobs:
       - name: Lib tests (macOS behavior proof)
         if: runner.os == 'macOS'
         run: |
-          cargo test -p pkcs11-proxy-ng-backend --lib
-          cargo test -p pkcs11-proxy-ng-shim --lib
+          cargo test --locked -p pkcs11-proxy-ng-backend --lib
+          cargo test --locked -p pkcs11-proxy-ng-shim --lib
         shell: bash
 
       # T2-1 tuned subset (landed T2run-fix1 F1): -k selection excluding
@@ -164,6 +172,12 @@ jobs:
       # exclusion is provider/framework-side only — proven red WITHOUT the
       # proxy in the loop (direct-phase red, provider crash, or
       # direct==proxied parity); proxy bugs are never excluded.
+      # W1-L17-09: this list is gated — local_quality_gate_test
+      # xplat_exclusion_list_matches_pinned_record pins all 20 atoms, so
+      # any add/remove fails until the pinned record + justification move
+      # together (exclusion edits trip review). The KAT-only residual stays
+      # narrowed explicitly (see scripts/ci-direct-vs-proxy.py); the
+      # silent-pass class must shrink, never widen.
       # Per-item record (what + why + provider-side evidence):
       # - test_ckr_digest/_keygen/_sign/_verify, test_arithmetic_overflow,
       #   test_cve_regression, test_ffi_length_boundary, test_padding_oracle,
@@ -200,7 +214,7 @@ jobs:
 
       - name: Upload comparison artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: xplat-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           path: |
@@ -229,21 +243,25 @@ jobs:
     env:
       PKCS11_PROXY_NG_WIN32_STUB_MODULE: ${{ github.workspace }}/target/win32-stub/p11win32stub.dll
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install Rust stable toolchain with i686 target
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain with i686 target
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: 1.98.1
           targets: i686-pc-windows-msvc
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
+          # W1-L16-13: single protoc version everywhere; must match
+          # mise.toml.
+          version: "36.1"
           # T2run: same rate-limit hardening as the compare legs.
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -255,11 +273,11 @@ jobs:
             Windows-X86-cargo-win32-
 
       - name: Build release daemon + shim (win32)
-        run: cargo build --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
+        run: cargo build --locked --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng -p pkcs11-proxy-ng-shim
         shell: bash
 
       - name: Set up x86 MSVC toolchain
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x86
 
@@ -306,10 +324,10 @@ jobs:
           # dev-cmd MSVC dirs, and rustc trusts PATH inside a dev prompt —
           # force the MSVC bindir first or rustc links GNU link (run-4 red).
           export PATH="$(dirname "$(which cl)"):$PATH"
-          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-types
-          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-shim --lib
-          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib
-          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng --lib
+          cargo test --locked --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-types
+          cargo test --locked --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-shim --lib
+          cargo test --locked --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib
+          cargo test --locked --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng --lib
         shell: bash
 
       # Explicit receipt: the stub test also runs inside the backend suite
@@ -321,14 +339,14 @@ jobs:
           set -o pipefail
           # T2run: same GNU-link.exe shadowing as the lib suites above.
           export PATH="$(dirname "$(which cl)"):$PATH"
-          cargo test --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib ffi::loading::tests::win32_stub_live_load -- --nocapture 2>&1 | tee stub-proof.log
+          cargo test --locked --release --target i686-pc-windows-msvc -p pkcs11-proxy-ng-backend --lib ffi::loading::tests::win32_stub_live_load -- --nocapture 2>&1 | tee stub-proof.log
           grep -q "1 passed" stub-proof.log
           grep -q "win32-stub-live-load: ok" stub-proof.log
         shell: bash
 
       - name: Upload win32 binaries
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: xplat-win32-${{ github.run_id }}
           path: |

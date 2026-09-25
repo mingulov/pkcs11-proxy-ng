@@ -86,7 +86,9 @@ impl FfiBackend {
         label: &str,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
-        let mut label_buf = space_pad::<32>(label);
+        // W1-L11-12: the shared types helper is the single padding impl.
+        let mut label_buf = [0u8; 32];
+        pkcs11_proxy_ng_types::space_pad_into(&mut label_buf, label);
         let (pin_ptr, pin_len) = match so_pin {
             Some(p) => (p.as_ptr() as *mut _, Self::ulong_len(p.len())),
             None => (std::ptr::null_mut(), 0),
@@ -345,26 +347,7 @@ mod tests {
     ) -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_CloseSession = close;
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         // Close tests exercise ordinary paths: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
         (backend, functions)
@@ -436,24 +419,7 @@ mod tests {
     fn native_owner_close_all_isolates_slots() {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_CloseAllSessions = Some(close_all_sessions_fails);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         // Close tests exercise ordinary paths: establish post-Initialize state.
         backend.lifecycle_domain.open_for_tests();
         let session = CkSessionHandle(23);
@@ -518,26 +484,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_GetTokenInfo = Some(token_info_ok);
         functions.C_GetInfo = Some(get_info_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         (backend, functions)
     }
 
@@ -575,26 +522,7 @@ mod tests {
     fn backend_with_open_session() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_OpenSession = Some(open_session_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         (backend, functions)
     }
 
@@ -631,26 +559,7 @@ mod tests {
     fn backend_with_slot_list() -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>) {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_GetSlotList = Some(slot_list_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         (backend, functions)
     }
 
@@ -812,26 +721,7 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
         functions.C_GetSessionInfo = Some(fence_session_info_ok);
         functions.C_CloseSession = Some(fence_close_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: functions.as_mut(),
-            func_list_3_0: None,
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend = FfiBackend::test_backend_with_tables(functions.as_mut(), None, None);
         backend.lifecycle_domain.open_for_tests();
         (backend, functions)
     }

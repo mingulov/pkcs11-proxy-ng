@@ -31,12 +31,17 @@ static LAST_REGISTRY_REVISION: Mutex<Option<String>> = Mutex::new(None);
 struct InterfaceState {
     fl_2_40: CK_FUNCTION_LIST,
     fl_3_0: CK_FUNCTION_LIST_3_0,
+    /// PKCS#11 3.1 is layout-identical to 3.0 (no new functions), so the
+    /// 3.1 entry reuses the 3.0 list type stamped with version {3,1}.
+    fl_3_1: CK_FUNCTION_LIST_3_0,
     fl_3_2: CK_FUNCTION_LIST_3_2,
-    catalog: [CK_INTERFACE; 3],
-    /// Number of interfaces the backend actually supports (1, 2, or 3).
+    catalog: [CK_INTERFACE; 4],
+    /// Number of interfaces the backend actually supports (1 to 4).
     count: CK_ULONG,
     /// Whether the backend reported a 3.0-compatible interface.
     has_3_0: bool,
+    /// Whether the backend reported a 3.1 interface (W1-L5-01).
+    has_3_1: bool,
     /// Whether the backend reported a 3.2-compatible interface.
     has_3_2: bool,
     /// Advertised separately from function-list availability because every
@@ -124,7 +129,8 @@ fn resolve_backend_attribute_stride(stride: Option<u32>, width: usize) -> Result
 ///
 /// - D6: a byte-order mismatch is refused (`Err`) — the wire carries native
 ///   ulong bytes, so a mismatch would corrupt every multi-byte ulong. All
-///   supported targets are little-endian.
+///   supported targets are little-endian. Out-of-contract orders (anything
+///   but 1/2/absent) are likewise refused, never fallen through (W1-C7-08).
 /// - D2: a valid advertised width (4 or 8) is used; any other value is hostile
 ///   and refused.
 /// - D9: an absent width falls back to 8 (LP64) — correct for every supported
@@ -144,7 +150,16 @@ pub(crate) fn resolve_backend_ulong_size(
                         big-endian; refusing (ADR-0011 D6)"
                 .to_string());
         }
-        _ => {}
+        // Contract orders (host_abi.rs): 1 = little, 2 = big, absent =
+        // unspecified (older daemon). Anything else is out of contract
+        // and refused loudly instead of falling through (W1-C7-08).
+        None | Some(1) | Some(2) => {}
+        Some(other) => {
+            return Err(format!(
+                "backend advertised an invalid CK_ULONG byte order {other} \
+                 (expected 1 (little-endian) or 2 (big-endian); ADR-0011 D6)"
+            ));
+        }
     }
     match size {
         Some(n @ (4 | 8)) => Ok((n as usize, false)),
@@ -541,6 +556,18 @@ fn build_patched_function_list_3_0(null_names: &[String]) -> CK_FUNCTION_LIST_3_
     fl
 }
 
+fn build_base_function_list_3_1() -> CK_FUNCTION_LIST_3_0 {
+    build_function_list_3_x!(CK_FUNCTION_LIST_3_0, CK_VERSION { major: 3, minor: 1 })
+}
+
+/// Build a patched v3.1 function list given a set of null function names.
+/// Same layout and patch table as 3.0; only the version stamp differs.
+fn build_patched_function_list_3_1(null_names: &[String]) -> CK_FUNCTION_LIST_3_0 {
+    let mut fl = build_base_function_list_3_1();
+    patch_function_list_3_0(&mut fl, null_names);
+    fl
+}
+
 /// Build a patched v3.2 function list given a set of null function names.
 fn build_patched_function_list_3_2(null_names: &[String]) -> CK_FUNCTION_LIST_3_2 {
     let mut fl = build_base_function_list_3_2();
@@ -577,6 +604,17 @@ impl std::fmt::Display for ProbeFailure {
 /// mechanism registry payload (when provided) and atomically swaps the
 /// shim's in-memory registry to match.
 fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
+    // W1-C7-01: pre-init probes share one failed dial outcome. A failed dial
+    // series (~21 s at default attempts/backoff) is cached in state; later
+    // pre-init probes to the same endpoint fail fast instead of re-dialing.
+    // C_Initialize always dials: it sets INITIALIZED before connecting, so
+    // this gate never engages there (nor in post-init reprobes), and any
+    // successful connect clears the cache.
+    if !state::is_initialized() && state::pre_init_connect_failed() {
+        return Err(ProbeFailure::Transient(
+            "connect failed (cached pre-init dial outcome; C_Initialize retries)".to_string(),
+        ));
+    }
     // Ensure the gRPC channel is up (returns Err(CkRv) on failure).
     state::ensure_client_connected()
         .map_err(|e| ProbeFailure::Transient(format!("connect failed: {e:?}")))?;
@@ -587,7 +625,7 @@ fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
             let mut client = state::client().lock().await;
             client.get_backend_interfaces().await
         })
-        .map_err(ProbeFailure::Transient)?;
+        .map_err(|e| ProbeFailure::Transient(e.to_string()))?;
 
     // Record the backend CK_ULONG width/byte order for the value bridge
     // (ADR-0011 D2/D6) before anything else uses it. A refusal here is
@@ -599,42 +637,45 @@ fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
     )
     .map_err(ProbeFailure::AbiMismatch)?;
 
-    // Install the server-published registry whenever the daemon
-    // includes one. Older daemons predate the field — in that case we
-    // keep whatever the shim's embedded-default fallback already
-    // installed (see init_general.rs).
-    if std::env::var_os("PKCS11_PROXY_DISABLE_SERVER_REGISTRY").is_none() {
-        if let Some(payload) = &probe.mechanism_registry {
-            let registry: MechanismRegistry = payload.into();
-            let new_revision = registry.revision().to_string();
-            log_registry_change(&new_revision);
-            state::replace_mechanism_registry(registry);
-        }
-    } else {
-        tracing::debug!(
-            "PKCS11_PROXY_DISABLE_SERVER_REGISTRY set; ignoring server-published registry"
-        );
-    }
+    maybe_install_server_registry(probe.mechanism_registry.as_ref());
 
+    Ok(build_interface_state(&probe.interfaces, probe.pointer_safe_message_parameters))
+}
+
+/// Build the cached interface state from one probe response. Pure over the
+/// reported `(major, minor, null_functions)` triples so the version mapping
+/// is unit tested without a daemon.
+///
+/// Catalog order is ascending by version; entries exist only for versions
+/// the backend actually reported — a 3.1 report yields a {3,1} entry and no
+/// {3,0} alias (W1-L5-01).
+fn build_interface_state(
+    interfaces: &[(u8, u8, Vec<String>)],
+    pointer_safe_message_parameters: bool,
+) -> InterfaceState {
     // Index null-function lists by (major, minor).
     let mut null_map = std::collections::HashMap::<(u8, u8), Vec<String>>::new();
-    for (major, minor, nulls) in &probe.interfaces {
+    for (major, minor, nulls) in interfaces {
         null_map.insert((*major, *minor), nulls.clone());
     }
 
     let empty = Vec::new();
     let nulls_2_40 = null_map.get(&(2, 40)).unwrap_or(&empty);
     let nulls_3_0 = null_map.get(&(3, 0)).unwrap_or(&empty);
+    let nulls_3_1 = null_map.get(&(3, 1)).unwrap_or(&empty);
     let nulls_3_2 = null_map.get(&(3, 2)).unwrap_or(&empty);
 
     // Determine which interfaces the backend reported.
     let has_3_0 = null_map.contains_key(&(3, 0));
+    let has_3_1 = null_map.contains_key(&(3, 1));
     let has_3_2 = null_map.contains_key(&(3, 2));
     // Always include v2.40 — every PKCS#11 module has it.
-    let count: CK_ULONG = 1 + if has_3_0 { 1 } else { 0 } + if has_3_2 { 1 } else { 0 };
+    let count: CK_ULONG =
+        1 + if has_3_0 { 1 } else { 0 } + if has_3_1 { 1 } else { 0 } + if has_3_2 { 1 } else { 0 };
 
     let fl_2_40 = build_patched_function_list(nulls_2_40);
     let fl_3_0 = build_patched_function_list_3_0(nulls_3_0);
+    let fl_3_1 = build_patched_function_list_3_1(nulls_3_1);
     let fl_3_2 = build_patched_function_list_3_2(nulls_3_2);
 
     // Build a placeholder catalog — pointers will be fixed up after the
@@ -656,18 +697,25 @@ fn probe_backend() -> Result<InterfaceState, ProbeFailure> {
             pFunctionList: std::ptr::null_mut(),
             flags: 0,
         },
+        CK_INTERFACE {
+            pInterfaceName: IFACE_NAME_PKCS11.as_ptr() as *mut CK_CHAR,
+            pFunctionList: std::ptr::null_mut(),
+            flags: 0,
+        },
     ];
 
-    Ok(InterfaceState {
+    InterfaceState {
         fl_2_40,
         fl_3_0,
+        fl_3_1,
         fl_3_2,
         catalog,
         count,
         has_3_0,
+        has_3_1,
         has_3_2,
-        pointer_safe_message_parameters: probe.pointer_safe_message_parameters,
-    })
+        pointer_safe_message_parameters,
+    }
 }
 
 /// Fix up the catalog's `pFunctionList` pointers to point into a leaked
@@ -683,10 +731,48 @@ fn fixup_catalog(st: &mut InterfaceState) {
             &st.fl_3_0 as *const CK_FUNCTION_LIST_3_0 as *mut std::ffi::c_void;
         idx += 1;
     }
+    if st.has_3_1 {
+        st.catalog[idx].pFunctionList =
+            &st.fl_3_1 as *const CK_FUNCTION_LIST_3_0 as *mut std::ffi::c_void;
+        idx += 1;
+    }
     if st.has_3_2 {
         st.catalog[idx].pFunctionList =
             &st.fl_3_2 as *const CK_FUNCTION_LIST_3_2 as *mut std::ffi::c_void;
+        idx += 1;
     }
+    debug_assert_eq!(idx as CK_ULONG, st.count, "catalog entries must match count");
+}
+
+/// Install the server-published registry whenever the daemon includes
+/// one. Older daemons predate the field — in that case we keep whatever
+/// the shim's embedded-default fallback already installed (see
+/// init_general.rs). `PKCS11_PROXY_DISABLE_SERVER_REGISTRY` (test/debug
+/// use, see AGENTS.md) forces the fallback path even when the daemon
+/// publishes a registry.
+pub(crate) fn maybe_install_server_registry(
+    payload: Option<&pkcs11_proxy_ng_proto::MechanismRegistryPayload>,
+) {
+    if std::env::var_os("PKCS11_PROXY_DISABLE_SERVER_REGISTRY").is_none() {
+        if let Some(payload) = payload {
+            let registry: MechanismRegistry = payload.into();
+            let new_revision = registry.revision().to_string();
+            log_registry_change(&new_revision);
+            state::replace_mechanism_registry(registry);
+        }
+    } else {
+        tracing::debug!(
+            "PKCS11_PROXY_DISABLE_SERVER_REGISTRY set; ignoring server-published registry"
+        );
+    }
+}
+
+/// Reset the revision tracker so drift tests start from a known state.
+/// Test-only; production resets (e.g. on cache clear) are Task 36's
+/// W1-C7-11, which subsumes this hook's purpose for real flows.
+#[cfg(test)]
+pub(crate) fn reset_registry_revision_for_test() {
+    *LAST_REGISTRY_REVISION.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Record the latest registry revision and emit a log line. A change
@@ -765,6 +851,8 @@ pub fn reprobe() -> Result<(), String> {
     // A reprobe can be talking to a restarted or downgraded daemon. Do not let
     // a transient failure retain permission for stateful message operations.
     clear_pointer_safe_message_parameters();
+    // A re-probe always dials fresh: drop any cached pre-init failure (W1-C7-01).
+    state::clear_pre_init_connect_failure();
     match probe_backend() {
         Ok(st) => {
             let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
@@ -792,6 +880,8 @@ pub fn reprobe() -> Result<(), String> {
 /// After this, `ensure_probed()` will re-probe on the next call.
 pub fn clear_cache() {
     clear_pointer_safe_message_parameters();
+    // Cache-clear (e.g. C_Finalize) also drops the dial-failure cache (W1-C7-01).
+    state::clear_pre_init_connect_failure();
     let mut guard = INTERFACE_STATE.write().unwrap_or_else(|e| e.into_inner());
     *guard = None;
     // Drop the advertised backend ABI so a fresh probe re-reads it (D2).
@@ -830,7 +920,17 @@ pub fn interface_count() -> CK_ULONG {
 /// Otherwise falls back to the static (all-non-null) catalog.
 ///
 /// Returns the number of entries written.
-pub fn copy_catalog(buf: *mut CK_INTERFACE, buf_len: CK_ULONG) -> CK_ULONG {
+///
+/// # Safety
+///
+/// `buf` must be non-null and valid for writes of `buf_len`
+/// `CK_INTERFACE` entries. A short buffer (`buf_len` below the catalog
+/// count) fails safe — nothing is written and 0 is returned — but a null
+/// `buf`, or a buffer smaller than the claimed `buf_len`, is immediate
+/// undefined behavior. The sole caller `C_GetInterfaceList` excludes null
+/// via its count-only path before calling. (In-callee null hardening is
+/// Task 36's W1-C7-12; until then the caller must uphold non-null.)
+pub unsafe fn copy_catalog(buf: *mut CK_INTERFACE, buf_len: CK_ULONG) -> CK_ULONG {
     let n = interface_count();
     if buf_len < n {
         return 0; // caller should have checked
@@ -1021,6 +1121,189 @@ mod backend_abi_tests {
         }
     }
 
+    /// W1-L5-01: a BouncyHSM-class probe — backend offers 3.1 (and 3.2) but
+    /// no literal 3.0 — must answer {3,1} with the real interface and {3,0}
+    /// with NULL, exactly like the native module. No invented {3,0} alias.
+    #[test]
+    fn bouncyhsm_probe_answers_3_1_and_not_3_0() {
+        let probe = vec![(2u8, 40u8, Vec::new()), (3, 1, Vec::new()), (3, 2, Vec::new())];
+        let mut st = super::build_interface_state(&probe, false);
+        super::fixup_catalog(&mut st);
+        assert_eq!(st.count, 3);
+        let catalog = &st.catalog[..st.count as usize];
+        let name = c"PKCS 11";
+
+        // {3,1} → the real interface, stamped 3.1.
+        let v31 = CK_VERSION { major: 3, minor: 1 };
+        let hit = find_interface_in_catalog(catalog, Some(name), Some(&v31), 0)
+            .expect("{3,1} must resolve when the backend offers 3.1");
+        let stamped = unsafe { *((&*hit).pFunctionList as *const CK_VERSION) };
+        assert_eq!((stamped.major, stamped.minor), (3, 1));
+
+        // {3,0} → honest NULL: the backend offers no literal 3.0.
+        let v30 = CK_VERSION { major: 3, minor: 0 };
+        assert!(
+            find_interface_in_catalog(catalog, Some(name), Some(&v30), 0).is_none(),
+            "no invented {{3,0}} alias for a 3.1-only backend"
+        );
+
+        // {3,2} still resolves, and the default (no version) is the highest.
+        let v32 = CK_VERSION { major: 3, minor: 2 };
+        assert!(find_interface_in_catalog(catalog, Some(name), Some(&v32), 0).is_some());
+        let default = find_interface_in_catalog(catalog, Some(name), None, 0)
+            .expect("default interface must resolve");
+        let default_stamped = unsafe { *((&*default).pFunctionList as *const CK_VERSION) };
+        assert_eq!((default_stamped.major, default_stamped.minor), (3, 2));
+    }
+
+    /// Control: a classic probe — backend answers literal 3.0 — keeps
+    /// answering {3,0} and must not gain a phantom {3,1}.
+    #[test]
+    fn literal_3_0_probe_answers_3_0_and_not_3_1() {
+        let probe = vec![(2u8, 40u8, Vec::new()), (3, 0, Vec::new()), (3, 2, Vec::new())];
+        let mut st = super::build_interface_state(&probe, false);
+        super::fixup_catalog(&mut st);
+        assert_eq!(st.count, 3);
+        let catalog = &st.catalog[..st.count as usize];
+        let name = c"PKCS 11";
+
+        let v30 = CK_VERSION { major: 3, minor: 0 };
+        let hit = find_interface_in_catalog(catalog, Some(name), Some(&v30), 0)
+            .expect("{3,0} must resolve when the backend offers literal 3.0");
+        let stamped = unsafe { *((&*hit).pFunctionList as *const CK_VERSION) };
+        assert_eq!((stamped.major, stamped.minor), (3, 0));
+
+        let v31 = CK_VERSION { major: 3, minor: 1 };
+        assert!(
+            find_interface_in_catalog(catalog, Some(name), Some(&v31), 0).is_none(),
+            "no phantom {{3,1}} for a literal-3.0 backend"
+        );
+    }
+
+    /// W1-C7-05: the patched-function-list path NULLs exactly the
+    /// backend-reported slots. Non-empty `null_functions` fixtures pin the
+    /// patch branch per struct version (2.40 + 3.0 here; 3.2 below).
+    #[test]
+    fn patched_function_list_nulls_reported_slots_only() {
+        let probe = vec![
+            (2u8, 40u8, vec!["C_Encrypt".to_string(), "C_Decrypt".to_string()]),
+            (3, 0, vec!["C_LoginUser".to_string()]),
+            (3, 2, Vec::new()),
+        ];
+        let st = super::build_interface_state(&probe, false);
+        // E0793: CK lists are packed on Windows; `is_some()`/`is_none()`
+        // run on by-value copies.
+        assert!(
+            {
+                let f = st.fl_2_40.C_Encrypt;
+                f.is_none()
+            },
+            "C_Encrypt nulled"
+        );
+        assert!(
+            {
+                let f = st.fl_2_40.C_Decrypt;
+                f.is_none()
+            },
+            "C_Decrypt nulled"
+        );
+        assert!(
+            {
+                let f = st.fl_2_40.C_SignInit;
+                f.is_some()
+            },
+            "C_SignInit stays"
+        );
+        assert!(
+            {
+                let f = st.fl_3_0.C_LoginUser;
+                f.is_none()
+            },
+            "C_LoginUser nulled"
+        );
+        assert!(
+            {
+                let f = st.fl_3_0.C_SessionCancel;
+                f.is_some()
+            },
+            "C_SessionCancel stays"
+        );
+        assert!(
+            {
+                let f = st.fl_3_2.C_EncapsulateKey;
+                f.is_some()
+            },
+            "3.2 unpatched stays"
+        );
+    }
+
+    /// W1-C7-05: unknown names in `null_functions` are ignored — a newer
+    /// daemon's function names must not break an older shim's patch loop
+    /// or NULL unrelated slots.
+    #[test]
+    fn patched_function_list_ignores_unknown_names() {
+        let probe = vec![(2u8, 40u8, vec!["C_NoSuchFunction".to_string(), String::new()])];
+        let st = super::build_interface_state(&probe, false);
+        assert!(
+            {
+                let f = st.fl_2_40.C_Encrypt;
+                f.is_some()
+            },
+            "C_Encrypt stays"
+        );
+        assert!(
+            {
+                let f = st.fl_2_40.C_Login;
+                f.is_some()
+            },
+            "C_Login stays"
+        );
+        assert!(
+            {
+                let f = st.fl_3_0.C_LoginUser;
+                f.is_some()
+            },
+            "3.0 C_LoginUser stays"
+        );
+    }
+
+    /// W1-C7-05: a 3.2-without-3.0 probe (BouncyHSM class) patches the 3.2
+    /// list from its own null set and catalogs exactly {2.40, 3.2} — no
+    /// invented {3,0} entry, and {3,0} lookups honestly miss.
+    #[test]
+    fn patched_3_2_without_3_0_catalogs_exactly_two_entries() {
+        let probe = vec![(2u8, 40u8, Vec::new()), (3, 2, vec!["C_EncapsulateKey".to_string()])];
+        let mut st = super::build_interface_state(&probe, false);
+        super::fixup_catalog(&mut st);
+        assert_eq!(st.count, 2);
+        assert!(
+            {
+                let f = st.fl_3_2.C_EncapsulateKey;
+                f.is_none()
+            },
+            "3.2 patch applies"
+        );
+        assert!(
+            {
+                let f = st.fl_3_2.C_DecapsulateKey;
+                f.is_some()
+            },
+            "3.2 sibling stays"
+        );
+        let catalog = &st.catalog[..st.count as usize];
+        let name = c"PKCS 11";
+        let v32 = CK_VERSION { major: 3, minor: 2 };
+        let hit = find_interface_in_catalog(catalog, Some(name), Some(&v32), 0)
+            .expect("{3,2} must resolve when the backend offers 3.2");
+        let stamped = unsafe { *((&*hit).pFunctionList as *const CK_VERSION) };
+        assert_eq!((stamped.major, stamped.minor), (3, 2));
+        let v30 = CK_VERSION { major: 3, minor: 0 };
+        assert!(
+            find_interface_in_catalog(catalog, Some(name), Some(&v30), 0).is_none(),
+            "no invented {{3,0}} alias for a 3.2-without-3.0 backend"
+        );
+    }
+
     #[test]
     fn message_parameter_capability_is_cleared_before_reprobe() {
         record_pointer_safe_message_parameters(true);
@@ -1074,6 +1357,19 @@ mod backend_abi_tests {
         assert!(resolve_backend_ulong_size(Some(2), native_order()).is_err());
         assert!(resolve_backend_ulong_size(Some(16), native_order()).is_err());
         assert!(resolve_backend_ulong_size(Some(0), native_order()).is_err());
+    }
+
+    /// W1-C7-08: out-of-contract byte orders are refused loudly — the
+    /// contract is 1 (little) / 2 (big) / unspecified only (host_abi.rs).
+    /// Falling through as "unspecified" would silently accept garbage.
+    #[test]
+    fn out_of_contract_byte_orders_refused() {
+        for order in [0, 3, 99, u32::MAX] {
+            let result = resolve_backend_ulong_size(Some(8), Some(order));
+            assert!(result.is_err(), "order {order} is out of contract and must be refused");
+            let err = result.unwrap_err();
+            assert!(err.contains("byte order"), "refusal must name the field: {err}");
+        }
     }
 
     #[test]

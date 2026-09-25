@@ -678,7 +678,10 @@ fn serial_selector_grants_regardless_of_label() {
 }
 
 #[test]
-fn duplicate_identity_in_config_last_wins() {
+fn duplicate_identity_in_config_is_rejected_loudly() {
+    // W1-C3-05: duplicate identities fail load (naming the identity) instead
+    // of the former silent last-wins overwrite, which dropped the first
+    // entry's grants without warning.
     let auth = crate::config::AuthConfig {
         allow_all_authenticated: false,
         anonymous_principal: None,
@@ -697,10 +700,11 @@ fn duplicate_identity_in_config_last_wins() {
             },
         ],
     };
-    let policy = TokenPolicy::from_config(&auth).unwrap();
-    let id = AuthenticatedIdentity::PeerCred { uid: 1000 };
-    assert!(!policy.allows(&id, "token-a", "any"), "first entry should be overwritten");
-    assert!(policy.allows(&id, "token-b", "any"), "last entry should apply");
+    let err = TokenPolicy::from_config(&auth).unwrap_err();
+    assert!(
+        err.contains("duplicate") && err.contains("uid=1000"),
+        "duplicate identity must fail load naming the identity, got: {err}"
+    );
 }
 
 #[test]
@@ -1791,5 +1795,186 @@ fn extract_allowed_for_object_unauthenticated_always_true() {
     assert!(
         policy.extract_allowed_for_object(&unauth, "Prod", "any", &uid),
         "unauthenticated peer must always be permitted (per-object extract is opt-in)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-05: duplicate [[auth.policy]] identities must be rejected loudly
+// instead of silently overwriting the first entry's grants.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn from_config_rejects_duplicate_identity() {
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![
+            crate::config::PolicyEntry {
+                identity: "uid=1000".into(),
+                tokens: crate::config::TokenAccessSpec::Specific(vec![
+                    crate::config::GrantSpec::Bare("label:token-a".into()),
+                ]),
+            },
+            crate::config::PolicyEntry {
+                identity: "uid=1000".into(),
+                tokens: crate::config::TokenAccessSpec::Specific(vec![
+                    crate::config::GrantSpec::Bare("label:token-b".into()),
+                ]),
+            },
+        ],
+    };
+    let err = TokenPolicy::from_config(&auth).unwrap_err();
+    assert!(
+        err.contains("uid=1000"),
+        "duplicate-identity error must name the identity, got: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_identities_duplicate_after_normalization() {
+    // W1-C3-05 + W1-C3-06: uid=01000 and uid=1000 normalize to the same
+    // runtime key, so configuring both is a duplicate, not two grants.
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![
+            crate::config::PolicyEntry {
+                identity: "uid=01000".into(),
+                tokens: crate::config::TokenAccessSpec::Specific(vec![
+                    crate::config::GrantSpec::Bare("label:token-a".into()),
+                ]),
+            },
+            crate::config::PolicyEntry {
+                identity: "uid=1000".into(),
+                tokens: crate::config::TokenAccessSpec::Specific(vec![
+                    crate::config::GrantSpec::Bare("label:token-b".into()),
+                ]),
+            },
+        ],
+    };
+    let err = TokenPolicy::from_config(&auth).unwrap_err();
+    assert!(
+        err.contains("duplicate"),
+        "normalization-colliding identities must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn from_config_accepts_unique_identities() {
+    // Preservation control: distinct identities load exactly as before.
+    let auth = crate::config::AuthConfig {
+        allow_all_authenticated: false,
+        anonymous_principal: None,
+        policy: vec![
+            crate::config::PolicyEntry {
+                identity: "uid=1000".into(),
+                tokens: crate::config::TokenAccessSpec::Specific(vec![
+                    crate::config::GrantSpec::Bare("label:token-a".into()),
+                ]),
+            },
+            crate::config::PolicyEntry {
+                identity: "uid=2000".into(),
+                tokens: crate::config::TokenAccessSpec::Specific(vec![
+                    crate::config::GrantSpec::Bare("label:token-b".into()),
+                ]),
+            },
+        ],
+    };
+    let policy = TokenPolicy::from_config(&auth).expect("unique identities must load");
+    assert!(policy.allows(&AuthenticatedIdentity::PeerCred { uid: 1000 }, "token-a", "any"));
+    assert!(policy.allows(&AuthenticatedIdentity::PeerCred { uid: 2000 }, "token-b", "any"));
+}
+
+// ---------------------------------------------------------------------------
+// W1-C3-10: LOGGED_SPKI / WARNED_LEGACY must be bounded (cap + eviction) so
+// sustained unique peers cannot grow them without limit. Dedup behavior is
+// preserved: repeats stay silent, evicted keys may log once more.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn log_dedup_set_dedups_repeats() {
+    let mut set = super::LogDedupSet::new();
+    assert!(set.insert("peer-a".to_string()), "first sighting logs");
+    assert!(!set.insert("peer-a".to_string()), "repeat must stay silent");
+    assert_eq!(set.len(), 1);
+}
+
+#[test]
+fn log_dedup_set_evicts_oldest_past_cap() {
+    let mut set = super::LogDedupSet::new();
+    for i in 0..super::LOG_DEDUP_CAP {
+        assert!(set.insert(format!("peer-{i:06}")));
+    }
+    assert_eq!(set.len(), super::LOG_DEDUP_CAP);
+    // One past the cap: oldest entry evicted, size stays bounded.
+    assert!(set.insert("peer-new".to_string()));
+    assert_eq!(set.len(), super::LOG_DEDUP_CAP);
+    // The evicted oldest key may log once more (bounded-memory tradeoff).
+    assert!(set.insert("peer-000000".to_string()), "evicted key re-admitted");
+    assert_eq!(set.len(), super::LOG_DEDUP_CAP);
+    // A retained key still dedups.
+    assert!(!set.insert("peer-new".to_string()), "retained key must stay silent");
+}
+
+#[test]
+fn sustained_unique_spki_peers_keep_logged_set_bounded() {
+    use std::collections::HashMap;
+    // Policy with no SPKI rules: every peer still records its SPKI in the
+    // dedup set via the log-once path in `allows`, then is denied.
+    let policy = TokenPolicy {
+        rules: HashMap::new(),
+        allow_all_authenticated: false,
+        has_policy: true,
+        anonymous_principal: None,
+        per_object_active_cache: false,
+        per_class_active_cache: false,
+        per_mechanism_active_cache: false,
+    };
+    for i in 0..(super::LOG_DEDUP_CAP + 256) {
+        let id = AuthenticatedIdentity::Mtls {
+            issuer: format!("CN=ca-{i}"),
+            subject: format!("CN=peer-{i}"),
+            spki_sha256: format!("c310-spki-{i:08}"),
+        };
+        assert!(!policy.allows(&id, "any", "any"));
+    }
+    assert!(
+        super::logged_spki_len() <= super::LOG_DEDUP_CAP,
+        "LOGGED_SPKI must stay bounded under sustained unique peers"
+    );
+}
+
+#[test]
+fn sustained_unique_legacy_peers_keep_warned_set_bounded() {
+    use std::collections::HashMap;
+    // One legacy DN rule per peer so each `allows` traverses the
+    // warn-once path for a distinct legacy key.
+    let mut rules = HashMap::new();
+    for i in 0..(super::LOG_DEDUP_CAP + 256) {
+        rules.insert(
+            format!("x509:issuer=CN=c310-ca;subject=CN=c310-legacy-{i:08}"),
+            TokenAccess::All,
+        );
+    }
+    let policy = TokenPolicy {
+        rules,
+        allow_all_authenticated: false,
+        has_policy: true,
+        anonymous_principal: None,
+        per_object_active_cache: false,
+        per_class_active_cache: false,
+        per_mechanism_active_cache: false,
+    };
+    for i in 0..(super::LOG_DEDUP_CAP + 256) {
+        let id = AuthenticatedIdentity::Mtls {
+            issuer: "CN=c310-ca".to_string(),
+            subject: format!("CN=c310-legacy-{i:08}"),
+            spki_sha256: String::new(),
+        };
+        assert!(policy.allows(&id, "any", "any"));
+    }
+    assert!(
+        super::warned_legacy_len() <= super::LOG_DEDUP_CAP,
+        "WARNED_LEGACY must stay bounded under sustained unique peers"
     );
 }

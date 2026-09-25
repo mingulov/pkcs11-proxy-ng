@@ -70,6 +70,63 @@ fn spawn_stop_child_with_env(scenario: &str, extra_env: &[(&str, &str)]) -> (Chi
     (child, permit)
 }
 
+/// Budget for a stop/marker child to exit on its own before the parent kills
+/// it. Healthy children carry 5 s internal watchdogs and exit in well under
+/// 10 s; a child alive past this is hung, and the suite must fail fast
+/// instead of hanging with it.
+const CHILD_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Reap a stop/marker child for `scenario`, draining pipes to EOF (no zombie)
+/// like `wait_with_output` — but bounded: polls `try_wait`, then SIGKILLs,
+/// reaps, and panics with the scenario and captured output past
+/// `CHILD_WAIT_TIMEOUT`. A hung child fails its test fast instead of hanging
+/// the suite.
+fn wait_stop_child(child: Child, scenario: &str) -> Output {
+    wait_stop_child_with_timeout(child, scenario, CHILD_WAIT_TIMEOUT)
+}
+
+/// `wait_stop_child` with an injectable timeout (the control test uses a
+/// short budget against a `sleep` child that never exits).
+fn wait_stop_child_with_timeout(
+    mut child: Child,
+    scenario: &str,
+    timeout: std::time::Duration,
+) -> Output {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait().expect("poll stop child") {
+            Some(_) => return child.wait_with_output().expect("reap stop child"),
+            None if start.elapsed() >= timeout => break,
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+    // Hung: kill, reap via `wait_with_output` (drains pipes, no zombie), then
+    // fail loudly with bounded output for triage.
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("reap killed stop child");
+    panic!(
+        "scenario {scenario}: child hung past {timeout:?}; killed instead of hanging the suite. \
+         status={:?} stdout={:?} stderr={:?}",
+        output.status,
+        truncate_lossy(&output.stdout, 2048),
+        truncate_lossy(&output.stderr, 2048),
+    );
+}
+
+/// Lossy UTF-8 prefix of `bytes` (at most `limit` chars) for failure messages.
+fn truncate_lossy(bytes: &[u8], limit: usize) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    if text.len() <= limit {
+        text.into_owned()
+    } else {
+        let mut cut = limit;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}…<truncated>", &text[..cut])
+    }
+}
+
 /// Assert the abnormal-stop record: normal exit 70, no signal/core, READY pipe.
 fn assert_stop_status(output: &Output, scenario: &str) {
     assert_eq!(
@@ -85,6 +142,34 @@ fn assert_stop_status(output: &Output, scenario: &str) {
         stdout.contains("READY"),
         "scenario {scenario}: READY line missing (pipe EOF proof), stdout={stdout:?}"
     );
+}
+
+/// W1-L10-16 negative control: a child that never exits must be killed at
+/// the timeout — failing its test fast with the scenario and captured
+/// output — instead of hanging the suite the way unbounded
+/// `wait_with_output` does.
+#[test]
+fn stop_child_wait_kills_hung_child_fast() {
+    let child = Command::new("sleep")
+        .arg("60")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn sleeper");
+    // Hold the permit like a real parent so the control respects the child cap.
+    let _permit = acquire_child_permit();
+    let start = std::time::Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_stop_child_with_timeout(child, "control-sleeper", std::time::Duration::from_secs(2))
+    }));
+    let elapsed = start.elapsed();
+    let err = result.expect_err("a hung child must fail the wait, not hang it");
+    let message = err.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(
+        message.contains("control-sleeper"),
+        "timeout failure must name the scenario, got {message:?}"
+    );
+    assert!(elapsed < std::time::Duration::from_secs(20), "kill must be fast, took {elapsed:?}");
 }
 
 /// Assert a control record: normal exit 0 (no stop), no signal/core, READY.
@@ -918,9 +1003,12 @@ fn install_exit_group_errno_deny() {
     let nr_exit_group: u32 = 231;
     #[cfg(all(target_arch = "x86", target_pointer_width = "32"))]
     let nr_exit_group: u32 = 252;
+    #[cfg(all(target_arch = "aarch64", target_pointer_width = "64"))]
+    let nr_exit_group: u32 = 94;
     #[cfg(not(any(
         all(target_arch = "x86_64", target_pointer_width = "64"),
-        all(target_arch = "x86", target_pointer_width = "32")
+        all(target_arch = "x86", target_pointer_width = "32"),
+        all(target_arch = "aarch64", target_pointer_width = "64")
     )))]
     let nr_exit_group: u32 = 0;
     // `if (nr == exit_group) return BPF_DENY; return ALLOW;`
@@ -1016,8 +1104,8 @@ fn run_n1_worker() -> ! {
 #[test]
 fn native_stop_s1_main_thread_stop() {
     let (child, _permit) = spawn_stop_child("s1-main");
-    // `wait_with_output` reaps (no zombie) and drains pipes to EOF.
-    let output = child.wait_with_output().expect("reap stop child");
+    // Bounded wait: reaps (no zombie), drains pipes to EOF, kills past 30 s.
+    let output = wait_stop_child(child, "s1-main");
     assert_stop_status(&output, "s1-main");
 }
 
@@ -1025,7 +1113,7 @@ fn native_stop_s1_main_thread_stop() {
 #[test]
 fn native_stop_s2_nonleader_worker_stop() {
     let (child, _permit) = spawn_stop_child("s2-worker");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s2-worker");
     assert_stop_status(&output, "s2-worker");
 }
 
@@ -1033,7 +1121,7 @@ fn native_stop_s2_nonleader_worker_stop() {
 #[test]
 fn native_stop_s3_racing_workers_stop() {
     let (child, _permit) = spawn_stop_child("s3-race");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s3-race");
     assert_stop_status(&output, "s3-race");
 }
 
@@ -1041,7 +1129,7 @@ fn native_stop_s3_racing_workers_stop() {
 #[test]
 fn native_stop_s4a_stuck_worker_join_timeout() {
     let (child, _permit) = spawn_stop_child("s4a-join-timeout");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s4a-join-timeout");
     assert_stop_status(&output, "s4a-join-timeout");
 }
 
@@ -1049,7 +1137,7 @@ fn native_stop_s4a_stuck_worker_join_timeout() {
 #[test]
 fn native_stop_s4b_leak_detached_stuck_worker() {
     let (child, _permit) = spawn_stop_child("s4b-leak-detached");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s4b-leak-detached");
     assert_stop_status(&output, "s4b-leak-detached");
 }
 
@@ -1057,7 +1145,7 @@ fn native_stop_s4b_leak_detached_stuck_worker() {
 #[test]
 fn native_stop_s5_retained_graph_stop() {
     let (child, _permit) = spawn_stop_child("s5-retained");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s5-retained");
     assert_stop_status(&output, "s5-retained");
 }
 
@@ -1065,7 +1153,7 @@ fn native_stop_s5_retained_graph_stop() {
 #[test]
 fn native_stop_s6_poisoned_registry_stop() {
     let (child, _permit) = spawn_stop_child("s6-poisoned");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s6-poisoned");
     assert_stop_status(&output, "s6-poisoned");
 }
 
@@ -1073,7 +1161,7 @@ fn native_stop_s6_poisoned_registry_stop() {
 #[test]
 fn native_stop_s7_pending_graph_stop() {
     let (child, _permit) = spawn_stop_child("s7-pending");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s7-pending");
     assert_stop_status(&output, "s7-pending");
 }
 
@@ -1084,7 +1172,7 @@ fn native_stop_s8_failed_finalize_controller_deadline() {
         "s8-finalize-deadline",
         &[("PKCS11_PROXY_NATIVE_STOP_GRACE_MS", "200")],
     );
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s8-finalize-deadline");
     assert_stop_status(&output, "s8-finalize-deadline");
 }
 
@@ -1092,7 +1180,7 @@ fn native_stop_s8_failed_finalize_controller_deadline() {
 #[test]
 fn native_stop_s9_unknown_entry_stop() {
     let (child, _permit) = spawn_stop_child("s9-unknown");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s9-unknown");
     assert_stop_status(&output, "s9-unknown");
 }
 
@@ -1100,7 +1188,7 @@ fn native_stop_s9_unknown_entry_stop() {
 #[test]
 fn native_stop_s10_returned_but_unsettled_stop() {
     let (child, _permit) = spawn_stop_child("s10-unsettled");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s10-unsettled");
     assert_stop_status(&output, "s10-unsettled");
 }
 
@@ -1108,7 +1196,7 @@ fn native_stop_s10_returned_but_unsettled_stop() {
 #[test]
 fn native_stop_s11_gated_waiter_stop() {
     let (child, _permit) = spawn_stop_child("s11-gated");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s11-gated");
     assert_stop_status(&output, "s11-gated");
 }
 
@@ -1116,7 +1204,7 @@ fn native_stop_s11_gated_waiter_stop() {
 #[test]
 fn native_stop_s12_failed_initialize_stop() {
     let (child, _permit) = spawn_stop_child("s12-failed-init");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s12-failed-init");
     assert_stop_status(&output, "s12-failed-init");
 }
 
@@ -1128,7 +1216,7 @@ fn native_stop_s13_stuck_ordinary_call_deadline_stop() {
         "s13-stuck-call",
         &[("PKCS11_PROXY_NATIVE_STOP_GRACE_MS", "200")],
     );
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s13-stuck-call");
     assert_stop_status(&output, "s13-stuck-call");
 }
 
@@ -1137,7 +1225,7 @@ fn native_stop_s13_stuck_ordinary_call_deadline_stop() {
 #[test]
 fn native_stop_s14_proof_invalidation_stop() {
     let (child, _permit) = spawn_stop_child("s14-proof-invalidated");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s14-proof-invalidated");
     assert_stop_status(&output, "s14-proof-invalidated");
 }
 
@@ -1146,7 +1234,7 @@ fn native_stop_s14_proof_invalidation_stop() {
 #[test]
 fn native_stop_s15_failed_finalize_stop() {
     let (child, _permit) = spawn_stop_child("s15-failed-finalize");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s15-failed-finalize");
     assert_stop_status(&output, "s15-failed-finalize");
 }
 
@@ -1155,7 +1243,7 @@ fn native_stop_s15_failed_finalize_stop() {
 #[test]
 fn native_stop_s16_sigabrt_handler_installed_stop() {
     let (child, _permit) = spawn_stop_child("s16-handler-installed");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s16-handler-installed");
     assert_stop_status(&output, "s16-handler-installed");
 }
 
@@ -1166,7 +1254,7 @@ fn native_stop_s16_sigabrt_handler_installed_stop() {
 #[test]
 fn native_stop_s17_genuine_waiter_stop() {
     let (child, _permit) = spawn_stop_child("s17-genuine-waiter");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "s17-genuine-waiter");
     assert_stop_status(&output, "s17-genuine-waiter");
 }
 
@@ -1174,7 +1262,7 @@ fn native_stop_s17_genuine_waiter_stop() {
 #[test]
 fn native_stop_c1_never_initialized_normal_drop() {
     let (child, _permit) = spawn_stop_child("c1-never-init");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "c1-never-init");
     assert_control_status(&output, "c1-never-init");
 }
 
@@ -1182,7 +1270,7 @@ fn native_stop_c1_never_initialized_normal_drop() {
 #[test]
 fn native_stop_c2_poisoned_unmanaged_normal_drop() {
     let (child, _permit) = spawn_stop_child("c2-unmanaged");
-    let output = child.wait_with_output().expect("reap stop child");
+    let output = wait_stop_child(child, "c2-unmanaged");
     assert_control_status(&output, "c2-unmanaged");
 }
 
@@ -1263,13 +1351,90 @@ const MARKER_TEST_PATH: &str = "ffi::native_stop_tests::native_stop_marker_child
 /// Per-process sequence so parallel parent tests get unique outcome dirs.
 static OUTCOME_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Create a fresh outcome dir for `tag` (pid + sequence unique). The caller
-/// removes it after asserting; removal failure is ignored.
-fn fresh_outcome_dir(tag: &str) -> std::path::PathBuf {
-    let seq = OUTCOME_SEQ.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("pkcs11-stop-{tag}-{}-{seq}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create outcome dir");
-    dir
+/// Marker outcome dir: owner-only (0700), exclusively created, removed on
+/// drop — including drops during unwinding, so a failed assert cannot leak
+/// marker dirs into the shared temp dir.
+struct OutcomeDir {
+    path: std::path::PathBuf,
+}
+
+impl OutcomeDir {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for OutcomeDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl Drop for OutcomeDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Create a fresh outcome dir for `tag`, unique across pid reuse (pid +
+/// wall-clock nanos + per-process sequence) and owner-only (0700). Uses
+/// exclusive create: on collision with a leftover from a crashed run under a
+/// reused pid, retries with a fresh sequence number instead of reusing it.
+fn fresh_outcome_dir(tag: &str) -> OutcomeDir {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    for _ in 0..100 {
+        let seq = OUTCOME_SEQ.fetch_add(1, Ordering::SeqCst);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir()
+            .join(format!("pkcs11-stop-{tag}-{}-{nanos}-{seq}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {
+                // mkdir mode is umask-masked; chmod pins 0700 deterministically
+                // even under an exotic umask.
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                    .unwrap_or_else(|e| panic!("chmod outcome dir {}: {e}", dir.display()));
+                return OutcomeDir { path: dir };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("create outcome dir {}: {e}", dir.display()),
+        }
+    }
+    panic!("could not create a unique outcome dir for {tag}");
+}
+
+/// W1-L10-17 negative control: outcome dirs are 0700 (not umask-default),
+/// unique per creation, and removed by their guard even when the test
+/// panics — the old `temp_dir pid+seq` + ignored `remove_dir_all` leaked
+/// world-readable dirs on failure and collided across pid reuse.
+#[test]
+fn outcome_dir_is_private_unique_and_self_cleaning() {
+    let first = fresh_outcome_dir("control-perms");
+    let second = fresh_outcome_dir("control-perms");
+    assert_ne!(first.path(), second.path(), "each outcome dir must be unique");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for dir in [&first, &second] {
+            let mode =
+                std::fs::metadata(dir.path()).expect("stat outcome dir").permissions().mode()
+                    & 0o777;
+            assert_eq!(mode, 0o700, "marker dirs must be owner-only, got {mode:o}");
+        }
+    }
+    let leaked = second.path().to_path_buf();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = second;
+        panic!("synthetic marker-test failure exercises cleanup");
+    }));
+    assert!(result.is_err());
+    assert!(!leaked.exists(), "guard must remove the outcome dir on panic");
+    assert!(first.path().exists(), "sibling dir must survive");
 }
 
 /// Spawn the lib test binary as a marker child for `scenario` with `dir`.
@@ -1402,10 +1567,9 @@ fn run_m1_drop_control() -> ! {
 fn native_stop_m1_rust_drop_absent_on_stop() {
     let dir = fresh_outcome_dir("m1-stop");
     let (child, _permit) = spawn_marker_child("m1-drop-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m1-drop-stop");
     assert_stop_status(&output, "m1-drop-stop");
     assert_marker_absent(&dir.join("rust_drop.marker"), "m1-drop-stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M1 positive control: normal exit runs the Drop sentinel.
@@ -1413,10 +1577,9 @@ fn native_stop_m1_rust_drop_absent_on_stop() {
 fn native_stop_m1_rust_drop_control_present() {
     let dir = fresh_outcome_dir("m1-control");
     let (child, _permit) = spawn_marker_child("m1-drop-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m1-drop-control");
     assert_control_status(&output, "m1-drop-control");
     assert_marker_bytes(&dir.join("rust_drop.marker"), b"rust-drop-fired", "m1-drop-control");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Expected bytes of the M2 panic-hook marker.
@@ -1467,10 +1630,9 @@ fn run_m2_hook_control() -> ! {
 fn native_stop_m2_panic_hook_absent_on_stop() {
     let dir = fresh_outcome_dir("m2-stop");
     let (child, _permit) = spawn_marker_child("m2-hook-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m2-hook-stop");
     assert_stop_status(&output, "m2-hook-stop");
     assert_marker_absent(&dir.join("panic_hook.marker"), "m2-hook-stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M2 positive control: a panicking child with a clean backend fires the hook
@@ -1479,7 +1641,7 @@ fn native_stop_m2_panic_hook_absent_on_stop() {
 fn native_stop_m2_panic_hook_control_present() {
     let dir = fresh_outcome_dir("m2-control");
     let (child, _permit) = spawn_marker_child("m2-hook-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m2-hook-control");
     let code = output.status.code();
     assert!(
         code != Some(0) && code != Some(70),
@@ -1495,7 +1657,6 @@ fn native_stop_m2_panic_hook_control_present() {
         "scenario m2-hook-control: READY line missing, stdout={stdout:?}"
     );
     assert_marker_bytes(&dir.join("panic_hook.marker"), b"panic-hook-fired", "m2-hook-control");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Expected bytes of the M3 C-atexit marker.
@@ -1557,10 +1718,9 @@ fn run_m3_atexit_control() -> ! {
 fn native_stop_m3_c_atexit_absent_on_stop() {
     let dir = fresh_outcome_dir("m3-stop");
     let (child, _permit) = spawn_marker_child("m3-atexit-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m3-atexit-stop");
     assert_stop_status(&output, "m3-atexit-stop");
     assert_marker_absent(&dir.join("c_atexit.marker"), "m3-atexit-stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M3 positive control: `process::exit(0)` runs atexit (skipping Rust drops),
@@ -1569,10 +1729,9 @@ fn native_stop_m3_c_atexit_absent_on_stop() {
 fn native_stop_m3_c_atexit_control_present() {
     let dir = fresh_outcome_dir("m3-control");
     let (child, _permit) = spawn_marker_child("m3-atexit-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m3-atexit-control");
     assert_control_status(&output, "m3-atexit-control");
     assert_marker_bytes(&dir.join("c_atexit.marker"), b"c-atexit-fired", "m3-atexit-control");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Expected bytes of the M4 subsumption marker.
@@ -1645,10 +1804,9 @@ fn run_m4_elf_control() -> ! {
 fn native_stop_m4_elf_unload_absent_on_stop() {
     let dir = fresh_outcome_dir("m4-stop");
     let (child, _permit) = spawn_marker_child("m4-elf-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m4-elf-stop");
     assert_stop_status(&output, "m4-elf-stop");
     assert_marker_absent(&dir.join("elf_unload_subsumed.marker"), "m4-elf-stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M4 positive control: normal exit runs the guard (and its inner `Library`
@@ -1657,14 +1815,13 @@ fn native_stop_m4_elf_unload_absent_on_stop() {
 fn native_stop_m4_elf_unload_control_present() {
     let dir = fresh_outcome_dir("m4-control");
     let (child, _permit) = spawn_marker_child("m4-elf-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m4-elf-control");
     assert_control_status(&output, "m4-elf-control");
     assert_marker_bytes(
         &dir.join("elf_unload_subsumed.marker"),
         b"elf-unload-subsumed",
         "m4-elf-control",
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Expected bytes of the M5 provider-Finalize marker.
@@ -1757,12 +1914,11 @@ fn native_stop_m5_provider_finalize_absent_on_stop() {
     let dir = fresh_outcome_dir("m5-stop");
     seed_m5_fresh(&dir);
     let (child, _permit) = spawn_marker_child("m5-finalize-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m5-finalize-stop");
     assert_stop_status(&output, "m5-finalize-stop");
     assert_marker_absent(&dir.join("provider_finalize.marker"), "m5-finalize-stop");
     assert_marker_bytes(&dir.join("finalize.count"), b"0", "m5-finalize-stop");
     assert_marker_bytes(&dir.join("capdrop.order"), b"fresh\n", "m5-finalize-stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M5 positive control: explicit `finalize()` runs the provider stub (marker
@@ -1773,7 +1929,7 @@ fn native_stop_m5_provider_finalize_control_present() {
     let dir = fresh_outcome_dir("m5-control");
     seed_m5_fresh(&dir);
     let (child, _permit) = spawn_marker_child("m5-finalize-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m5-finalize-control");
     assert_control_status(&output, "m5-finalize-control");
     assert_marker_bytes(
         &dir.join("provider_finalize.marker"),
@@ -1786,7 +1942,6 @@ fn native_stop_m5_provider_finalize_control_present() {
         b"fresh\nfinalize\nguard\n",
         "m5-finalize-control",
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Expected bytes of the M6 SIGABRT-handler marker.
@@ -1848,14 +2003,13 @@ fn run_m6_sigabrt_control() -> ! {
 fn native_stop_m6_sigabrt_handler_control_present() {
     let dir = fresh_outcome_dir("m6-control");
     let (child, _permit) = spawn_marker_child("m6-sigabrt-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m6-sigabrt-control");
     assert_control_status(&output, "m6-sigabrt-control");
     assert_marker_bytes(
         &dir.join("sigabrt_handler.marker"),
         b"sigabrt-handler-returned",
         "m6-sigabrt-control",
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M7 stop child: C3M-clean (initialized then finalized) backend whose
@@ -1909,9 +2063,8 @@ fn run_m7_poisoned_domain_control() -> ! {
 fn native_stop_m7_poisoned_domain_drop_stops() {
     let dir = fresh_outcome_dir("m7-stop");
     let (child, _permit) = spawn_marker_child("m7-poisoned-domain-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m7-poisoned-domain-stop");
     assert_stop_status(&output, "m7-poisoned-domain-stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M7 positive control: the same C3M-clean backend with a quiet domain
@@ -1920,9 +2073,8 @@ fn native_stop_m7_poisoned_domain_drop_stops() {
 fn native_stop_m7_poisoned_domain_drop_control_clean() {
     let dir = fresh_outcome_dir("m7-control");
     let (child, _permit) = spawn_marker_child("m7-poisoned-domain-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m7-poisoned-domain-control");
     assert_control_status(&output, "m7-poisoned-domain-control");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Expected bytes of the M8 TLS-Drop marker.
@@ -1992,10 +2144,9 @@ fn run_m8_tls_control() -> ! {
 fn native_stop_m8_tls_drop_absent_on_stop() {
     let dir = fresh_outcome_dir("m8-stop");
     let (child, _permit) = spawn_marker_child("m8-tls-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m8-tls-stop");
     assert_stop_status(&output, "m8-tls-stop");
     assert_marker_absent(&dir.join("tls_drop.marker"), "m8-tls-stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M8 positive control: worker-thread exit runs the TLS sentinel.
@@ -2003,10 +2154,9 @@ fn native_stop_m8_tls_drop_absent_on_stop() {
 fn native_stop_m8_tls_drop_control_present() {
     let dir = fresh_outcome_dir("m8-control");
     let (child, _permit) = spawn_marker_child("m8-tls-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m8-tls-control");
     assert_control_status(&output, "m8-tls-control");
     assert_marker_bytes(&dir.join("tls_drop.marker"), b"tls-drop-fired", "m8-tls-control");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Expected bytes of the M9 `on_exit` marker.
@@ -2079,10 +2229,9 @@ fn run_m9_onexit_control() -> ! {
 fn native_stop_m9_c_onexit_absent_on_stop() {
     let dir = fresh_outcome_dir("m9-stop");
     let (child, _permit) = spawn_marker_child("m9-onexit-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m9-onexit-stop");
     assert_stop_status(&output, "m9-onexit-stop");
     assert_marker_absent(&dir.join("c_onexit.marker"), "m9-onexit-stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M9 positive control: `process::exit(0)` runs `on_exit`, so the marker
@@ -2092,10 +2241,9 @@ fn native_stop_m9_c_onexit_absent_on_stop() {
 fn native_stop_m9_c_onexit_control_present() {
     let dir = fresh_outcome_dir("m9-control");
     let (child, _permit) = spawn_marker_child("m9-onexit-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m9-onexit-control");
     assert_control_status(&output, "m9-onexit-control");
     assert_marker_bytes(&dir.join("c_onexit.marker"), b"c-onexit-fired", "m9-onexit-control");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Expected bytes of the M10 provider-entry marker.
@@ -2229,11 +2377,10 @@ fn native_stop_m10_callback_absent_on_stop() {
     let dir = fresh_outcome_dir("m10-stop");
     seed_m10_fresh(&dir);
     let (child, _permit) = spawn_marker_child("m10-callback-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m10-callback-stop");
     assert_stop_status(&output, "m10-callback-stop");
     assert_marker_absent(&dir.join("provider_entry.marker"), "m10-callback-stop");
     assert_marker_bytes(&dir.join("close_session.count"), b"0", "m10-callback-stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M10 positive control: the explicit close runs the provider entry
@@ -2243,7 +2390,7 @@ fn native_stop_m10_callback_control_present() {
     let dir = fresh_outcome_dir("m10-control");
     seed_m10_fresh(&dir);
     let (child, _permit) = spawn_marker_child("m10-callback-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m10-callback-control");
     assert_control_status(&output, "m10-callback-control");
     assert_marker_bytes(
         &dir.join("provider_entry.marker"),
@@ -2251,7 +2398,6 @@ fn native_stop_m10_callback_control_present() {
         "m10-callback-control",
     );
     assert_marker_bytes(&dir.join("close_session.count"), b"1", "m10-callback-control");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Expected bytes of the M11 domain-holder marker.
@@ -2328,10 +2474,9 @@ fn run_m11_domain_control() -> ! {
 fn native_stop_m11_domain_drop_absent_on_stop() {
     let dir = fresh_outcome_dir("m11-stop");
     let (child, _permit) = spawn_marker_child("m11-domain-stop", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m11-domain-stop");
     assert_stop_status(&output, "m11-domain-stop");
     assert_marker_absent(&dir.join("domain_drop.marker"), "m11-domain-stop");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M11 positive control: the normal path drops the domain guard.
@@ -2339,12 +2484,11 @@ fn native_stop_m11_domain_drop_absent_on_stop() {
 fn native_stop_m11_domain_drop_control_present() {
     let dir = fresh_outcome_dir("m11-control");
     let (child, _permit) = spawn_marker_child("m11-domain-control", &dir);
-    let output = child.wait_with_output().expect("reap marker child");
+    let output = wait_stop_child(child, "m11-domain-control");
     assert_control_status(&output, "m11-domain-control");
     assert_marker_bytes(
         &dir.join("domain_drop.marker"),
         b"domain-drop-fired",
         "m11-domain-control",
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

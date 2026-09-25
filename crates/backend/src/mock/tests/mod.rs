@@ -279,7 +279,7 @@ fn cms_sig_mechanism(certificate_handle: CkObjectHandle) -> CkMechanism {
     CkMechanism {
         mechanism_type: CkMechanismType::CMS_SIG,
         params: Some(CkMechanismParams::CmsSig(CmsSigParams {
-            certificate_handle: certificate_handle.0,
+            certificate_handle,
             signing_mechanism: Box::new(CkMechanism {
                 mechanism_type: CkMechanismType::RSA_PKCS,
                 params: None,
@@ -303,7 +303,7 @@ fn kip_mechanism(mechanism_type: CkMechanismType, key_handle: CkObjectHandle) ->
                 mechanism_type: CkMechanismType::SHA256,
                 params: None,
             }),
-            key_handle: key_handle.0,
+            key_handle,
             seed: b"seed".to_vec().into(),
         })),
     }
@@ -347,5 +347,3 @@ fn gcm_mechanism_output() -> CkMechanismParams {
         aad_null: false,
     })
 }
-
-const CKF_DONT_BLOCK: u64 = 0x0000_0001;

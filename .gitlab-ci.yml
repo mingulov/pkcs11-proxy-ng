@@ -1,3 +1,12 @@
+# Carrier-image builds for the Alpine APK and Amazon RPM targets.
+#
+# By-design split (W1-L17-05): full image builds (abuild/rpmbuild over a
+# complete workspace compile) run ONLY here, in external GitLab — never in
+# GitHub CI. The per-PR packaging signal in GitHub is the `packaging-smoke`
+# job (.github/workflows/ci.yml -> scripts/packaging-smoke.sh): it pins the
+# four version mirrors to the Cargo workspace version and checks the
+# APKBUILD/spec shape, so version drift and packaging-file breakage fail
+# fast on every PR without a second full build farm.
 default:
   image: docker:latest
 

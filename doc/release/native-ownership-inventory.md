@@ -18,7 +18,8 @@ the stop-arm matrix or consumer set changes.
 
 Stop arms (`native_stop.rs`): (1) Linux x86_64 GNU/musl,
 (2) Linux x86 GNU/musl, (3) Windows MSVC x86_64/x86,
-(4) macOS aarch64/x86_64, (5) fallback (refuse load).
+(4) macOS aarch64/x86_64, (5) Linux aarch64 GNU/musl,
+(6) fallback (refuse load).
 
 | Variant | Arm | Load? | Codegen reviewed | Natively executed |
 |---|---|---|---|---|
@@ -27,9 +28,10 @@ Stop arms (`native_stop.rs`): (1) Linux x86_64 GNU/musl,
 | linux/x86_64/musl release (static+dynamic) | 1 | yes | yes (static pattern; libc wrapper distinguished) | yes, Alpine 3.23 (STOP 48/48, M9 N/A) |
 | linux/x86/musl release | 2 | yes | yes (dynamic pattern, Alpine rustc 1.91.1) | yes, linux/386 Alpine (STOP 48/48, M9 N/A) |
 | MSRV 1.88 debug (x86_64+x86) | 1, 2 | yes | yes (symbols; shape matches stable) | no (MSRV CI builds only) |
+| linux/aarch64/gnu release | 5 | yes | yes (qualification review) | no (stop stub; load path runs on the xplat ARM leg) |
 | windows/msvc x86_64+x86 | 3 | yes | no (out of TO26b scope) | wine smoke only (existing) |
 | macos aarch64+x86_64 | 4 | yes | no (out of TO26b scope) | no (no macOS runner here) |
-| other (s390x, aarch64-linux, …) | 5 fallback | NO (`NATIVE_FFI_QUALIFIED=false`) | n/a (compile-only) | no (`be-qemu-tier.md` covers qemu) |
+| other (s390x, riscv64, …) | 6 fallback | NO (`NATIVE_FFI_QUALIFIED=false`) | n/a (compile-only) | no (`be-qemu-tier.md` covers qemu) |
 
 M9 `on_exit` pair is `cfg(all(linux, gnu))` — glibc-only "where
 available"; musl handler suppression is covered by the M3 `atexit`

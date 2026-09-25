@@ -17,8 +17,10 @@ pub(super) async fn init_token(
     token_policy: &TokenPolicy,
     request: Request<pkcs11_proxy_ng_proto::InitTokenRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::InitTokenResponse>, Status> {
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // W1-C8-11: `InitTokenRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     if !context_exists(ctx_mgr, &ctx_id).await {
         return Ok(Response::new(pkcs11_proxy_ng_proto::InitTokenResponse {
@@ -54,9 +56,9 @@ pub(super) async fn init_token(
     }
 
     // Hold the SO PIN in `SecretBytes` (wiped on drop, redacted in Debug).
-    let so_pin = req.so_pin.map(SecretBytes::new);
+    let so_pin = std::mem::take(&mut req.so_pin).map(SecretBytes::new);
     let label_for_log = req.label.clone();
-    let label = req.label;
+    let label = std::mem::take(&mut req.label);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
         let so_pin = so_pin.map(SecretBytes::into_zeroizing);
@@ -67,6 +69,10 @@ pub(super) async fn init_token(
     let ck_rv = match &result {
         Ok(()) => {
             info!(context_id = %ctx_id.0, label = %label_for_log, "Token initialized");
+            // W1-L13-18: initializing the token destroys its objects — revoke
+            // the daemon-wide authz generation so no cached token-object
+            // metadata survives the wipe.
+            ctx_mgr.revoke_authz_generation();
             CkRv::OK.0
         }
         Err(error) => {
@@ -83,8 +89,10 @@ pub(super) async fn init_pin(
     backend_ref: &Arc<dyn Pkcs11Backend>,
     request: Request<pkcs11_proxy_ng_proto::InitPinRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::InitPinResponse>, Status> {
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // W1-C8-11: `InitPinRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
         Ok(session) => session,
@@ -94,7 +102,7 @@ pub(super) async fn init_pin(
     };
 
     // Hold the user PIN in `SecretBytes` (wiped on drop, redacted in Debug).
-    let pin = req.pin.map(SecretBytes::new);
+    let pin = std::mem::take(&mut req.pin).map(SecretBytes::new);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
         let pin = pin.map(SecretBytes::into_zeroizing);
@@ -121,8 +129,10 @@ pub(super) async fn set_pin(
     backend_ref: &Arc<dyn Pkcs11Backend>,
     request: Request<pkcs11_proxy_ng_proto::SetPinRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SetPinResponse>, Status> {
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // W1-C8-11: `SetPinRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
         Ok(session) => session,
@@ -132,8 +142,8 @@ pub(super) async fn set_pin(
     };
 
     // Hold both PINs in `SecretBytes` (wiped on drop, redacted in Debug).
-    let old_pin = req.old_pin.map(SecretBytes::new);
-    let new_pin = req.new_pin.map(SecretBytes::new);
+    let old_pin = std::mem::take(&mut req.old_pin).map(SecretBytes::new);
+    let new_pin = std::mem::take(&mut req.new_pin).map(SecretBytes::new);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || {
         let old_pin = old_pin.map(SecretBytes::into_zeroizing);

@@ -59,7 +59,7 @@ while :; do
     fi
     if [[ $attempt -ge 5 ]]; then
         echo "fail: scenario2 — sign did not recover after restart" >&2
-        cat /tmp/shim_sign.log >&2
+        cat "$SHIM_SIGN_LOG" >&2
         exit 1
     fi
     sleep 1

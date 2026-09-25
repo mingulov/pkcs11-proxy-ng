@@ -30,7 +30,7 @@ docker compose -f tests/chaos/docker-compose.yml down -v
 
 | # | id | Description | Pass criteria |
 | --- | --- | --- | --- |
-| 1 | `backend_hang` | `SLOW_BACKEND_SIGN_DELAY_MS=120000` on C_Sign. | Shim returns CKR_DEVICE_ERROR within `request_timeout_secs`. Daemon stays alive. Future calls work once delay is dropped. |
+| 1 | `backend_hang` | `SLOW_BACKEND_SIGN_DELAY_MS=120000` on C_Sign. | Shim returns CKR_FUNCTION_FAILED well under the hang (W1-L3-01: backend timeouts are outcome-ambiguous). Daemon stays alive. Future calls work once delay is dropped. |
 | 2 | `backend_oom` | Stub backend variant that returns CKR_HOST_MEMORY. | Health flips NOT_SERVING after `backend_health_consecutive_failures` consecutive failures. |
 | 3 | `sigstop_daemon` | SIGSTOP daemon for 60 s, then SIGCONT. | Shim's http2 keepalive trips; shim reconnects on next call; client_context_id may need re-init if lease expired. |
 | 4 | `disk_full_or_mid_write` | (a) chmod -w on daemon config dir + SIGHUP; (b) sed -i mid-write of mechanism_params.toml + SIGHUP. | Error logged, registry retained, daemon survives. |

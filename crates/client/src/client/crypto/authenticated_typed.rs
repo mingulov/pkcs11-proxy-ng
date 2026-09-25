@@ -21,10 +21,46 @@ fn decode_output(
     Ok(output)
 }
 
+/// Tri-state `typed_auth_capability` encoding (W1-C10-03).
+const AUTH_CAP_UNKNOWN: u8 = 0;
+const AUTH_CAP_NO: u8 = 1;
+const AUTH_CAP_YES: u8 = 2;
+
 impl Pkcs11Client {
+    /// The cached `pointer_safe_authenticated_parameters` capability, if a
+    /// probe already established it on this connection.
+    pub(crate) fn cached_typed_auth_capability(&self) -> Option<bool> {
+        match self.typed_auth_capability.load(std::sync::atomic::Ordering::Acquire) {
+            AUTH_CAP_YES => Some(true),
+            AUTH_CAP_NO => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Record the capability carried by a fresh probe. Every probe
+    /// overwrites — the value always matches the latest effects version
+    /// the client has seen, so a version change can never leave a stale
+    /// capability behind.
+    pub(crate) fn note_typed_auth_capability(&self, capable: bool) {
+        self.typed_auth_capability.store(
+            if capable { AUTH_CAP_YES } else { AUTH_CAP_NO },
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    /// Drop the cached capability (reconnect re-probes on next use).
+    /// Store-based so all clones sharing the connection observe it.
+    pub(crate) fn invalidate_typed_auth_capability(&self) {
+        self.typed_auth_capability.store(AUTH_CAP_UNKNOWN, std::sync::atomic::Ordering::Release);
+    }
+
     pub async fn require_typed_authenticated_parameters(&mut self) -> CkResult<()> {
+        if let Some(capable) = self.cached_typed_auth_capability() {
+            return if capable { Ok(()) } else { Err(CkRv::FUNCTION_NOT_SUPPORTED) };
+        }
         let probe =
             self.get_backend_interfaces().await.map_err(|_| CkRv::FUNCTION_NOT_SUPPORTED)?;
+        // `get_backend_interfaces` already cached the fresh probe value.
         if probe.pointer_safe_authenticated_parameters {
             Ok(())
         } else {
@@ -46,7 +82,7 @@ impl Pkcs11Client {
         let mut request = wire::WrapKeyAuthenticatedRequest {
             client_context_id: self.context_id()?,
             session_handle: session.0,
-            mechanism: Some(mechanism.into()),
+            mechanism: Some(mechanism.try_into()?),
             wrapping_key_handle: wrapping_key.0,
             key_handle: key.0,
             authenticated_parameters: Some(wire::AuthenticatedParameters {
@@ -83,7 +119,7 @@ impl Pkcs11Client {
             client_context_id: self.context_id()?,
             session_handle: session.0,
             function: wire::ParameterOutputFunction::WrapKeyAuthenticated as i32,
-            mechanism: Some(mechanism.into()),
+            mechanism: Some(mechanism.try_into()?),
             wrapping_key_handle: wrapping_key.0,
             key_handle: key.0,
             output_spec: Some(spec.into()),
@@ -149,7 +185,7 @@ impl Pkcs11Client {
         let mut request = wire::UnwrapKeyAuthenticatedRequest {
             client_context_id: self.context_id()?,
             session_handle: session.0,
-            mechanism: Some(mechanism.into()),
+            mechanism: Some(mechanism.try_into()?),
             unwrapping_key_handle: unwrapping_key.0,
             template: Self::proto_template(template.unwrap_or(&[])),
             template_null: template.is_none(),
@@ -175,6 +211,21 @@ impl Pkcs11Client {
 mod tests {
     use super::*;
 
+    // W1-C10-03: the capability tri-state starts unknown, records both
+    // outcomes, and invalidates back to unknown.
+    #[tokio::test]
+    async fn typed_auth_capability_tristate_round_trip() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let client = Pkcs11Client::from_channel(channel);
+        assert_eq!(client.cached_typed_auth_capability(), None);
+        client.note_typed_auth_capability(true);
+        assert_eq!(client.cached_typed_auth_capability(), Some(true));
+        client.note_typed_auth_capability(false);
+        assert_eq!(client.cached_typed_auth_capability(), Some(false));
+        client.invalidate_typed_auth_capability();
+        assert_eq!(client.cached_typed_auth_capability(), None);
+    }
+
     #[tokio::test]
     async fn authenticated_legacy_exact_client_rejects_structures_before_transport() {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
@@ -185,7 +236,7 @@ mod tests {
             params: Some(CkMechanismParams::Gostr3410KeyWrap(Gostr3410KeyWrapParams {
                 wrap_oid: vec![0; 3],
                 ukm: vec![0; 8],
-                key_handle: 17,
+                key_handle: CkObjectHandle(17),
             })),
         };
         let result = client

@@ -24,10 +24,10 @@ use tonic::transport::{
     Certificate as TonicCertificate, ClientTlsConfig, Endpoint, Identity, Server,
 };
 
-struct LeafCert {
-    cert_pem: String,
-    key_pem: String,
-    der: Vec<u8>,
+pub(crate) struct LeafCert {
+    pub(crate) cert_pem: String,
+    pub(crate) key_pem: String,
+    pub(crate) der: Vec<u8>,
 }
 
 // Each integration binary uses the fixture fields relevant to its boundary.
@@ -43,7 +43,7 @@ pub struct MtlsFixture {
     _shutdown: tokio::sync::watch::Sender<bool>,
 }
 
-fn new_ca() -> (Certificate, Issuer<'static, KeyPair>) {
+pub(crate) fn new_ca() -> (Certificate, Issuer<'static, KeyPair>) {
     let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.distinguished_name.push(DnType::CommonName, "Root CA");
@@ -56,7 +56,7 @@ fn new_ca() -> (Certificate, Issuer<'static, KeyPair>) {
     (cert, Issuer::new(params, key))
 }
 
-fn new_leaf(
+pub(crate) fn new_leaf(
     issuer: &Issuer<'static, KeyPair>,
     common_name: &str,
     subject_alt_names: Vec<String>,
@@ -72,7 +72,7 @@ fn new_leaf(
     LeafCert { cert_pem: cert.pem(), key_pem: key.serialize_pem(), der: cert.der().to_vec() }
 }
 
-fn write_file(dir: &TempDir, name: &str, contents: &str) -> PathBuf {
+pub(crate) fn write_file(dir: &TempDir, name: &str, contents: &str) -> PathBuf {
     let path = dir.path().join(name);
     std::fs::write(&path, contents).unwrap();
     // The daemon rejects mTLS private keys with group/other access (mode must

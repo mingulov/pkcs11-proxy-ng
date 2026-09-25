@@ -9,7 +9,13 @@ use pkcs11_proxy_ng_types::CkRv;
 use super::super::super::auth::policy::TokenPolicy;
 use super::super::super::context_manager::{ClientContextId, ContextManager};
 use super::super::authorization::slot_is_authorized;
-use super::super::service_utils::spawn_backend;
+use super::super::service_utils::{current_context_operation_guard, spawn_task};
+
+/// Bound for a `CKF_DONT_BLOCK` backend wait (W1-L6-10). A correct provider
+/// answers a nonblocking poll in microseconds; only a faulty one parks it.
+/// Past this grace the daemon reports `CKR_NO_EVENT` and abandons the
+/// parked call instead of blocking a poll that must never block.
+const NONBLOCKING_WAIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn no_event() -> Response<pkcs11_proxy_ng_proto::WaitForSlotEventResponse> {
     Response::new(pkcs11_proxy_ng_proto::WaitForSlotEventResponse {
@@ -35,9 +41,46 @@ pub(super) async fn wait_for_slot_event(
         }));
     }
 
+    // W1-L6-10: slot waits bypass spawn_backend entirely — they hold NO
+    // breaker slot and take NO request timeout. A blocking wait
+    // legitimately outlives request_timeout (native modules block
+    // indefinitely), so routing it through the breaker burned a stuck
+    // slot per slow wait and let repeated waits trip the global
+    // breaker. Floods are bounded instead by the transport (L6-20) and
+    // per-connection admission (L7-28) layers. The dispatch operation
+    // guard still travels into the blocking task so a parked wait keeps
+    // its context unreapable, exactly as before.
     let flags = req.flags;
+    let dont_block = flags & cryptoki_sys::CKF_DONT_BLOCK as u64 != 0;
     let backend = backend_ref.clone();
-    let result = spawn_backend(move || backend.wait_for_slot_event(flags)).await?;
+    let operation_guard = current_context_operation_guard();
+    let result = if dont_block {
+        // Respect DONT_BLOCK: a nonblocking poll must never block. A
+        // correct provider answers at once; if a faulty one still
+        // hasn't answered within the grace, report NO_EVENT and abandon
+        // the parked call — any real event surfaces on the next poll.
+        let task = spawn_task(move || {
+            let _operation_guard = operation_guard;
+            backend.wait_for_slot_event(flags)
+        });
+        match tokio::time::timeout(NONBLOCKING_WAIT_GRACE, task).await {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    grace_secs = NONBLOCKING_WAIT_GRACE.as_secs(),
+                    "DONT_BLOCK slot wait still parked past the grace; \
+                     reporting NO_EVENT (faulty provider)"
+                );
+                Err(CkRv::NO_EVENT)
+            }
+        }
+    } else {
+        spawn_task(move || {
+            let _operation_guard = operation_guard;
+            backend.wait_for_slot_event(flags)
+        })
+        .await?
+    };
 
     let backend_slot = match result {
         Ok(backend_slot) => BackendSlotId(backend_slot),

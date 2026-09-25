@@ -387,10 +387,10 @@ impl Pkcs11Backend for TestBackend3x {
         &self,
         _session: CkSessionHandle,
         _user_type: CkUserType,
-        _username: &[u8],
-        pin: &[u8],
+        _username: Option<&[u8]>,
+        pin: Option<&[u8]>,
     ) -> CkResult<()> {
-        if pin == b"1234" { Ok(()) } else { Err(CkRv::PIN_INCORRECT) }
+        if pin.is_some_and(|p| p == b"1234") { Ok(()) } else { Err(CkRv::PIN_INCORRECT) }
     }
 
     fn session_cancel(&self, _session: CkSessionHandle, _flags: CkFlags) -> CkResult<()> {
@@ -734,7 +734,8 @@ mod tests {
     fn login_user_correct_pin() {
         let backend = TestBackend3x::default_test();
         backend.initialize().unwrap();
-        let result = backend.login_user(CkSessionHandle(1), CkUserType::User, b"alice", b"1234");
+        let result =
+            backend.login_user(CkSessionHandle(1), CkUserType::User, Some(b"alice"), Some(b"1234"));
         assert_eq!(result, Ok(()));
     }
 
@@ -742,7 +743,12 @@ mod tests {
     fn login_user_wrong_pin() {
         let backend = TestBackend3x::default_test();
         backend.initialize().unwrap();
-        let result = backend.login_user(CkSessionHandle(1), CkUserType::User, b"alice", b"wrong");
+        let result = backend.login_user(
+            CkSessionHandle(1),
+            CkUserType::User,
+            Some(b"alice"),
+            Some(b"wrong"),
+        );
         assert_eq!(result, Err(CkRv::PIN_INCORRECT));
     }
 

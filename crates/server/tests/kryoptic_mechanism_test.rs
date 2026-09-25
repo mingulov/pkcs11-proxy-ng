@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Comprehensive parameterized mechanism integration tests against Kryoptic.
 //!
 //! Each test proves a different mechanism parameter shape works through the full
@@ -5,7 +8,9 @@
 //! -> result -> reverse path.
 //!
 //! All tests are `#[ignore]` because they require the Kryoptic PKCS#11 module
-//! and specific environment variables to be set.
+//! and specific environment variables to be set. An explicit `--ignored` run
+//! that cannot execute (missing provider/mechanism) FAILS with its skip
+//! reason instead of reporting a green pass (W1-L9-11).
 //!
 //! Run with:
 //! ```sh
@@ -138,8 +143,9 @@ async fn kryoptic_all_mechanisms_visible() -> Result<(), String> {
     let fixture = match ProviderFixture::kryoptic_from_env().await {
         Ok(f) => f,
         Err(_) => {
-            record_skip!(support::SkipReason::ProviderMissing("kryoptic"));
-            return Ok(());
+            return Err(support::fail_explicit_skip(support::SkipReason::ProviderMissing(
+                "kryoptic",
+            )));
         }
     };
     let daemon = DaemonHarness::start(&fixture).await?;
@@ -175,8 +181,9 @@ async fn kryoptic_aes_cbc_encrypt_decrypt() -> Result<(), String> {
     let fixture = match ProviderFixture::kryoptic_from_env().await {
         Ok(f) => f,
         Err(_) => {
-            record_skip!(support::SkipReason::ProviderMissing("kryoptic"));
-            return Ok(());
+            return Err(support::fail_explicit_skip(support::SkipReason::ProviderMissing(
+                "kryoptic",
+            )));
         }
     };
     let daemon = DaemonHarness::start(&fixture).await?;
@@ -184,13 +191,12 @@ async fn kryoptic_aes_cbc_encrypt_decrypt() -> Result<(), String> {
     let slot = ensure_user_token(&mut client, &fixture).await?;
 
     if !supports_mechanism(&mut client, slot, CkMechanismType::AES_CBC).await? {
-        record_skip!(support::SkipReason::MechanismUnsupported {
-            provider: "kryoptic",
-            mechanism: "CKM_AES_CBC",
-        });
         client.finalize().await.map_err(|rv| rv.to_string())?;
         daemon.shutdown().await?;
-        return Ok(());
+        return Err(support::fail_explicit_skip(support::SkipReason::MechanismUnsupported {
+            provider: "kryoptic",
+            mechanism: "CKM_AES_CBC",
+        }));
     }
 
     let session = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
@@ -214,8 +220,9 @@ async fn kryoptic_aes_ctr_encrypt_decrypt() -> Result<(), String> {
     let fixture = match ProviderFixture::kryoptic_from_env().await {
         Ok(f) => f,
         Err(_) => {
-            record_skip!(support::SkipReason::ProviderMissing("kryoptic"));
-            return Ok(());
+            return Err(support::fail_explicit_skip(support::SkipReason::ProviderMissing(
+                "kryoptic",
+            )));
         }
     };
     let daemon = DaemonHarness::start(&fixture).await?;
@@ -223,13 +230,12 @@ async fn kryoptic_aes_ctr_encrypt_decrypt() -> Result<(), String> {
     let slot = ensure_user_token(&mut client, &fixture).await?;
 
     if !supports_mechanism(&mut client, slot, CKM_AES_CTR).await? {
-        record_skip!(support::SkipReason::MechanismUnsupported {
-            provider: "kryoptic",
-            mechanism: "CKM_AES_CTR",
-        });
         client.finalize().await.map_err(|rv| rv.to_string())?;
         daemon.shutdown().await?;
-        return Ok(());
+        return Err(support::fail_explicit_skip(support::SkipReason::MechanismUnsupported {
+            provider: "kryoptic",
+            mechanism: "CKM_AES_CTR",
+        }));
     }
 
     let session = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
@@ -252,8 +258,9 @@ async fn kryoptic_rsa_pss_sign_verify() -> Result<(), String> {
     let fixture = match ProviderFixture::kryoptic_from_env().await {
         Ok(f) => f,
         Err(_) => {
-            record_skip!(support::SkipReason::ProviderMissing("kryoptic"));
-            return Ok(());
+            return Err(support::fail_explicit_skip(support::SkipReason::ProviderMissing(
+                "kryoptic",
+            )));
         }
     };
     let daemon = DaemonHarness::start(&fixture).await?;
@@ -261,13 +268,12 @@ async fn kryoptic_rsa_pss_sign_verify() -> Result<(), String> {
     let slot = ensure_user_token(&mut client, &fixture).await?;
 
     if !supports_mechanism(&mut client, slot, CKM_SHA256_RSA_PKCS_PSS).await? {
-        record_skip!(support::SkipReason::MechanismUnsupported {
-            provider: "kryoptic",
-            mechanism: "CKM_SHA256_RSA_PKCS_PSS",
-        });
         client.finalize().await.map_err(|rv| rv.to_string())?;
         daemon.shutdown().await?;
-        return Ok(());
+        return Err(support::fail_explicit_skip(support::SkipReason::MechanismUnsupported {
+            provider: "kryoptic",
+            mechanism: "CKM_SHA256_RSA_PKCS_PSS",
+        }));
     }
 
     let session = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
@@ -293,8 +299,9 @@ async fn kryoptic_rsa_oaep_encrypt_decrypt() -> Result<(), String> {
     let fixture = match ProviderFixture::kryoptic_from_env().await {
         Ok(f) => f,
         Err(_) => {
-            record_skip!(support::SkipReason::ProviderMissing("kryoptic"));
-            return Ok(());
+            return Err(support::fail_explicit_skip(support::SkipReason::ProviderMissing(
+                "kryoptic",
+            )));
         }
     };
     let daemon = DaemonHarness::start(&fixture).await?;
@@ -302,13 +309,12 @@ async fn kryoptic_rsa_oaep_encrypt_decrypt() -> Result<(), String> {
     let slot = ensure_user_token(&mut client, &fixture).await?;
 
     if !supports_mechanism(&mut client, slot, CkMechanismType::RSA_PKCS_OAEP).await? {
-        record_skip!(support::SkipReason::MechanismUnsupported {
-            provider: "kryoptic",
-            mechanism: "CKM_RSA_PKCS_OAEP",
-        });
         client.finalize().await.map_err(|rv| rv.to_string())?;
         daemon.shutdown().await?;
-        return Ok(());
+        return Err(support::fail_explicit_skip(support::SkipReason::MechanismUnsupported {
+            provider: "kryoptic",
+            mechanism: "CKM_RSA_PKCS_OAEP",
+        }));
     }
 
     let session = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
@@ -334,8 +340,9 @@ async fn kryoptic_ecdh1_derive() -> Result<(), String> {
     let fixture = match ProviderFixture::kryoptic_from_env().await {
         Ok(f) => f,
         Err(_) => {
-            record_skip!(support::SkipReason::ProviderMissing("kryoptic"));
-            return Ok(());
+            return Err(support::fail_explicit_skip(support::SkipReason::ProviderMissing(
+                "kryoptic",
+            )));
         }
     };
     let daemon = DaemonHarness::start(&fixture).await?;
@@ -343,13 +350,12 @@ async fn kryoptic_ecdh1_derive() -> Result<(), String> {
     let slot = ensure_user_token(&mut client, &fixture).await?;
 
     if !supports_mechanism(&mut client, slot, CkMechanismType::ECDH1_DERIVE).await? {
-        record_skip!(support::SkipReason::MechanismUnsupported {
-            provider: "kryoptic",
-            mechanism: "CKM_ECDH1_DERIVE",
-        });
         client.finalize().await.map_err(|rv| rv.to_string())?;
         daemon.shutdown().await?;
-        return Ok(());
+        return Err(support::fail_explicit_skip(support::SkipReason::MechanismUnsupported {
+            provider: "kryoptic",
+            mechanism: "CKM_ECDH1_DERIVE",
+        }));
     }
 
     let session = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
@@ -372,8 +378,9 @@ async fn kryoptic_hkdf_derive() -> Result<(), String> {
     let fixture = match ProviderFixture::kryoptic_from_env().await {
         Ok(f) => f,
         Err(_) => {
-            record_skip!(support::SkipReason::ProviderMissing("kryoptic"));
-            return Ok(());
+            return Err(support::fail_explicit_skip(support::SkipReason::ProviderMissing(
+                "kryoptic",
+            )));
         }
     };
     let daemon = DaemonHarness::start(&fixture).await?;
@@ -381,13 +388,12 @@ async fn kryoptic_hkdf_derive() -> Result<(), String> {
     let slot = ensure_user_token(&mut client, &fixture).await?;
 
     if !supports_mechanism(&mut client, slot, CKM_HKDF_DERIVE).await? {
-        record_skip!(support::SkipReason::MechanismUnsupported {
-            provider: "kryoptic",
-            mechanism: "CKM_HKDF_DERIVE",
-        });
         client.finalize().await.map_err(|rv| rv.to_string())?;
         daemon.shutdown().await?;
-        return Ok(());
+        return Err(support::fail_explicit_skip(support::SkipReason::MechanismUnsupported {
+            provider: "kryoptic",
+            mechanism: "CKM_HKDF_DERIVE",
+        }));
     }
 
     let session = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
@@ -412,8 +418,9 @@ async fn kryoptic_aes_cbc_encrypt_data_derive() -> Result<(), String> {
     let fixture = match ProviderFixture::kryoptic_from_env().await {
         Ok(f) => f,
         Err(_) => {
-            record_skip!(support::SkipReason::ProviderMissing("kryoptic"));
-            return Ok(());
+            return Err(support::fail_explicit_skip(support::SkipReason::ProviderMissing(
+                "kryoptic",
+            )));
         }
     };
     let daemon = DaemonHarness::start(&fixture).await?;
@@ -421,13 +428,12 @@ async fn kryoptic_aes_cbc_encrypt_data_derive() -> Result<(), String> {
     let slot = ensure_user_token(&mut client, &fixture).await?;
 
     if !supports_mechanism(&mut client, slot, CKM_AES_CBC_ENCRYPT_DATA).await? {
-        record_skip!(support::SkipReason::MechanismUnsupported {
-            provider: "kryoptic",
-            mechanism: "CKM_AES_CBC_ENCRYPT_DATA",
-        });
         client.finalize().await.map_err(|rv| rv.to_string())?;
         daemon.shutdown().await?;
-        return Ok(());
+        return Err(support::fail_explicit_skip(support::SkipReason::MechanismUnsupported {
+            provider: "kryoptic",
+            mechanism: "CKM_AES_CBC_ENCRYPT_DATA",
+        }));
     }
 
     let session = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
@@ -451,8 +457,9 @@ async fn kryoptic_ecdsa_sha3_sign_verify() -> Result<(), String> {
     let fixture = match ProviderFixture::kryoptic_from_env().await {
         Ok(f) => f,
         Err(_) => {
-            record_skip!(support::SkipReason::ProviderMissing("kryoptic"));
-            return Ok(());
+            return Err(support::fail_explicit_skip(support::SkipReason::ProviderMissing(
+                "kryoptic",
+            )));
         }
     };
     let daemon = DaemonHarness::start(&fixture).await?;
@@ -460,13 +467,12 @@ async fn kryoptic_ecdsa_sha3_sign_verify() -> Result<(), String> {
     let slot = ensure_user_token(&mut client, &fixture).await?;
 
     if !supports_mechanism(&mut client, slot, CKM_ECDSA_SHA3_256).await? {
-        record_skip!(support::SkipReason::MechanismUnsupported {
-            provider: "kryoptic",
-            mechanism: "CKM_ECDSA_SHA3_256",
-        });
         client.finalize().await.map_err(|rv| rv.to_string())?;
         daemon.shutdown().await?;
-        return Ok(());
+        return Err(support::fail_explicit_skip(support::SkipReason::MechanismUnsupported {
+            provider: "kryoptic",
+            mechanism: "CKM_ECDSA_SHA3_256",
+        }));
     }
 
     let session = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
@@ -523,8 +529,9 @@ async fn kryoptic_mechanism_info_for_all() -> Result<(), String> {
     let fixture = match ProviderFixture::kryoptic_from_env().await {
         Ok(f) => f,
         Err(_) => {
-            record_skip!(support::SkipReason::ProviderMissing("kryoptic"));
-            return Ok(());
+            return Err(support::fail_explicit_skip(support::SkipReason::ProviderMissing(
+                "kryoptic",
+            )));
         }
     };
     let daemon = DaemonHarness::start(&fixture).await?;
@@ -553,4 +560,33 @@ async fn kryoptic_mechanism_info_for_all() -> Result<(), String> {
     client.finalize().await.map_err(|rv| rv.to_string())?;
     daemon.shutdown().await?;
     Ok(())
+}
+
+#[test]
+fn explicit_skip_failure_carries_reason() {
+    // W1-L9-11: every skip reason must survive into the failure message
+    // so an explicit run that cannot execute fails WITH its reason.
+    for (reason, fragment) in [
+        (support::SkipReason::ToolMissing("pkcs11-tool"), "pkcs11-tool"),
+        (support::SkipReason::ProviderMissing("kryoptic"), "kryoptic"),
+        (
+            support::SkipReason::MechanismUnsupported {
+                provider: "kryoptic",
+                mechanism: "CKM_FOO",
+            },
+            "CKM_FOO",
+        ),
+        (
+            support::SkipReason::KnownIncompat { provider: "nss", description: "no stdout" },
+            "no stdout",
+        ),
+        (support::SkipReason::FundamentalLimitation("no fork"), "no fork"),
+        (support::SkipReason::EnvNotSet("SOME_VAR"), "SOME_VAR"),
+    ] {
+        let message = support::fail_explicit_skip(reason);
+        assert!(
+            message.contains("explicit --ignored") && message.contains(fragment),
+            "failure must carry the skip reason, got {message:?}"
+        );
+    }
 }

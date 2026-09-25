@@ -7,8 +7,11 @@ use pkcs11_proxy_ng_types::*;
 
 use crate::state;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{
+    catch_panics, classify_input, dispatch_byte_output_exact, dispatch_byte_output_exact_no_input,
+    input_buf_to_ck_in_buf, read_mechanism, rv_err, rv_ok, unit_result_to_rv, validate_mechanism,
+    with_client, write_mechanism_output_params,
+};
 
 pub unsafe extern "C" fn c_digest_init(
     h_session: CK_SESSION_HANDLE,
@@ -27,7 +30,10 @@ pub unsafe extern "C" fn c_digest_init(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         let result =
             with_client!(client => client.digest_init(CkSessionHandle(h_session as u64), &mech));
         if result.is_ok() {
@@ -45,25 +51,15 @@ pub unsafe extern "C" fn c_digest(
     p_digest: CK_BYTE_PTR,
     pul_digest_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_digest, pul_digest_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::Digest,
-            &spec,
-            data,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_digest, pul_digest_len) },
-            Err(e) => rv_err(e),
-        }
+            p_data,
+            ul_data_len,
+            p_digest,
+            pul_digest_len,
+        )
     })
 }
 
@@ -100,21 +96,13 @@ pub unsafe extern "C" fn c_digest_final(
     p_digest: CK_BYTE_PTR,
     pul_digest_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let spec = unsafe { output_buffer_spec(p_digest, pul_digest_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact_no_input(
+            h_session,
             ByteOutputFunction::DigestFinal,
-            &spec,
-            CkInBuf::Bytes(&[]),
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_digest, pul_digest_len) },
-            Err(e) => rv_err(e),
-        }
+            p_digest,
+            pul_digest_len,
+        )
     })
 }
 
@@ -131,7 +119,6 @@ pub unsafe extern "C" fn c_encrypt_init(
         if p_mechanism.is_null() {
             let result = with_client!(client => client.encrypt_init_cancel(CkSessionHandle(h_session as u64)));
             if result.is_ok() {
-                state::clear_delayed_gcm_writeback(h_session);
                 state::clear_encrypt_output_caches(h_session);
                 state::clear_operation_state_cache(h_session);
             }
@@ -141,9 +128,10 @@ pub unsafe extern "C" fn c_encrypt_init(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
-        let delayed_gcm_param = unsafe { delayed_gcm_parameter_addr(p_mechanism) };
-        state::clear_delayed_gcm_writeback(h_session);
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         let result = with_client!(client => client.encrypt_init(
             CkSessionHandle(h_session as u64),
             &mech,
@@ -151,9 +139,10 @@ pub unsafe extern "C" fn c_encrypt_init(
         ));
         match result {
             Ok(output_params) => {
-                if let Some(param_addr) = delayed_gcm_param {
-                    state::remember_delayed_gcm_writeback(h_session, param_addr);
-                }
+                // W1-C6-01: the generated GCM IV is delivered here, inside
+                // the call whose caller memory is live. No caller address
+                // is retained: C_Encrypt receives no mechanism pointer, so
+                // there is no live target a later write could use.
                 if let Some(params) = output_params {
                     unsafe { write_mechanism_output_params(p_mechanism, &params) };
                 }
@@ -173,73 +162,20 @@ pub unsafe extern "C" fn c_encrypt(
     p_encrypted_data: CK_BYTE_PTR,
     pul_encrypted_data_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let data = match input_buf_to_ck_in_buf(unsafe { classify_input(p_data, ul_data_len) }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_encrypted_data, pul_encrypted_data_len) };
-        let result = with_client!(client => client.byte_output_exact_with_mechanism_out(
-            CkSessionHandle(h_session as u64),
+    // W1-C6-01: plain byte_output_exact — Encrypt-time mechanism_out is
+    // deliberately not consumed. The generated GCM IV is delivered at
+    // Init (see c_encrypt_init); writing it here would mean writing to
+    // Init-scope caller memory through a retained address (use-after-scope).
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::Encrypt,
-            &spec,
-            data,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok((r, mechanism_out)) => {
-                let rv = unsafe {
-                    write_exact_output(&spec, &r, p_encrypted_data, pul_encrypted_data_len)
-                };
-                if rv == rv_ok() && (spec.buffer_present || spec.length_pointer_null) {
-                    let delayed_gcm_param = state::take_delayed_gcm_writeback(h_session);
-                    if let (Some(param_addr), Some(params)) = (delayed_gcm_param, mechanism_out) {
-                        unsafe { write_delayed_gcm_output_params(param_addr, &params) };
-                    }
-                }
-                rv
-            }
-            Err(e) => rv_err(e),
-        }
+            p_data,
+            ul_data_len,
+            p_encrypted_data,
+            pul_encrypted_data_len,
+        )
     })
-}
-
-pub(super) unsafe fn delayed_gcm_parameter_addr(p_mechanism: CK_MECHANISM_PTR) -> Option<usize> {
-    if p_mechanism.is_null() {
-        return None;
-    }
-    let mechanism = unsafe { &*p_mechanism };
-    if mechanism.mechanism != CKM_AES_GCM
-        || mechanism.pParameter.is_null()
-        || mechanism.ulParameterLen < std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG
-    {
-        return None;
-    }
-
-    let gcm = unsafe { &*(mechanism.pParameter as *const CK_GCM_PARAMS) };
-    if gcm.pIv.is_null() {
-        return None;
-    }
-    let capacity = if gcm.ulIvLen > 0 {
-        gcm.ulIvLen as usize
-    } else {
-        (((gcm.ulIvBits as u64).saturating_add(7)) / 8) as usize
-    };
-    if capacity == 0 { None } else { Some(mechanism.pParameter as usize) }
-}
-
-pub(super) unsafe fn write_delayed_gcm_output_params(
-    param_addr: usize,
-    params: &CkMechanismParams,
-) {
-    let mut mechanism = CK_MECHANISM {
-        mechanism: CKM_AES_GCM,
-        pParameter: param_addr as CK_VOID_PTR,
-        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
-    };
-    unsafe { write_mechanism_output_params(&mut mechanism, params) };
 }
 
 pub unsafe extern "C" fn c_encrypt_update(
@@ -249,27 +185,15 @@ pub unsafe extern "C" fn c_encrypt_update(
     p_encrypted_part: CK_BYTE_PTR,
     pul_encrypted_part_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let part = match input_buf_to_ck_in_buf(unsafe { classify_input(p_part, ul_part_len) }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_encrypted_part, pul_encrypted_part_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::EncryptUpdate,
-            &spec,
-            part,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe {
-                write_exact_output(&spec, &r, p_encrypted_part, pul_encrypted_part_len)
-            },
-            Err(e) => rv_err(e),
-        }
+            p_part,
+            ul_part_len,
+            p_encrypted_part,
+            pul_encrypted_part_len,
+        )
     })
 }
 
@@ -278,24 +202,13 @@ pub unsafe extern "C" fn c_encrypt_final(
     p_last_encrypted_part: CK_BYTE_PTR,
     pul_last_encrypted_part_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let spec =
-            unsafe { output_buffer_spec(p_last_encrypted_part, pul_last_encrypted_part_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact_no_input(
+            h_session,
             ByteOutputFunction::EncryptFinal,
-            &spec,
-            CkInBuf::Bytes(&[]),
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe {
-                write_exact_output(&spec, &r, p_last_encrypted_part, pul_last_encrypted_part_len)
-            },
-            Err(e) => rv_err(e),
-        }
+            p_last_encrypted_part,
+            pul_last_encrypted_part_len,
+        )
     })
 }
 
@@ -317,7 +230,10 @@ pub unsafe extern "C" fn c_decrypt_init(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         let result = with_client!(client => client.decrypt_init(
             CkSessionHandle(h_session as u64),
             &mech,
@@ -338,27 +254,15 @@ pub unsafe extern "C" fn c_decrypt(
     p_data: CK_BYTE_PTR,
     pul_data_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let encrypted_data = match input_buf_to_ck_in_buf(unsafe {
-            classify_input(p_encrypted_data, ul_encrypted_data_len)
-        }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_data, pul_data_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::Decrypt,
-            &spec,
-            encrypted_data,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_data, pul_data_len) },
-            Err(e) => rv_err(e),
-        }
+            p_encrypted_data,
+            ul_encrypted_data_len,
+            p_data,
+            pul_data_len,
+        )
     })
 }
 
@@ -369,27 +273,15 @@ pub unsafe extern "C" fn c_decrypt_update(
     p_part: CK_BYTE_PTR,
     pul_part_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let encrypted_part = match input_buf_to_ck_in_buf(unsafe {
-            classify_input(p_encrypted_part, ul_encrypted_part_len)
-        }) {
-            Ok(buf) => buf,
-            Err(e) => return rv_err(e),
-        };
-        let spec = unsafe { output_buffer_spec(p_part, pul_part_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact(
+            h_session,
             ByteOutputFunction::DecryptUpdate,
-            &spec,
-            encrypted_part,
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_part, pul_part_len) },
-            Err(e) => rv_err(e),
-        }
+            p_encrypted_part,
+            ul_encrypted_part_len,
+            p_part,
+            pul_part_len,
+        )
     })
 }
 
@@ -398,21 +290,13 @@ pub unsafe extern "C" fn c_decrypt_final(
     p_last_part: CK_BYTE_PTR,
     pul_last_part_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    catch_panics(|| {
-        let spec = unsafe { output_buffer_spec(p_last_part, pul_last_part_len) };
-        let result = with_client!(client => client.byte_output_exact(
-            CkSessionHandle(h_session as u64),
+    catch_panics(|| unsafe {
+        dispatch_byte_output_exact_no_input(
+            h_session,
             ByteOutputFunction::DecryptFinal,
-            &spec,
-            CkInBuf::Bytes(&[]),
-            None,
-            0,
-            0,
-        ));
-        match result {
-            Ok(r) => unsafe { write_exact_output(&spec, &r, p_last_part, pul_last_part_len) },
-            Err(e) => rv_err(e),
-        }
+            p_last_part,
+            pul_last_part_len,
+        )
     })
 }
 

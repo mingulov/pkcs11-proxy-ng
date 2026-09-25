@@ -1,3 +1,6 @@
+// W1-L12-03: test diagnostics (skip notices, progress, summaries) go to
+// stderr by design; the workspace lint table denies this sink elsewhere.
+#![allow(clippy::print_stderr)]
 //! Live retained-oracle topology test (C3M.6 row 12).
 //!
 //! Drives the **loaded shim C ABI** against an out-of-process daemon whose

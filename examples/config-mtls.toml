@@ -1,9 +1,11 @@
-# Reference: planned mTLS-secured TCP configuration shape
+# Reference: mTLS-secured TCP configuration.
 #
-# Runtime mTLS enforcement is not wired in this binary yet. The daemon fails
-# closed when auth = "mtls" is configured so this file cannot accidentally
-# start a plaintext listener that looks secured. Keep this as the target
-# configuration shape for the full mTLS listener implementation.
+# mTLS is wired and enforced (see server_tls_config in
+# crates/server/src/server/transport.rs): with auth = "mtls" the daemon
+# requires ca_cert, server_cert, and server_key; refuses to start when
+# the server key is group/other-accessible (chmod 0600) or a certificate
+# is expired or not yet valid; and authenticates every client against
+# the CA. Point the paths below at your PKI material.
 #
 # Certificate setup (example with OpenSSL):
 #   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
@@ -47,11 +49,11 @@ max_blocking_threads = 512
 # max_stuck_backend_calls = 16
 
 [listener.remote]
-bind = "0.0.0.0:50051"
+bind = "0.0.0.0:7512"
 auth = "mtls"
-ca_cert = "/etc/pkcs11-proxy/ca.crt"
-server_cert = "/etc/pkcs11-proxy/server.crt"
-server_key = "/etc/pkcs11-proxy/server.key"
+ca_cert = "/etc/pkcs11-proxy-ng/ca.crt"
+server_cert = "/etc/pkcs11-proxy-ng/server.crt"
+server_key = "/etc/pkcs11-proxy-ng/server.key"
 
 [auth]
 allow_all_authenticated = true

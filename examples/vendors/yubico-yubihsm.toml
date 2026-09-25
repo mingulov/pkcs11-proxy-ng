@@ -3,13 +3,17 @@
 #
 # Reference: pkcs11y.h (https://github.com/Yubico/yubihsm-shell/blob/master/pkcs11/pkcs11y.h)
 # Vendor base: 0x59554200 | CKM_VENDOR_DEFINED ("YUB\0")
-
-# CKM_YUBICO_AES_CCM_WRAP — scalar parameter (nonce length)
-[[params]]
-shape = "mac_general"
-mechanisms = [0xD9554201]  # CKM_YUBICO_AES_CCM_WRAP
+#
+# NOTE (W1-L8-06): `parameterless` must stay top-level (before the first
+# [[params]]): TOML attaches a bare key written after a [[params]] header
+# to that table, where the strict registry loader rejects it.
 
 # CKM_YUBICO_RSA_WRAP — parameterless
 parameterless = [
   0xD9554202, # CKM_YUBICO_RSA_WRAP (approximate, check your SDK)
 ]
+
+# CKM_YUBICO_AES_CCM_WRAP — scalar parameter (nonce length)
+[[params]]
+shape = "mac_general"
+mechanisms = [0xD9554201]  # CKM_YUBICO_AES_CCM_WRAP

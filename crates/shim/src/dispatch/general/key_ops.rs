@@ -1,8 +1,12 @@
 use cryptoki_sys::*;
 use pkcs11_proxy_ng_types::*;
 
-#[allow(unused_imports)]
-use super::*;
+use super::helpers::{
+    catch_panics, ck_attrs_to_rust_checked, classify_input, input_buf_to_ck_in_buf,
+    null_preserving_template, output_buffer_spec, read_mechanism, read_wrap_key_mechanism, rv_err,
+    rv_ok, unit_result_to_rv, validate_mechanism, with_client, write_exact_output,
+    write_mechanism_output_params, write_object_handle_output, write_object_handle_pair_output,
+};
 
 pub unsafe extern "C" fn c_wrap_key(
     h_session: CK_SESSION_HANDLE,
@@ -21,7 +25,10 @@ pub unsafe extern "C" fn c_wrap_key(
             return rv;
         }
 
-        let mech = unsafe { read_wrap_key_mechanism(p_mechanism) };
+        let mech = match unsafe { read_wrap_key_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         let spec = unsafe { output_buffer_spec(p_wrapped_key, pul_wrapped_key_len) };
         let result = with_client!(client => client.byte_output_exact_with_mechanism_out(
             CkSessionHandle(h_session as u64),
@@ -76,7 +83,10 @@ pub unsafe extern "C" fn c_unwrap_key(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         let wrapped_key = match input_buf_to_ck_in_buf(unsafe {
             classify_input(p_wrapped_key, ul_wrapped_key_len)
         }) {
@@ -127,7 +137,10 @@ pub unsafe extern "C" fn c_derive_key(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         match with_client!(client => client.derive_key_with_mechanism_out_result(
             CkSessionHandle(h_session as u64),
             &mech,
@@ -183,7 +196,10 @@ pub unsafe extern "C" fn c_generate_key(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         match with_client!(client => client.generate_key_with_mechanism_out(
             CkSessionHandle(h_session as u64),
             &mech,
@@ -237,7 +253,10 @@ pub unsafe extern "C" fn c_generate_key_pair(
         if rv != rv_ok() {
             return rv;
         }
-        let mech = unsafe { read_mechanism(p_mechanism) };
+        let mech = match unsafe { read_mechanism(p_mechanism) } {
+            Ok(mech) => mech,
+            Err(e) => return rv_err(e),
+        };
         match with_client!(client => client.generate_key_pair(
             CkSessionHandle(h_session as u64),
             &mech,
@@ -292,8 +311,11 @@ pub unsafe extern "C" fn c_generate_random(
         match with_client!(client => client.generate_random(CkSessionHandle(h_session as u64), random_len))
         {
             Ok(data) => {
+                // W1-L3-08: a daemon response with the wrong length is a
+                // protocol violation, not a backend failure — fail closed
+                // with GENERAL_ERROR before touching caller memory.
                 if data.len() != random_len as usize {
-                    return rv_err(CkRv::DEVICE_ERROR);
+                    return rv_err(CkRv::GENERAL_ERROR);
                 }
                 unsafe {
                     std::ptr::copy_nonoverlapping(data.as_ptr(), p_random_data, data.len());

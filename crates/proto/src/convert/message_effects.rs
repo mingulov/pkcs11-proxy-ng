@@ -1,10 +1,9 @@
 //! Typed direction/stage effects; only owned output bytes can cross this boundary.
 use super::message_params::MessageParameter;
 use crate::pkcs11_proxy_ng::v1 as wire;
-use pkcs11_proxy_ng_types::{CkOutputBufferSpec, CkResult, CkRv, OutputContractViolation};
-// Published CK_GENERATOR_FUNCTION values, independent of native integer width.
-const CKG_NO_GENERATE: u64 = 0;
-const CKG_GENERATE_COUNTER_XOR: u64 = 4;
+use pkcs11_proxy_ng_types::{
+    CkGeneratorFunction, CkOutputBufferSpec, CkResult, CkRv, OutputContractViolation,
+};
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum MessageEffects {
@@ -73,8 +72,8 @@ impl MessageEffects {
         let generated = |generator: u64| {
             context.encrypt
                 && context.generated_stage
-                && generator != CKG_NO_GENERATE
-                && (generator == CKG_GENERATE_COUNTER_XOR
+                && generator != CkGeneratorFunction::NO_GENERATE.0
+                && (generator == CkGeneratorFunction::GENERATE_COUNTER_XOR.0
                     || (context.rv == CkRv::OK
                         && matches!(
                             context.mode,
@@ -186,7 +185,7 @@ impl TryFrom<&wire::MessageParameterEffects> for MessageEffects {
                 Ok(Self::Ccm { nonce: value.nonce.clone(), mac: value.mac.clone() })
             }
             Some(Effect::Salsa(value)) => Ok(Self::Salsa { tag: value.tag.clone() }),
-            None => Err(CkRv::FUNCTION_NOT_SUPPORTED),
+            None => Err(super::ABSENT_MESSAGE_ONEOF_RV),
         }
     }
 }
@@ -355,7 +354,7 @@ mod tests {
             iv: vec![0xa5; 12],
             iv_null_len: None,
             iv_fixed_bits: 9,
-            iv_generator: CKG_GENERATE_COUNTER_XOR,
+            iv_generator: CkGeneratorFunction::GENERATE_COUNTER_XOR.0,
             tag: vec![0; 16],
             tag_null_len: None,
             tag_bits: 128,
@@ -376,6 +375,19 @@ mod tests {
                     }
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn absent_effect_oneof_decodes_to_unified_rv() {
+        // W1-C8-03: absent oneof must report the documented sibling-wide RV.
+        assert_eq!(
+            MessageEffects::try_from(&wire::MessageParameterEffects { effect: None }),
+            Err(crate::convert::ABSENT_MESSAGE_ONEOF_RV),
+        );
+        assert_eq!(
+            MessageEffects::try_from(&wire::MessageParameterEffects { effect: None }),
+            Err(CkRv::ARGUMENTS_BAD),
         );
     }
 

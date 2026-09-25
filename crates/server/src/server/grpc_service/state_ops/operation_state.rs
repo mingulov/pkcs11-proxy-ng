@@ -15,7 +15,7 @@ use super::super::super::handle_map::{BackendHandle, VirtualHandle};
 use super::super::ck_result_to_rv;
 use super::super::service_utils::{
     check_sanitize, ck_rv_only, ensure_private_use_allowed, gate_object_handle, input_from_wire,
-    spawn_backend, spawn_backend_with_optional_timeout,
+    resolve_session, spawn_backend, spawn_backend_with_optional_timeout,
 };
 use crate::server::grpc_service::HandlerContext;
 
@@ -26,6 +26,16 @@ async fn resolve_state_handles(
     encryption_key_handle: u64,
     authentication_key_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle, CkObjectHandle), CkRv> {
+    // W1-L11-06: the session leg goes through the shared
+    // service_utils::resolve_session (context-gone →
+    // CRYPTOKI_NOT_INITIALIZED, unknown session → SESSION_HANDLE_INVALID).
+    // The key legs keep their W1-C1-01 loud-fail mapping below.
+    resolve_session(ctx_mgr, ctx_id, session_handle).await?;
+    // Second transient read for the key legs. The session mapping is
+    // re-checked here so a session evicted between the two reads still
+    // fails closed with SESSION_HANDLE_INVALID (single-read semantics
+    // preserved); a context lost between the reads maps to
+    // CRYPTOKI_NOT_INITIALIZED exactly as the single read did.
     let resolved: Option<(Option<BackendHandle>, Option<BackendHandle>, Option<BackendHandle>)> =
         ctx_mgr
             .get_context(ctx_id, |ctx| {
@@ -42,14 +52,26 @@ async fn resolve_state_handles(
     };
 
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
-    let encryption_key =
-        encryption_key.map_or(CkObjectHandle(0), |handle| CkObjectHandle(handle.0 as u64));
-    let authentication_key =
-        authentication_key.map_or(CkObjectHandle(0), |handle| CkObjectHandle(handle.0 as u64));
+    // W1-C1-01: unlike the sibling resolve paths, handle 0 is meaningful here
+    // ("no key needed" per the C_SetOperationState contract), so the forward-0
+    // convention would silently turn a bad wire handle into no-key. A
+    // nonzero-but-unmapped wire handle fails loudly with the key-op
+    // handle-invalid code instead; wire 0 stays no-key.
+    let encryption_key = match encryption_key {
+        Some(handle) => CkObjectHandle(handle.0 as u64),
+        None if encryption_key_handle == 0 => CkObjectHandle(0),
+        None => return Err(CkRv::KEY_HANDLE_INVALID),
+    };
+    let authentication_key = match authentication_key {
+        Some(handle) => CkObjectHandle(handle.0 as u64),
+        None if authentication_key_handle == 0 => CkObjectHandle(0),
+        None => return Err(CkRv::KEY_HANDLE_INVALID),
+    };
 
     Ok((CkSessionHandle(backend_session.0 as u64), encryption_key, authentication_key))
 }
 
+// NOTE: legacy per-op RPC (W1-L11-21 retention; see service.proto) — not used by the shim; NULL-input class not forwarded (ADR-0010 Scope 2 covers the *_exact paths).
 pub(super) async fn get_operation_state(
     ctx_mgr: &Arc<ContextManager>,
     backend_ref: &Arc<dyn Pkcs11Backend>,
@@ -343,6 +365,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unmapped_nonzero_state_key_handles_yield_key_handle_invalid() {
+        // W1-C1-01: a nonzero-but-unmapped wire handle must fail loudly with
+        // CKR_KEY_HANDLE_INVALID ("the specified key handle is not valid") instead
+        // of being coerced to handle 0, which C_SetOperationState reads as "no key
+        // needed". KEY (not OBJECT) because hEncryptionKey / hAuthenticationKey are
+        // key handles — the key-op invalid code per the sibling resolve convention
+        // (service_utils: "CKR_KEY_HANDLE_INVALID for key ops"). Wire 0 stays
+        // no-key (covered by the zero-handle tests above).
+        let (ctx_mgr, mock, backend, ctx_id, virtual_session) = setup_message_shapes().await;
+        let handler = HandlerContext::for_test(&ctx_mgr, &backend);
+        for (encryption_key_handle, authentication_key_handle) in
+            [(0xDEAD_BEEFu64, 0u64), (0, 0xDEAD_BEEF), (0xDEAD_BEEF, 0xBEEF_DEAD)]
+        {
+            let calls_before = mock.message_lifecycle_call_count();
+            let response = set_operation_state(
+                &handler,
+                false,
+                Request::new(pkcs11_proxy_ng_proto::SetOperationStateRequest {
+                    client_context_id: ctx_id.0.clone(),
+                    session_handle: virtual_session.0,
+                    operation_state: vec![0xC9, 0xEA, 2],
+                    encryption_key_handle,
+                    authentication_key_handle,
+                    operation_state_null_len: None,
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(
+                response.ck_rv,
+                CkRv::KEY_HANDLE_INVALID.0,
+                "enc={encryption_key_handle:#x} auth={authentication_key_handle:#x}",
+            );
+            assert_eq!(
+                mock.message_lifecycle_call_count(),
+                calls_before,
+                "invalid handles must fail before the backend call",
+            );
+        }
+        assert_eq!(
+            message_shapes(&ctx_mgr, &ctx_id, virtual_session).await,
+            vec![Some(MessageParameterShape::Unmodeled); 4],
+            "failed restore must preserve server message shapes",
+        );
+    }
+
+    #[tokio::test]
+    async fn t7_set_operation_state_rejects_unknown_session_and_context() {
+        // W1-L11-06 characterization: the session leg of set_operation_state
+        // must map unknown-context / unknown-session exactly like the shared
+        // resolve_session. Must pass before AND after the resolver DRY.
+        let (ctx_mgr, _mock, backend, ctx_id, _virtual_session) = setup_message_shapes().await;
+        let handler = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let response = set_operation_state(
+            &handler,
+            false,
+            Request::new(pkcs11_proxy_ng_proto::SetOperationStateRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: 9_999_999,
+                operation_state: vec![0xC9, 0xEA, 2],
+                encryption_key_handle: 0,
+                authentication_key_handle: 0,
+                operation_state_null_len: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.ck_rv, CkRv::SESSION_HANDLE_INVALID.0);
+
+        let response = set_operation_state(
+            &handler,
+            false,
+            Request::new(pkcs11_proxy_ng_proto::SetOperationStateRequest {
+                client_context_id: "t7-gone".into(),
+                session_handle: 1,
+                operation_state: vec![0xC9, 0xEA, 2],
+                encryption_key_handle: 0,
+                authentication_key_handle: 0,
+                operation_state_null_len: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.ck_rv, CkRv::CRYPTOKI_NOT_INITIALIZED.0);
+    }
+
+    #[tokio::test]
+    async fn mapped_state_key_handles_pass_through() {
+        // W1-C1-01 guard: mapped nonzero handles keep flowing to the backend.
+        let (ctx_mgr, mock, backend, ctx_id, virtual_session) = setup_message_shapes().await;
+        let handler = HandlerContext::for_test(&ctx_mgr, &backend);
+        let virtual_encryption_key =
+            crate::server::grpc_service::service_utils::register_session_object_handle(
+                &ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                CkObjectHandle(0xE001),
+                false,
+                Some(false),
+            )
+            .await;
+        let virtual_authentication_key =
+            crate::server::grpc_service::service_utils::register_session_object_handle(
+                &ctx_mgr,
+                &ctx_id,
+                virtual_session,
+                CkObjectHandle(0xA001),
+                false,
+                Some(false),
+            )
+            .await;
+        assert_ne!(virtual_encryption_key, 0);
+        assert_ne!(virtual_authentication_key, 0);
+        let calls_before = mock.message_lifecycle_call_count();
+        let response = set_operation_state(
+            &handler,
+            false,
+            Request::new(pkcs11_proxy_ng_proto::SetOperationStateRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: virtual_session.0,
+                operation_state: vec![0xC9, 0xEA, 2],
+                encryption_key_handle: virtual_encryption_key,
+                authentication_key_handle: virtual_authentication_key,
+                operation_state_null_len: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.ck_rv, CkRv::OK.0);
+        assert_eq!(
+            mock.message_lifecycle_call_count(),
+            calls_before + 1,
+            "mapped handles must still reach the backend",
+        );
+        assert_eq!(
+            message_shapes(&ctx_mgr, &ctx_id, virtual_session).await,
+            vec![None; 4],
+            "successful restore with keys clears server message shapes",
+        );
+    }
+
+    #[tokio::test]
     async fn restore_outcomes_settle_every_server_message_shape() {
         for (action, timeout, expected_rv, expected_shape) in [
             (
@@ -360,7 +529,7 @@ mod tests {
             (
                 MockMessageLifecycleAction::Delay(std::time::Duration::from_millis(60), CkRv::OK),
                 Some(std::time::Duration::from_millis(5)),
-                Some(CkRv::DEVICE_ERROR),
+                Some(CkRv::FUNCTION_FAILED),
                 None,
             ),
             (
@@ -369,7 +538,7 @@ mod tests {
                     CkRv::FUNCTION_FAILED,
                 ),
                 Some(std::time::Duration::from_millis(5)),
-                Some(CkRv::DEVICE_ERROR),
+                Some(CkRv::FUNCTION_FAILED),
                 Some(MessageParameterShape::Unmodeled),
             ),
             (MockMessageLifecycleAction::Panic, None, None, None),

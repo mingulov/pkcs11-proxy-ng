@@ -91,6 +91,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
+        // W1-C8-02 + W1-L2-04 (D3-S2 codegen Zeroize): decoded password
+        // buffers must wipe on drop. The borrow-based conversions copy
+        // secrets out of these messages; without drop-wiping the source
+        // `Vec`s free plain. Field-covering derive, so future secret
+        // fields wipe with no drift.
+        //
+        // W1-C8-11 (FOLLOWUP-zeroize-proto): the same treatment for the
+        // five PIN-bearing request messages. `LoginUserRequest.username`
+        // is secret-classified too and wipes with the whole message.
+        // NOTE: the derived `Drop` forbids moving fields out of these
+        // messages and forbids struct-update syntax on them; handlers
+        // take PIN buffers with `mem::take` instead.
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.SkipjackPrivateWrapParams",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.SkipjackRelayxParams",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.PbeParams",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.Pkcs5Pbkd2Params",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.LoginRequest",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.LoginUserRequest",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.InitTokenRequest",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.InitPinRequest",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
+        .type_attribute(
+            ".pkcs11_proxy_ng.v1.SetPinRequest",
+            "#[derive(::zeroize::Zeroize, ::zeroize::ZeroizeOnDrop)]",
+        )
         .skip_debug(redacted.iter().map(|message| format!(".pkcs11_proxy_ng.v1.{message}")))
         .compile_protos(
             &[

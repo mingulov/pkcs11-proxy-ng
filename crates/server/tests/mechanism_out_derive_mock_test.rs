@@ -14,9 +14,6 @@ mod common_3x;
 use common_3x::{init_client, mock_daemon};
 
 const CKM_PBE_MD2_DES_CBC: CkMechanismType = CkMechanismType(0x0000_03A0);
-const CKM_SP800_108_COUNTER_KDF: CkMechanismType = CkMechanismType(0x0000_03AC);
-const CKM_SP800_108_FEEDBACK_KDF: CkMechanismType = CkMechanismType(0x0000_03AD);
-const CKM_SP800_108_DOUBLE_PIPELINE_KDF: CkMechanismType = CkMechanismType(0x0000_03AE);
 const CKM_WTLS_MASTER_KEY_DERIVE: CkMechanismType = CkMechanismType(0x0000_03D1);
 const CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE: CkMechanismType = CkMechanismType(0x0000_03D4);
 const CKM_TLS12_KEY_AND_MAC_DERIVE: CkMechanismType = CkMechanismType(0x0000_03E1);
@@ -60,7 +57,7 @@ async fn derive_key_mechanism_out_surfaces_pbe_iv_through_mock_grpc_stack() {
 async fn derive_key_mechanism_out_surfaces_wtls_version_through_mock_grpc_stack() {
     let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CKM_WTLS_MASTER_KEY_DERIVE]));
     let expected_output = CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
-        digest_mechanism: CkMechanismType::SHA256.0,
+        digest_mechanism: CkMechanismType::SHA256,
         random_info: WtlsRandomData {
             client_random: vec![0x11; 16],
             server_random: vec![0x22; 16],
@@ -77,7 +74,7 @@ async fn derive_key_mechanism_out_surfaces_wtls_version_through_mock_grpc_stack(
     let mechanism = CkMechanism {
         mechanism_type: CKM_WTLS_MASTER_KEY_DERIVE,
         params: Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
-            digest_mechanism: CkMechanismType::SHA256.0,
+            digest_mechanism: CkMechanismType::SHA256,
             random_info: WtlsRandomData {
                 client_random: vec![0x11; 16],
                 server_random: vec![0x22; 16],
@@ -100,7 +97,7 @@ async fn derive_key_mechanism_out_surfaces_wtls_key_material_through_mock_grpc_s
     let backend =
         Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE]));
     let expected_output = CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
-        digest_mechanism: CkMechanismType::SHA256.0,
+        digest_mechanism: CkMechanismType::SHA256,
         mac_size_bits: 160,
         key_size_bits: 128,
         iv_size_bits: 32,
@@ -110,8 +107,8 @@ async fn derive_key_mechanism_out_surfaces_wtls_key_material_through_mock_grpc_s
             client_random: vec![0x33; 16],
             server_random: vec![0x44; 16],
         },
-        mac_secret_handle: 101,
-        key_handle: 202,
+        mac_secret_handle: CkObjectHandle(101),
+        key_handle: CkObjectHandle(202),
         iv: vec![0xA1, 0xA2, 0xA3, 0xA4],
     });
     backend.set_derive_key_output(Some(expected_output.clone()));
@@ -124,7 +121,7 @@ async fn derive_key_mechanism_out_surfaces_wtls_key_material_through_mock_grpc_s
     let mechanism = CkMechanism {
         mechanism_type: CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE,
         params: Some(CkMechanismParams::WtlsKeyMat(WtlsKeyMatParams {
-            digest_mechanism: CkMechanismType::SHA256.0,
+            digest_mechanism: CkMechanismType::SHA256,
             mac_size_bits: 160,
             key_size_bits: 128,
             iv_size_bits: 32,
@@ -134,8 +131,8 @@ async fn derive_key_mechanism_out_surfaces_wtls_key_material_through_mock_grpc_s
                 client_random: vec![0x33; 16],
                 server_random: vec![0x44; 16],
             },
-            mac_secret_handle: 0,
-            key_handle: 0,
+            mac_secret_handle: CkObjectHandle(0),
+            key_handle: CkObjectHandle(0),
             iv: vec![0; 4],
         })),
     };
@@ -152,10 +149,10 @@ async fn derive_key_mechanism_out_surfaces_wtls_key_material_through_mock_grpc_s
     let Some(CkMechanismParams::WtlsKeyMat(output)) = mechanism_out else {
         panic!("expected WTLS key-mat mechanism_out");
     };
-    assert_ne!(output.mac_secret_handle, 0);
-    assert_ne!(output.mac_secret_handle, 101);
-    assert_ne!(output.key_handle, 0);
-    assert_ne!(output.key_handle, 202);
+    assert_ne!(output.mac_secret_handle.0, 0);
+    assert_ne!(output.mac_secret_handle.0, 101);
+    assert_ne!(output.key_handle.0, 0);
+    assert_ne!(output.key_handle.0, 202);
     assert_eq!(output.mac_size_bits, 160);
     assert_eq!(output.key_size_bits, 128);
     assert_eq!(output.sequence_number, 7);
@@ -171,11 +168,11 @@ async fn derive_key_mechanism_out_surfaces_tls_key_material_through_mock_grpc_st
         iv_size_bits: 32,
         is_export: false,
         random_info: SslRandomData { client_random: vec![0x55; 32], server_random: vec![0x66; 32] },
-        prf_hash_mechanism: CkMechanismType::SHA256.0,
-        client_mac_secret_handle: 101,
-        server_mac_secret_handle: 102,
-        client_key_handle: 201,
-        server_key_handle: 202,
+        prf_hash_mechanism: CkMechanismType::SHA256,
+        client_mac_secret_handle: CkObjectHandle(101),
+        server_mac_secret_handle: CkObjectHandle(102),
+        client_key_handle: CkObjectHandle(201),
+        server_key_handle: CkObjectHandle(202),
         client_iv: vec![0xA1, 0xA2, 0xA3, 0xA4].into(),
         server_iv: vec![0xB1, 0xB2, 0xB3, 0xB4].into(),
     });
@@ -197,11 +194,11 @@ async fn derive_key_mechanism_out_surfaces_tls_key_material_through_mock_grpc_st
                 client_random: vec![0x55; 32],
                 server_random: vec![0x66; 32],
             },
-            prf_hash_mechanism: CkMechanismType::SHA256.0,
-            client_mac_secret_handle: 0,
-            server_mac_secret_handle: 0,
-            client_key_handle: 0,
-            server_key_handle: 0,
+            prf_hash_mechanism: CkMechanismType::SHA256,
+            client_mac_secret_handle: CkObjectHandle(0),
+            server_mac_secret_handle: CkObjectHandle(0),
+            client_key_handle: CkObjectHandle(0),
+            server_key_handle: CkObjectHandle(0),
             client_iv: vec![0; 4].into(),
             server_iv: vec![0; 4].into(),
         })),
@@ -225,17 +222,18 @@ async fn derive_key_mechanism_out_surfaces_tls_key_material_through_mock_grpc_st
         (output.client_key_handle, 201),
         (output.server_key_handle, 202),
     ] {
-        assert_ne!(rewritten, 0);
-        assert_ne!(rewritten, native);
+        assert_ne!(rewritten.0, 0);
+        assert_ne!(rewritten.0, native);
     }
     assert_eq!(output.mac_size_bits, 160);
     assert_eq!(output.key_size_bits, 128);
-    assert_eq!(output.prf_hash_mechanism, CkMechanismType::SHA256.0);
+    assert_eq!(output.prf_hash_mechanism, CkMechanismType::SHA256);
 }
 
 #[tokio::test]
 async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles() {
-    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CKM_SP800_108_COUNTER_KDF]));
+    let backend =
+        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SP800_108_COUNTER_KDF]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
 
@@ -246,16 +244,16 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles()
     client.login(session, CkUserType::User, Some(b"1234")).await.unwrap();
     let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_COUNTER_KDF,
+        mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CKM_SHA256_HMAC,
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
             data_params: vec![sp800_108_counter_iteration_param()],
             additional_derived_keys: vec![Sp800108DerivedKey {
                 template: vec![CkAttribute {
                     attr_type: CkAttributeType::VALUE_LEN,
                     value: Some(CkAttributeValue::Ulong(32)),
                 }],
-                key_handle: 0,
+                key_handle: CkObjectHandle(0),
             }],
         })),
     };
@@ -267,7 +265,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles()
     let Some(CkMechanismParams::Sp800108Kdf(output)) = mechanism_out else {
         panic!("expected SP800-108 mechanism_out");
     };
-    let additional_key = CkObjectHandle(output.additional_derived_keys[0].key_handle);
+    let additional_key = output.additional_derived_keys[0].key_handle;
 
     assert_ne!(primary_key, CkObjectHandle(0));
     assert_ne!(additional_key, CkObjectHandle(0));
@@ -307,8 +305,10 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_additional_key_handles()
 
 #[tokio::test]
 async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_additional_key_handles() {
-    let backend =
-        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CKM_SP800_108_DOUBLE_PIPELINE_KDF]));
+    let backend = Arc::new(MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![CkMechanismType::SP800_108_DOUBLE_PIPELINE_KDF],
+    ));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
 
@@ -319,9 +319,9 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_addition
     client.login(session, CkUserType::User, Some(b"1234")).await.unwrap();
     let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_DOUBLE_PIPELINE_KDF,
+        mechanism_type: CkMechanismType::SP800_108_DOUBLE_PIPELINE_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CKM_SHA256_HMAC,
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
             data_params: vec![
                 sp800_108_counter_iteration_param(),
                 PrfDataParam {
@@ -336,7 +336,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_addition
                         "double-pipeline-extra".to_string().into(),
                     )),
                 }],
-                key_handle: 0,
+                key_handle: CkObjectHandle(0),
             }],
         })),
     };
@@ -348,7 +348,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_addition
     let Some(CkMechanismParams::Sp800108Kdf(output)) = mechanism_out else {
         panic!("expected SP800-108 double-pipeline mechanism_out");
     };
-    let additional_key = CkObjectHandle(output.additional_derived_keys[0].key_handle);
+    let additional_key = output.additional_derived_keys[0].key_handle;
 
     assert_ne!(primary_key, CkObjectHandle(0));
     assert_ne!(additional_key, CkObjectHandle(0));
@@ -375,7 +375,8 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_double_pipeline_addition
 async fn derive_key_mechanism_out_surfaces_sp800_108_template_failure_handle() {
     const SENTINEL_HANDLE: u64 = 0xCAFE_BABE;
 
-    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CKM_SP800_108_COUNTER_KDF]));
+    let backend =
+        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SP800_108_COUNTER_KDF]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
 
@@ -383,9 +384,9 @@ async fn derive_key_mechanism_out_surfaces_sp800_108_template_failure_handle() {
     let session = client.open_session(slots[0], CKF_SERIAL).await.unwrap();
     let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_COUNTER_KDF,
+        mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CKM_SHA256_HMAC,
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
             data_params: vec![sp800_108_counter_iteration_param()],
             additional_derived_keys: vec![
                 Sp800108DerivedKey {
@@ -393,14 +394,14 @@ async fn derive_key_mechanism_out_surfaces_sp800_108_template_failure_handle() {
                         attr_type: CkAttributeType::VALUE_LEN,
                         value: Some(CkAttributeValue::Ulong(32)),
                     }],
-                    key_handle: SENTINEL_HANDLE,
+                    key_handle: CkObjectHandle(SENTINEL_HANDLE),
                 },
                 Sp800108DerivedKey {
                     template: vec![CkAttribute {
                         attr_type: CkAttributeType::VALUE_LEN,
                         value: Some(CkAttributeValue::Ulong(0)),
                     }],
-                    key_handle: SENTINEL_HANDLE,
+                    key_handle: CkObjectHandle(SENTINEL_HANDLE),
                 },
             ],
         })),
@@ -416,8 +417,8 @@ async fn derive_key_mechanism_out_surfaces_sp800_108_template_failure_handle() {
     let Some(CkMechanismParams::Sp800108Kdf(output)) = result.mechanism_out else {
         panic!("expected SP800-108 mechanism output on template failure");
     };
-    assert_eq!(output.additional_derived_keys[0].key_handle, SENTINEL_HANDLE);
-    assert_eq!(output.additional_derived_keys[1].key_handle, 0);
+    assert_eq!(output.additional_derived_keys[0].key_handle.0, SENTINEL_HANDLE);
+    assert_eq!(output.additional_derived_keys[1].key_handle.0, 0);
     assert_eq!(
         client.destroy_object(session, CkObjectHandle(base_key.0 + 1)).await.unwrap_err(),
         CkRv::OBJECT_HANDLE_INVALID,
@@ -427,7 +428,10 @@ async fn derive_key_mechanism_out_surfaces_sp800_108_template_failure_handle() {
 
 #[tokio::test]
 async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_handles() {
-    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CKM_SP800_108_FEEDBACK_KDF]));
+    let backend = Arc::new(MockBackend::new(
+        vec![CkSlotId(0)],
+        vec![CkMechanismType::SP800_108_FEEDBACK_KDF],
+    ));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
 
@@ -438,9 +442,9 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_
     client.login(session, CkUserType::User, Some(b"1234")).await.unwrap();
     let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_FEEDBACK_KDF,
+        mechanism_type: CkMechanismType::SP800_108_FEEDBACK_KDF,
         params: Some(CkMechanismParams::Sp800108FeedbackKdf(Sp800108FeedbackKdfParams {
-            prf_type: CKM_SHA256_HMAC,
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
             data_params: vec![sp800_108_counter_iteration_param()],
             iv: vec![0xA5; 16],
             additional_derived_keys: vec![Sp800108DerivedKey {
@@ -448,7 +452,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_
                     attr_type: CkAttributeType::VALUE_LEN,
                     value: Some(CkAttributeValue::Ulong(64)),
                 }],
-                key_handle: 0,
+                key_handle: CkObjectHandle(0),
             }],
         })),
     };
@@ -460,7 +464,7 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_
     let Some(CkMechanismParams::Sp800108FeedbackKdf(output)) = mechanism_out else {
         panic!("expected SP800-108 feedback mechanism_out");
     };
-    let additional_key = CkObjectHandle(output.additional_derived_keys[0].key_handle);
+    let additional_key = output.additional_derived_keys[0].key_handle;
 
     assert_ne!(primary_key, CkObjectHandle(0));
     assert_eq!(output.iv, vec![0xA5; 16]);
@@ -485,7 +489,8 @@ async fn derive_key_mechanism_out_virtualizes_sp800_108_feedback_additional_key_
 
 #[tokio::test]
 async fn derive_key_rejects_invalid_sp800_108_key_handle_data_param() {
-    let backend = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CKM_SP800_108_COUNTER_KDF]));
+    let backend =
+        Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::SP800_108_COUNTER_KDF]));
     let (endpoint, _shutdown) = mock_daemon(backend).await;
     let mut client = init_client(&endpoint).await;
 
@@ -494,9 +499,9 @@ async fn derive_key_rejects_invalid_sp800_108_key_handle_data_param() {
     let base_key = client.create_object(session, Some(&[])).await.unwrap();
     let invalid_nested_key = CkObjectHandle(0xDEAD_BEEF);
     let mechanism = CkMechanism {
-        mechanism_type: CKM_SP800_108_COUNTER_KDF,
+        mechanism_type: CkMechanismType::SP800_108_COUNTER_KDF,
         params: Some(CkMechanismParams::Sp800108Kdf(Sp800108KdfParams {
-            prf_type: CKM_SHA256_HMAC,
+            prf_type: CkMechanismType(CKM_SHA256_HMAC),
             data_params: vec![
                 sp800_108_counter_iteration_param(),
                 PrfDataParam {

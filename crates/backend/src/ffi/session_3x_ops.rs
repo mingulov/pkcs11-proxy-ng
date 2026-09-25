@@ -6,12 +6,22 @@ impl FfiBackend {
         &self,
         session: CkSessionHandle,
         user_type: CkUserType,
-        username: &[u8],
-        pin: &[u8],
+        username: Option<&[u8]>,
+        pin: Option<&[u8]>,
     ) -> CkResult<()> {
         let admission = self.lifecycle_domain.admit_ordinary()?;
         // C_LoginUser(hSession, userType, pPin, ulPinLen, pUsername, ulUsernameLen)
         // PIN comes before username per OASIS PKCS#11 3.0 spec.
+        // W1-C6-07: NULL pin/username (protected path) stays NULL at the
+        // provider boundary, exactly like `ffi_login` — never an empty slice.
+        let (pin_ptr, pin_len) = match pin {
+            Some(p) => (p.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR, Self::ulong_len(p.len())),
+            None => (std::ptr::null_mut(), 0),
+        };
+        let (username_ptr, username_len) = match username {
+            Some(u) => (u.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR, Self::ulong_len(u.len())),
+            None => (std::ptr::null_mut(), 0),
+        };
         let _session_fence = self.session_fences.enter(&admission, session)?;
         call_3x_fn!(
             &admission,
@@ -20,10 +30,10 @@ impl FfiBackend {
             C_LoginUser,
             Self::session_handle(session)?,
             user_type as cryptoki_sys::CK_USER_TYPE,
-            pin.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR,
-            Self::ulong_len(pin.len()),
-            username.as_ptr() as *mut cryptoki_sys::CK_UTF8CHAR,
-            Self::ulong_len(username.len())
+            pin_ptr,
+            pin_len,
+            username_ptr,
+            username_len
         )
     }
 
@@ -96,6 +106,29 @@ mod tests {
         cryptoki_sys::CKR_OK
     }
 
+    /// Per-call provider observations: (pin_is_null, pin_len, username_is_null,
+    /// username_len). Presence + lengths only — the provider stub never
+    /// retains credential bytes. Guarded by TEST_LOCK like the cancel counter.
+    static LOGIN_USER_OBSERVED: std::sync::Mutex<Vec<(bool, u64, bool, u64)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    unsafe extern "C" fn login_user_capture(
+        _session: cryptoki_sys::CK_SESSION_HANDLE,
+        _user_type: cryptoki_sys::CK_USER_TYPE,
+        pin: cryptoki_sys::CK_UTF8CHAR_PTR,
+        pin_len: cryptoki_sys::CK_ULONG,
+        username: cryptoki_sys::CK_UTF8CHAR_PTR,
+        username_len: cryptoki_sys::CK_ULONG,
+    ) -> cryptoki_sys::CK_RV {
+        LOGIN_USER_OBSERVED.lock().unwrap().push((
+            pin.is_null(),
+            pin_len as u64,
+            username.is_null(),
+            username_len as u64,
+        ));
+        cryptoki_sys::CKR_OK
+    }
+
     fn backend_with_session_cancel()
     -> (FfiBackend, Box<cryptoki_sys::CK_FUNCTION_LIST>, Box<cryptoki_sys::CK_FUNCTION_LIST_3_0>)
     {
@@ -103,26 +136,8 @@ mod tests {
         let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
         functions.C_SessionCancel = Some(counted_session_cancel);
         functions.C_LoginUser = Some(login_user_ok);
-        let backend = FfiBackend {
-            _lib: crate::ffi::loading::test_library_handle(),
-            func_list: base.as_mut(),
-            func_list_3_0: Some(functions.as_ref()),
-            func_list_3_2: None,
-            initialize_args: None,
-            mech_cache: dashmap::DashMap::new(),
-            last_init_family: dashmap::DashMap::new(),
-            session_slot_map: dashmap::DashMap::new(),
-            slot_sessions: dashmap::DashMap::new(),
-            object_cleanup: Default::default(),
-            // Test-local backend: bypasses the process reservation without
-            // consuming it; never backs production dispatch (C3M.4).
-            construction: crate::ffi::native_domain::ConstructionPermit::unmanaged_test_only(),
-            lifecycle: Default::default(),
-            lifecycle_domain: Default::default(),
-            session_fences: Default::default(),
-            retirement_sentinel: crate::ffi::native_domain::RetirementSentinel::unmanaged_test_only(
-            ),
-        };
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions.as_ref()), None);
         (backend, base, functions)
     }
 
@@ -154,7 +169,7 @@ mod tests {
         let (backend, _base, _functions) = backend_with_session_cancel();
         assert_eq!(
             backend
-                .ffi_login_user(CkSessionHandle(7), CkUserType::User, b"name", b"1234")
+                .ffi_login_user(CkSessionHandle(7), CkUserType::User, Some(b"name"), Some(b"1234"))
                 .unwrap_err(),
             CkRv::CRYPTOKI_NOT_INITIALIZED
         );
@@ -165,7 +180,37 @@ mod tests {
         // Control: the same call reaches the stub once the domain is open.
         let (backend, _base, _functions) = backend_with_session_cancel();
         backend.lifecycle_domain.open_for_tests();
-        backend.ffi_login_user(CkSessionHandle(7), CkUserType::User, b"name", b"1234").unwrap();
+        backend
+            .ffi_login_user(CkSessionHandle(7), CkUserType::User, Some(b"name"), Some(b"1234"))
+            .unwrap();
+    }
+
+    /// W1-C6-07: None pin/username must reach the provider as NULL with
+    /// zero length (the `ffi_login` convention), while Some reaches it as
+    /// a live pointer — the two classes stay distinguishable at the FFI
+    /// boundary, exactly like `C_Login`.
+    #[test]
+    fn login_user_none_reaches_provider_as_null() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        LOGIN_USER_OBSERVED.lock().unwrap().clear();
+        let mut base = Box::new(cryptoki_sys::CK_FUNCTION_LIST::default());
+        let mut functions = Box::new(cryptoki_sys::CK_FUNCTION_LIST_3_0::default());
+        functions.C_LoginUser = Some(login_user_capture);
+        let backend =
+            FfiBackend::test_backend_with_tables(base.as_mut(), Some(functions.as_ref()), None);
+        backend.lifecycle_domain.open_for_tests();
+
+        backend.ffi_login_user(CkSessionHandle(7), CkUserType::User, None, None).unwrap();
+        backend.ffi_login_user(CkSessionHandle(7), CkUserType::User, Some(b""), Some(b"")).unwrap();
+        backend
+            .ffi_login_user(CkSessionHandle(7), CkUserType::User, Some(b"name"), Some(b"1234"))
+            .unwrap();
+
+        assert_eq!(
+            *LOGIN_USER_OBSERVED.lock().unwrap(),
+            vec![(true, 0, true, 0), (false, 0, false, 0), (false, 4, false, 4)],
+            "None must arrive as NULL+0, Some as live pointer + len"
+        );
     }
 
     #[test]
