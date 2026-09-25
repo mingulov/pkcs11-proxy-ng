@@ -155,7 +155,7 @@ pub(crate) async fn unwrap_key(
                 ctx_mgr,
                 &ctx_id,
                 virtual_session,
-                CkObjectHandle(object.0),
+                CkObjectHandle(object.0 as u64),
                 is_token,
             )
             .await;

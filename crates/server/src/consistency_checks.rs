@@ -241,6 +241,11 @@ fn backend_methods_have_proto_rpcs() {
         "initialize",
         "finalize",
         "get_interface_capabilities",
+        // ABI advertisement metadata (ADR-0011 D2/D6): carried inside the
+        // GetBackendInterfaces response, not PKCS#11 functions.
+        "abi_ulong_size",
+        "abi_byte_order",
+        "abi_attribute_stride",
         // Exact-output trait method shared via EncapsulateKeyExact RPC
         "encapsulate_key_exact",
         // Exact-output trait methods shared via ByteOutputExact RPC

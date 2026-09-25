@@ -1,4 +1,5 @@
 use crate::config::{TcpAuthMode, UnixAuthMode};
+#[cfg(unix)]
 use tonic::transport::server::UdsConnectInfo;
 use tonic::{Request, Status};
 
@@ -12,17 +13,23 @@ use super::identity::AuthenticatedIdentity;
 /// equivalent of mutual auth; a Unix socket has no network to run mTLS over).
 /// Every other connection is TCP and is authenticated via `tcp_auth` (mTLS).
 /// `none` on either transport yields [`AuthenticatedIdentity::Unauthenticated`].
+/// On non-Unix hosts the Unix transport does not exist (config validation
+/// rejects `[listener.local]` there), so every request is TCP.
 pub fn identity_from_request<T>(
     request: &Request<T>,
     tcp_auth: TcpAuthMode,
     unix_auth: UnixAuthMode,
 ) -> Result<AuthenticatedIdentity, Status> {
+    #[cfg(unix)]
     if let Some(uds) = request.extensions().get::<UdsConnectInfo>() {
         return identity_from_uds(uds, unix_auth);
     }
+    #[cfg(not(unix))]
+    let _ = unix_auth;
     identity_from_tcp(request, tcp_auth)
 }
 
+#[cfg(unix)]
 fn identity_from_uds(
     uds: &UdsConnectInfo,
     unix_auth: UnixAuthMode,
@@ -65,6 +72,7 @@ fn identity_from_tcp<T>(
 #[cfg(test)]
 mod tests {
     use crate::config::{TcpAuthMode, UnixAuthMode};
+    #[cfg(unix)]
     use tonic::transport::server::UdsConnectInfo;
     use tonic::{Code, Request};
 
@@ -85,6 +93,7 @@ mod tests {
         assert_eq!(err.code(), Code::Unauthenticated);
     }
 
+    #[cfg(unix)]
     #[test]
     fn unix_none_auth_is_unauthenticated_even_with_uds_connect_info() {
         let mut request = Request::new(());
@@ -97,6 +106,7 @@ mod tests {
         assert_eq!(identity.to_string(), "unauthenticated");
     }
 
+    #[cfg(unix)]
     #[test]
     fn unix_peer_cred_without_credentials_fails_closed() {
         let mut request = Request::new(());

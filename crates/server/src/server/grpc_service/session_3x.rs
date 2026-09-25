@@ -85,7 +85,7 @@ pub(super) async fn session_cancel(
         }
     };
 
-    let flags = CkFlags(req.flags);
+    let flags = CkFlags(req.flags as u64);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.session_cancel(session, flags)).await?;
 

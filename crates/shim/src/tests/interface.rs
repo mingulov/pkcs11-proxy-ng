@@ -2,12 +2,14 @@ use super::*;
 
 #[test]
 fn get_function_list_null_returns_bad_args() {
+    let _guard = shim_state_test_guard();
     let rv = unsafe { C_GetFunctionList(std::ptr::null_mut()) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
 }
 
 #[test]
 fn get_function_list_returns_nonnull_pointer() {
+    let _guard = shim_state_test_guard();
     let mut p: *mut CK_FUNCTION_LIST = std::ptr::null_mut();
     let rv = unsafe { C_GetFunctionList(&mut p) };
     assert_eq!(rv, CKR_OK as CK_RV);
@@ -16,6 +18,7 @@ fn get_function_list_returns_nonnull_pointer() {
 
 #[test]
 fn get_function_list_version_is_2_40() {
+    let _guard = shim_state_test_guard();
     let mut p: *mut CK_FUNCTION_LIST = std::ptr::null_mut();
     unsafe {
         C_GetFunctionList(&mut p);
@@ -27,6 +30,7 @@ fn get_function_list_version_is_2_40() {
 
 #[test]
 fn get_function_list_is_stable() {
+    let _guard = shim_state_test_guard();
     let mut p1: *mut CK_FUNCTION_LIST = std::ptr::null_mut();
     let mut p2: *mut CK_FUNCTION_LIST = std::ptr::null_mut();
     unsafe {
@@ -38,12 +42,14 @@ fn get_function_list_is_stable() {
 
 #[test]
 fn get_interface_list_null_count_returns_bad_args() {
+    let _guard = shim_state_test_guard();
     let rv = unsafe { C_GetInterfaceList(std::ptr::null_mut(), std::ptr::null_mut()) };
     assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
 }
 
 #[test]
 fn get_interface_list_count_only_mode() {
+    let _guard = shim_state_test_guard();
     let mut count: CK_ULONG = 0;
     let rv = unsafe { C_GetInterfaceList(std::ptr::null_mut(), &mut count) };
     assert_eq!(rv, CKR_OK as CK_RV);
@@ -52,6 +58,7 @@ fn get_interface_list_count_only_mode() {
 
 #[test]
 fn get_interface_list_buffer_too_small() {
+    let _guard = shim_state_test_guard();
     let mut buf = [super::empty_interface(); 1];
     let mut count: CK_ULONG = 1;
     let rv = unsafe { C_GetInterfaceList(buf.as_mut_ptr(), &mut count) };
@@ -60,6 +67,7 @@ fn get_interface_list_buffer_too_small() {
 
 #[test]
 fn get_interface_list_fills_entries() {
+    let _guard = shim_state_test_guard();
     let mut buf = [super::empty_interface(); 3];
     let mut count: CK_ULONG = 3;
     let rv = unsafe { C_GetInterfaceList(buf.as_mut_ptr(), &mut count) };
@@ -86,6 +94,7 @@ fn listed_interface_version(index: usize) -> CK_VERSION {
 
 #[test]
 fn get_interface_list_first_entry_is_2_40() {
+    let _guard = shim_state_test_guard();
     let ver = listed_interface_version(0);
     assert_eq!(ver.major, 2);
     assert_eq!(ver.minor, 40);
@@ -93,6 +102,7 @@ fn get_interface_list_first_entry_is_2_40() {
 
 #[test]
 fn get_interface_list_second_entry_is_3_0() {
+    let _guard = shim_state_test_guard();
     let ver = listed_interface_version(1);
     assert_eq!(ver.major, 3);
     assert_eq!(ver.minor, 0);
@@ -100,6 +110,7 @@ fn get_interface_list_second_entry_is_3_0() {
 
 #[test]
 fn get_interface_null_ppinterface_returns_bad_args() {
+    let _guard = shim_state_test_guard();
     let rv = unsafe {
         C_GetInterface(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), 0)
     };
@@ -108,6 +119,7 @@ fn get_interface_null_ppinterface_returns_bad_args() {
 
 #[test]
 fn get_interface_null_name_returns_default() {
+    let _guard = shim_state_test_guard();
     let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
     let rv = unsafe { C_GetInterface(std::ptr::null_mut(), std::ptr::null_mut(), &mut pp, 0) };
     assert_eq!(rv, CKR_OK as CK_RV);
@@ -121,6 +133,7 @@ fn get_interface_null_name_returns_default() {
 
 #[test]
 fn get_interface_pkcs11_no_version_returns_3_2() {
+    let _guard = shim_state_test_guard();
     let name = b"PKCS 11\0";
     let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
     let rv = unsafe {
@@ -137,6 +150,7 @@ fn get_interface_pkcs11_no_version_returns_3_2() {
 
 #[test]
 fn get_interface_pkcs11_version_2_40() {
+    let _guard = shim_state_test_guard();
     let name = b"PKCS 11\0";
     let mut req_ver = CK_VERSION { major: 2, minor: 40 };
     let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
@@ -152,6 +166,7 @@ fn get_interface_pkcs11_version_2_40() {
 
 #[test]
 fn get_interface_pkcs11_version_3_0() {
+    let _guard = shim_state_test_guard();
     let name = b"PKCS 11\0";
     let mut req_ver = CK_VERSION { major: 3, minor: 0 };
     let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
@@ -167,6 +182,7 @@ fn get_interface_pkcs11_version_3_0() {
 
 #[test]
 fn get_interface_unknown_name_returns_null_ok() {
+    let _guard = shim_state_test_guard();
     let name = b"NoSuchInterface\0";
     let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
     let rv = unsafe {
@@ -178,6 +194,7 @@ fn get_interface_unknown_name_returns_null_ok() {
 
 #[test]
 fn get_interface_unknown_version_returns_null_ok() {
+    let _guard = shim_state_test_guard();
     let name = b"PKCS 11\0";
     let mut req_ver = CK_VERSION { major: 9, minor: 9 };
     let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
@@ -188,6 +205,7 @@ fn get_interface_unknown_version_returns_null_ok() {
 
 #[test]
 fn get_interface_3_0_list_has_nonnull_get_interface_list_slot() {
+    let _guard = shim_state_test_guard();
     let name = b"PKCS 11\0";
     let mut req_ver = CK_VERSION { major: 3, minor: 0 };
     let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
@@ -203,6 +221,7 @@ fn get_interface_3_0_list_has_nonnull_get_interface_list_slot() {
 
 #[test]
 fn get_interface_2_40_list_has_nonnull_legacy_async_slots() {
+    let _guard = shim_state_test_guard();
     let name = b"PKCS 11\0";
     let mut req_ver = CK_VERSION { major: 2, minor: 40 };
     let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
@@ -230,6 +249,7 @@ fn get_3_0_list() -> *const CK_FUNCTION_LIST_3_0 {
 
 #[test]
 fn all_3_0_out_of_scope_slots_are_nonnull() {
+    let _guard = shim_state_test_guard();
     let fl3 = get_3_0_list();
     unsafe {
         let fl = &*fl3;
@@ -262,6 +282,7 @@ fn all_3_0_out_of_scope_slots_are_nonnull() {
 
 #[test]
 fn out_of_scope_stubs_return_function_not_supported() {
+    let _guard = shim_state_test_guard();
     // C_GetFunctionStatus and C_CancelFunction are now real dispatch functions
     // (require connected client) like Message*Final; they are tested via
     // integration tests, not stub tests.
@@ -271,6 +292,7 @@ fn out_of_scope_stubs_return_function_not_supported() {
 
 #[test]
 fn interface_catalog_has_three_entries() {
+    let _guard = shim_state_test_guard();
     let mut count: CK_ULONG = 0;
     let rv = unsafe { C_GetInterfaceList(std::ptr::null_mut(), &mut count) };
     assert_eq!(rv, CKR_OK as CK_RV);
@@ -279,6 +301,7 @@ fn interface_catalog_has_three_entries() {
 
 #[test]
 fn get_interface_3_2_by_version() {
+    let _guard = shim_state_test_guard();
     let name = b"PKCS 11\0";
     let mut req_ver = CK_VERSION { major: 3, minor: 2 };
     let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
@@ -294,6 +317,7 @@ fn get_interface_3_2_by_version() {
 
 #[test]
 fn get_interface_default_returns_3_2() {
+    let _guard = shim_state_test_guard();
     let mut pp: *mut CK_INTERFACE = std::ptr::null_mut();
     let rv = unsafe { C_GetInterface(std::ptr::null_mut(), std::ptr::null_mut(), &mut pp, 0) };
     assert_eq!(rv, CKR_OK as CK_RV);
@@ -307,6 +331,7 @@ fn get_interface_default_returns_3_2() {
 
 #[test]
 fn get_interface_list_third_entry_is_3_2() {
+    let _guard = shim_state_test_guard();
     let ver = listed_interface_version(2);
     assert_eq!(ver.major, 3);
     assert_eq!(ver.minor, 2);
@@ -326,6 +351,7 @@ fn get_3_2_list() -> *const CK_FUNCTION_LIST_3_2 {
 
 #[test]
 fn all_3_2_out_of_scope_slots_are_nonnull() {
+    let _guard = shim_state_test_guard();
     let fl3 = get_3_2_list();
     unsafe {
         let fl = &*fl3;
@@ -370,6 +396,7 @@ fn all_3_2_out_of_scope_slots_are_nonnull() {
 
 #[test]
 fn out_of_scope_3_2_stubs_return_function_not_supported() {
+    let _guard = shim_state_test_guard();
     // All 3.2 functions now have real implementations (Wave 5) that require
     // a connected client. Only C_AsyncGetID and C_AsyncJoin return a fixed
     // error without needing a client connection.

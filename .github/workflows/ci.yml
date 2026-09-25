@@ -64,6 +64,36 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
+  # ── Tier 0b2: dependency policy (licenses / bans / sources) ───────────────
+  # deny.toml carries the strict license allowlist, source pinning, and ban
+  # rules from the 2026-06 security review; this job makes it enforced
+  # rather than decorative. cargo-audit (above) covers advisories with the
+  # RustSec DB; `cargo deny check` additionally gates licenses/bans/sources.
+  deny:
+    name: Cargo Deny
+    runs-on: ubuntu-24.04
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo deny binary
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: ${{ runner.os }}-cargo-deny-v0
+
+      - name: Install cargo-deny
+        run: |
+          if ! command -v cargo-deny >/dev/null 2>&1; then
+            cargo install cargo-deny --locked
+          fi
+
+      - name: cargo deny check
+        run: cargo deny check
+
   # ── Tier 0c: build, test, clippy ──────────────────────────────────────────
   build-and-test:
     name: Build & Test
@@ -126,3 +156,85 @@ jobs:
 
       - name: cargo build --workspace (MSRV)
         run: cargo build --workspace
+
+  # ── Tier 0e: narrow-CK_ULONG targets (i686) ────────────────────────────────
+  # Compiles + tests for a 32-bit-CK_ULONG target (i686-unknown-linux-gnu,
+  # ILP32). This is the surfacing mechanism for the narrow-CK_ULONG width
+  # bridge (ADR-0011): it catches ABI/width gaps — compile-time
+  # `CK_ULONG`-as-u32 conversions AND runtime width assumptions such as
+  # 8-byte ulong attribute encodings — that the x86_64 build cannot.
+  #
+  # Runs the full shim lib suite (dispatch units + the TestDaemon integration
+  # modules), the backend lib suite (MockBackend emulates a narrow-native
+  # backend here; D4 checked-narrowing reject tests take their narrow branch),
+  # the SERVER lib suite (the 32-bit daemon host is a supported D3 target),
+  # the pure width logic (types), and an ABI compile of the client crates plus
+  # the daemon binary. Real-.so backend tests skip themselves on ELF-class
+  # mismatch (64-bit provider modules cannot load into a 32-bit process).
+  # Live cross-width topologies (i686 daemon + i386 SoftHSM2) run via
+  # scripts/run-cross-width-live-test.sh outside the per-PR gate.
+  narrow-client-i686:
+    name: Narrow CK_ULONG targets (i686)
+    runs-on: ubuntu-24.04
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system dependencies (protobuf + 32-bit toolchain for ring)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler gcc-multilib libc6-dev-i386
+
+      - name: Install stable toolchain with i686 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-unknown-linux-gnu
+
+      - name: cargo test types + shim + backend + server (i686)
+        run: |
+          cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng-types
+          cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng-shim --lib
+          cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng-backend --lib
+          cargo test --target i686-unknown-linux-gnu -p pkcs11-proxy-ng --lib
+
+      - name: cargo build client crates + daemon (i686 ABI compile)
+        run: |
+          cargo build --target i686-unknown-linux-gnu \
+            -p pkcs11-proxy-ng-shim \
+            -p pkcs11-proxy-ng-client \
+            -p pkcs11-proxy-ng
+
+  # ── Tier 0f: Windows build (LLP64, x86_64-pc-windows-msvc) ──────────────────
+  # Cross-compiles the client shim AND the daemon for Windows x64 via
+  # cargo-xwin (no Windows runner / no Wine needed). This is the LLP64 edge of
+  # ADR-0011: 64-bit pointers + 32-bit CK_ULONG + `#pragma pack(1)`. Catches
+  # Windows-only ABI gaps (packed-field E0793, Unix-only deps). The daemon is
+  # mTLS-TCP-only on Windows: the UDS/peer-cred transport is compiled out and
+  # config validation rejects [listener.local] there.
+  windows-client-llp64:
+    name: Windows client shim (LLP64, cargo-xwin)
+    runs-on: ubuntu-24.04
+    needs: fmt
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install protobuf + LLVM (clang/lld) + nasm
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y protobuf-compiler clang lld nasm
+
+      - name: Install stable toolchain with Windows MSVC target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install cargo-xwin
+        run: cargo install cargo-xwin --locked
+
+      - name: cargo xwin build (client shim + daemon, Windows x64)
+        run: |
+          cargo xwin build --target x86_64-pc-windows-msvc \
+            -p pkcs11-proxy-ng-shim \
+            -p pkcs11-proxy-ng-client \
+            -p pkcs11-proxy-ng-backend \
+            -p pkcs11-proxy-ng

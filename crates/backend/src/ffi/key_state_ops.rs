@@ -19,7 +19,7 @@ impl FfiBackend {
         base_key: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_with_mechanism(
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
@@ -47,7 +47,7 @@ impl FfiBackend {
         base_key: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_with_mechanism_output(
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
@@ -71,7 +71,7 @@ impl FfiBackend {
         base_key: CkObjectHandle,
         template: &[CkAttribute],
     ) -> CkResult<crate::traits::CkDeriveKeyOutputResult> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_with_mechanism_output_result(
             unsafe { (*self.func_list).C_DeriveKey },
             mechanism,
@@ -173,7 +173,7 @@ impl FfiBackend {
         wrapped_key: CkInBuf<'_>,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         let (wk_ptr, wk_len) = wrapped_key.as_ptr_len();
         Self::call_object_with_mechanism(
             unsafe { (*self.func_list).C_UnwrapKey },
@@ -199,7 +199,7 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         template: &[CkAttribute],
     ) -> CkResult<CkObjectHandle> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_with_mechanism(
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
@@ -223,7 +223,7 @@ impl FfiBackend {
         mechanism: &CkMechanism,
         template: &[CkAttribute],
     ) -> CkResult<(CkObjectHandle, Option<CkMechanismParams>)> {
-        let ffi_attrs = FfiAttrs::from_slice(template);
+        let ffi_attrs = FfiAttrs::from_slice(template)?;
         Self::call_object_with_mechanism_output(
             unsafe { (*self.func_list).C_GenerateKey },
             mechanism,
@@ -246,8 +246,8 @@ impl FfiBackend {
         pub_template: &[CkAttribute],
         priv_template: &[CkAttribute],
     ) -> CkResult<(CkObjectHandle, CkObjectHandle)> {
-        let pub_ffi = FfiAttrs::from_slice(pub_template);
-        let priv_ffi = FfiAttrs::from_slice(priv_template);
+        let pub_ffi = FfiAttrs::from_slice(pub_template)?;
+        let priv_ffi = FfiAttrs::from_slice(priv_template)?;
         Self::call_object_pair_with_mechanism(
             unsafe { (*self.func_list).C_GenerateKeyPair },
             mechanism,

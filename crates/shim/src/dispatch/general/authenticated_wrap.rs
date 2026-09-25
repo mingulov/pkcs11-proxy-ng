@@ -49,7 +49,7 @@ pub unsafe extern "C" fn c_wrap_key_authenticated(
             unsafe { parameter_roundtrip_spec(c_mech.pParameter, c_mech.ulParameterLen) };
 
         let result = with_client!(client => client.parameter_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ParameterOutputFunction::WrapKeyAuthenticated,
             &output_spec,
             CkInBuf::Bytes(&[]),
@@ -120,9 +120,9 @@ pub unsafe extern "C" fn c_unwrap_key_authenticated(
         };
 
         match with_client!(client => client.unwrap_key_authenticated(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             &mech,
-            CkObjectHandle(h_unwrapping_key),
+            CkObjectHandle(h_unwrapping_key as u64),
             wrapped_key,
             &template,
             aad,

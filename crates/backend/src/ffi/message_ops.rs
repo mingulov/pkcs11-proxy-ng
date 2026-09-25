@@ -931,7 +931,7 @@ impl FfiBackend {
         if !output_spec.buffer_present {
             // Size query
             let rv = call(&mut ck_params, std::ptr::null_mut(), &mut out_len);
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 let result_gcm = GcmMessageParams {
                     iv: iv_buf,
                     iv_fixed_bits: gcm.iv_fixed_bits,
@@ -948,7 +948,7 @@ impl FfiBackend {
                     MessageParameter::GcmMessage(result_gcm),
                 ))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         } else {
             let capped = super::call_helpers::capped_output_len(output_spec.buffer_len);
@@ -956,7 +956,7 @@ impl FfiBackend {
             let mut buf = vec![0u8; capped];
             let rv = call(&mut ck_params, buf.as_mut_ptr(), &mut out_len);
 
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 buf.truncate(out_len as usize);
                 let result_gcm = GcmMessageParams {
                     iv: iv_buf,
@@ -973,7 +973,7 @@ impl FfiBackend {
                     },
                     MessageParameter::GcmMessage(result_gcm),
                 ))
-            } else if rv == CkRv::BUFFER_TOO_SMALL.0 {
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::BUFFER_TOO_SMALL,
@@ -989,7 +989,7 @@ impl FfiBackend {
                     }),
                 ))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         }
     }
@@ -1051,7 +1051,7 @@ impl FfiBackend {
 
         if !output_spec.buffer_present {
             let rv = call(&mut ck_params, std::ptr::null_mut(), &mut out_len);
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
@@ -1061,14 +1061,14 @@ impl FfiBackend {
                     snapshot(&nonce_buf, &mac_buf),
                 ))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         } else {
             let capped = super::call_helpers::capped_output_len(output_spec.buffer_len);
             out_len = capped as cryptoki_sys::CK_ULONG;
             let mut buf = vec![0u8; capped];
             let rv = call(&mut ck_params, buf.as_mut_ptr(), &mut out_len);
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 buf.truncate(out_len as usize);
                 Ok((
                     CkOutputBufferResult {
@@ -1078,7 +1078,7 @@ impl FfiBackend {
                     },
                     snapshot(&nonce_buf, &mac_buf),
                 ))
-            } else if rv == CkRv::BUFFER_TOO_SMALL.0 {
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::BUFFER_TOO_SMALL,
@@ -1088,7 +1088,7 @@ impl FfiBackend {
                     snapshot(&nonce_buf, &mac_buf),
                 ))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         }
     }
@@ -1143,7 +1143,7 @@ impl FfiBackend {
 
         if !output_spec.buffer_present {
             let rv = call(&mut ck_params, std::ptr::null_mut(), &mut out_len);
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::OK,
@@ -1153,14 +1153,14 @@ impl FfiBackend {
                     snapshot(&nonce_buf, &tag_buf),
                 ))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         } else {
             let capped = super::call_helpers::capped_output_len(output_spec.buffer_len);
             out_len = capped as cryptoki_sys::CK_ULONG;
             let mut buf = vec![0u8; capped];
             let rv = call(&mut ck_params, buf.as_mut_ptr(), &mut out_len);
-            if rv == CkRv::OK.0 {
+            if rv == CkRv::OK.0 as cryptoki_sys::CK_RV {
                 buf.truncate(out_len as usize);
                 Ok((
                     CkOutputBufferResult {
@@ -1170,7 +1170,7 @@ impl FfiBackend {
                     },
                     snapshot(&nonce_buf, &tag_buf),
                 ))
-            } else if rv == CkRv::BUFFER_TOO_SMALL.0 {
+            } else if rv == CkRv::BUFFER_TOO_SMALL.0 as cryptoki_sys::CK_RV {
                 Ok((
                     CkOutputBufferResult {
                         ck_rv: CkRv::BUFFER_TOO_SMALL,
@@ -1180,7 +1180,7 @@ impl FfiBackend {
                     snapshot(&nonce_buf, &tag_buf),
                 ))
             } else {
-                Err(CkRv(rv))
+                Err(CkRv(rv as u64))
             }
         }
     }

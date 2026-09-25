@@ -65,13 +65,13 @@ pub(super) async fn open_session(
         }
     }
 
-    let flags = CkSessionFlags(req.flags);
+    let flags = CkSessionFlags(req.flags as u64);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.open_session(backend_slot, flags)).await?;
 
     match result {
         Ok(backend_session) => {
-            let slot_id = CkSlotId(req.slot_id);
+            let slot_id = CkSlotId(req.slot_id as u64);
             match register_session_handle(ctx_mgr, &ctx_id, backend_session, slot_id).await {
                 Some(virtual_handle) => {
                     debug!(
@@ -130,7 +130,7 @@ pub(super) async fn close_session(
         Some(Some(backend_handle)) => backend_handle,
     };
 
-    let session = CkSessionHandle(backend_handle.0);
+    let session = CkSessionHandle(backend_handle.0 as u64);
     let backend = backend_ref.clone();
     let result = spawn_backend(move || backend.close_session(session)).await?;
 
@@ -203,7 +203,7 @@ pub(super) async fn close_all_sessions(
     // ADR-0002 §7: close only THIS client's sessions for the target slot.
     // We MUST NOT call backend.close_all_sessions() — that would close
     // sessions belonging to other logical client instances.
-    let slot_id = CkSlotId(req.slot_id);
+    let slot_id = CkSlotId(req.slot_id as u64);
     let backend_sessions = ctx_mgr
         .get_context(&ctx_id, |ctx| ctx.remove_sessions_for_slot(slot_id))
         .await
@@ -215,7 +215,7 @@ pub(super) async fn close_all_sessions(
     } else {
         // Single spawn_backend call to close all sessions in batch.
         let sessions: Vec<CkSessionHandle> =
-            backend_sessions.iter().map(|bh| CkSessionHandle(bh.0)).collect();
+            backend_sessions.iter().map(|bh| CkSessionHandle(bh.0 as u64)).collect();
         let backend = backend_ref.clone();
         let result = spawn_backend(move || backend.close_sessions(&sessions)).await?;
         match result {

@@ -42,7 +42,10 @@ unsafe fn read_message_init_mechanism(
         // Recognised AEAD message params: ship the mechanism type only and let
         // the backend rebuild the CK_*_MESSAGE_PARAMS struct from this.
         Some(mp) if !matches!(mp, MessageParameter::Raw(_)) => Ok((
-            Some(CkMechanism { mechanism_type: CkMechanismType(c_mech.mechanism), params: None }),
+            Some(CkMechanism {
+                mechanism_type: CkMechanismType(c_mech.mechanism as u64),
+                params: None,
+            }),
             Some(mp),
         )),
         // Parameterless / unrecognised: preserve the classic shim behaviour.
@@ -65,10 +68,10 @@ pub unsafe extern "C" fn c_message_encrypt_init(
             Err(rv) => return rv,
         };
         let result = with_client!(client => client.message_encrypt_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             mech.as_ref(),
             init_param.as_ref(),
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         ));
         if result.is_ok() {
             state::clear_message_encrypt_output_cache(h_session);
@@ -85,7 +88,7 @@ pub unsafe extern "C" fn c_message_encrypt_init(
 pub unsafe extern "C" fn c_message_encrypt_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(
-            with_client!(client => client.message_encrypt_final(CkSessionHandle(h_session))),
+            with_client!(client => client.message_encrypt_final(CkSessionHandle(h_session as u64))),
         )
     })
 }
@@ -105,10 +108,10 @@ pub unsafe extern "C" fn c_message_decrypt_init(
             Err(rv) => return rv,
         };
         let result = with_client!(client => client.message_decrypt_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             mech.as_ref(),
             init_param.as_ref(),
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         ));
         if result.is_ok() {
             state::clear_message_decrypt_output_cache(h_session);
@@ -125,7 +128,7 @@ pub unsafe extern "C" fn c_message_decrypt_init(
 pub unsafe extern "C" fn c_message_decrypt_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(
-            with_client!(client => client.message_decrypt_final(CkSessionHandle(h_session))),
+            with_client!(client => client.message_decrypt_final(CkSessionHandle(h_session as u64))),
         )
     })
 }
@@ -150,9 +153,9 @@ pub unsafe extern "C" fn c_message_sign_init(
             Some(unsafe { read_mechanism(p_mechanism) })
         };
         let result = with_client!(client => client.message_sign_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             mech.as_ref(),
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         ));
         if result.is_ok() {
             state::clear_message_sign_output_cache(h_session);
@@ -169,7 +172,7 @@ pub unsafe extern "C" fn c_message_sign_init(
 pub unsafe extern "C" fn c_message_sign_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(
-            with_client!(client => client.message_sign_final(CkSessionHandle(h_session))),
+            with_client!(client => client.message_sign_final(CkSessionHandle(h_session as u64))),
         )
     })
 }
@@ -194,9 +197,9 @@ pub unsafe extern "C" fn c_message_verify_init(
             Some(unsafe { read_mechanism(p_mechanism) })
         };
         unit_result_to_rv(with_client!(client => client.message_verify_init(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             mech.as_ref(),
-            CkObjectHandle(h_key),
+            CkObjectHandle(h_key as u64),
         )))
     })
 }
@@ -208,7 +211,7 @@ pub unsafe extern "C" fn c_message_verify_init(
 pub unsafe extern "C" fn c_message_verify_final(h_session: CK_SESSION_HANDLE) -> CK_RV {
     catch_panics(|| {
         unit_result_to_rv(
-            with_client!(client => client.message_verify_final(CkSessionHandle(h_session))),
+            with_client!(client => client.message_verify_final(CkSessionHandle(h_session as u64))),
         )
     })
 }
@@ -262,7 +265,7 @@ pub unsafe extern "C" fn c_encrypt_message(
         };
 
         let result = with_client!(client => client.parameter_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ParameterOutputFunction::EncryptMessage,
             &output_spec,
             plaintext,
@@ -311,7 +314,7 @@ pub unsafe extern "C" fn c_encrypt_message_begin(
         };
 
         let result = with_client!(client => client.encrypt_message_begin(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             parameter,
             aad,
         ));
@@ -364,14 +367,14 @@ pub unsafe extern "C" fn c_encrypt_message_next(
         };
 
         let result = with_client!(client => client.parameter_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ParameterOutputFunction::EncryptMessageNext,
             &output_spec,
             plaintext_part,
             CkInBuf::Bytes(&[]),
             &[],
             &param_out_spec,
-            flags,
+            flags.into(),
             None,
             0,
             0,
@@ -439,7 +442,7 @@ pub unsafe extern "C" fn c_decrypt_message(
         };
 
         let result = with_client!(client => client.parameter_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ParameterOutputFunction::DecryptMessage,
             &output_spec,
             ciphertext,
@@ -488,7 +491,7 @@ pub unsafe extern "C" fn c_decrypt_message_begin(
         };
 
         let result = with_client!(client => client.decrypt_message_begin(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             parameter,
             aad,
         ));
@@ -541,14 +544,14 @@ pub unsafe extern "C" fn c_decrypt_message_next(
         };
 
         let result = with_client!(client => client.parameter_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ParameterOutputFunction::DecryptMessageNext,
             &output_spec,
             ciphertext_part,
             CkInBuf::Bytes(&[]),
             &[],
             &param_out_spec,
-            flags,
+            flags.into(),
             None,
             0,
             0,
@@ -606,7 +609,7 @@ pub unsafe extern "C" fn c_sign_message(
         };
 
         let result = with_client!(client => client.parameter_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ParameterOutputFunction::SignMessage,
             &output_spec,
             data,
@@ -647,7 +650,7 @@ pub unsafe extern "C" fn c_sign_message_begin(
         let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
 
         let result = with_client!(client => client.sign_message_begin(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             parameter,
         ));
 
@@ -689,7 +692,7 @@ pub unsafe extern "C" fn c_sign_message_next(
         if !request_signature {
             // Feed more data — no output. Use existing convenience path.
             let result = with_client!(client => client.sign_message_next(
-                CkSessionHandle(h_session),
+                CkSessionHandle(h_session as u64),
                 parameter,
                 data_part,
                 false,
@@ -721,7 +724,7 @@ pub unsafe extern "C" fn c_sign_message_next(
         };
 
         let result = with_client!(client => client.parameter_output_exact(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             ParameterOutputFunction::SignMessageNext,
             &output_spec,
             data_part,
@@ -776,7 +779,7 @@ pub unsafe extern "C" fn c_verify_message(
         };
 
         unit_result_to_rv(with_client!(client => client.verify_message(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             parameter,
             data,
             signature,
@@ -797,7 +800,7 @@ pub unsafe extern "C" fn c_verify_message_begin(
         let parameter = unsafe { read_input_slice(p_parameter as *const u8, ul_parameter_len) };
 
         unit_result_to_rv(with_client!(client => client.verify_message_begin(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             parameter,
         )))
     })
@@ -837,7 +840,7 @@ pub unsafe extern "C" fn c_verify_message_next(
         };
 
         unit_result_to_rv(with_client!(client => client.verify_message_next(
-            CkSessionHandle(h_session),
+            CkSessionHandle(h_session as u64),
             parameter,
             data_part,
             is_final,

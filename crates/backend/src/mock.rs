@@ -15,12 +15,13 @@ struct LoginGate {
 }
 
 mod crypto_ops;
+pub mod echo;
 mod mock_types;
 mod object_ops;
 mod session_ops;
 mod state;
 
-pub use self::mock_types::{MockAttributeSlot, MultiPartOp};
+pub use self::mock_types::{MockAbi, MockAttributeSlot, MultiPartOp};
 use self::state::{MockState, compute_session_state};
 
 const CK_SP800_108_KEY_HANDLE: u64 = 0x0000_0005;
@@ -164,6 +165,24 @@ pub struct MockBackend {
     /// Test-only gate (M5 harness): when `Some`, each real backend `login`
     /// signals + blocks on it. `None` (default) makes `login` a no-op gate.
     login_gate: Mutex<Option<LoginGate>>,
+    /// The backend ABI this mock emulates on the wire (ADR-0011): ulong
+    /// width for values/lengths, CK_ATTRIBUTE stride for nested templates.
+    abi: MockAbi,
+    /// When set, the D2 byte-order advertisement claims big-endian so the
+    /// client's D6 refusal path can be exercised.
+    advertise_big_endian: bool,
+    /// Mechanism-parameter presence rules captured from a registry at
+    /// construction (`with_mechanism_registry`); `None` (plain `new`)
+    /// keeps the mock permissive for existing suites.
+    param_presence: Option<ParamPresence>,
+}
+
+/// Which mechanisms require parameters and which forbid them, snapshot
+/// from a `MechanismRegistry`. Mechanisms in neither set (vendor,
+/// unregistered) are not validated.
+struct ParamPresence {
+    parameterless: std::collections::HashSet<u64>,
+    shaped: std::collections::HashSet<u64>,
 }
 
 impl MockBackend {
@@ -208,6 +227,9 @@ impl MockBackend {
             token_info_calls: AtomicUsize::new(0),
             data_op_calls: AtomicUsize::new(0),
             login_gate: Mutex::new(None),
+            abi: MockAbi::host(),
+            advertise_big_endian: false,
+            param_presence: None,
         }
     }
 
@@ -229,8 +251,11 @@ impl MockBackend {
     /// This is useful for protocol/workflow tests that need the complete
     /// proxy-understood mechanism surface, including vendor override entries.
     pub fn with_mechanism_registry(slots: Vec<CkSlotId>, registry: &MechanismRegistry) -> Self {
-        let mechanisms =
-            registry.registered_mechanisms().into_iter().map(CkMechanismType).collect();
+        let mechanisms = registry
+            .registered_mechanisms()
+            .into_iter()
+            .map(|x| CkMechanismType(x as u64))
+            .collect();
         Self::new(slots, mechanisms)
     }
 
@@ -427,6 +452,42 @@ impl MockBackend {
     ///
     /// `max_sessions`: maximum number of concurrently open sessions (0 = unlimited).
     /// `max_objects`:  maximum number of live objects (0 = unlimited).
+    /// Opt in to registry-backed mechanism-parameter presence validation:
+    /// a shaped mechanism without params — or a parameterless one WITH
+    /// params — is rejected with `CKR_MECHANISM_PARAM_INVALID`, matching
+    /// real-token behavior. Off by default: protocol-coverage suites
+    /// deliberately drive every mechanism with `params: None`.
+    pub fn with_param_presence_validation(mut self, registry: &MechanismRegistry) -> Self {
+        let parameterless = registry
+            .registered_mechanisms()
+            .into_iter()
+            .map(|x| x as u64)
+            .filter(|m| registry.is_parameterless(*m))
+            .collect();
+        let shaped = registry.param_shapes_view().keys().copied().collect();
+        self.param_presence = Some(ParamPresence { parameterless, shaped });
+        self
+    }
+
+    /// Emulate a specific backend ABI (default: the host's own profile).
+    pub fn with_abi(mut self, abi: MockAbi) -> Self {
+        self.abi = abi;
+        self
+    }
+
+    /// Advertise big-endian byte order (D2) so tests can pin the client's
+    /// D6 refusal path. Values are still emitted little-endian: a correct
+    /// client must refuse before ever parsing one.
+    pub fn with_big_endian_advertisement(mut self) -> Self {
+        self.advertise_big_endian = true;
+        self
+    }
+
+    /// The ABI profile this mock emulates.
+    pub fn abi(&self) -> MockAbi {
+        self.abi
+    }
+
     pub fn with_quotas(mut self, max_sessions: u64, max_objects: u64) -> Self {
         self.max_sessions = max_sessions;
         self.max_objects = max_objects;
@@ -437,7 +498,7 @@ impl MockBackend {
         if self.max_objects > 0 && state.live_objects.len() as u64 >= self.max_objects {
             return Err(CkRv::DEVICE_MEMORY);
         }
-        let handle = CkObjectHandle(state.next_object);
+        let handle = CkObjectHandle(state.next_object as u64);
         state.next_object += 1;
         state.live_objects.insert(handle.0);
         Ok(handle)
@@ -473,18 +534,41 @@ impl MockBackend {
         })
     }
 
+    /// Map one input attribute to its stored slot. A nested-template
+    /// VALUE round-trips through the structural nested slot so the exact
+    /// output path serves it with real two-call semantics.
+    fn template_entry_to_slot(attr: &CkAttribute) -> Option<(u64, MockAttributeSlot)> {
+        let slot = match attr.value.clone()? {
+            CkAttributeValue::NestedTemplate(subs) => MockAttributeSlot::NestedTemplate(
+                subs.into_iter()
+                    .filter_map(|sub| {
+                        sub.value.map(|v| (sub.attr_type, MockAttributeSlot::Value(v)))
+                    })
+                    .collect(),
+            ),
+            value => MockAttributeSlot::Value(value),
+        };
+        Some((attr.attr_type.0, slot))
+    }
+
     fn store_object_template(&self, handle: CkObjectHandle, template: &[CkAttribute]) {
         if template.is_empty() {
             return;
         }
-
-        let attrs = template
-            .iter()
-            .filter_map(|attr| {
-                attr.value.clone().map(|value| (attr.attr_type.0, MockAttributeSlot::Value(value)))
-            })
-            .collect::<HashMap<_, _>>();
+        let attrs =
+            template.iter().filter_map(Self::template_entry_to_slot).collect::<HashMap<_, _>>();
         self.attribute_store.lock().unwrap().insert(handle.0, attrs);
+    }
+
+    /// C_SetAttributeValue semantics: merge the template into the object's
+    /// existing attributes (unlike allocation, which starts fresh).
+    fn merge_object_template(&self, handle: CkObjectHandle, template: &[CkAttribute]) {
+        if template.is_empty() {
+            return;
+        }
+        let mut store = self.attribute_store.lock().unwrap();
+        let attrs = store.entry(handle.0).or_default();
+        attrs.extend(template.iter().filter_map(Self::template_entry_to_slot));
     }
 
     fn remove_objects(&self, state: &mut MockState, objects: &[u64]) {
@@ -518,7 +602,11 @@ impl MockBackend {
     }
 
     fn require_live_object_if_nonzero(&self, state: &MockState, object: u64) -> CkResult<()> {
-        if object == 0 { Ok(()) } else { self.require_live_object(state, CkObjectHandle(object)) }
+        if object == 0 {
+            Ok(())
+        } else {
+            self.require_live_object(state, CkObjectHandle(object as u64))
+        }
     }
 
     fn validate_source_grounded_param_handles(
@@ -532,7 +620,7 @@ impl MockBackend {
 
         match params {
             CkMechanismParams::ObjectHandle(params) => {
-                self.require_live_object(state, CkObjectHandle(params.handle))?;
+                self.require_live_object(state, CkObjectHandle(params.handle as u64))?;
             }
             CkMechanismParams::Kip(params)
                 if matches!(
@@ -543,19 +631,19 @@ impl MockBackend {
                 self.require_live_object_if_nonzero(state, params.key_handle)?;
             }
             CkMechanismParams::Ecdh2Derive(params) => {
-                self.require_live_object(state, CkObjectHandle(params.private_data_handle))?;
+                self.require_live_object(state, CkObjectHandle(params.private_data_handle as u64))?;
             }
             CkMechanismParams::EcmqvDerive(params) => {
                 for handle in [params.private_data_handle, params.public_key_handle] {
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
             }
             CkMechanismParams::X942Dh2Derive(params) => {
-                self.require_live_object(state, CkObjectHandle(params.private_data_handle))?;
+                self.require_live_object(state, CkObjectHandle(params.private_data_handle as u64))?;
             }
             CkMechanismParams::X942MqvDerive(params) => {
                 for handle in [params.private_data_handle, params.public_key_handle] {
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
             }
             CkMechanismParams::X3dhInitiate(params) => {
@@ -567,11 +655,14 @@ impl MockBackend {
                     params.own_identity_handle,
                     params.own_ephemeral_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
             }
             CkMechanismParams::X3dhRespond(params) => {
-                self.require_live_object(state, CkObjectHandle(params.initiator_identity_handle))?;
+                self.require_live_object(
+                    state,
+                    CkObjectHandle(params.initiator_identity_handle as u64),
+                )?;
             }
             CkMechanismParams::X2RatchetInitialize(params) => {
                 for handle in [
@@ -579,7 +670,7 @@ impl MockBackend {
                     params.peer_public_identity_handle,
                     params.own_public_identity_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
             }
             CkMechanismParams::X2RatchetRespond(params) => {
@@ -588,7 +679,7 @@ impl MockBackend {
                     params.initiator_identity_handle,
                     params.own_identity_handle,
                 ] {
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
             }
             CkMechanismParams::CmsSig(params) => {
@@ -626,6 +717,24 @@ impl MockBackend {
         }
     }
 
+    /// Registry-backed parameter-presence validation: a shaped mechanism
+    /// without params — or a parameterless one WITH params — is rejected
+    /// the way a real token rejects it. Permissive without a registry and
+    /// for mechanisms the registry does not classify (vendor).
+    fn validate_mechanism_param_presence(&self, mechanism: &CkMechanism) -> CkResult<()> {
+        let Some(presence) = &self.param_presence else {
+            return Ok(());
+        };
+        let mech = mechanism.mechanism_type.0;
+        if presence.shaped.contains(&mech) && mechanism.params.is_none() {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+        if presence.parameterless.contains(&mech) && mechanism.params.is_some() {
+            return Err(CkRv::MECHANISM_PARAM_INVALID);
+        }
+        Ok(())
+    }
+
     fn require_mechanism_workflow_for_state(
         &self,
         state: &MockState,
@@ -634,6 +743,7 @@ impl MockBackend {
         required_flag: u64,
     ) -> CkResult<()> {
         self.require_supported_mechanism_for_state(state, session, mechanism)?;
+        self.validate_mechanism_param_presence(mechanism)?;
         if self.enforce_source_grounded_workflows
             && session_ops::mock_mechanism_workflow_flags(mechanism.mechanism_type) & required_flag
                 == 0
@@ -653,13 +763,41 @@ impl MockBackend {
         self.require_mechanism_workflow_for_state(&state, session, mechanism, required_flag)
     }
 
+    /// Deterministic IV writeback for `CK_GCM_WRAP_PARAMS` whose generator
+    /// asks the token to produce the IV (anything but CKG_NO_GENERATE = 1):
+    /// the caller's `iv_fixed_bits` prefix is preserved and the tail is a
+    /// stable echo of (session, fixed prefix) — assertable byte-exact,
+    /// distinct per session.
+    fn generated_iv_writeback(
+        session: CkSessionHandle,
+        mechanism: &CkMechanism,
+    ) -> Option<CkMechanismParams> {
+        let Some(CkMechanismParams::GcmWrap(p)) = &mechanism.params else {
+            return None;
+        };
+        if p.iv_generator <= 1 || p.iv.is_empty() {
+            return None;
+        }
+        let fixed_bytes = ((p.iv_fixed_bits as usize) / 8).min(p.iv.len());
+        let mut iv = p.iv[..fixed_bytes].to_vec();
+        iv.extend(echo::echo_bytes(
+            "gcm-iv",
+            &[&session.0.to_le_bytes(), &p.iv[..fixed_bytes]],
+            p.iv.len() - fixed_bytes,
+        ));
+        let mut generated = p.clone();
+        generated.iv = iv;
+        Some(CkMechanismParams::GcmWrap(generated))
+    }
+
     fn xor_bytes(data: &[u8]) -> Vec<u8> {
         data.iter().map(|byte| byte ^ 0x42).collect()
     }
 
     fn digest_bytes(data: &[u8]) -> Vec<u8> {
-        let sum: u32 = data.iter().map(|&byte| byte as u32).sum();
-        sum.to_be_bytes().to_vec()
+        // Deterministic, input-derived, domain-separated (see mock::echo);
+        // 4 bytes to keep two-call buffer tests simple.
+        echo::echo_bytes("digest", &[data], 4)
     }
 
     fn reverse_bytes(data: &[u8]) -> Vec<u8> {
@@ -805,7 +943,7 @@ impl MockBackend {
                 }
                 CK_SP800_108_KEY_HANDLE => {
                     let handle = read_sp800_108_key_handle_value(&data_param.value)?;
-                    self.require_live_object(state, CkObjectHandle(handle))?;
+                    self.require_live_object(state, CkObjectHandle(handle as u64))?;
                 }
                 _ => {}
             }
@@ -958,6 +1096,18 @@ fn read_sp800_108_key_handle_value(value: &[u8]) -> CkResult<u64> {
 }
 
 impl Pkcs11Backend for MockBackend {
+    fn abi_ulong_size(&self) -> u32 {
+        self.abi.ulong_width() as u32
+    }
+
+    fn abi_byte_order(&self) -> u32 {
+        if self.advertise_big_endian { 2 } else { 1 }
+    }
+
+    fn abi_attribute_stride(&self) -> u32 {
+        self.abi.attribute_stride() as u32
+    }
+
     fn initialize(&self) -> CkResult<()> {
         self.initialize_backend()
     }
@@ -1095,8 +1245,8 @@ impl Pkcs11Backend for MockBackend {
         self.init_cancel_impl(s, MultiPartOp::Sign)
     }
     fn sign(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
-        let _ = self.resolve_input(d)?;
-        self.sign_impl(s)
+        let data = self.resolve_input(d)?;
+        self.sign_impl(s, data)
     }
     fn sign_update(&self, s: CkSessionHandle, p: CkInBuf<'_>) -> CkResult<()> {
         let _ = self.resolve_input(p)?;
@@ -1118,9 +1268,9 @@ impl Pkcs11Backend for MockBackend {
         self.init_cancel_impl(s, MultiPartOp::SignRecover)
     }
     fn sign_recover(&self, s: CkSessionHandle, d: CkInBuf<'_>) -> CkResult<Vec<u8>> {
-        let _ = self.resolve_input(d)?;
+        let data = self.resolve_input(d)?;
         self.state.lock().unwrap().end_op(s, MultiPartOp::SignRecover)?;
-        Ok(vec![0xDE, 0xAD])
+        Ok(echo::echo_bytes("sign-recover", &[data], 2))
     }
     fn verify_recover_init(
         &self,
@@ -1188,7 +1338,14 @@ impl Pkcs11Backend for MockBackend {
     ) -> CkResult<Option<CkMechanismParams>> {
         self.require_mechanism_workflow_for_session(s, m, CkMechanismFlags::ENCRYPT)?;
         self.encrypt_init_impl(s, k)?;
-        let output = self.encrypt_init_output.lock().unwrap().clone();
+        // Injected test output wins; otherwise IV-generating GCM-wrap
+        // params produce a deterministic writeback.
+        let output = self
+            .encrypt_init_output
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| Self::generated_iv_writeback(s, m));
         match &output {
             Some(params) => {
                 self.session_mechanism_output.lock().unwrap().insert(s.0, params.clone());
@@ -1353,9 +1510,13 @@ impl Pkcs11Backend for MockBackend {
         &self,
         session: CkSessionHandle,
         object: CkObjectHandle,
-        _template: &[CkAttribute],
+        template: &[CkAttribute],
     ) -> CkResult<()> {
-        self.set_attribute_value_impl(session, object)
+        self.set_attribute_value_impl(session, object)?;
+        // The template was previously discarded: C_SetAttributeValue merges
+        // into the stored attributes so set-then-read round-trips.
+        self.merge_object_template(object, template);
+        Ok(())
     }
     fn generate_key_pair(
         &self,
@@ -1408,8 +1569,7 @@ impl Pkcs11Backend for MockBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let _ = self.resolve_input(data)?;
-        self.sign_exact_impl(s, spec)
+        self.sign_exact_impl(s, self.resolve_input(data)?, spec)
     }
 
     fn sign_final_exact(
@@ -1426,8 +1586,7 @@ impl Pkcs11Backend for MockBackend {
         data: CkInBuf<'_>,
         spec: &CkOutputBufferSpec,
     ) -> CkResult<CkOutputBufferResult> {
-        let _ = self.resolve_input(data)?;
-        self.sign_recover_exact_impl(s, spec)
+        self.sign_recover_exact_impl(s, self.resolve_input(data)?, spec)
     }
 
     fn verify_recover_exact(
