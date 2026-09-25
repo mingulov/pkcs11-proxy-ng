@@ -1449,15 +1449,26 @@ pub(super) async fn backend_object_known_token(
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> bool {
+    backend_object_token_state(ctx, backend_session, backend_object).await.unwrap_or(false)
+}
+
+/// Actual token lifetime when known. Preserve unknown metadata separately
+/// from a positively observed session object so copy registration can fall
+/// back to an unambiguous explicit TOKEN override without overriding false.
+pub(super) async fn backend_object_token_state(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> Option<bool> {
     match probe_bool_attr(ctx, backend_session, backend_object, CkAttributeType::TOKEN).await {
-        BoolAttrProbe::Present(token) => token,
-        // Absent TOKEN on an "other"-class object is spec-compliant (no
-        // storage attributes); such objects are token-global metadata —
-        // fail open. Anything else stays fail-closed.
+        BoolAttrProbe::Present(token) => Some(token),
+        // Spec other-class objects lack TOKEN and are token-global metadata.
         BoolAttrProbe::AttrAbsent => {
-            backend_object_has_other_class(ctx, backend_session, backend_object).await
+            backend_object_has_other_class(ctx, backend_session, backend_object)
+                .await
+                .then_some(true)
         }
-        BoolAttrProbe::Failed => false,
+        BoolAttrProbe::Failed => None,
     }
 }
 

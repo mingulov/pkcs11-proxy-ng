@@ -550,3 +550,129 @@ async fn token_object_attribute_required_for_persistence() -> Result<(), String>
 
     daemon.shutdown().await
 }
+
+/// Copy templates inherit CKA_TOKEN when omitted. The copied virtual handle
+/// must have the same lifetime as the actual SoftHSM object, including a
+/// source discovered in a fresh logical context rather than minted there.
+#[tokio::test]
+#[ignore] // requires SoftHSM2 tools and library
+async fn softhsm_copied_object_lifetime_follows_token_attribute() -> Result<(), String> {
+    let fixture = ProviderFixture::soft_hsm().await?;
+    let daemon = DaemonHarness::start(&fixture).await?;
+    let result = async {
+        for (name, source_token, override_token, discovered, label_only) in [
+            ("token-empty", true, None, false, false),
+            ("token-label", true, None, false, true),
+            ("discovered-token", true, None, true, false),
+            ("token-to-session", true, Some(false), false, false),
+            ("session-to-token", false, Some(true), false, false),
+            ("session-empty", false, None, false, false),
+        ] {
+            let mut client = initialized_client(daemon.endpoint()).await?;
+            let slot = find_token_slot(&mut client).await?;
+            let mut copying = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
+            let label = unique_label(name);
+            let source = client
+                .create_object(
+                    copying,
+                    Some(&[
+                        CkAttribute {
+                            attr_type: CkAttributeType::CLASS,
+                            value: Some(CkAttributeValue::Ulong(CkObjectClass::DATA.0)),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::TOKEN,
+                            value: Some(CkAttributeValue::Bool(source_token)),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::PRIVATE,
+                            value: Some(CkAttributeValue::Bool(false)),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::LABEL,
+                            value: Some(CkAttributeValue::String(label.clone().into())),
+                        },
+                        CkAttribute {
+                            attr_type: CkAttributeType::VALUE,
+                            value: Some(CkAttributeValue::Bytes(b"copy-lifetime".to_vec().into())),
+                        },
+                    ]),
+                )
+                .await
+                .map_err(|rv| format!("{name}: create: {rv}"))?;
+            let source = if discovered {
+                client.finalize().await.map_err(|rv| rv.to_string())?;
+                client = initialized_client(daemon.endpoint()).await?;
+                copying = open_user_session(&mut client, slot, &fixture.user_pin, true).await?;
+                let found = find_objects_by_label(&mut client, copying, &label).await?;
+                if found.len() != 1 {
+                    return Err(format!(
+                        "{name}: expected one discovered source, got {}",
+                        found.len()
+                    ));
+                }
+                found[0]
+            } else {
+                source
+            };
+            let surviving = open_public_session(&mut client, slot, true).await?;
+            let mut overrides = Vec::new();
+            if let Some(token) = override_token {
+                // Native CK_BBOOL bytes are also accepted by the wire conversion.
+                overrides.push(CkAttribute {
+                    attr_type: CkAttributeType::TOKEN,
+                    value: Some(CkAttributeValue::Bytes(vec![u8::from(token)].into())),
+                });
+            }
+            if label_only {
+                overrides.push(CkAttribute {
+                    attr_type: CkAttributeType::LABEL,
+                    value: Some(CkAttributeValue::String(unique_label("copy").into())),
+                });
+            }
+            let copied = client
+                .copy_object(copying, source, Some(&overrides))
+                .await
+                .map_err(|rv| format!("{name}: copy: {rv}"))?;
+            let expected_token = override_token.unwrap_or(source_token);
+            let query = [CkAttribute {
+                attr_type: CkAttributeType::TOKEN,
+                value: Some(CkAttributeValue::Bool(false)),
+            }];
+            let (rv, attrs) = client
+                .get_attribute_value(copying, copied, &query)
+                .await
+                .map_err(|rv| format!("{name}: read actual token flag: {rv}"))?;
+            if rv != CkRv::OK {
+                return Err(format!("{name}: native attribute result {rv}"));
+            }
+            if attrs[0].value != Some(CkAttributeValue::Bool(expected_token)) {
+                return Err(format!("{name}: unexpected actual native copy flag"));
+            }
+            client.close_session(copying).await.map_err(|rv| rv.to_string())?;
+            let outcome = client.get_attribute_value(surviving, copied, &query).await;
+            if expected_token {
+                let (rv, attrs) =
+                    outcome.map_err(|rv| format!("{name}: surviving token handle: {rv}"))?;
+                if rv != CkRv::OK {
+                    return Err(format!(
+                        "{name}: copied token handle must survive creating-session close, got {rv}"
+                    ));
+                }
+                if attrs[0].value != Some(CkAttributeValue::Bool(true)) {
+                    return Err(format!("{name}: surviving copy must remain a token object"));
+                }
+            } else {
+                let rv = outcome.map(|(rv, _)| rv).unwrap_or_else(|rv| rv);
+                if rv != CkRv::OBJECT_HANDLE_INVALID {
+                    return Err(format!("{name}: session copy must expire, got {rv}"));
+                }
+            }
+            client.finalize().await.map_err(|rv| rv.to_string())?;
+        }
+        Ok(())
+    }
+    .await;
+    daemon.shutdown().await?;
+    result
+}

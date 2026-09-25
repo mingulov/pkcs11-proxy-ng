@@ -140,6 +140,9 @@ pub struct MockBackend {
     state: Mutex<MockState>,
     /// object_handle → (attr_type → slot)
     attribute_store: Mutex<HashMap<u64, HashMap<u64, MockAttributeSlot>>>,
+    /// Test-fixture override for a single-attribute metadata read. Default
+    /// None leaves provider-like stored attributes unchanged.
+    attribute_read_override: Mutex<Option<(CkAttributeType, CkResult<CkAttributeValue>)>>,
     /// Pending slot events (FIFO queue). Drained by wait_for_slot_event.
     slot_event_queue: Mutex<std::collections::VecDeque<CkSlotId>>,
     slot_event_condvar: Condvar,
@@ -418,6 +421,7 @@ impl MockBackend {
             slot_mechanisms: Mutex::new(HashMap::new()),
             enforce_source_grounded_workflows: false,
             attribute_store: Mutex::new(HashMap::new()),
+            attribute_read_override: Mutex::new(None),
             injected_error: Mutex::new(None),
             injected_close_error: Mutex::new(None),
             close_session_delay: Mutex::new(None),
@@ -554,6 +558,16 @@ impl MockBackend {
     ) {
         let mut store = self.attribute_store.lock().unwrap();
         store.entry(object.0).or_default().insert(attr_type.0, slot);
+    }
+
+    /// Override single-attribute metadata probes in tests, without changing
+    /// create/copy success or the object's stored attributes and lifetime.
+    pub fn set_attribute_read_override(
+        &self,
+        attr_type: CkAttributeType,
+        result: CkResult<CkAttributeValue>,
+    ) {
+        *self.attribute_read_override.lock().unwrap() = Some((attr_type, result));
     }
 
     /// Configure the objects to be served by successive `find_objects` calls.
