@@ -3,7 +3,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -258,6 +258,95 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// Exactly-once stuck-call accounting (T08, R-H1).
+///
+/// A backend call counts as stuck from the timeout branch's publication
+/// until the blocking task actually finishes. The old
+/// `fetch_add`-then-`store` handshake leaked +1 whenever the FFI
+/// returned in between; the timeout and completion sides now rendezvous
+/// on one mutex over three states, so every interleaving balances:
+///
+/// * `Running → TimedOut` (timeout branch): increments the gauge.
+/// * `TimedOut → Completed` (task completion guard): decrements it.
+/// * `Running → Completed` (fast completion): no gauge movement.
+/// * `Completed → Completed` (redundant completion): no-op.
+///
+/// No backend operation runs under the lock — only the state flip and
+/// the gauge update — so this cannot wedge a call. A poisoned mutex
+/// (unreachable in practice: the critical section cannot panic)
+/// recovers via `into_inner` like the shim's lock helpers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StuckCallState {
+    Running,
+    TimedOut,
+    Completed,
+}
+
+struct StuckCallAccounting<'a> {
+    gauge: &'a AtomicUsize,
+    state: Mutex<StuckCallState>,
+}
+
+impl<'a> StuckCallAccounting<'a> {
+    fn new(gauge: &'a AtomicUsize) -> Self {
+        Self { gauge, state: Mutex::new(StuckCallState::Running) }
+    }
+
+    /// Publish the timeout. Returns the gauge value after publication
+    /// (the live stuck count for the timeout log line). If the task
+    /// already completed (`Running → Completed` won the race), the call
+    /// is already accounted and nothing is published.
+    fn timeout(&self) -> usize {
+        let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        if *state == StuckCallState::Running {
+            *state = StuckCallState::TimedOut;
+            self.gauge.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            self.gauge.load(Ordering::Relaxed)
+        }
+    }
+
+    /// Mark the backend call finished. Returns the remaining stuck count
+    /// when this call releases a published stuck slot, `None` otherwise.
+    /// Idempotent: only the `TimedOut → Completed` transition decrements,
+    /// so the gauge can neither leak +1 nor underflow.
+    fn complete(&self) -> Option<usize> {
+        let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
+        match *state {
+            StuckCallState::TimedOut => {
+                *state = StuckCallState::Completed;
+                Some(self.gauge.fetch_sub(1, Ordering::Relaxed) - 1)
+            }
+            StuckCallState::Running => {
+                *state = StuckCallState::Completed;
+                None
+            }
+            StuckCallState::Completed => None,
+        }
+    }
+}
+
+/// Drops when the blocking task ends — normal return, panic unwind, or
+/// post-cancellation completion — releasing exactly one stuck slot iff
+/// the timeout branch published one. Caller cancellation alone never
+/// touches the gauge: it drops the timeout future (no `timeout()` call)
+/// while the task still runs, and the later `complete()` observes
+/// `Running → Completed`.
+struct StuckCallCompletionGuard<'a> {
+    accounting: Arc<StuckCallAccounting<'a>>,
+}
+
+impl Drop for StuckCallCompletionGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(remaining) = self.accounting.complete() {
+            tracing::info!(
+                stuck_calls = remaining,
+                "a previously stuck backend call returned; slot released"
+            );
+        }
+    }
+}
+
 fn try_acquire_backend_call(
     counter: &'static AtomicUsize,
     max_calls: usize,
@@ -474,10 +563,12 @@ where
     };
     let context_operation_guard = current_context_operation_guard();
 
-    // Set when the caller's timeout fires: tells the task's completion
-    // path to decrement the stuck gauge it was counted into.
-    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let timed_out_task = std::sync::Arc::clone(&timed_out);
+    // Exactly-once stuck accounting (T08): the mutex inside serializes
+    // the timeout branch below against the task's completion guard, so a
+    // return racing the timeout can neither leak +1 nor decrement a gauge
+    // that was never incremented.
+    let accounting = Arc::new(StuckCallAccounting::new(stuck_gauge));
+    let accounting_task = Arc::clone(&accounting);
     let task = spawn_task(move || {
         // Hold the slot for the TRUE lifetime of the backend call: a
         // blocking task always runs to completion, so the guard drops
@@ -486,25 +577,19 @@ where
         let _guard = guard;
         let _peer_guard = peer_guard;
         let _context_operation_guard = context_operation_guard;
-        let result = operation();
-        if timed_out_task.load(Ordering::Acquire) {
-            let remaining = stuck_gauge.fetch_sub(1, Ordering::Relaxed) - 1;
-            tracing::info!(
-                stuck_calls = remaining,
-                "a previously stuck backend call returned; slot released"
-            );
-        }
-        result
+        // Completion ownership lives INSIDE the blocking closure: the
+        // guard drops exactly when the FFI returns — including on panic
+        // unwind and after caller cancellation — balancing any timeout
+        // publication. Breaker/peer/context guards keep their true
+        // lifetimes: caller cancellation releases none of them.
+        let _completion = StuckCallCompletionGuard { accounting: accounting_task };
+        operation()
     });
 
     let result = match tokio::time::timeout(timeout, task).await {
         Ok(result) => result,
         Err(_elapsed) => {
-            // Order matters: count the call as stuck BEFORE publishing the
-            // flag its completion path reads, so the decrement can never
-            // run against a gauge that was not yet incremented.
-            let stuck = stuck_gauge.fetch_add(1, Ordering::Relaxed) + 1;
-            timed_out.store(true, Ordering::Release);
+            let stuck = accounting.timeout();
             tracing::warn!(
                 timeout_secs = timeout.as_secs(),
                 in_flight = counter.load(Ordering::Relaxed),
@@ -798,13 +883,18 @@ pub(super) async fn resolve_object_authz_context(
     let (label, serial) = match ctx.context_manager.cached_token_info(backend_slot) {
         Some(cached) => cached,
         None => {
+            // Generation-guarded publication (T09): a fetch started before
+            // a reinit must not reinsert stale label/serial after its
+            // invalidation.
+            let generation = ctx.context_manager.authz_generation();
             let backend_ref = ctx.backend.clone();
             match spawn_backend(move || backend_ref.get_token_info(backend_slot.0)).await {
                 Ok(Ok(info)) => {
-                    ctx.context_manager.cache_token_info(
+                    ctx.context_manager.cache_token_info_if_generation(
                         backend_slot,
                         info.label.clone(),
                         info.serial_number.clone(),
+                        generation,
                     );
                     (info.label, info.serial_number)
                 }
@@ -967,12 +1057,24 @@ pub(super) async fn resolve_session_and_key(
     session_handle: u64,
     key_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
-    let Some((session, key)) = ctx
+    resolve_session_and_handle(ctx, ctx_id, session_handle, key_handle, CkRv::KEY_HANDLE_INVALID)
+        .await
+}
+
+async fn resolve_session_and_handle(
+    ctx: &HandlerContext,
+    ctx_id: &ClientContextId,
+    session_handle: u64,
+    object_handle: u64,
+    stale_rv: CkRv,
+) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
+    let Some((session, key, destroyed)) = ctx
         .context_manager
         .get_context(ctx_id, |c| {
             (
                 c.session_handles.resolve(VirtualHandle(session_handle)),
-                c.object_handles.resolve(VirtualHandle(key_handle)),
+                c.object_handles.resolve(VirtualHandle(object_handle)),
+                c.destroyed_objects.contains(&VirtualHandle(object_handle)),
             )
         })
         .await
@@ -981,6 +1083,15 @@ pub(super) async fn resolve_session_and_key(
     };
 
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
+    // T20 tombstone: a virtual handle removed by an explicit C_DestroyObject
+    // names a definitively-gone object — answer the handle-invalid family
+    // locally instead of forwarding 0 (whose backend verdict is
+    // backend-specific: bouncyhsm answers DEVICE_ERROR on copy-of-0 but
+    // OBJECT_HANDLE_INVALID on copy-of-destroyed). Never-existed handles
+    // still forward 0 so the backend decides error priority.
+    if key.is_none() && destroyed {
+        return Err(stale_rv);
+    }
     // When the key handle is unknown to the proxy (not in the mapping),
     // forward CK_INVALID_HANDLE (0) to the backend rather than returning
     // CKR_KEY_HANDLE_INVALID locally.  This preserves transparency: the
@@ -996,7 +1107,7 @@ pub(super) async fn resolve_session_and_key(
             ctx,
             ctx_id,
             session_handle,
-            key_handle,
+            object_handle,
             CkSessionHandle(backend_session.0),
             backend_key,
         )
@@ -1009,7 +1120,7 @@ pub(super) async fn resolve_session_and_key(
         || ctx.token_policy.per_class_active())
         && backend_key.0 != 0
     {
-        gate_object_handle(ctx, ctx_id, session_handle, key_handle, backend_session, backend_key)
+        gate_object_handle(ctx, ctx_id, session_handle, object_handle, backend_session, backend_key)
             .await
     } else {
         backend_key
@@ -1023,11 +1134,18 @@ pub(super) async fn resolve_session_and_object(
     session_handle: u64,
     object_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle), CkRv> {
-    // W1-L11-05: the key and object resolvers were line-identical modulo
-    // parameter names (same forward-0, D6(1) authn, and per-object/class
-    // gate); the object entry point delegates to the key implementation so
-    // there is exactly one. Both names are kept for call-site clarity.
-    resolve_session_and_key(ctx, ctx_id, session_handle, object_handle).await
+    // W1-L11-05: one shared implementation behind both names (same
+    // forward-0, tombstone, D6(1) authn, and per-object/class gate); the
+    // names differ only in the tombstone RV flavor (key vs object) for
+    // call-site clarity.
+    resolve_session_and_handle(
+        ctx,
+        ctx_id,
+        session_handle,
+        object_handle,
+        CkRv::OBJECT_HANDLE_INVALID,
+    )
+    .await
 }
 
 pub(super) async fn resolve_session_and_two_objects(
@@ -1037,13 +1155,15 @@ pub(super) async fn resolve_session_and_two_objects(
     first_object_handle: u64,
     second_object_handle: u64,
 ) -> Result<(CkSessionHandle, CkObjectHandle, CkObjectHandle), CkRv> {
-    let Some((session, first_object, second_object)) = ctx
+    let Some((session, first_object, second_object, first_destroyed, second_destroyed)) = ctx
         .context_manager
         .get_context(ctx_id, |c| {
             (
                 c.session_handles.resolve(VirtualHandle(session_handle)),
                 c.object_handles.resolve(VirtualHandle(first_object_handle)),
                 c.object_handles.resolve(VirtualHandle(second_object_handle)),
+                c.destroyed_objects.contains(&VirtualHandle(first_object_handle)),
+                c.destroyed_objects.contains(&VirtualHandle(second_object_handle)),
             )
         })
         .await
@@ -1052,6 +1172,15 @@ pub(super) async fn resolve_session_and_two_objects(
     };
 
     let backend_session = session.ok_or(CkRv::SESSION_HANDLE_INVALID)?;
+    // T20 tombstones (both handles are keys on the wrap/unwrap path): a
+    // destroyed handle answers KEY_HANDLE_INVALID locally instead of
+    // forwarding 0; never-existed handles still forward 0.
+    if first_object.is_none() && first_destroyed {
+        return Err(CkRv::KEY_HANDLE_INVALID);
+    }
+    if second_object.is_none() && second_destroyed {
+        return Err(CkRv::KEY_HANDLE_INVALID);
+    }
     // Forward CK_INVALID_HANDLE to backend when either object is unknown; see
     // resolve_session_and_key for rationale. Local context/session validation
     // remains explicit; backend-visible object handle priority stays backend-owned.
@@ -1193,63 +1322,80 @@ pub(super) async fn session_slot_login_state(
 }
 
 /// D6(1) enforcement for object-MINTING operations (create/copy/generate/
-/// derive/unwrap): when the calling context is logically logged out on the
-/// session's slot and `template` declares the new object private, refuse with
-/// `CKR_USER_NOT_LOGGED_IN` without reaching the backend — regardless of the
-/// backend's own login state (which other live tenants may hold). Pure
-/// logical-layer check; never disturbs other tenants' backend state.
+/// derive/unwrap), as refined in T20: when the calling context is logically
+/// logged out on the session's slot and `template` declares the new object
+/// private, refuse with `CKR_USER_NOT_LOGGED_IN` — but ONLY while another
+/// live tenant holds the slot login (forwarding would ride their backend
+/// login). With no other holder the backend is truly logged out, so its
+/// verdict is unpolluted and authoritative: forward and return whatever it
+/// says (lenient backends such as NSS allow logged-out private session
+/// mints; strict backends refuse — both match direct exactly). The old
+/// unconditional refusal diverged from every lenient backend (21 lanes).
+/// Unknown sessions fail closed (refuse), preserving error precedence for
+/// the downstream handle resolve.
 pub(super) async fn ensure_private_mint_allowed(
     ctx_mgr: &Arc<ContextManager>,
     ctx_id: &ClientContextId,
     virtual_session: u64,
     template: &[CkAttribute],
 ) -> Result<(), CkRv> {
-    if template_declares_private_object(template)
-        && session_slot_login_state(ctx_mgr, ctx_id, virtual_session).await.is_none()
-    {
+    if !template_declares_private_object(template) {
+        return Ok(());
+    }
+    let (_, slot, login_state) =
+        match resolve_session_slot_login(ctx_mgr, ctx_id, virtual_session).await {
+            Ok(triple) => triple,
+            Err(_) => return Err(CkRv::USER_NOT_LOGGED_IN),
+        };
+    if login_state.is_none() && ctx_mgr.other_login_state_for_slot(slot, ctx_id) {
         return Err(CkRv::USER_NOT_LOGGED_IN);
     }
     Ok(())
 }
 
-/// Three-state `CKA_PRIVATE` probe for one backend object: `Some(true)` is
-/// known private, `Some(false)` is known public, `None` is probe failure
-/// (backend error, transport failure, absent/unparseable value). A read-only
-/// probe that never disturbs other tenants. Callers choose the failure
-/// polarity: USE fails open to the backend's own faithful verdict
-/// ([`backend_object_is_private`]); find-enumeration fails closed
-/// ([`backend_object_known_public`]).
-async fn probe_backend_object_private(
+/// Outcome of a single boolean-attribute probe (T20 visibility refinement).
+/// `Present(b)` is a decoded value; `AttrAbsent` is attribute-absence — the
+/// call failed with `ATTRIBUTE_TYPE_INVALID`, or succeeded with a
+/// per-attribute `CK_UNAVAILABLE_INFORMATION` marker (value `None`);
+/// `Failed` is any other backend/transport error or an undecodable value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoolAttrProbe {
+    Present(bool),
+    AttrAbsent,
+    Failed,
+}
+
+/// Shared single-attribute boolean probe behind the read-only find filters
+/// (`CKA_PRIVATE` / `CKA_TOKEN`). Read-only; never disturbs other tenants.
+async fn probe_bool_attr(
     ctx: &HandlerContext,
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
-) -> Option<bool> {
+    attr_type: CkAttributeType,
+) -> BoolAttrProbe {
     let backend = ctx.backend.clone();
     let fetched = spawn_backend(move || {
-        let mut template = [CkAttribute {
-            attr_type: CkAttributeType::PRIVATE,
-            value: Some(CkAttributeValue::Bool(false)),
-        }];
-        let privacy =
+        let mut template = [CkAttribute { attr_type, value: Some(CkAttributeValue::Bool(false)) }];
+        let outcome =
             match backend.get_attribute_value(backend_session, backend_object, &mut template) {
-                Ok(()) => template.first().and_then(|attr| attr.value.as_ref()).and_then(|value| {
-                    match value {
-                        CkAttributeValue::Bool(b) => Some(*b),
-                        CkAttributeValue::Bytes(bytes) => {
-                            Some(bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0)))
-                        }
-                        CkAttributeValue::Ulong(u) => Some(*u != 0),
-                        _ => None,
-                    }
-                }),
-                Err(_) => None,
+                Ok(()) => match template.first().and_then(|attr| attr.value.as_ref()) {
+                    None => BoolAttrProbe::AttrAbsent,
+                    Some(CkAttributeValue::Bool(b)) => BoolAttrProbe::Present(*b),
+                    Some(CkAttributeValue::Bytes(bytes)) => BoolAttrProbe::Present(
+                        bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0)),
+                    ),
+                    Some(CkAttributeValue::Ulong(u)) => BoolAttrProbe::Present(*u != 0),
+                    Some(_) => BoolAttrProbe::Failed,
+                },
+                Err(e) if e == CkRv::ATTRIBUTE_TYPE_INVALID => BoolAttrProbe::AttrAbsent,
+                Err(_) => BoolAttrProbe::Failed,
             };
-        Ok(privacy)
+        Ok(outcome)
     })
     .await;
     match fetched {
-        Ok(Ok(privacy)) => privacy,
-        _ => None,
+        Ok(Ok(outcome)) => outcome,
+        _ => BoolAttrProbe::Failed,
     }
 }
 
@@ -1263,68 +1409,131 @@ async fn backend_object_is_private(
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> bool {
-    probe_backend_object_private(ctx, backend_session, backend_object).await == Some(true)
+    matches!(
+        probe_bool_attr(ctx, backend_session, backend_object, CkAttributeType::PRIVATE).await,
+        BoolAttrProbe::Present(true)
+    )
 }
 
 /// F-04: known-public probe for find-enumeration filtering. Returns `true`
-/// only when the probe positively reports public; unknown privacy hides the
-/// object (fail-closed — unlike USE there is no backend verdict to fall back
-/// to, and a logged-out context must not observe private objects).
+/// when the probe positively reports public, or when the attribute is absent
+/// on a spec "other"-class object (see [`is_other_object_class`]); unknown
+/// privacy otherwise hides the object (fail-closed — unlike USE there is no
+/// backend verdict to fall back to, and a logged-out context must not
+/// observe private objects).
 pub(super) async fn backend_object_known_public(
     ctx: &HandlerContext,
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> bool {
-    probe_backend_object_private(ctx, backend_session, backend_object).await == Some(false)
-}
-
-/// Three-state `CKA_TOKEN` probe for one backend object: `Some(true)` is a
-/// token object, `Some(false)` is session-scoped, `None` is probe failure.
-/// Read-only; mirrors [`probe_backend_object_private`].
-async fn probe_backend_object_token(
-    ctx: &HandlerContext,
-    backend_session: CkSessionHandle,
-    backend_object: CkObjectHandle,
-) -> Option<bool> {
-    let backend = ctx.backend.clone();
-    let fetched = spawn_backend(move || {
-        let mut template = [CkAttribute {
-            attr_type: CkAttributeType::TOKEN,
-            value: Some(CkAttributeValue::Bool(false)),
-        }];
-        let token =
-            match backend.get_attribute_value(backend_session, backend_object, &mut template) {
-                Ok(()) => template.first().and_then(|attr| attr.value.as_ref()).and_then(|value| {
-                    match value {
-                        CkAttributeValue::Bool(b) => Some(*b),
-                        CkAttributeValue::Bytes(bytes) => {
-                            Some(bytes.expose(|raw| raw.first().is_some_and(|&b| b != 0)))
-                        }
-                        CkAttributeValue::Ulong(u) => Some(*u != 0),
-                        _ => None,
-                    }
-                }),
-                Err(_) => None,
-            };
-        Ok(token)
-    })
-    .await;
-    match fetched {
-        Ok(Ok(token)) => token,
-        _ => None,
+    match probe_bool_attr(ctx, backend_session, backend_object, CkAttributeType::PRIVATE).await {
+        BoolAttrProbe::Present(public) => !public,
+        // Absent PRIVATE on an "other"-class object is spec-compliant (no
+        // storage attributes); such objects are token-global metadata —
+        // fail open. Anything else stays fail-closed.
+        BoolAttrProbe::AttrAbsent => {
+            backend_object_has_other_class(ctx, backend_session, backend_object).await
+        }
+        BoolAttrProbe::Failed => false,
     }
 }
 
 /// CROSS-PROC-001: known-token probe for find-enumeration filtering.
-/// Returns `true` only when the probe positively reports a token object;
-/// session-scoped or probe failure returns `false` (fail-closed — an
-/// unknown session object belongs to another context and must hide).
+/// Returns `true` when the probe positively reports a token object, or when
+/// the attribute is absent on a spec "other"-class object (see
+/// [`is_other_object_class`]); session-scoped or otherwise-unknown objects
+/// return `false` (fail-closed — an unknown session object belongs to
+/// another context and must hide).
 pub(super) async fn backend_object_known_token(
     ctx: &HandlerContext,
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> bool {
-    probe_backend_object_token(ctx, backend_session, backend_object).await == Some(true)
+    match probe_bool_attr(ctx, backend_session, backend_object, CkAttributeType::TOKEN).await {
+        BoolAttrProbe::Present(token) => token,
+        // Absent TOKEN on an "other"-class object is spec-compliant (no
+        // storage attributes); such objects are token-global metadata —
+        // fail open. Anything else stays fail-closed.
+        BoolAttrProbe::AttrAbsent => {
+            backend_object_has_other_class(ctx, backend_session, backend_object).await
+        }
+        BoolAttrProbe::Failed => false,
+    }
+}
+
+/// T20 visibility: PKCS#11 "other" object classes (OASIS
+/// `object_classification`: HW_FEATURE, MECHANISM, PROFILE, VALIDATION)
+/// possess no storage attributes, so spec-compliant backends answer
+/// `CKA_TOKEN` / `CKA_PRIVATE` with `ATTRIBUTE_TYPE_INVALID` (observed
+/// natively on kryoptic mechanism objects). They are token-global
+/// metadata by design — never secrets — so attribute-absence fails open
+/// for them, matching direct (where no proxy filter hides them).
+/// Storage classes and unknown/vendor classes stay fail-closed.
+fn is_other_object_class(class: CkObjectClass) -> bool {
+    matches!(
+        class,
+        CkObjectClass::HW_FEATURE
+            | CkObjectClass::MECHANISM
+            | CkObjectClass::PROFILE
+            | CkObjectClass::VALIDATION
+    )
+}
+
+/// `CKA_CLASS` probe for one backend object: the class value, or `None` on
+/// any failure or undecodable value (fail-closed — callers treat unknown
+/// class as storage).
+async fn probe_object_class(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> Option<CkObjectClass> {
+    let backend = ctx.backend.clone();
+    let fetched = spawn_backend(move || {
+        let mut template = [CkAttribute {
+            attr_type: CkAttributeType::CLASS,
+            value: Some(CkAttributeValue::Ulong(0)),
+        }];
+        let class =
+            match backend.get_attribute_value(backend_session, backend_object, &mut template) {
+                Ok(()) => match template.first().and_then(|attr| attr.value.as_ref()) {
+                    Some(CkAttributeValue::Ulong(u)) => Some(CkObjectClass(*u)),
+                    Some(CkAttributeValue::Bytes(bytes)) => bytes.expose(|raw| {
+                        if raw.len() == size_of::<u64>() {
+                            let mut buf = [0u8; 8];
+                            buf.copy_from_slice(raw);
+                            Some(CkObjectClass(u64::from_ne_bytes(buf)))
+                        } else if raw.len() == size_of::<u32>() {
+                            let mut buf = [0u8; 4];
+                            buf.copy_from_slice(raw);
+                            Some(CkObjectClass(u64::from(u32::from_ne_bytes(buf))))
+                        } else {
+                            None
+                        }
+                    }),
+                    _ => None,
+                },
+                Err(_) => None,
+            };
+        Ok(class)
+    })
+    .await;
+    match fetched {
+        Ok(Ok(class)) => class,
+        _ => None,
+    }
+}
+
+/// True when the object's probed class is a spec "other" class (see
+/// [`is_other_object_class`]); any probe failure reads as storage
+/// (fail-closed).
+async fn backend_object_has_other_class(
+    ctx: &HandlerContext,
+    backend_session: CkSessionHandle,
+    backend_object: CkObjectHandle,
+) -> bool {
+    probe_object_class(ctx, backend_session, backend_object)
+        .await
+        .is_some_and(is_other_object_class)
 }
 
 /// CROSS-PROC-001: true when `backend_object` already maps in the calling
@@ -1368,10 +1577,16 @@ pub(super) async fn find_result_visible_to_context(
 }
 
 /// D6(1) enforcement for object/key USE (sign/verify/encrypt/decrypt/digest
-/// init, get/set attributes, wrap/unwrap/derive keys, ...): when the calling
-/// context is logically logged out on the session's slot and the object is
-/// private, refuse with `CKR_USER_NOT_LOGGED_IN` without performing the
-/// operation.
+/// init, get/set attributes, wrap/unwrap/derive keys, ...), as refined in
+/// T20: when the calling context is logically logged out on the session's
+/// slot and the object is private, refuse with `CKR_USER_NOT_LOGGED_IN` —
+/// but ONLY while another live tenant holds the slot login (forwarding
+/// would ride their backend login). With no other holder the backend is
+/// truly logged out, so its verdict is unpolluted and authoritative:
+/// forward and return whatever it says (lenient backends such as NSS
+/// allow logged-out use of own private session objects; strict backends
+/// refuse — both match direct exactly). The old unconditional refusal
+/// diverged from every lenient backend (21 lanes).
 ///
 /// Cost: the logged-in path costs one in-memory map read. The logged-out path
 /// decides from the mint-recorded privacy bit when known (still no backend
@@ -1408,10 +1623,27 @@ pub(super) async fn ensure_private_use_allowed(
     backend_session: CkSessionHandle,
     backend_object: CkObjectHandle,
 ) -> Result<(), CkRv> {
-    if session_slot_login_state(&ctx.context_manager, ctx_id, virtual_session).await.is_some() {
+    let (_, slot, login_state) =
+        match resolve_session_slot_login(&ctx.context_manager, ctx_id, virtual_session).await {
+            Ok(triple) => triple,
+            Err(_) => {
+                // Unknown session: fail closed exactly like the old gate
+                // (refuse when private), preserving error precedence for
+                // the downstream handle resolve.
+                if object_is_private(ctx, ctx_id, virtual_object, backend_session, backend_object)
+                    .await
+                {
+                    return Err(CkRv::USER_NOT_LOGGED_IN);
+                }
+                return Ok(());
+            }
+        };
+    if login_state.is_some() {
         return Ok(());
     }
-    if object_is_private(ctx, ctx_id, virtual_object, backend_session, backend_object).await {
+    if object_is_private(ctx, ctx_id, virtual_object, backend_session, backend_object).await
+        && ctx.context_manager.other_login_state_for_slot(slot, ctx_id)
+    {
         return Err(CkRv::USER_NOT_LOGGED_IN);
     }
     Ok(())
@@ -1761,6 +1993,208 @@ mod tests {
             0,
             "gauge drops when the call returns"
         );
+    }
+
+    #[test]
+    fn stuck_accounting_state_level_contract() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gauge = AtomicUsize::new(0);
+        let accounting = StuckCallAccounting::new(&gauge);
+        accounting.complete();
+        accounting.timeout();
+        assert_eq!(gauge.load(Ordering::SeqCst), 0);
+
+        let gauge = AtomicUsize::new(0);
+        let accounting = StuckCallAccounting::new(&gauge);
+        accounting.timeout();
+        assert_eq!(gauge.load(Ordering::SeqCst), 1);
+        accounting.complete();
+        accounting.complete();
+        assert_eq!(gauge.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stuck_accounting_timeout_complete_collision_balances() {
+        // Forced collisions, not sleeps: both sides enter past a barrier
+        // simultaneously 500 times, so the mutex sees both orders across
+        // iterations. Every pair must net to zero — any non-atomicity in
+        // the handshake would leak +1 or underflow.
+        use std::sync::Barrier;
+        static COLLISION_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        for _ in 0..500 {
+            let accounting = StuckCallAccounting::new(&COLLISION_GAUGE);
+            let barrier = Barrier::new(2);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    barrier.wait();
+                    accounting.timeout();
+                });
+                barrier.wait();
+                accounting.complete();
+            });
+            assert_eq!(
+                COLLISION_GAUGE.load(Ordering::SeqCst),
+                0,
+                "every timeout/complete collision must balance"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stuck_accounting_completion_after_timeout_balances_gauge() {
+        // Rendezvous-forced order: the timeout observably fires first
+        // (FUNCTION_FAILED + gauge 1), then the release lets the FFI
+        // return. The late completion must free both the stuck slot and
+        // the breaker slot — no leaked +1 either side.
+        static LATE_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static LATE_TEST_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        let (unstick_tx, unstick_rx) = std::sync::mpsc::channel::<()>();
+
+        let result = spawn_backend_core(
+            &LATE_TEST_COUNTER,
+            &LATE_TEST_GAUGE,
+            Duration::from_millis(50),
+            8,
+            move || {
+                let _ = unstick_rx.recv();
+                Ok(0u8)
+            },
+        )
+        .await;
+        assert_eq!(result.expect("no transport error").unwrap_err(), CkRv::FUNCTION_FAILED);
+        assert_eq!(LATE_TEST_GAUGE.load(Ordering::Relaxed), 1);
+
+        unstick_tx.send(()).expect("receiver alive");
+        for _ in 0..400 {
+            if LATE_TEST_GAUGE.load(Ordering::Relaxed) == 0
+                && LATE_TEST_COUNTER.load(Ordering::Relaxed) == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            LATE_TEST_GAUGE.load(Ordering::Relaxed),
+            0,
+            "late completion releases the stuck slot"
+        );
+        assert_eq!(
+            LATE_TEST_COUNTER.load(Ordering::Relaxed),
+            0,
+            "late completion releases the breaker slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn stuck_accounting_task_panic_after_timeout_balances_gauge() {
+        // The completion guard drops on task unwind: a panic after the
+        // timeout published must still release the stuck slot.
+        static PANIC_LATE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static PANIC_LATE_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        let (unstick_tx, unstick_rx) = std::sync::mpsc::channel::<()>();
+
+        let result = spawn_backend_core(
+            &PANIC_LATE_COUNTER,
+            &PANIC_LATE_GAUGE,
+            Duration::from_millis(50),
+            8,
+            move || -> CkResult<u8> {
+                let _ = unstick_rx.recv();
+                panic!("T08 fixture: panic after timeout");
+            },
+        )
+        .await;
+        assert_eq!(result.expect("no transport error").unwrap_err(), CkRv::FUNCTION_FAILED);
+        assert_eq!(PANIC_LATE_GAUGE.load(Ordering::Relaxed), 1);
+
+        unstick_tx.send(()).expect("receiver alive");
+        for _ in 0..400 {
+            if PANIC_LATE_GAUGE.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            PANIC_LATE_GAUGE.load(Ordering::Relaxed),
+            0,
+            "unwind completion releases the stuck slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn stuck_accounting_task_panic_before_timeout_never_increments() {
+        // A panic before any timeout: the guard observes Running →
+        // Completed, so the gauge never moves. Deterministic — the spawn
+        // returns only after the task (and its guard) finished.
+        static PANIC_FAST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static PANIC_FAST_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        let result = spawn_backend_core(
+            &PANIC_FAST_COUNTER,
+            &PANIC_FAST_GAUGE,
+            Duration::from_secs(30),
+            8,
+            || -> CkResult<u8> {
+                panic!("T08 fixture: panic before timeout");
+            },
+        )
+        .await;
+        assert!(result.is_err(), "blocking-task panic surfaces as Status");
+        assert_eq!(PANIC_FAST_GAUGE.load(Ordering::SeqCst), 0);
+        assert_eq!(PANIC_FAST_COUNTER.load(Ordering::SeqCst), 0, "breaker slot frees on panic");
+    }
+
+    #[tokio::test]
+    async fn stuck_accounting_caller_cancellation_leaves_no_stuck_count() {
+        // Caller cancellation drops the timeout future (no timeout() call)
+        // while the task still runs: the later completion observes Running
+        // → Completed, and no guard is released early.
+        static CANCEL_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        static CANCEL_TEST_GAUGE: AtomicUsize = AtomicUsize::new(0);
+        let (unstick_tx, unstick_rx) = std::sync::mpsc::channel::<()>();
+
+        let rpc = tokio::spawn(spawn_backend_core(
+            &CANCEL_TEST_COUNTER,
+            &CANCEL_TEST_GAUGE,
+            Duration::from_secs(30),
+            8,
+            move || {
+                let _ = unstick_rx.recv();
+                Ok(0u8)
+            },
+        ));
+        for _ in 0..400 {
+            if CANCEL_TEST_COUNTER.load(Ordering::Relaxed) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            CANCEL_TEST_COUNTER.load(Ordering::Relaxed),
+            1,
+            "slot acquired before cancellation"
+        );
+
+        rpc.abort();
+        let aborted = rpc.await.expect_err("aborted join must err");
+        assert!(aborted.is_cancelled());
+        assert_eq!(
+            CANCEL_TEST_COUNTER.load(Ordering::Relaxed),
+            1,
+            "cancellation must not release the breaker slot"
+        );
+
+        unstick_tx.send(()).expect("receiver alive");
+        for _ in 0..400 {
+            if CANCEL_TEST_GAUGE.load(Ordering::Relaxed) == 0
+                && CANCEL_TEST_COUNTER.load(Ordering::Relaxed) == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(CANCEL_TEST_GAUGE.load(Ordering::Relaxed), 0);
+        assert_eq!(CANCEL_TEST_COUNTER.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

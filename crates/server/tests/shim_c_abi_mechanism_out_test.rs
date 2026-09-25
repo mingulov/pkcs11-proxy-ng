@@ -396,7 +396,33 @@ async fn loaded_shim_rejects_unsafe_official_lengthless_parameter_shapes() {
         let _finalize_on_drop = FinalizeOnDrop(c_finalize);
         let c_sign_init = functions.C_SignInit.expect("C_SignInit");
         let c_derive_key = functions.C_DeriveKey.expect("C_DeriveKey");
+        let c_get_slot_list = functions.C_GetSlotList.expect("C_GetSlotList");
+        let c_open_session = functions.C_OpenSession.expect("C_OpenSession");
         assert_eq!(c_initialize(std::ptr::null_mut()), CKR_OK as CK_RV, "C_Initialize");
+
+        // T29 M3 session-first precedence: init calls resolve the session
+        // before validating the mechanism, so the rejection assertions below
+        // need a real session (an unknown handle would correctly yield
+        // CKR_SESSION_HANDLE_INVALID instead).
+        let mut slot_count: CK_ULONG = 0;
+        assert_eq!(
+            c_get_slot_list(CK_TRUE, std::ptr::null_mut(), &mut slot_count),
+            CKR_OK as CK_RV,
+            "C_GetSlotList(size)"
+        );
+        assert!(slot_count > 0, "mock daemon should expose at least one token slot");
+        let mut slots = vec![0 as CK_SLOT_ID; slot_count as usize];
+        assert_eq!(
+            c_get_slot_list(CK_TRUE, slots.as_mut_ptr(), &mut slot_count),
+            CKR_OK as CK_RV,
+            "C_GetSlotList(data)"
+        );
+        let mut session: CK_SESSION_HANDLE = 0;
+        assert_eq!(
+            c_open_session(slots[0], CKF_SERIAL_SESSION, std::ptr::null_mut(), None, &mut session),
+            CKR_OK as CK_RV,
+            "C_OpenSession"
+        );
 
         let mut nested_sign = CK_MECHANISM {
             mechanism: CKM_SHA256_RSA_PKCS,
@@ -425,7 +451,7 @@ async fn loaded_shim_rejects_unsafe_official_lengthless_parameter_shapes() {
             ulParameterLen: mem::size_of::<CK_CMS_SIG_PARAMS>() as CK_ULONG,
         };
         assert_eq!(
-            c_sign_init(1, &mut cms_mechanism, 1),
+            c_sign_init(session, &mut cms_mechanism, 1),
             CKR_MECHANISM_PARAM_INVALID as CK_RV,
             "C_SignInit should reject CK_CMS_SIG_PARAMS before reading lengthless content type"
         );
@@ -503,7 +529,7 @@ async fn loaded_shim_rejects_unsafe_official_lengthless_parameter_shapes() {
             };
 
             assert_eq!(
-                c_derive_key(1, &mut mechanism, 1, std::ptr::null_mut(), 0, &mut derived_key,),
+                c_derive_key(session, &mut mechanism, 1, std::ptr::null_mut(), 0, &mut derived_key,),
                 CKR_MECHANISM_PARAM_INVALID as CK_RV,
                 "C_DeriveKey should reject {label} before reading lengthless pointer fields"
             );

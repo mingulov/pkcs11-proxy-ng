@@ -137,7 +137,7 @@ async fn run_optional_backend_smoke(fixture: ProviderFixture) -> Result<(), Stri
             payload.as_bytes(),
         )
         .await?;
-        assert_eq!(decrypted, payload.as_bytes());
+        decrypted.expose(|bytes| assert_eq!(bytes, payload.as_bytes()));
 
         if supports_mechanism(&mut client, slot, CkMechanismType::RSA_PKCS_PSS).await? {
             rsa_pss_sign(&mut client, session, pair.private_key, payload.as_bytes()).await?;
@@ -166,7 +166,7 @@ async fn run_optional_backend_smoke(fixture: ProviderFixture) -> Result<(), Stri
             payload.as_bytes(),
         )
         .await?;
-        assert_eq!(reopened_decrypted, payload.as_bytes());
+        reopened_decrypted.expose(|bytes| assert_eq!(bytes, payload.as_bytes()));
 
         client.destroy_object(session, found_public[0]).await.map_err(|rv| rv.to_string())?;
         client.destroy_object(session, found_private[0]).await.map_err(|rv| rv.to_string())?;

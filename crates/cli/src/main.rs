@@ -3,7 +3,7 @@
 // itself is W1-L2-12 (P3), not this gate.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use pkcs11_proxy_ng_client::{Pkcs11Client, tls::ClientTlsFiles};
 use tracing_subscriber::EnvFilter;
 
@@ -78,7 +78,14 @@ fn init_logging(cli: &Cli) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn core::error::Error>> {
-    let cli = Cli::parse();
+    // T14: parse through `ArgMatches` so explicit-argv secret metadata
+    // (`SecretOrigins`) is captured during clap parsing (`--help` /
+    // `--version` / parse errors behave exactly as `Cli::parse`).
+    let raw_matches = Cli::command().get_matches();
+    let origins = secrets::SecretOrigins::from_subcommand_matches(
+        raw_matches.subcommand().map(|(_, sub)| sub),
+    );
+    let cli = Cli::from_arg_matches(&raw_matches).unwrap_or_else(|e| e.exit());
     init_logging(&cli);
 
     if let Commands::Audit { cmd: AuditCmd::Verify { dir, public_key_hex } } = &cli.command {
@@ -165,7 +172,7 @@ async fn main() -> Result<(), Box<dyn core::error::Error>> {
     .map_err(|e| format!("Connection failed: {e}"))?;
     client.initialize().await.map_err(crate::handlers::cli_err("C_Initialize"))?;
 
-    let result = run_command(&mut client, cli.command).await;
+    let result = run_command(&mut client, cli.command, &origins).await;
 
     let _ = client.finalize().await;
 

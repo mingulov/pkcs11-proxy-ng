@@ -72,6 +72,15 @@ unsafe fn ck_attrs_to_rust_at_depth(
     if count as usize > MAX_TEMPLATE_COUNT {
         return Err(CkRv::ARGUMENTS_BAD);
     }
+    // T03: validate the template-array extent arithmetic before indexing
+    // (count*stride overflow, end-address wrap). Readability stays a
+    // caller contract; elements are copied unaligned below.
+    checked_extent(
+        p_template as usize,
+        count as u64,
+        std::mem::size_of::<CK_ATTRIBUTE>(),
+        MAX_TEMPLATE_COUNT.saturating_mul(std::mem::size_of::<CK_ATTRIBUTE>()),
+    )?;
     // Width bridge (ADR-0011): a ulong array whose element width differs between
     // this client and the backend is re-encoded here, on the client edge.
     // (Scalar ulongs already travel width-independently as a typed `ulong_value`.)
@@ -95,6 +104,15 @@ unsafe fn ck_attrs_to_rust_at_depth(
             None
         } else {
             let len = attr.ulValueLen as usize;
+            // T03: validate the value extent before any byte access below.
+            // This enforces the 512 MiB serializable cap (replacing the
+            // inline check) plus isize::MAX and end-address arithmetic.
+            checked_extent(
+                attr.pValue as usize,
+                attr.ulValueLen as u64,
+                1,
+                MAX_SERIALIZABLE_BYTES,
+            )?;
             if ck_type.is_attribute_template() {
                 // Input direction of CKF_ARRAY_ATTRIBUTE: pValue is a nested
                 // CK_ATTRIBUTE[] in the CLIENT's layout. Parse it structurally
@@ -130,8 +148,6 @@ unsafe fn ck_attrs_to_rust_at_depth(
                 // Unaligned load: caller value bytes carry no alignment promise.
                 let v = unsafe { (attr.pValue as *const CK_ULONG).read_unaligned() };
                 Some(CkAttributeValue::Ulong(v as u64))
-            } else if len > MAX_SERIALIZABLE_BYTES {
-                return Err(CkRv::ARGUMENTS_BAD);
             } else if ck_type.is_ulong_array()
                 && client_ulong_width != backend_ulong_width
                 && len.is_multiple_of(client_ulong_width)

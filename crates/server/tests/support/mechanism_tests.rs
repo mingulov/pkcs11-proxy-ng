@@ -381,7 +381,7 @@ pub async fn test_aes_cbc_encrypt_decrypt(
         .await
         .map_err(|rv| format!("C_Decrypt(AES-CBC) failed: {rv}"))?;
 
-    if decrypted.as_slice() != plaintext.as_slice() {
+    if decrypted.expose(|bytes| bytes != plaintext.as_slice()) {
         return Err("AES-CBC round-trip should recover plaintext".into());
     }
 
@@ -448,7 +448,7 @@ pub async fn test_aes_ctr_encrypt_decrypt(
         .await
         .map_err(|rv| format!("C_Decrypt(AES-CTR) failed: {rv}"))?;
 
-    if decrypted.as_slice() != plaintext.as_slice() {
+    if decrypted.expose(|bytes| bytes != plaintext.as_slice()) {
         return Err("AES-CTR round-trip should recover plaintext".into());
     }
 
@@ -576,7 +576,7 @@ pub async fn test_rsa_oaep_encrypt_decrypt(
         .await
         .map_err(|rv| format!("C_Decrypt(OAEP) failed: {rv}"))?;
 
-    if decrypted.as_slice() != plaintext.as_slice() {
+    if decrypted.expose(|bytes| bytes != plaintext.as_slice()) {
         return Err("OAEP round-trip should recover plaintext".into());
     }
 

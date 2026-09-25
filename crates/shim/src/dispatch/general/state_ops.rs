@@ -76,6 +76,12 @@ pub unsafe extern "C" fn c_set_operation_state(
         if p_operation_state.is_null() {
             return rv_err(CkRv::ARGUMENTS_BAD);
         }
+        // T07: gate before touching the message-operation map so a
+        // pre-init call returns CRYPTOKI_NOT_INITIALIZED without
+        // inserting entries for a never-opened session.
+        if !state::is_initialized() {
+            return rv_err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
         let operation_states = [
             state::MessageOperation::Encrypt,
             state::MessageOperation::Decrypt,

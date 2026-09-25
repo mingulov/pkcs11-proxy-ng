@@ -139,7 +139,7 @@ impl Pkcs11Client {
         &mut self,
         session: CkSessionHandle,
         signature: &[u8],
-    ) -> CkResult<Vec<u8>> {
+    ) -> CkResult<SecretBytes> {
         let ctx = self.context_id()?;
         let req = pkcs11_proxy_ng_proto::VerifyRecoverRequest {
             client_context_id: ctx,
@@ -147,7 +147,8 @@ impl Pkcs11Client {
             signature: signature.to_vec(),
             signature_null_len: None,
         };
-        pkcs11_unary_map!(self.grpc.verify_recover(req), true, resp => resp.data)
+        // T13: adopt the recovered data into `SecretBytes` (no copy).
+        pkcs11_unary_map!(self.grpc.verify_recover(req), true, mut resp => SecretBytes::new(std::mem::take(&mut resp.data)))
     }
 
     pub async fn verify_init(

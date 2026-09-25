@@ -234,15 +234,21 @@ pub(super) async fn destroy_object(
     // cached attribute entries so a recycled virtual handle cannot alias stale
     // data, inherit created-status or privacy, or serve stale coalesced
     // attributes for the now-destroyed object (B2, G3, G3-PR3 Task 2, R2 I1,
-    // D6(1)). Revoke the daemon-wide authz generation (W1-L13-18): the freed
-    // backend handle may be recycled by another context's create, which must
-    // invalidate every context's cached token-object metadata.
+    // D6(1)), and record a destroy tombstone so later uses answer the
+    // handle-invalid family locally (T20). Revoke the daemon-wide authz
+    // generation (W1-L13-18): the freed backend handle may be recycled by
+    // another context's create, which must invalidate every context's
+    // cached token-object metadata.
     if result.is_ok() {
         let virtual_object = VirtualHandle(req.object_handle);
         let _ = ctx
             .context_manager
             .get_context(&ctx_id, |client_ctx| {
                 client_ctx.object_handles.remove(virtual_object);
+                // T20 tombstone: later uses of this handle answer the
+                // handle-invalid family locally (forward-0's backend
+                // verdict is backend-specific). Mirrors the removal above.
+                client_ctx.destroyed_objects.insert(virtual_object);
                 client_ctx.object_metadata.remove(&virtual_object);
                 client_ctx.token_object_metadata.remove(&virtual_object);
                 client_ctx.created_objects.remove(&virtual_object);
@@ -543,6 +549,169 @@ mod tests {
             resp.ck_rv,
             CkRv::OBJECT_HANDLE_INVALID.0,
             "post-close destroy of an evicted session handle must report 130, not 257"
+        );
+    }
+
+    /// T20 tombstone fixture: one mock session/object pair with both
+    /// handles registered in a fresh context.
+    async fn setup_destroy_fixture() -> (
+        Arc<ContextManager>,
+        Arc<dyn Pkcs11Backend>,
+        crate::server::context_manager::ClientContextId,
+        u64,
+        u64,
+    ) {
+        let mock = Arc::new(MockBackend::new(vec![CkSlotId(0)], vec![CkMechanismType::RSA_PKCS]));
+        let backend: Arc<dyn Pkcs11Backend> = mock.clone();
+        let backend_session = mock.open_session(CkSlotId(0), CkSessionFlags::default()).unwrap();
+        let backend_object = mock.create_object(backend_session, Some(&[])).unwrap();
+
+        let ctx_mgr = Arc::new(ContextManager::new(Duration::from_secs(300), 0));
+        ctx_mgr.register_slot(crate::server::slot_map::BackendSlotId(CkSlotId(0))).await;
+        let backend_slot = crate::server::slot_map::BackendSlotId(CkSlotId(0));
+        ctx_mgr.cache_token_info(
+            crate::server::slot_map::BackendSlotId(CkSlotId(0)),
+            "MockToken".into(),
+            "0001".into(),
+        );
+        let ctx_id = ctx_mgr.create_context(None).await.unwrap();
+        let (session_vh, obj_vh) = ctx_mgr
+            .get_context(&ctx_id, |ctx| {
+                let svh = ctx.register_session(BackendHandle(backend_session.0), backend_slot);
+                let ovh = ctx.object_handles.insert(BackendHandle(backend_object.0));
+                (svh, ovh)
+            })
+            .await
+            .unwrap();
+        (ctx_mgr, backend, ctx_id, session_vh.0, obj_vh.0)
+    }
+
+    /// T20 tombstones: copy-after-destroy answers OBJECT_HANDLE_INVALID
+    /// locally instead of forwarding 0 (bouncyhsm answers copy-of-0 with
+    /// DEVICE_ERROR, copy-of-destroyed with OBJECT_HANDLE_INVALID).
+    #[tokio::test]
+    async fn destroy_then_copy_reports_object_handle_invalid() {
+        let (ctx_mgr, backend, ctx_id, session_vh, obj_vh) = setup_destroy_fixture().await;
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let destroy = super::destroy_object(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh,
+                object_handle: obj_vh,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(destroy.ck_rv, CkRv::OK.0, "destroy must succeed");
+
+        let copy = super::copy_object(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::CopyObjectRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh,
+                object_handle: obj_vh,
+                template: Vec::new(),
+                template_null: true,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            copy.ck_rv,
+            CkRv::OBJECT_HANDLE_INVALID.0,
+            "copy-after-destroy must report OBJECT_HANDLE_INVALID, not forward 0"
+        );
+        assert_eq!(copy.new_object_handle, 0, "failed copy must not mint a handle");
+    }
+
+    /// T20 tombstones: double destroy answers OBJECT_HANDLE_INVALID.
+    #[tokio::test]
+    async fn double_destroy_reports_object_handle_invalid() {
+        let (ctx_mgr, backend, ctx_id, session_vh, obj_vh) = setup_destroy_fixture().await;
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let first = super::destroy_object(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh,
+                object_handle: obj_vh,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(first.ck_rv, CkRv::OK.0, "first destroy must succeed");
+
+        let second = super::destroy_object(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh,
+                object_handle: obj_vh,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            second.ck_rv,
+            CkRv::OBJECT_HANDLE_INVALID.0,
+            "double destroy must report OBJECT_HANDLE_INVALID"
+        );
+    }
+
+    /// T20 tombstones: resolver flavors (object vs key) and forward-0
+    /// preserved for never-existed handles.
+    #[tokio::test]
+    async fn tombstone_flavors_and_forward_zero() {
+        use super::super::super::service_utils::{
+            resolve_session_and_key, resolve_session_and_object, resolve_session_and_two_objects,
+        };
+
+        let (ctx_mgr, backend, ctx_id, session_vh, obj_vh) = setup_destroy_fixture().await;
+        let ctx = HandlerContext::for_test(&ctx_mgr, &backend);
+
+        let destroy = super::destroy_object(
+            &ctx,
+            Request::new(pkcs11_proxy_ng_proto::DestroyObjectRequest {
+                client_context_id: ctx_id.0.clone(),
+                session_handle: session_vh,
+                object_handle: obj_vh,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(destroy.ck_rv, CkRv::OK.0, "destroy must succeed");
+
+        // Tombstoned handle: flavor follows the resolver (object vs key).
+        assert_eq!(
+            resolve_session_and_object(&ctx, &ctx_id, session_vh, obj_vh).await,
+            Err(CkRv::OBJECT_HANDLE_INVALID),
+            "object-flavored resolve of a destroyed handle must refuse locally"
+        );
+        assert_eq!(
+            resolve_session_and_key(&ctx, &ctx_id, session_vh, obj_vh).await,
+            Err(CkRv::KEY_HANDLE_INVALID),
+            "key-flavored resolve of a destroyed handle must refuse locally"
+        );
+        assert_eq!(
+            resolve_session_and_two_objects(&ctx, &ctx_id, session_vh, obj_vh, obj_vh).await,
+            Err(CkRv::KEY_HANDLE_INVALID),
+            "two-object resolve of a destroyed handle must refuse locally"
+        );
+        // Never-existed handle: still forwarded as 0 for the backend verdict.
+        let (_, backend_object) =
+            resolve_session_and_object(&ctx, &ctx_id, session_vh, 9999).await.unwrap();
+        assert_eq!(
+            backend_object,
+            CkObjectHandle(0),
+            "never-existed handles must keep the forward-0 semantic"
         );
     }
 }

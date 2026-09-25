@@ -25,6 +25,26 @@ struct LoginGate {
     proceed: Arc<(Mutex<bool>, Condvar)>,
 }
 
+/// One-shot rendezvous gate for slow-provider simulation (T09): the next
+/// matching call signals on `entered`, blocks on `release`, then proceeds.
+/// Taken (not cloned) so only the first call parks — later calls run
+/// normally, which keeps multi-RPC tests deadlock-free.
+struct TokenRendezvous {
+    entered: std::sync::mpsc::Sender<CkSlotId>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+/// One-shot rendezvous gate for slow-discovery simulation (T11): the
+/// next `get_interface_capabilities` signals on `entered`, blocks on
+/// `release`, then proceeds. Taken (not cloned) so only the first
+/// call parks — later calls run normally, which keeps multi-RPC
+/// tests deadlock-free. Slotless sibling of [`TokenRendezvous`]:
+/// discovery carries no slot identity.
+struct InterfaceCapsRendezvous {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
 /// Predicate over a `find_objects_init` template: installed with
 /// [`MockBackend::set_find_template_gate`] so `find_objects` can simulate
 /// class-sensitive search.
@@ -106,6 +126,8 @@ pub struct MockBackend {
     authenticated_unwrap_fault: Mutex<Option<CkRv>>,
     destroy_error: Mutex<Option<CkRv>>,
     destroy_calls: AtomicUsize,
+    /// Number of `finalize` trait calls (T10: finalized-exactly-once proof).
+    finalize_calls: AtomicUsize,
     mechanism_entries: Mutex<mechanism_entry::MechanismEntries>,
     pub slots: Vec<CkSlotId>,
     pub mechanisms: Vec<CkMechanismType>,
@@ -132,6 +154,16 @@ pub struct MockBackend {
     /// script backend errors (contention, sentinel RVs) the queue cannot
     /// express. Set via `set_next_wait_outcome()`.
     next_wait_outcome: Mutex<Option<CkResult<CkSlotId>>>,
+    /// One-shot `finalize` outcome override for shutdown-lifetime tests
+    /// (T10). Checked before any state change, mirroring
+    /// `next_wait_outcome`. Set via `set_next_finalize_outcome()`.
+    next_finalize_outcome: Mutex<Option<CkResult<()>>>,
+    /// When set, `finalize` parks on `finalize_condvar` until released,
+    /// simulating a wedged provider finalize for coordinator-timeout
+    /// coverage. Set via `inject_finalize_park()`, cleared (with a wake)
+    /// via `release_finalize()`.
+    park_finalize: Mutex<bool>,
+    finalize_condvar: Condvar,
     /// Count of `wait_for_slot_event` trait calls reaching the backend.
     /// Wait-matrix tests use it to prove zero-backend-entry refusals.
     wait_calls: AtomicUsize,
@@ -166,6 +198,25 @@ pub struct MockBackend {
     /// analogue for teardown tests (W1-C2-03): wedges the last-holder
     /// logout so eviction boundedness is provable without a real stuck HSM.
     logout_delay: Mutex<Option<std::time::Duration>>,
+    /// One-shot gate for the next `init_token` (T09): signals entry, waits
+    /// release, then proceeds — models a slow provider reinit.
+    init_token_gate: Mutex<Option<TokenRendezvous>>,
+    /// One-shot error for the next `init_token` (T09), e.g. SESSION_EXISTS
+    /// with open sessions. Consumed by the call; `None` (default) succeeds.
+    init_token_error: Mutex<Option<CkRv>>,
+    /// One-shot gate for the next `get_token_info` (T09): snapshots the
+    /// CURRENT identity at entry, signals, waits release, then returns the
+    /// snapshot — modeling a slow provider read whose data may be stale by
+    /// return time.
+    token_info_gate: Mutex<Option<TokenRendezvous>>,
+    /// One-shot gate for the next `get_interface_capabilities` (T11):
+    /// signals entry, parks until release, then returns the caps —
+    /// modeling a slow discovery RPC. Set via
+    /// [`MockBackend::set_interface_caps_gate`].
+    interface_caps_gate: Mutex<Option<InterfaceCapsRendezvous>>,
+    /// Count of `get_interface_capabilities` trait calls reaching the
+    /// backend. Discovery tests use it to prove backend reach.
+    interface_caps_calls: AtomicUsize,
     /// Error that `login` specifically returns (before `login_impl`). Used to
     /// simulate PIN failures (e.g. CKR_PIN_INCORRECT) so tests can exercise
     /// the per-slot failed-login budget without a real PKCS#11 module.
@@ -347,6 +398,9 @@ impl MockBackend {
             slot_event_queue: Mutex::new(std::collections::VecDeque::new()),
             hang_slot_event: Mutex::new(false),
             next_wait_outcome: Mutex::new(None),
+            next_finalize_outcome: Mutex::new(None),
+            park_finalize: Mutex::new(false),
+            finalize_condvar: Condvar::new(),
             wait_calls: AtomicUsize::new(0),
             mechanism_entries: Mutex::new(mechanism_entry::MechanismEntries::default()),
             wrap_entries: Mutex::new(Vec::new()),
@@ -354,6 +408,7 @@ impl MockBackend {
             authenticated_unwrap_fault: Mutex::new(None),
             destroy_error: Mutex::new(None),
             destroy_calls: AtomicUsize::new(0),
+            finalize_calls: AtomicUsize::new(0),
             slot_event_condvar: Condvar::new(),
             token_presence: Mutex::new(HashMap::new()),
             token_identities: Mutex::new(HashMap::new()),
@@ -367,6 +422,11 @@ impl MockBackend {
             injected_close_error: Mutex::new(None),
             close_session_delay: Mutex::new(None),
             logout_delay: Mutex::new(None),
+            init_token_gate: Mutex::new(None),
+            init_token_error: Mutex::new(None),
+            token_info_gate: Mutex::new(None),
+            interface_caps_gate: Mutex::new(None),
+            interface_caps_calls: AtomicUsize::new(0),
             injected_login_rv: Mutex::new(None),
             encrypt_init_output: Mutex::new(None),
             encrypt_operation_output: Mutex::new(None),
@@ -570,9 +630,40 @@ impl MockBackend {
         *self.next_wait_outcome.lock().unwrap() = Some(outcome);
     }
 
+    /// Script the next `finalize` outcome (consumed one-shot, checked
+    /// before any state change). Lets shutdown-lifetime tests drive a
+    /// failed provider finalize.
+    pub fn set_next_finalize_outcome(&self, outcome: CkResult<()>) {
+        *self.next_finalize_outcome.lock().unwrap() = Some(outcome);
+    }
+
+    /// Make `finalize` park until `release_finalize` (which wakes
+    /// parked finalizers to re-check). Simulates a wedged provider
+    /// finalize for coordinator-timeout coverage.
+    pub fn inject_finalize_park(&self, park: bool) {
+        *self.park_finalize.lock().unwrap() = park;
+        self.finalize_condvar.notify_all();
+    }
+
+    /// Release a finalize parked by `inject_finalize_park(true)`.
+    pub fn release_finalize(&self) {
+        self.inject_finalize_park(false);
+    }
+
+    /// Number of `finalize` trait calls that reached the backend.
+    pub fn finalize_call_count(&self) -> usize {
+        self.finalize_calls.load(Ordering::SeqCst)
+    }
+
     /// Number of `wait_for_slot_event` trait calls that reached the backend.
     pub fn wait_call_count(&self) -> usize {
         self.wait_calls.load(Ordering::SeqCst)
+    }
+
+    /// Number of slot events currently queued (test rendezvous: lets a
+    /// test await a parked waiter's consumption without sleeps).
+    pub fn slot_event_queue_len(&self) -> usize {
+        self.slot_event_queue.lock().unwrap().len()
     }
 
     /// Configure whether a token is present in a known slot.
@@ -774,6 +865,53 @@ impl MockBackend {
 
     pub fn clear_logout_delay(&self) {
         *self.logout_delay.lock().unwrap() = None;
+    }
+
+    /// Install a one-shot gate for the next `init_token` (T09): it signals
+    /// `entered` with the slot, blocks until `release` fires, then proceeds
+    /// (updating the slot identity to the requested label on success).
+    pub fn set_init_token_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<CkSlotId>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        *self.init_token_gate.lock().unwrap() = Some(TokenRendezvous { entered, release });
+    }
+
+    /// Fail the next `init_token` with `rv` (T09), e.g. SESSION_EXISTS with
+    /// open sessions. Consumed by the call; the slot identity is untouched.
+    pub fn set_init_token_error(&self, rv: CkRv) {
+        *self.init_token_error.lock().unwrap() = Some(rv);
+    }
+
+    /// Install a one-shot gate for the next `get_token_info` (T09): it
+    /// snapshots the current identity at entry, signals `entered`, blocks
+    /// until `release` fires, then returns the snapshot (possibly stale).
+    pub fn set_token_info_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<CkSlotId>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        *self.token_info_gate.lock().unwrap() = Some(TokenRendezvous { entered, release });
+    }
+
+    /// Install a one-shot gate for the next
+    /// `get_interface_capabilities` (T11): it signals `entered`,
+    /// blocks until `release` fires, then returns the caps. Only the
+    /// first call parks; later calls run normally.
+    pub fn set_interface_caps_gate(
+        &self,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) {
+        *self.interface_caps_gate.lock().unwrap() =
+            Some(InterfaceCapsRendezvous { entered, release });
+    }
+
+    /// Number of `get_interface_capabilities` trait calls that reached
+    /// the backend.
+    pub fn interface_caps_call_count(&self) -> usize {
+        self.interface_caps_calls.load(Ordering::SeqCst)
     }
 
     /// Number of currently open backend sessions. Leak accounting for
@@ -1597,6 +1735,7 @@ impl Pkcs11Backend for MockBackend {
     }
 
     fn finalize(&self) -> CkResult<()> {
+        self.finalize_calls.fetch_add(1, Ordering::SeqCst);
         self.finalize_backend()
     }
 
@@ -1615,6 +1754,18 @@ impl Pkcs11Backend for MockBackend {
     fn get_token_info(&self, slot_id: CkSlotId) -> CkResult<CkTokenInfo> {
         self.token_info_calls.fetch_add(1, Ordering::SeqCst);
         self.token_info_requested_slots.lock().unwrap().push(slot_id);
+        // T09 one-shot gate: snapshot at entry, signal, park until release,
+        // then return the snapshot (stale if the token changed meanwhile).
+        // NOTE: the take is bound BEFORE the branch — a
+        // `if let Some(..) = lock().take()` scrutinee would hold the guard
+        // across the park (temporary lifetime) and wedge later calls.
+        let gate = self.token_info_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let snapshot = self.token_info(slot_id)?;
+            let _ = gate.entered.send(slot_id);
+            let _ = gate.release.recv();
+            return Ok(snapshot);
+        }
         self.token_info(slot_id)
     }
 
@@ -1630,9 +1781,33 @@ impl Pkcs11Backend for MockBackend {
         self.mechanism_info(slot_id, mech)
     }
 
-    fn init_token(&self, slot_id: CkSlotId, _so_pin: Option<&[u8]>, _label: &str) -> CkResult<()> {
+    fn init_token(&self, slot_id: CkSlotId, _so_pin: Option<&[u8]>, label: &str) -> CkResult<()> {
         self.init_token_requested_slots.lock().unwrap().push(slot_id);
         self.require_known_slot(slot_id)?;
+        // T09 one-shot gate: signal entry, park until release, then proceed.
+        // Bound before the branch: an if-let scrutinee take would hold the
+        // guard across the park (temporary lifetime) and wedge later calls.
+        let gate = self.init_token_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(slot_id);
+            let _ = gate.release.recv();
+        }
+        // T09 one-shot error injection (e.g. SESSION_EXISTS with open
+        // sessions): consumed here; the slot identity is untouched.
+        let injected = self.init_token_error.lock().unwrap().take();
+        if let Some(rv) = injected {
+            return Err(rv);
+        }
+        // A real reinit relabels the token: adopt the requested label (keep
+        // the serial) so daemon cache invalidation is observable.
+        let serial = self
+            .token_identities
+            .lock()
+            .unwrap()
+            .get(&slot_id)
+            .map(|(_, serial)| serial.clone())
+            .unwrap_or_else(|| "0001".into());
+        self.set_slot_token_identity(slot_id, label.to_string(), serial);
         self.noop_ok()
     }
 
@@ -2105,6 +2280,17 @@ impl Pkcs11Backend for MockBackend {
     }
     fn wait_for_slot_event(&self, flags: u64) -> CkResult<CkSlotId> {
         self.wait_for_slot_event_impl(flags)
+    }
+
+    fn admit_slot_wait(&self, flags: u64) -> CkResult<()> {
+        // Mock lifecycle first (mirrors the check inside
+        // `wait_for_slot_event_impl`), then the shared width→mode
+        // boundary — the custom-backend responsibility pattern: lifecycle
+        // precedes width precedes mode, zero provider attempts.
+        if !self.state.lock().unwrap().initialized {
+            return Err(CkRv::CRYPTOKI_NOT_INITIALIZED);
+        }
+        crate::traits::admit_slot_wait_width_mode(flags)
     }
 
     fn get_operation_state(&self, s: CkSessionHandle) -> CkResult<SecretBytes> {
@@ -2835,7 +3021,7 @@ impl Pkcs11Backend for MockBackend {
     fn login_user(
         &self,
         session: CkSessionHandle,
-        _user_type: CkUserType,
+        user_type: CkUserType,
         username: Option<&[u8]>,
         pin: Option<&[u8]>,
     ) -> CkResult<()> {
@@ -2861,9 +3047,25 @@ impl Pkcs11Backend for MockBackend {
         if !self.state.lock().unwrap().has_session(session) {
             return Err(CkRv::SESSION_HANDLE_INVALID);
         }
+        // T20: share the token login state with `login_impl` — the mock
+        // token holds one login per slot and answers a second login with
+        // ALREADY without evaluating the PIN (non-revalidating backend).
         // A NULL (protected-path) PIN carries no verifiable bytes, so the
         // mock cannot accept it; only the exact test PIN succeeds.
-        if pin.is_some_and(|p| p == b"1234") { Ok(()) } else { Err(CkRv::PIN_INCORRECT) }
+        let mut state = self.state.lock().unwrap();
+        let slot_id = match state.session_record(session) {
+            Some((slot_id, _)) => slot_id,
+            None => return Err(CkRv::SESSION_HANDLE_INVALID),
+        };
+        if state.login_state.contains_key(&slot_id) {
+            return Err(CkRv::USER_ALREADY_LOGGED_IN);
+        }
+        if pin.is_some_and(|p| p == b"1234") {
+            state.login_state.insert(slot_id, user_type);
+            Ok(())
+        } else {
+            Err(CkRv::PIN_INCORRECT)
+        }
     }
 
     fn session_cancel(&self, session: CkSessionHandle, _flags: CkFlags) -> CkResult<()> {
@@ -3654,6 +3856,16 @@ impl Pkcs11Backend for MockBackend {
     }
 
     fn get_interface_capabilities(&self) -> InterfaceCapabilities {
+        self.interface_caps_calls.fetch_add(1, Ordering::SeqCst);
+        // T11 one-shot gate: signal entry, park until release, then
+        // proceed. Bound before the branch: an if-let scrutinee take
+        // would hold the guard across the park (temporary lifetime)
+        // and wedge later calls.
+        let gate = self.interface_caps_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.recv();
+        }
         if let Some(caps) = self.interface_capabilities.lock().unwrap().as_ref() {
             return caps.clone();
         }

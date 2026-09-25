@@ -1590,6 +1590,193 @@ fn concurrent_ensure_probed_installs_consistent_state() {
     }
 }
 
+/// T11: the probe RPC must not hold the shared client mutex (R-H4).
+/// While one thread's probe is parked server-side (one-shot discovery
+/// gate), the client mutex must be acquirable — an unrelated caller
+/// can lock it immediately instead of queueing behind the probe.
+/// Fails pre-fix (`try_lock` fails: the guard is held across the RPC).
+///
+/// Scope note: this pins the MUTEX hold scope (what T11 changed), not
+/// end-to-end RPC overlap — a second RPC issued during the park does
+/// not complete in this harness. That transport-level head-of-line
+/// behavior is out of T11's scope: production never parks a worker
+/// this way (blocking backend calls run on the `spawn_backend`
+/// blocking pool, and discovery is pure metadata), and the validated
+/// plan defers broader fetch/stage redesigns.
+/// Post-release, the unrelated initialized call completes normally
+/// (post-probe health) and the published catalog comes from this
+/// probe's response alone: distinctive single-entry caps (count 1,
+/// 2.40) — never the 3-entry pre-probe fallback, never a mix.
+#[test]
+fn slow_probe_releases_client_mutex_during_rpc() {
+    use super::output_semantics::TestDaemon;
+    use pkcs11_proxy_ng_types::{InterfaceCapabilities, InterfaceInfo};
+    let _guard = shim_state_test_guard();
+    let _saved = SavedConnectEnv::capture();
+    let daemon = TestDaemon::fresh();
+    // Distinctive caps: installed state (count 1) is unmistakable
+    // against the 3-entry pre-probe fallback.
+    daemon.backend.set_interface_capabilities(InterfaceCapabilities {
+        interfaces: vec![InterfaceInfo {
+            version_major: 2,
+            version_minor: 40,
+            null_functions: vec![],
+        }],
+    });
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon.endpoint);
+        std::env::remove_var("PKCS11_PROXY_SOCKET");
+    }
+    crate::state::mark_finalized();
+    crate::interface_probe::clear_cache();
+    crate::state::mark_client_reconnect_required();
+    // Server-side initialization WITHOUT a probe: connect, then run the
+    // init RPC directly on the shared client so it stores the server
+    // context (the unrelated slot-list call needs one; a bare init flag
+    // is not enough). Deliberately not `c_initialize` — that would
+    // probe first and warm the server discovery cache.
+    crate::state::ensure_client_connected().expect("connect to fresh daemon");
+    crate::state::runtime()
+        .block_on(async { crate::state::client().lock().await.initialize().await })
+        .expect("init RPC must create the server context");
+    assert!(crate::state::mark_initialized(), "test must own the init flag");
+
+    // Park the next discovery RPC server-side (no probe has run yet, so
+    // the fresh backend Arc is a cold server-discovery-cache key ⇒ the
+    // probe deterministically reaches the mock).
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    daemon.backend.set_interface_caps_gate(entered_tx, release_rx);
+    let probe = std::thread::spawn(crate::interface_probe::ensure_probed);
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("probe RPC must reach the parked backend");
+    assert_eq!(
+        daemon.backend.interface_caps_call_count(),
+        1,
+        "exactly one discovery RPC must reach the backend"
+    );
+
+    // THE regression assertion: the mutex must be free while the
+    // probe RPC is parked. Pre-fix this fails (the probe holds the
+    // guard across `get_backend_interfaces().await`); post-fix the
+    // probe cloned under the lock and released it before the RPC.
+    let mutex_free = crate::state::client().try_lock().is_ok();
+    if !mutex_free {
+        // Release before failing so the parked probe can finish and
+        // free the install lock for later tests.
+        let _ = release_tx.send(());
+    }
+    assert!(mutex_free, "client mutex must be acquirable during a parked probe RPC");
+
+    // Release the park; the probe completes and publishes exactly its
+    // own response generation.
+    let _ = release_tx.send(());
+    probe.join().expect("probe thread must not panic").expect("probe must succeed");
+    let n = crate::interface_probe::interface_count();
+    assert_eq!(n, 1, "installed count must come from this probe's caps");
+    let mut buf = [super::empty_interface(); 4];
+    let written = unsafe { crate::interface_probe::copy_catalog(buf.as_mut_ptr(), 4) };
+    assert_eq!(written, n, "copied entries must match the installed count");
+    assert!(!buf[0].pFunctionList.is_null(), "installed entry must have a function list");
+    let ver = unsafe { *(buf[0].pFunctionList as *const CK_VERSION) };
+    assert_eq!((ver.major, ver.minor), (2, 40));
+
+    // Post-probe health: the unrelated initialized call completes
+    // normally once the park releases (no deadlock, no poisoning).
+    let mut slot_count: CK_ULONG = 0;
+    let rv = unsafe {
+        dispatch::general::c_get_slot_list(CK_FALSE, std::ptr::null_mut(), &mut slot_count)
+    };
+    assert_eq!(rv, CKR_OK as CK_RV);
+    assert_eq!(slot_count, 2, "fresh daemon serves 2 slots");
+    crate::state::mark_finalized();
+    crate::state::mark_client_reconnect_required();
+}
+
+/// T11: install serialization survives a hammering of clears against
+/// failing probes — a failed probe publishes nothing, so once cleared
+/// the catalog stays at the pre-probe fallback (never the stale
+/// distinctive install, never a partial mix), and a later good probe
+/// reinstalls cleanly (no poisoning from the hammering).
+#[test]
+fn concurrent_clear_and_failed_probe_publishes_nothing_stale() {
+    use super::output_semantics::TestDaemon;
+    use pkcs11_proxy_ng_types::{InterfaceCapabilities, InterfaceInfo};
+    let _guard = shim_state_test_guard();
+    let _saved = SavedConnectEnv::capture();
+    let daemon = TestDaemon::fresh();
+    daemon.backend.set_interface_capabilities(InterfaceCapabilities {
+        interfaces: vec![InterfaceInfo {
+            version_major: 2,
+            version_minor: 40,
+            null_functions: vec![],
+        }],
+    });
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon.endpoint);
+        std::env::remove_var("PKCS11_PROXY_SOCKET");
+    }
+    crate::state::mark_finalized();
+    crate::interface_probe::clear_cache();
+    crate::state::mark_client_reconnect_required();
+    crate::interface_probe::ensure_probed().expect("good probe must install");
+    assert_eq!(crate::interface_probe::interface_count(), 1);
+
+    // Guaranteed-refused endpoint: every failing probe is one fast-fail
+    // dial (CONNECT_ATTEMPTS=1 via the guard), never a 21 s series.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral loopback port")
+        .local_addr()
+        .expect("listener addr")
+        .port();
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", format!("http://127.0.0.1:{port}"));
+    }
+    crate::state::mark_client_reconnect_required();
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            std::thread::spawn(move || {
+                for _ in 0..25 {
+                    if i % 2 == 0 {
+                        crate::interface_probe::clear_cache();
+                    } else {
+                        let _ = crate::interface_probe::ensure_probed();
+                    }
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().expect("hammer thread must not panic");
+    }
+    // Fallback shape (count 3, optimistic versions), not the stale
+    // distinctive install (count 1) and not a partial mix.
+    let n = crate::interface_probe::interface_count();
+    assert_eq!(n, 3, "cleared + failed probes must leave the fallback");
+    let mut buf = [super::empty_interface(); 4];
+    let written = unsafe { crate::interface_probe::copy_catalog(buf.as_mut_ptr(), 4) };
+    assert_eq!(written, 3);
+    let versions: Vec<(u8, u8)> = buf[..3]
+        .iter()
+        .map(|entry| {
+            assert!(!entry.pFunctionList.is_null(), "fallback entries must have function lists");
+            let ver = unsafe { *(entry.pFunctionList as *const CK_VERSION) };
+            (ver.major, ver.minor)
+        })
+        .collect();
+    assert_eq!(versions, [(2, 40), (3, 0), (3, 2)]);
+
+    // A later good probe reinstalls the distinctive caps (no poisoning).
+    unsafe {
+        std::env::set_var("PKCS11_PROXY_ENDPOINT", &daemon.endpoint);
+    }
+    crate::state::mark_client_reconnect_required();
+    crate::interface_probe::ensure_probed().expect("reprobe must reinstall");
+    assert_eq!(crate::interface_probe::interface_count(), 1);
+    crate::state::mark_client_reconnect_required();
+}
+
 /// W1-L5-03: the pre-probe fallback catalog is an intentional optimistic
 /// transient — count 3 with entries [2.40, 3.0, 3.2] — used until the
 /// first successful probe installs the backend's actual shape, which may

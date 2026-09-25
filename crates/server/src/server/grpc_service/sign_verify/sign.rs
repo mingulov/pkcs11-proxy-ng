@@ -97,8 +97,10 @@ pub(crate) async fn sign(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `SignRequest` is `ZeroizeOnDrop`; take owned fields out with
+    // `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
         Ok(session) => session,
@@ -110,7 +112,7 @@ pub(crate) async fn sign(
         }
     };
 
-    let data = SecretBytes::new(req.data);
+    let data = SecretBytes::new(std::mem::take(&mut req.data));
     let data_null_len = req.data_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {
@@ -151,8 +153,10 @@ pub(crate) async fn sign_update(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `SignUpdateRequest` is `ZeroizeOnDrop`; take owned fields out with
+    // `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
         Ok(session) => session,
@@ -161,7 +165,7 @@ pub(crate) async fn sign_update(
         }
     };
 
-    let part = SecretBytes::new(req.part);
+    let part = SecretBytes::new(std::mem::take(&mut req.part));
     let part_null_len = req.part_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, part_null_len) {
@@ -300,8 +304,10 @@ pub(crate) async fn sign_recover(
     let ctx_mgr = &ctx.context_manager;
     let backend_ref = &ctx.backend;
     let sanitize_inputs = ctx.sanitize_inputs;
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `SignRecoverRequest` is `ZeroizeOnDrop`; take owned fields out
+    // with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
 
     let session = match resolve_session(ctx_mgr, &ctx_id, req.session_handle).await {
         Ok(session) => session,
@@ -313,7 +319,7 @@ pub(crate) async fn sign_recover(
         }
     };
 
-    let data = SecretBytes::new(req.data);
+    let data = SecretBytes::new(std::mem::take(&mut req.data));
     let data_null_len = req.data_null_len;
     // ADR-0010 sanitize_inputs: validate NULL data pointer before backend call.
     if let Err(rv) = check_sanitize(sanitize_inputs, data_null_len) {

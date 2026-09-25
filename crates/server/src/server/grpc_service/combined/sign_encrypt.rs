@@ -19,8 +19,10 @@ pub(super) async fn digest_encrypt_update(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::DigestEncryptUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::DigestEncryptUpdateResponse>, Status> {
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `DigestEncryptUpdateRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
     let session = match resolve_session(&ctx.context_manager, &ctx_id, req.session_handle).await {
         Ok(session) => session,
         Err(error) => {
@@ -31,7 +33,7 @@ pub(super) async fn digest_encrypt_update(
         }
     };
 
-    let part = SecretBytes::new(req.part);
+    let part = SecretBytes::new(std::mem::take(&mut req.part));
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || {
         part.expose(|raw| backend.digest_encrypt_update(session, CkInBuf::Bytes(raw)))
@@ -49,8 +51,10 @@ pub(super) async fn sign_encrypt_update(
     ctx: &HandlerContext,
     request: Request<pkcs11_proxy_ng_proto::SignEncryptUpdateRequest>,
 ) -> Result<Response<pkcs11_proxy_ng_proto::SignEncryptUpdateResponse>, Status> {
-    let req = request.into_inner();
-    let ctx_id = ClientContextId(req.client_context_id);
+    // T12: `SignEncryptUpdateRequest` is `ZeroizeOnDrop`; take owned fields
+    // out with `mem::take` instead of moving them.
+    let mut req = request.into_inner();
+    let ctx_id = ClientContextId(std::mem::take(&mut req.client_context_id));
     let session = match resolve_session(&ctx.context_manager, &ctx_id, req.session_handle).await {
         Ok(session) => session,
         Err(error) => {
@@ -61,7 +65,7 @@ pub(super) async fn sign_encrypt_update(
         }
     };
 
-    let part = SecretBytes::new(req.part);
+    let part = SecretBytes::new(std::mem::take(&mut req.part));
     let backend = ctx.backend.clone();
     let result = spawn_backend(move || {
         part.expose(|raw| backend.sign_encrypt_update(session, CkInBuf::Bytes(raw)))

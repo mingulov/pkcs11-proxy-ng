@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::Duration;
 
 use cryptoki_sys::{CK_SESSION_HANDLE, CK_SLOT_ID};
@@ -110,19 +110,81 @@ pub(crate) fn clear_pre_init_connect_failure() {
 /// guard.
 static MECHANISM_REGISTRY: OnceLock<RwLock<Arc<MechanismRegistry>>> = OnceLock::new();
 
+/// Lock a process-global session/message map, recovering from poison
+/// (T07, C-B2) instead of panicking or silently skipping the operation.
+///
+/// Soundness: every critical section on these maps performs only
+/// `HashMap` insert/remove/clear/retain/`entry().or_insert_with()`
+/// with an allocation-only closure, plus `Arc` clones. None of those
+/// can mutate-then-panic: `or_insert_with` inserts only after its
+/// closure returns, and `HashMap` itself panics solely on capacity
+/// overflow (requires `isize::MAX` entries — unreachable) or
+/// allocation failure (abort-class, never unwound through here). A
+/// poisoned guard therefore always dereferences to a structurally
+/// valid map holding whole committed entries, so recovering with
+/// `into_inner` and completing the operation is exact: reads see
+/// committed state, writes/evictions/clears take effect, and no orphan
+/// entry is ever retained behind a skipped op. The poison flag itself
+/// is deliberately NOT cleared — every later accessor re-recovers
+/// through this same helper rather than one blind `clear_poison` that
+/// would suppress the error for all future users.
+pub(crate) fn lock_recovering<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Take the registry `RwLock` for reading, recovering from poison
+/// (T07, C-B2). Sound for the same whole-`Arc` reason documented on
+/// [`try_mechanism_registry`]: any value behind the lock is a complete
+/// registry snapshot.
+pub(crate) fn read_registry_recovering(
+    lock: &RwLock<Arc<MechanismRegistry>>,
+) -> std::sync::RwLockReadGuard<'_, Arc<MechanismRegistry>> {
+    lock.read().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Take the registry `RwLock` for writing, recovering from poison
+/// (T07, C-B2). The recovered guard is immediately overwritten with a
+/// fresh `Arc`, so whatever a panicked writer left behind is dropped
+/// whole — no torn state can survive the assignment.
+pub(crate) fn write_registry_recovering(
+    lock: &RwLock<Arc<MechanismRegistry>>,
+) -> std::sync::RwLockWriteGuard<'_, Arc<MechanismRegistry>> {
+    lock.write().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Fallible read of the current mechanism registry (T07, C-B2).
+///
+/// * No registry installed yet — pre-init, or a data-plane call racing
+///   `C_Initialize` between the init-flag claim and the seed install —
+///   maps to `CRYPTOKI_NOT_INITIALIZED`, never a panic.
+/// * A poisoned `RwLock` recovers via `into_inner`. Replacement
+///   preserves the readers' snapshot invariant: [`replace_mechanism_registry`]
+///   publishes under the write lock with a single whole-`Arc`
+///   assignment, readers clone under the read lock, and no critical
+///   section can leave a partial registry behind (the only panics
+///   possible there are abort-class allocation failures). A reader
+///   that clones the recovered `Arc` therefore holds either the
+///   pre-swap or the post-swap registry — never a torn hybrid — and
+///   in-flight operations keep working on the snapshot they cloned.
+///
+/// Callers do not have to worry about locking — the
+/// `Arc<MechanismRegistry>` is captured and the underlying lock is
+/// released before this function returns.
+pub fn try_mechanism_registry() -> Result<Arc<MechanismRegistry>, CkRv> {
+    let lock = MECHANISM_REGISTRY.get().ok_or(CkRv::CRYPTOKI_NOT_INITIALIZED)?;
+    Ok(read_registry_recovering(lock).clone())
+}
+
 /// Returns a cheap clone of the current mechanism registry.
 ///
 /// Panics if called before [`replace_mechanism_registry`] has installed
-/// the first registry. Callers do not have to worry about locking — the
-/// `Arc<MechanismRegistry>` is captured and the underlying lock is
-/// released before this function returns.
+/// the first registry — production call sites that can run pre-init or
+/// race `C_Initialize` must use [`try_mechanism_registry`] instead. A
+/// poisoned lock recovers (same invariant as `try_mechanism_registry`);
+/// only the never-installed case panics, and only in test/controlled
+/// contexts that install first.
 pub fn mechanism_registry() -> Arc<MechanismRegistry> {
-    MECHANISM_REGISTRY
-        .get()
-        .expect("MechanismRegistry not initialized")
-        .read()
-        .expect("MechanismRegistry RwLock poisoned")
-        .clone()
+    try_mechanism_registry().expect("MechanismRegistry not initialized")
 }
 
 /// Install or atomically replace the global mechanism registry.
@@ -131,12 +193,14 @@ pub fn mechanism_registry() -> Arc<MechanismRegistry> {
 /// the `OnceLock`; later invocations (from `reprobe()`) acquire the
 /// write lock and swap the `Arc` in-place. Existing readers that already
 /// cloned the `Arc` keep using the old registry until they drop it,
-/// which preserves consistency for in-flight operations.
+/// which preserves consistency for in-flight operations. A poisoned
+/// write lock recovers and is overwritten with the fresh `Arc` (see
+/// `write_registry_recovering`).
 pub fn replace_mechanism_registry(reg: MechanismRegistry) {
     let arc = Arc::new(reg);
     match MECHANISM_REGISTRY.get() {
         Some(lock) => {
-            *lock.write().expect("MechanismRegistry RwLock poisoned") = arc;
+            *write_registry_recovering(lock) = arc;
         }
         None => {
             // Ignore the race outcome: if another thread already
@@ -251,24 +315,18 @@ pub(crate) fn message_operation_state(
     h_session: CK_SESSION_HANDLE,
     operation: MessageOperation,
 ) -> Arc<Mutex<MessageOperationState>> {
-    MESSAGE_OPERATION_STATES
-        .lock()
-        .expect("message-operation state map poisoned")
+    lock_recovering(&MESSAGE_OPERATION_STATES)
         .entry((h_session, operation))
         .or_insert_with(|| Arc::new(Mutex::new(MessageOperationState::default())))
         .clone()
 }
 
 fn evict_message_operations(h_session: CK_SESSION_HANDLE) {
-    if let Ok(mut map) = MESSAGE_OPERATION_STATES.lock() {
-        map.retain(|(session, _), _| *session != h_session);
-    }
+    lock_recovering(&MESSAGE_OPERATION_STATES).retain(|(session, _), _| *session != h_session);
 }
 
 pub(crate) fn remember_session_slot(h_session: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
-    if let Ok(mut map) = SESSION_SLOTS.lock() {
-        map.insert(h_session, slot_id);
-    }
+    lock_recovering(&SESSION_SLOTS).insert(h_session, slot_id);
 }
 
 /// Whether `h_session` was opened through this shim and not since closed
@@ -276,20 +334,15 @@ pub(crate) fn remember_session_slot(h_session: CK_SESSION_HANDLE, slot_id: CK_SL
 /// mechanism validation). Every live session in this process passed through
 /// `c_open_session` (which remembers it) and every close/evict path forgets
 /// it, so "unknown" means the server would answer `SESSION_HANDLE_INVALID`
-/// (or the handle never existed). Fail-open on a poisoned map: proceeding
-/// preserves correctness (the server still resolves the session), degrading
-/// only the precedence nicety.
+/// (or the handle never existed). A poisoned map recovers via
+/// `lock_recovering` and is consulted normally — the recovered map holds
+/// only committed entries, so the answer stays exact instead of fail-open.
 pub(crate) fn is_session_known(h_session: CK_SESSION_HANDLE) -> bool {
-    match SESSION_SLOTS.lock() {
-        Ok(map) => map.contains_key(&h_session),
-        Err(_) => true,
-    }
+    lock_recovering(&SESSION_SLOTS).contains_key(&h_session)
 }
 
 fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
-    if let Ok(mut map) = SESSION_SLOTS.lock() {
-        map.remove(&h_session);
-    }
+    lock_recovering(&SESSION_SLOTS).remove(&h_session);
 }
 
 /// Clear every per-session cache across all sessions.
@@ -299,12 +352,8 @@ fn forget_session_slot(h_session: CK_SESSION_HANDLE) {
 /// they are gone; only session ownership and message-operation
 /// discriminators remain.
 pub(crate) fn clear_all_caches() {
-    if let Ok(mut map) = SESSION_SLOTS.lock() {
-        map.clear();
-    }
-    if let Ok(mut map) = MESSAGE_OPERATION_STATES.lock() {
-        map.clear();
-    }
+    lock_recovering(&SESSION_SLOTS).clear();
+    lock_recovering(&MESSAGE_OPERATION_STATES).clear();
 }
 
 /// Forget session ownership and all message-operation discriminators without
@@ -321,15 +370,14 @@ pub(crate) fn evict_session_authoritative_state(h_session: CK_SESSION_HANDLE) {
 /// Called from `c_close_all_sessions` on the close attempt, unconditionally
 /// (dropped regardless of the server's `CK_RV`).
 pub(crate) fn evict_slot_session_caches(slot_id: CK_SLOT_ID) {
-    let sessions = if let Ok(mut map) = SESSION_SLOTS.lock() {
+    let sessions = {
+        let mut map = lock_recovering(&SESSION_SLOTS);
         let sessions: Vec<_> =
             map.iter().filter(|(_, slot)| **slot == slot_id).map(|(session, _)| *session).collect();
         for session in &sessions {
             map.remove(session);
         }
         sessions
-    } else {
-        Vec::new()
     };
 
     for session in sessions {

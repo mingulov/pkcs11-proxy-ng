@@ -23,14 +23,22 @@ async fn assert_invalid_unwrap_cleanup(cleanup_rv: CkRv) {
         .unwrap();
     let before = f.backend.wrap_observations().len();
     f.backend.set_authenticated_unwrap_fault(cleanup_rv);
+    // T12: `UnwrapKeyAuthenticatedRequest` is `ZeroizeOnDrop`, so
+    // struct-update syntax is forbidden — all fields are spelled out.
     let request = UnwrapKeyAuthenticatedRequest {
         client_context_id: c.context.clone(),
         session_handle: c.session,
         mechanism: mechanism(c.keys[2]),
         unwrapping_key_handle: c.keys[0],
         wrapped_key: vec![0; 16],
+        template: Vec::new(),
+        associated_data: Vec::new(),
+        wrapped_key_null_len: None,
+        associated_data_null_len: None,
         authenticated_parameters: Some(AuthenticatedParameters::default()),
-        ..Default::default()
+        // Present-but-empty template, exactly as `..Default::default()`
+        // produced before (NULL-ness is semantically significant here).
+        template_null: false,
     };
     let response = c.rpc.unwrap_key_authenticated(request.clone()).await.unwrap().into_inner();
     assert_eq!(response.ck_rv, CkRv::DEVICE_ERROR.0);
@@ -78,23 +86,34 @@ async fn authenticated_typed_server_negotiates_all_three_routes_without_raw_outp
             let parameters = typed.then(AuthenticatedParameters::default);
             let (rv, raw_empty, ack) = match route {
                 0 => {
-                    let r = c
+                    // T12: `WrapKeyAuthenticatedResponse` is `ZeroizeOnDrop`;
+                    // take the field instead of moving it.
+                    let mut r = c
                         .rpc
+                        // T12: `WrapKeyAuthenticatedRequest` is `ZeroizeOnDrop`;
+                        // struct-update syntax is forbidden — all fields spelled out.
                         .wrap_key_authenticated(WrapKeyAuthenticatedRequest {
                             client_context_id: c.context.clone(),
                             session_handle: c.session,
                             mechanism: mechanism(c.keys[2]),
                             wrapping_key_handle: c.keys[0],
                             key_handle: c.keys[1],
+                            associated_data: Vec::new(),
+                            associated_data_null_len: None,
                             authenticated_parameters: parameters,
-                            ..Default::default()
                         })
                         .await
                         .unwrap()
                         .into_inner();
-                    (r.ck_rv, r.mechanism_parameter_out.is_empty(), r.authenticated_output)
+                    (
+                        r.ck_rv,
+                        r.mechanism_parameter_out.is_empty(),
+                        std::mem::take(&mut r.authenticated_output),
+                    )
                 }
                 1 => {
+                    // T12: `ParameterOutputExactRequest` is `ZeroizeOnDrop`;
+                    // struct-update syntax is forbidden — all fields spelled out.
                     let r = c
                         .rpc
                         .parameter_output_exact(ParameterOutputExactRequest {
@@ -107,7 +126,14 @@ async fn authenticated_typed_server_negotiates_all_three_routes_without_raw_outp
                             function: ParameterOutputFunction::WrapKeyAuthenticated as i32,
                             output_spec: Some(output_spec()),
                             authenticated_parameters: parameters,
-                            ..Default::default()
+                            input_data: Vec::new(),
+                            associated_data: Vec::new(),
+                            parameter: Vec::new(),
+                            parameter_out_spec: None,
+                            flags: 0,
+                            message_parameter: None,
+                            input_data_null_len: None,
+                            associated_data_null_len: None,
                         })
                         .await
                         .unwrap()
@@ -121,21 +147,33 @@ async fn authenticated_typed_server_negotiates_all_three_routes_without_raw_outp
                     )
                 }
                 _ => {
-                    let r = c
+                    // T12: `UnwrapKeyAuthenticatedResponse` is `ZeroizeOnDrop`;
+                    // take the field instead of moving it.
+                    let mut r = c
                         .rpc
+                        // T12: `UnwrapKeyAuthenticatedRequest` is
+                        // `ZeroizeOnDrop`; struct-update syntax is forbidden.
                         .unwrap_key_authenticated(UnwrapKeyAuthenticatedRequest {
                             client_context_id: c.context.clone(),
                             session_handle: c.session,
                             mechanism: mechanism(c.keys[2]),
                             unwrapping_key_handle: c.keys[0],
                             wrapped_key: vec![0; 16],
+                            template: Vec::new(),
+                            associated_data: Vec::new(),
+                            wrapped_key_null_len: None,
+                            associated_data_null_len: None,
                             authenticated_parameters: parameters,
-                            ..Default::default()
+                            template_null: false,
                         })
                         .await
                         .unwrap()
                         .into_inner();
-                    (r.ck_rv, r.mechanism_parameter_out.is_empty(), r.authenticated_output)
+                    (
+                        r.ck_rv,
+                        r.mechanism_parameter_out.is_empty(),
+                        std::mem::take(&mut r.authenticated_output),
+                    )
                 }
             };
             assert_eq!(
@@ -145,8 +183,10 @@ async fn authenticated_typed_server_negotiates_all_three_routes_without_raw_outp
             );
             assert!(raw_empty, "native-structure output channel must be empty");
             if typed {
+                // T12: `AuthenticatedMechanismOutput` is `ZeroizeOnDrop`;
+                // take the field instead of moving it.
                 assert!(matches!(
-                    ack.and_then(|a| a.output),
+                    ack.and_then(|mut a| std::mem::take(&mut a.output)),
                     Some(authenticated_mechanism_output::Output::Unchanged(true))
                 ));
             } else {
@@ -219,13 +259,15 @@ async fn authenticated_typed_sdk_roundtrips_ordinary_exact_and_unwrap_over_mtls(
         assert_eq!(main.ck_rv, expected);
         assert!(matches!(output, AuthenticatedOutput::Unchanged));
     }
+    // T13: `expose` cannot lend across `.await`; materialize the input copy.
+    let wrapped_bytes = wrapped.expose(|bytes| bytes.to_vec());
     let (unwrapped, output) = client
         .unwrap_key_authenticated_typed(
             session,
             &mechanism,
             None,
             key,
-            CkInBuf::Bytes(&wrapped),
+            CkInBuf::Bytes(&wrapped_bytes),
             Some(&[]),
             CkInBuf::Bytes(&[]),
         )
@@ -243,6 +285,8 @@ async fn authenticated_typed_exact_rejects_dual_raw_request_before_dispatch() {
     let before = f.backend.wrap_observations().len();
     let response = c
         .rpc
+        // T12: `ParameterOutputExactRequest` is `ZeroizeOnDrop`;
+        // struct-update syntax is forbidden — all fields spelled out.
         .parameter_output_exact(ParameterOutputExactRequest {
             exact_output_effects_version: 1,
             client_context_id: c.context.clone(),
@@ -254,7 +298,13 @@ async fn authenticated_typed_exact_rejects_dual_raw_request_before_dispatch() {
             authenticated_parameters: Some(AuthenticatedParameters::default()),
             parameter: vec![0; 16],
             output_spec: Some(output_spec()),
-            ..Default::default()
+            input_data: Vec::new(),
+            associated_data: Vec::new(),
+            parameter_out_spec: None,
+            flags: 0,
+            message_parameter: None,
+            input_data_null_len: None,
+            associated_data_null_len: None,
         })
         .await
         .unwrap()

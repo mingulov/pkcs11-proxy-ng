@@ -11,18 +11,184 @@ mod mechanism_to_ffi_tests {
     use pkcs11_proxy_ng_types::{
         AesCmacKeyDerivationParams, AesCtrParams, CkMechanism, CkMechanismParams, CkMechanismType,
         CkMgf, CkOaepSource, CkObjectHandle, CkPbkdf2Prf, CkPbkdf2SaltSource, CkRv,
-        DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams, IvParams,
-        KeyDerivationStringData, KmacParams, KyberParams, MuGenParams, ObjectHandleParam,
-        PbeParams, Pkcs5Pbkd2Params, RawMechanismParams, RsaAesKeyWrapParams, RsaPkcsOaepParams,
-        RsaPkcsPssParams, SecretBytes, SignAdditionalContext, Ssl3KeyMatParams,
-        Ssl3MasterKeyDeriveParams, SslRandomData, TlsPrfParams, VendorObjectExtractParams,
-        VendorObjectInsertParams, WtlsKeyMatParams, WtlsMasterKeyDeriveParams, WtlsPrfParams,
-        WtlsRandomData,
+        DilithiumParams, EciesParams, ExtractParams, GcmParams, HdKeyDeriveParams,
+        Ike1PrfDeriveParams, IvParams, KeyDerivationStringData, KeyWrapSetOaepParams, KipParams,
+        KmacParams, KyberParams, MuGenParams, ObjectHandleParam, PbeParams, Pkcs5Pbkd2Params,
+        RawMechanismParams, RsaAesKeyWrapParams, RsaPkcsOaepParams, RsaPkcsPssParams, SecretBytes,
+        SignAdditionalContext, Ssl3KeyMatParams, Ssl3MasterKeyDeriveParams, SslRandomData,
+        Tls12ExtendedMasterKeyDeriveParams, Tls12MasterKeyDeriveParams, TlsPrfParams,
+        VendorObjectExtractParams, VendorObjectInsertParams, WtlsKeyMatParams,
+        WtlsMasterKeyDeriveParams, WtlsPrfParams, WtlsRandomData,
     };
 
     fn convert(mechanism_type: CkMechanismType, params: CkMechanismParams) -> super::FfiMechanism {
         mechanism_to_ffi(&CkMechanism { mechanism_type, params: Some(params) })
             .expect("mechanism converts to ffi")
+    }
+
+    #[test]
+    fn kip_nesting_depth_limit_is_enforced() {
+        // T03/RV-N2 backend half: mirror of the shim reader bound (16
+        // nested nodes allowed, 17th rejected). The typed tree is owned
+        // (acyclic), so a depth counter suffices; no cycle check needed.
+        fn nest(inner: CkMechanism) -> CkMechanism {
+            CkMechanism {
+                mechanism_type: CkMechanismType::RSA_PKCS,
+                params: Some(CkMechanismParams::Kip(KipParams {
+                    mechanism: Box::new(inner),
+                    key_handle: CkObjectHandle(0),
+                    seed: SecretBytes::copy_from_slice(&[]),
+                })),
+            }
+        }
+        fn leaf() -> CkMechanism {
+            CkMechanism { mechanism_type: CkMechanismType::RSA_PKCS, params: None }
+        }
+        let mut mech = leaf();
+        for _ in 0..16 {
+            mech = nest(mech);
+        }
+        assert!(mechanism_to_ffi(&mech).is_ok(), "16 nested nodes must convert");
+        let deep = nest(mech);
+        assert_eq!(
+            mechanism_to_ffi(&deep).err(),
+            Some(CkRv::MECHANISM_PARAM_INVALID),
+            "17th nested node must be rejected before recursion"
+        );
+    }
+
+    fn ssl_random() -> SslRandomData {
+        SslRandomData { client_random: vec![0x11; 32], server_random: vec![0x22; 32] }
+    }
+
+    fn tls12_mech(major: u32, minor: u32) -> CkMechanism {
+        CkMechanism {
+            mechanism_type: CkMechanismType::TLS12_MASTER_KEY_DERIVE,
+            params: Some(CkMechanismParams::Tls12MasterKeyDerive(Tls12MasterKeyDeriveParams {
+                random_info: ssl_random(),
+                version_major: major,
+                version_minor: minor,
+                prf_hash_mechanism: CkMechanismType::SHA256,
+            })),
+        }
+    }
+
+    #[test]
+    fn tls12_version_bytes_are_checked_before_native_conversion() {
+        // T05: valid versions convert; any out-of-byte version is
+        // MECHANISM_PARAM_INVALID, including valid-first/invalid-second;
+        // the 0.0 DH sentinel still converts (NULL version preserved).
+        assert!(mechanism_to_ffi(&tls12_mech(3, 3)).is_ok());
+        assert!(mechanism_to_ffi(&tls12_mech(0, 0)).is_ok());
+        assert!(mechanism_to_ffi(&tls12_mech(255, 255)).is_ok());
+        for (major, minor) in [(3, 256), (256, 3), (256, 256), (u32::MAX, 0), (0, u32::MAX)] {
+            assert_eq!(
+                mechanism_to_ffi(&tls12_mech(major, minor)).err(),
+                Some(CkRv::MECHANISM_PARAM_INVALID),
+                "TLS12 version {major}.{minor} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn ssl3_and_tls12_extended_version_bytes_are_checked() {
+        // T05: same byte discipline for the sibling version arms.
+        let ssl3 = |major: u32, minor: u32| CkMechanism {
+            mechanism_type: CkMechanismType::SSL3_MASTER_KEY_DERIVE,
+            params: Some(CkMechanismParams::Ssl3MasterKeyDerive(Ssl3MasterKeyDeriveParams {
+                random_info: ssl_random(),
+                version_major: major,
+                version_minor: minor,
+            })),
+        };
+        let ext = |major: u32, minor: u32| CkMechanism {
+            mechanism_type: CkMechanismType::TLS12_EXTENDED_MASTER_KEY_DERIVE,
+            params: Some(CkMechanismParams::Tls12ExtendedMasterKeyDerive(
+                Tls12ExtendedMasterKeyDeriveParams {
+                    prf_hash_mechanism: CkMechanismType::SHA256,
+                    session_hash: vec![0x33; 48],
+                    version_major: major,
+                    version_minor: minor,
+                },
+            )),
+        };
+        assert!(mechanism_to_ffi(&ssl3(3, 0)).is_ok());
+        assert!(mechanism_to_ffi(&ssl3(0, 0)).is_ok());
+        assert!(mechanism_to_ffi(&ext(3, 3)).is_ok());
+        assert!(mechanism_to_ffi(&ext(0, 0)).is_ok());
+        for (major, minor) in [(3, 256), (256, 3), (u32::MAX, u32::MAX)] {
+            assert_eq!(
+                mechanism_to_ffi(&ssl3(major, minor)).err(),
+                Some(CkRv::MECHANISM_PARAM_INVALID),
+                "SSL3 version {major}.{minor} must be rejected"
+            );
+            assert_eq!(
+                mechanism_to_ffi(&ext(major, minor)).err(),
+                Some(CkRv::MECHANISM_PARAM_INVALID),
+                "TLS12-extended version {major}.{minor} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn oaep_bc_ike1_key_number_and_wtls_version_bytes_are_checked() {
+        // T05: single-byte wire fields reject >255 with
+        // MECHANISM_PARAM_INVALID instead of truncating.
+        let kwso = |bc: u32| CkMechanism {
+            mechanism_type: CkMechanismType(0x0000_0401),
+            params: Some(CkMechanismParams::KeyWrapSetOaep(KeyWrapSetOaepParams {
+                bc,
+                x: SecretBytes::copy_from_slice(&[0x44; 8]),
+            })),
+        };
+        let ike1 = |key_number: u32| CkMechanism {
+            mechanism_type: CkMechanismType::IKE1_PRF_DERIVE,
+            params: Some(CkMechanismParams::Ike1PrfDerive(Ike1PrfDeriveParams {
+                prf_mechanism: CkMechanismType::SHA256,
+                has_prev_key: false,
+                keygxy_handle: CkObjectHandle(1),
+                prev_key_handle: CkObjectHandle(0),
+                ckyi: SecretBytes::copy_from_slice(&[0x55; 8]),
+                ckyr: SecretBytes::copy_from_slice(&[0x66; 8]),
+                key_number,
+            })),
+        };
+        let wtls = |version: u32| CkMechanism {
+            mechanism_type: CkMechanismType::WTLS_MASTER_KEY_DERIVE,
+            params: Some(CkMechanismParams::WtlsMasterKeyDerive(WtlsMasterKeyDeriveParams {
+                digest_mechanism: CkMechanismType::SHA256,
+                random_info: WtlsRandomData {
+                    client_random: vec![0xA1, 0xA2],
+                    server_random: vec![0xB1, 0xB2],
+                },
+                version,
+            })),
+        };
+        assert!(mechanism_to_ffi(&kwso(1)).is_ok());
+        assert!(mechanism_to_ffi(&ike1(1)).is_ok());
+        assert!(mechanism_to_ffi(&wtls(1)).is_ok());
+        // Upper boundary is inclusive at every arm (an over-strict arm
+        // rejecting 255 must fail here, not just at the helper).
+        assert!(mechanism_to_ffi(&kwso(255)).is_ok());
+        assert!(mechanism_to_ffi(&ike1(255)).is_ok());
+        assert!(mechanism_to_ffi(&wtls(255)).is_ok());
+        for bad in [256, u32::MAX] {
+            assert_eq!(
+                mechanism_to_ffi(&kwso(bad)).err(),
+                Some(CkRv::MECHANISM_PARAM_INVALID),
+                "OAEP bc {bad} must be rejected"
+            );
+            assert_eq!(
+                mechanism_to_ffi(&ike1(bad)).err(),
+                Some(CkRv::MECHANISM_PARAM_INVALID),
+                "IKE1 key_number {bad} must be rejected"
+            );
+            assert_eq!(
+                mechanism_to_ffi(&wtls(bad)).err(),
+                Some(CkRv::MECHANISM_PARAM_INVALID),
+                "WTLS version {bad} must be rejected"
+            );
+        }
     }
 
     #[test]

@@ -365,7 +365,9 @@ async fn nss_aes_cbc_encrypt_decrypt_parameterized() -> Result<(), String> {
         .await
         .map_err(|rv| format!("C_Decrypt(AES-CBC) failed: {rv}"))?;
 
-    assert_eq!(decrypted.as_slice(), plaintext, "AES-CBC round-trip should recover plaintext");
+    decrypted.expose(|bytes| {
+        assert_eq!(bytes, &plaintext[..], "AES-CBC round-trip should recover plaintext")
+    });
     eprintln!("AES-CBC encrypt+decrypt with IvParams succeeded");
 
     // Clean up.
@@ -531,7 +533,9 @@ async fn nss_aes_gcm_encrypt_decrypt_parameterized() -> Result<(), String> {
         .await
         .map_err(|rv| format!("C_Decrypt(AES-GCM) failed: {rv}"))?;
 
-    assert_eq!(decrypted.as_slice(), plaintext, "AES-GCM round-trip should recover plaintext");
+    decrypted.expose(|bytes| {
+        assert_eq!(bytes, &plaintext[..], "AES-GCM round-trip should recover plaintext")
+    });
     eprintln!("AES-GCM encrypt+decrypt with GcmParams succeeded");
 
     // Clean up.
